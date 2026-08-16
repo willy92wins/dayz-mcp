@@ -1,18 +1,31 @@
 # DayZ-MCP
 
-**The missing piece for autonomous DayZ mod development: an MCP server that lets an
-agent build a mod, launch the game, drive it, observe what happened and try again —
-without a human at the keyboard.**
+**An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
+game, put the world into a state, act, and read back what the engine did — 39 typed
+tools, server-authoritative, no keyboard, no OCR.**
 
-Everything else in a DayZ workflow can already be automated. Editing Enforce Script,
-config.cpp and models is file work; packing a PBO is a command. What could not be
-automated was the part that decides whether the change actually works: getting the
-game up with the mod loaded, putting a player, a vehicle or an object into the exact
-situation the change is about, and reading back what the engine did. That step was
-a human sitting in front of the client. DayZ-MCP turns it into tool calls, which is
-what closes the loop.
+Two things fall out of that, and both are new for this game:
 
-## The loop, as tools
+- **The autonomous mod-development loop closes.** Editing Enforce Script, config.cpp
+  and models is file work; packing a PBO is a command. What could not be automated was
+  the part that decides whether the change actually works — getting the game up with
+  the mod loaded, putting a player, a vehicle or an object into the exact situation the
+  change is about, and reading the result. That step was a human at the client.
+  DayZ-MCP makes it tool calls: an agent can now change, build, run, measure and fix a
+  mod on its own.
+- **An agent can run a server.** The same verbs that set up a test scene are the ones
+  an event director or an admin needs: see every player, teleport one, spawn or remove
+  something, change time and weather, message everyone, watch the log, wait for a
+  condition — all through `MissionServer`, all serialized behind one daemon with leases
+  and an audit trail. Point an agent at a server and it can *operate* it, not just
+  query it.
+
+The verbs are also useful one at a time — spawn a car and read its telemetry, grab a
+frame, raycast a placement, record a 20 Hz drive trace as a regression fixture — which
+is why the surface reads like a Swiss-army knife. It is one; the two loops above are
+what the blades add up to.
+
+## The development loop, as tools
 
 | Step | Tool(s) | What it does |
 |---|---|---|
@@ -23,9 +36,23 @@ what closes the loop.
 | **Reset + repeat** | `restore_gameplay`, `dayz_test_stop`, `session_*` | Return the world to normal, stop the managed run, hand the game to the next session. |
 
 An agent that can call these can iterate on a mod the way it iterates on code: change,
-build, run, measure, fix. That is the tool this repo exists for. The individual calls
-are useful on their own — spawn a car, read its telemetry, grab a frame — but the
-value is the closed loop.
+build, run, measure, fix — the way this repo itself was developed and gated.
+
+## The server, as tools
+
+| Need | Tool(s) |
+|---|---|
+| Who is online, where, in what state | `query_all_players`, `query_player_state`, `object_inspect` |
+| Move, equip, stage | `player_teleport`, `inventory_give`, `world_spawn`, `object_delete`, `object_anim`, `vehicle_prepare_fixture` |
+| Set the stage | `world_time_set`, `world_weather_set`, `engine_set` |
+| Talk to players | `notify_players` |
+| Watch | `logs_since` (tail from a cursor), `wait_for` (block on a condition or a log pattern), `telemetry_read`, `vehicle_telemetry` |
+| Undo, hand over | `restore_gameplay`, `session_acquire_wait` / `session_release` / `session_status` |
+
+Everything server-side works against a headless server — it returns data, not frames.
+Visual capture (`capture_screenshot`, `camera_*`) needs a rendered client on the same
+machine. Several agents can share one running game: the daemon owns the port, hands
+out one lease at a time and audits what each holder did.
 
 ## How it works
 
@@ -45,8 +72,10 @@ the acceptance contract is in [`product-spec.md`](product-spec.md).
 
 - Windows, with DayZ and DayZ Tools installed (the server talks to `DayZDiag_x64`)
 - Python **3.10 or newer**
-- A DayZ server you are allowed to run mods on. This is a development tool: it is
-  meant for a local diag server, not for a live one.
+- A DayZ server you are allowed to run mods on. The daemon binds `127.0.0.1` only and
+  sits on the same machine as the game it drives — there is no remote mode and no
+  multi-user mode, by design. The reference deployment is a local DayZDiag server plus
+  a client for visual capture; the server-side verbs need only the bridge mod loaded.
 
 ## Two halves
 
