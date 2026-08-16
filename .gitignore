@@ -1,0 +1,40 @@
+# Credentials. The API key is generated at install time and must never be
+# committed; the server refuses to start without one, so a clone creating its
+# own is the intended path.
+tools/.dayz_mcp.key
+
+# Machine-local launcher registry: absolute paths and NTFS file ids. Only the
+# empty baseline (approved-launchers.baseline.json) is versioned; a clone
+# installs onto it.
+tools/approved-launchers.json
+tools/approved-launchers.lock
+tools/approved-launchers.receipts/
+tools/FORCE
+
+# Built launcher bundle. Its source ships under
+# tools/native-launchers/dayz-test-v1/src/; the build output is 40+ MB of
+# compiled launcher and embedded CPython, sealed against the building machine.
+tools/native-launchers/dayz-test-v1/*.exe
+tools/native-launchers/dayz-test-v1/*.dll
+tools/native-launchers/dayz-test-v1/*.pyd
+tools/native-launchers/dayz-test-v1/*.zip
+tools/native-launchers/dayz-test-v1/*.pyz
+tools/native-launchers/dayz-test-v1/*.json
+tools/native-launchers/dayz-test-v1/runtime/
+
+# Virtualenv created by install-mcp.ps1, and the packaging metadata that
+# `pip install -e` leaves beside it.
+tools/.venv-mcp/
+*.egg-info/
+build/
+dist/
+
+# Runtime state and profiles the server writes while running.
+tools/_audit/
+tools/reports/
+_server/
+_client/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/

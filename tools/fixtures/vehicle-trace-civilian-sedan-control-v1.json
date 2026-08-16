@@ -1,0 +1,18 @@
+{
+  "schema": "dayz-mcp-vehicle-trace-course-v1",
+  "course_id": "civilian-sedan-control-v1",
+  "vehicle_type": "CivilianSedan",
+  "requested_sample_hz": 20,
+  "minimum_duration_s": 2.0,
+  "controls": [
+    {"at_s": 0.0, "throttle": 0.5, "steer": 0.0, "brake": 0.0, "handbrake": 0.0},
+    {"at_s": 1.0, "throttle": 0.2, "steer": 0.25, "brake": 0.0, "handbrake": 0.0},
+    {"at_s": 2.0, "throttle": 0.0, "steer": 0.0, "brake": 1.0, "handbrake": 0.0}
+  ],
+  "required_observations": [
+    "owner_stable",
+    "net_id_stable",
+    "control_readback",
+    "body_contact_owner_client"
+  ]
+}

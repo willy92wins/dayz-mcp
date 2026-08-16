@@ -1,0 +1,39 @@
+{
+  "format_version": 1,
+  "projects": [
+    {
+      "mod": "ExampleMod",
+      "default_base_mods": ["@ExampleCore"],
+      "default_source": {
+        "path": "C:\\DayZ\\ExampleMod\\source",
+        "allow_root_junction": false
+      },
+      "dev_root": {
+        "path": "C:\\DayZ\\ExampleMod\\dev",
+        "allow_root_junction": false
+      },
+      "mission_roots": [
+        {
+          "path": "C:\\DayZ\\ExampleMod\\dev\\_server\\mpmissions",
+          "allow_root_junction": false
+        }
+      ],
+      "mod_roots": [
+        {
+          "path": "C:\\DayZ\\ExampleMod\\mods",
+          "allow_root_junction": false
+        }
+      ],
+      "build_temp_root": "C:\\DayZ\\ExampleMod\\temp",
+      "build_source_basename": null,
+      "diag_executable": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ\\DayZDiag_x64.exe",
+      "game_directory": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ",
+      "mission_aliases": {
+        "chernarus": "C:\\DayZ\\ExampleMod\\dev\\_server\\mpmissions\\dayzOffline.chernarusplus",
+        "livonia": "C:\\DayZ\\ExampleMod\\dev\\_server\\mpmissions\\dayzOffline.enoch",
+        "sakhal": "C:\\DayZ\\ExampleMod\\dev\\_server\\mpmissions\\dayzOffline.sakhal"
+      },
+      "mods_root": "C:\\DayZ\\ExampleMod\\mods"
+    }
+  ]
+}

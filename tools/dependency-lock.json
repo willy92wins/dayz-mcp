@@ -1,0 +1,142 @@
+{
+  "artifacts": {
+    "approved_launcher_registry": {
+      "location": "project_relative",
+      "path": "tools/approved-launchers.baseline.json",
+      "role": "empty_registry_baseline",
+      "sha256": "330B04E8D7AB06E7EE850326C1CAE180F119ED21486745DC0EC9BAAE203C653B",
+      "size": 45
+    },
+    "historical_dayz_test_oracle": {
+      "location": "project_relative",
+      "path": "test-contracts/task9-protocol-docs/skills/dayz-test-ingame/templates/dayz-test.ps1",
+      "role": "static_oracle_only",
+      "sha256": "3AE0911F682F051C48FCA398D7E6CF2896D2ECDCBD6E068FB3D72125216D8912",
+      "size": 29540
+    },
+    "psutil_license": {
+      "location": "project_relative",
+      "path": "tools/vendor/psutil/LICENSE",
+      "role": "vendored_license",
+      "sha256": "C7ADC4D5D1337A548B967421F1FBE258B93033A0417708FD6F4E38F8ECBCEB80",
+      "size": 1577
+    },
+    "psutil_wheel": {
+      "location": "project_relative",
+      "path": "tools/vendor/psutil/psutil-7.2.2-cp37-abi3-win_amd64.whl",
+      "role": "vendored_wheel",
+      "sha256": "EB7E81434C8D223EC4A219B5FC1C47D0417B12BE7EA866E24FB5AD6E84B3D988",
+      "size": 137737
+    },
+    "secure_launcher_source": {
+      "location": "project_relative",
+      "path": "tools/dayz_mcp/secure_launcher.py",
+      "role": "productive_launcher_source",
+      "sha256": "BD7C0FDDB23B9BA583B7BD250F16D6D720249D28A21B108AA787EA2F032DF2B2",
+      "size": 8943
+    }
+  },
+  "format_version": 1,
+  "remote_artifacts": {
+    "cpython_embed": {
+      "architecture": "AMD64",
+      "license": "PSF-2.0",
+      "sha256": "AD4961A479DEDBEB7C7D113253F8DB1B1935586B73C27488712BEEC4F2C894E6",
+      "size": 12023245,
+      "url": "https://www.python.org/ftp/python/3.14.3/python-3.14.3-embed-amd64.zip",
+      "version": "3.14.3"
+    }
+  },
+  "toolchains": {
+    "msvc": {
+      "compiler_version": "19.50.35728",
+      "files": {
+        "c1": {
+          "path": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\c1.dll",
+          "sha256": "2D419A8A92185738B41AA46270941C789D2ADAB3073237F84B2D41FB6976FF25",
+          "size": 3475480
+        },
+        "c1xx": {
+          "path": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\c1xx.dll",
+          "sha256": "9373032DC14BAA99DD9EBF3D0FF8FF3E691313A68ADFDC4D4B2331ACD779FBF0",
+          "size": 12529688
+        },
+        "c2": {
+          "path": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\c2.dll",
+          "sha256": "B782BEAB246445804327C0A0937DD3751A0756F65071A9908E398A788C0E3EFD",
+          "size": 10839584
+        },
+        "cl": {
+          "path": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe",
+          "sha256": "194DDF4AAFCB74452218A982309A97DE30E0ADB33EDF4AF02904EE107213E782",
+          "size": 682568
+        },
+        "dumpbin": {
+          "path": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\dumpbin.exe",
+          "sha256": "003959D2E77E464CD90F1B09BCD593E908A3922398B0E193CCEAB67D22D86DF2",
+          "size": 22584
+        },
+        "libcmt": {
+          "path": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.50.35717\\lib\\x64\\libcmt.lib",
+          "sha256": "E913A9FA09008C5FD9CAF7F1EAD3CE0AF91D89028BF28C53BDBA49E15CDCFD51",
+          "size": 6531918
+        },
+        "libvcruntime": {
+          "path": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.50.35717\\lib\\x64\\libvcruntime.lib",
+          "sha256": "A500FE3BDA1C254B8EB7B0EAFCF08F068AE5E1E32EC1DEF969B77DD2F5321EB2",
+          "size": 2065690
+        },
+        "link": {
+          "path": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\link.exe",
+          "sha256": "C988ACB4EC7EF964AE4D4E414B693A6A3782DD85F1E200100B3F896DB6B1A202",
+          "size": 3416136
+        }
+      },
+      "root_version": "14.50.35717",
+      "trees": {
+        "bin_hostx64_x64": {
+          "path": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64",
+          "sha256": "1EAC0899D415401CBAAD04A15EB473F602D53484CE74E6B4E7677619699C561B"
+        },
+        "include": {
+          "path": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.50.35717\\include",
+          "sha256": "BB750405060F340654C14A7449B771C9A17FA7A4E7AAB4AD317DB50F988750B4"
+        },
+        "lib": {
+          "path": "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.50.35717\\lib",
+          "sha256": "84B43E51D6E5F5B84772754C43AD9E76C7C6AB28C92205397BE20775A1111207"
+        }
+      }
+    },
+    "windows_sdk": {
+      "files": {
+        "bcrypt": {
+          "path": "C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\um\\x64\\bcrypt.lib",
+          "sha256": "9FE31DF255D17B0339391FF80A71BF2C5D442CC301BD2FE6EEEA00B626F10785",
+          "size": 14576
+        },
+        "buffer_overflow_u": {
+          "path": "C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\um\\x64\\BufferOverflowU.lib",
+          "sha256": "38B7E4D7E149938954CFCDDCAE6AC380A1B3CE20D19F373ACDCEF1112E374463",
+          "size": 385732
+        },
+        "kernel32": {
+          "path": "C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\um\\x64\\kernel32.lib",
+          "sha256": "341C7D56125A03B458E4D5093E4C79B33123CCFDFD610FE236937B8E6F3134BB",
+          "size": 311908
+        }
+      },
+      "trees": {
+        "include": {
+          "path": "C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0",
+          "sha256": "A1FFD7E99C13A598F11B28AF84B4CE321CDA1421C373C0D336D29A398A96585E"
+        },
+        "lib": {
+          "path": "C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0",
+          "sha256": "F5194AC0112674B25E8317F887DE06DE3126D45A02921257168A331A9604944C"
+        }
+      },
+      "version": "10.0.26100.0"
+    }
+  }
+}

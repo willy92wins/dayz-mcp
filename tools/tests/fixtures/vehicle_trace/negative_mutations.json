@@ -1,0 +1,17 @@
+{
+  "schema": "dayz-mcp-vehicle-trace-negative-fixtures-v1",
+  "mutations": [
+    {"id": "missing_sample_field", "kind": "delete", "path": ["samples", 3, "steer_applied"], "expected_status": "STOP"},
+    {"id": "sequence_gap", "kind": "set", "path": ["samples", 5, "sequence"], "value": 7, "expected_status": "STOP"},
+    {"id": "clock_regression", "kind": "set", "path": ["samples", 8, "monotonic_s"], "value": 100.2, "expected_status": "STOP"},
+    {"id": "sample_gap", "kind": "set", "path": ["samples", 8, "monotonic_s"], "value": 100.5, "expected_status": "STOP"},
+    {"id": "low_effective_hz", "kind": "set_period", "value": 0.06, "expected_status": "STOP"},
+    {"id": "steer_mismatch", "kind": "set", "path": ["samples", 4, "steer_applied"], "value": -0.25, "expected_status": "STOP"},
+    {"id": "overflow", "kind": "set", "path": ["overflow"], "value": true, "expected_status": "STOP"},
+    {"id": "owner_lost", "kind": "set", "path": ["samples", 7, "is_owner"], "value": false, "expected_status": "STOP"},
+    {"id": "net_id_changed", "kind": "set", "path": ["samples", 7, "net_id_low"], "value": 999, "expected_status": "STOP"},
+    {"id": "grounding_tamper", "kind": "set", "path": ["declared_derived"], "value": {"grounding": false}, "expected_status": "FAIL"},
+    {"id": "spinout_tamper", "kind": "set", "path": ["declared_derived"], "value": {"spinout": true}, "expected_status": "FAIL"},
+    {"id": "rollover_tamper", "kind": "set", "path": ["declared_derived"], "value": {"rollover": true}, "expected_status": "FAIL"}
+  ]
+}
