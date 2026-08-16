@@ -1,0 +1,16 @@
+# Hash-frozen sources (the bridge .c files, the sealed launcher inputs) are
+# compared byte-for-byte by the test suite. Force LF on checkout everywhere
+# so a Windows clone with core.autocrlf=true does not fail those tests.
+* text=auto eol=lf
+
+# Vendored artefacts pinned by size+sha256 in tools/dependency-lock.json ship
+# with whatever line endings upstream used; git must never normalise them.
+tools/vendor/** binary
+
+*.png binary
+*.pyd binary
+*.dll binary
+*.exe binary
+*.whl binary
+*.zip binary
+*.pyz binary

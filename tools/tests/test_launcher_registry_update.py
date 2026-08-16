@@ -61,6 +61,41 @@ class LauncherRegistryUpdateTest(unittest.TestCase):
             self.assertEqual(restored_sha, updater._sha256(BASELINE))
             self.assertEqual(len(list(receipts.glob("*/rolled-back.json"))), 1)
 
+    def test_bootstrap_creates_the_registry_from_baseline_exactly_once(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = root / "approved-launchers.baseline.json"
+            baseline.write_bytes(BASELINE)
+            registry = root / "approved-launchers.json"
+
+            created_sha = updater._bootstrap_registry(
+                registry_path=registry, baseline_path=baseline
+            )
+            self.assertEqual(registry.read_bytes(), BASELINE)
+            self.assertEqual(created_sha, updater._sha256(BASELINE))
+            # Ties this fixture to the shipped pin: if the baseline constant
+            # drifts from the real file, the mismatch surfaces here.
+            self.assertEqual(created_sha, updater._BASELINE_SHA256)
+
+            with self.assertRaisesRegex(
+                RuntimeError, "launcher_registry_already_bootstrapped"
+            ):
+                updater._bootstrap_registry(
+                    registry_path=registry, baseline_path=baseline
+                )
+            self.assertEqual(registry.read_bytes(), BASELINE)
+
+            drifted = root / "drifted-baseline.json"
+            drifted.write_bytes(BASELINE + b" ")
+            fresh = root / "fresh-registry.json"
+            with self.assertRaisesRegex(
+                RuntimeError, "launcher_registry_baseline_drift"
+            ):
+                updater._bootstrap_registry(
+                    registry_path=fresh, baseline_path=drifted
+                )
+            self.assertFalse(fresh.exists())
+
     def test_provenance_tracks_the_recorded_chain_and_catches_in_place_rewrites(self) -> None:
         # BUG-072. The four states are asserted on ONE registry as it moves, because
         # what matters is the transition between them, not each label in isolation.

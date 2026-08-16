@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 import uuid
 from pathlib import Path
 from typing import Sequence
@@ -26,6 +27,9 @@ _CANONICAL_BUNDLE = (
 )
 _CANONICAL_RECEIPTS = (
     Path(__file__).resolve().parents[1] / "approved-launchers.receipts"
+)
+_CANONICAL_BASELINE = (
+    Path(__file__).resolve().parents[1] / "approved-launchers.baseline.json"
 )
 _BASELINE_SHA256 = "330B04E8D7AB06E7EE850326C1CAE180F119ED21486745DC0EC9BAAE203C653B"
 _REPLACEFILE_WRITE_THROUGH = 0x00000001
@@ -150,6 +154,38 @@ def _read_receipt(path: Path) -> bytes:
     ):
         _invalid("invalid_launcher_registry_receipt")
     return raw
+
+
+def _bootstrap_registry(*, registry_path: Path, baseline_path: Path) -> str:
+    # Create-only seed of the live registry from the shipped empty baseline.
+    # A clone has no approved-launchers.json and every transition needs one to
+    # CAS against, so this is the documented first step after building the
+    # bundle. It never touches an existing registry: resetting one stays an
+    # explicit human decision.
+    try:
+        raw = baseline_path.read_bytes()
+    except OSError as error:
+        raise RuntimeError("launcher_registry_baseline_missing") from error
+    if _sha256(raw) != _BASELINE_SHA256:
+        _invalid("launcher_registry_baseline_drift")
+    try:
+        launcher_registry._parse_launcher_registry(raw.decode("utf-8"))
+    except (UnicodeError, ValueError) as error:
+        raise RuntimeError("launcher_registry_baseline_invalid") from error
+    if registry_path.exists():
+        _invalid("launcher_registry_already_bootstrapped")
+    _write_create_only(registry_path, raw)
+    installed, _installed_identity = _read_pinned(registry_path)
+    if installed != raw:
+        _invalid("launcher_registry_bootstrap_verification_failed")
+    return _sha256(raw)
+
+
+def bootstrap_registry() -> str:
+    return _bootstrap_registry(
+        registry_path=_CANONICAL_REGISTRY,
+        baseline_path=_CANONICAL_BASELINE,
+    )
 
 
 def _validated_entry(bundle: Path) -> dict[str, object]:
@@ -500,17 +536,23 @@ def _parser() -> argparse.ArgumentParser:
     install = commands.add_parser("install-dayz-test-v1")
     install.add_argument("--expected-sha256", required=True)
     commands.add_parser("rollback-last")
+    commands.add_parser("bootstrap")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        result = (
-            install_dayz_test_v1(expected_sha256=args.expected_sha256)
-            if args.command == "install-dayz-test-v1"
-            else rollback_last_registry_transition()
-        )
+        if args.command == "install-dayz-test-v1":
+            result = install_dayz_test_v1(expected_sha256=args.expected_sha256)
+        elif args.command == "bootstrap":
+            result = bootstrap_registry()
+            print(
+                "next: install-dayz-test-v1 --expected-sha256 " + result,
+                file=sys.stderr,
+            )
+        else:
+            result = rollback_last_registry_transition()
     except BaseException as error:
         print(f"launcher registry update failed: {type(error).__name__}")
         return 1

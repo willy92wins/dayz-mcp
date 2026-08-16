@@ -82,8 +82,14 @@ The builder reads a host-only intent file. It never loads the published example.
 3. Set `allow_root_junction` to `true` only on a leaf that is a mount-point junction. Otherwise the builder raises `required_junction_missing`.
 4. Each mission alias must live under one of that project's `mission_roots`.
 5. `mods_root` must repeat one of the `mod_roots` paths.
-6. Run the builder. A missing path stops the build; create the directory or fix the JSON.
-7. Install the bundle in `approved-launchers.json` as today.
+6. On a machine other than the one that produced `tools/dependency-lock.json`,
+   re-pin the toolchain section first: `python relock_toolchain.py` discovers the
+   local MSVC and Windows SDK and rewrites only that section; the shipped
+   artifact pins stay untouched.
+7. Run the builder. A missing path stops the build; create the directory or fix the JSON.
+8. Seed and install the registry:
+   `python -m dayz_mcp.launcher_registry_update bootstrap`, then
+   `python -m dayz_mcp.launcher_registry_update install-dayz-test-v1 --expected-sha256 <sha printed by bootstrap>`.
 
 Locate the file with `--policy PATH`, then `DAYZ_MCP_LAUNCHER_POLICY`, then `%LOCALAPPDATA%\DayZ_MCP\launcher-policy.json`. An empty env value is an error, not a fallback. The published example is never selected.
 
