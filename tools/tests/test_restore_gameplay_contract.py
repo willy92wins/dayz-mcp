@@ -77,7 +77,48 @@ class RestoreGameplayEnforceSourceContractTest(unittest.TestCase):
         self.assertIn("RestoreGameplay();", branch_body)
         self.assertIn("result.ok = true;", branch_body)
 
+    def test_restore_gameplay_command_releases_the_camera_like_shutdown(self) -> None:
+        # BUG-075: the command branch only called RestoreGameplay, which covers
+        # simulation, controls and HUD and never the camera, so the tool answered
+        # ok:1 with the view still locked to the debug camera and reconnecting was
+        # the only way out. Shutdown already performed the full teardown, so the
+        # fix was to share it rather than copy it.
+        source = CLIENT_BRIDGE.read_text(encoding="utf-8")
+        dispatch = _method_body(source, "protected void Dispatch(MCPCommand command)")
+        branch_start = dispatch.index('else if (command.cmd == "restore_gameplay")')
+        branch_end = dispatch.index("}", branch_start)
+        self.assertIn("ReleaseCamera();", dispatch[branch_start:branch_end])
+
+        release = _method_body(source, "protected void ReleaseCamera()")
+        self.assertIn("m_ActiveCam.SetActive(false);", release)
+        self.assertIn("DeleteOwnedCamera();", release)
+
+        # One copy only. An inline teardown in Shutdown is exactly how the command
+        # path came to be missing it, so a second copy must not reappear there.
+        shutdown = _method_body(source, "void Shutdown()")
+        self.assertIn("ReleaseCamera();", shutdown)
+        self.assertNotIn("m_ActiveCam.SetActive(false);", shutdown)
+
+    def test_switching_to_the_free_camera_drops_the_owned_one(self) -> None:
+        # Found by tracing the invariant above to its other call sites: this method
+        # overwrites m_ActiveCam and clears m_ActiveCamOwned, so an owned
+        # staticcamera that was active would stay in the world with no reference
+        # left able to delete it. The static path already drops the previous camera
+        # before building its replacement.
+        source = CLIENT_BRIDGE.read_text(encoding="utf-8")
+        apply_free = _method_body(
+            source, "protected bool ApplyFreeCamera(MCPJob job, MCPCameraValidation validation)"
+        )
+        self.assertIn("DeleteOwnedCamera();", apply_free)
+        self.assertLess(
+            apply_free.index("DeleteOwnedCamera();"), apply_free.index("m_ActiveCam = freeCam;")
+        )
+
     def test_vehicle_get_in_restores_once_before_reading_vehicle_command(self) -> None:
+        # Deliberately NOT extended with ReleaseCamera: this path restores
+        # simulation as a precondition for reading the vehicle command, not as an
+        # exit from camera control, and tearing the camera down here would break
+        # filming a drive from a placed camera.
         source = CLIENT_BRIDGE.read_text(encoding="utf-8")
         prep = _method_body(source, "protected bool ProcessVehicleGetInClientPrep(MCPJob job)")
         guard = "if (!job.sim_restored)"

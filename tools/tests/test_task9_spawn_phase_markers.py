@@ -35,8 +35,24 @@ BRIDGE = WORKSPACE_ROOT / "scripts" / "5_Mission" / "MCPBridge.c"
 # timeout de vehicle_drive): vehicle_drive esta en SERVER_COMMANDS del bridge pero NO en la
 # superficie de tools MCP, asi que solo se alcanza llamando al daemon en crudo. Un camino que
 # la superficie no expone tampoco puede regresionar por uso normal del agente.
-BRIDGE_SHA256 = "C5DBFCFF1806EC9166304A9212ADB04CCE7E56D05D34634A427E9E58C2E99D71"
-BASE_BRIDGE_SHA256 = "988020EA824AB0CDFE8B04801BA1B6CEDDC8A40C7564D30CF8DF46839284CC73"
+# Re-congelados 2026-08-16 (segunda vez del dia) sobre el bridge con el fix de BUG-071: la API key
+# deja de leerse una sola vez. ReloadKeyAfterFailure relee dayz_mcp.json cuando el backoff de poll
+# alcanza KEY_RELOAD_BACKOFF_S (4 s) y adopta la key SOLO si cambio, poniendo el backoff a 0; una key
+# igual retorna antes, para que un servidor caido no reintente en caliente. El disparador es el fallo
+# sostenido y no una clasificacion del error, porque OnError entrega un ERestResultState y EREST_ERROR
+# comparte el valor 5 con EREST_ERROR_CLIENTERROR (restapi.c:16-17): un 401 y una conexion rechazada
+# son indistinguibles desde Enforce.
+# Gate in-game del mismo dia y del camino NUEVO, no solo de que compile: se planto una key caducada
+# ANTES de arrancar el servidor, asi que el bridge nacio con credencial muerta y reprodujo el sintoma
+# exacto de la ficha -- poll error=5 con backoff_s 4 -> 8 -> 16 -> 30 -> 30, clavado en el tope. Al
+# restaurar la key buena en caliente: "poll key reloaded path=$mission:dayz_mcp.json keylen=43", y el
+# poll reanudado de verdad (bridge_status.server_peer.last_poll_age_s = 0.216), sin reiniciar la
+# mision. Mission compilo 216x files; 490x classes, cero errores.
+# Para quien repita el gate: editar dayz_mcp.json con el bridge YA arrancado no hace NADA -- la key
+# vive en memoria, los polls siguen OK y no hay fallo que dispare la recarga. Hay que plantar la key
+# caducada y reiniciar el proceso.
+BRIDGE_SHA256 = "F716A88D2A179DBD3B25CA0A2D58AF061236DA59D8B51C9F20A6BA99671F6F8E"
+BASE_BRIDGE_SHA256 = "E87539E53CFC68F3AC3446A43E167BED16665FF4F2947408AC451234F6DF96C9"
 
 MARKERS = (
     'Log("spawn phase id=" + command.id + " phase=validate_begin");',

@@ -1730,7 +1730,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("world_weather_set", args, "server", _timeout(timeout_s))
 
-    @app.tool(description="Set the client camera through the existing camera_set bridge command.")
+    @app.tool(description=(
+        "Set the client camera through the existing camera_set bridge command. "
+        "cam_mode: orient (cam_pos + cam_orientation), lookat (cam_pos + look_at), "
+        "matrix (cam_matrix of 12), free (cam_pos, then look_at or cam_orientation)."
+    ))
     async def camera_set(
         cam_mode: str = "orient",
         cam_pos: list[float] | None = None,
@@ -1741,6 +1745,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         settle_ticks: int = 3,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
+        # BUG-076: the wire value is `lookat`, but the vector argument sitting
+        # right beside it is `look_at`, so a caller naturally spells the mode
+        # with the underscore and gets a bare `bad_args`. Normalize rather than
+        # widen the wire: the branches below forward cam_mode verbatim, so
+        # accepting the alias without rewriting it would make this tool admit
+        # exactly what MCPClientBridge.c:1741 then rejects in-game.
+        if cam_mode == "look_at":
+            cam_mode = "lookat"
         if cam_mode == "orient":
             args = {"cam_mode": cam_mode, "cam_pos": _require_vec3(cam_pos, "cam_pos"), "cam_orientation": _require_vec3(cam_orientation, "cam_orientation")}
         elif cam_mode == "lookat":
@@ -1754,7 +1766,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             else:
                 args["cam_orientation"] = _require_vec3(cam_orientation, "cam_orientation")
         else:
-            raise ToolError("bad_args")
+            raise ToolError(
+                "bad_args: cam_mode must be one of orient, lookat, matrix, free "
+                "(look_at is accepted as an alias of lookat)"
+            )
         fov_value = float(fov)
         if fov_value < 0.0 or not math.isfinite(fov_value):
             raise ToolError("bad_args")
@@ -1769,7 +1784,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("camera_get", args, "client", _timeout(timeout_s))
 
-    @app.tool(description="Restore local player simulation, input controls, and HUD after camera control.")
+    @app.tool(description=(
+        "Restore local player simulation, input controls and HUD, and release the "
+        "camera: the free camera is deactivated and an owned static camera is "
+        "deleted. This is the only exit from camera control, as camera_set has no "
+        "off mode."
+    ))
     async def restore_gameplay(timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("restore_gameplay", {}, "client", _timeout(timeout_s))

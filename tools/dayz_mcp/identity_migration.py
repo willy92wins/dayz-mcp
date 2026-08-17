@@ -1066,6 +1066,38 @@ def _next_marker_candidates(
     return tuple(candidates)
 
 
+def _settled_receipt(
+    source_path: Path,
+    backup_path: Path,
+    receipt_path: Path,
+    pending_receipt_path: Path,
+    marker_path: Path,
+    next_path: Path,
+) -> dict[str, object] | None:
+    """Return the published receipt when the migration is already settled.
+
+    Settled is the single state ``_recover_backup_transaction`` resolves without
+    writing anything: a final receipt that validates, and none of the artifacts
+    that mark an interrupted run. A leftover marker is excluded even though a
+    receipt is present, because that branch unlinks the marker.
+
+    Every other case returns None so the caller runs the gated path and fails
+    exactly where it did before: an invalid receipt still raises, from its
+    original site rather than from here.
+    """
+    if not os.path.lexists(receipt_path):
+        return None
+    if any(
+        os.path.lexists(path)
+        for path in (pending_receipt_path, next_path, marker_path)
+    ):
+        return None
+    try:
+        return _validate_receipt(receipt_path, source_path, backup_path)
+    except RunsBackupGateError:
+        return None
+
+
 def _recover_backup_transaction(
     source_path: Path,
     backup_path: Path,
@@ -1253,6 +1285,24 @@ def ensure_runs_v1_backup(
     )
 
     with _exclusive_gate_lock(destination_dir / _LOCK_NAME):
+        # BUG-080: quiescence is a precondition for WRITING -- it exists so that
+        # nothing mutates runs while it is copied. Once the receipt is published
+        # and no transaction artifact remains there is nothing left to write, and
+        # demanding an empty machine buys no safety while making the daemon
+        # unbootable: the scan counts every `-m dayz_mcp` process of every open
+        # session as a blocker (:739-743), so the drain never converges and
+        # startup dies at its deadline (daemon.py:246-261). Deliberately narrow --
+        # anything that could still write falls through to the gate below.
+        settled = _settled_receipt(
+            source_path,
+            backup_path,
+            receipt_path,
+            pending_receipt_path,
+            marker_path,
+            next_path,
+        )
+        if settled is not None:
+            return settled
         _assert_quiescent(
             port,
             allowed_current_identity,

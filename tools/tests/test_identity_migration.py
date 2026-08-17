@@ -80,6 +80,63 @@ class RunsBackupGateTest(unittest.TestCase):
         self.assertFalse((self.migration / "runs.pre-v2.json").exists())
         self.assertTrue((self.migration / "runs-backup-receipt.json").is_file())
 
+    def test_settled_migration_ignores_blockers_that_only_gate_writing(self) -> None:
+        # BUG-080: the quiescence assert ran before the receipt fast path, so a
+        # migration that had finished long ago still demanded an empty machine.
+        # Once every open session's `-m dayz_mcp` client counted as a blocker, no
+        # daemon could boot at all: each candidate died at its startup deadline
+        # with nothing left to write.
+        self.paths.root.mkdir(parents=True)
+        self.paths.runs_path.write_bytes(b'{"runs":[{"run_id":"settled"}]}\n')
+        receipt = self.run_gate()
+        backup_bytes = (self.migration / "runs.pre-v2.json").read_bytes()
+        receipt_bytes = (self.migration / "runs-backup-receipt.json").read_bytes()
+
+        variants = (
+            {"scan_fn": lambda _allowed: (1234,)},
+            {"listener_fn": lambda _port: True},
+        )
+        for kwargs in variants:
+            with self.subTest(kwargs=sorted(kwargs)):
+                self.assertEqual(self.run_gate(**kwargs), receipt)
+
+        # Read-only has to mean read-only, or the skipped gate would be a real hole.
+        self.assertEqual((self.migration / "runs.pre-v2.json").read_bytes(), backup_bytes)
+        self.assertEqual(
+            (self.migration / "runs-backup-receipt.json").read_bytes(), receipt_bytes
+        )
+
+    def test_blockers_still_gate_every_receipt_state_with_work_left(self) -> None:
+        # The controls that keep the fast path narrow. Each case below has a
+        # receipt on disk and must still hit the gate, because each still has
+        # something to write. Asserting the specific error is what proves the gate
+        # was reached rather than some later validation.
+        self.paths.root.mkdir(parents=True)
+        self.paths.runs_path.write_bytes(b'{"runs":[]}\n')
+        self.run_gate()
+        receipt_path = self.migration / "runs-backup-receipt.json"
+        published = receipt_path.read_bytes()
+        blocked = {"scan_fn": lambda _allowed: (1234,)}
+
+        leftovers = (
+            ("runs-backup-transaction.json", "marker the recovery path unlinks"),
+            ("runs-backup-receipt.pending", "interrupted publish"),
+            ("runs-backup-transaction.next", "half written marker"),
+        )
+        for name, reason in leftovers:
+            with self.subTest(leftover=reason):
+                artifact = self.migration / name
+                artifact.write_bytes(b"{}")
+                with self.assertRaisesRegex(RunsBackupGateError, "dayz_mcp_process_present"):
+                    self.run_gate(**blocked)
+                artifact.unlink()
+
+        with self.subTest(leftover="unreadable receipt"):
+            receipt_path.write_bytes(b"not json")
+            with self.assertRaisesRegex(RunsBackupGateError, "dayz_mcp_process_present"):
+                self.run_gate(**blocked)
+            receipt_path.write_bytes(published)
+
     def test_listener_or_dayz_process_blocks_before_backup_or_receipt(self) -> None:
         self.paths.root.mkdir(parents=True)
         self.paths.runs_path.write_bytes(b"legacy")

@@ -33,6 +33,9 @@ class MCPBridge
 	protected float m_PollHz;
 	protected float m_Accum;
 	protected float m_ElapsedS;
+	// Backoff at which a poll failure stops looking transient and the credential on
+	// disk is re-read (BUG-071).
+	protected const float KEY_RELOAD_BACKOFF_S = 4.0;
 	protected float m_Backoff;
 	protected int m_Tick;
 	protected int m_TickPollSent;
@@ -347,6 +350,52 @@ class MCPBridge
 		}
 
 		Log("poll " + reason + " backoff_s=" + m_Backoff);
+
+		if (m_Backoff >= KEY_RELOAD_BACKOFF_S)
+		{
+			ReloadKeyAfterFailure();
+		}
+	}
+
+	// BUG-071: the key is read once at configure time and never again, so rotating
+	// it -- or a port reclaim handing the socket to a differently keyed holder --
+	// leaves the bridge polling with a dead credential until the mission restarts.
+	// The only visible symptom was the backoff above climbing to its 30 s cap.
+	// The trigger is persistent failure, not a classified auth error, because the
+	// callback receives an ERestResultState and EREST_ERROR shares its value with
+	// EREST_ERROR_CLIENTERROR (restapi.c:16-17): a 401 and a refused connection are
+	// indistinguishable here. Gated on the backoff so the file read costs at most
+	// one per failed poll and never runs on the success path.
+	// A changed url is deliberately NOT adopted: that needs a fresh RestContext,
+	// which is init territory, not the poll failure path.
+	protected void ReloadKeyAfterFailure()
+	{
+		string path = "$profile:dayz_mcp.json";
+		if (!FileExist(path))
+		{
+			path = "$mission:dayz_mcp.json";
+		}
+
+		if (!FileExist(path))
+		{
+			return;
+		}
+
+		MCPConfig cfg = new MCPConfig();
+		JsonFileLoader<MCPConfig>.JsonLoadFile(path, cfg);
+		if (!cfg.key || cfg.key == "")
+		{
+			return;
+		}
+
+		if (cfg.key == m_Key)
+		{
+			return;
+		}
+
+		m_Key = cfg.key;
+		m_Backoff = 0.0;
+		Log("poll key reloaded path=" + path + " keylen=" + m_Key.Length());
 	}
 
 	protected void Dispatch(MCPCommand command)

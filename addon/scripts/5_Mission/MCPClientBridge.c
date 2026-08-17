@@ -109,6 +109,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected string m_PollVersion;
 	protected float m_PollHz;
 	protected float m_Accum;
+	// Backoff at which a poll failure stops looking transient and the credential on
+	// disk is re-read (BUG-071).
+	protected const float KEY_RELOAD_BACKOFF_S = 4.0;
 	protected float m_Backoff;
 	protected int m_Tick;
 	protected int m_TickPollSent;
@@ -392,6 +395,52 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		Log("client poll " + reason + " backoff_s=" + m_Backoff);
+
+		if (m_Backoff >= KEY_RELOAD_BACKOFF_S)
+		{
+			ReloadKeyAfterFailure();
+		}
+	}
+
+	// BUG-071: the key is read once at configure time and never again, so rotating
+	// it -- or a port reclaim handing the socket to a differently keyed holder --
+	// leaves the bridge polling with a dead credential until the mission restarts.
+	// The only visible symptom was the backoff above climbing to its 30 s cap.
+	// The trigger is persistent failure, not a classified auth error, because the
+	// callback receives an ERestResultState and EREST_ERROR shares its value with
+	// EREST_ERROR_CLIENTERROR (restapi.c:16-17): a 401 and a refused connection are
+	// indistinguishable here. Gated on the backoff so the file read costs at most
+	// one per failed poll and never runs on the success path.
+	// A changed url is deliberately NOT adopted: that needs a fresh RestContext,
+	// which is init territory, not the poll failure path.
+	protected void ReloadKeyAfterFailure()
+	{
+		string path = "$profile:dayz_mcp.json";
+		if (!FileExist(path))
+		{
+			path = "$mission:dayz_mcp.json";
+		}
+
+		if (!FileExist(path))
+		{
+			return;
+		}
+
+		MCPConfig cfg = new MCPConfig();
+		JsonFileLoader<MCPConfig>.JsonLoadFile(path, cfg);
+		if (!cfg.key || cfg.key == "")
+		{
+			return;
+		}
+
+		if (cfg.key == m_Key)
+		{
+			return;
+		}
+
+		m_Key = cfg.key;
+		m_Backoff = 0.0;
+		Log("client poll key reloaded path=" + path + " keylen=" + m_Key.Length());
 	}
 
 	protected void DrainPending()
@@ -469,6 +518,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "restore_gameplay")
 		{
 			RestoreGameplay();
+			ReleaseCamera();
 			result.ok = true;
 		}
 		else if (command.cmd == "drive_probe_client")
@@ -1563,6 +1613,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 
+		// Switching away from an owned staticcamera has to drop it first: the
+		// assignments at the end of this method overwrite m_ActiveCam and clear
+		// m_ActiveCamOwned, which would strand the old camera in the world with no
+		// reference left to delete it. Bare DeleteOwnedCamera, not ReleaseCamera,
+		// to match what the static path already does when it replaces a camera.
+		DeleteOwnedCamera();
+
 		PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
 		if (player)
 		{
@@ -2098,6 +2155,24 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 	}
 
+	// BUG-075: RestoreGameplay covers simulation, controls and HUD and never the
+	// camera, so the restore_gameplay command answered ok:1 with the view still
+	// locked to the debug camera -- and camera_set has no off mode, so reconnecting
+	// was the only way out. Shutdown already performed the full teardown; sharing
+	// it is what stops the two paths drifting apart again.
+	// Ownership is the subtlety: FreeDebugCamera is a singleton the bridge does not
+	// own and is only deactivated, while the staticcamera built for
+	// orient/lookat/matrix is owned and must also be deleted.
+	protected void ReleaseCamera()
+	{
+		if (m_ActiveCam)
+		{
+			m_ActiveCam.SetActive(false);
+		}
+
+		DeleteOwnedCamera();
+	}
+
 	protected void DeleteOwnedCamera()
 	{
 		if (m_ActiveCam && m_ActiveCamOwned)
@@ -2187,11 +2262,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPVehicleTrace.Abort("shutdown");
 		MCPCarDrive.Clear();
 		RestoreGameplay();
-		if (m_ActiveCam)
-		{
-			m_ActiveCam.SetActive(false);
-		}
-		DeleteOwnedCamera();
+		ReleaseCamera();
 
 		if (m_Ctx)
 		{

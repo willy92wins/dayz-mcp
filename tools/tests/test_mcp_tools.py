@@ -393,6 +393,40 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         _assert_tool_error(self, bad_notify.exception)
         self.assertIn("bad_args", str(bad_notify.exception))
 
+    async def test_camera_set_look_at_alias_is_normalized_for_the_wire(self) -> None:
+        # BUG-076: `lookat` is the value the game matches on
+        # (MCPClientBridge.c:1741), but the vector argument beside it is spelled
+        # `look_at`, so callers reach for the underscore and get a bare bad_args.
+        # The alias must be NORMALIZED, not merely accepted: every branch forwards
+        # cam_mode verbatim, so passing the caller's spelling through would trade a
+        # clean local rejection for one that only shows up in-game.
+        app, runtime = self.build_started()
+        self.start_peer(runtime, "server")
+        client = self.start_peer(runtime, "client")
+
+        await app.call_tool(
+            "camera_set",
+            {"cam_mode": "look_at", "cam_pos": [1, 2, 3], "look_at": [4, 5, 6], "timeout_s": 5.0},
+        )
+
+        sent = [command for command in client.commands_seen if command["cmd"] == "camera_set"]
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["args"]["cam_mode"], "lookat")
+        self.assertEqual(sent[0]["args"]["look_at"], [4.0, 5.0, 6.0])
+
+        # Negative control: a near-miss that is NOT the documented alias must still
+        # be rejected -- the fix adds one spelling, it does not relax the mode set.
+        with self.assertRaises(Exception) as unknown:
+            await app.call_tool(
+                "camera_set", {"cam_mode": "lookAt", "cam_pos": [1, 2, 3], "timeout_s": 1.0}
+            )
+        _assert_tool_error(self, unknown.exception)
+        message = str(unknown.exception)
+        self.assertIn("bad_args", message)
+        # The rejection has to name the way out, or the next caller guesses again.
+        for mode in ("orient", "lookat", "matrix", "free"):
+            self.assertIn(mode, message)
+
     async def test_timeout_has_an_upper_bound(self) -> None:
         # BUG-027 / F1.3: only <=0 and non-finite were rejected, so a caller could
         # pin an operation far past MAX_OPERATION_PIN_S. The 299 s call below is
