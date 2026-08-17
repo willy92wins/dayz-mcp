@@ -223,6 +223,26 @@ Aceptación detallada: `plans/2026-07-14-agent-session-coordination-design.md` �
   corre no es lo que hay en disco (F2.3). Sin PBO, sin tocar Enforce.
   Plan: `plans/2026-08-07-mejoras-y-capacidades-plan-v2.md`.
 
+- **2026-08-17 (dos cambios de contrato observables):**
+  1. **`entities` entra en la poda de referencias.** El campo se quedó fuera de
+     `PRUNABLE_FIELDS` cuando se añadió `entities_query`, así que hasta hoy TODO
+     verbo emitía `entities: []`. Ahora se poda como los demás contenedores de
+     referencia vacíos. **Sin excepción semántica**, a diferencia de
+     `query_all_players`: `entities_query` informa además de `count_total`, que
+     es un entero y por tanto nunca se poda, de modo que un resultado vacío
+     sigue diciéndolo. La excepción solo aplica cuando el contenedor es la
+     ÚNICA salida del verbo, que es el caso de `players` y no el de `entities`.
+  2. **`ui_set_text` acepta `TextWidget`.** Antes devolvía `text_not_writable`
+     para una etiqueta plana, pese a que `SetText` existe
+     (`1_core\proto\enwidgets.c:195`); quedaba fuera por omisión, no por
+     política, ya que `ButtonWidget` —igual de no-legible— sí se aceptaba. Es
+     un ensanchamiento: ninguna llamada que antes funcionara cambia. Cubre
+     también `MultilineTextWidget`, que deriva de `TextWidget`. Caveat que el
+     consumidor debe conocer: escribir una etiqueta cambia lo que se DIBUJA, no
+     el estado del juego, y `TextWidget` no tiene getter, así que `ui_tree`
+     reporta `text_readable: false` para ella. No condiciones un gate sobre un
+     texto que escribió este verbo.
+
 - **2026-07-25 (H12 — credencial viva tras rotación/restart):** aprobado e
   implementado un provider único por `ClientRuntime`. Un 401 de un daemon ya
   acreditado permite revalidar la autoridad original, releer el mismo keyfile y

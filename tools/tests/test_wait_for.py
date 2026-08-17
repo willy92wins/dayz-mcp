@@ -57,9 +57,10 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         result = await server.execute_wait_for(
             runtime, "players_at_least", value=1, timeout_s=0.6, poll_interval_s=0.5
         )
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
+        self.assertEqual(result["tool"], "wait_for")
         self.assertEqual(result["observed"], 0)
         self.assertGreaterEqual(result["probes"], 1)
 
@@ -68,6 +69,23 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(server.ToolError) as ctx:
             await server.execute_wait_for(runtime, "not_a_condition")
         self.assertIn("bad_args", str(ctx.exception))
+        self.assertIn("players_at_least", str(ctx.exception))
+
+    async def test_version_blocked_aborts_first_probe(self) -> None:
+        class _Blocked(_FakeRuntime):
+            async def call_bridge(self, cmd, args, peer, timeout_s):
+                raise server.ToolError("version_blocked")
+
+        runtime = _Blocked()
+        with self.assertRaises(server.ToolError) as ctx:
+            await server.execute_wait_for(
+                runtime,
+                "players_at_least",
+                value=1,
+                timeout_s=10.0,
+                poll_interval_s=2.0,
+            )
+        self.assertIn("version_blocked", str(ctx.exception))
 
     async def test_sleep_does_not_hold_tool_lock(self) -> None:
         # Fails if wait_for wraps its whole body in `async with runtime.tool_lock`.
@@ -118,9 +136,100 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
                 pattern="MATCH",
                 timeout_s=0.6,
                 poll_interval_s=0.5,
+                lookback_lines=0,
             )
 
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
+        self.assertEqual(result["tool"], "wait_for")
         self.assertGreaterEqual(result["probes"], 1)
+
+    async def test_log_matches_lookback_sees_recent_preexisting_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profiles = Path(directory) / "_server" / "profiles"
+            profiles.mkdir(parents=True)
+            log = profiles / "script.log"
+            lines = [f"line-{i}\n" for i in range(10)]
+            lines.append("BTCOpenResponse\n")
+            log.write_text("".join(lines), encoding="utf-8")
+
+            async def lifecycle_status() -> dict:
+                return {"runs": [{"run_id": "run-a", "profiles": str(profiles)}]}
+
+            runtime = _FakeRuntime()
+            runtime.lifecycle_status = lifecycle_status
+            result = await server.execute_wait_for(
+                runtime,
+                "log_matches",
+                pattern="BTCOpenResponse",
+                timeout_s=0.6,
+                poll_interval_s=0.5,
+                lookback_lines=5,
+            )
+
+        self.assertTrue(result["satisfied"])
+        self.assertTrue(result["ok"])
+        self.assertIn("BTCOpenResponse", str(result["observed"]))
+
+    async def test_log_matches_lookback_misses_line_outside_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profiles = Path(directory) / "_server" / "profiles"
+            profiles.mkdir(parents=True)
+            log = profiles / "script.log"
+            lines = ["BTCOpenResponse\n"] + [f"later-{i}\n" for i in range(20)]
+            log.write_text("".join(lines), encoding="utf-8")
+
+            async def lifecycle_status() -> dict:
+                return {"runs": [{"run_id": "run-a", "profiles": str(profiles)}]}
+
+            runtime = _FakeRuntime()
+            runtime.lifecycle_status = lifecycle_status
+            result = await server.execute_wait_for(
+                runtime,
+                "log_matches",
+                pattern="BTCOpenResponse",
+                timeout_s=0.6,
+                poll_interval_s=0.5,
+                lookback_lines=5,
+            )
+
+        self.assertFalse(result["satisfied"])
+        self.assertTrue(result["timed_out"])
+
+    async def test_log_matches_lookback_zero_misses_preexisting_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profiles = Path(directory) / "_server" / "profiles"
+            profiles.mkdir(parents=True)
+            log = profiles / "script.log"
+            log.write_text("BTCOpenResponse\n", encoding="utf-8")
+
+            async def lifecycle_status() -> dict:
+                return {"runs": [{"run_id": "run-a", "profiles": str(profiles)}]}
+
+            runtime = _FakeRuntime()
+            runtime.lifecycle_status = lifecycle_status
+            result = await server.execute_wait_for(
+                runtime,
+                "log_matches",
+                pattern="BTCOpenResponse",
+                timeout_s=0.6,
+                poll_interval_s=0.5,
+                lookback_lines=0,
+            )
+
+        self.assertFalse(result["satisfied"])
+        self.assertTrue(result["timed_out"])
+
+    async def test_lookback_lines_out_of_range_is_bad_args(self) -> None:
+        runtime = _FakeRuntime()
+        for bad in (-1, 2001, True):
+            with self.subTest(bad=bad):
+                with self.assertRaises(server.ToolError) as ctx:
+                    await server.execute_wait_for(
+                        runtime,
+                        "players_at_least",
+                        value=1,
+                        lookback_lines=bad,
+                    )
+                self.assertIn("lookback_lines", str(ctx.exception))

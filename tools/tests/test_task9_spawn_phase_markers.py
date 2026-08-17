@@ -51,8 +51,49 @@ BRIDGE = WORKSPACE_ROOT / "scripts" / "5_Mission" / "MCPBridge.c"
 # Para quien repita el gate: editar dayz_mcp.json con el bridge YA arrancado no hace NADA -- la key
 # vive en memoria, los polls siguen OK y no hay fallo que dispare la recarga. Hay que plantar la key
 # caducada y reiniciar el proceso.
-BRIDGE_SHA256 = "F716A88D2A179DBD3B25CA0A2D58AF061236DA59D8B51C9F20A6BA99671F6F8E"
-BASE_BRIDGE_SHA256 = "E87539E53CFC68F3AC3446A43E167BED16665FF4F2947408AC451234F6DF96C9"
+# Re-congelados 2026-08-17 sobre el bridge v7 (batch 6): player_teleport / inventory_give sin
+# PluginDeveloper (solo se registra bajo DIAG_DEVELOPER, pluginmanager.c:65,:247-252 -> muerto
+# en release; patron sustituto VPP: SetPosition + edge vehiculo por SetTransform,
+# CreateInInventory / CreateInHands), uid opcional en teleport/give/notify (FindHumanByUid por
+# GetPlainId), verbo entities_query (GetObjectsAtPosition3D, nearest-first + count_total),
+# IsAllowedSpawnFlags admite ECE_CREATEPHYSICS. Gate in-game del mismo dia (run dd0a01cc, servidor +
+# cliente 1.29.163709, PBO 9BEA4C6D1D67AA33 con este fichero byte-identico dentro): teleport sin uid
+# a y=0 asento en y=294.73 y query_all_players lo confirmo; teleport con uid ok y uid falso ->
+# player_not_found; teleport con el jugador SENTADO en un CivilianSedan movio coche y jugador
+# (entities_query encontro el sedan en el destino, in_vehicle siguio en 1) -- pos_real vino VIEJO
+# (posicion previa), hallazgo del buzon confirmado, sin arreglar; inventory_give a inventory ok,
+# a manos ok, segunda vez a manos -> hands_occupied; notify_players por uid y broadcast visibles
+# en captura del cliente (SendNotificationToPlayerIdentityExtended notifica desde server), uid
+# falso -> player_not_found; entities_query count_total 38/19/18 ordenado ascendente y read-only
+# sin lease; infectado ZmbM_CitizenASkinny_Blue con flags 3108 (PLACE_ON_SURFACE|INITAI|
+# CREATEPHYSICS) recorrio 12.7 m en ~16 s hacia el jugador y le pego (health 0.695 -> 0.483) --
+# pos_real del spawn con flags explicitos devolvio y=0 aunque asento en y=291.97; wait_for
+# log_matches espero 56.6 s / 28 sondeos. Script log del servidor sin errores del bridge (los tres
+# ok=0 son los negativos intencionados). Mission compilo 216x files; 497x classes.
+# ROJO A PROPOSITO desde 2026-08-17 13:05: fix source-only de pos_real (buzon fb-20260817-094207-f33e)
+# -- DispatchPlayerTeleport reporta la posicion del TRANSPORTE en la rama vehiculo (la del ocupante
+# va un frame por detras del SetTransform) y ValidateSpawnArgs resuelve y==0 a SurfaceY antes de
+# CreateObjectEx (la colocacion en superficie de la IA es diferida y el readiness la leia a y=0).
+# Contratos offline: tests/test_player_teleport.py y tests/test_world_spawn_ground_contract.py.
+# Re-congelar las dos mitades tras el gate agrupado con action_use (mismo PBO), no antes.
+# Re-congelados 2026-08-17 22:2x sobre el bridge con el fix de pos_real, gate CONJUNTO con action_use
+# (run 28f2e26f, servidor + cliente 1.29.163709, PBO BCA758A161B95058 con las 11 entradas byte-identicas
+# a fuente, este fichero 0ED14AF5... dentro): teleport a pie y=0 -> pos_real y=294.73; world_spawn
+# LFPG_BTCAtmAdmin flags=0 y=0 -> pos_real y=294.69 found:1; action_use LFPG_ActionOpenBTCAtm sobre
+# LFPG_BTCAtmAdmin a 2.94 m -> started:1 y [BTCOpenResponse] + [BTCAtmView] Opened en el log del cliente;
+# ui_tree(BTCAtmRoot) 40 nodos; ui_set_text(EditBtcAmount) legible; ui_click(BtnBuyBtc) -> clicked:1
+# handler=LFPG_BTCAtmView user_id=100 (rama Dabs VIVA) y [BTCTxResult] type=1 err=6 (stock=0);
+# ui_set_text sobre TextWidget StatusText ok; CivilianSedan flags=0 y=0 -> pos_real y=294.68; teleport
+# SENTADO -> pos_real=[7150, 294.01, 7720] = posicion NUEVA del transporte (entities_query: sedan a 0.20 m,
+# in_vehicle sigue 1) -- el hallazgo del buzon fb-20260817-094207-f33e queda cerrado; telemetry_read del
+# sedan: declared_slots con 16 nombres reales y ninguno vacio (BUG-066(c) cerrado); infectado flags 3108
+# y=0 -> pos_real y=294.06 (ya no y=0). Script logs sin errores del bridge (los dos ok=0 del cliente son
+# negativos intencionados: ui_tree sin path sobre host pre-creado -> no_menu, vehicle_telemetry sin
+# asiento cliente -> not_seated). Hallazgo colateral, NO del bridge: wait_for(log_matches) solo mira
+# lineas posteriores a su propia llamada, asi que una respuesta que aterriza antes del primer sondeo
+# (BTCOpenResponse, BTCTxResult: ~200 ms tras el disparo) se pierde y el verbo vence con ok:true.
+BRIDGE_SHA256 = "0ED14AF5076A2672121EFD37A18B613F8D1929733FA6F4CD2F58B73E6D546BA3"
+BASE_BRIDGE_SHA256 = "B86E79D357C8551946DF3B080360073F7A6EC587A03D7212D4C5364754096FD2"
 
 MARKERS = (
     'Log("spawn phase id=" + command.id + " phase=validate_begin");',

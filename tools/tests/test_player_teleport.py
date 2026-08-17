@@ -62,18 +62,39 @@ class PlayerTeleportEnforceContractTest(unittest.TestCase):
         body = _method_body(source, "protected bool DispatchPlayerTeleport(")
         required = [
             "ValidatePositionArgs(command.args)",
-            "GetFirstHuman()",
-            "PlayerBase.Cast(human)",
-            'result.error = "no_players"',
+            "ResolvePlayer(command.args, resolveError)",
+            "result.error = resolveError",
             "position[1] == 0",
             "SurfaceY(position[0], position[2])",
-            "PluginDeveloper.GetInstance()",
-            "developer.Teleport(player, position)",
+            "GetCommand_Vehicle()",
+            "GetTransport()",
+            "SetTransform(mat)",
+            "player.SetPosition(position)",
+            "applied = veh.GetPosition()",
+            "applied = player.GetPosition()",
             "result.pos_real = new array<float>()",
         ]
         for token in required:
             with self.subTest(token=token):
                 self.assertIn(token, body)
+        self.assertNotIn("PluginDeveloper", body)
+
+    def test_vehicle_branch_reports_the_transport_position(self) -> None:
+        # Gate 2026-08-17: with the occupant seated, pos_real came back as the PREVIOUS position
+        # because player.GetPosition() lags SetTransform by a sim frame. The transport is what
+        # moved, so the vehicle branch must read it back; the single stale read after both
+        # branches must be gone.
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        body = _method_body(source, "protected bool DispatchPlayerTeleport(")
+        self.assertNotIn("vector applied = player.GetPosition()", body)
+        set_transform = body.index("veh.SetTransform(mat)")
+        transport_read = body.index("applied = veh.GetPosition()")
+        occupant_read = body.index("applied = player.GetPosition()")
+        publish = body.index("VectorToArray(applied, result.pos_real)")
+        self.assertLess(set_transform, transport_read)
+        self.assertLess(transport_read, occupant_read)
+        self.assertLess(occupant_read, publish)
+        self.assertEqual(body.count("veh.SetTransform(mat)"), 1)
 
 
 class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):

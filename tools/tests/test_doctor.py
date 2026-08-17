@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import hashlib
 import json
+import os
 import shlex
 import sys
 import unittest
@@ -1118,6 +1119,47 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertFalse(payload["ok"])
         self.assertIn("PROCESS_SCAN_FAILED", self.codes(payload))
+
+    def test_undecodable_process_output_is_decode_failed_not_process_scan(self) -> None:
+        module = self.require_doctor()
+        undecodable = UnicodeDecodeError("cp1252", b"\xa2", 0, 1, "ordinal not in range")
+
+        def boom_listener(_port: int) -> int | None:
+            raise undecodable
+
+        payload, exit_code = self.execute(listener_pid=boom_listener)
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertIn("PROCESS_SCAN_DECODE_FAILED", self.codes(payload))
+        self.assertNotIn("PROCESS_SCAN_FAILED", self.codes(payload))
+
+        class _BytesResult:
+            returncode = 0
+            stdout = b"ok \xa2 end"
+            stderr = b""
+
+        with patch.object(module.subprocess, "run", return_value=_BytesResult()):
+            code, text = module._run_command(["netstat"])
+        self.assertEqual(code, 0)
+        self.assertTrue(text.startswith("ok "))
+        self.assertIn("end", text)
+
+    def test_listener_pid_from_netstat_bytes_replaces_undecodable_and_returns_pid(self) -> None:
+        if os.name != "nt":
+            self.skipTest("netstat listener parse is Windows-only")
+        module = self.require_doctor()
+
+        class _NetstatResult:
+            returncode = 0
+            stdout = (
+                b"Active \xa2 Connections\r\n"
+                b"  TCP    127.0.0.1:8765         0.0.0.0:0              LISTENING       4242\r\n"
+            )
+            stderr = b""
+
+        with patch.object(module.subprocess, "run", return_value=_NetstatResult()):
+            pid = module._listener_pid_from_netstat_bytes(8765)
+        self.assertEqual(pid, 4242)
 
     def test_live_diag_without_strong_run_record_is_process_unregistered(self) -> None:
         def snapshot(names: list[str]) -> dict[str, object]:

@@ -1,4 +1,4 @@
-const string MCP_BRIDGE_VERSION = "6";
+const string MCP_BRIDGE_VERSION = "7";
 const float MCP_ARG_FLOAT_UNSET = float.MAX;
 const int MCP_FIXTURE_SEQ_UNSET = -2147483647;
 
@@ -36,6 +36,8 @@ class MCPArgs
 	int sample_hz;
 	int max_samples;
 	string path;
+	string text;
+	int button;
 	int max_lines;
 	int camera;
 	float fov;
@@ -76,6 +78,10 @@ class MCPArgs
 	string dest;
 	// F3.6 object_inspect — memory-point / bounding_center names
 	ref array<string> want;
+	// Optional player identity (GetPlainId). Empty = first human / broadcast.
+	string uid;
+	// action_use: ActionBase typename (Type().ToString()), e.g. LFPG_ActionOpenBTCAtm.
+	string action;
 
 	void MCPArgs()
 	{
@@ -298,6 +304,20 @@ class MCPMemoryPoint
 	}
 };
 
+// entities_query row. type is Object.GetType(); classname is Object.ClassName().
+class MCPEntityHit
+{
+	string type;
+	string classname;
+	ref array<float> pos;
+	float distance;
+
+	void MCPEntityHit()
+	{
+		pos = new array<float>();
+	}
+};
+
 // F3.6 object_inspect payload. bounding_center is model-local (GetBoundingCenter).
 class MCPObjectInspect
 {
@@ -311,6 +331,35 @@ class MCPObjectInspect
 		bounding_center = new array<float>();
 		memory_points = new array<ref MCPMemoryPoint>();
 		has_bounding_center = false;
+	}
+};
+
+// One widget in a client UI walk. text_readable is false when the proto has no getter.
+class MCPUiNode
+{
+	string name;
+	string type;
+	int user_id;
+	bool visible;
+	bool visible_hierarchy;
+	bool disabled;
+	bool ignore_pointer;
+	int color;
+	float screen_x;
+	float screen_y;
+	float screen_w;
+	float screen_h;
+	string text;
+	bool text_readable;
+};
+
+class MCPUiSnapshot
+{
+	ref array<ref MCPUiNode> nodes;
+
+	void MCPUiSnapshot()
+	{
+		nodes = new array<ref MCPUiNode>();
 	}
 };
 
@@ -362,6 +411,18 @@ class MCPResult
 	bool deferred;
 	// F3.6 object_inspect
 	ref MCPObjectInspect inspect;
+	// entities_query: raw nearby objects, nearest-first, cut at args.limit.
+	int count_total;
+	ref array<ref MCPEntityHit> entities;
+	// Client UI verbs (ui_tree / ui_set_text / ui_click).
+	ref MCPUiSnapshot ui;
+	bool clicked;
+	string handler;
+	int user_id;
+	// action_use: started means local dispatch only; server ack is not awaited.
+	string action;
+	float distance;
+	bool started;
 };
 
 class MCPJob

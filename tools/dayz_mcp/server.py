@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any, Awaitable, Callable, Iterator
+from typing import Annotated, Any, Awaitable, Callable, Iterator, Literal
 
 from mcp.server.fastmcp import Context, FastMCP, Image
 from mcp.server.fastmcp.exceptions import ToolError
@@ -26,6 +26,7 @@ from dayz_mcp import (
     daemon_credential,
     dayz_test_tool,
     host_config,
+    inbox,
     orphan_guard,
 )
 from dayz_mcp.control_client import ControlClient, ControlClientError, ControlIdentity
@@ -56,6 +57,29 @@ WAIT_FOR_CONDITIONS = frozenset({
     "players_at_most",
     "log_matches",
 })
+LEASE_REQUIRED_RECIPE = "lease_required: call session_acquire_wait(purpose=...)"
+LEASE_TOOL_LINE = "Requires a lease (session_acquire_wait)."
+DAEMON_AUTOSPAWN_DISABLED = (
+    "daemon_autospawn_disabled: start the daemon (--daemon) or omit "
+    "--no-daemon-autospawn"
+)
+DAEMON_AUTOSPAWN_ALREADY = (
+    "daemon_unavailable: autospawn already attempted (start the daemon "
+    "or omit --no-daemon-autospawn)"
+)
+# A peer with last_poll_age_s >= this value is not live (game polls ~0.2s).
+PEER_STALE_S = 15.0
+# Closed ready.reason set. *_legacy_blocked / version_mismatch only after
+# that peer has polled at least once (last_poll_age_s is not None).
+READY_REASONS = frozenset({
+    "ready",
+    "no_run",
+    "server_poll_stale",
+    "client_not_polling",
+    "client_legacy_blocked",
+    "version_mismatch",
+})
+WAIT_FOR_LOOKBACK_MAX = 2000
 _REMOTE_ERROR_CODES = frozenset({
     "audit_failed",
     "bad_args",
@@ -150,6 +174,125 @@ def _remote_error_code(payload: object) -> str:
     return "remote_error"
 
 
+def _peer_is_live(peer: object) -> bool:
+    if not isinstance(peer, dict):
+        return False
+    age = peer.get("last_poll_age_s")
+    return isinstance(age, (int, float)) and not isinstance(age, bool) and age < PEER_STALE_S
+
+
+def compute_bridge_ready(status: dict[str, Any]) -> dict[str, Any]:
+    """Return {ready, reason} for a bridge_status snapshot. Additive field.
+
+    Version reasons are used only when that peer has polled at least once.
+    Server liveness is checked before client liveness.
+    """
+    server = status.get("server_peer") if isinstance(status.get("server_peer"), dict) else {}
+    client = status.get("client_peer") if isinstance(status.get("client_peer"), dict) else {}
+    s_age = server.get("last_poll_age_s")
+    c_age = client.get("last_poll_age_s")
+    s_live = _peer_is_live(server)
+    c_live = _peer_is_live(client)
+    s_state = server.get("version_state")
+    c_state = client.get("version_state")
+    if s_live and c_live and s_state == "ok" and c_state == "ok":
+        return {"ready": True, "reason": "ready"}
+    if s_age is None and c_age is None:
+        return {"ready": False, "reason": "no_run"}
+    if not s_live:
+        return {"ready": False, "reason": "server_poll_stale"}
+    if not c_live:
+        return {"ready": False, "reason": "client_not_polling"}
+    if c_age is not None and c_state == "legacy_blocked":
+        return {"ready": False, "reason": "client_legacy_blocked"}
+    if (
+        (s_age is not None and s_state in {"version_mismatch", "legacy_blocked"})
+        or (c_age is not None and c_state == "version_mismatch")
+    ):
+        return {"ready": False, "reason": "version_mismatch"}
+    if s_state != "ok" or c_state != "ok":
+        return {"ready": False, "reason": "version_mismatch"}
+    return {"ready": False, "reason": "no_run"}
+
+
+def _with_ready(status: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(status)
+    payload["ready"] = compute_bridge_ready(payload)
+    return payload
+
+
+def _game_not_ready_reason(
+    status: dict[str, Any] | None,
+    peer: str | None = None,
+) -> str:
+    if isinstance(status, dict) and peer in {"server", "client"}:
+        key = "client_peer" if peer == "client" else "server_peer"
+        if not _peer_is_live(status.get(key)):
+            return "client_not_polling" if peer == "client" else "server_poll_stale"
+    if not isinstance(status, dict):
+        return "no_run"
+    reason = compute_bridge_ready(status)["reason"]
+    if reason == "ready":
+        return "no_run"
+    return str(reason)
+
+
+def _target_peer_down(
+    status_snapshot: dict[str, Any] | None,
+    peer: str | None,
+) -> bool:
+    """True when the command's target peer is not live (same rule as embedded)."""
+    if not isinstance(status_snapshot, dict):
+        return False
+    if peer in {"server", "client"}:
+        key = "client_peer" if peer == "client" else "server_peer"
+        return not _peer_is_live(status_snapshot.get(key))
+    return not _peer_is_live(status_snapshot.get("server_peer")) and not _peer_is_live(
+        status_snapshot.get("client_peer")
+    )
+
+
+def _public_enqueue_error(
+    payload: dict[str, Any],
+    *,
+    status_snapshot: dict[str, Any] | None = None,
+    peer: str | None = None,
+) -> str:
+    """Map a remote enqueue payload to the caller-facing ToolError string."""
+    code = _remote_error_code(payload)
+    if code == "lease_required":
+        if (
+            isinstance(payload, dict)
+            and payload.get("version_state") in {"legacy_blocked", "version_mismatch"}
+        ):
+            if _target_peer_down(status_snapshot, peer):
+                return f"game_not_ready:reason={_game_not_ready_reason(status_snapshot, peer)}"
+            expected = payload.get("expected")
+            got = payload.get("got")
+            return (
+                f"{LEASE_REQUIRED_RECIPE}; "
+                f"version_blocked:bridge {got!r} != {expected!r}"
+            )
+        return LEASE_REQUIRED_RECIPE
+    if code == "version_blocked":
+        if _target_peer_down(status_snapshot, peer):
+            return f"game_not_ready:reason={_game_not_ready_reason(status_snapshot, peer)}"
+        expected = payload.get("expected") if isinstance(payload, dict) else None
+        got = payload.get("got") if isinstance(payload, dict) else None
+        if isinstance(expected, str):
+            return f"version_blocked:bridge {got!r} != {expected!r}"
+        return "version_blocked"
+    return code
+
+
+def _image_format_from_mime(mime: object) -> str:
+    if mime == "image/jpeg":
+        return "jpeg"
+    if mime == "image/webp":
+        return "webp"
+    return "png"
+
+
 @dataclass(frozen=True)
 class ServerConfig:
     # mode: "embedded" (bare default — bind the loopback in-process, today's path),
@@ -170,6 +313,8 @@ class ServerConfig:
     task_label: str = ""
     session_ttl_s: float = 120.0
     runtime_dir: str | None = None
+    # CLI flag is the spawn authority for this process. It need not match
+    # the registered host argv (registration-False / CLI-True is allowed).
     auto_spawn_daemon: bool = True
 
 
@@ -245,7 +390,7 @@ class Runtime:
     async def bridge_status_payload(self) -> dict[str, Any]:
         """Async status accessor used by the bridge_status tool (uniform with
         ClientRuntime, which fetches /status over HTTP)."""
-        return self.status()
+        return _with_ready(self.status())
 
     def ensure_peer_allowed(self, peer: str) -> None:
         snapshot = self.status()
@@ -253,6 +398,10 @@ class Runtime:
         peer_status = snapshot[peer_key]
         state = peer_status["version_state"]
         if state in {"legacy_blocked", "version_mismatch"}:
+            if peer_status.get("last_poll_age_s") is None or not _peer_is_live(peer_status):
+                raise ToolError(
+                    f"game_not_ready:reason={_game_not_ready_reason(snapshot, peer)}"
+                )
             raise ToolError(f"{peer} peer version_state={state}: {peer_status['version_detail']}")
 
     def liveness_message(self, peer: str) -> str:
@@ -276,7 +425,11 @@ class Runtime:
             cmd, args, peer=peer, operation_timeout_s=timeout_s
         )
         if status != 200:
-            raise ToolError(payload.get("error", f"enqueue_failed_http_{status}"))
+            raise ToolError(
+                _public_enqueue_error(payload, status_snapshot=self.status(), peer=peer)
+                if isinstance(payload, dict)
+                else payload.get("error", f"enqueue_failed_http_{status}")
+            )
 
         command_id = int(payload["id"])
         return await self.wait_for_result(cmd, command_id, peer, timeout_s)
@@ -292,7 +445,13 @@ class Runtime:
             operation_timeout_s=timeout_s,
         )
         if status != 200:
-            raise ToolError(payload.get("error", f"enqueue_failed_http_{status}"))
+            raise ToolError(
+                _public_enqueue_error(
+                    payload, status_snapshot=self.status(), peer="server"
+                )
+                if isinstance(payload, dict)
+                else payload.get("error", f"enqueue_failed_http_{status}")
+            )
 
         command_id = int(payload["id"])
         return await self.wait_for_result("exec_enforce", command_id, "server", timeout_s)
@@ -414,9 +573,11 @@ class ClientRuntime:
         if (
             type(provenance.auto_spawn_daemon) is not bool
             or type(config.auto_spawn_daemon) is not bool
-            or config.auto_spawn_daemon != provenance.auto_spawn_daemon
         ):
             raise host_config.HostConfigError("daemon_provenance_conflict")
+        # --no-daemon-autospawn is a local process flag. Requiring it to match
+        # the registered host argv aborted the whole stdio client (pipeline_*
+        # included). Honor the CLI: False disables spawn; True may spawn.
         authority_keyfile = host_config.require_matching_keyfile(
             provenance.keyfile, provenance.keyfile
         )
@@ -440,7 +601,8 @@ class ClientRuntime:
         self._daemon_executable = provenance.native_executable
         self._daemon_argv = tuple(provenance.argv)
         self._daemon_cwd = provenance.cwd
-        self._auto_spawn_daemon = provenance.auto_spawn_daemon
+        self._auto_spawn_daemon = bool(config.auto_spawn_daemon)
+        self._spawn_attempted = False
         self._log = config.log_sink or (lambda message: print(message, file=sys.stderr, flush=True))
         self._spawn_lock = threading.Lock()
         self._probe = probe_fn
@@ -505,6 +667,8 @@ class ClientRuntime:
             return await method(*args, **kwargs)
 
         def public_error_code(error: ControlClientError) -> str:
+            if error.code == "lease_required":
+                return LEASE_REQUIRED_RECIPE
             if (
                 error.code in _REMOTE_ERROR_CODES
                 or error.code in _CONTROL_CLIENT_ERROR_CODES
@@ -520,7 +684,10 @@ class ClientRuntime:
                 and error.request_stage == "pre_request"
                 and error.http_bytes_sent == 0
             )
-            if retryable and await asyncio.to_thread(self._ensure_daemon):
+            if retryable:
+                spawned = await asyncio.to_thread(self._ensure_daemon)
+                if not spawned:
+                    raise ToolError(self._daemon_missing_error()) from None
                 try:
                     return await invoke()
                 except ControlClientError as retry_error:
@@ -627,12 +794,28 @@ class ClientRuntime:
             raise ToolError("daemon_health_invalid_response")
         return True
 
+    def _daemon_missing_error(self) -> str:
+        if not self._auto_spawn_daemon:
+            return DAEMON_AUTOSPAWN_DISABLED
+        if getattr(self, "_spawn_attempted", False):
+            return DAEMON_AUTOSPAWN_ALREADY
+        return "daemon_unavailable"
+
     def _ensure_daemon(self, deadline: float | None = None) -> bool:
+        """Discover the daemon; spawn at most once per unsuccessful streak.
+
+        The first spawn can block up to ``_startup_budget_s`` (typically 5-12s)
+        waiting for GET /status. A failed spawn leaves ``_spawn_attempted`` set
+        so later misses fail fast. The flag clears when /status is healthy.
+        Does not attach a parent-death watchdog: the daemon outlives this
+        session (D-14).
+        """
         startup_deadline = self._time_fn() + self._startup_budget_s
         if deadline is not None:
             startup_deadline = min(startup_deadline, float(deadline))
         deadline = startup_deadline
         if self._daemon_healthy(deadline):
+            self._spawn_attempted = False
             return True
         if self._time_fn() >= deadline:
             return False
@@ -645,9 +828,13 @@ class ClientRuntime:
             if self._time_fn() >= deadline:
                 return False
             if self._daemon_healthy(deadline):
+                self._spawn_attempted = False
                 return True
             if self._time_fn() >= deadline:
                 return False
+            if getattr(self, "_spawn_attempted", False):
+                return False
+            self._spawn_attempted = True
             self._log(f"CLIENT: no daemon on 127.0.0.1:{self.port}; spawning")
             self._spawn_fn()
             while True:
@@ -655,6 +842,7 @@ class ClientRuntime:
                 if remaining <= 0.0:
                     break
                 if self._daemon_healthy(deadline):
+                    self._spawn_attempted = False
                     return True
                 remaining = deadline - self._time_fn()
                 if remaining <= 0.0:
@@ -745,7 +933,7 @@ class ClientRuntime:
             if not retryable:
                 raise ToolError("daemon_response_ambiguous") from None
             if not self._ensure_daemon(call_deadline):
-                raise ToolError("daemon_unavailable") from None
+                raise ToolError(self._daemon_missing_error()) from None
             try:
                 return self._request_once(
                     method, path, payload, query, remaining_timeout()
@@ -794,6 +982,16 @@ class ClientRuntime:
             error = self._enqueue_error(payload)
             if error in _STALE_LEASE_ERRORS and lease_token is not None:
                 self._control._clear_matching_lease(lease_token)
+            if _remote_error_code(payload) in {"version_blocked", "lease_required"}:
+                try:
+                    snapshot = await self.bridge_status_payload(
+                        timeout_s=LIVENESS_STATUS_TIMEOUT_S
+                    )
+                except Exception:
+                    snapshot = None
+                error = _public_enqueue_error(
+                    payload, status_snapshot=snapshot, peer=peer
+                )
             raise ToolError(error)
         if "id" not in payload:
             raise ToolError("daemon_bad_enqueue_response")
@@ -806,7 +1004,7 @@ class ClientRuntime:
         return await self.call_bridge("exec_enforce", args, "server", timeout_s)
 
     def _enqueue_error(self, payload: dict[str, Any]) -> str:
-        return _remote_error_code(payload)
+        return _public_enqueue_error(payload)
 
     async def _await_result(
         self,
@@ -877,7 +1075,7 @@ class ClientRuntime:
         )
         if status != 200:
             raise ToolError(str(payload.get("error") or payload))
-        return payload
+        return _with_ready(payload)
 
 
 def required_keyfile(config: ServerConfig) -> str:
@@ -969,8 +1167,88 @@ def _patch_public_argument_alias(app: FastMCP, tool_name: str, internal: str, pu
 def _player_count(result: dict[str, Any]) -> int:
     players = result.get("players")
     if not isinstance(players, list):
-        raise ToolError("query_all_players")
+        raise ToolError("wait_for: players list missing")
     return len(players)
+
+
+def _sibling_profile_dirs(profiles: list[str]) -> list[str]:
+    """Add the _client/_server sibling when the run only recorded one side."""
+    extra: list[str] = []
+    for item in profiles:
+        path = Path(item)
+        parent = path.parent.name.casefold()
+        if parent == "_server":
+            sibling = str(path.parent.parent / "_client" / "profiles")
+        elif parent == "_client":
+            sibling = str(path.parent.parent / "_server" / "profiles")
+        else:
+            continue
+        if log_tail.is_allowed_profiles_dir(sibling) and Path(sibling).is_dir():
+            extra.append(sibling)
+    return sorted(set(profiles + extra))
+
+
+def _run_start_epoch(runs: list[dict[str, Any]]) -> float | None:
+    times: list[float] = []
+    for run in runs:
+        for proc in run.get("processes") or []:
+            if not isinstance(proc, dict):
+                continue
+            raw = proc.get("creation_time_utc")
+            if not isinstance(raw, str) or not raw:
+                continue
+            try:
+                times.append(
+                    datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+                )
+            except ValueError:
+                continue
+    return min(times) if times else None
+
+
+def _newest_rpt_and_script(dated: list[tuple[float, str]]) -> list[str]:
+    """Newest .rpt and newest .log by suffix, independent of mtime gap."""
+    newest_rpt: str | None = None
+    newest_script: str | None = None
+    rpt_mtime = script_mtime = None
+    for mtime, path in dated:
+        suffix = Path(path).suffix.casefold()
+        if suffix == ".rpt":
+            if rpt_mtime is None or mtime >= rpt_mtime:
+                newest_rpt, rpt_mtime = path, mtime
+        elif suffix == ".log":
+            if script_mtime is None or mtime >= script_mtime:
+                newest_script, script_mtime = path, mtime
+    return [path for path in (newest_rpt, newest_script) if path]
+
+
+def _current_launch_logs(profiles_dir: str, start_epoch: float | None) -> list[str]:
+    """Return RPT/script files from the current launch, never historic dumps.
+
+    Without a launch timestamp, keep the newest .rpt and the newest .log by
+    name suffix (not a time cluster), so a quiet current file is not dropped.
+    """
+    paths = log_tail.resolve_log_files(profiles_dir)
+    dated: list[tuple[float, str]] = []
+    for path in paths:
+        try:
+            dated.append((Path(path).stat().st_mtime, path))
+        except OSError:
+            continue
+    if not dated:
+        return []
+    if start_epoch is None:
+        return _newest_rpt_and_script(dated)
+    floor = start_epoch - 2.0
+    return [path for mtime, path in dated if mtime >= floor]
+
+
+def _profile_dirs_from_runs(runs: list[dict[str, Any]]) -> list[str]:
+    candidates = sorted(
+        {str(item.get("profiles")) for item in runs if item.get("profiles")}
+    )
+    allowed = [item for item in candidates if log_tail.is_allowed_profiles_dir(item)]
+    return _sibling_profile_dirs(allowed)
 
 
 async def _wait_for_script_log_paths(runtime: Any) -> list[str]:
@@ -983,16 +1261,47 @@ async def _wait_for_script_log_paths(runtime: Any) -> list[str]:
     if not isinstance(status, dict):
         raise ToolError("no_active_run")
     runs = [item for item in (status.get("runs") or []) if isinstance(item, dict)]
-    candidates = sorted({str(item.get("profiles")) for item in runs if item.get("profiles")})
-    if not candidates:
-        raise ToolError("no_active_run")
-    profiles = [item for item in candidates if log_tail.is_allowed_profiles_dir(item)]
+    profiles = _profile_dirs_from_runs(runs)
     if not profiles:
-        raise ToolError("bad_profiles")
+        raise ToolError("no_active_run")
+    start_epoch = _run_start_epoch(runs)
     paths: list[str] = []
     for profiles_dir in profiles:
-        paths.extend(log_tail.resolve_log_files(profiles_dir))
+        paths.extend(_current_launch_logs(profiles_dir, start_epoch))
     return paths
+
+
+def _offset_before_last_lines(data: bytes, lookback_lines: int) -> int:
+    """Byte offset of the start of the last ``lookback_lines`` lines."""
+    if lookback_lines <= 0 or not data:
+        return len(data)
+    parts = data.split(b"\n")
+    line_count = len(parts) - 1 if parts and parts[-1] == b"" else len(parts)
+    skip = max(0, line_count - lookback_lines)
+    if skip == 0:
+        return 0
+    offset = 0
+    seen = 0
+    for part in parts:
+        if seen >= skip:
+            break
+        offset += len(part) + 1
+        seen += 1
+    return min(offset, len(data))
+
+
+def _marker_rewound(path: str, lookback_lines: int) -> log_tail.TailMarker:
+    file_path = Path(path)
+    with file_path.open("rb") as handle:
+        data = handle.read()
+        size = len(data)
+        identity = log_tail._file_identity(
+            handle, min(log_tail.IDENTITY_PREFIX_BYTES, size)
+        )
+    offset = _offset_before_last_lines(data, lookback_lines)
+    return log_tail.TailMarker(
+        path=str(file_path), offset=offset, size=size, identity=identity
+    )
 
 
 def _log_markers_at_end(paths: list[str]) -> dict[str, log_tail.TailMarker]:
@@ -1003,6 +1312,20 @@ def _log_markers_at_end(paths: list[str]) -> dict[str, log_tail.TailMarker]:
         except log_tail.LogTailError:
             continue
         markers[path] = result["marker"]
+    return markers
+
+
+def _log_markers_with_lookback(
+    paths: list[str], lookback_lines: int
+) -> dict[str, log_tail.TailMarker]:
+    if lookback_lines <= 0:
+        return _log_markers_at_end(paths)
+    markers: dict[str, log_tail.TailMarker] = {}
+    for path in paths:
+        try:
+            markers[path] = _marker_rewound(path, lookback_lines)
+        except (OSError, log_tail.LogTailError):
+            continue
     return markers
 
 
@@ -1030,13 +1353,14 @@ def _wait_for_response(
     satisfied: bool,
 ) -> dict[str, Any]:
     return {
-        "ok": True,
+        "ok": satisfied,
         "satisfied": satisfied,
         "condition": condition,
         "elapsed_s": time.monotonic() - started,
         "probes": probes,
         "observed": observed,
         "timed_out": not satisfied,
+        "tool": "wait_for",
     }
 
 
@@ -1047,6 +1371,7 @@ async def execute_wait_for(
     pattern: str = "",
     timeout_s: float = 180.0,
     poll_interval_s: float = 2.0,
+    lookback_lines: int = 200,
 ) -> dict[str, Any]:
     """Poll until a wait_for condition holds.
 
@@ -1056,15 +1381,31 @@ async def execute_wait_for(
     full wait. Each probe takes the lock; the sleep stays outside it.
     """
     if condition not in WAIT_FOR_CONDITIONS:
-        raise ToolError("bad_args")
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ToolError("bad_args")
+        raise ToolError(
+            "bad_args: condition must be one of "
+            "players_at_least, players_at_most, log_matches"
+        )
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ToolError("bad_args: value must be a non-negative int")
     if not isinstance(pattern, str):
-        raise ToolError("bad_args")
-    timeout_s = min(_finite_float(timeout_s, "bad_args"), WAIT_FOR_MAX_TIMEOUT_S)
-    poll_interval_s = max(
-        _finite_float(poll_interval_s, "bad_args"), WAIT_FOR_MIN_POLL_INTERVAL_S
-    )
+        raise ToolError("bad_args: pattern must be a string")
+    if condition == "log_matches" and pattern == "":
+        raise ToolError("bad_args: pattern must be non-empty when condition is log_matches")
+    timeout_value = _finite_float(timeout_s, "bad_args: timeout_s must be > 0")
+    if timeout_value <= 0.0:
+        raise ToolError("bad_args: timeout_s must be > 0")
+    timeout_s = min(timeout_value, WAIT_FOR_MAX_TIMEOUT_S)
+    poll_value = _finite_float(poll_interval_s, "bad_args: poll_interval_s must be > 0")
+    if poll_value <= 0.0:
+        raise ToolError("bad_args: poll_interval_s must be > 0")
+    poll_interval_s = max(poll_value, WAIT_FOR_MIN_POLL_INTERVAL_S)
+    if (
+        not isinstance(lookback_lines, int)
+        or isinstance(lookback_lines, bool)
+        or lookback_lines < 0
+        or lookback_lines > WAIT_FOR_LOOKBACK_MAX
+    ):
+        raise ToolError("bad_args: lookback_lines must be in 0..2000")
 
     started = time.monotonic()
     deadline = started + timeout_s
@@ -1074,7 +1415,9 @@ async def execute_wait_for(
 
     if condition == "log_matches":
         async with runtime.tool_lock:
-            log_markers = _log_markers_at_end(await _wait_for_script_log_paths(runtime))
+            log_markers = _log_markers_with_lookback(
+                await _wait_for_script_log_paths(runtime), lookback_lines
+            )
 
     while time.monotonic() < deadline:
         async with runtime.tool_lock:
@@ -1082,9 +1425,31 @@ async def execute_wait_for(
             remaining = deadline - time.monotonic()
             if condition in {"players_at_least", "players_at_most"}:
                 probe_timeout = min(DEFAULT_TOOL_TIMEOUT_S, max(remaining, POLL_INTERVAL_S))
-                result = await runtime.call_bridge(
-                    "query_all_players", {}, "server", probe_timeout
-                )
+                try:
+                    result = await runtime.call_bridge(
+                        "query_all_players", {}, "server", probe_timeout
+                    )
+                except ToolError as exc:
+                    message = str(exc)
+                    if message.startswith("timeout waiting for"):
+                        suffix = ""
+                        if "; " in message:
+                            suffix = "; " + message.split("; ", 1)[1]
+                        raise ToolError(
+                            f"wait_for timed out waiting for {condition}{suffix}"
+                        ) from None
+                    if message.startswith("version_blocked") or message.startswith(
+                        "game_not_ready"
+                    ) or message in {
+                        "daemon_unavailable",
+                        "version_blocked",
+                    }:
+                        raise
+                    if "query_all_players" in message:
+                        raise ToolError(
+                            message.replace("query_all_players", "wait_for")
+                        ) from None
+                    raise
                 observed = _player_count(result)
                 satisfied = (
                     observed >= value
@@ -1141,9 +1506,20 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     app = FastMCP(
         name="dayz-mcp",
         instructions=(
-            "Expose DayZDiag through typed MCP tools. Use dayz_test_run and "
-            "dayz_test_stop for queued lifecycle operations; use bridge_status "
-            "to inspect server/client peer liveness."
+            "Expose DayZDiag through typed MCP tools. Flow: "
+            "session_acquire_wait (or lease_acquire) -> check "
+            "bridge_status.ready -> mutating verbs -> wait_for to wait -> "
+            "session_release. Use dayz_test_run / dayz_test_stop for lifecycle. "
+            "Spawn: run playbooks/place_safely.toml before a new site; "
+            "pos=[x, surface_query.y, z]; y=0 is ground; example "
+            "type=CivilianSedan; living infected flags=3108 "
+            "(ECE_PLACE_ON_SURFACE|ECE_INITAI|ECE_CREATEPHYSICS). "
+            "wait_for/logs_since read script/RPT only — player chat is not "
+            "there; with -adminlog the server .ADM has chat, no tool reads it. "
+            "wait_for(log_matches) lookback_lines=200 includes the last N "
+            "lines already on disk so a sequential action_use then wait_for "
+            "does not miss a ~200ms response. action_use v1: held item is "
+            "null; componentIndex=-1; classname is exact GetType()."
         ),
         lifespan=lifespan,
     )
@@ -1153,7 +1529,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("session_tools_require_client_mode")
         return runtime
 
-    @app.tool(description="Acquire or join the FIFO lease for exclusive DayZ mutations.")
+    @app.tool(
+        description="LOW-LEVEL: prefer session_acquire_wait. Acquire or join the FIFO lease."
+    )
     async def session_acquire(purpose: str) -> dict[str, Any]:
         if not isinstance(purpose, str) or not purpose.strip():
             raise ToolError("bad_purpose")
@@ -1161,7 +1539,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with client.tool_lock:
             return await client.session_acquire(purpose.strip())
 
-    @app.tool(description="Wait up to 30 seconds for this client's FIFO ticket.")
+    @app.tool(
+        description="LOW-LEVEL: prefer session_acquire_wait. Wait up to 30s for this client's FIFO ticket."
+    )
     async def session_wait(ticket: str, timeout_s: float = 30.0) -> dict[str, Any]:
         if not isinstance(ticket, str) or not ticket:
             raise ToolError("bad_ticket")
@@ -1173,8 +1553,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(
         description=(
-            "Wait in the FIFO queue until this request acquires the lease or its "
-            "maximum wait expires; never returns a queued result."
+            "Preferred: use this, not session_acquire. Wait in the FIFO until "
+            "this request acquires the lease or its maximum wait expires; "
+            "never returns a queued result."
         )
     )
     async def session_acquire_wait(
@@ -1205,7 +1586,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 purpose.strip(), validated_wait, report
             )
 
-    @app.tool(description="Cancel this client's exact queued FIFO ticket.")
+    app.add_tool(
+        session_acquire_wait,
+        name="lease_acquire",
+        description="alias of session_acquire_wait",
+    )
+
+    @app.tool(
+        description="LOW-LEVEL: prefer session_acquire_wait. Cancel this client's exact queued FIFO ticket."
+    )
     async def session_cancel(ticket: str) -> dict[str, Any]:
         if not isinstance(ticket, str) or not ticket:
             raise ToolError("bad_ticket")
@@ -1213,7 +1602,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with client.tool_lock:
             return await client.session_cancel(ticket)
 
-    @app.tool(description="Renew an active lease while exclusive work is in progress.")
+    @app.tool(
+        description="LOW-LEVEL: prefer session_acquire_wait. Renew an active lease while exclusive work is in progress."
+    )
     async def session_heartbeat(lease_token: str) -> dict[str, Any]:
         if not isinstance(lease_token, str) or not lease_token:
             raise ToolError("bad_lease_token")
@@ -1367,8 +1758,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(
         description=(
-            "Read RPT/script log lines appended since a marker, from the profile "
-            "of the active run. Pure host-side file read; requires no lease."
+            "Read RPT/script log lines appended since a marker, from the "
+            "active run's _server and _client profiles. Without a marker, "
+            "reads the current launch (not the historic dump). No lease."
         )
     )
     async def logs_since(
@@ -1393,22 +1785,26 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         runs = [item for item in (status.get("runs") or []) if isinstance(item, dict)]
         if run_id is not None:
             runs = [item for item in runs if item.get("run_id") == run_id]
-        candidates = sorted({str(item.get("profiles")) for item in runs if item.get("profiles")})
+        candidates = sorted(
+            {str(item.get("profiles")) for item in runs if item.get("profiles")}
+        )
         if not candidates:
             raise ToolError("no_active_run")
-        # The manifest is data, not a caller argument, but it still decides which
-        # host directory is read: refuse anything that is not a run profile.
-        profiles = [item for item in candidates if log_tail.is_allowed_profiles_dir(item)]
-        if not profiles:
+        allowed = [
+            item for item in candidates if log_tail.is_allowed_profiles_dir(item)
+        ]
+        if not allowed:
             raise ToolError("bad_profiles")
+        profiles = _sibling_profile_dirs(allowed)
+        start_epoch = _run_start_epoch(runs)
 
         files: list[dict[str, Any]] = []
         remaining = max_lines
         updated = dict(markers)
-        # Every log of the profile, not just the newest: DayZ writes the RPT and
-        # the script log CONCURRENTLY, and the engine errors live in the RPT.
+        # Only logs from this launch: DayZ writes the RPT and the script log
+        # CONCURRENTLY, and a profiles dir also holds months of older files.
         for profiles_dir in profiles:
-            for log_path in log_tail.resolve_log_files(profiles_dir):
+            for log_path in _current_launch_logs(profiles_dir, start_epoch):
                 if remaining <= 0:
                     break
                 try:
@@ -1436,7 +1832,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         log_marker_state["marker"] = encoded
         return {"ok": 1, "files": files, "marker": encoded}
 
-    @app.tool(description="Spawn a DayZ object through the existing world_spawn bridge command.")
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Spawn a DayZ object through the existing "
+            "world_spawn bridge command."
+        )
+    )
     async def world_spawn(
         type: str,
         pos: list[float],
@@ -1448,7 +1849,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("world_spawn", args, "server", _timeout(timeout_s))
 
-    @app.tool(description="Delete an object previously returned by world_spawn.object_id.")
+    @app.tool(
+        description=(
+            "Requires a lease (session_acquire_wait). Delete an object "
+            "previously returned by world_spawn.object_id."
+        )
+    )
     async def object_delete(object_id: int, timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         if not isinstance(object_id, int) or isinstance(object_id, bool):
             raise ToolError("bad_args")
@@ -1459,30 +1865,54 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("object_delete", args, "server", _timeout(timeout_s))
 
-    @app.tool(description="Send a vanilla notification popup to all connected players.")
+    @app.tool(
+        description=(
+            "Requires a lease (session_acquire_wait). Send a vanilla "
+            "notification popup. uid empty (default) broadcasts to every "
+            "connected player; a non-empty uid targets that identity."
+        )
+    )
     async def notify_players(
         show_time: float,
         title: str,
         detail: str = "",
         icon: str = "",
+        uid: str = "",
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         show_time_value = _finite_float(show_time)
         if show_time_value <= 0.0 or not isinstance(title, str) or title == "":
             raise ToolError("bad_args")
-        if not isinstance(detail, str) or not isinstance(icon, str):
+        if not isinstance(detail, str) or not isinstance(icon, str) or not isinstance(uid, str):
             raise ToolError("bad_args")
-        args = {"show_time": show_time_value, "title": title, "detail": detail, "icon": icon}
+        args: dict[str, Any] = {
+            "show_time": show_time_value,
+            "title": title,
+            "detail": detail,
+            "icon": icon,
+        }
+        if uid != "":
+            args["uid"] = uid
         async with runtime.tool_lock:
             return await runtime.call_bridge("notify_players", args, "server", _timeout(timeout_s))
 
-    @app.tool(description="Seat the first player in the driver seat of a vehicle near pos.")
+    @app.tool(
+        description=(
+            "Requires a lease (session_acquire_wait). Seat the first "
+            "player in the driver seat of a vehicle near pos."
+        )
+    )
     async def vehicle_enter(pos: list[float], timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         args = {"pos": _require_vec3(pos, "pos")}
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_enter", args, "server", _timeout(timeout_s))
 
-    @app.tool(description="Raycast through the server bridge using from/to world positions.")
+    @app.tool(
+        description=(
+            "Raycast through the server bridge using from/to world positions. "
+            "Public arg is from (alias of from_pos)."
+        )
+    )
     async def scene_raycast(
         from_pos: list[float],
         to: list[float],
@@ -1541,8 +1971,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     # F3.2: general fixture prep for any CarScript (no classname allowlist).
     @app.tool(
         description=(
-            "Prepare a vehicle fixture near pos (OnDebugSpawn when needed). "
-            "Any CarScript classname; non-vehicles return fixture_not_vehicle."
+            "Requires a lease (session_acquire_wait). Prepare a vehicle "
+            "fixture near pos (OnDebugSpawn when needed). Any CarScript "
+            "classname; non-vehicles return fixture_not_vehicle."
         )
     )
     async def vehicle_prepare_fixture(
@@ -1578,24 +2009,32 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("surface_query", args, "server", _timeout(timeout_s))
 
-    # F3.3: mutating teleport of the first connected player.
+    # F3.3: mutating teleport of a connected player.
     @app.tool(
         description=(
-            "Teleport the first connected player to pos. y==0 snaps to SurfaceY "
-            "(vanilla script-console contract)."
+            "Requires a lease (session_acquire_wait). Teleport a "
+            "connected player to pos. y==0 snaps to SurfaceY (vanilla "
+            "script-console contract). uid empty (default) targets the first "
+            "human; a non-empty uid selects by PlayerIdentity.GetPlainId()."
         )
     )
     async def player_teleport(
         pos: list[float],
+        uid: str = "",
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
-        args = {"pos": _require_vec3(pos, "pos")}
+        if not isinstance(uid, str):
+            raise ToolError("bad_args")
+        args: dict[str, Any] = {"pos": _require_vec3(pos, "pos")}
+        if uid != "":
+            args["uid"] = uid
         async with runtime.tool_lock:
             return await runtime.call_bridge("player_teleport", args, "server", _timeout(timeout_s))
 
     # F3.4: read or write entity animation phase.
     @app.tool(
         description=(
+            f"{LEASE_TOOL_LINE} "
             "Read or set an entity animation phase by classname near pos. "
             "Omit phase to read; provide phase to SetAnimationPhase."
         )
@@ -1621,23 +2060,30 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("object_anim", args, "server", _timeout(timeout_s))
 
-    # F3.5: spawn into first player's inventory.
+    # F3.5: spawn into a player's inventory.
     @app.tool(
         description=(
-            "Spawn classname into the first player's inventory. "
-            "dest is 'hands' or 'inventory'."
+            "Requires a lease (session_acquire_wait). Spawn classname "
+            "into a player's inventory via CreateInInventory. dest is 'hands' "
+            "or 'inventory'. uid empty (default) targets the first human; a "
+            "non-empty uid selects by PlayerIdentity.GetPlainId()."
         )
     )
     async def inventory_give(
         classname: str,
         dest: str = "hands",
+        uid: str = "",
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(classname, str) or classname == "":
             raise ToolError("bad_args")
         if dest not in {"hands", "inventory"}:
             raise ToolError("bad_args")
-        args = {"classname": classname, "dest": dest}
+        if not isinstance(uid, str):
+            raise ToolError("bad_args")
+        args: dict[str, Any] = {"classname": classname, "dest": dest}
+        if uid != "":
+            args["uid"] = uid
         async with runtime.tool_lock:
             return await runtime.call_bridge("inventory_give", args, "server", _timeout(timeout_s))
 
@@ -1664,7 +2110,40 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("object_inspect", args, "server", _timeout(timeout_s))
 
-    @app.tool(description="Set server world date/time and optionally the time multiplier.")
+    @app.tool(
+        description=(
+            "Query world entities around pos within radius (0 < r <= 200). "
+            "Returns the nearest entries up to limit (default 32, max 128) as "
+            "{type, classname, pos, distance} sorted by distance ascending, plus "
+            "count_total before the cut. No classname filter; raw nearby objects. "
+            "Absent entities travel as []."
+        )
+    )
+    async def entities_query(
+        pos: list[float],
+        radius: float,
+        limit: int = 32,
+        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        radius_value = _finite_float(radius)
+        if radius_value <= 0.0 or radius_value > 200.0:
+            raise ToolError("bad_args")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 128:
+            raise ToolError("bad_args")
+        args = {
+            "pos": _require_vec3(pos, "pos"),
+            "radius": radius_value,
+            "limit": int(limit),
+        }
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("entities_query", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            "Requires a lease (session_acquire_wait). Set server world "
+            "date/time and optionally the time multiplier."
+        )
+    )
     async def world_time_set(
         year: int,
         month: int,
@@ -1704,7 +2183,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("world_time_set", args, "server", _timeout(timeout_s))
 
-    @app.tool(description="Set server weather overcast, rain, or fog forecast values.")
+    @app.tool(
+        description=(
+            "Requires a lease (session_acquire_wait). Set server weather "
+            "overcast, rain, or fog forecast values."
+        )
+    )
     async def world_weather_set(
         overcast: float | None = None,
         rain: float | None = None,
@@ -1731,9 +2215,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return await runtime.call_bridge("world_weather_set", args, "server", _timeout(timeout_s))
 
     @app.tool(description=(
-        "Set the client camera through the existing camera_set bridge command. "
+        "Requires a lease (session_acquire_wait). Set the client camera "
+        "through the existing camera_set bridge command. "
         "cam_mode: orient (cam_pos + cam_orientation), lookat (cam_pos + look_at), "
-        "matrix (cam_matrix of 12), free (cam_pos, then look_at or cam_orientation)."
+        "matrix (cam_matrix of 12), free (cam_pos, then look_at or cam_orientation). "
+        "cam_mode look_at is accepted as an alias of lookat and is sent as lookat."
     ))
     async def camera_set(
         cam_mode: str = "orient",
@@ -1785,10 +2271,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return await runtime.call_bridge("camera_get", args, "client", _timeout(timeout_s))
 
     @app.tool(description=(
-        "Restore local player simulation, input controls and HUD, and release the "
-        "camera: the free camera is deactivated and an owned static camera is "
-        "deleted. This is the only exit from camera control, as camera_set has no "
-        "off mode."
+        f"{LEASE_TOOL_LINE} Restore local player simulation, input, HUD, and "
+        "release the camera. camera_set has no off mode."
     ))
     async def restore_gameplay(timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
@@ -1840,7 +2324,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raw = base64.b64decode(data.encode("ascii"), validate=True)
         except ValueError as exc:
             raise ToolError("bad image data") from exc
-        image_format = "jpeg" if inline.get("mimeType") == "image/jpeg" else "png"
+        image_format = _image_format_from_mime(inline.get("mimeType"))
         image = Image(data=raw, format=image_format)
         if not save_fullres:
             # Backward-compatible single-Image return (now JPEG instead of PNG).
@@ -1856,25 +2340,47 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             async with runtime.tool_lock:
                 return await runtime.call_exec_enforce(args, _timeout(timeout_s))
 
-    @app.tool(description="Inspect loopback queues, peer liveness, and version_state without touching DayZ.")
+    @app.tool(
+        description=(
+            "Inspect peer liveness, version_state, and ready "
+            "{ready, reason=ready|no_run|server_poll_stale|client_not_polling|"
+            "client_legacy_blocked|version_mismatch}. "
+            "daemon_modules.stale = source newer than daemon, not a crash."
+        )
+    )
     async def bridge_status() -> dict[str, Any]:
         runtime.touch()
         return await runtime.bridge_status_payload()
 
-    @app.tool(description="Seat the connected client in a nearby vehicle (client-side ownership get-in).")
+    @app.tool(
+        description=(
+            "Requires a lease (session_acquire_wait). Seat the connected "
+            "client in a nearby vehicle (client-side ownership get-in)."
+        )
+    )
     async def vehicle_get_in_client(pos: list[float], timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         args = {"pos": _require_vec3(pos, "pos")}
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_get_in_client", args, "client", _timeout(timeout_s))
 
-    @app.tool(description="Start or stop the owned vehicle's engine.")
+    @app.tool(
+        description=(
+            "Requires a lease (session_acquire_wait). Start or stop the "
+            "owned vehicle's engine."
+        )
+    )
     async def engine_set(mode: str, timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         if mode not in ("start", "stop"):
             raise ToolError("bad_mode")
         async with runtime.tool_lock:
             return await runtime.call_bridge("engine_set", {"mode": mode}, "client", _timeout(timeout_s))
 
-    @app.tool(description="Set sustained owner-side driving control (held until released or deadman TTL).")
+    @app.tool(
+        description=(
+            "Requires a lease (session_acquire_wait). Set sustained "
+            "owner-side driving control (held until released or deadman TTL)."
+        )
+    )
     async def vehicle_control(
         throttle: float = 0.0,
         steer: float = 0.0,
@@ -1907,7 +2413,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_telemetry", {}, "client", _timeout(timeout_s))
 
-    @app.tool(description="Capture and read an atomic owner-client vehicle trace.")
+    @app.tool(
+        description=f"{LEASE_TOOL_LINE} Capture and read an atomic owner-client vehicle trace."
+    )
     async def vehicle_trace(
         mode: str,
         trace_id: str = "",
@@ -1940,23 +2448,113 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
 
-    @app.tool(description="Release sustained vehicle control (stop driving).")
+    @app.tool(
+        description=(
+            "Requires a lease (session_acquire_wait). Release sustained "
+            "vehicle control (stop driving)."
+        )
+    )
     async def vehicle_release(timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_release", {}, "client", _timeout(timeout_s))
 
+    @app.tool(description=(
+        "Walk the client widget tree from an optional named root, or the active "
+        "scripted menu when path is empty. Each node reports name, type, user_id, "
+        "visible, visible_hierarchy, disabled, text, text_readable and screen box. "
+        "TextWidget/RichTextWidget have no getter: text_readable is false and text "
+        "is empty, never a fake label."
+    ))
+    async def ui_tree(
+        path: str = "",
+        limit: int = 256,
+        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(path, str):
+            raise ToolError("bad_args")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 512:
+            raise ToolError("bad_args")
+        args: dict[str, Any] = {"limit": int(limit)}
+        if path != "":
+            args["path"] = path
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("ui_tree", args, "client", _timeout(timeout_s))
+
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Write text on a client EditBox/MultilineEditBox/"
+        "Button/Text widget by name. Other types return text_not_writable."
+    ))
+    async def ui_set_text(
+        path: str,
+        text: str,
+        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(path, str) or path == "":
+            raise ToolError("bad_args")
+        if not isinstance(text, str):
+            raise ToolError("bad_args")
+        args = {"path": path, "text": text}
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("ui_set_text", args, "client", _timeout(timeout_s))
+
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Click a client widget by name. button is "
+        "0=left, 1=right, 2=middle."
+    ))
+    async def ui_click(
+        path: str,
+        button: int = 0,
+        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(path, str) or path == "":
+            raise ToolError("bad_args")
+        if not isinstance(button, int) or isinstance(button, bool) or button < 0 or button > 2:
+            raise ToolError("bad_args")
+        args = {"path": path, "button": int(button)}
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("ui_click", args, "client", _timeout(timeout_s))
+
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Start a DayZ user action on the local player "
+        "without keyboard. Confirm with wait_for(condition=log_matches)."
+    ))
+    async def action_use(
+        action: str,
+        classname: str = "",
+        pos: list[float] | None = None,
+        radius: float = 5.0,
+        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(action, str) or action == "":
+            raise ToolError("bad_args")
+        if not isinstance(classname, str):
+            raise ToolError("bad_args")
+        radius_value = _finite_float(radius)
+        if radius_value <= 0.0:
+            raise ToolError("bad_args")
+        args: dict[str, Any] = {"action": action, "radius": radius_value}
+        if classname != "":
+            args["classname"] = classname
+        if pos is not None:
+            args["pos"] = _require_vec3(pos, "pos")
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("action_use", args, "client", _timeout(timeout_s))
+
     @app.tool(
         description=(
-            "Block until a condition holds (player count or a new script-log "
-            "match), polling without holding the multi-session tool lock."
+            "Block until a condition holds. condition ENUM: players_at_least, "
+            "players_at_most, log_matches. lookback_lines (default 200) "
+            "rewinds initial log markers N lines so a just-written match is "
+            "not missed. ok is true only if satisfied."
         )
     )
     async def wait_for(
-        condition: str,
+        condition: Literal["players_at_least", "players_at_most", "log_matches"],
         value: int = 0,
         pattern: str = "",
         timeout_s: float = 180.0,
         poll_interval_s: float = 2.0,
+        lookback_lines: int = 200,
     ) -> dict[str, Any]:
         # Unique in this file: do not wrap the whole body in tool_lock.
         # execute_wait_for takes the lock only around each probe and sleeps
@@ -1969,7 +2567,105 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             pattern=pattern,
             timeout_s=timeout_s,
             poll_interval_s=poll_interval_s,
+            lookback_lines=lookback_lines,
         )
+
+    def _pipeline_platform() -> str:
+        config = getattr(runtime, "config", None)
+        value = getattr(config, "client_platform", "") if config is not None else ""
+        return value if type(value) is str else ""
+
+    @app.tool(
+        description=(
+            "List approved dayz_test_run project names from the sealed "
+            "request policy (the `mod` field). No host paths."
+        )
+    )
+    async def list_projects() -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return dayz_test_tool.list_project_names()
+
+    @app.tool(
+        description=(
+            "File pipeline feedback from any agent session. kind must be "
+            "bug | request | finding | tool_contribution. Body template: "
+            "tool, args, error, repro. For contributions, reference "
+            "artifacts at DURABLE paths (never session scratchpads). "
+            "Appends to a local shared inbox; ids cannot collide. Works "
+            "even when the game and daemon are down."
+        )
+    )
+    async def pipeline_feedback(
+        kind: Literal["bug", "request", "finding", "tool_contribution"],
+        title: str,
+        body: str,
+        project: str = "",
+    ) -> dict[str, Any]:
+        """File pipeline feedback from any agent session: a bug you hit, a request for a missing capability, a finding worth recording, or a tool/playbook you built (kind=tool_contribution). For contributions, reference artifacts at DURABLE paths (never session scratchpads). Appends to a local shared inbox; ids cannot collide. Works even when the game and daemon are down."""
+        # The lock here only preserves the one-tool-at-a-time client invariant;
+        # these tools do not call the bridge.
+        async with runtime.tool_lock:
+            try:
+                return inbox.append_feedback(
+                    kind,
+                    title,
+                    body,
+                    project=project,
+                    platform=_pipeline_platform(),
+                )
+            except ValueError as exc:
+                message = str(exc)
+                if message == "bad_args" or message.startswith("bad_args"):
+                    raise ToolError(message) from None
+                raise
+
+    @app.tool(
+        description=(
+            "Drain the pipeline inbox for owner triage or any-agent lookup."
+        )
+    )
+    async def pipeline_inbox(
+        limit: int = 20,
+        kind: str = "",
+        include_resolved: bool = False,
+    ) -> dict[str, Any]:
+        """Drain the pipeline inbox for owner triage or any-agent lookup."""
+        # The lock here only preserves the one-tool-at-a-time client invariant;
+        # these tools do not call the bridge.
+        async with runtime.tool_lock:
+            try:
+                return inbox.read_inbox(
+                    limit=limit, kind=kind, include_resolved=include_resolved
+                )
+            except ValueError as exc:
+                message = str(exc)
+                if message == "bad_args" or message.startswith("bad_args"):
+                    raise ToolError(message) from None
+                raise
+
+    @app.tool(
+        description=(
+            "Triage a feedback item by appending a resolution; deletes "
+            "nothing, history is append-only."
+        )
+    )
+    async def pipeline_resolve(
+        feedback_id: str,
+        resolution: str,
+    ) -> dict[str, Any]:
+        """Triage a feedback item by appending a resolution; deletes nothing, history is append-only."""
+        # The lock here only preserves the one-tool-at-a-time client invariant;
+        # these tools do not call the bridge.
+        async with runtime.tool_lock:
+            try:
+                return inbox.append_resolution(
+                    feedback_id, resolution, platform=_pipeline_platform()
+                )
+            except ValueError as exc:
+                message = str(exc)
+                if message == "bad_args" or message.startswith("bad_args"):
+                    raise ToolError(message) from None
+                raise
 
     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
     return app, runtime

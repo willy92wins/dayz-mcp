@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-EXPECTED_BRIDGE_VERSION = "6"
+EXPECTED_BRIDGE_VERSION = "7"
 
 # Peer version_state values that must block command delivery / enqueue.
 BLOCKED_VERSION_STATES = {"legacy_blocked", "version_mismatch"}

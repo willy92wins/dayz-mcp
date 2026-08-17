@@ -1,0 +1,16 @@
+{
+  "name": "red_no_surface",
+  "params": {
+    "x": 7512.0,
+    "z": 7502.0,
+    "clear_r": 15.0
+  },
+  "responses": {
+    "S1": {
+      "ok": 0
+    }
+  },
+  "expect_overall": "FAIL",
+  "expect_stopped_at": "S1",
+  "expect_reason": "no_surface"
+}

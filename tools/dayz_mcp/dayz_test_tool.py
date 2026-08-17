@@ -4,7 +4,8 @@ import json
 import ntpath
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
 from dayz_mcp import dayz_test_request, dayz_test_worker, secure_launcher
@@ -322,6 +323,61 @@ def _artifact_paths(
     return [ntpath.join(policy.dev_root, root, "profiles") for root in roots]
 
 
+def list_project_names() -> dict[str, object]:
+    """Approved `dayz_test_run` project names. No host paths or file ids."""
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "native-launchers"
+        / "dayz-test-v1"
+        / "request-policy.json"
+    )
+    try:
+        data = json.loads(path.read_bytes().decode("utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        _fail("launcher_policy_invalid")
+    projects: list[dict[str, str]] = []
+    if not isinstance(data, dict):
+        _fail("launcher_policy_invalid")
+    for item in data.get("projects") or []:
+        if isinstance(item, dict) and isinstance(item.get("mod"), str) and item["mod"]:
+            projects.append({"name": item["mod"]})
+    return {"projects": projects}
+
+
+def _pid_alive(pid: object) -> bool | None:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    try:
+        import psutil
+
+        return bool(psutil.pid_exists(pid))
+    except Exception:
+        return None
+
+
+def _liveness_from_status(
+    status: object, run_id: str | None
+) -> tuple[bool | None, bool | None]:
+    if not isinstance(status, dict) or not run_id:
+        return None, None
+    runs = [item for item in (status.get("runs") or []) if isinstance(item, dict)]
+    match = next((item for item in runs if item.get("run_id") == run_id), None)
+    if match is None:
+        return None, None
+    server_alive: bool | None = None
+    client_alive: bool | None = None
+    for proc in match.get("processes") or []:
+        if not isinstance(proc, dict):
+            continue
+        role = proc.get("role")
+        alive = _pid_alive(proc.get("pid"))
+        if role == "server":
+            server_alive = alive
+        elif role == "client":
+            client_alive = alive
+    return server_alive, client_alive
+
+
 def _compact_result(
     *,
     terminal: WorkerTerminal,
@@ -329,6 +385,8 @@ def _compact_result(
     mode: str,
     started_at: float,
     artifacts_paths: list[str],
+    server_alive: bool | None = None,
+    client_alive: bool | None = None,
 ) -> dict[str, object]:
     return {
         "status": "succeeded" if terminal.ok else "failed",
@@ -340,6 +398,8 @@ def _compact_result(
         "artifacts_paths": artifacts_paths,
         "error_code": terminal.error_code,
         "cleanup_degraded": terminal.cleanup_degraded,
+        "server_alive": server_alive,
+        "client_alive": client_alive,
     }
 
 
@@ -436,12 +496,29 @@ async def _execute_request(
     _validate_terminal_context(
         terminal, preflight=preflight, expected_run_id=expected_run_id
     )
+    server_alive: bool | None = None
+    client_alive: bool | None = None
+    if terminal.ok and not preflight and terminal.run_id:
+        try:
+            status = await runtime.lifecycle_status()
+        except Exception:
+            status = None
+        server_alive, client_alive = _liveness_from_status(status, terminal.run_id)
+        if public_mode in {"all", "offline"} and client_alive is False:
+            terminal = replace(
+                terminal,
+                ok=False,
+                error_code="client_dead_after_ack",
+                exit_code=1,
+            )
     return _compact_result(
         terminal=terminal,
         project=policy.mod,
         mode=public_mode,
         started_at=started_at,
         artifacts_paths=artifacts_paths,
+        server_alive=server_alive,
+        client_alive=client_alive,
     )
 
 

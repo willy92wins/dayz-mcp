@@ -39,6 +39,8 @@ READ_ONLY = {
     "logs_since",
     "surface_query",
     "object_inspect",
+    "entities_query",
+    "ui_tree",
 }
 
 

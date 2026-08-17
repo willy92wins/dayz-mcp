@@ -1060,7 +1060,10 @@ from dayz_mcp.runtime_state import RuntimePaths
 root, signal, release = map(Path, sys.argv[1:])
 paths = RuntimePaths(root, root / 'audit', root / 'coordination.json', root / 'runs.json')
 with daemon_startup_election(paths) as elected:
-    signal.write_text('1' if elected else '0', encoding='ascii')
+    # Publish atomically: the parent must never observe an existing-but-empty signal.
+    staged = signal.with_suffix('.tmp')
+    staged.write_text('1' if elected else '0', encoding='ascii')
+    staged.replace(signal)
     while not release.exists():
         time.sleep(0.01)
 """
@@ -1069,10 +1072,19 @@ with daemon_startup_election(paths) as elected:
                 cwd=str(Path(__file__).resolve().parents[1]),
             )
             try:
-                deadline = time.monotonic() + 5.0
-                while not signal.exists() and time.monotonic() < deadline:
+                # Wait for CONTENT, not existence: a create-then-write child races an
+                # exists()-gated read into '' (measured 1/3 under a full-suite load).
+                deadline = time.monotonic() + 15.0
+                observed = ""
+                while time.monotonic() < deadline:
+                    try:
+                        observed = signal.read_text(encoding="ascii")
+                    except FileNotFoundError:
+                        observed = ""
+                    if observed:
+                        break
                     time.sleep(0.01)
-                self.assertEqual(signal.read_text(encoding="ascii"), "1")
+                self.assertEqual(observed, "1")
                 paths = RuntimePaths(
                     root,
                     root / "audit",

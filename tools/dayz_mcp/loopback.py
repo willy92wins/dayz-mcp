@@ -14,7 +14,10 @@ from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 from dayz_mcp import daemon_credential, orphan_guard
-from dayz_mcp.core import BLOCKED_VERSION_STATES
+from dayz_mcp.core import (
+    BLOCKED_VERSION_STATES,
+    EXPECTED_BRIDGE_VERSION,
+)
 from dayz_mcp.session_coordination import (
     ClientIdentity,
     SessionCoordinator,
@@ -42,6 +45,7 @@ SERVER_COMMANDS = {
     "object_anim",
     "inventory_give",
     "object_inspect",
+    "entities_query",
 }
 CLIENT_COMMANDS = {
     "camera_set",
@@ -54,6 +58,10 @@ CLIENT_COMMANDS = {
     "vehicle_telemetry",
     "vehicle_trace",
     "vehicle_release",
+    "ui_tree",
+    "ui_set_text",
+    "ui_click",
+    "action_use",
 }
 
 CREDENTIAL_RECOVERY_TTL_S = 300.0
@@ -216,7 +224,10 @@ def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
         return True, None
 
     if cmd == "player_teleport":
-        if set(args) != {"pos"}:
+        keys = set(args)
+        if keys != {"pos"} and keys != {"pos", "uid"}:
+            return False, "bad_args"
+        if "uid" in args and not isinstance(args.get("uid"), str):
             return False, "bad_args"
         pos = args.get("pos")
         if not isinstance(pos, list) or len(pos) != 3:
@@ -252,7 +263,10 @@ def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
         return True, None
 
     if cmd == "inventory_give":
-        if set(args) != {"classname", "dest"}:
+        keys = set(args)
+        if keys != {"classname", "dest"} and keys != {"classname", "dest", "uid"}:
+            return False, "bad_args"
+        if "uid" in args and not isinstance(args.get("uid"), str):
             return False, "bad_args"
         classname = args.get("classname")
         dest = args.get("dest")
@@ -301,6 +315,106 @@ def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
         icon = args.get("icon", "")
         if not isinstance(detail, str) or not isinstance(icon, str):
             return False, "bad_args"
+        if "uid" in args and not isinstance(args.get("uid"), str):
+            return False, "bad_args"
+        return True, None
+
+    if cmd == "entities_query":
+        keys = set(args)
+        if keys != {"pos", "radius"} and keys != {"pos", "radius", "limit"}:
+            return False, "bad_args"
+        pos = args.get("pos")
+        radius = args.get("radius")
+        if not isinstance(pos, list) or len(pos) != 3:
+            return False, "bad_args"
+        try:
+            if any(not _is_real_number(component) for component in pos):
+                return False, "bad_args"
+            if not _is_real_number(radius) or float(radius) <= 0.0 or float(radius) > 200.0:
+                return False, "bad_args"
+        except (OverflowError, ValueError):
+            return False, "bad_args"
+        if "limit" in args:
+            limit = args.get("limit")
+            if (
+                not isinstance(limit, int)
+                or isinstance(limit, bool)
+                or limit < 1
+                or limit > 128
+            ):
+                return False, "bad_args"
+        return True, None
+
+    if cmd == "ui_tree":
+        keys = set(args)
+        if keys - {"path", "limit"}:
+            return False, "bad_args"
+        if "path" in args and not isinstance(args.get("path"), str):
+            return False, "bad_args"
+        if "limit" in args:
+            limit = args.get("limit")
+            if (
+                not isinstance(limit, int)
+                or isinstance(limit, bool)
+                or limit < 1
+                or limit > 512
+            ):
+                return False, "bad_args"
+        return True, None
+
+    if cmd == "ui_set_text":
+        if set(args) != {"path", "text"}:
+            return False, "bad_args"
+        path = args.get("path")
+        text = args.get("text")
+        if not isinstance(path, str) or path == "":
+            return False, "bad_args"
+        if not isinstance(text, str):
+            return False, "bad_args"
+        return True, None
+
+    if cmd == "ui_click":
+        keys = set(args)
+        if keys != {"path"} and keys != {"path", "button"}:
+            return False, "bad_args"
+        path = args.get("path")
+        if not isinstance(path, str) or path == "":
+            return False, "bad_args"
+        if "button" in args:
+            button = args.get("button")
+            if (
+                not isinstance(button, int)
+                or isinstance(button, bool)
+                or button < 0
+                or button > 2
+            ):
+                return False, "bad_args"
+        return True, None
+
+    if cmd == "action_use":
+        keys = set(args)
+        if keys - {"action", "classname", "pos", "radius"}:
+            return False, "bad_args"
+        action = args.get("action")
+        if not isinstance(action, str) or action == "":
+            return False, "bad_args"
+        if "classname" in args and not isinstance(args.get("classname"), str):
+            return False, "bad_args"
+        if "pos" in args:
+            pos = args.get("pos")
+            if not isinstance(pos, list) or len(pos) != 3:
+                return False, "bad_args"
+            try:
+                if any(not _is_real_number(component) for component in pos):
+                    return False, "bad_args"
+            except (OverflowError, ValueError):
+                return False, "bad_args"
+        if "radius" in args:
+            try:
+                if not _is_real_number(args.get("radius")) or float(args.get("radius")) <= 0.0:
+                    return False, "bad_args"
+            except (OverflowError, ValueError):
+                return False, "bad_args"
         return True, None
 
     return True, None
@@ -436,6 +550,13 @@ class ServerState:
             payload: dict[str, object] = {"error": decision.error}
             if decision.cleanup_degraded:
                 payload["cleanup_degraded"] = list(decision.cleanup_degraded)
+            if decision.error == "lease_required":
+                blocked = self._version_block_fields(safe_peer)
+                if blocked:
+                    payload["version_state"] = blocked.get("state")
+                    payload["expected"] = blocked.get("expected")
+                    payload["got"] = blocked.get("got")
+                    payload["detail"] = blocked.get("detail")
             return decision.http_status, payload
 
         if command_requires_lease(safe_cmd) and self._retail_quarantined():
@@ -530,6 +651,33 @@ class ServerState:
                     dict.fromkeys([*existing_degradation, *cleanup_degraded])
                 )
 
+    def _version_block_fields(self, peer: str | None) -> dict[str, object]:
+        """Peer version fields when the destination is blocked. Empty if ok.
+
+        Used both on the 409 version_blocked path and attached to a
+        lease_required 423 so a missing token does not hide a PBO mismatch.
+        """
+        if not peer or self.version_validator is None:
+            return {}
+        with self._lock:
+            poll_version = self._poll_versions.get(peer)
+        state = self.version_validator(poll_version)
+        if state not in BLOCKED_VERSION_STATES:
+            return {}
+        got: object = None
+        if isinstance(poll_version, str) and poll_version:
+            got = poll_version.partition("~")[0]
+        if poll_version is None:
+            detail = "poll did not include ver="
+        else:
+            detail = f"bridge_version {got!r} != {EXPECTED_BRIDGE_VERSION!r}"
+        return {
+            "state": state,
+            "expected": EXPECTED_BRIDGE_VERSION,
+            "got": got,
+            "detail": detail,
+        }
+
     def _enqueue_command(
         self,
         cmd: str,
@@ -565,7 +713,10 @@ class ServerState:
                 poll_version = self._poll_versions.get(peer)
             state = self.version_validator(poll_version)
             if state in BLOCKED_VERSION_STATES:
-                return 409, {"error": "version_blocked", "state": state}
+                blocked = self._version_block_fields(peer)
+                payload: dict[str, object] = {"error": "version_blocked", "state": state}
+                payload.update(blocked)
+                return 409, payload
 
         if cmd == "exec_enforce":
             return self._enqueue_exec_enforce(

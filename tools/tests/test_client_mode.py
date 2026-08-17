@@ -332,7 +332,11 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("sensitive-test-value", enqueue_error)
                 self.assertNotIn("active-token-shaped-test-value", enqueue_error)
 
-        self.assertEqual(runtime._enqueue_error({"error": "lease_required"}), "lease_required")
+        self.assertEqual(
+            runtime._enqueue_error({"error": "lease_required"}),
+            server.LEASE_REQUIRED_RECIPE,
+        )
+        self.assertIn("session_acquire_wait", runtime._enqueue_error({"error": "lease_required"}))
         self.assertEqual(
             runtime._enqueue_error(
                 {"error": "version_blocked", "state": "active-token-shaped-test-value"}
@@ -646,6 +650,12 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         srv = self._daemon(require_version=True)
         self._peer(srv, "server")  # polls with no version → legacy_blocked
         runtime = self._client(srv)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            status = await runtime.bridge_status_payload()
+            if (status.get("server_peer") or {}).get("last_poll_age_s") is not None:
+                break
+            await asyncio.sleep(0.02)
         with self.assertRaises(Exception) as err:
             await runtime.call_bridge("query_player_state", {}, "server", 1.0)
         self.assertEqual(type(err.exception).__name__, "ToolError")
@@ -1278,33 +1288,45 @@ class ClientRuntimeProvenanceGateTest(unittest.TestCase):
         connection.assert_not_called()
         self.assertEqual(requests, [])
 
-    def test_auto_spawn_mismatch_fails_before_key_connect_or_request(self) -> None:
-        key_reads: list[str] = []
-        requests: list[dict[str, object]] = []
-        with (
-            patch.object(
-                host_config,
-                "resolve_daemon_provenance",
-                return_value=self._provenance(auto_spawn_daemon=False),
-            ),
-            patch.object(server, "read_key", side_effect=key_reads.append),
-            patch.object(
-                server.orphan_guard,
-                "verified_daemon_http_request",
-                side_effect=lambda **kwargs: requests.append(kwargs),
-            ),
-            patch.object(
-                server.orphan_guard.http.client, "HTTPConnection"
-            ) as connection,
-            self.assertRaisesRegex(
-                host_config.HostConfigError, "^daemon_provenance_conflict$"
-            ),
+    def test_auto_spawn_cli_override_does_not_crash_construction(self) -> None:
+        # Host registration may have auto_spawn=True while this process passed
+        # --no-daemon-autospawn. Construction must succeed; spawn stays off.
+        spawns: list[bool] = []
+        with patch.object(
+            host_config,
+            "resolve_daemon_provenance",
+            return_value=self._provenance(auto_spawn_daemon=True),
         ):
-            server.ClientRuntime(self._config(auto_spawn_daemon=True))
+            runtime = server.ClientRuntime(
+                self._config(auto_spawn_daemon=False),
+                spawn_fn=lambda: spawns.append(True) or 4321,
+                probe_fn=lambda *_args, **_kwargs: False,
+                startup_budget_s=0.01,
+            )
 
-        self.assertEqual(key_reads, [])
-        connection.assert_not_called()
-        self.assertEqual(requests, [])
+        self.assertFalse(runtime._auto_spawn_daemon)
+        self.assertFalse(runtime._ensure_daemon())
+        self.assertEqual(spawns, [])
+
+    def test_registration_false_cli_true_does_not_conflict(self) -> None:
+        # CLI is the spawn authority: host registration may disable autospawn
+        # while this process did not pass --no-daemon-autospawn.
+        spawns: list[bool] = []
+        with patch.object(
+            host_config,
+            "resolve_daemon_provenance",
+            return_value=self._provenance(auto_spawn_daemon=False),
+        ):
+            runtime = server.ClientRuntime(
+                self._config(auto_spawn_daemon=True),
+                spawn_fn=lambda: spawns.append(True) or 4321,
+                probe_fn=lambda *_args, **_kwargs: False,
+                startup_budget_s=0.01,
+            )
+
+        self.assertTrue(runtime._auto_spawn_daemon)
+        self.assertFalse(runtime._ensure_daemon())
+        self.assertEqual(spawns, [True])
 
     def test_consensual_no_autospawn_is_the_runtime_authority(self) -> None:
         spawns: list[bool] = []

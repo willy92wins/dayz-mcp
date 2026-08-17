@@ -62,67 +62,65 @@ class InventoryGiveIngressTest(unittest.TestCase):
 
 
 class InventoryGiveEnforceContractTest(unittest.TestCase):
-    def test_handler_uses_plugin_developer_and_no_player_error(self) -> None:
+    def test_handler_resolves_player_and_honors_dest(self) -> None:
         source = BRIDGE_PATH.read_text(encoding="utf-8")
         body = _method_body(source, "protected bool DispatchInventoryGive(")
         required = [
             'command.args.dest != "hands"',
             'command.args.dest != "inventory"',
-            "GetFirstHuman()",
-            'result.error = "no_players"',
-            "PluginDeveloper.GetInstance()",
-            "SpawnEntityInInventory(",
-            "FindInventoryLocationType.HANDS",
-            "FindInventoryLocationType.ANY",
-            'result.error = "spawn_failed"',
+            "ResolvePlayer(",
+            'command.args.dest == "hands"',
+            "GetItemInHands()",
+            'result.error = "hands_occupied"',
+            "GetHumanInventory()",
+            "CreateInHands(",
+            "CreateInInventory(",
+            'result.error = "create_failed"',
             "result.classname = command.args.classname",
         ]
         for token in required:
             with self.subTest(token=token):
                 self.assertIn(token, body)
 
-    def test_hands_occupied_is_deferred_success_not_spawn_failed(self) -> None:
-        """P1: vanilla returns null after Drop+CallLater when HANDS are full.
+        forbidden = [
+            "PluginDeveloper",
+            "FindInventoryLocationType",
+            "SpawnEntityInInventory",
+            "SpawnEntityInPlayerInventory",
+            "handsOccupied",
+            "result.deferred = true",
+            "DropEntity",
+            "CallLater",
+        ]
+        for token in forbidden:
+            with self.subTest(forbidden=token):
+                self.assertNotIn(token, body)
 
-        Must stay red if the handler again maps that null to spawn_failed only.
-        """
+    def test_hands_occupied_fails_closed_before_create(self) -> None:
         source = BRIDGE_PATH.read_text(encoding="utf-8")
         body = _method_body(source, "protected bool DispatchInventoryGive(")
 
-        # Precondition observed before the PluginDeveloper call.
-        self.assertIn("GetItemInHands()", body)
-        self.assertLess(body.index("GetItemInHands()"), body.index("SpawnEntityInInventory("))
-        self.assertIn("handsOccupied", body)
-
-        # Explicit deferred success contract (scalar; not pruned).
-        self.assertIn("result.deferred = true", body)
-        self.assertIn("result.ok = true", body)
-
-        # The deferred branch must sit inside the !spawned path, before spawn_failed.
-        null_block_start = body.index("if (!spawned)")
-        null_block = body[null_block_start:]
-        self.assertIn("if (handsOccupied)", null_block)
+        hands_block = _method_body(body, 'if (command.args.dest == "hands")')
+        self.assertIn("GetItemInHands()", hands_block)
+        self.assertIn('result.error = "hands_occupied"', hands_block)
+        self.assertIn("CreateInHands(", hands_block)
+        self.assertNotIn("CreateInInventory(", hands_block)
         self.assertLess(
-            null_block.index("if (handsOccupied)"),
-            null_block.index('result.error = "spawn_failed"'),
+            hands_block.index("GetItemInHands()"),
+            hands_block.index("CreateInHands("),
         )
-        deferred_ok = null_block[
-            null_block.index("if (handsOccupied)") : null_block.index(
-                'result.error = "spawn_failed"'
-            )
-        ]
-        self.assertIn("result.deferred = true", deferred_ok)
-        self.assertIn("result.ok = true", deferred_ok)
-        self.assertNotIn('result.error = "spawn_failed"', deferred_ok)
+        self.assertLess(
+            hands_block.index('result.error = "hands_occupied"'),
+            hands_block.index("CreateInHands("),
+        )
 
-        # Citation must name the player path that actually runs, not :572 non-player.
-        self.assertIn("SpawnEntityInPlayerInventory", body)
-        self.assertNotIn("plugindeveloper.c:572", body)
+        self.assertLess(body.index("CreateInHands("), body.index("CreateInInventory("))
+        inv_block = body[body.index("CreateInInventory(") :]
+        self.assertNotIn("CreateInHands(", inv_block)
 
-        messages = (
-            addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
-        ).read_text(encoding="utf-8")
-        self.assertIn("bool deferred;", messages)
+        null_block = body[body.index("if (!spawned)") :]
+        self.assertIn('result.error = "create_failed"', null_block)
+        self.assertNotIn("hands_occupied", null_block)
 
 
 class InventoryGiveAppToolTest(unittest.IsolatedAsyncioTestCase):

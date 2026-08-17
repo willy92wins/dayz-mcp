@@ -229,7 +229,8 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             {
                 "session_acquire", "session_wait", "session_heartbeat",
-                "session_release", "session_status",
+                "session_release", "session_status", "session_acquire_wait",
+                "lease_acquire",
             }.issubset(tools)
         )
         self.assertNotIn("force_release", tools)
@@ -489,6 +490,9 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
 
         blocked_app, blocked_runtime = self.build_started(require_version=True)
         self.start_peer(blocked_runtime, "server")
+        await self.wait_for(
+            lambda: blocked_runtime.status()["server_peer"]["last_poll_age_s"] is not None
+        )
         with self.assertRaises(Exception) as err:
             await blocked_app.call_tool("query_player_state", {"timeout_s": 1.0})
         _assert_tool_error(self, err.exception)
@@ -520,6 +524,32 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         status = _content_json(await ok_app.call_tool("bridge_status", {}))
         self.assertEqual(status["version_state"]["server"], "ok")
+
+    async def test_bridge_status_ready_true_with_fresh_versioned_peers(self) -> None:
+        app, runtime = self.build_started()
+        version = f"{EXPECTED_BRIDGE_VERSION}~1.29.0"
+        self.start_peer(runtime, "server", version=version)
+        self.start_peer(runtime, "client", version=version)
+        await self.wait_for(
+            lambda: (
+                runtime.status()["server_peer"]["version_state"] == "ok"
+                and runtime.status()["client_peer"]["version_state"] == "ok"
+                and runtime.status()["server_peer"]["last_poll_age_s"] is not None
+                and runtime.status()["client_peer"]["last_poll_age_s"] is not None
+            )
+        )
+        status = _content_json(await app.call_tool("bridge_status", {}))
+        ready = status["ready"]
+        self.assertIs(ready["ready"], True)
+        self.assertEqual(ready["reason"], "ready")
+        self.assertIn(ready["reason"], server_module.READY_REASONS)
+
+    async def test_bridge_status_ready_false_without_peers(self) -> None:
+        app, _runtime = self.build_started()
+        status = _content_json(await app.call_tool("bridge_status", {}))
+        ready = status["ready"]
+        self.assertIs(ready["ready"], False)
+        self.assertIn(ready["reason"], server_module.READY_REASONS)
 
     async def test_shutdown_reuses_port(self) -> None:
         _app, runtime = self.build_started()

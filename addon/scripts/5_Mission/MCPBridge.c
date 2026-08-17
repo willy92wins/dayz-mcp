@@ -499,6 +499,10 @@ class MCPBridge
 		{
 			postNow = DispatchQueryGetInCondition(command, result);
 		}
+		else if (command.cmd == "entities_query")
+		{
+			postNow = DispatchEntitiesQuery(command, result);
+		}
 		else
 		{
 			result.ok = false;
@@ -589,7 +593,24 @@ class MCPBridge
 			return true;
 		}
 
-		NotificationSystem.SendNotificationToPlayerIdentityExtended(null, command.args.show_time, command.args.title, command.args.detail, command.args.icon);
+		PlayerIdentity targetIdentity = null;
+		if (command.args.uid != "")
+		{
+			Human human = FindHumanByUid(command.args.uid);
+			if (human)
+			{
+				targetIdentity = human.GetIdentity();
+			}
+
+			if (!targetIdentity)
+			{
+				result.ok = false;
+				result.error = "player_not_found";
+				return true;
+			}
+		}
+
+		NotificationSystem.SendNotificationToPlayerIdentityExtended(targetIdentity, command.args.show_time, command.args.title, command.args.detail, command.args.icon);
 		result.ok = true;
 		result.sent = true;
 		return true;
@@ -1071,9 +1092,9 @@ class MCPBridge
 		return true;
 	}
 
-	// F3.3: teleport first connected player. y==0 means "snap to surface" (scriptconsolegeneraltab.c:246-251).
-	// Peer: server. DeveloperTeleport.SetPlayerPosition applies SetPosition when g_Game.IsServer()
-	// (developerteleport.c:141-144). PluginDeveloper is registered via MissionBase PluginManagerInit.
+	// Teleport a connected player. y==0 snaps to SurfaceY (scriptconsolegeneraltab.c:246-251).
+	// Empty uid targets the first human; a set uid resolves by PlayerIdentity.GetPlainId().
+	// Occupant in a vehicle moves the transport (GetTransform / SetTransform).
 	protected bool DispatchPlayerTeleport(MCPCommand command, MCPResult result)
 	{
 		MCPSpawnValidation validation = ValidatePositionArgs(command.args);
@@ -1084,12 +1105,12 @@ class MCPBridge
 			return true;
 		}
 
-		Human human = GetFirstHuman();
-		PlayerBase player = PlayerBase.Cast(human);
+		string resolveError = "";
+		PlayerBase player = ResolvePlayer(command.args, resolveError);
 		if (!player)
 		{
 			result.ok = false;
-			result.error = "no_players";
+			result.error = resolveError;
 			return true;
 		}
 
@@ -1099,17 +1120,30 @@ class MCPBridge
 			position[1] = GetGame().SurfaceY(position[0], position[2]);
 		}
 
-		PluginDeveloper developer = PluginDeveloper.GetInstance();
-		if (!developer)
+		Transport veh = null;
+		HumanCommandVehicle vehicleCommand = player.GetCommand_Vehicle();
+		if (vehicleCommand)
 		{
-			result.ok = false;
-			result.error = "plugin_unavailable";
-			return true;
+			veh = vehicleCommand.GetTransport();
 		}
 
-		developer.Teleport(player, position);
+		vector applied;
+		if (veh)
+		{
+			vector mat[4];
+			veh.GetTransform(mat);
+			mat[3] = position;
+			veh.SetTransform(mat);
+			// The occupant's own position lags the transport until the next sim frame;
+			// the transport is what moved, so it is what pos_real reports.
+			applied = veh.GetPosition();
+		}
+		else
+		{
+			player.SetPosition(position);
+			applied = player.GetPosition();
+		}
 
-		vector applied = player.GetPosition();
 		result.pos_real = new array<float>();
 		VectorToArray(applied, result.pos_real);
 		result.ok = true;
@@ -1174,13 +1208,7 @@ class MCPBridge
 		return true;
 	}
 
-	// F3.5: spawn classname into first player's inventory via PluginDeveloper.
-	// dest hands -> FindInventoryLocationType.HANDS; inventory -> ANY.
-	// Active path: target is always a player, so SpawnEntityInInventory (plugindeveloper.c:566-571)
-	// always delegates to SpawnEntityInPlayerInventory (:603+). The non-player IsServer branch
-	// at :572 is unreachable from this verb.
-	// HANDS + occupied: SpawnEntityInPlayerInventory drops the held item, CallLater-reschedules
-	// the spawn for 500 ms, and returns null (:609-618). That is success deferred, not spawn_failed.
+	// Spawn classname into hands or inventory. Empty uid targets the first human.
 	protected bool DispatchInventoryGive(MCPCommand command, MCPResult result)
 	{
 		if (!command.args || command.args.classname == "" || (command.args.dest != "hands" && command.args.dest != "inventory"))
@@ -1190,63 +1218,36 @@ class MCPBridge
 			return true;
 		}
 
-		Human human = GetFirstHuman();
-		PlayerBase player = PlayerBase.Cast(human);
+		string resolveError = "";
+		PlayerBase player = ResolvePlayer(command.args, resolveError);
 		if (!player)
 		{
 			result.ok = false;
-			result.error = "no_players";
+			result.error = resolveError;
 			return true;
 		}
 
-		EntityAI target = EntityAI.Cast(player);
-		if (!target)
-		{
-			result.ok = false;
-			result.error = "no_players";
-			return true;
-		}
-
-		PluginDeveloper developer = PluginDeveloper.GetInstance();
-		if (!developer)
-		{
-			result.ok = false;
-			result.error = "plugin_unavailable";
-			return true;
-		}
-
-		FindInventoryLocationType locationType = FindInventoryLocationType.ANY;
+		EntityAI spawned = null;
 		if (command.args.dest == "hands")
 		{
-			locationType = FindInventoryLocationType.HANDS;
-		}
-
-		// Detect the deferred-spawn precondition before the call. Target is a player, so
-		// SpawnEntityInInventory always routes to SpawnEntityInPlayerInventory
-		// (plugindeveloper.c:566-571 -> :603+). When HANDS are occupied, that helper drops
-		// the held item, CallLater-reschedules ~500 ms, and returns null (:609-618).
-		bool handsOccupied = false;
-		if (locationType == FindInventoryLocationType.HANDS && player.GetItemInHands())
-		{
-			handsOccupied = true;
-		}
-
-		// health/quantity -1 = vanilla "use max" convention in PluginDeveloper.
-		EntityAI spawned = developer.SpawnEntityInInventory(target, command.args.classname, -1, -1, false, "", locationType);
-		if (!spawned)
-		{
-			if (handsOccupied)
+			if (player.GetItemInHands())
 			{
-				// SpawnEntityInPlayerInventory deferred path: held item dropped, spawn pending.
-				result.classname = command.args.classname;
-				result.deferred = true;
-				result.found = false;
-				result.ok = true;
+				result.ok = false;
+				result.error = "hands_occupied";
 				return true;
 			}
 
+			spawned = player.GetHumanInventory().CreateInHands(command.args.classname);
+		}
+		else
+		{
+			spawned = player.GetInventory().CreateInInventory(command.args.classname);
+		}
+
+		if (!spawned)
+		{
 			result.ok = false;
-			result.error = "spawn_failed";
+			result.error = "create_failed";
 			return true;
 		}
 
@@ -1254,6 +1255,62 @@ class MCPBridge
 		result.type = spawned.GetType();
 		result.found = true;
 		result.deferred = false;
+		result.ok = true;
+		return true;
+	}
+
+	// Raw nearby objects via GetObjectsAtPosition3D. No classname filter.
+	// result.entities is the nearest `limit` hits; result.count_total is the uncut size.
+	protected bool DispatchEntitiesQuery(MCPCommand command, MCPResult result)
+	{
+		MCPSpawnValidation validation = ValidatePositionArgs(command.args);
+		if (!validation.ok)
+		{
+			result.ok = false;
+			result.error = validation.error;
+			return true;
+		}
+
+		if (!command.args || command.args.radius <= 0.0 || !IsFiniteFloat(command.args.radius) || command.args.radius > 200.0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		int limit = command.args.limit;
+		if (limit <= 0 || limit > 128)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		m_ReadyObjects.Clear();
+		m_ReadyProxyCargos.Clear();
+		GetGame().GetObjectsAtPosition3D(validation.pos, command.args.radius, m_ReadyObjects, m_ReadyProxyCargos);
+
+		array<ref MCPEntityHit> collected = new array<ref MCPEntityHit>();
+		int i = 0;
+		while (i < m_ReadyObjects.Count())
+		{
+			Object found = m_ReadyObjects.Get(i);
+			if (found)
+			{
+				MCPEntityHit entry = new MCPEntityHit();
+				vector foundPos = found.GetPosition();
+				entry.type = found.GetType();
+				entry.classname = found.ClassName();
+				VectorToArray(foundPos, entry.pos);
+				entry.distance = vector.Distance(validation.pos, foundPos);
+				collected.Insert(entry);
+			}
+
+			i = i + 1;
+		}
+
+		result.count_total = collected.Count();
+		result.entities = TakeNearestEntities(collected, limit);
 		result.ok = true;
 		return true;
 	}
@@ -2311,6 +2368,14 @@ class MCPBridge
 			return validation;
 		}
 
+		// y == 0 means "on the ground" (same contract as player_teleport). Resolving it here keeps
+		// pos_real honest for entities whose surface placement is deferred to the first sim frame
+		// (AI spawned with ECE_INITAI): the readiness probe reads GetPosition() before that frame runs.
+		if (y == 0)
+		{
+			y = GetGame().SurfaceY(x, z);
+		}
+
 		if (args.flags != 0)
 		{
 			if (!IsAllowedSpawnFlags(args.flags))
@@ -2398,7 +2463,7 @@ class MCPBridge
 		}
 
 		int extraFlags = flags - ECE_PLACE_ON_SURFACE;
-		int allowedExtraFlags = ECE_INITAI | ECE_EQUIP_ATTACHMENTS | ECE_NOPERSISTENCY_WORLD;
+		int allowedExtraFlags = ECE_INITAI | ECE_EQUIP_ATTACHMENTS | ECE_NOPERSISTENCY_WORLD | ECE_CREATEPHYSICS;
 		if ((extraFlags | allowedExtraFlags) == allowedExtraFlags)
 		{
 			return true;
@@ -2424,6 +2489,105 @@ class MCPBridge
 		}
 
 		return Human.Cast(player);
+	}
+
+	protected Human FindHumanByUid(string uid)
+	{
+		if (uid == "")
+		{
+			return null;
+		}
+
+		m_Players.Clear();
+		GetGame().GetPlayers(m_Players);
+
+		int i = 0;
+		while (i < m_Players.Count())
+		{
+			Man p = m_Players.Get(i);
+			if (p)
+			{
+				PlayerIdentity ident = p.GetIdentity();
+				if (ident && ident.GetPlainId() == uid)
+				{
+					return Human.Cast(p);
+				}
+			}
+
+			i = i + 1;
+		}
+
+		return null;
+	}
+
+	protected PlayerBase ResolvePlayer(MCPArgs args, out string error)
+	{
+		error = "";
+		Human human = null;
+		if (!args || args.uid == "")
+		{
+			human = GetFirstHuman();
+			if (!human)
+			{
+				error = "no_players";
+				return null;
+			}
+		}
+		else
+		{
+			human = FindHumanByUid(args.uid);
+			if (!human)
+			{
+				error = "player_not_found";
+				return null;
+			}
+		}
+
+		PlayerBase player = PlayerBase.Cast(human);
+		if (!player)
+		{
+			if (args && args.uid != "")
+			{
+				error = "player_not_found";
+			}
+			else
+			{
+				error = "no_players";
+			}
+
+			return null;
+		}
+
+		return player;
+	}
+
+	protected array<ref MCPEntityHit> TakeNearestEntities(array<ref MCPEntityHit> collected, int limit)
+	{
+		array<ref MCPEntityHit> nearest = new array<ref MCPEntityHit>();
+		if (!collected || limit <= 0)
+		{
+			return nearest;
+		}
+
+		while (collected.Count() > 0 && nearest.Count() < limit)
+		{
+			int minIdx = 0;
+			int k = 1;
+			while (k < collected.Count())
+			{
+				if (collected.Get(k).distance < collected.Get(minIdx).distance)
+				{
+					minIdx = k;
+				}
+
+				k = k + 1;
+			}
+
+			nearest.Insert(collected.Get(minIdx));
+			collected.Remove(minIdx);
+		}
+
+		return nearest;
 	}
 
 	protected Transport FindTransportNear(vector pos)

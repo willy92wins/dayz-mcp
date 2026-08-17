@@ -14,6 +14,10 @@ Two deliberate limits:
 2. An empty container is not always noise. `query_all_players` returning
    `players: []` is a verified success (in-game 2026-07-29) and must survive.
    Such pairs live in SEMANTIC_EMPTY_FIELDS and are never pruned.
+   The test is whether the container is the verb's ONLY answer.
+   `entities_query` reports `count_total` beside `entities`, and an int
+   survives pruning, so an empty result still says so. `query_all_players`
+   has no such scalar: prune its array and the answer is gone with it.
 
 This is an observable contract change for a published server: see the changelog.
 """
@@ -36,6 +40,8 @@ PRUNABLE_FIELDS = (
     "pos_real",
     "normal",
     "inspect",
+    "entities",
+    "ui",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.

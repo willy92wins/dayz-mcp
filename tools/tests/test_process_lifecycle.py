@@ -1070,14 +1070,16 @@ class ProcessLifecycleTest(unittest.TestCase):
             self.coordinator.authorize(IDENTITY_A, self.token_a, "world_spawn").allowed
         )
 
-    def test_reaper_skips_pid_reuse_mismatch(self) -> None:  # SC-002
+    def test_reaper_retires_foreign_identity_without_terminate(self) -> None:
         rec = process(48976)
         self.add_run(rec, owner=None, state="RUNNING_IDLE")
         self.guard.snapshots[48976] = snapshot(rec) | {
             "creation_time_utc": "9999-01-01T00:00:00.0000000Z"
         }
-        self.assertEqual(self.lifecycle.reap_dead_runs(), [])
-        self.assertEqual(self.store.get("run-existing").state, "RUNNING_IDLE")
+        self.assertEqual(self.lifecycle.reap_dead_runs(), ["run-existing"])
+        stored = self.store.get("run-existing")
+        self.assertEqual(stored.state, "EXITED")
+        self.assertEqual(stored.processes, [])
         self.assertEqual(self.guard.terminate_calls, [])
 
     def test_reaper_skips_live_run(self) -> None:  # SC-003
@@ -1139,18 +1141,123 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertIn(result["error"], {"lease_required", "lease_invalid"})
         self.assertEqual(self.store.get("run-existing").state, "RUNNING_IDLE")
 
-    def test_stop_mismatch_to_unreconciled_clears_owner(self) -> None:  # SC-009 / F-07
+    def test_stop_unknown_guard_unavailable_to_unreconciled_clears_owner(self) -> None:
+        # SC-009 / F-07: unknown guard snapshot stays fail-closed; owner cleared.
+        rec = process(48101, "server")
+        self.add_run(rec, owner="A", state="RUNNING")
+        self.guard.snapshots[rec.pid] = {
+            "error": "identity_unavailable",
+            "exit_code": 3,
+        }
+        result = self.lifecycle.stop_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertEqual(result.get("error"), "guard_unavailable")
+        self.assertEqual(result.get("_http_status"), 503)
+        stored = self.store.get("run-existing")
+        self.assertEqual(stored.state, "UNRECONCILED")
+        self.assertIsNone(stored.owner_session_id)
+        self.assertIsNone(stored.owner_lease_id)
+        persisted = RunManifestStore(self.store.paths).get("run-existing")
+        self.assertEqual(persisted.state, "UNRECONCILED")
+        self.assertIsNone(persisted.owner_session_id)
+        self.assertIsNone(persisted.owner_lease_id)
+        self.assertEqual(self.guard.terminate_calls, [])
+
+    def test_stop_unknown_incomplete_identity_to_unreconciled_clears_owner(self) -> None:
+        # SC-009 / F-07: incomplete identity is unknown, not foreign; owner cleared.
+        rec = process(48102, "server")
+        self.add_run(rec, owner="A", state="RUNNING")
+        self.guard.snapshots[rec.pid] = {
+            "pid": rec.pid,
+            "identity_complete": False,
+            "exit_code": 1,
+        }
+        result = self.lifecycle.stop_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertEqual(result.get("error"), "process_identity_mismatch")
+        self.assertEqual(result.get("_http_status"), 409)
+        stored = self.store.get("run-existing")
+        self.assertEqual(stored.state, "UNRECONCILED")
+        self.assertIsNone(stored.owner_session_id)
+        self.assertIsNone(stored.owner_lease_id)
+        persisted = RunManifestStore(self.store.paths).get("run-existing")
+        self.assertEqual(persisted.state, "UNRECONCILED")
+        self.assertEqual(self.guard.terminate_calls, [])
+
+    def test_stop_and_reaper_audit_payload_classifies_owned_gone_and_foreign(self) -> None:
+        live, gone, foreign = (
+            process(48201, "server"),
+            process(48202, "client"),
+            process(48203, "client"),
+        )
+        run = self.add_run(live, owner="A", state="RUNNING")
+        run.processes.extend([gone, foreign])
+        self.store.replace(run)
+        self.guard.snapshots[live.pid] = snapshot(live)
+        self._dead(gone.pid)
+        self.guard.snapshots[foreign.pid] = snapshot(foreign) | {
+            "creation_time_utc": "9999-01-01T00:00:00.0000000Z"
+        }
+        result = self.lifecycle.stop_run(IDENTITY_A, self.token_a, run.run_id)
+        self.assertTrue(result.get("ok"))
+        stop_audit = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "lifecycle_stop"
+        ]
+        self.assertEqual(stop_audit[-1]["owned_pids"], [live.pid])
+        self.assertEqual(stop_audit[-1]["gone_pids"], [gone.pid])
+        self.assertEqual(stop_audit[-1]["foreign_pids"], [foreign.pid])
+
+        gone_idle, foreign_idle = process(48221), process(48222)
+        self.store.add(
+            RunRecord(
+                "run-reap-audit",
+                None,
+                None,
+                "RUNNING_IDLE",
+                "same",
+                "@SameMod",
+                "profiles",
+                "mission",
+                [gone_idle, foreign_idle],
+            )
+        )
+        self._dead(gone_idle.pid)
+        self.guard.snapshots[foreign_idle.pid] = snapshot(foreign_idle) | {
+            "creation_time_utc": "9999-01-01T00:00:00.0000000Z"
+        }
+        self.audit.events.clear()
+        self.assertEqual(self.lifecycle.reap_dead_runs(), ["run-reap-audit"])
+        reaped = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "run_reaped"
+        ]
+        self.assertEqual(reaped[-1]["reason"], "all_processes_gone_or_foreign")
+        self.assertEqual(reaped[-1]["owned_pids"], [])
+        self.assertEqual(reaped[-1]["gone_pids"], [gone_idle.pid])
+        self.assertEqual(reaped[-1]["foreign_pids"], [foreign_idle.pid])
+
+    def test_stop_foreign_identity_exits_without_terminate(self) -> None:
         rec = process(48976, "server")
         self.add_run(rec, owner="A", state="RUNNING")
         self.guard.snapshots[48976] = snapshot(rec) | {
             "creation_time_utc": "9999-01-01T00:00:00.0000000Z"
         }
         result = self.lifecycle.stop_run(IDENTITY_A, self.token_a, "run-existing")
-        self.assertEqual(result.get("error"), "process_identity_mismatch")
+        self.assertEqual(
+            result,
+            {
+                "ok": True,
+                "run_id": "run-existing",
+                "state": "EXITED",
+                "terminated": 0,
+            },
+        )
         stored = self.store.get("run-existing")
-        self.assertEqual(stored.state, "UNRECONCILED")
+        self.assertEqual(stored.state, "EXITED")
         self.assertIsNone(stored.owner_session_id)
         self.assertIsNone(stored.owner_lease_id)
+        self.assertEqual(self.guard.terminate_calls, [])
 
     def test_identity_unavailable_uses_only_open_launcher_handle_and_marks_unreconciled(self) -> None:
         self.launcher.confirmed_exit = False
@@ -1171,7 +1278,7 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertEqual(result["error"], "run_not_adopted")
         self.assertEqual(self.guard.terminate_calls, [])
 
-    def test_pid_reuse_or_fingerprint_mismatch_preserves_every_process(self) -> None:
+    def test_pid_reuse_skips_foreign_pid_and_stops_owned_survivor(self) -> None:
         first, second = process(102), process(103)
         run = self.add_run(first)
         run.processes.append(second)
@@ -1179,9 +1286,18 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.guard.snapshots[first.pid] = snapshot(first) | {"creation_time_utc": "different"}
         self.guard.snapshots[second.pid] = snapshot(second)
         result = self.lifecycle.stop_run(IDENTITY_A, self.token_a, run.run_id)
-        self.assertEqual(result["error"], "process_identity_mismatch")
-        self.assertEqual(self.guard.terminate_calls, [])
-        self.assertEqual(self.store.get(run.run_id).state, "UNRECONCILED")
+        self.assertEqual(
+            result,
+            {
+                "ok": True,
+                "run_id": "run-existing",
+                "state": "EXITED",
+                "terminated": 1,
+            },
+        )
+        self.assertEqual([item.pid for item in self.guard.terminate_calls], [second.pid])
+        stored = self.store.get(run.run_id)
+        self.assertEqual((stored.state, stored.owner_session_id), ("EXITED", None))
 
     def test_fully_matching_registered_stop_exits_only_that_run(self) -> None:
         record = process(112)
@@ -1266,6 +1382,57 @@ class ProcessLifecycleTest(unittest.TestCase):
         result = self.lifecycle.adopt_run(IDENTITY_A, self.token_a, "run-existing")
         self.assertEqual(result, {"ok": True, "run_id": "run-existing", "state": "RUNNING"})
         self.assertEqual(self.store.get("run-existing").owner_session_id, "A")
+
+    def test_stop_run_releases_when_one_registered_pid_is_already_dead(self) -> None:
+        live, dead = process(48011, "server"), process(48012, "client")
+        run = self.add_run(live, owner="A", state="RUNNING")
+        run.processes.append(dead)
+        self.store.replace(run)
+        self.guard.snapshots[live.pid] = snapshot(live)
+        self._dead(dead.pid)
+        result = self.lifecycle.stop_run(IDENTITY_A, self.token_a, run.run_id)
+        self.assertEqual(
+            result,
+            {
+                "ok": True,
+                "run_id": "run-existing",
+                "state": "EXITED",
+                "terminated": 1,
+            },
+        )
+        stored = self.store.get(run.run_id)
+        self.assertEqual((stored.state, stored.owner_session_id), ("EXITED", None))
+        self.assertEqual([item.pid for item in self.guard.terminate_calls], [live.pid])
+
+    def test_reaper_retires_incoherent_all_dead_and_unblocks_start(self) -> None:
+        first, second = process(48001), process(48002)
+        run = self.add_run(first, owner=None, state="RUNNING_IDLE")
+        run.processes.append(second)
+        self.store.replace(run)
+        self._dead(first.pid)
+        self.guard.snapshots[second.pid] = snapshot(second) | {
+            "creation_time_utc": "9999-01-01T00:00:00.0000000Z"
+        }
+        self.assertEqual(self.lifecycle.reap_dead_runs(), ["run-existing"])
+        self.assertEqual(self.store.get("run-existing").state, "EXITED")
+        launched = process(self.launcher.pid)
+        self.guard.snapshots[launched.pid] = snapshot(launched)
+        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        self.assertNotEqual(result.get("error"), "active_run_exists")
+        self.assertTrue(result.get("ok"))
+
+    def test_adopt_allows_absent_registered_process(self) -> None:
+        live, dead = process(48021, "server"), process(48022, "client")
+        run = self.add_run(live, owner=None, state="RUNNING_IDLE")
+        run.processes.append(dead)
+        self.store.replace(run)
+        self.guard.snapshots[live.pid] = snapshot(live)
+        self._dead(dead.pid)
+        result = self.lifecycle.adopt_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertEqual(result, {"ok": True, "run_id": "run-existing", "state": "RUNNING"})
+        stop = self.lifecycle.stop_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertEqual(stop.get("state"), "EXITED")
+        self.assertEqual([item.pid for item in self.guard.terminate_calls], [live.pid])
 
     def test_quarantine_blocks_lifecycle_before_manifest_or_guard(self) -> None:
         record = process(108)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import locale
 import math
 import os
 import re
@@ -131,18 +132,58 @@ class _DaemonStatusError(RuntimeError):
         super().__init__(code)
 
 
+def _decode_console_bytes(raw: bytes) -> str:
+    encoding = locale.getpreferredencoding(False) or "utf-8"
+    return raw.decode(encoding, errors="replace")
+
+
 def _run_command(argv: list[str]) -> tuple[int, str]:
     try:
         result = subprocess.run(
             argv,
             capture_output=True,
-            text=True,
             timeout=15.0,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return 127, ""
-    return result.returncode, result.stdout
+    return result.returncode, _decode_console_bytes(result.stdout or b"")
+
+
+def _listener_pid_from_netstat_bytes(port: int) -> int | None:
+    if os.name != "nt":
+        return None
+    try:
+        result = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    text = _decode_console_bytes(result.stdout or b"")
+    local_endpoint = "127.0.0.1:" + str(int(port))
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[3] != "LISTENING":
+            continue
+        if parts[1] != local_endpoint:
+            continue
+        try:
+            return int(parts[-1])
+        except ValueError:
+            continue
+    return None
+
+
+def _listener_pid_resilient(port: int) -> int | None:
+    try:
+        return orphan_guard.listener_pid_for_port(port)
+    except UnicodeError:
+        return _listener_pid_from_netstat_bytes(port)
 
 
 def _read_daemon_status(
@@ -195,7 +236,7 @@ def default_sources(policy: AccreditedDaemonPolicy) -> DoctorSources:
         codex_config=lambda: _run_command(
             [codex, "mcp", "get", "dayz-mcp", "--json"]
         ),
-        listener_pid=orphan_guard.listener_pid_for_port,
+        listener_pid=_listener_pid_resilient,
         process_argv=orphan_guard.command_argv_of,
         daemon_status=daemon_status,
         process_snapshot=orphan_guard.snapshot_processes_by_name,
@@ -388,6 +429,15 @@ def _safe_snapshot(
 ) -> list[dict[str, object]] | None:
     try:
         payload = source(list(names))
+    except UnicodeError as exc:
+        findings.append(
+            _finding(
+                "PROCESS_SCAN_DECODE_FAILED",
+                scope=scope,
+                detail=type(exc).__name__,
+            )
+        )
+        return None
     except Exception:
         payload = {"known": False, "processes": []}
     if not isinstance(payload, dict) or payload.get("known") is not True:
@@ -890,6 +940,16 @@ def _diagnose(sources: DoctorSources, *, require_clean: bool) -> dict[str, objec
         checked_ports.add(registration.port)
         try:
             pid = sources.listener_pid(registration.port)
+        except UnicodeError as exc:
+            findings.append(
+                _finding(
+                    "PROCESS_SCAN_DECODE_FAILED",
+                    scope="listener",
+                    port=registration.port,
+                    detail=type(exc).__name__,
+                )
+            )
+            continue
         except Exception:
             findings.append(
                 _finding("PROCESS_SCAN_FAILED", scope="listener", port=registration.port)
@@ -912,6 +972,17 @@ def _diagnose(sources: DoctorSources, *, require_clean: bool) -> dict[str, objec
     for port, (pid, registration) in sorted(listeners.items()):
         try:
             argv = sources.process_argv(pid)
+        except UnicodeError as exc:
+            findings.append(
+                _finding(
+                    "PROCESS_SCAN_DECODE_FAILED",
+                    scope="listener",
+                    port=port,
+                    pid=pid,
+                    detail=type(exc).__name__,
+                )
+            )
+            continue
         except Exception:
             argv = None
         if (

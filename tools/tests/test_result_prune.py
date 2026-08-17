@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ from dayz_mcp.result_prune import (
     SEMANTIC_EMPTY_FIELDS,
     prune_unfilled_fields,
 )
+from tests._addon_paths import addon_root
 
 
 # A bridge answer as the wire actually carries it: MCPResult is one flat class,
@@ -33,6 +35,40 @@ def _wire_result(**filled: object) -> dict[str, object]:
     }
     empty.update(filled)
     return {"ok": 1, "cmd": "fixture", **empty}
+
+
+# Other classes in MCPMessages.c also declare `ref` members. Only MCPResult
+# is the prune contract, so the scan stops at that class's closing brace.
+def _mcp_result_ref_members(source: str) -> tuple[str, ...]:
+    start = source.index("class MCPResult")
+    brace = source.index("{", start)
+    depth = 0
+    body = ""
+    for index in range(brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                body = source[brace + 1 : index]
+                break
+    else:
+        raise AssertionError("unterminated class MCPResult")
+
+    names: list[str] = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("//"):
+            continue
+        comment = line.find("//")
+        if comment >= 0:
+            line = line[:comment].rstrip()
+        if not line.startswith("ref "):
+            continue
+        match = re.search(r"(\w+)\s*;\s*$", line)
+        if match:
+            names.append(match.group(1))
+    return tuple(names)
 
 
 class ResultPruneTest(unittest.TestCase):
@@ -113,24 +149,13 @@ class ResultPruneTest(unittest.TestCase):
         self.assertEqual(result_prune.prune_unfilled_fields("x", []), [])
 
     def test_prunable_fields_match_the_bridge_result_class(self) -> None:
-        # Anchored to MCPMessages.c:280-289. If the Enforce class gains a ref
-        # member, this fails and forces a decision instead of silent drift.
-        self.assertEqual(
-            PRUNABLE_FIELDS,
-            (
-                "state",
-                "players",
-                "raycast",
-                "telemetry",
-                "camera",
-                "applied",
-                "get_in",
-                "trace",
-                "pos_real",
-                "normal",
-                "inspect",
-            ),
-        )
+        # Expectation comes from MCPResult, not from a second Python tuple.
+        # That is what fails when the Enforce class gains a `ref` member and
+        # PRUNABLE_FIELDS is left behind.
+        messages = (
+            addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(PRUNABLE_FIELDS, _mcp_result_ref_members(messages))
 
 
 if __name__ == "__main__":

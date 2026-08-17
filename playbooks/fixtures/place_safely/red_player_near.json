@@ -1,0 +1,35 @@
+{
+  "name": "red_player_near",
+  "params": {
+    "x": 7512.0,
+    "z": 7502.0,
+    "clear_r": 15.0
+  },
+  "responses": {
+    "S1": {
+      "ok": 1,
+      "y": 315.5601,
+      "type": "cp_grass",
+      "normal": [0.0, 1.0, 0.0]
+    },
+    "S2": {
+      "ok": 1,
+      "raycast": {
+        "hit": true,
+        "pos": [7512.0, 315.5603, 7502.0]
+      }
+    },
+    "S3": {
+      "ok": 1,
+      "players": [
+        {
+          "uid": "76561198000000001",
+          "pos": [7515.0, 315.5601, 7502.0]
+        }
+      ]
+    }
+  },
+  "expect_overall": "FAIL",
+  "expect_stopped_at": "S3",
+  "expect_reason": "player_near"
+}

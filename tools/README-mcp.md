@@ -34,8 +34,8 @@ python install_mcp.py --server-profiles "C:\path\server_profiles" --client-profi
 3. Call `bridge_status`, then run the read-only doctor when validating the host:
 
 ```text
-.\.venv-mcp\Scripts\python.exe -m dayz_mcp.doctor --json
-.\.venv-mcp\Scripts\python.exe -m dayz_mcp.doctor --json --require-clean
+.\.venv-mcp\Scripts\python.exe -m dayz_mcp.doctor --daemon-policy normal --json
+.\.venv-mcp\Scripts\python.exe -m dayz_mcp.doctor --daemon-policy normal --json --require-clean
 ```
 
 Doctor exit codes are `0` for clean or warning-only output, `1` for findings with severity `FAIL`, and `2` when no stable diagnosis can be produced. Externally opened retail DayZ is `RETAIL_MANUAL_CLOSE_REQUIRED`: warning/exit 0 normally and fail/exit 1 with `--require-clean`. Close retail through its UI and rerun doctor; the doctor never stops, adopts, reclaims, or assigns ownership to a process.
@@ -60,6 +60,12 @@ Mutating work uses the request-bound high-level queue by default:
 `install_mcp.py --register` also applies a seven-day host-side wait budget atomically to both user configs: Claude `timeout = 604800000` ms and Codex `tool_timeout_sec = 604800`. Queue cancellation remains explicit; this budget prevents the host from cutting off a healthy FIFO wait during normal long-running work. The writer holds both Windows files with `share=0`, verifies writes through the same handles and uses a restricted recovery journal; a busy or conflicting config fails closed without forcing a host shutdown. Existing host processes must be restarted or a new session opened before the new timeout is effective.
 
 Read-only tools do not require a lease. Never use another session's token or terminate a process to advance the FIFO queue.
+
+Requires a lease (these mutate the game): `world_spawn`, `object_delete`, `player_teleport`, `inventory_give`, `notify_players`, `vehicle_enter`, `vehicle_control`, `vehicle_release`, `vehicle_prepare_fixture`, `camera_set`, `world_time_set`, `world_weather_set`, `engine_set`, `object_anim` (write), `restore_gameplay`, `dayz_test_run`, `dayz_test_stop`. The last two acquire and release the lease internally.
+
+No lease (read-only): `query_all_players`, `query_player_state`, `entities_query`, `surface_query`, `scene_raycast`, `object_inspect`, `telemetry_read`, `vehicle_telemetry`, `camera_get`, `logs_since`, `ui_tree`, `query_get_in_condition`, `bridge_status`, `session_status`, `capture_screenshot`, `pipeline_*`.
+
+A mutation without a lease returns `lease_required`. Call `session_acquire_wait` first.
 
 ## Managed lifecycle and administration
 
@@ -95,16 +101,52 @@ Locate the file with `--policy PATH`, then `DAYZ_MCP_LAUNCHER_POLICY`, then `%LO
 
 Exceptional `python -m dayz_mcp.admin_cli` release/reconcile operations require a real interactive TTY, a non-empty reason, and exact typed confirmation. They are not MCP tools and are not a normal queue-bypass mechanism.
 
+## Cookbook
+
+Short call sequences for a cold consumer. Playbook runner usage is in [`playbooks/README.md`](../playbooks/README.md).
+
+### Wait for a player
+
+1. `session_status()` — confirm the lease is claimable (no blocking owner).
+2. `bridge_status()` — `version_state` is ok and `server_peer.last_poll_age_s` is small. The first call of a session may return `daemon_unavailable`; retry once.
+3. `wait_for(condition="log_matches", pattern="OnStoreLoad SUCCESS")` — player finished `OnStoreLoad`. Other Diag 1.29 needles that do appear: `"Create entity type 'SurvivorM_"` and `config loaded`. Never wait for `connected to server`; that string is not written.
+4. `wait_for(condition="players_at_least", value=1)` — at least one connected player.
+5. `query_all_players()` — `{ok: 1, players: [{uid, pos: [x, y, z], health (0..1), in_vehicle}]}`. An empty `players` list is success with zero players, not an error. `uid` is SteamID64 (`PlayerIdentity.GetPlainId()`).
+
+`wait_for` on timeout still returns `ok: true` with `satisfied: false` and `timed_out: true`. Gate on `satisfied`, not `ok`. `timeout_s` is capped at 600. With the game off, the first probe aborts with `version_blocked` or `daemon_unavailable`.
+
+`logs_since(marker=None, max_lines=200)` reads the active run's `script_*.log` and `.RPT` (server and client) and returns a `marker` for the next call. No lease. Player chat is not exposed: `wait_for` `log_matches` and `logs_since` read script/RPT only, where chat does not appear. With `-adminlog` the server writes a profiles `.ADM` file (`Chat("Name"(id=<hash>)): text`, plus Connect/Disconnect); no tool reads it — inspect `.ADM` by hand.
+
+### Spawn safely
+
+1. `session_acquire(purpose="spawn")` — keep `lease_token`; call `session_heartbeat(lease_token)` before the 120 s TTL. If the queue is held, use `session_acquire_wait(purpose="spawn", max_wait_s=...)` instead.
+2. Run `place_safely` ([`playbooks/place_safely.toml`](../playbooks/place_safely.toml); runner: [`playbooks/README.md`](../playbooks/README.md)). The playbook is DRAFT and `canopy_dy` is `uncalibrated`: an S2 canopy FAIL is downgraded to WARN (`uncalibrated_gate_downgraded`) and the verdict is `PASS_WITH_WARNINGS`. That does not certify a clear canopy or roof. Do not spawn unless S2 is a clean PASS. S4 checks only the vertical column (`entities_query` radius 5; WARN if `count_total > 25`) and players inside `clear_r`; it does not detect lateral solids. Manual substitute: `surface_query(x, z)`, then `scene_raycast` down the column, then `entities_query` plus `query_all_players`.
+3. `world_spawn(type="CivilianSedan", pos=[x, surface_y, z], flags=0)` after a clean PASS, with `surface_y` from `surface_query`. `flags=0` uses `ECE_PLACE_ON_SURFACE`; `y=0` in `pos` means on the ground. Verified: `type="CivilianSedan"`, `pos=[7086, 0, 7726]` → `pos_real` y=`297.03`.
+4. Living infected: `world_spawn(type="ZmbM_CitizenASkinny_Blue", pos=[x, surface_y, z], flags=3108)` (`ECE_PLACE_ON_SURFACE|ECE_INITAI|ECE_CREATEPHYSICS`). Without `ECE_INITAI` the infected has no AI.
+5. `object_delete(object_id)` on the returned `object_id` when finished.
+6. `session_release(lease_token)`.
+
+### Report friction or a bug
+
+These mailbox tools work with no game and no daemon.
+
+1. `pipeline_inbox(limit=20)` — see whether the item is already filed. Optional `kind` filter; `include_resolved=false` by default.
+2. `pipeline_feedback(kind="bug", title="...", body="...", project="")` — `kind` is `bug`, `request`, `finding`, or `tool_contribution`. `title` ≤ 120 characters; `body` ≤ 8000. Body template: `tool / args / error / repro`. Returns `id` `fb-YYYYMMDD-HHMMSS-hex4`. Over-length or an invalid `kind` fails with `bad_args` (the field is not named).
+3. `pipeline_resolve(feedback_id, resolution)` to triage (append-only; nothing is deleted).
+
 ## Troubleshooting
 
 - `bridge_status.server_peer.last_poll_age_s = null`: the server-side bridge has not polled; check server profiles and mission config.
 - `bridge_status.client_peer.last_poll_age_s = null`: the client-side bridge has not polled; check `client_profiles\dayz_mcp.json`.
 - `legacy_blocked`: `--require-version` is on while running the 4A bridge. Keep it off until the 4B PBO sends `ver=`.
 - `version_mismatch`: bridge or game version does not match the MCP server config.
+- `version_blocked` with the game off means no DayZ peers, not a protocol mismatch.
+- `lease_required`: call `session_acquire_wait` before the mutating tool.
 - Timeout errors include peer liveness so you can distinguish a quiet peer from a command-level failure.
 - `CONFIG_EMBEDDED`/`CONFIG_MISMATCH`: repair both registrations with `python install_mcp.py --register`; do not fall back to embedded.
 - `PROCESS_UNREGISTERED`, `RUN_STALE`, or `RUN_IDENTITY_MISMATCH`: preserve the process and manifest for explicit lifecycle/admin review; doctor performs no cleanup.
 - `PROCESS_SCAN_FAILED`: the process snapshot is unknown, so the result is fail-closed rather than clean.
+- `PROCESS_SCAN_DECODE_FAILED`: process-scan output could not be decoded; fail-closed and distinct from a missing process.
 - `RUN_PREPRUNE_BACKUP_SLOTS_EXHAUSTED`: all ten `runs.json.bak-preprune*` slots are taken, so the load-time prune refuses to run and the manifest keeps growing. Retire the stale backups to restore pruning; the doctor still performs no cleanup.
 
 `telemetry_read` is exposed as-is. Known residual backlog remains BUG-010/011/012: fixture line caps, radius/Inf hardening, and JSON-lines schema validation.

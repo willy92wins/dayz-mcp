@@ -1,0 +1,53 @@
+id = "place_safely"
+version = "1.0.0"
+status = "DRAFT"            # DRAFT | PROBED | CALIBRATED | FROZEN
+# DRAFT: canopy_dy is uncalibrated; S2 FAIL becomes WARN and does not certify a clear canopy.
+summary = "Is (x,z) safe to spawn/teleport to? Checks solid ground, the vertical column and nearby players. Does NOT check lateral solids; while DRAFT the canopy gate is uncalibrated and only WARNs."
+requires_bridge = "7"
+requires_tools = ["surface_query", "scene_raycast", "query_all_players", "entities_query"]
+
+[params]                     # defaults; the CLI may override them
+x = 0.0
+z = 0.0
+clear_r = 15.0
+
+[[calibration]]
+name = "canopy_dy"
+threshold = 0.05
+state = "uncalibrated"       # uncalibrated NEVER gates: degrades that expect FAIL to WARN
+n_sites_required = 3
+[[calibration.measured]]
+site = [7512.0, 7502.0]
+value = 0.0002
+source = "raycast 315.5603 vs surface_query 315.5601, in-game 2026-08-16"
+
+[[steps]]
+id = "S1"
+tool = "surface_query"
+args = { x = "$x", z = "$z" }
+expect = [ { field = "ok", op = "eq", value = 1 }, { field = "y", op = "finite" } ]
+on_fail = { action = "STOP", reason = "no_surface" }
+
+[[steps]]
+id = "S2"
+tool = "scene_raycast"
+args = { from = ["$x", "$S1.y + 30", "$z"], to = ["$x", "$S1.y - 5", "$z"], intersect = "geom" }
+expect = [
+  { field = "raycast.hit", op = "eq", value = true },
+  { field = "raycast.pos.1", op = "near", ref = "$S1.y", tol_ref = "canopy_dy" },
+]
+on_fail = { action = "STOP", reason = "canopy_or_roof" }
+
+[[steps]]
+id = "S3"
+tool = "query_all_players"
+args = {}
+expect = [ { field = "players", op = "min_dist_xz_gte", origin = ["$x", "$z"], value = "$clear_r" } ]
+on_fail = { action = "STOP", reason = "player_near" }
+
+[[steps]]
+id = "S4"
+tool = "entities_query"
+args = { pos = ["$x", "$S1.y", "$z"], radius = 5.0, limit = 32 }
+expect = [ { field = "count_total", op = "lte", value = 25 } ]
+on_fail = { action = "WARN", reason = "crowded_spot" }   # WARN: N for "full" is not calibrated

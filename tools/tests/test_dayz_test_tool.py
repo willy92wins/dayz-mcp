@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import asyncio
+import os
 import types
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -466,6 +467,8 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "artifacts_paths",
                 "error_code",
                 "cleanup_degraded",
+                "server_alive",
+                "client_alive",
             },
         )
         self.assertEqual(result["status"], "succeeded")
@@ -528,10 +531,114 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "artifacts_paths",
                 "error_code",
                 "cleanup_degraded",
+                "server_alive",
+                "client_alive",
             },
         )
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["error_code"], readiness_code)
+
+    async def test_run_fails_when_client_pid_is_already_dead(self) -> None:
+        policy = _policy()
+        runtime = _Runtime(
+            lifecycle={
+                "runs": [
+                    {
+                        "run_id": RUN_ID,
+                        "processes": [
+                            {"role": "server", "pid": os.getpid()},
+                            {"role": "client", "pid": 999_999_999},
+                        ],
+                    }
+                ]
+            }
+        )
+
+        async def launch(_raw_request: bytes, **kwargs: object) -> int:
+            await kwargs["execution_started_cb"]()
+            kwargs["output_sink"](
+                "stdout",
+                _terminal(
+                    {
+                        "cleanup_degraded": False,
+                        "error_code": None,
+                        "exit_code": 0,
+                        "ok": True,
+                        "run_id": RUN_ID,
+                    }
+                ),
+            )
+            return 0
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch,
+        ):
+            result = await dayz_test_tool.execute_dayz_test_run(
+                runtime, project="ExampleMod", mode="all"
+            )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "client_dead_after_ack")
+        self.assertEqual(result["client_alive"], False)
+        self.assertEqual(result["server_alive"], True)
+
+    def test_list_project_names_returns_mod_fields_only(self) -> None:
+        policy = {
+            "projects": [
+                {
+                    "mod": "FixtureListedMod",
+                    "name": "ShouldNotSurface",
+                    "path": "ignored-extra",
+                },
+                "skip-non-dict",
+                {"name": "Nameless"},
+                {"mod": ""},
+                {"mod": 3},
+                None,
+                {"mod": "FixtureSecondMod"},
+            ]
+        }
+
+        class _PolicyPath:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def resolve(self) -> _PolicyPath:
+                return self
+
+            @property
+            def parents(self) -> tuple[_PolicyPath, _PolicyPath]:
+                return (self, self)
+
+            def __truediv__(self, _other: object) -> _PolicyPath:
+                return self
+
+            def read_bytes(self) -> bytes:
+                return json.dumps(policy).encode("utf-8")
+
+        # list_project_names() locates the policy through Path(__file__);
+        # replace Path so the read never leaves this fixture.
+        with patch.object(dayz_test_tool, "Path", _PolicyPath):
+            payload = dayz_test_tool.list_project_names()
+
+        self.assertEqual(
+            payload,
+            {
+                "projects": [
+                    {"name": "FixtureListedMod"},
+                    {"name": "FixtureSecondMod"},
+                ]
+            },
+        )
+        self.assertTrue(all(set(item) == {"name"} for item in payload["projects"]))
 
     async def test_run_rejects_busy_session_before_opening_launcher(self) -> None:
         runtime = _Runtime()

@@ -654,6 +654,35 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
             409,
             "version_blocked",
         )
+        status, payload = state.enqueue_command(
+            "world_spawn",
+            {"type": "X", "pos": [1, 2, 3]},
+            peer="server",
+            identity_payload=COORDINATED_IDENTITY,
+            lease_token=token,
+            operation_timeout_s=15.0,
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error"], "version_blocked")
+        self.assertEqual(payload["expected"], "7")
+        self.assertEqual(payload["state"], "legacy_blocked")
+
+    def test_lease_required_includes_version_block_fields(self) -> None:
+        state, coordinator, _client, _token, _clock = self._coordinated_state(
+            version_validator=lambda _version: "version_mismatch"
+        )
+        status, payload = state.enqueue_command(
+            "world_spawn",
+            {"type": "X", "pos": [1, 2, 3]},
+            peer="server",
+            identity_payload=COORDINATED_IDENTITY,
+            lease_token=None,
+            operation_timeout_s=15.0,
+        )
+        self.assertEqual(payload["error"], "lease_required")
+        self.assertEqual(payload["version_state"], "version_mismatch")
+        self.assertEqual(payload["expected"], "7")
+        self.assertIn(status, {403, 423})
 
     def test_post_authorize_queue_full_aborts(self) -> None:
         state, coordinator, client, token, _clock = self._coordinated_state()

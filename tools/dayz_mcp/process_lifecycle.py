@@ -1229,6 +1229,46 @@ class ProcessLifecycle:
             and str(actual.get("command_line_sha256", "")).casefold() == record.command_line_sha256.casefold()
         )
 
+    def _classify_registered_process(self, record: ProcessRecord) -> tuple[str, str]:
+        """Classify a registered PID as owned, gone, foreign, or unknown.
+
+        Absent (process_not_found) and a complete identity that does not match
+        are both "no longer ours". Unknown snapshots stay fail-closed. A foreign
+        PID must never be terminated.
+        """
+        try:
+            actual = self.guard.snapshot(record.pid)
+        except Exception:
+            return "unknown", "guard_unavailable"
+        if not isinstance(actual, dict):
+            return "unknown", "process_identity_mismatch"
+        if actual.get("error") == "process_not_found" and actual.get("exit_code") == 4:
+            return "gone", "process_not_found"
+        if actual.get("exit_code") == 3:
+            return "unknown", "guard_unavailable"
+        if self._identity_matches(record, actual):
+            return "owned", ""
+        if actual.get("identity_complete") is True:
+            return "foreign", "process_identity_mismatch"
+        return "unknown", "process_identity_mismatch"
+
+    def _partition_registered_processes(
+        self, processes: list[ProcessRecord]
+    ) -> tuple[dict[str, list[int]], str | None]:
+        buckets: dict[str, list[int]] = {
+            "owned": [],
+            "gone": [],
+            "foreign": [],
+            "unknown": [],
+        }
+        unknown_reason: str | None = None
+        for record in processes:
+            kind, reason = self._classify_registered_process(record)
+            buckets[kind].append(record.pid)
+            if kind == "unknown" and unknown_reason is None:
+                unknown_reason = reason
+        return buckets, unknown_reason
+
     def stop_run(self, client: ClientIdentity, token: str | None, run_id: object) -> dict[str, object]:
         legacy_error = self._legacy_identity_error()
         if legacy_error is not None:
@@ -1256,67 +1296,79 @@ class ProcessLifecycle:
                 or run.state != "RUNNING"
             ):
                 return self._reject_reserved(authority, command, "run_not_adopted")
+            owned: list[ProcessRecord] = []
+            gone_pids: list[int] = []
+            foreign_pids: list[int] = []
             for record in run.processes:
+                kind, reason = self._classify_registered_process(record)
+                if kind == "owned":
+                    owned.append(record)
+                    continue
+                if kind == "gone":
+                    gone_pids.append(record.pid)
+                    continue
+                if kind == "foreign":
+                    foreign_pids.append(record.pid)
+                    continue
+                run.owner_session_id = None
+                run.owner_lease_id = None
+                run.state = "UNRECONCILED"
                 try:
-                    actual = self.guard.snapshot(record.pid)
+                    self.manifest.replace(run)
                 except Exception:
-                    actual = {"error": "guard_unavailable", "exit_code": 3}
-                if not self._identity_matches(record, actual):
-                    reason = (
-                        "guard_unavailable"
-                        if isinstance(actual, dict) and actual.get("exit_code") == 3
-                        else "process_identity_mismatch"
+                    result = self._error("manifest_failed", 503)
+                    degraded = ["manifest_failed"]
+                    degraded.extend(
+                        self.coordinator.abort_reservation(
+                            authority[0],
+                            authority[1],
+                            authority[2],
+                            "manifest_failed",
+                        )
                     )
-                    run.owner_session_id = None
-                    run.owner_lease_id = None
-                    run.state = "UNRECONCILED"
-                    try:
-                        self.manifest.replace(run)
-                    except Exception:
-                        result = self._error("manifest_failed", 503)
-                        degraded = ["manifest_failed"]
-                        degraded.extend(
-                            self.coordinator.abort_reservation(
-                                authority[0],
-                                authority[1],
-                                authority[2],
-                                "manifest_failed",
-                            )
-                        )
-                        result["cleanup_degraded"] = list(
-                            dict.fromkeys(degraded)
-                        )
-                        return self._terminal_outcome(
-                            result,
-                            "lifecycle_stop_outcome",
-                            client,
-                            reason="manifest_failed",
-                            decision="manual_cleanup_required",
-                            run_id=run.run_id,
-                            state="RUNNING",
-                            terminated=0,
-                        )
-                    result = self._reject_reserved(
-                        authority,
-                        command,
-                        reason,
-                        503 if reason == "guard_unavailable" else 409,
+                    result["cleanup_degraded"] = list(
+                        dict.fromkeys(degraded)
                     )
-                    result["run_id"] = run.run_id
-                    result["state"] = "UNRECONCILED"
                     return self._terminal_outcome(
                         result,
                         "lifecycle_stop_outcome",
                         client,
-                        reason=reason,
+                        reason="manifest_failed",
                         decision="manual_cleanup_required",
                         run_id=run.run_id,
-                        state="UNRECONCILED",
+                        state="RUNNING",
                         terminated=0,
                     )
+                result = self._reject_reserved(
+                    authority,
+                    command,
+                    reason,
+                    503 if reason == "guard_unavailable" else 409,
+                )
+                result["run_id"] = run.run_id
+                result["state"] = "UNRECONCILED"
+                return self._terminal_outcome(
+                    result,
+                    "lifecycle_stop_outcome",
+                    client,
+                    reason=reason,
+                    decision="manual_cleanup_required",
+                    run_id=run.run_id,
+                    state="UNRECONCILED",
+                    terminated=0,
+                )
             if self._quarantined():
                 return self._reject_reserved(authority, command, "retail_quarantine")
-            if not self._audit("lifecycle_stop", client, "identity_match", "allowed", run_id=run_id):
+            if not self._audit(
+                "lifecycle_stop",
+                client,
+                "identity_match",
+                "allowed",
+                run_id=run_id,
+                owned_pids=[record.pid for record in owned],
+                gone_pids=list(gone_pids),
+                foreign_pids=list(foreign_pids),
+            ):
                 self.coordinator.reject_reservation(
                     authority[0], authority[1], authority[2], "audit_failed"
                 )
@@ -1344,8 +1396,8 @@ class ProcessLifecycle:
                         terminated=0,
                     )
                 terminated = 0
-                survivors = list(run.processes)
-                for record in list(run.processes):
+                survivors = list(owned)
+                for record in list(owned):
                     if self._quarantined():
                         run.owner_session_id = None
                         run.owner_lease_id = None
@@ -1493,15 +1545,13 @@ class ProcessLifecycle:
             ):
                 return self._reject_reserved(authority, command, "active_run_exists")
             for record in run.processes:
-                try:
-                    actual = self.guard.snapshot(record.pid)
-                except Exception:
+                kind, reason = self._classify_registered_process(record)
+                if kind == "unknown":
                     return self._reject_reserved(
-                        authority, command, "guard_unavailable", 503
-                    )
-                if not self._identity_matches(record, actual):
-                    return self._reject_reserved(
-                        authority, command, "process_identity_mismatch"
+                        authority,
+                        command,
+                        reason,
+                        503 if reason == "guard_unavailable" else 409,
                     )
             if self._quarantined():
                 return self._reject_reserved(authority, command, "retail_quarantine")
@@ -1850,16 +1900,16 @@ class ProcessLifecycle:
         return result
 
     def _run_all_dead(self, run: RunRecord) -> tuple[bool, str]:
-        """True only if EVERY registered process is CONFIRMED dead and the diag
-        snapshot is known-clean. Reuses the exact dead-vs-mismatch discrimination of
-        _reconcile_survivors: a PID-reuse/identity mismatch, a still-alive survivor,
-        an unavailable guard, or an unknown/unexpected DayZ each return (False, reason)
-        so the run is left untouched for manual review. Never a basis to terminate."""
-        survivors, error, _status = self._reconcile_survivors(run.processes)
-        if error is not None:
-            return False, error
-        if survivors:
+        """True if every registered process is gone or foreign and the diag
+        snapshot is known-clean. A still-owned survivor, an unknown snapshot,
+        or an unexpected DayZ returns (False, reason). Identity mismatch is
+        treated as foreign (not ours) and does not block reap. Never a basis
+        to terminate."""
+        buckets, unknown_reason = self._partition_registered_processes(run.processes)
+        if buckets["owned"]:
             return False, "process_alive"
+        if buckets["unknown"]:
+            return False, unknown_reason or "process_identity_mismatch"
         diag_ok, diag_reason = self._diag_snapshot_registered(set())
         if not diag_ok:
             return False, diag_reason
@@ -1872,13 +1922,17 @@ class ProcessLifecycle:
         failure cause ("audit_failed" / "manifest_failed") so the agent path reports the
         real reason instead of conflating a disk failure with an audit failure. On a
         persist failure the manifest rolls back in-memory; the next pass converges."""
+        buckets, _unknown_reason = self._partition_registered_processes(run.processes)
         if not self._audit(
             "run_reaped",
             client,
-            "all_processes_dead",
+            "all_processes_gone_or_foreign",
             "reaped",
             run_id=run.run_id,
             dead_pids=[record.pid for record in run.processes],
+            owned_pids=list(buckets["owned"]),
+            gone_pids=list(buckets["gone"]),
+            foreign_pids=list(buckets["foreign"]),
         ):
             return "audit_failed"
         run.owner_session_id = None
@@ -1891,34 +1945,38 @@ class ProcessLifecycle:
             return "manifest_failed"
         return ""
 
+    def _reap_dead_runs_locked(self) -> list[str]:
+        """Caller holds _operation_lock and has already passed quarantine."""
+        reaped: list[str] = []
+        for run in self.manifest.list_runs():
+            if run.state not in _REAPABLE_STATES:
+                continue
+            all_dead, _reason = self._run_all_dead(run)
+            if not all_dead:
+                continue
+            if not self._reap_run_locked(run, client=None):
+                reaped.append(run.run_id)
+        return reaped
+
     def reap_dead_runs(self) -> list[str]:
         """Daemon housekeeping: retire every reapable run whose processes are all
-        confirmed dead, so a crashed DayZ never permanently blocks the box (the run
+        gone or foreign, so a crashed DayZ never permanently blocks the box (the run
         would otherwise linger active and fail every start/adopt/stop until a manual
-        admin reconcile). Safe by construction — reaps only zero-live-process runs and
-        never calls terminate. Skipped whole under retail quarantine."""
-        reaped: list[str] = []
+        admin reconcile). Safe by construction — reaps only zero-owned-process runs
+        and never calls terminate. Skipped whole under retail quarantine."""
         with self._operation_lock:
             self._require_legacy_identity_safe()
             if self._quarantined():
-                return reaped
-            for run in self.manifest.list_runs():
-                if run.state not in _REAPABLE_STATES:
-                    continue
-                all_dead, _reason = self._run_all_dead(run)
-                if not all_dead:
-                    continue
-                if not self._reap_run_locked(run, client=None):
-                    reaped.append(run.run_id)
-        return reaped
+                return []
+            return self._reap_dead_runs_locked()
 
     def reap_dead_run(
         self, client: ClientIdentity, token: str | None, run_id: object
     ) -> dict[str, object]:
-        """Agent-callable, non-TTY recovery restricted to the all-dead case. Lease-gated
-        like other lifecycle ops. Rejects (run_not_reapable) any run with a live process,
-        a PID-reuse mismatch, an unavailable guard or an ambiguous diag — those keep the
-        TTY-gated admin_reconcile path. Terminates nothing."""
+        """Agent-callable, non-TTY recovery restricted to the all-dead-or-foreign
+        case. Lease-gated like other lifecycle ops. Rejects (run_not_reapable)
+        any run with a still-owned process, an unavailable guard or an ambiguous
+        diag — those keep the TTY-gated admin_reconcile path. Terminates nothing."""
         legacy_error = self._legacy_identity_error()
         if legacy_error is not None:
             return legacy_error

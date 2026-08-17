@@ -100,6 +100,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const int DRIVE_CLIENT_PHASE_DRIVE = 2;
 	protected const int DRIVE_CLIENT_PHASE_SAMPLE = 3;
 	protected const int DRIVE_CLIENT_PHASE_REPORT = 4;
+	protected const int UI_TREE_DEFAULT_LIMIT = 256;
+	protected const int UI_TREE_MAX_LIMIT = 512;
+	protected const float ACTION_USE_DEFAULT_RADIUS = 5.0;
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -549,6 +552,22 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			postNow = DispatchVehicleRelease(command, result);
 		}
+		else if (command.cmd == "ui_tree")
+		{
+			postNow = DispatchUiTree(command, result);
+		}
+		else if (command.cmd == "ui_set_text")
+		{
+			postNow = DispatchUiSetText(command, result);
+		}
+		else if (command.cmd == "ui_click")
+		{
+			postNow = DispatchUiClick(command, result);
+		}
+		else if (command.cmd == "action_use")
+		{
+			postNow = DispatchActionUse(command, result);
+		}
 		else
 		{
 			result.ok = false;
@@ -989,6 +1008,586 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPCarDrive.Clear();
 		result.ok = true;
 		return true;
+	}
+
+	protected bool DispatchUiTree(MCPCommand command, MCPResult result)
+	{
+		MCPArgs args = command.args;
+		string error = "";
+		Widget root = ResolveUiRoot(args, error);
+		if (!root)
+		{
+			result.ok = false;
+			result.error = error;
+			return true;
+		}
+
+		int limit = UI_TREE_DEFAULT_LIMIT;
+		if (args && args.limit > 0)
+		{
+			limit = args.limit;
+		}
+		if (limit > UI_TREE_MAX_LIMIT)
+		{
+			limit = UI_TREE_MAX_LIMIT;
+		}
+
+		MCPUiSnapshot snap = new MCPUiSnapshot();
+		CollectUiNodes(root, snap, limit);
+		result.ui = snap;
+		result.ok = true;
+		return true;
+	}
+
+	protected bool DispatchUiSetText(MCPCommand command, MCPResult result)
+	{
+		if (!command.args || command.args.path == "")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		string error = "";
+		Widget target = ResolveUiRoot(command.args, error);
+		if (!target)
+		{
+			result.ok = false;
+			result.error = error;
+			return true;
+		}
+
+		string text = command.args.text;
+		EditBoxWidget editBox = EditBoxWidget.Cast(target);
+		if (editBox)
+		{
+			editBox.SetText(text);
+		}
+		else
+		{
+			MultilineEditBoxWidget multi = MultilineEditBoxWidget.Cast(target);
+			if (multi)
+			{
+				multi.SetText(text);
+			}
+			else
+			{
+				ButtonWidget btn = ButtonWidget.Cast(target);
+				if (btn)
+				{
+					btn.SetText(text);
+				}
+				else
+				{
+					// Checked last on purpose: the widgets above may derive from
+					// TextWidget, and Cast would claim them first. SetText exists
+					// (1_core\proto\enwidgets.c:195) but GetText does not, so this
+					// write is not readable back through ui_tree.
+					TextWidget label = TextWidget.Cast(target);
+					if (label)
+					{
+						label.SetText(text);
+					}
+					else
+					{
+						result.ok = false;
+						result.error = "text_not_writable";
+						return true;
+					}
+				}
+			}
+		}
+
+		MCPUiSnapshot snap = new MCPUiSnapshot();
+		MCPUiNode node = new MCPUiNode();
+		FillUiNode(target, node);
+		snap.nodes.Insert(node);
+		result.ui = snap;
+		result.ok = true;
+		return true;
+	}
+
+	protected bool DispatchUiClick(MCPCommand command, MCPResult result)
+	{
+		if (!command.args || command.args.path == "")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		int mouseButton = command.args.button;
+		if (mouseButton < 0 || mouseButton > 2)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		string error = "";
+		Widget target = ResolveUiRoot(command.args, error);
+		if (!target)
+		{
+			result.ok = false;
+			result.error = error;
+			return true;
+		}
+
+		string handlerName = "";
+		bool didClick = InvokeUiClick(target, mouseButton, handlerName);
+		result.user_id = target.GetUserID();
+		result.handler = handlerName;
+		result.clicked = didClick;
+		if (!didClick)
+		{
+			result.ok = false;
+			//! Empty name = the walk found no handler at all. A named handler that
+			//! returned false ran and declined. Collapsing both codes would leave the
+			//! verb unable to report a click that reached a handler and did nothing.
+			if (handlerName == "")
+			{
+				result.error = "no_handler";
+			}
+			else
+			{
+				result.error = "not_handled";
+			}
+			return true;
+		}
+
+		result.ok = true;
+		return true;
+	}
+
+	// Starts a user action on the local player. Returns after PerformActionStart;
+	// UseAcknowledgment() is true (actionbase.c:1146-1148) so the server still
+	// re-evaluates. Waiting here would freeze the sim tick.
+	protected bool DispatchActionUse(MCPCommand command, MCPResult result)
+	{
+		result.started = false;
+
+		if (!command.args || command.args.action == "")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!player)
+		{
+			result.ok = false;
+			result.error = "no_player";
+			return true;
+		}
+
+		ActionManagerClient amc = ActionManagerClient.Cast(player.GetActionManager());
+		if (!amc)
+		{
+			result.ok = false;
+			result.error = "no_action_manager";
+			return true;
+		}
+
+		string wantedAction = command.args.action;
+		ActionBase action;
+		if (ActionManagerBase.m_ActionsArray)
+		{
+			int actionIndex = 0;
+			while (actionIndex < ActionManagerBase.m_ActionsArray.Count() && !action)
+			{
+				ActionBase candidate = ActionManagerBase.m_ActionsArray.Get(actionIndex);
+				if (candidate && candidate.Type().ToString() == wantedAction)
+				{
+					action = candidate;
+				}
+
+				actionIndex = actionIndex + 1;
+			}
+		}
+
+		if (!action)
+		{
+			result.ok = false;
+			result.error = "action_not_found";
+			return true;
+		}
+
+		result.action = action.Type().ToString();
+
+		vector searchPos;
+		if (command.args.pos && command.args.pos.Count() > 0)
+		{
+			if (!ArrayToVector(command.args.pos, searchPos))
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+		}
+		else
+		{
+			searchPos = player.GetPosition();
+		}
+
+		float searchRadius = ACTION_USE_DEFAULT_RADIUS;
+		if (command.args.radius > 0.0 && IsFiniteFloat(command.args.radius))
+		{
+			searchRadius = command.args.radius;
+		}
+
+		string classFilter = command.args.classname;
+		Object targetObj = FindNearestObjectNearClient(searchPos, searchRadius, classFilter, player);
+		if (!targetObj)
+		{
+			result.ok = false;
+			result.error = "target_not_found";
+			return true;
+		}
+
+		// cursorHitPos must be a real point on the target. CCTCursor.Can
+		// measures DistanceSq from GetCursorHitPos (cctcursor.c:30-33).
+		// ForceTarget writes vector.Zero (actionmanagerclient.c:466), which
+		// is ~10 km from the player on Chernarus and always fails.
+		vector cursorHitPos = targetObj.GetPosition();
+		ActionTarget actionTarget = new ActionTarget(targetObj, null, -1, cursorHitPos, 0);
+
+		result.classname = targetObj.GetType();
+		result.pos_real = new array<float>();
+		VectorToArray(cursorHitPos, result.pos_real);
+		result.distance = vector.Distance(player.GetPosition(), cursorHitPos);
+
+		if (amc.GetRunningAction() != null)
+		{
+			result.ok = false;
+			result.error = "action_in_progress";
+			return true;
+		}
+
+		if (!amc.ActionPossibilityCheck(player.GetCurrentCommandID()))
+		{
+			result.ok = false;
+			result.error = "not_possible";
+			return true;
+		}
+
+		if (!ScriptInputUserData.CanStoreInputUserData())
+		{
+			result.ok = false;
+			result.error = "input_busy";
+			return true;
+		}
+
+		// Item is null: ActionInteractBase.UseMainItem() is false
+		// (actioninteractbase.c:71-74). CCINone is not empty-hands.
+		if (!action.Can(player, actionTarget, null))
+		{
+			result.ok = false;
+			result.error = "condition_failed";
+			return true;
+		}
+
+		amc.PerformActionStart(action, actionTarget, null, NULL);
+		// PerformActionStart is void. ActionStart can fail in SetupAction
+		// (typically inventory reservation) and return without ctx.Send
+		// (actionmanagerclient.c:638-643). GetRunningAction() is null then.
+		if (amc.GetRunningAction() == null)
+		{
+			result.started = false;
+			result.ok = false;
+			result.error = "setup_failed";
+			return true;
+		}
+
+		result.started = true;
+		result.ok = true;
+		return true;
+	}
+
+	protected Object FindNearestObjectNearClient(vector pos, float radius, string classFilter, Object skip)
+	{
+		m_ReadyObjects.Clear();
+		m_ReadyProxyCargos.Clear();
+		GetGame().GetObjectsAtPosition3D(pos, radius, m_ReadyObjects, m_ReadyProxyCargos);
+
+		Object best;
+		float bestDist = 0.0;
+		int i = 0;
+		while (i < m_ReadyObjects.Count())
+		{
+			Object found = m_ReadyObjects.Get(i);
+			if (found && found != skip)
+			{
+				bool classOk = classFilter == "";
+				if (!classOk)
+				{
+					if (found.GetType() == classFilter)
+					{
+						classOk = true;
+					}
+					else if (found.ClassName() == classFilter)
+					{
+						classOk = true;
+					}
+				}
+
+				if (classOk)
+				{
+					float distSq = vector.DistanceSq(pos, found.GetPosition());
+					if (!best)
+					{
+						best = found;
+						bestDist = distSq;
+					}
+					else if (distSq < bestDist)
+					{
+						best = found;
+						bestDist = distSq;
+					}
+				}
+			}
+
+			i = i + 1;
+		}
+
+		return best;
+	}
+
+	protected Widget ResolveUiRoot(MCPArgs args, out string error)
+	{
+		error = "";
+		if (!GetGame())
+		{
+			error = "no_game";
+			return null;
+		}
+
+		WorkspaceWidget workspace = GetGame().GetWorkspace();
+		if (!workspace)
+		{
+			error = "no_workspace";
+			return null;
+		}
+
+		if (args && args.path != "")
+		{
+			Widget named = workspace.FindAnyWidget(args.path);
+			if (!named)
+			{
+				named = FindWidgetByNameWalk(workspace, args.path);
+			}
+			if (!named)
+			{
+				error = "widget_not_found";
+				return null;
+			}
+			return named;
+		}
+
+		UIManager ui = GetGame().GetUIManager();
+		if (ui)
+		{
+			UIScriptedMenu menu = ui.GetMenu();
+			if (menu)
+			{
+				Widget menuRoot = menu.GetLayoutRoot();
+				if (menuRoot)
+				{
+					return menuRoot;
+				}
+			}
+		}
+
+		error = "no_menu";
+		return null;
+	}
+
+	protected Widget FindWidgetByNameWalk(Widget start, string name)
+	{
+		if (!start)
+		{
+			return null;
+		}
+
+		if (start.GetName() == name)
+		{
+			return start;
+		}
+
+		Widget child = start.GetChildren();
+		while (child)
+		{
+			Widget found = FindWidgetByNameWalk(child, name);
+			if (found)
+			{
+				return found;
+			}
+
+			child = child.GetSibling();
+		}
+
+		return null;
+	}
+
+	protected void FillUiNode(Widget w, MCPUiNode node)
+	{
+		if (!w || !node)
+		{
+			return;
+		}
+
+		node.name = w.GetName();
+		node.type = w.GetTypeName();
+		node.user_id = w.GetUserID();
+		node.visible = w.IsVisible();
+		node.visible_hierarchy = w.IsVisibleHierarchy();
+		node.disabled = false;
+		int flags = w.GetFlags();
+		if (flags & WidgetFlags.DISABLED)
+		{
+			node.disabled = true;
+		}
+		node.ignore_pointer = false;
+		if (flags & WidgetFlags.IGNOREPOINTER)
+		{
+			node.ignore_pointer = true;
+		}
+		node.color = w.GetColor();
+		float sx;
+		float sy;
+		float sw;
+		float sh;
+		w.GetScreenPos(sx, sy);
+		w.GetScreenSize(sw, sh);
+		node.screen_x = sx;
+		node.screen_y = sy;
+		node.screen_w = sw;
+		node.screen_h = sh;
+		node.text_readable = false;
+		node.text = "";
+
+		EditBoxWidget editBox = EditBoxWidget.Cast(w);
+		if (editBox)
+		{
+			node.text = editBox.GetText();
+			node.text_readable = true;
+			return;
+		}
+
+		MultilineEditBoxWidget multi = MultilineEditBoxWidget.Cast(w);
+		if (multi)
+		{
+			string multiText;
+			multi.GetText(multiText);
+			node.text = multiText;
+			node.text_readable = true;
+			return;
+		}
+
+		ButtonWidget btn = ButtonWidget.Cast(w);
+		if (btn)
+		{
+			string btnText;
+			btn.GetText(btnText);
+			node.text = btnText;
+			node.text_readable = true;
+		}
+	}
+
+	protected void CollectUiNodes(Widget w, MCPUiSnapshot snap, int limit)
+	{
+		if (!w)
+		{
+			return;
+		}
+		if (!snap)
+		{
+			return;
+		}
+		if (!snap.nodes)
+		{
+			return;
+		}
+		if (snap.nodes.Count() >= limit)
+		{
+			return;
+		}
+
+		MCPUiNode node = new MCPUiNode();
+		FillUiNode(w, node);
+		snap.nodes.Insert(node);
+
+		Widget child = w.GetChildren();
+		while (child)
+		{
+			CollectUiNodes(child, snap, limit);
+			if (snap.nodes.Count() >= limit)
+			{
+				return;
+			}
+			child = child.GetSibling();
+		}
+	}
+
+	//! Returns whether a handler CONSUMED the click, not whether one was found.
+	//! ScriptedWidgetEventHandler.OnClick reports that in its return value
+	//! (1_core\proto\enwidgets.c:658). handlerName is set as soon as a handler is
+	//! located, so the caller can tell an absent handler from a declining one.
+	protected bool InvokeUiClick(Widget target, int mouseButton, out string handlerName)
+	{
+		handlerName = "";
+		Widget cursor = target;
+		while (cursor)
+		{
+			Class scriptInst;
+			cursor.GetScript(scriptInst);
+			ScriptedWidgetEventHandler scriptHandler = ScriptedWidgetEventHandler.Cast(scriptInst);
+			if (scriptHandler)
+			{
+				handlerName = scriptInst.ClassName();
+				return scriptHandler.OnClick(target, 0, 0, mouseButton);
+			}
+
+			Class userInst;
+			cursor.GetUserData(userInst);
+			ScriptedWidgetEventHandler userHandler = ScriptedWidgetEventHandler.Cast(userInst);
+			if (userHandler)
+			{
+				handlerName = userInst.ClassName();
+				return userHandler.OnClick(target, 0, 0, mouseButton);
+			}
+
+			// Dabs leaves a ScriptedViewBase (Managed, not an event handler) in userdata.
+			// Its OnClick dispatches by the clicked widget's UserID.
+#ifdef DabsFramework
+			ScriptedViewBase dabsView = ScriptedViewBase.Cast(userInst);
+			if (dabsView)
+			{
+				handlerName = userInst.ClassName();
+				return dabsView.OnClick(target, 0, 0, mouseButton);
+			}
+#endif
+
+			cursor = cursor.GetParent();
+		}
+
+		if (!GetGame())
+		{
+			return false;
+		}
+
+		UIManager ui = GetGame().GetUIManager();
+		if (ui)
+		{
+			UIScriptedMenu menu = ui.GetMenu();
+			if (menu)
+			{
+				handlerName = menu.ClassName();
+				return menu.OnClick(target, 0, 0, mouseButton);
+			}
+		}
+
+		return false;
 	}
 
 	override bool MCP_ProcessJob(MCPJob job)
