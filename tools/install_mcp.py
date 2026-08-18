@@ -7,6 +7,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import stat
 import struct
 import subprocess
@@ -23,19 +24,23 @@ from dayz_mcp.host_config import (
 
 
 TOOLS_ROOT = Path(__file__).resolve().parent
-INSTALLER_CLI_MANIFEST = (
-    TOOLS_ROOT.parent / "reports" / "security" / "installer-cli-manifest-v1.json"
-)
 _EXPECTED_ROLES = {"CLAUDE": "claude.exe", "CODEX": "codex.exe"}
 _HEX_UPPER = frozenset("0123456789ABCDEF")
 _PE_X64_MACHINE = 0x8664
 _PE32_PLUS_MAGIC = 0x20B
 _PSUTIL_WHEEL_BYTES = 137_737
 _PSUTIL_WHEEL_SHA256 = "eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988"
+_ABSENT_PROBE_NAME = "p0s-absent-fixture-do-not-create"
+_SECURITY_DIR_ENV = "DAYZ_MCP_SECURITY_DIR"
+_PIN_RECIPE = "run: python install_mcp.py --pin-clis"
+_CLI_MANIFEST_NAME = "installer-cli-manifest-v1.json"
+_NOT_FOUND_FIXTURE_NAME = "installer-not-found-fixtures-v1.json"
 
 
 class InstallerContractError(RuntimeError):
-    pass
+    def __init__(self, code: str, detail: str = "") -> None:
+        self.code = code
+        super().__init__(f"{code}: {detail}" if detail else code)
 
 
 class InstallerExecutionError(RuntimeError):
@@ -61,6 +66,9 @@ class InstallerOptions:
     idle_timeout_seconds: float
     allow_legacy: bool
     register: bool
+    pin_clis: bool
+    claude_exe: Path | None
+    codex_exe: Path | None
     tools_root: Path
 
 
@@ -115,6 +123,27 @@ class RegistrationProvider(Protocol):
 
 
 CommandRunner = Callable[..., object]
+
+
+def installer_security_dir() -> Path:
+    override = os.environ.get(_SECURITY_DIR_ENV)
+    if override is not None:
+        text = override.strip()
+        if not text:
+            raise InstallerContractError("installer_cli_manifest_missing", _PIN_RECIPE)
+        return Path(text)
+    local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+    if not local_appdata:
+        raise InstallerContractError("installer_cli_manifest_missing", _PIN_RECIPE)
+    return Path(local_appdata) / "DayZ_MCP" / "security"
+
+
+def installer_cli_manifest_path() -> Path:
+    return installer_security_dir() / _CLI_MANIFEST_NAME
+
+
+def installer_not_found_fixtures_path() -> Path:
+    return installer_security_dir() / _NOT_FOUND_FIXTURE_NAME
 
 
 def _native_regular_file(path: Path) -> os.stat_result:
@@ -191,14 +220,14 @@ def _validate_cli_entry(role: str, value: object) -> InstallerCliEntry:
 
     metadata = _native_regular_file(path)
     if metadata.st_size != expected_bytes:
-        raise InstallerContractError("installer_cli_byte_drift")
+        raise InstallerContractError("installer_cli_byte_drift", _PIN_RECIPE)
     _validate_x64_pe(path)
     try:
         digest = hashlib.sha256(path.read_bytes()).hexdigest().upper()
     except OSError as error:
         raise InstallerContractError("installer_cli_unreadable") from error
     if digest != expected_sha256:
-        raise InstallerContractError("installer_cli_hash_drift")
+        raise InstallerContractError("installer_cli_hash_drift", _PIN_RECIPE)
 
     return InstallerCliEntry(role, path, expected_bytes, expected_sha256)
 
@@ -206,6 +235,10 @@ def _validate_cli_entry(role: str, value: object) -> InstallerCliEntry:
 def load_installer_cli_manifest(path: Path) -> InstallerCliManifest:
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise InstallerContractError(
+            "installer_cli_manifest_missing", _PIN_RECIPE
+        ) from error
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise InstallerContractError("invalid_installer_cli_manifest") from error
     if (
@@ -246,6 +279,10 @@ def load_installer_not_found_fixtures(
     try:
         manifest_bytes = manifest_file.read_bytes()
         payload = json.loads(Path(fixture_path).read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise InstallerContractError(
+            "installer_cli_manifest_missing", _PIN_RECIPE
+        ) from error
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise InstallerContractError("invalid_installer_not_found_fixture") from error
     manifest = load_installer_cli_manifest(manifest_file)
@@ -266,7 +303,9 @@ def load_installer_not_found_fixtures(
         or binding.get("sha256")
         != hashlib.sha256(manifest_bytes).hexdigest().upper()
     ):
-        raise InstallerContractError("installer_not_found_manifest_binding_drift")
+        raise InstallerContractError(
+            "installer_not_found_manifest_binding_drift", _PIN_RECIPE
+        )
     raw_entries = payload.get("entries")
     if not isinstance(raw_entries, dict) or set(raw_entries) != {"CLAUDE", "CODEX"}:
         raise InstallerContractError("invalid_installer_not_found_fixture")
@@ -303,6 +342,143 @@ def load_installer_not_found_fixtures(
             stderr=stderr,
         )
     return InstallerNotFoundFixtures(entries)
+
+
+def _atomic_write_json(path: Path, payload: object) -> None:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.name + ".tmp")
+    text = json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _retire_installer_not_found_fixture(path: Path) -> None:
+    fixture = Path(path)
+    if not fixture.is_file():
+        return
+    stale = fixture.with_name(fixture.name + ".stale")
+    os.replace(fixture, stale)
+
+
+def _resolve_pin_cli(role: str, explicit: Path | None) -> Path:
+    expected_name = _EXPECTED_ROLES[role]
+    flag = f"--{role.lower()}-exe"
+    if explicit is not None:
+        candidate = Path(explicit)
+    else:
+        found = shutil.which(role.lower())
+        if not found:
+            raise InstallerContractError(
+                "installer_cli_missing",
+                f"pass {flag} PATH; {_PIN_RECIPE}",
+            )
+        candidate = Path(found)
+    if candidate.suffix.casefold() != ".exe":
+        raise InstallerContractError(
+            "installer_cli_not_native_exe",
+            f"pass {flag} PATH to a native {expected_name}; {_PIN_RECIPE}",
+        )
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as error:
+        raise InstallerContractError(
+            "installer_cli_missing",
+            f"pass {flag} PATH; {_PIN_RECIPE}",
+        ) from error
+    _native_regular_file(resolved)
+    _validate_x64_pe(resolved)
+    if resolved.name.casefold() != expected_name:
+        raise InstallerContractError("installer_cli_role_path_mismatch")
+    return resolved
+
+
+def pin_installer_clis(
+    *,
+    claude_exe: Path | None = None,
+    codex_exe: Path | None = None,
+    runner: CommandRunner = subprocess.run,
+) -> list[InstallerCliEntry]:
+    resolved = {
+        "CLAUDE": _resolve_pin_cli("CLAUDE", claude_exe),
+        "CODEX": _resolve_pin_cli("CODEX", codex_exe),
+    }
+    entries = {
+        role: build_installer_cli_entry_payload(role, path)
+        for role, path in resolved.items()
+    }
+    manifest_payload = {
+        "schema_version": 1,
+        "kind": "dayz-mcp-installer-clis-v1",
+        "entries": entries,
+    }
+    manifest_path = installer_cli_manifest_path()
+    fixture_path = installer_not_found_fixtures_path()
+    _retire_installer_not_found_fixture(fixture_path)
+    _atomic_write_json(manifest_path, manifest_payload)
+    manifest = load_installer_cli_manifest(manifest_path)
+    fixture_entries: dict[str, dict[str, object]] = {}
+    for role in ("CLAUDE", "CODEX"):
+        arguments = ["mcp", "get", _ABSENT_PROBE_NAME]
+        if role == "CODEX":
+            arguments.append("--json")
+        try:
+            completed = invoke_manifest_cli(
+                manifest.entries[role], arguments, runner
+            )
+        except subprocess.TimeoutExpired as error:
+            raise InstallerContractError(
+                "installer_cli_probe_timeout",
+                f"{role}; {_PIN_RECIPE}",
+            ) from error
+        except OSError as error:
+            raise InstallerContractError(
+                f"installer_cli_launch_failed:{role}:{getattr(error, 'winerror', None)}"
+            ) from error
+        returncode = getattr(completed, "returncode", None)
+        stdout = getattr(completed, "stdout", None)
+        stderr = getattr(completed, "stderr", None)
+        if (
+            not isinstance(returncode, int)
+            or isinstance(returncode, bool)
+            or returncode == 0
+            or not isinstance(stdout, str)
+            or not isinstance(stderr, str)
+            or len(stdout) > 4096
+            or len(stderr) > 4096
+            or "\0" in stdout
+            or "\0" in stderr
+        ):
+            raise InstallerContractError(
+                "invalid_installer_not_found_probe", _PIN_RECIPE
+            )
+        fixture_entries[role] = {
+            "cli_sha256": manifest.entries[role].sha256,
+            "returncode": returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+        }
+    manifest_bytes = manifest_path.read_bytes()
+    fixture_payload = {
+        "schema_version": 1,
+        "kind": "dayz-mcp-installer-not-found-fixtures-v1",
+        "probe_name": _ABSENT_PROBE_NAME,
+        "cli_manifest": {
+            "bytes": len(manifest_bytes),
+            "sha256": hashlib.sha256(manifest_bytes).hexdigest().upper(),
+        },
+        "entries": fixture_entries,
+    }
+    _atomic_write_json(fixture_path, fixture_payload)
+    load_installer_not_found_fixtures(fixture_path, manifest_path)
+    return [manifest.entries[role] for role in ("CLAUDE", "CODEX")]
 
 
 _VALUE_FLAGS = frozenset(
@@ -562,7 +738,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-game-version", default="")
     parser.add_argument("--idle-timeout-seconds", type=float, default=1800.0)
     parser.add_argument("--allow-legacy", action="store_true")
-    parser.add_argument("--register", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--register", action="store_true")
+    mode.add_argument("--pin-clis", action="store_true")
+    parser.add_argument("--claude-exe", default="")
+    parser.add_argument("--codex-exe", default="")
     return parser
 
 
@@ -577,6 +757,8 @@ def parse_args(
         parser.error("--port must be between 1 and 65535")
     if not math.isfinite(args.idle_timeout_seconds) or args.idle_timeout_seconds < 0:
         parser.error("--idle-timeout-seconds must be finite and non-negative")
+    if (args.claude_exe or args.codex_exe) and not args.pin_clis:
+        parser.error("--claude-exe and --codex-exe require --pin-clis")
 
     canonical_tools = Path(tools_root).resolve()
     keyfile = (
@@ -594,6 +776,9 @@ def parse_args(
         idle_timeout_seconds=args.idle_timeout_seconds,
         allow_legacy=args.allow_legacy,
         register=args.register,
+        pin_clis=args.pin_clis,
+        claude_exe=Path(args.claude_exe) if args.claude_exe else None,
+        codex_exe=Path(args.codex_exe) if args.codex_exe else None,
         tools_root=canonical_tools,
     )
 
@@ -978,9 +1163,8 @@ def run_installer(
             "venv_python": str(venv_python),
         }
 
-    reports = options.tools_root.parent / "reports" / "security"
-    manifest_path = reports / "installer-cli-manifest-v1.json"
-    fixture_path = reports / "installer-not-found-fixtures-v1.json"
+    manifest_path = installer_cli_manifest_path()
+    fixture_path = installer_not_found_fixtures_path()
     manifest = load_installer_cli_manifest(manifest_path)
     not_found = load_installer_not_found_fixtures(fixture_path, manifest_path)
     provider = CliRegistrationProvider(manifest, not_found, runner=runner)
@@ -1015,16 +1199,30 @@ def run_installer(
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
+        options = parse_args(argv)
+        if options.pin_clis:
+            entries = pin_installer_clis(
+                claude_exe=options.claude_exe,
+                codex_exe=options.codex_exe,
+            )
+            for entry in entries:
+                print(f"{entry.role} {entry.path} {entry.bytes} {entry.sha256}")
+            return 0
         result = run_installer(
-            parse_args(argv),
+            options,
             base_python=Path(sys.executable),
         )
     except (InstallerContractError, InstallerExecutionError, OSError, ValueError) as error:
-        code = str(error)
-        if not re.fullmatch(r"[A-Za-z0-9_:-]+", code):
-            code = "installer_failed"
+        code = getattr(error, "code", None)
+        if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9_:-]+", code):
+            text = str(error)
+            code = text if re.fullmatch(r"[A-Za-z0-9_:-]+", text) else "installer_failed"
+        payload: dict[str, str] = {"status": "error", "error": code}
+        detail = str(error)
+        if detail and detail != code:
+            payload["detail"] = detail
         print(
-            json.dumps({"status": "error", "error": code}, sort_keys=True),
+            json.dumps(payload, sort_keys=True),
             file=sys.stderr,
         )
         return 2

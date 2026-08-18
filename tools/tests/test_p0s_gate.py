@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import io
+import os
 import struct
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stdout
@@ -15,7 +17,11 @@ TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
-from install_mcp import InstallerContractError, load_installer_cli_manifest
+from install_mcp import (
+    InstallerContractError,
+    installer_cli_manifest_path,
+    load_installer_cli_manifest,
+)
 from p0s_gate import (
     capture_installer_not_found_fixtures,
     create_installer_cli_manifest,
@@ -175,6 +181,66 @@ class InstallerCliManifestProducerTest(unittest.TestCase):
                         runner=lambda _argv, **_kwargs: completed,
                     )
                 self.assertFalse(fixture_path.exists())
+
+    def test_default_not_found_probe_follows_security_dir_env(self) -> None:
+        security = self.root / "security"
+        security.mkdir()
+        manifest = security / "installer-cli-manifest-v1.json"
+        create_installer_cli_manifest(
+            manifest,
+            {"CLAUDE": self.claude, "CODEX": self.codex},
+            provenance_checker=self.allow_provenance,
+            signature_checker=self.allow_signature,
+        )
+        fixture_path = security / "installer-not-found-fixtures-v1.json"
+        calls: list[list[str]] = []
+
+        def fake_runner(argv: list[str], **_kwargs: object) -> object:
+            calls.append(list(argv))
+            role = Path(argv[0]).stem.upper()
+            return type(
+                "Completed",
+                (),
+                {
+                    "returncode": 7 if role == "CLAUDE" else 8,
+                    "stdout": f"{role}-absent\n",
+                    "stderr": "",
+                },
+            )()
+
+        with patch.dict(os.environ, {"DAYZ_MCP_SECURITY_DIR": str(security)}):
+            self.assertEqual(installer_cli_manifest_path(), manifest)
+            capture_installer_not_found_fixtures(
+                fixture_path,
+                runner=fake_runner,
+            )
+
+        payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["probe_name"], "p0s-absent-fixture-do-not-create")
+        self.assertEqual(
+            calls[0][1:],
+            ["mcp", "get", "p0s-absent-fixture-do-not-create"],
+        )
+        self.assertEqual(
+            calls[1][1:],
+            ["mcp", "get", "p0s-absent-fixture-do-not-create", "--json"],
+        )
+
+    def test_not_found_probe_timeout_is_typed_contract_error(self) -> None:
+        self._create_fake_manifest()
+        fixture_path = self.root / "reports" / "installer-not-found-fixtures-v1.json"
+
+        def timeout_runner(_argv: list[str], **_kwargs: object) -> object:
+            raise subprocess.TimeoutExpired(cmd="claude.exe", timeout=30.0)
+
+        with self.assertRaises(InstallerContractError) as raised:
+            capture_installer_not_found_fixtures(
+                fixture_path,
+                manifest_path=self.output,
+                runner=timeout_runner,
+            )
+        self.assertEqual(raised.exception.code, "installer_cli_probe_timeout")
+        self.assertFalse(fixture_path.exists())
 
 
 class RunsBackupCliGateTest(unittest.TestCase):

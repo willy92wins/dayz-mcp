@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shutil
 import struct
+import subprocess
 import sys
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -27,12 +30,15 @@ from install_mcp import (
     RegistrationTransactionError,
     build_client_args,
     install_runtime,
+    installer_cli_manifest_path,
+    installer_not_found_fixtures_path,
     invoke_manifest_cli,
     load_installer_cli_manifest,
     load_installer_not_found_fixtures,
     parse_claude_registration,
     parse_codex_registration,
     parse_args,
+    pin_installer_clis,
     register_transaction,
 )
 
@@ -46,6 +52,73 @@ def write_fake_x64_pe(path: Path) -> None:
     struct.pack_into("<H", payload, 0x94, 0xF0)
     struct.pack_into("<H", payload, 0x98, 0x20B)
     path.write_bytes(payload)
+
+
+def cli_entry_payload(path: Path) -> dict[str, object]:
+    payload = path.read_bytes()
+    return {
+        "path": str(path.resolve()),
+        "bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest().upper(),
+    }
+
+
+def write_synthetic_cli_manifest(path: Path, claude: Path, codex: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "dayz-mcp-installer-clis-v1",
+                "entries": {
+                    "CLAUDE": cli_entry_payload(claude),
+                    "CODEX": cli_entry_payload(codex),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def write_synthetic_not_found_fixture(fixture_path: Path, manifest_path: Path) -> None:
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = load_installer_cli_manifest(manifest_path)
+    payload = {
+        "schema_version": 1,
+        "kind": "dayz-mcp-installer-not-found-fixtures-v1",
+        "probe_name": "p0s-absent-fixture-do-not-create",
+        "cli_manifest": {
+            "bytes": len(manifest_bytes),
+            "sha256": hashlib.sha256(manifest_bytes).hexdigest().upper(),
+        },
+        "entries": {
+            "CLAUDE": {
+                "cli_sha256": manifest.entries["CLAUDE"].sha256,
+                "returncode": 7,
+                "stdout": "CLAUDE-absent\n",
+                "stderr": "",
+            },
+            "CODEX": {
+                "cli_sha256": manifest.entries["CODEX"].sha256,
+                "returncode": 8,
+                "stdout": "CODEX-absent\n",
+                "stderr": "",
+            },
+        },
+    }
+    fixture_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def absent_probe_runner(argv: list[str], **_kwargs: object) -> object:
+    role = Path(argv[0]).stem.upper()
+    return type(
+        "Completed",
+        (),
+        {
+            "returncode": 7 if role == "CLAUDE" else 8,
+            "stdout": f"{role}-absent\n",
+            "stderr": "",
+        },
+    )()
 
 
 class InstallerCliManifestTest(unittest.TestCase):
@@ -668,27 +741,47 @@ class InstallerRegistrationParserTest(unittest.TestCase):
             )
 
     def test_real_not_found_fixture_is_byte_bound_to_current_cli_manifest(self) -> None:
-        reports = TOOLS_DIR.parent / "reports" / "security"
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        claude = root / "claude.exe"
+        codex = root / "codex.exe"
+        write_fake_x64_pe(claude)
+        write_fake_x64_pe(codex)
+        manifest_path = root / "installer-cli-manifest-v1.json"
+        fixture_path = root / "installer-not-found-fixtures-v1.json"
+        write_synthetic_cli_manifest(manifest_path, claude, codex)
+        write_synthetic_not_found_fixture(fixture_path, manifest_path)
 
-        fixture = load_installer_not_found_fixtures(
-            reports / "installer-not-found-fixtures-v1.json",
-            reports / "installer-cli-manifest-v1.json",
-        )
+        fixture = load_installer_not_found_fixtures(fixture_path, manifest_path)
 
         self.assertEqual(set(fixture.entries), {"CLAUDE", "CODEX"})
         self.assertNotEqual(fixture.entries["CLAUDE"].returncode, 0)
         self.assertNotEqual(fixture.entries["CODEX"].returncode, 0)
+        drifted = json.loads(fixture_path.read_text(encoding="utf-8"))
+        drifted["cli_manifest"]["sha256"] = "0" * 64
+        fixture_path.write_text(json.dumps(drifted), encoding="utf-8")
+        with self.assertRaises(InstallerContractError) as raised:
+            load_installer_not_found_fixtures(fixture_path, manifest_path)
+        self.assertEqual(raised.exception.code, "installer_not_found_manifest_binding_drift")
 
 
 class InstallerCliRegistrationProviderTest(unittest.TestCase):
     def setUp(self) -> None:
-        reports = TOOLS_DIR.parent / "reports" / "security"
-        self.manifest = load_installer_cli_manifest(
-            reports / "installer-cli-manifest-v1.json"
-        )
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        self.claude = root / "claude.exe"
+        self.codex = root / "codex.exe"
+        write_fake_x64_pe(self.claude)
+        write_fake_x64_pe(self.codex)
+        self.manifest_path = root / "installer-cli-manifest-v1.json"
+        self.fixture_path = root / "installer-not-found-fixtures-v1.json"
+        write_synthetic_cli_manifest(self.manifest_path, self.claude, self.codex)
+        write_synthetic_not_found_fixture(self.fixture_path, self.manifest_path)
+        self.manifest = load_installer_cli_manifest(self.manifest_path)
         self.fixture = load_installer_not_found_fixtures(
-            reports / "installer-not-found-fixtures-v1.json",
-            reports / "installer-cli-manifest-v1.json",
+            self.fixture_path, self.manifest_path
         )
 
     def test_exact_frozen_nonzero_maps_to_absent_and_drift_is_error(self) -> None:
@@ -894,6 +987,321 @@ class InstallerOrchestrationTest(unittest.TestCase):
             installer.run_installer(self.options, base_python=Path(sys.executable))
 
         register.assert_not_called()
+
+
+class InstallerCliPinLocalTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.security = self.root / "security"
+        self.security.mkdir()
+        self.claude = self.root / "claude.exe"
+        self.codex = self.root / "codex.exe"
+        write_fake_x64_pe(self.claude)
+        write_fake_x64_pe(self.codex)
+        self.env = patch.dict(
+            os.environ, {"DAYZ_MCP_SECURITY_DIR": str(self.security)}
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def test_pin_clis_happy_path_writes_two_roles(self) -> None:
+        entries = pin_installer_clis(
+            claude_exe=self.claude,
+            codex_exe=self.codex,
+            runner=absent_probe_runner,
+        )
+
+        self.assertEqual([entry.role for entry in entries], ["CLAUDE", "CODEX"])
+        manifest = load_installer_cli_manifest(installer_cli_manifest_path())
+        self.assertEqual(manifest.entries["CLAUDE"].path, self.claude)
+        self.assertEqual(manifest.entries["CODEX"].path, self.codex)
+        fixture = load_installer_not_found_fixtures(
+            installer_not_found_fixtures_path(),
+            installer_cli_manifest_path(),
+        )
+        self.assertEqual(fixture.entries["CLAUDE"].returncode, 7)
+        self.assertEqual(fixture.entries["CODEX"].returncode, 8)
+
+    def test_pin_clis_main_prints_one_line_per_role(self) -> None:
+        buffer = io.StringIO()
+
+        def fake_invoke(entry: object, arguments: object, _runner: object) -> object:
+            path = getattr(entry, "path", Path("unknown.exe"))
+            return absent_probe_runner([str(path), *list(arguments)])
+
+        with (
+            patch.object(installer, "invoke_manifest_cli", side_effect=fake_invoke),
+            redirect_stdout(buffer),
+        ):
+            code = installer.main(
+                [
+                    "--pin-clis",
+                    "--claude-exe",
+                    str(self.claude),
+                    "--codex-exe",
+                    str(self.codex),
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        lines = [line for line in buffer.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("CLAUDE "))
+        self.assertTrue(lines[1].startswith("CODEX "))
+        self.assertIn(str(self.claude), lines[0])
+        self.assertIn(str(self.codex), lines[1])
+
+    def test_which_shim_is_typed_error_asking_for_explicit_path(self) -> None:
+        shim = self.root / "claude.cmd"
+        shim.write_text("@echo off\n", encoding="utf-8")
+
+        def fake_which(name: str) -> str | None:
+            if name == "claude":
+                return str(shim)
+            if name == "codex":
+                return str(self.codex)
+            return None
+
+        with patch.object(installer.shutil, "which", side_effect=fake_which):
+            with self.assertRaises(InstallerContractError) as raised:
+                pin_installer_clis(runner=absent_probe_runner)
+
+        self.assertEqual(raised.exception.code, "installer_cli_not_native_exe")
+        self.assertIn("--claude-exe", str(raised.exception))
+        self.assertFalse(installer_cli_manifest_path().exists())
+
+    def test_missing_manifest_is_typed_with_pin_recipe(self) -> None:
+        with self.assertRaises(InstallerContractError) as raised:
+            load_installer_cli_manifest(installer_cli_manifest_path())
+
+        self.assertEqual(raised.exception.code, "installer_cli_manifest_missing")
+        self.assertIn("run: python install_mcp.py --pin-clis", str(raised.exception))
+
+        options = parse_args(["--register"], tools_root=self.root)
+        with (
+            patch.object(
+                installer,
+                "install_runtime",
+                return_value={"venv_python": str(self.root / "python.exe")},
+            ),
+            self.assertRaises(InstallerContractError) as register_raised,
+        ):
+            installer.run_installer(options, base_python=Path(sys.executable))
+        self.assertEqual(
+            register_raised.exception.code, "installer_cli_manifest_missing"
+        )
+        self.assertIn(
+            "run: python install_mcp.py --pin-clis",
+            str(register_raised.exception),
+        )
+
+    def test_byte_and_hash_drift_after_pin_name_pin_clis(self) -> None:
+        pin_installer_clis(
+            claude_exe=self.claude,
+            codex_exe=self.codex,
+            runner=absent_probe_runner,
+        )
+        original = self.claude.read_bytes()
+        mutated = bytearray(original)
+        mutated[-1] = (mutated[-1] + 1) % 256
+        self.claude.write_bytes(bytes(mutated))
+        with self.assertRaises(InstallerContractError) as hash_raised:
+            load_installer_cli_manifest(installer_cli_manifest_path())
+        self.assertEqual(hash_raised.exception.code, "installer_cli_hash_drift")
+        self.assertIn("--pin-clis", str(hash_raised.exception))
+
+        write_fake_x64_pe(self.claude)
+        pin_installer_clis(
+            claude_exe=self.claude,
+            codex_exe=self.codex,
+            runner=absent_probe_runner,
+        )
+        self.claude.write_bytes(self.claude.read_bytes() + b"\x00")
+        with self.assertRaises(InstallerContractError) as byte_raised:
+            load_installer_cli_manifest(installer_cli_manifest_path())
+        self.assertEqual(byte_raised.exception.code, "installer_cli_byte_drift")
+        self.assertIn("--pin-clis", str(byte_raised.exception))
+
+    def test_security_dir_env_is_used_by_installer(self) -> None:
+        other = self.root / "other-security"
+        other.mkdir()
+        with patch.dict(os.environ, {"DAYZ_MCP_SECURITY_DIR": str(other)}):
+            self.assertEqual(
+                installer_cli_manifest_path(),
+                other / "installer-cli-manifest-v1.json",
+            )
+            pin_installer_clis(
+                claude_exe=self.claude,
+                codex_exe=self.codex,
+                runner=absent_probe_runner,
+            )
+            self.assertTrue((other / "installer-cli-manifest-v1.json").is_file())
+            self.assertTrue(
+                (other / "installer-not-found-fixtures-v1.json").is_file()
+            )
+        self.assertFalse(
+            (self.security / "installer-cli-manifest-v1.json").exists()
+        )
+
+    def test_pin_clis_and_register_are_exclusive(self) -> None:
+        with self.assertRaises(SystemExit) as raised:
+            parse_args(
+                ["--pin-clis", "--register"],
+                tools_root=self.root,
+            )
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_register_main_error_json_includes_pin_recipe(self) -> None:
+        stderr = io.StringIO()
+        with (
+            patch.object(
+                installer,
+                "install_runtime",
+                return_value={"venv_python": str(self.root / "python.exe")},
+            ),
+            redirect_stderr(stderr),
+        ):
+            code = installer.main(["--register"])
+
+        self.assertEqual(code, 2)
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["error"], "installer_cli_manifest_missing")
+        self.assertIn(
+            "run: python install_mcp.py --pin-clis", payload["detail"]
+        )
+
+    def test_failed_repin_does_not_leave_orphan_fixture(self) -> None:
+        pin_installer_clis(
+            claude_exe=self.claude,
+            codex_exe=self.codex,
+            runner=absent_probe_runner,
+        )
+        fixture = installer_not_found_fixtures_path()
+        self.assertTrue(fixture.is_file())
+
+        def fail_runner(_argv: list[str], **_kwargs: object) -> object:
+            return type(
+                "Completed",
+                (),
+                {"returncode": 0, "stdout": "", "stderr": ""},
+            )()
+
+        with self.assertRaises(InstallerContractError) as raised:
+            pin_installer_clis(
+                claude_exe=self.claude,
+                codex_exe=self.codex,
+                runner=fail_runner,
+            )
+
+        self.assertFalse(fixture.exists())
+        self.assertIn("--pin-clis", str(raised.exception))
+
+    def test_exe_flags_without_pin_clis_are_argument_errors(self) -> None:
+        for argv in (
+            ["--claude-exe", str(self.claude)],
+            ["--codex-exe", str(self.codex)],
+            ["--register", "--claude-exe", str(self.claude)],
+        ):
+            with self.subTest(argv=argv):
+                with self.assertRaises(SystemExit) as raised:
+                    parse_args(argv, tools_root=self.root)
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_pin_probe_timeout_is_typed_contract_error(self) -> None:
+        def timeout_runner(_argv: list[str], **_kwargs: object) -> object:
+            raise subprocess.TimeoutExpired(cmd="claude.exe", timeout=30.0)
+
+        with self.assertRaises(InstallerContractError) as raised:
+            pin_installer_clis(
+                claude_exe=self.claude,
+                codex_exe=self.codex,
+                runner=timeout_runner,
+            )
+        self.assertEqual(raised.exception.code, "installer_cli_probe_timeout")
+        self.assertIn("--pin-clis", str(raised.exception))
+
+
+class PublicBoundaryPinLocalTest(unittest.TestCase):
+    def test_publish_boundary_excludes_installer_cli_pins(self) -> None:
+        publish = TOOLS_DIR / "publish"
+        # The publish tooling stays in the private tree; the exported clone
+        # has no tools/publish, so the boundary check only runs at the source.
+        if not (publish / "included.json").is_file():
+            self.skipTest("publish tooling not shipped in this checkout")
+        included = json.loads(
+            (publish / "included.json").read_text(encoding="utf-8")
+        )
+        files = included["files"]
+        self.assertNotIn(
+            "reports/security/installer-cli-manifest-v1.json", files
+        )
+        self.assertNotIn(
+            "reports/security/installer-not-found-fixtures-v1.json", files
+        )
+        source = (publish / "boundary.py").read_text(encoding="utf-8")
+        runtime_generated = source.split("RUNTIME_GENERATED", 1)[1]
+        self.assertIn("installer-cli-manifest-v1.json", runtime_generated)
+        self.assertIn("installer-not-found-fixtures-v1.json", runtime_generated)
+        self.assertNotIn(
+            '"reports/security/installer-cli-manifest-v1.json"', source
+        )
+        self.assertNotIn(
+            '"reports/security/installer-not-found-fixtures-v1.json"', source
+        )
+        self.assertIn("--pin-clis", source)
+        installer_source = (TOOLS_DIR / "install_mcp.py").read_text(encoding="utf-8")
+        gate_source = (TOOLS_DIR / "p0s_gate.py").read_text(encoding="utf-8")
+        self.assertNotIn("reports/security", installer_source)
+        self.assertNotIn("reports\\security", installer_source)
+        self.assertNotIn("reports/security", gate_source)
+        self.assertNotIn("reports\\security", gate_source)
+
+
+class PublicToolCountDocsTest(unittest.TestCase):
+    def test_readme_tool_count_matches_instantiated_app(self) -> None:
+        from dayz_mcp.server import ServerConfig, build_app
+
+        app, _runtime = build_app(
+            ServerConfig(key="k", port=0, log_sink=lambda _message: None)
+        )
+        without = {tool.name for tool in app._tool_manager.list_tools()}
+        without.discard("ui_dialog")
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        allow_path = Path(tmp.name) / "allowlist.json"
+        allow_path.write_text("[]", encoding="utf-8")
+        app_with, _runtime_with = build_app(
+            ServerConfig(
+                key="k",
+                port=0,
+                log_sink=lambda _message: None,
+                enable_exec_enforce=True,
+                exec_allowlist=str(allow_path),
+            )
+        )
+        with_exec = {tool.name for tool in app_with._tool_manager.list_tools()}
+        with_exec.discard("ui_dialog")
+
+        self.assertNotIn("exec_enforce", without)
+        self.assertEqual(with_exec, without | {"exec_enforce"})
+        readme = (TOOLS_DIR.parent / "README.md").read_text(encoding="utf-8")
+        formula = (
+            f"{len(without)} tools (+ `exec_enforce` when an allowlist is configured)"
+        )
+        self.assertIn(formula, readme)
+        self.assertNotIn("39 tools", readme)
+        self.assertIn("--pin-clis", readme)
+        self.assertIn("python install_mcp.py --register", readme)
+        self.assertIn("does not read that pin", readme)
+        self.assertNotIn("ui_dialog", readme)
+        for name in sorted(without):
+            self.assertIn(f"`{name}`", readme)
+        tools_readme = (TOOLS_DIR / "README-mcp.md").read_text(encoding="utf-8")
+        self.assertIn("python install_mcp.py --pin-clis", tools_readme)
+        self.assertIn("python install_mcp.py --register", tools_readme)
+        self.assertNotIn("when run with `-Register`", tools_readme)
 
 
 if __name__ == "__main__":

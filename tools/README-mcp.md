@@ -11,15 +11,18 @@
 From `tools/`:
 
 ```text
+python install_mcp.py --pin-clis
 python install_mcp.py
 ```
+
+`--pin-clis` records native x64 `claude.exe` / `codex.exe` under `%LOCALAPPDATA%\DayZ_MCP\security\` (override with `DAYZ_MCP_SECURITY_DIR`). It is required before `python install_mcp.py --register`. The non-Python installer registration path does not need that pin.
 
 The installer creates `.venv-mcp`, installs `mcp==1.27.2`, generates `.dayz_mcp.key` if missing, writes sample `dayz_mcp.json` files under `_mcp_config`, and prints both registration commands:
 
 - Claude: `--client --client-platform claude`
 - Codex: `--client --client-platform codex`
 
-It mutates the Claude and Codex MCP registrations only when run with `-Register`. Registration is remove-then-add and verifies both effective configurations use client mode, the expected platform, the same port/keyfile, and no `--embedded` flag.
+It mutates the Claude and Codex MCP registrations only when run with `--register`. Registration is remove-then-add and verifies both effective configurations use client mode, the expected platform, the same port/keyfile, and no `--embedded` flag.
 
 To seed real DayZ profile/mission config, pass the directories explicitly:
 
@@ -57,7 +60,7 @@ Mutating work uses the request-bound high-level queue by default:
 
 `session_acquire` and `session_wait` remain low-level compatibility tools. A caller that uses them owns its loop and must call `session_cancel(ticket)` when abandoning a queued ticket. The high-level call installs an operation tombstone on timeout, cancellation or transport failure, including when its first HTTP request completes late. The long wait is tied to the live MCP request/host; it is not a durable job and does not resume after host restart.
 
-`install_mcp.py --register` also applies a seven-day host-side wait budget atomically to both user configs: Claude `timeout = 604800000` ms and Codex `tool_timeout_sec = 604800`. Queue cancellation remains explicit; this budget prevents the host from cutting off a healthy FIFO wait during normal long-running work. The writer holds both Windows files with `share=0`, verifies writes through the same handles and uses a restricted recovery journal; a busy or conflicting config fails closed without forcing a host shutdown. Existing host processes must be restarted or a new session opened before the new timeout is effective.
+`install_mcp.py --pin-clis` then `install_mcp.py --register` also applies a seven-day host-side wait budget atomically to both user configs: Claude `timeout = 604800000` ms and Codex `tool_timeout_sec = 604800`. Queue cancellation remains explicit; this budget prevents the host from cutting off a healthy FIFO wait during normal long-running work. The writer holds both Windows files with `share=0`, verifies writes through the same handles and uses a restricted recovery journal; a busy or conflicting config fails closed without forcing a host shutdown. Existing host processes must be restarted or a new session opened before the new timeout is effective.
 
 Read-only tools do not require a lease. Never use another session's token or terminate a process to advance the FIFO queue.
 
@@ -143,7 +146,7 @@ These mailbox tools work with no game and no daemon.
 - `version_blocked` with the game off means no DayZ peers, not a protocol mismatch.
 - `lease_required`: call `session_acquire_wait` before the mutating tool.
 - Timeout errors include peer liveness so you can distinguish a quiet peer from a command-level failure.
-- `CONFIG_EMBEDDED`/`CONFIG_MISMATCH`: repair both registrations with `python install_mcp.py --register`; do not fall back to embedded.
+- `CONFIG_EMBEDDED`/`CONFIG_MISMATCH`: repair both registrations with `python install_mcp.py --pin-clis` then `python install_mcp.py --register`; do not fall back to embedded.
 - `PROCESS_UNREGISTERED`, `RUN_STALE`, or `RUN_IDENTITY_MISMATCH`: preserve the process and manifest for explicit lifecycle/admin review; doctor performs no cleanup.
 - `PROCESS_SCAN_FAILED`: the process snapshot is unknown, so the result is fail-closed rather than clean.
 - `PROCESS_SCAN_DECODE_FAILED`: process-scan output could not be decoded; fail-closed and distinct from a missing process.

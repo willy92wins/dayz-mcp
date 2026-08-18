@@ -69,6 +69,7 @@ class WeakAgentCatalogTest(unittest.IsolatedAsyncioTestCase):
             "action_use",
             "ui_click",
             "ui_set_text",
+            "ui_dialog",
             "vehicle_trace",
         ):
             first = (tools[name].description or "").splitlines()[0]

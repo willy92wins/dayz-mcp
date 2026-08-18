@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import math
 import os
@@ -28,6 +29,7 @@ from dayz_mcp import (
     host_config,
     inbox,
     orphan_guard,
+    ui_dialog as ui_dialog_mod,
 )
 from dayz_mcp.control_client import ControlClient, ControlClientError, ControlIdentity
 from dayz_mcp.accredited_daemon_transport import AccreditedTransportError
@@ -471,6 +473,35 @@ class Runtime:
 
         self.state.abandon_command(command_id, "tool_timeout")
         raise ToolError(f"timeout waiting for {cmd} id={command_id}; {self.liveness_message(peer)}")
+
+    async def enqueue_bridge(
+        self, cmd: str, args: dict[str, Any], peer: str, timeout_s: float
+    ) -> int:
+        self.touch()
+        self.ensure_peer_allowed(peer)
+        status, payload = self.state.enqueue_command(
+            cmd, args, peer=peer, operation_timeout_s=timeout_s
+        )
+        if status != 200:
+            raise ToolError(
+                _public_enqueue_error(payload, status_snapshot=self.status(), peer=peer)
+                if isinstance(payload, dict)
+                else payload.get("error", f"enqueue_failed_http_{status}")
+            )
+        return int(payload["id"])
+
+    async def probe_bridge_result(
+        self, cmd: str, command_id: int, peer: str
+    ) -> dict[str, Any] | None:
+        result = self.state.take_result(command_id, remove=True)
+        if result is None:
+            return None
+        if not result.get("ok"):
+            raise ToolError(str(result.get("error") or result))
+        return result_prune.prune_unfilled_fields(cmd, result)
+
+    async def abandon_bridge(self, command_id: int, reason: str) -> None:
+        self.state.abandon_command(command_id, reason)
 
     def audit_exec(self, expr: str, verdict: str, main_fn: str = "", command_id: int | None = None) -> None:
         audit_path = self.exec_audit_path()
@@ -1045,6 +1076,77 @@ class ClientRuntime:
             f"{await self._liveness_message(peer)}"
         )
 
+    async def enqueue_bridge(
+        self, cmd: str, args: dict[str, Any], peer: str, timeout_s: float
+    ) -> int:
+        self.touch()
+        deadline = self._time_fn() + timeout_s
+        lease_token, _ticket = self._session_state_snapshot()
+        request_payload: dict[str, Any] = {
+            "identity": self.identity.to_payload(),
+            "cmd": cmd,
+            "args": args,
+            "peer": peer,
+            "operation_timeout_s": timeout_s,
+        }
+        if lease_token is not None:
+            request_payload["lease_token"] = lease_token
+        status, payload = await asyncio.to_thread(
+            self._call,
+            "POST",
+            "/enqueue",
+            request_payload,
+            None,
+            timeout_s,
+            deadline,
+        )
+        if status != 200:
+            error = self._enqueue_error(payload)
+            if error in _STALE_LEASE_ERRORS and lease_token is not None:
+                self._control._clear_matching_lease(lease_token)
+            if _remote_error_code(payload) in {"version_blocked", "lease_required"}:
+                try:
+                    snapshot = await self.bridge_status_payload(
+                        timeout_s=LIVENESS_STATUS_TIMEOUT_S
+                    )
+                except Exception:
+                    snapshot = None
+                error = _public_enqueue_error(
+                    payload, status_snapshot=snapshot, peer=peer
+                )
+            raise ToolError(error)
+        if "id" not in payload:
+            raise ToolError("daemon_bad_enqueue_response")
+        return int(payload["id"])
+
+    async def probe_bridge_result(
+        self, cmd: str, command_id: int, peer: str
+    ) -> dict[str, Any] | None:
+        deadline = self._time_fn() + DEFAULT_TOOL_TIMEOUT_S
+        status, payload = await asyncio.to_thread(
+            self._call,
+            "GET",
+            "/await",
+            None,
+            {"id": str(command_id), "remove": "1"},
+            DEFAULT_TOOL_TIMEOUT_S,
+            deadline,
+        )
+        if status != 200:
+            raise ToolError(str(payload.get("error") or payload))
+        if payload.get("status") == "done":
+            result = payload.get("result") or {}
+            if not result.get("ok"):
+                raise ToolError(str(result.get("error") or result))
+            return result_prune.prune_unfilled_fields(cmd, result)
+        return None
+
+    async def abandon_bridge(self, command_id: int, reason: str) -> None:
+        # Client mode has no daemon /abandon route. An undelivered command
+        # expires via COMMAND_TTL_S; a delivered one is reaped by its
+        # operation deadline. This method is a documented no-op.
+        return
+
     async def _liveness_message(self, peer: str) -> str:
         # The whole body is guarded, not just the fetch: this runs inside the
         # timeout handler, so anything raising here would REPLACE the timeout
@@ -1375,10 +1477,10 @@ async def execute_wait_for(
 ) -> dict[str, Any]:
     """Poll until a wait_for condition holds.
 
-    This is the only MCP entry that must not wrap its whole body in
-    ``runtime.tool_lock``. The daemon is a multi-session broker: holding that
-    lock across ``await asyncio.sleep`` would stall every other tool for the
-    full wait. Each probe takes the lock; the sleep stays outside it.
+    Any tool that waits on a human or a slow condition takes the lock
+    per probe and sleeps outside it (``wait_for``, ``ui_dialog``). The
+    daemon is a multi-session broker: holding ``runtime.tool_lock`` across
+    ``await asyncio.sleep`` would stall every other tool for the full wait.
     """
     if condition not in WAIT_FOR_CONDITIONS:
         raise ToolError(
@@ -1481,6 +1583,75 @@ async def execute_wait_for(
         observed=observed,
         satisfied=False,
     )
+
+
+async def _peer_liveness_suffix(runtime: Any, peer: str) -> str:
+    try:
+        message_fn = getattr(runtime, "liveness_message", None)
+        if callable(message_fn):
+            text = message_fn(peer)
+            if inspect.isawaitable(text):
+                text = await text
+            return f"; {text}"
+        alt = getattr(runtime, "_liveness_message", None)
+        if callable(alt):
+            return f"; {await alt(peer)}"
+    except Exception:
+        return ""
+    return ""
+
+
+async def execute_ui_dialog(
+    runtime: Any,
+    kind: str,
+    title: str,
+    message: str = "",
+    fields: list[dict[str, Any]] | None = None,
+    timeout_s: float = ui_dialog_mod.DEFAULT_TIMEOUT_S,
+) -> dict[str, Any]:
+    """Show a client modal and wait for the local player.
+
+    Any tool that waits on a human or a slow condition takes the lock
+    per probe and sleeps outside it (``wait_for``, ``ui_dialog``).
+    """
+    try:
+        request = ui_dialog_mod.parse_request(kind, title, message, fields, timeout_s)
+    except ui_dialog_mod.UiDialogError as exc:
+        raise ToolError(str(exc)) from None
+
+    args = ui_dialog_mod.bridge_args(request)
+    budget = ui_dialog_mod.bridge_wait_budget_s(request.timeout_s)
+    async with runtime.tool_lock:
+        command_id = await runtime.enqueue_bridge(
+            "ui_dialog", args, "client", budget
+        )
+
+    deadline = time.monotonic() + budget
+    try:
+        while time.monotonic() < deadline:
+            async with runtime.tool_lock:
+                result = await runtime.probe_bridge_result(
+                    "ui_dialog", command_id, "client"
+                )
+            if result is not None:
+                try:
+                    return ui_dialog_mod.interpret_result(request, result)
+                except ui_dialog_mod.UiDialogError as exc:
+                    raise ToolError(str(exc)) from None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            # Sleep outside the lock. Do not wrap this loop in tool_lock.
+            await asyncio.sleep(min(WAIT_FOR_MIN_POLL_INTERVAL_S, remaining))
+    except asyncio.CancelledError:
+        async with runtime.tool_lock:
+            await runtime.abandon_bridge(command_id, "cancelled")
+        raise
+
+    async with runtime.tool_lock:
+        await runtime.abandon_bridge(command_id, "tool_timeout")
+    suffix = await _peer_liveness_suffix(runtime, "client")
+    raise ToolError(f"timeout waiting for ui_dialog id={command_id}{suffix}")
 
 
 def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
@@ -2515,6 +2686,27 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return await runtime.call_bridge("ui_click", args, "client", _timeout(timeout_s))
 
     @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Client modal (acknowledge/confirm/form). "
+        "Blocks up to timeout_s for the local player's answer; "
+        "cancelled and timed_out are valid."
+    ))
+    async def ui_dialog(
+        kind: Literal["acknowledge", "confirm", "form"],
+        title: str,
+        message: str = "",
+        fields: list[dict[str, Any]] | None = None,
+        timeout_s: float = 60.0,
+    ) -> dict[str, Any]:
+        return await execute_ui_dialog(
+            runtime,
+            kind,
+            title,
+            message=message,
+            fields=fields,
+            timeout_s=timeout_s,
+        )
+
+    @app.tool(description=(
         f"{LEASE_TOOL_LINE} Start a DayZ user action on the local player "
         "without keyboard. Confirm with wait_for(condition=log_matches)."
     ))
@@ -2556,10 +2748,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         poll_interval_s: float = 2.0,
         lookback_lines: int = 200,
     ) -> dict[str, Any]:
-        # Unique in this file: do not wrap the whole body in tool_lock.
-        # execute_wait_for takes the lock only around each probe and sleeps
-        # outside it. A whole-body lock here would freeze every other session
-        # that shares the daemon for the full timeout_s.
+        # wait_for and ui_dialog: do not wrap the whole body in tool_lock.
+        # Any tool that waits on a human or a slow condition takes the lock
+        # per probe and sleeps outside it. A whole-body lock here would freeze
+        # every other session that shares the daemon for the full timeout_s.
         return await execute_wait_for(
             runtime,
             condition,

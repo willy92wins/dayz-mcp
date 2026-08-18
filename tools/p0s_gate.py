@@ -17,9 +17,10 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from install_mcp import (
-    INSTALLER_CLI_MANIFEST,
     InstallerContractError,
     build_installer_cli_entry_payload,
+    installer_cli_manifest_path,
+    installer_not_found_fixtures_path,
     invoke_manifest_cli,
     load_installer_cli_manifest,
 )
@@ -74,12 +75,6 @@ _WTD_STATEACTION_VERIFY = 1
 _WTD_STATEACTION_CLOSE = 2
 _WTD_CACHE_ONLY_URL_RETRIEVAL = 0x1000
 _ABSENT_PROBE_NAME = "p0s-absent-fixture-do-not-create"
-INSTALLER_NOT_FOUND_FIXTURES = (
-    TOOLS_DIR.parent
-    / "reports"
-    / "security"
-    / "installer-not-found-fixtures-v1.json"
-)
 
 
 def authenticode_valid(path: Path) -> bool:
@@ -207,13 +202,15 @@ def create_installer_cli_manifest(
 def capture_installer_not_found_fixtures(
     output_path: Path,
     *,
-    manifest_path: Path = INSTALLER_CLI_MANIFEST,
+    manifest_path: Path | None = None,
     runner: Callable[..., object] = subprocess.run,
 ) -> Path:
     output = Path(output_path)
     if output.exists():
         raise FileExistsError("installer not-found fixture is create-only")
-    manifest_file = Path(manifest_path)
+    manifest_file = Path(
+        manifest_path if manifest_path is not None else installer_cli_manifest_path()
+    )
     manifest_bytes = manifest_file.read_bytes()
     manifest_hash = hashlib.sha256(manifest_bytes).hexdigest().upper()
     manifest = load_installer_cli_manifest(manifest_file)
@@ -225,6 +222,10 @@ def capture_installer_not_found_fixtures(
             arguments.append("--json")
         try:
             completed = invoke_manifest_cli(manifest.entries[role], arguments, runner)
+        except subprocess.TimeoutExpired as error:
+            raise InstallerContractError(
+                "installer_cli_probe_timeout", f"{role}"
+            ) from error
         except OSError as error:
             winerror = getattr(error, "winerror", None)
             raise InstallerContractError(
@@ -299,13 +300,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "freeze-installer-clis":
         created = create_installer_cli_manifest(
-            INSTALLER_CLI_MANIFEST,
+            installer_cli_manifest_path(),
             {"CLAUDE": args.claude_exe, "CODEX": args.codex_exe},
         )
         print(json.dumps({"status": "created", "path": str(created)}))
         return 0
     if args.command == "probe-installer-not-found":
-        created = capture_installer_not_found_fixtures(INSTALLER_NOT_FOUND_FIXTURES)
+        created = capture_installer_not_found_fixtures(
+            installer_not_found_fixtures_path()
+        )
         print(json.dumps({"status": "created", "path": str(created)}))
         return 0
     if args.command == "backup-runs-v1":

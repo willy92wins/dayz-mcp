@@ -1,8 +1,9 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 39 typed
-tools, server-authoritative, no keyboard, no OCR.**
+game, put the world into a state, act, and read back what the engine did — 49 typed
+tools (+ `exec_enforce` when an allowlist is configured), server-authoritative, no
+keyboard, no OCR.**
 
 Two things fall out of that, and both are new for this game:
 
@@ -33,7 +34,7 @@ what the blades add up to.
 | **Set up the scene** | `world_spawn`, `player_teleport`, `vehicle_enter`, `inventory_give`, `world_time_set`, `world_weather_set`, `engine_set` | Put the world into the state the test needs — deterministically, from script. |
 | **Act** | `vehicle_control`, `object_anim`, `camera_set`, `notify_players` | Drive, animate, frame the shot. |
 | **Observe** | `wait_for`, `logs_since`, `query_player_state`, `object_inspect`, `vehicle_telemetry`, `vehicle_trace`, `scene_raycast`, `surface_query`, `capture_screenshot` | Structured state from the server, log tails since a cursor, 20 Hz vehicle traces, raycasts, frames. Data an agent can assert on, not pixels to squint at. |
-| **Reset + repeat** | `restore_gameplay`, `dayz_test_stop`, `session_*` | Return the world to normal, stop the managed run, hand the game to the next session. |
+| **Reset + repeat** | `restore_gameplay`, `dayz_test_stop`, `session_acquire_wait`, `session_release`, `session_status` | Return the world to normal, stop the managed run, hand the game to the next session. |
 
 An agent that can call these can iterate on a mod the way it iterates on code: change,
 build, run, measure, fix — the way this repo itself was developed and gated.
@@ -50,9 +51,9 @@ build, run, measure, fix — the way this repo itself was developed and gated.
 | Undo, hand over | `restore_gameplay`, `session_acquire_wait` / `session_release` / `session_status` |
 
 Everything server-side works against a headless server — it returns data, not frames.
-Visual capture (`capture_screenshot`, `camera_*`) needs a rendered client on the same
-machine. Several agents can share one running game: the daemon owns the port, hands
-out one lease at a time and audits what each holder did.
+Visual capture (`capture_screenshot`, `camera_get`, `camera_set`) needs a rendered
+client on the same machine. Several agents can share one running game: the daemon
+owns the port, hands out one lease at a time and audits what each holder did.
 
 ## How it works
 
@@ -62,10 +63,22 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` is broken in the diag build (T165276), so frames
 come from an external window grab of the rendered client, which only reads pixels.
 
-**39 tools** across world, player, vehicle, camera, telemetry, lifecycle and session
-coordination. Several agent sessions can share one running game through a single
-daemon that owns the port and hands out leases. The full surface, the transport and
-the security model are in [`dayz-mcp-architecture.md`](dayz-mcp-architecture.md);
+**49 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+vehicle, camera, telemetry, lifecycle and session coordination:
+`action_use`, `bridge_status`, `camera_get`, `camera_set`, `capture_screenshot`,
+`dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `inventory_give`,
+`lease_acquire`, `list_projects`, `logs_since`, `notify_players`, `object_anim`,
+`object_delete`, `object_inspect`, `pipeline_feedback`, `pipeline_inbox`,
+`pipeline_resolve`, `player_teleport`, `query_all_players`, `query_get_in_condition`,
+`query_player_state`, `restore_gameplay`, `scene_raycast`, `session_acquire`,
+`session_acquire_wait`, `session_cancel`, `session_heartbeat`, `session_release`,
+`session_status`, `session_wait`, `surface_query`, `telemetry_read`, `ui_click`,
+`ui_set_text`, `ui_tree`, `vehicle_control`, `vehicle_enter`, `vehicle_get_in_client`,
+`vehicle_prepare_fixture`, `vehicle_release`, `vehicle_telemetry`, `vehicle_trace`,
+`wait_for`, `world_spawn`, `world_time_set`, `world_weather_set`.
+Several agent sessions can share one running game through a single daemon that owns
+the port and hands out leases. The full surface, the transport and the security
+model are in [`dayz-mcp-architecture.md`](dayz-mcp-architecture.md);
 the acceptance contract is in [`product-spec.md`](product-spec.md).
 
 ## What you need
@@ -90,6 +103,9 @@ endpoint. Nothing is client-authoritative: positions and state are read in
 
 ## Install
 
+The usual installer does not need a CLI pin. It registers by calling
+`claude mcp add` / `codex.cmd mcp add` directly, so an npm `.cmd` shim is fine:
+
 ```powershell
 cd tools
 .\install-mcp.ps1 -Register
@@ -98,6 +114,20 @@ cd tools
 It creates `tools\.venv-mcp`, installs the pinned dependencies plus this package,
 generates an API key, and writes the client configuration. `-Register` also
 registers the server with your MCP client.
+
+The hardened Python path is different: `python install_mcp.py --register` talks
+only to native x64 `claude.exe` / `codex.exe` recorded on this machine. Pin those
+first (writes under `%LOCALAPPDATA%\DayZ_MCP\security\`):
+
+```powershell
+cd tools
+python install_mcp.py --pin-clis
+python install_mcp.py --register
+```
+
+If `claude` / `codex` on PATH are shims (`.cmd` / `.ps1`), pass the native x64
+executables with `--claude-exe` and `--codex-exe`. Re-run `--pin-clis` after those
+binaries change. `.\install-mcp.ps1 -Register` does not read that pin.
 
 Three run modes (`python -m dayz_mcp`):
 

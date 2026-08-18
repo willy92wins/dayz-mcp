@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import socket
 import threading
 import time
 import unittest
@@ -981,5 +982,203 @@ class StaleCommandHygieneTest(unittest.TestCase):
         self.assertEqual(state.take_result(command_id)["error"], "stale_discarded")
 
 
+class LoopbackHttpBodyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.key = "test-key"
+        self.state = loopback.ServerState(self.key)
+        self.httpd = loopback.create_http_server(0, self.state, log_sink=lambda _message: None)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        self.thread.start()
+        host, port = self.httpd.server_address
+        self.base = f"http://{host}:{port}"
+
+    def tearDown(self) -> None:
+        self.httpd.shutdown()
+        self.thread.join(timeout=2.0)
+        self.httpd.server_close()
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        query: dict | None = None,
+        include_key: bool = True,
+    ) -> tuple[int, dict]:
+        params = dict(query or {})
+        if include_key:
+            params["key"] = self.key
+        url = self.base + path + "?" + urllib.parse.urlencode(params)
+        data = None
+        headers = {}
+        if payload is not None:
+            data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=2.0) as response:
+                raw = response.read().decode("utf-8")
+                return int(response.status), json.loads(raw)
+        except urllib.error.HTTPError as exc:
+            try:
+                raw = exc.read().decode("utf-8")
+                return int(exc.code), json.loads(raw)
+            finally:
+                exc.close()
+
+    def _raw_http(self, request: bytes, timeout: float = 2.0) -> tuple[int, dict]:
+        parsed = urllib.parse.urlparse(self.base)
+        host = parsed.hostname or "127.0.0.1"
+        port = int(parsed.port or 80)
+        sock = socket.create_connection((host, port), timeout=timeout)
+        try:
+            sock.sendall(request)
+            sock.shutdown(socket.SHUT_WR)
+            chunks: list[bytes] = []
+            while True:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                chunks.append(data)
+        finally:
+            sock.close()
+        raw = b"".join(chunks)
+        header, sep, body = raw.partition(b"\r\n\r\n")
+        if not sep:
+            raise AssertionError(f"no HTTP header separator in {raw!r}")
+        status = int(header.split(b"\r\n", 1)[0].split()[1])
+        if not body:
+            return status, {}
+        return status, json.loads(body.decode("utf-8"))
+
+    def test_ui_dialog_enqueue_well_formed_and_rejects_seven_fields(self) -> None:
+        status, body = self.request(
+            "POST",
+            "/enqueue",
+            {
+                "cmd": "ui_dialog",
+                "args": {
+                    "kind": "acknowledge",
+                    "title": "Ready",
+                    "message": "Mod loaded.",
+                },
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("id", body)
+        status, poll = self.request("GET", "/poll", query={"peer": "client"})
+        self.assertEqual(status, 200)
+        self.assertEqual(poll["commands"][0]["cmd"], "ui_dialog")
+
+        status, body = self.request(
+            "POST",
+            "/enqueue",
+            {
+                "cmd": "ui_dialog",
+                "args": {
+                    "kind": "form",
+                    "title": "Form",
+                    "fields": [
+                        {"id": f"f{index}", "label": f"Field {index}"}
+                        for index in range(7)
+                    ],
+                },
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(body, {"error": "bad_args"})
+
+    def test_ui_dialog_unhashable_kind_is_bad_args(self) -> None:
+        status, body = self.request(
+            "POST",
+            "/enqueue",
+            {"cmd": "ui_dialog", "args": {"kind": {}, "title": "T"}},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(body, {"error": "bad_args"})
+
+    def test_read_json_rejects_negative_content_length(self) -> None:
+        status, body = self._raw_http(
+            (
+                f"POST /enqueue?key={self.key} HTTP/1.0\r\n"
+                "Host: 127.0.0.1\r\n"
+                "Content-Length: -1\r\n"
+                "\r\n"
+            ).encode("ascii")
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(body, {"error": "bad_content_length"})
+
+    def test_read_json_rejects_non_numeric_content_length(self) -> None:
+        status, body = self._raw_http(
+            (
+                f"POST /enqueue?key={self.key} HTTP/1.0\r\n"
+                "Host: 127.0.0.1\r\n"
+                "Content-Length: nope\r\n"
+                "\r\n"
+            ).encode("ascii")
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(body, {"error": "bad_content_length"})
+
+    def test_read_json_rejects_oversize_without_reading_body(self) -> None:
+        too_big = loopback.MAX_BODY_BYTES + 1
+        status, body = self._raw_http(
+            (
+                f"POST /enqueue?key={self.key} HTTP/1.0\r\n"
+                "Host: 127.0.0.1\r\n"
+                f"Content-Length: {too_big}\r\n"
+                "\r\n"
+            ).encode("ascii")
+        )
+        self.assertEqual(status, 413)
+        self.assertEqual(body, {"error": "body_too_large"})
+
+    def test_read_json_rejects_invalid_utf8(self) -> None:
+        status, body = self._raw_http(
+            (
+                f"POST /enqueue?key={self.key} HTTP/1.0\r\n"
+                "Host: 127.0.0.1\r\n"
+                "Content-Length: 1\r\n"
+                "\r\n"
+            ).encode("ascii")
+            + b"\xff"
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(body, {"error": "bad_json"})
+
+    def test_read_json_rejects_short_body(self) -> None:
+        payload = b'{"cmd":"x"}'
+        status, body = self._raw_http(
+            (
+                f"POST /enqueue?key={self.key} HTTP/1.0\r\n"
+                "Host: 127.0.0.1\r\n"
+                "Content-Length: 20\r\n"
+                "\r\n"
+            ).encode("ascii")
+            + payload
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(body, {"error": "bad_body_length"})
+
+    def test_read_json_happy_path_still_enqueues(self) -> None:
+        payload = json.dumps(
+            {"cmd": "query_player_state", "args": {}}, separators=(",", ":")
+        ).encode("utf-8")
+        status, body = self._raw_http(
+            (
+                f"POST /enqueue?key={self.key} HTTP/1.0\r\n"
+                "Host: 127.0.0.1\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(payload)}\r\n"
+                "\r\n"
+            ).encode("ascii")
+            + payload
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("id", body)
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
-from dayz_mcp import daemon_credential, orphan_guard
+from dayz_mcp import daemon_credential, orphan_guard, ui_dialog
 from dayz_mcp.core import (
     BLOCKED_VERSION_STATES,
     EXPECTED_BRIDGE_VERSION,
@@ -61,6 +61,7 @@ CLIENT_COMMANDS = {
     "ui_tree",
     "ui_set_text",
     "ui_click",
+    "ui_dialog",
     "action_use",
 }
 
@@ -100,6 +101,11 @@ MAX_QUEUE = 64
 # its last poll exceeds PEER_RECONNECT_GAP_S (the previous game/session is gone).
 COMMAND_TTL_S = 30.0
 PEER_RECONNECT_GAP_S = 10.0
+# Ceiling for Handler._read_json. Checked against exec_enforce (short
+# allowlisted expr), world_spawn (tiny), pipeline_feedback (not on this
+# socket; 8 KiB inbox cap), ui_tree /result (<=512 nodes) and
+# vehicle_trace /result (limit<=64 samples). None approach 1 MiB.
+MAX_BODY_BYTES = 1 * 1024 * 1024
 
 LogSink = Callable[[str], None]
 VersionValidator = Callable[[str | None], str]
@@ -390,6 +396,9 @@ def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
             ):
                 return False, "bad_args"
         return True, None
+
+    if cmd == "ui_dialog":
+        return ui_dialog.validate_command_args(args)
 
     if cmd == "action_use":
         keys = set(args)
@@ -1510,15 +1519,34 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _read_json(self) -> dict | None:
+        raw_length = self.headers.get("Content-Length", "0")
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
+            length = int(raw_length)
+        except (TypeError, ValueError):
             self._json(400, {"error": "bad_content_length"})
+            return None
+        if length < 0:
+            self._json(400, {"error": "bad_content_length"})
+            return None
+        if length > MAX_BODY_BYTES:
+            # HTTP/1.0, no keep-alive: 413 without reading the body is safe.
+            # A client still sending >1 MiB may see RST instead of the 413 body.
+            self._json(413, {"error": "body_too_large"})
             return None
 
         raw = self.rfile.read(length)
+        if len(raw) != length:
+            self._json(400, {"error": "bad_body_length"})
+            return None
+
         try:
-            body = json.loads(raw.decode("utf-8") or "{}")
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            self._json(400, {"error": "bad_json"})
+            return None
+
+        try:
+            body = json.loads(text or "{}")
         except json.JSONDecodeError:
             self._json(400, {"error": "bad_json"})
             return None
