@@ -62,6 +62,12 @@ class WeakAgentCatalogTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("players_at_least", wait_desc)
         self.assertIn("players_at_most", wait_desc)
         self.assertIn("log_matches", wait_desc)
+        self.assertIn("playbook_run", tools)
+        playbook_desc = tools["playbook_run"].description or ""
+        self.assertTrue(playbook_desc.startswith("Requires a lease (session_acquire_wait)."))
+        self.assertIn("checklist", playbook_desc.lower())
+        self.assertIn("Does not launch DayZ", playbook_desc)
+        self.assertLessEqual(len(playbook_desc), 200)
         for name in (
             "player_teleport",
             "world_spawn",
@@ -70,6 +76,7 @@ class WeakAgentCatalogTest(unittest.IsolatedAsyncioTestCase):
             "ui_click",
             "ui_set_text",
             "ui_dialog",
+            "playbook_run",
             "vehicle_trace",
         ):
             first = (tools[name].description or "").splitlines()[0]
@@ -77,6 +84,14 @@ class WeakAgentCatalogTest(unittest.IsolatedAsyncioTestCase):
                 first.startswith("Requires a lease (session_acquire_wait)."),
                 f"{name}={first!r}",
             )
+
+    async def test_playbook_run_unknown_name_is_bad_args(self) -> None:
+        app, _runtime = build_app(ServerConfig(log_sink=lambda _m: None))
+        with self.assertRaises(Exception) as ctx:
+            await app.call_tool("playbook_run", {"name": "not_in_dictionary"})
+        message = str(ctx.exception)
+        self.assertIn("bad_args: name", message)
+        self.assertIn("not_in_dictionary", message)
 
     def test_fastmcp_instructions_name_the_junior_flow(self) -> None:
         app, _runtime = build_app(ServerConfig(log_sink=lambda _m: None))

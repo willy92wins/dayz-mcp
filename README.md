@@ -63,13 +63,13 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` is broken in the diag build (T165276), so frames
 come from an external window grab of the rendered client, which only reads pixels.
 
-**49 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**50 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle and session coordination:
 `action_use`, `bridge_status`, `camera_get`, `camera_set`, `capture_screenshot`,
 `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `inventory_give`,
 `lease_acquire`, `list_projects`, `logs_since`, `notify_players`, `object_anim`,
 `object_delete`, `object_inspect`, `pipeline_feedback`, `pipeline_inbox`,
-`pipeline_resolve`, `player_teleport`, `query_all_players`, `query_get_in_condition`,
+`pipeline_resolve`, `playbook_run`, `player_teleport`, `query_all_players`, `query_get_in_condition`,
 `query_player_state`, `restore_gameplay`, `scene_raycast`, `session_acquire`,
 `session_acquire_wait`, `session_cancel`, `session_heartbeat`, `session_release`,
 `session_status`, `session_wait`, `surface_query`, `telemetry_read`, `ui_click`,

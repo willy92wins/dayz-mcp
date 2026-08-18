@@ -125,10 +125,82 @@ class UiDialogValidationTest(unittest.TestCase):
                     "id": "name",
                     "label": "Name",
                     "required": True,
-                    "default": "",
+                    "default_text": "",
                 }
             ],
         )
+        self.assertNotIn("default", payload["fields"][0])
+
+    def test_bridge_args_maps_agent_default_to_default_text(self) -> None:
+        request = ui_dialog.parse_request(
+            "form",
+            "Title",
+            "",
+            [{"id": "name", "label": "Name", "default": "cached"}],
+        )
+        payload = ui_dialog.bridge_args(request)
+        self.assertEqual(payload["fields"][0]["default_text"], "cached")
+        self.assertNotIn("default", payload["fields"][0])
+
+    def test_tool_path_rejects_default_text(self) -> None:
+        with self.assertRaises(ui_dialog.UiDialogError) as ctx:
+            ui_dialog.parse_request(
+                "form",
+                "Title",
+                "",
+                [{"id": "name", "label": "Name", "default_text": "x"}],
+            )
+        self.assertEqual(
+            str(ctx.exception),
+            "bad_args: unknown key 'default_text' in fields[0]",
+        )
+
+    def test_wire_path_accepts_default_text_and_rejects_both_keys(self) -> None:
+        request = ui_dialog.parse_request(
+            "form",
+            "Title",
+            "",
+            [{"id": "name", "label": "Name", "default_text": "cached"}],
+            wire=True,
+        )
+        self.assertEqual(request.fields[0].default, "cached")
+        with self.assertRaises(ui_dialog.UiDialogError) as ctx:
+            ui_dialog.parse_request(
+                "form",
+                "Title",
+                "",
+                [
+                    {
+                        "id": "name",
+                        "label": "Name",
+                        "default": "a",
+                        "default_text": "b",
+                    }
+                ],
+                wire=True,
+            )
+        self.assertIn("fields[0].default_text", str(ctx.exception))
+
+    def test_default_error_prefix_matches_path(self) -> None:
+        too_long = "x" * (ui_dialog.DEFAULT_MAX_CHARS + 1)
+        with self.assertRaises(ui_dialog.UiDialogError) as ctx:
+            ui_dialog.parse_request(
+                "form",
+                "Title",
+                "",
+                [{"id": "name", "label": "Name", "default": too_long}],
+            )
+        self.assertIn("fields[0].default", str(ctx.exception))
+        self.assertNotIn("default_text", str(ctx.exception))
+        with self.assertRaises(ui_dialog.UiDialogError) as ctx:
+            ui_dialog.parse_request(
+                "form",
+                "Title",
+                "",
+                [{"id": "name", "label": "Name", "default_text": too_long}],
+                wire=True,
+            )
+        self.assertIn("fields[0].default_text", str(ctx.exception))
 
     def test_missing_id_and_label_names_id_first(self) -> None:
         with self.assertRaises(ui_dialog.UiDialogError) as ctx:
@@ -277,6 +349,99 @@ class UiDialogResultTest(unittest.TestCase):
         )
         self.assertEqual(result["id"], 44)
         self.assertEqual(result["_server"], meta)
+
+    def _enforce_dialog(self, state: str, **filled: object) -> dict:
+        dialog: dict = {
+            "state": state,
+            "dismissed_by": "",
+            "choice": "",
+            "values": [],
+            "reason": "",
+            "elapsed_s": 1.0,
+        }
+        dialog.update(filled)
+        return dialog
+
+    def test_enforce_shaped_payload_per_state_and_kind(self) -> None:
+        cases: list[tuple[ui_dialog.UiDialogRequest, dict, str]] = [
+            (
+                self._ack(),
+                self._enforce_dialog("completed", dismissed_by="ok"),
+                "completed",
+            ),
+            (self._ack(), self._enforce_dialog("cancelled"), "cancelled"),
+            (self._ack(), self._enforce_dialog("timed_out"), "timed_out"),
+            (self._ack(), self._enforce_dialog("disconnected"), "disconnected"),
+            (
+                self._ack(),
+                self._enforce_dialog("rejected", reason="busy"),
+                "rejected",
+            ),
+            (
+                self._confirm(),
+                self._enforce_dialog("completed", choice="yes"),
+                "completed",
+            ),
+            (
+                self._confirm(),
+                self._enforce_dialog("completed", choice="no"),
+                "completed",
+            ),
+            (self._confirm(), self._enforce_dialog("cancelled"), "cancelled"),
+            (self._confirm(), self._enforce_dialog("timed_out"), "timed_out"),
+            (
+                self._confirm(),
+                self._enforce_dialog("disconnected"),
+                "disconnected",
+            ),
+            (
+                self._confirm(),
+                self._enforce_dialog("rejected", reason="busy"),
+                "rejected",
+            ),
+            (
+                self._form(),
+                self._enforce_dialog(
+                    "completed",
+                    values=[
+                        {"id": "name", "value": "North"},
+                        {"id": "note", "value": ""},
+                    ],
+                ),
+                "completed",
+            ),
+            (self._form(), self._enforce_dialog("cancelled"), "cancelled"),
+            (self._form(), self._enforce_dialog("timed_out"), "timed_out"),
+            (self._form(), self._enforce_dialog("disconnected"), "disconnected"),
+            (
+                self._form(),
+                self._enforce_dialog("rejected", reason="busy"),
+                "rejected",
+            ),
+        ]
+        for request, dialog, state in cases:
+            with self.subTest(kind=request.kind, state=state, choice=dialog.get("choice")):
+                result = ui_dialog.interpret_result(request, _wire(dialog))
+                self.assertEqual(result["state"], state)
+                self.assertEqual(result["ok"], 1)
+                if state != "completed" or request.kind != "form":
+                    self.assertNotIn("values", result)
+                if state == "completed" and request.kind == "acknowledge":
+                    self.assertEqual(result["dismissed_by"], "ok")
+                    self.assertNotIn("choice", result)
+                if state == "completed" and request.kind == "confirm":
+                    self.assertIn(result["choice"], {"yes", "no"})
+                    self.assertNotIn("dismissed_by", result)
+                if state == "rejected":
+                    self.assertEqual(result["reason"], "busy")
+
+    def test_enforce_empty_values_on_completed_form_is_bridge_bad_result(self) -> None:
+        with self.assertRaises(ui_dialog.UiDialogError) as ctx:
+            ui_dialog.interpret_result(
+                self._form(),
+                _wire(self._enforce_dialog("completed", values=[])),
+            )
+        self.assertIn("bridge_bad_result", str(ctx.exception))
 
     def test_prune_keeps_dialog_and_drops_empty_player_state(self) -> None:
         raw = _wire(
@@ -431,7 +596,10 @@ class UiDialogExecuteTest(unittest.IsolatedAsyncioTestCase):
         text = server.execute_wait_for.__doc__ or ""
         self.assertIn("wait_for", text)
         self.assertIn("ui_dialog", text)
+        self.assertIn("playbook_run", text)
         self.assertNotIn("only MCP entry", text)
+        ui_text = server.execute_ui_dialog.__doc__ or ""
+        self.assertIn("playbook_run", ui_text)
 
 
 class UiDialogClientRuntimeTest(unittest.IsolatedAsyncioTestCase):
@@ -611,6 +779,23 @@ class UiDialogWhitelistTest(unittest.TestCase):
         )
         self.assertFalse(ok)
         self.assertEqual(error, "bad_args")
+        ok, error = loopback.validate_command_args(
+            "ui_dialog",
+            {
+                "kind": "form",
+                "title": "T",
+                "fields": [
+                    {
+                        "id": "name",
+                        "label": "Name",
+                        "required": True,
+                        "default_text": "cached",
+                    }
+                ],
+            },
+        )
+        self.assertTrue(ok)
+        self.assertIsNone(error)
 
 
 if __name__ == "__main__":

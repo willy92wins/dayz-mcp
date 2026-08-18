@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import http.client
+import locale
 import math
 import os
 import ntpath
@@ -335,37 +336,54 @@ def walk_past_redirectors(
     return None
 
 
+def _decode_console_bytes(raw: bytes) -> str:
+    """Decode console/OEM bytes without raising on undecodable octets."""
+    encoding = locale.getpreferredencoding(False) or "utf-8"
+    return raw.decode(encoding, errors="replace")
+
+
+def _listener_pid_from_netstat_output(raw: bytes | str, port: int) -> int | None:
+    """Parse a ``netstat -ano -p TCP`` dump for the 127.0.0.1 listener PID."""
+    if isinstance(raw, bytes):
+        text = _decode_console_bytes(raw)
+    else:
+        text = raw
+    local_endpoint = "127.0.0.1:" + str(int(port))
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[3] != "LISTENING":
+            continue
+        if parts[1] != local_endpoint:
+            continue
+        for token in reversed(parts[4:]):
+            try:
+                return int(token)
+            except ValueError:
+                continue
+    return None
+
+
 def listener_pid_for_port(port: int) -> int | None:
     """PID of the process LISTENING on ``port`` via ``netstat -ano`` (None if none).
 
     netstat row layout (verified): ``Proto  Local  Foreign  State  PID`` — the PID
     is the last whitespace-separated column and the local address ends with ``:port``.
+    Console bytes are decoded with ``errors='replace'`` so OEM code-page output
+    cannot raise ``UnicodeDecodeError`` under UTF-8 mode.
     """
     if not _IS_WINDOWS:  # pragma: no cover
         return None
-    local_endpoint = "127.0.0.1:" + str(int(port))
     try:
         result = subprocess.run(
             ["netstat", "-ano", "-p", "TCP"],
             capture_output=True,
-            text=True,
             timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return None
-    for line in result.stdout.splitlines():
-        parts = line.split()
-        if len(parts) < 5 or parts[3] != "LISTENING":
-            continue
-        if parts[1] != local_endpoint:
-            continue
-        try:
-            return int(parts[-1])
-        except ValueError:
-            continue
-    return None
+    return _listener_pid_from_netstat_output(result.stdout or b"", port)
 
 
 def _native_listener_pid_for_port(port: int) -> int | None:

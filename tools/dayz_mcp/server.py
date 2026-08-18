@@ -29,6 +29,7 @@ from dayz_mcp import (
     host_config,
     inbox,
     orphan_guard,
+    playbook_tool as playbook_tool_mod,
     ui_dialog as ui_dialog_mod,
 )
 from dayz_mcp.control_client import ControlClient, ControlClientError, ControlIdentity
@@ -1478,9 +1479,12 @@ async def execute_wait_for(
     """Poll until a wait_for condition holds.
 
     Any tool that waits on a human or a slow condition takes the lock
-    per probe and sleeps outside it (``wait_for``, ``ui_dialog``). The
-    daemon is a multi-session broker: holding ``runtime.tool_lock`` across
-    ``await asyncio.sleep`` would stall every other tool for the full wait.
+    per probe and sleeps outside it (``wait_for``, ``ui_dialog``,
+    ``playbook_run``). The daemon is a multi-session broker: holding
+    ``runtime.tool_lock`` across ``await asyncio.sleep`` would stall every
+    other tool for the full wait. ``playbook_run`` is a compositor: it
+    does not wrap its body in the lock; each step tool takes the lock as
+    usual.
     """
     if condition not in WAIT_FOR_CONDITIONS:
         raise ToolError(
@@ -1612,7 +1616,8 @@ async def execute_ui_dialog(
     """Show a client modal and wait for the local player.
 
     Any tool that waits on a human or a slow condition takes the lock
-    per probe and sleeps outside it (``wait_for``, ``ui_dialog``).
+    per probe and sleeps outside it (``wait_for``, ``ui_dialog``,
+    ``playbook_run``).
     """
     try:
         request = ui_dialog_mod.parse_request(kind, title, message, fields, timeout_s)
@@ -1681,7 +1686,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "session_acquire_wait (or lease_acquire) -> check "
             "bridge_status.ready -> mutating verbs -> wait_for to wait -> "
             "session_release. Use dayz_test_run / dayz_test_stop for lifecycle. "
-            "Spawn: run playbooks/place_safely.toml before a new site; "
+            "Spawn: playbook_run(name=\"place_safely\", "
+            "params={\"x\":..,\"z\":..}) before a new site; "
             "pos=[x, surface_query.y, z]; y=0 is ground; example "
             "type=CivilianSedan; living infected flags=3108 "
             "(ECE_PLACE_ON_SURFACE|ECE_INITAI|ECE_CREATEPHYSICS). "
@@ -2748,10 +2754,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         poll_interval_s: float = 2.0,
         lookback_lines: int = 200,
     ) -> dict[str, Any]:
-        # wait_for and ui_dialog: do not wrap the whole body in tool_lock.
-        # Any tool that waits on a human or a slow condition takes the lock
-        # per probe and sleeps outside it. A whole-body lock here would freeze
-        # every other session that shares the daemon for the full timeout_s.
+        # wait_for, ui_dialog, and playbook_run: do not wrap the whole body
+        # in tool_lock. Any tool that waits on a human or a slow condition
+        # takes the lock per probe and sleeps outside it. A whole-body lock
+        # here would freeze every other session that shares the daemon for
+        # the full timeout_s.
         return await execute_wait_for(
             runtime,
             condition,
@@ -2858,6 +2865,29 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 if message == "bad_args" or message.startswith("bad_args"):
                     raise ToolError(message) from None
                 raise
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Run a named playbook checklist from the "
+            "dictionary. Does not launch DayZ. certified is always false."
+        )
+    )
+    async def playbook_run(
+        name: str,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run a named playbook checklist.
+
+        Does not wrap the body in ``runtime.tool_lock``. Each step tool
+        takes the lock as usual (same rule as ``wait_for`` and
+        ``ui_dialog``). There is no envelope timeout: each sub-tool
+        applies its own budget (``DEFAULT_TOOL_TIMEOUT_S`` 15s up to
+        ``MAX_TIMEOUT_S`` 300s; ``wait_for`` <= 600s; ``ui_dialog``
+        <= 250s). At most ``MAX_PLAYBOOK_STEPS`` steps. ``certified``
+        is always false until a FROZEN sidecar registry exists. Does
+        not launch DayZ.
+        """
+        return await playbook_tool_mod.execute_playbook_run(app, name, params)
 
     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
     return app, runtime

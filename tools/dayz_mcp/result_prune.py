@@ -42,6 +42,7 @@ PRUNABLE_FIELDS = (
     "inspect",
     "entities",
     "ui",
+    "dialog",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
@@ -49,11 +50,18 @@ SEMANTIC_EMPTY_FIELDS = frozenset(
     {
         # Verified in-game 2026-07-29: empty array is success, not absence.
         ("query_all_players", "players"),
+        # ui_dialog answers inside `dialog`; an empty object there is a bridge
+        # defect the caller must see, not noise to hide.
+        ("ui_dialog", "dialog"),
     }
 )
 
 
 def _is_empty_container(value: Any) -> bool:
+    # `null` for a ref member means the same as {} / []: the verb never filled it.
+    # The bridge does not emit null for a filled ref (players null arrives as []).
+    if value is None:
+        return True
     return (isinstance(value, (list, dict))) and not value
 
 

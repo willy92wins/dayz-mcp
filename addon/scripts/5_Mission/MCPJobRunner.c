@@ -53,6 +53,30 @@ class MCPJobRunner
 		return m_Jobs.Count();
 	}
 
+	int CountExcluding(string kind)
+	{
+		if (!m_Jobs)
+		{
+			return 0;
+		}
+
+		int n = 0;
+		int i = 0;
+		int total = m_Jobs.Count();
+		while (i < total)
+		{
+			MCPJob job = m_Jobs.GetElement(i);
+			if (job && job.kind != kind)
+			{
+				n = n + 1;
+			}
+
+			i = i + 1;
+		}
+
+		return n;
+	}
+
 	void AddJob(MCPJob job)
 	{
 		if (!m_Jobs || !job)

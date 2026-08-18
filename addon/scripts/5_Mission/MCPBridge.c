@@ -169,6 +169,13 @@ class MCPBridge
 			return;
 		}
 
+		string loopbackPrefix = "http://127.0.0.1:";
+		if (!StringHasPrefix(cfg.url, loopbackPrefix))
+		{
+			LogInitFailure("config url not loopback");
+			return;
+		}
+
 		m_Url = cfg.url;
 		m_Key = cfg.key;
 		if (cfg.pollHz > 0.0)

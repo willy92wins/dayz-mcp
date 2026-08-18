@@ -32,6 +32,7 @@ def _wire_result(**filled: object) -> dict[str, object]:
         "get_in": {},
         "trace": {},
         "pos_real": [],
+        "dialog": {},
     }
     empty.update(filled)
     return {"ok": 1, "cmd": "fixture", **empty}
@@ -106,7 +107,10 @@ class ResultPruneTest(unittest.TestCase):
         # a blanket opt-out and the ambiguity would survive everywhere else.
         pruned = prune_unfilled_fields("query_player_state", _wire_result())
         self.assertNotIn("players", pruned)
-        self.assertEqual(SEMANTIC_EMPTY_FIELDS, frozenset({("query_all_players", "players")}))
+        self.assertEqual(
+            SEMANTIC_EMPTY_FIELDS,
+            frozenset({("query_all_players", "players"), ("ui_dialog", "dialog")}),
+        )
 
     def test_scalars_are_never_pruned_even_when_falsy(self) -> None:
         # False/0/"" are indistinguishable from "never assigned", so they are
@@ -139,6 +143,25 @@ class ResultPruneTest(unittest.TestCase):
                 self.assertEqual(
                     {field for field in PRUNABLE_FIELDS if field in pruned}, expected
                 )
+
+    def test_empty_dialog_is_pruned_except_on_ui_dialog(self) -> None:
+        empty_object = prune_unfilled_fields(
+            "world_spawn", {**_wire_result(), "dialog": {}}
+        )
+        self.assertNotIn("dialog", empty_object)
+        empty_none = prune_unfilled_fields(
+            "query_player_state", {**_wire_result(), "dialog": None}
+        )
+        self.assertNotIn("dialog", empty_none)
+        kept_empty = prune_unfilled_fields(
+            "ui_dialog", {**_wire_result(), "dialog": {}}
+        )
+        self.assertEqual(kept_empty["dialog"], {})
+        filled = {"state": "completed", "elapsed_s": 1.0}
+        kept_filled = prune_unfilled_fields(
+            "ui_dialog", {**_wire_result(), "dialog": filled}
+        )
+        self.assertEqual(kept_filled["dialog"], filled)
 
     def test_unknown_keys_and_non_dict_results_pass_through(self) -> None:
         result = _wire_result()

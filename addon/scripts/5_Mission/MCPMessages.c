@@ -9,6 +9,36 @@ class MCPConfig
 	float pollHz;
 };
 
+// ui_dialog wire field. Key is default_text; default is reserved in Enforce.
+class MCPDialogField
+{
+	string id;
+	string label;
+	bool required;
+	string default_text;
+};
+
+class MCPDialogValue
+{
+	string id;
+	string value;
+};
+
+class MCPDialogResult
+{
+	string state;
+	string dismissed_by;
+	string choice;
+	ref array<ref MCPDialogValue> values;
+	string reason;
+	float elapsed_s;
+
+	void MCPDialogResult()
+	{
+		values = new array<ref MCPDialogValue>();
+	}
+};
+
 class MCPArgs
 {
 	string type;
@@ -82,6 +112,11 @@ class MCPArgs
 	string uid;
 	// action_use: ActionBase typename (Type().ToString()), e.g. LFPG_ActionOpenBTCAtm.
 	string action;
+	// ui_dialog (wire v1.1). title is reused above. kind is this class only.
+	string kind;
+	string message;
+	float timeout_s;
+	ref array<ref MCPDialogField> fields;
 
 	void MCPArgs()
 	{
@@ -93,6 +128,7 @@ class MCPArgs
 		cam_matrix = new array<float>();
 		look_at = new array<float>();
 		want = new array<string>();
+		fields = new array<ref MCPDialogField>();
 		component = -1;
 		limit = 64;
 		sample_hz = 20;
@@ -103,6 +139,7 @@ class MCPArgs
 		rain = MCP_ARG_FLOAT_UNSET;
 		fog = MCP_ARG_FLOAT_UNSET;
 		phase = MCP_ARG_FLOAT_UNSET;
+		timeout_s = 0.0;
 	}
 };
 
@@ -423,6 +460,8 @@ class MCPResult
 	string action;
 	float distance;
 	bool started;
+	// ui_dialog nested payload. Unassigned on other commands.
+	ref MCPDialogResult dialog;
 };
 
 class MCPJob
@@ -455,6 +494,7 @@ class MCPJob
 	int tick_poll_sent;
 	int tick_poll_callback;
 	int tick_dispatch;
+	ref MCPDialogResult dialog;
 };
 
 class MCPSpawnValidation

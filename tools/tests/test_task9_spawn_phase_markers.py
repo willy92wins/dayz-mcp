@@ -92,8 +92,8 @@ BRIDGE = WORKSPACE_ROOT / "scripts" / "5_Mission" / "MCPBridge.c"
 # asiento cliente -> not_seated). Hallazgo colateral, NO del bridge: wait_for(log_matches) solo mira
 # lineas posteriores a su propia llamada, asi que una respuesta que aterriza antes del primer sondeo
 # (BTCOpenResponse, BTCTxResult: ~200 ms tras el disparo) se pierde y el verbo vence con ok:true.
-BRIDGE_SHA256 = "0ED14AF5076A2672121EFD37A18B613F8D1929733FA6F4CD2F58B73E6D546BA3"
-BASE_BRIDGE_SHA256 = "B86E79D357C8551946DF3B080360073F7A6EC587A03D7212D4C5364754096FD2"
+BRIDGE_SHA256 = "F1B49714E2CC9660362BF5ACD57844BAD16F284BC5F5D523908F44E56A38DFE3"
+BASE_BRIDGE_SHA256 = "136A6056C6439B2D41A24FCE390567421489134ABFBD1DED9891C1264B50F158"
 
 MARKERS = (
     'Log("spawn phase id=" + command.id + " phase=validate_begin");',

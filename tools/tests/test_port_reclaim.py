@@ -459,6 +459,43 @@ class NetstatParserTest(unittest.TestCase):
             orphan_guard.subprocess.run = original_run
             orphan_guard._IS_WINDOWS = original_is_windows
 
+    def test_oem_netstat_bytes_do_not_break_pid_detection(self) -> None:
+        raw = (
+            b"  TCP    127.0.0.1:8765         0.0.0.0:0              LISTENING       4242 \xa2"
+        )
+        with patch.object(
+            orphan_guard.locale, "getpreferredencoding", return_value="utf-8"
+        ):
+            with self.assertRaises(UnicodeDecodeError):
+                raw.decode("utf-8")
+            self.assertEqual(
+                orphan_guard._listener_pid_from_netstat_output(raw, 8765), 4242
+            )
+            with patch.object(
+                orphan_guard,
+                "_decode_console_bytes",
+                side_effect=lambda data: data.decode("utf-8"),
+            ):
+                with self.assertRaises(UnicodeDecodeError):
+                    orphan_guard._listener_pid_from_netstat_output(raw, 8765)
+
+            class Result:
+                returncode = 0
+                stdout = (
+                    b"Active \xa2 Connections\r\n"
+                    b"  TCP    127.0.0.1:8765         0.0.0.0:0              LISTENING       4242\r\n"
+                )
+
+            original_run = orphan_guard.subprocess.run
+            original_is_windows = orphan_guard._IS_WINDOWS
+            try:
+                orphan_guard._IS_WINDOWS = True
+                orphan_guard.subprocess.run = lambda *args, **kwargs: Result()
+                self.assertEqual(orphan_guard.listener_pid_for_port(8765), 4242)
+            finally:
+                orphan_guard.subprocess.run = original_run
+                orphan_guard._IS_WINDOWS = original_is_windows
+
 
 class StructuredArgvSnapshotTest(unittest.TestCase):
     def test_structured_argv_preserves_arguments_with_spaces(self) -> None:

@@ -1,0 +1,377 @@
+FrameWidgetClass MCPDialogRoot {
+	name "MCPDialogRoot"
+	visible 0
+	ignorepointer 1
+	position 0 0
+	size 1 1
+	hexactpos 0
+	vexactpos 0
+	hexactsize 0
+	vexactsize 0
+	priority 2000
+	{
+		PanelWidgetClass MCPDialogPanel {
+			name "MCPDialogPanel"
+			color 0.1176 0.1176 0.1176 0.9608
+			position 0 0
+			size 0.38 0.70
+			halign center_ref
+			valign center_ref
+			hexactpos 0
+			vexactpos 0
+			hexactsize 0
+			vexactsize 0
+			style Colorable
+			{
+				TextWidgetClass Title {
+					name "Title"
+					ignorepointer 1
+					color 1 1 1 1
+					position 0.04 0.025
+					size 0.92 0.07
+					hexactpos 0
+					vexactpos 0
+					hexactsize 0
+					vexactsize 0
+					text ""
+					font "gui/fonts/sdf_MetronBook24"
+					"text color" 1 1 1 1
+					"text halign" center
+					"text valign" center
+				}
+				MultilineTextWidgetClass Message {
+					name "Message"
+					ignorepointer 1
+					color 1 1 1 1
+					position 0.04 0.10
+					size 0.92 0.18
+					hexactpos 0
+					vexactpos 0
+					hexactsize 0
+					vexactsize 0
+					text ""
+					font "gui/fonts/sdf_MetronLight24"
+					"text color" 1 1 1 1
+					"text halign" center
+					"text valign" top
+					wrap 1
+				}
+				FrameWidgetClass Row0 {
+					name "Row0"
+					visible 0
+					position 0.04 0.285
+					size 0.92 0.07
+					hexactpos 0
+					vexactpos 0
+					hexactsize 0
+					vexactsize 0
+					{
+						TextWidgetClass Label0 {
+							name "Label0"
+							ignorepointer 1
+							position 0 0
+							size 0.34 1
+							hexactpos 0
+							vexactpos 0
+							hexactsize 0
+							vexactsize 0
+							text ""
+							font "gui/fonts/sdf_MetronBook24"
+							"text color" 1 1 1 1
+							"text halign" left
+							"text valign" center
+						}
+						EditBoxWidgetClass Edit0 {
+							name "Edit0"
+							position 0.36 0.1
+							size 0.64 0.8
+							hexactpos 0
+							vexactpos 0
+							hexactsize 0
+							vexactsize 0
+							style Default
+							font "gui/fonts/sdf_MetronLight24"
+						}
+					}
+				}
+				FrameWidgetClass Row1 {
+					name "Row1"
+					visible 0
+					position 0.04 0.36
+					size 0.92 0.07
+					hexactpos 0
+					vexactpos 0
+					hexactsize 0
+					vexactsize 0
+					{
+						TextWidgetClass Label1 {
+							name "Label1"
+							ignorepointer 1
+							position 0 0
+							size 0.34 1
+							hexactpos 0
+							vexactpos 0
+							hexactsize 0
+							vexactsize 0
+							text ""
+							font "gui/fonts/sdf_MetronBook24"
+							"text color" 1 1 1 1
+							"text halign" left
+							"text valign" center
+						}
+						EditBoxWidgetClass Edit1 {
+							name "Edit1"
+							position 0.36 0.1
+							size 0.64 0.8
+							hexactpos 0
+							vexactpos 0
+							hexactsize 0
+							vexactsize 0
+							style Default
+							font "gui/fonts/sdf_MetronLight24"
+						}
+					}
+				}
+				FrameWidgetClass Row2 {
+					name "Row2"
+					visible 0
+					position 0.04 0.435
+					size 0.92 0.07
+					hexactpos 0
+					vexactpos 0
+					hexactsize 0
+					vexactsize 0
+					{
+						TextWidgetClass Label2 {
+							name "Label2"
+							ignorepointer 1
+							position 0 0
+							size 0.34 1
+							hexactpos 0
+							vexactpos 0
+							hexactsize 0
+							vexactsize 0
+							text ""
+							font "gui/fonts/sdf_MetronBook24"
+							"text color" 1 1 1 1
+							"text halign" left
+							"text valign" center
+						}
+						EditBoxWidgetClass Edit2 {
+							name "Edit2"
+							position 0.36 0.1
+							size 0.64 0.8
+							hexactpos 0
+							vexactpos 0
+							hexactsize 0
+							vexactsize 0
+							style Default
+							font "gui/fonts/sdf_MetronLight24"
+						}
+					}
+				}
+				FrameWidgetClass Row3 {
+					name "Row3"
+					visible 0
+					position 0.04 0.51
+					size 0.92 0.07
+					hexactpos 0
+					vexactpos 0
+					hexactsize 0
+					vexactsize 0
+					{
+						TextWidgetClass Label3 {
+							name "Label3"
+							ignorepointer 1
+							position 0 0
+							size 0.34 1
+							hexactpos 0
+							vexactpos 0
+							hexactsize 0
+							vexactsize 0
+							text ""
+							font "gui/fonts/sdf_MetronBook24"
+							"text color" 1 1 1 1
+							"text halign" left
+							"text valign" center
+						}
+						EditBoxWidgetClass Edit3 {
+							name "Edit3"
+							position 0.36 0.1
+							size 0.64 0.8
+							hexactpos 0
+							vexactpos 0
+							hexactsize 0
+							vexactsize 0
+							style Default
+							font "gui/fonts/sdf_MetronLight24"
+						}
+					}
+				}
+				FrameWidgetClass Row4 {
+					name "Row4"
+					visible 0
+					position 0.04 0.585
+					size 0.92 0.07
+					hexactpos 0
+					vexactpos 0
+					hexactsize 0
+					vexactsize 0
+					{
+						TextWidgetClass Label4 {
+							name "Label4"
+							ignorepointer 1
+							position 0 0
+							size 0.34 1
+							hexactpos 0
+							vexactpos 0
+							hexactsize 0
+							vexactsize 0
+							text ""
+							font "gui/fonts/sdf_MetronBook24"
+							"text color" 1 1 1 1
+							"text halign" left
+							"text valign" center
+						}
+						EditBoxWidgetClass Edit4 {
+							name "Edit4"
+							position 0.36 0.1
+							size 0.64 0.8
+							hexactpos 0
+							vexactpos 0
+							hexactsize 0
+							vexactsize 0
+							style Default
+							font "gui/fonts/sdf_MetronLight24"
+						}
+					}
+				}
+				FrameWidgetClass Row5 {
+					name "Row5"
+					visible 0
+					position 0.04 0.66
+					size 0.92 0.07
+					hexactpos 0
+					vexactpos 0
+					hexactsize 0
+					vexactsize 0
+					{
+						TextWidgetClass Label5 {
+							name "Label5"
+							ignorepointer 1
+							position 0 0
+							size 0.34 1
+							hexactpos 0
+							vexactpos 0
+							hexactsize 0
+							vexactsize 0
+							text ""
+							font "gui/fonts/sdf_MetronBook24"
+							"text color" 1 1 1 1
+							"text halign" left
+							"text valign" center
+						}
+						EditBoxWidgetClass Edit5 {
+							name "Edit5"
+							position 0.36 0.1
+							size 0.64 0.8
+							hexactpos 0
+							vexactpos 0
+							hexactsize 0
+							vexactsize 0
+							style Default
+							font "gui/fonts/sdf_MetronLight24"
+						}
+					}
+				}
+				TextWidgetClass Error {
+					name "Error"
+					visible 0
+					ignorepointer 1
+					color 0.90 0.20 0.20 1
+					position 0.04 0.74
+					size 0.92 0.06
+					hexactpos 0
+					vexactpos 0
+					hexactsize 0
+					vexactsize 0
+					text ""
+					font "gui/fonts/sdf_MetronBook24"
+					"text color" 0.90 0.20 0.20 1
+					"text halign" center
+					"text valign" center
+				}
+				ButtonWidgetClass BtnOk {
+					name "BtnOk"
+					visible 0
+					position 0.35 0.86
+					size 0.30 0.08
+					hexactpos 0
+					vexactpos 0
+					hexactsize 0
+					vexactsize 0
+					style EmptyHighlight
+					text "OK"
+					text_proportion 0.5
+					font "gui/fonts/sdf_MetronBook24"
+				}
+				ButtonWidgetClass BtnYes {
+					name "BtnYes"
+					visible 0
+					position 0.06 0.86
+					size 0.26 0.08
+					hexactpos 0
+					vexactpos 0
+					hexactsize 0
+					vexactsize 0
+					style EmptyHighlight
+					text "Yes"
+					text_proportion 0.5
+					font "gui/fonts/sdf_MetronBook24"
+				}
+				ButtonWidgetClass BtnNo {
+					name "BtnNo"
+					visible 0
+					position 0.37 0.86
+					size 0.26 0.08
+					hexactpos 0
+					vexactpos 0
+					hexactsize 0
+					vexactsize 0
+					style EmptyHighlight
+					text "No"
+					text_proportion 0.5
+					font "gui/fonts/sdf_MetronBook24"
+				}
+				ButtonWidgetClass BtnSubmit {
+					name "BtnSubmit"
+					visible 0
+					position 0.37 0.86
+					size 0.26 0.08
+					hexactpos 0
+					vexactpos 0
+					hexactsize 0
+					vexactsize 0
+					style EmptyHighlight
+					text "Submit"
+					text_proportion 0.45
+					font "gui/fonts/sdf_MetronBook24"
+				}
+				ButtonWidgetClass BtnCancel {
+					name "BtnCancel"
+					visible 0
+					position 0.68 0.86
+					size 0.26 0.08
+					hexactpos 0
+					vexactpos 0
+					hexactsize 0
+					vexactsize 0
+					style EmptyHighlight
+					text "Cancel"
+					text_proportion 0.45
+					font "gui/fonts/sdf_MetronBook24"
+				}
+			}
+		}
+	}
+}

@@ -13,6 +13,8 @@ fixture that proves the gate fires.
 | PROBED | CALIBRATED | Every gating threshold has measured data. |
 | CALIBRATED | FROZEN | Green fixtures plus a content SHA of the playbook and its fixtures. |
 
+`playbook_run` reports `certified: false` / `certified_reason: no_frozen_registry` until that SHA lives in a sidecar FROZEN registry (never inside the TOML).
+
 A threshold without measured data stays `state = "uncalibrated"` and never
 gates. A FAIL on that expect is downgraded to WARN and the verdict reason is
 `uncalibrated_gate_downgraded`.
@@ -44,8 +46,9 @@ python playbooks/runner.py playbooks/place_safely.toml --fixtures playbooks/fixt
 `--live` starts a new MCP stdio client against the shared daemon (the
 `CONFIG` block at the top of `runner.py`). The client may autospawn that
 daemon if no listener is present. The `mcp` package is imported only on
-this path. There is no MCP tool `run_playbook`; the runner is just
-another client.
+this path. The MCP tool `playbook_run(name, params)` uses the same
+runner in the current session/lease and does not launch DayZ;
+`certified` is always false until the FROZEN sidecar registry exists.
 
 With DayZ off, S1 fails with `tool_error` `version_blocked` in about
 13-15 s and the process exits 1. That means no DayZ peers, not a

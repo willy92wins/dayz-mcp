@@ -106,7 +106,7 @@ Exceptional `python -m dayz_mcp.admin_cli` release/reconcile operations require 
 
 ## Cookbook
 
-Short call sequences for a cold consumer. Playbook runner usage is in [`playbooks/README.md`](../playbooks/README.md).
+Short call sequences for a cold consumer. Use `playbook_run(name, params)` for a named checklist; CLI runner usage is in [`playbooks/README.md`](../playbooks/README.md).
 
 ### Wait for a player
 
@@ -123,7 +123,7 @@ Short call sequences for a cold consumer. Playbook runner usage is in [`playbook
 ### Spawn safely
 
 1. `session_acquire(purpose="spawn")` — keep `lease_token`; call `session_heartbeat(lease_token)` before the 120 s TTL. If the queue is held, use `session_acquire_wait(purpose="spawn", max_wait_s=...)` instead.
-2. Run `place_safely` ([`playbooks/place_safely.toml`](../playbooks/place_safely.toml); runner: [`playbooks/README.md`](../playbooks/README.md)). The playbook is DRAFT and `canopy_dy` is `uncalibrated`: an S2 canopy FAIL is downgraded to WARN (`uncalibrated_gate_downgraded`) and the verdict is `PASS_WITH_WARNINGS`. That does not certify a clear canopy or roof. Do not spawn unless S2 is a clean PASS. S4 checks only the vertical column (`entities_query` radius 5; WARN if `count_total > 25`) and players inside `clear_r`; it does not detect lateral solids. Manual substitute: `surface_query(x, z)`, then `scene_raycast` down the column, then `entities_query` plus `query_all_players`.
+2. `playbook_run(name="place_safely", params={"x":..,"z":..})` ([`playbooks/place_safely.toml`](../playbooks/place_safely.toml); runner: [`playbooks/README.md`](../playbooks/README.md)). The playbook is DRAFT and `canopy_dy` is `uncalibrated`: an S2 canopy FAIL is downgraded to WARN (`uncalibrated_gate_downgraded`) and the verdict is `PASS_WITH_WARNINGS`. That does not certify a clear canopy or roof. Do not spawn unless S2 is a clean PASS. S4 checks only the vertical column (`entities_query` radius 5; WARN if `count_total > 25`) and players inside `clear_r`; it does not detect lateral solids. Manual substitute: `surface_query(x, z)`, then `scene_raycast` down the column, then `entities_query` plus `query_all_players`.
 3. `world_spawn(type="CivilianSedan", pos=[x, surface_y, z], flags=0)` after a clean PASS, with `surface_y` from `surface_query`. `flags=0` uses `ECE_PLACE_ON_SURFACE`; `y=0` in `pos` means on the ground. Verified: `type="CivilianSedan"`, `pos=[7086, 0, 7726]` → `pos_real` y=`297.03`.
 4. Living infected: `world_spawn(type="ZmbM_CitizenASkinny_Blue", pos=[x, surface_y, z], flags=3108)` (`ECE_PLACE_ON_SURFACE|ECE_INITAI|ECE_CREATEPHYSICS`). Without `ECE_INITAI` the infected has no AI.
 5. `object_delete(object_id)` on the returned `object_id` when finished.

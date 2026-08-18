@@ -31,7 +31,9 @@ DEFAULT_TIMEOUT_S = 60.0
 BRIDGE_SLACK_S = 10.0
 FIELD_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 ALLOWED_ARG_KEYS = frozenset({"kind", "title", "message", "fields", "timeout_s"})
-ALLOWED_FIELD_KEYS = frozenset({"id", "label", "required", "default"})
+TOOL_FIELD_KEYS = frozenset({"id", "label", "required", "default"})
+WIRE_FIELD_KEYS = frozenset({"id", "label", "required", "default_text"})
+ALLOWED_FIELD_KEYS = TOOL_FIELD_KEYS
 REQUIRED_FIELD_KEYS = frozenset({"id", "label"})
 
 
@@ -83,6 +85,8 @@ def parse_request(
     message: object = "",
     fields: object = None,
     timeout_s: object = DEFAULT_TIMEOUT_S,
+    *,
+    wire: bool = False,
 ) -> UiDialogRequest:
     if not isinstance(kind, str) or kind not in KINDS:
         raise UiDialogError(
@@ -122,7 +126,7 @@ def parse_request(
         if not FIELDS_MIN <= len(fields) <= FIELDS_MAX:
             _bad("fields", f"has {len(fields)} items, max {FIELDS_MAX}" if len(fields) > FIELDS_MAX else f"has {len(fields)} items, min {FIELDS_MIN}")
         parsed_fields = tuple(
-            _parse_field(index, item) for index, item in enumerate(fields)
+            _parse_field(index, item, wire=wire) for index, item in enumerate(fields)
         )
         seen: dict[str, int] = {}
         for index, field in enumerate(parsed_fields):
@@ -142,11 +146,14 @@ def parse_request(
     )
 
 
-def _parse_field(index: int, item: object) -> FieldSpec:
+def _parse_field(index: int, item: object, *, wire: bool = False) -> FieldSpec:
     prefix = f"fields[{index}]"
     if not isinstance(item, dict):
         _bad(prefix, "must be an object")
-    unknown = [key for key in item if key not in ALLOWED_FIELD_KEYS]
+    if wire and "default" in item and "default_text" in item:
+        _bad(f"{prefix}.default_text", "cannot be combined with default")
+    allowed = WIRE_FIELD_KEYS if wire else TOOL_FIELD_KEYS
+    unknown = [key for key in item if key not in allowed]
     if unknown:
         key = sorted(str(entry) for entry in unknown)[0]
         raise UiDialogError(f"bad_args: unknown key '{key}' in {prefix}")
@@ -173,12 +180,22 @@ def _parse_field(index: int, item: object) -> FieldSpec:
             _bad(f"{prefix}.required", "must be a bool")
         required = required_value
 
-    if "default" not in item:
-        default = ""
-    else:
+    if wire:
+        if "default_text" in item:
+            default = _require_str(item.get("default_text"), f"{prefix}.default_text")
+            if len(default) > DEFAULT_MAX_CHARS:
+                _bad(
+                    f"{prefix}.default_text",
+                    f"must be 0..{DEFAULT_MAX_CHARS} chars",
+                )
+        else:
+            default = ""
+    elif "default" in item:
         default = _require_str(item.get("default"), f"{prefix}.default")
         if len(default) > DEFAULT_MAX_CHARS:
             _bad(f"{prefix}.default", f"must be 0..{DEFAULT_MAX_CHARS} chars")
+    else:
+        default = ""
 
     return FieldSpec(id=field_id, label=label, required=required, default=default)
 
@@ -202,6 +219,7 @@ def validate_command_args(args: dict[str, Any]) -> tuple[bool, str | None]:
             args.get("message", ""),
             args.get("fields"),
             args.get("timeout_s", DEFAULT_TIMEOUT_S),
+            wire=True,
         )
     except (UiDialogError, TypeError):
         return False, "bad_args"
@@ -211,9 +229,8 @@ def validate_command_args(args: dict[str, Any]) -> tuple[bool, str | None]:
 def bridge_args(request: UiDialogRequest) -> dict[str, Any]:
     """Map validated tool args to the bridge command payload.
 
-    Phase 1 sends ``fields`` as an array of objects (preferred). Cycle 6
-    may flatten that array here if Enforce input cannot carry
-    ``array<ref T>``.
+    The agent field key remains ``default``. The Enforce cable key is
+    ``default_text`` (``default`` is reserved in Enforce).
     """
     payload: dict[str, Any] = {
         "kind": request.kind,
@@ -227,7 +244,7 @@ def bridge_args(request: UiDialogRequest) -> dict[str, Any]:
                 "id": field.id,
                 "label": field.label,
                 "required": field.required,
-                "default": field.default,
+                "default_text": field.default,
             }
             for field in request.fields
         ]
@@ -287,6 +304,16 @@ def _interpret_dialog_result(
     choice = dialog.get("choice")
     dismissed_by = dialog.get("dismissed_by")
     reason = dialog.get("reason")
+    if choice == "":
+        choice = None
+    if dismissed_by == "":
+        dismissed_by = None
+    if reason == "":
+        reason = None
+    # Enforce emits unassigned arrays as []. Treat that as absent except
+    # completed form, where [] cannot satisfy fields >= 1.
+    if values == [] and not (state == "completed" and request.kind == "form"):
+        values = None
 
     if state == "completed":
         if request.kind == "acknowledge":

@@ -72,6 +72,24 @@ class MCPClientResultCallback : RestCallback
 	}
 };
 
+class MCPClientDialogSink : MCPDialogSink
+{
+	protected MCPClientBridge m_Owner;
+
+	void MCPClientDialogSink(MCPClientBridge owner)
+	{
+		m_Owner = owner;
+	}
+
+	override void OnDialogResult(MCPDialogResult dialog)
+	{
+		if (m_Owner)
+		{
+			m_Owner.AcceptDialogResult(dialog);
+		}
+	}
+};
+
 class MCPClientBridge extends MCPJobRunnerOwner
 {
 	protected const int MAX_DISPATCH_PER_TICK = 4;
@@ -131,6 +149,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected ref MCPJobRunner m_JobRunner;
 	protected ref array<Object> m_ReadyObjects;
 	protected ref array<CargoBase> m_ReadyProxyCargos;
+	protected ref MCPDialogController m_Dialog;
+	protected ref MCPDialogSink m_DialogSink;
+	protected MCPJob m_DialogJob;
+	protected bool m_DialogHostTried;
 
 	void MCPClientBridge()
 	{
@@ -152,6 +174,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_JobRunner = new MCPJobRunner();
 		m_ReadyObjects = new array<Object>();
 		m_ReadyProxyCargos = new array<CargoBase>();
+		m_DialogHostTried = false;
 	}
 
 	void ~MCPClientBridge()
@@ -191,6 +214,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			TryInit();
 			return;
+		}
+
+		if (!m_DialogHostTried && IsClientInGame())
+		{
+			m_DialogHostTried = true;
+			EnsureDialogHost();
 		}
 
 		DrainPending();
@@ -484,6 +513,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return GetGame() && GetGame().GetPlayer();
 	}
 
+	protected bool HasExclusiveJob()
+	{
+		if (!m_JobRunner)
+		{
+			return false;
+		}
+
+		return m_JobRunner.CountExcluding("ui_dialog") > 0;
+	}
+
 	protected void Dispatch(MCPCommand command)
 	{
 		if (!command)
@@ -568,6 +607,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			postNow = DispatchActionUse(command, result);
 		}
+		else if (command.cmd == "ui_dialog")
+		{
+			postNow = DispatchUiDialog(command, result);
+		}
 		else
 		{
 			result.ok = false;
@@ -590,7 +633,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
-		if (m_JobRunner && m_JobRunner.Count() > 0)
+		if (HasExclusiveJob())
 		{
 			result.ok = false;
 			result.error = "busy";
@@ -659,7 +702,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			command.args.throttle = throttle;
 		}
 
-		if (m_JobRunner && m_JobRunner.Count() > 0)
+		if (HasExclusiveJob())
 		{
 			result.ok = false;
 			result.error = "busy";
@@ -694,7 +737,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
-		if (m_JobRunner && m_JobRunner.Count() > 0)
+		if (HasExclusiveJob())
 		{
 			result.ok = false;
 			result.error = "busy";
@@ -1159,6 +1202,174 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return true;
 	}
 
+	protected bool DispatchUiDialog(MCPCommand command, MCPResult result)
+	{
+		if (!ValidateUiDialogArgs(command.args))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		if (m_Dialog && m_Dialog.IsOpen())
+		{
+			MCPDialogResult rejected = new MCPDialogResult();
+			rejected.state = "rejected";
+			rejected.reason = "busy";
+			rejected.elapsed_s = 0.0;
+			result.ok = true;
+			result.dialog = rejected;
+			Log("client ui_dialog rejected reason=busy");
+			return true;
+		}
+
+		if (!EnsureDialogHost())
+		{
+			result.ok = false;
+			result.error = DialogHostError();
+			return true;
+		}
+
+		float timeoutS = 60.0;
+		if (command.args.timeout_s > 0.0)
+		{
+			timeoutS = command.args.timeout_s;
+		}
+
+		MCPDialogSpec spec = new MCPDialogSpec();
+		spec.kind = command.args.kind;
+		spec.title = command.args.title;
+		spec.message = command.args.message;
+		spec.timeout_s = timeoutS;
+		if (command.args.fields)
+		{
+			spec.fields = command.args.fields;
+		}
+
+		MCPJob job = new MCPJob();
+		job.id = command.id;
+		job.kind = "ui_dialog";
+		job.args = command.args;
+		job.dialog = new MCPDialogResult();
+		job.deadline_s = m_JobRunner.GetElapsedS() + timeoutS + 5.0;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		m_Dialog.SetResultTarget(job.dialog);
+		m_Dialog.SetClock(m_JobRunner);
+		float deadlineS = m_JobRunner.GetElapsedS() + timeoutS;
+		if (!m_Dialog.Open(spec, deadlineS))
+		{
+			result.ok = false;
+			result.error = DialogHostError();
+			return true;
+		}
+
+		m_JobRunner.AddJob(job);
+		m_DialogJob = job;
+		int fieldCount = 0;
+		if (command.args.fields)
+		{
+			fieldCount = command.args.fields.Count();
+		}
+
+		Log("client job queued id=" + job.id + " kind=ui_dialog fields=" + fieldCount + " deadline_s=" + job.deadline_s);
+		return false;
+	}
+
+	protected bool ValidateUiDialogArgs(MCPArgs args)
+	{
+		if (!args)
+		{
+			return false;
+		}
+
+		if (args.kind != "acknowledge" && args.kind != "confirm" && args.kind != "form")
+		{
+			return false;
+		}
+
+		if (args.title == "")
+		{
+			return false;
+		}
+
+		int fieldCount = 0;
+		if (args.fields)
+		{
+			fieldCount = args.fields.Count();
+		}
+
+		if (fieldCount > 6)
+		{
+			return false;
+		}
+
+		if (args.kind == "form" && fieldCount < 1)
+		{
+			return false;
+		}
+
+		if (args.timeout_s != 0.0)
+		{
+			if (args.timeout_s < 5.0 || args.timeout_s > 240.0 || !IsFiniteFloat(args.timeout_s))
+			{
+				return false;
+			}
+		}
+
+		int i = 0;
+		while (i < fieldCount)
+		{
+			MCPDialogField field = args.fields.Get(i);
+			if (!field || field.id == "")
+			{
+				return false;
+			}
+
+			i = i + 1;
+		}
+
+		return true;
+	}
+
+	protected bool EnsureDialogHost()
+	{
+		if (!m_Dialog)
+		{
+			m_Dialog = new MCPDialogController();
+			m_DialogSink = new MCPClientDialogSink(this);
+			m_Dialog.SetSink(m_DialogSink);
+			m_Dialog.SetClock(m_JobRunner);
+		}
+
+		return m_Dialog.EnsureHost();
+	}
+
+	protected string DialogHostError()
+	{
+		if (m_Dialog)
+		{
+			string err = m_Dialog.GetLastHostError();
+			if (err != "")
+			{
+				return err;
+			}
+		}
+
+		return "host_create_failed";
+	}
+
+	void AcceptDialogResult(MCPDialogResult dialog)
+	{
+		if (!dialog)
+		{
+			return;
+		}
+
+		Log("dialog result state=" + dialog.state + " reason=" + dialog.reason);
+	}
+
 	// Starts a user action on the local player. Returns after PerformActionStart;
 	// UseAcknowledgment() is true (actionbase.c:1146-1148) so the server still
 	// re-evaluates. Waiting here would freeze the sim tick.
@@ -1609,12 +1820,26 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			return ProcessVehicleGetInClientJob(job);
 		}
+		else if (job.kind == "ui_dialog")
+		{
+			if (m_Dialog)
+			{
+				m_Dialog.Tick(m_JobRunner.GetElapsedS());
+			}
+
+			return false;
+		}
 
 		return false;
 	}
 
 	override bool MCP_IsJobReady(MCPJob job)
 	{
+		if (job && job.kind == "ui_dialog" && job.dialog && job.dialog.state != "")
+		{
+			return true;
+		}
+
 		return false;
 	}
 
@@ -2308,6 +2533,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			resultGetIn.tick_dispatch = job.tick_dispatch;
 			PostResult(resultGetIn);
 		}
+
+		if (job.kind == "ui_dialog")
+		{
+			PostUiDialogJob(job);
+		}
 	}
 
 	override void MCP_PostJobFailure(MCPJob job)
@@ -2316,6 +2546,17 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			MCPCarDrive.Clear();
 			RestoreGameplay();
+		}
+
+		if (job && job.kind == "ui_dialog")
+		{
+			if (m_Dialog && m_Dialog.IsOpen())
+			{
+				m_Dialog.FinishDisconnected();
+			}
+
+			PostUiDialogJob(job);
+			return;
 		}
 
 		if (!job)
@@ -2346,6 +2587,17 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
+		if (job.kind == "ui_dialog")
+		{
+			if (m_Dialog && m_Dialog.IsOpen())
+			{
+				m_Dialog.Tick(job.deadline_s);
+			}
+
+			PostUiDialogJob(job);
+			return;
+		}
+
 		MCPResult result = new MCPResult();
 		result.id = job.id;
 		result.ok = false;
@@ -2353,6 +2605,40 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		result.tick_poll_sent = job.tick_poll_sent;
 		result.tick_poll_callback = job.tick_poll_callback;
 		result.tick_dispatch = job.tick_dispatch;
+		PostResult(result);
+	}
+
+	protected void PostUiDialogJob(MCPJob job)
+	{
+		if (!job)
+		{
+			return;
+		}
+
+		MCPResult result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		if (job.dialog && job.dialog.state != "")
+		{
+			result.dialog = job.dialog;
+			result.ok = true;
+			result.error = "";
+		}
+		else
+		{
+			result.ok = false;
+			if (job.error != "")
+			{
+				result.error = job.error;
+			}
+			else
+			{
+				result.error = "dialog_no_state";
+			}
+		}
+
 		PostResult(result);
 	}
 
@@ -2365,6 +2651,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		job.actor = null;
 		job.subject = null;
+		if (m_DialogJob == job)
+		{
+			m_DialogJob = null;
+		}
 	}
 
 	protected MCPCameraValidation ValidateCameraArgs(MCPArgs args)
@@ -2858,6 +3148,30 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	void Shutdown()
 	{
+		if (m_Dialog && m_Dialog.IsOpen())
+		{
+			m_Dialog.FinishDisconnected();
+		}
+
+		// Best-effort: POST disconnected, then reset() drops pending REST buffers
+		// (restapi.c:130-133). The result may never reach Python; that is a
+		// transport timeout, not a dialog timed_out. No sync wait is allowed.
+		if (m_DialogJob && m_DialogJob.dialog && m_DialogJob.dialog.state != "")
+		{
+			PostUiDialogJob(m_DialogJob);
+		}
+
+		if (m_Dialog)
+		{
+			m_Dialog.DestroyHost();
+			m_Dialog.SetSink(null);
+			m_Dialog.SetResultTarget(null);
+			m_Dialog = null;
+		}
+
+		m_DialogSink = null;
+		m_DialogJob = null;
+		m_DialogHostTried = false;
 		MCPVehicleTrace.Abort("shutdown");
 		MCPCarDrive.Clear();
 		RestoreGameplay();
