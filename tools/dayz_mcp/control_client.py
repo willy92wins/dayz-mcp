@@ -26,11 +26,15 @@ class ControlClientError(RuntimeError):
         *,
         request_stage: str,
         http_bytes_sent: int,
+        hint: str | None = None,
     ) -> None:
-        super().__init__(code)
         self.code = code
         self.request_stage = request_stage
         self.http_bytes_sent = http_bytes_sent
+        self.hint = hint if isinstance(hint, str) and hint else None
+        super().__init__(
+            code if self.hint is None else f"{code}: {self.hint}"
+        )
 
 
 @dataclass(frozen=True)
@@ -195,10 +199,12 @@ class ControlClient:
             ) from None
         response = _decode_body(response_body)
         if status not in (200, 202):
+            hint = response.get("hint")
             raise ControlClientError(
                 _remote_error_code(response),
                 request_stage="post_request",
                 http_bytes_sent=1,
+                hint=hint if isinstance(hint, str) else None,
             )
         return response
 

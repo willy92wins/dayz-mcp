@@ -1096,12 +1096,14 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertEqual(self.lifecycle.reap_dead_runs(), [])
         self.assertEqual(self.store.get("run-existing").state, "RUNNING_IDLE")
 
-    def test_reaper_skips_under_retail_quarantine(self) -> None:  # SC-005 (retail)
+    def test_reaper_retires_under_retail_quarantine(self) -> None:  # SC-005 / BUG-104
         self.add_run(process(48976), owner=None, state="RUNNING_IDLE")
         self._dead(48976)
         self.probe_result = {"known": True, "processes": [{"pid": 5, "name": "DayZ_x64.exe"}]}
-        self.assertEqual(self.lifecycle.reap_dead_runs(), [])
-        self.assertEqual(self.store.get("run-existing").state, "RUNNING_IDLE")
+        self.assertTrue(self.lifecycle._quarantined())
+        self.assertEqual(self.lifecycle.reap_dead_runs(), ["run-existing"])
+        self.assertEqual(self.store.get("run-existing").state, "EXITED")
+        self.assertEqual(self.guard.terminate_calls, [])
 
     def test_reaper_audit_before_act_is_fail_closed(self) -> None:  # SC-007
         self.add_run(process(48976), owner=None, state="RUNNING_IDLE")
@@ -1575,6 +1577,113 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertIn("Get-IdentityFromProcess $proc", terminate)
         self.assertNotIn("Get-Identity ([int]$expected.pid)", terminate)
         self.assertLess(terminate.index("Get-IdentityFromProcess $proc"), terminate.index("$proc.Kill()"))
+
+    def _never_started_run(
+        self, run_id: str = "11111111-1111-4111-8111-111111111111"
+    ) -> RunRecord:
+        run = RunRecord(
+            run_id,
+            None,
+            None,
+            "EXITED",
+            "same",
+            "@SameMod",
+            "profiles",
+            "mission",
+            [],
+            "22222222-2222-4222-8222-222222222222",
+            HASH_A,
+            False,
+        )
+        self.store.add(run)
+        return run
+
+    def test_stop_never_started_unacked_exited_run_succeeds_without_killing(self) -> None:
+        run = self._never_started_run()
+
+        result = self.lifecycle.stop_run(IDENTITY_A, self.token_a, run.run_id)
+
+        self.assertEqual(result.get("ok"), True)
+        self.assertEqual(result.get("run_id"), run.run_id)
+        self.assertEqual(result.get("state"), "EXITED")
+        self.assertEqual(self.guard.terminate_calls, [])
+        stored = self.store.get(run.run_id)
+        self.assertEqual(stored.state, "EXITED")
+        self.assertIsNone(stored.owner_session_id)
+        self.assertFalse(stored.launch_acknowledged)
+
+    def test_stop_never_started_does_not_open_foreign_running_runs(self) -> None:
+        ghost = self._never_started_run()
+        live = process(201)
+        owned = self.add_run(live)
+        self.guard.snapshots[live.pid] = snapshot(live)
+        self.coordinator.release(IDENTITY_A, self.token_a)
+        status, acquired = self.coordinator.acquire(IDENTITY_B, "other")
+        self.assertEqual(status, 200)
+
+        ghost_stop = self.lifecycle.stop_run(
+            IDENTITY_B, acquired["lease_token"], ghost.run_id
+        )
+        live_stop = self.lifecycle.stop_run(
+            IDENTITY_B, acquired["lease_token"], owned.run_id
+        )
+
+        self.assertEqual(ghost_stop.get("ok"), True)
+        self.assertEqual(live_stop.get("error"), "run_not_adopted")
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertEqual(self.store.get(owned.run_id).state, "RUNNING")
+        self.assertEqual(self.store.get(owned.run_id).owner_session_id, "A")
+
+    def test_acked_exited_run_is_not_stoppable_as_a_ghost(self) -> None:
+        run = RunRecord(
+            "33333333-3333-4333-8333-333333333333",
+            None,
+            None,
+            "EXITED",
+            "same",
+            "@SameMod",
+            "profiles",
+            "mission",
+            [],
+        )
+        self.store.add(run)
+
+        result = self.lifecycle.stop_run(IDENTITY_A, self.token_a, run.run_id)
+
+        self.assertEqual(result.get("error"), "run_not_adopted")
+        self.assertEqual(self.guard.terminate_calls, [])
+
+    def test_failed_prepare_exposes_lifecycle_reason_on_status(self) -> None:
+        class _EmptyMint:
+            def prepare(self, *_args: object, **_kwargs: object) -> str:
+                return ""
+
+            def retire_role(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+            def confirm(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+            def retire_run(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+        self.lifecycle.bindings = _EmptyMint()
+        request = self.recoverable_request()
+
+        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, request)
+
+        self.assertEqual(result.get("error"), "instance_config_missing")
+        self.assertEqual(result.get("state"), "EXITED")
+        status = self.lifecycle.status(IDENTITY_A)
+        self.assertEqual(status.get("last_start_error"), "instance_config_missing")
+        stored = self.store.get(str(request["new_run_id"]))
+        self.assertEqual(stored.state, "EXITED")
+        self.assertFalse(stored.launch_acknowledged)
+        self.assertEqual(stored.processes, [])
+        stop = self.lifecycle.stop_run(
+            IDENTITY_A, self.token_a, str(request["new_run_id"])
+        )
+        self.assertEqual(stop.get("ok"), True)
 
 
 if __name__ == "__main__":

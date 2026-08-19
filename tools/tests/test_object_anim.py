@@ -35,6 +35,9 @@ def _method_body(source: str, signature: str) -> str:
 class ObjectAnimIngressTest(unittest.TestCase):
     def setUp(self) -> None:
         self.state = loopback.ServerState("test-key")
+        from tests.fence_helpers import bind_both_peers
+
+        bind_both_peers(self.state)
 
     def test_happy_read_and_write_server(self) -> None:
         self.assertIn(COMMAND, loopback.SERVER_COMMANDS)

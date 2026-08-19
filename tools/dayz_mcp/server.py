@@ -39,6 +39,7 @@ from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import LoopbackServer, read_key
 from dayz_mcp.server_cli import build_server_parser
+from dayz_mcp.process_lifecycle import empty_box, occupancy_error_fields
 from dayz_mcp.session_coordination import ClientIdentity
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
 
@@ -54,6 +55,10 @@ MAX_TIMEOUT_S = 300.0
 LIVENESS_STATUS_TIMEOUT_S = 1.0
 POLL_INTERVAL_S = 0.05
 WAIT_FOR_MAX_TIMEOUT_S = 600.0
+BOX_WAIT_MAX_S = 600.0
+BOX_WAIT_POLL_S = 1.0
+BOX_WAIT_MIN_POLL_S = 0.05
+BOX_CLAIM_HEARTBEAT_S = 30.0
 WAIT_FOR_MIN_POLL_INTERVAL_S = 0.5
 WAIT_FOR_CONDITIONS = frozenset({
     "players_at_least",
@@ -81,6 +86,17 @@ READY_REASONS = frozenset({
     "client_not_polling",
     "client_legacy_blocked",
     "version_mismatch",
+    "binding_ambiguous",
+    "unbound_after_restart",
+    "binding_not_ready",
+    "binding_retired",
+    "instance_unknown",
+    "instance_unattributed",
+    "instance_role_mismatch",
+    "instance_malformed",
+    "instance_peer_collision",
+    "legacy_unbound",
+    "creation_time_unreadable",
 })
 WAIT_FOR_LOOKBACK_MAX = 2000
 _REMOTE_ERROR_CODES = frozenset({
@@ -116,6 +132,19 @@ _REMOTE_ERROR_CODES = frozenset({
     "ticket_invalid",
     "unauthorized",
     "version_blocked",
+    "legacy_unbound",
+    "instance_malformed",
+    "instance_unknown",
+    "unbound_after_restart",
+    "instance_role_mismatch",
+    "instance_ambiguous",
+    "instance_unattributed",
+    "binding_not_ready",
+    "binding_retired",
+    "instance_peer_collision",
+    "instance_config_missing",
+    "instance_config_mismatch",
+    "creation_time_unreadable",
 })
 _STALE_TICKET_ERRORS = frozenset({"ticket_expired", "ticket_invalid"})
 _STALE_LEASE_ERRORS = frozenset({"lease_expired", "lease_invalid"})
@@ -177,10 +206,33 @@ def _remote_error_code(payload: object) -> str:
     return "remote_error"
 
 
+_FENCE_BLOCK_READY = {
+    "AMBIGUOUS": "binding_ambiguous",
+    "STARTING": "binding_not_ready",
+    "RETIRED": "binding_retired",
+    "binding_retired": "binding_retired",
+    "instance_unknown": "instance_unknown",
+    "unbound_after_restart": "unbound_after_restart",
+    "instance_unattributed": "instance_unattributed",
+    "instance_role_mismatch": "instance_role_mismatch",
+    "instance_malformed": "instance_malformed",
+    "instance_peer_collision": "instance_peer_collision",
+    "creation_time_unreadable": "creation_time_unreadable",
+}
+
+
 def _peer_is_live(peer: object) -> bool:
     if not isinstance(peer, dict):
         return False
-    age = peer.get("last_poll_age_s")
+    bind = peer.get("binding_state")
+    if bind == "LEGACY_UNBOUND":
+        return False
+    if bind in {None, ""}:
+        age = peer.get("last_poll_age_s")
+    elif bind != "BOUND":
+        return False
+    else:
+        age = peer.get("bound_last_poll_age_s")
     return isinstance(age, (int, float)) and not isinstance(age, bool) and age < PEER_STALE_S
 
 
@@ -198,6 +250,18 @@ def compute_bridge_ready(status: dict[str, Any]) -> dict[str, Any]:
     c_live = _peer_is_live(client)
     s_state = server.get("version_state")
     c_state = client.get("version_state")
+    s_bind = server.get("binding_state")
+    c_bind = client.get("binding_state")
+    s_block = _FENCE_BLOCK_READY.get(s_bind)
+    c_block = _FENCE_BLOCK_READY.get(c_bind)
+    if s_block:
+        return {"ready": False, "reason": s_block}
+    if c_block:
+        return {"ready": False, "reason": c_block}
+    if s_bind == "LEGACY_UNBOUND" and s_age is not None:
+        return {"ready": False, "reason": "legacy_unbound"}
+    if c_bind == "LEGACY_UNBOUND" and c_age is not None:
+        return {"ready": False, "reason": "legacy_unbound"}
     if s_live and c_live and s_state == "ok" and c_state == "ok":
         return {"ready": True, "reason": "ready"}
     if s_age is None and c_age is None:
@@ -701,6 +765,11 @@ class ClientRuntime:
         def public_error_code(error: ControlClientError) -> str:
             if error.code == "lease_required":
                 return LEASE_REQUIRED_RECIPE
+            if error.hint and (
+                error.code in _REMOTE_ERROR_CODES
+                or error.code in _CONTROL_CLIENT_ERROR_CODES
+            ):
+                return str(error)
             if (
                 error.code in _REMOTE_ERROR_CODES
                 or error.code in _CONTROL_CLIENT_ERROR_CODES
@@ -769,6 +838,27 @@ class ClientRuntime:
 
     async def session_status(self) -> dict[str, Any]:
         return await self._control_with_lazy_spawn(self._control.session_status)
+
+    async def session_box_status(
+        self,
+        *,
+        wait: bool = False,
+        ticket: str | None = None,
+        done: bool = False,
+        claim: bool = False,
+    ) -> dict[str, Any]:
+        payload: dict[str, object] = {}
+        if wait:
+            payload["box_wait"] = True
+        if isinstance(ticket, str) and ticket:
+            payload["box_ticket"] = ticket
+        if done:
+            payload["box_wait_done"] = True
+        if claim:
+            payload["box_wait_claim"] = True
+        return await self._control_with_lazy_spawn(
+            self._control._session_call, "/session/status", payload
+        )
 
     async def reconcile_idle_session(self) -> dict[str, Any]:
         return await self._control_with_lazy_spawn(
@@ -1346,6 +1436,25 @@ def _current_launch_logs(profiles_dir: str, start_epoch: float | None) -> list[s
     return [path for mtime, path in dated if mtime >= floor]
 
 
+def _coerce_logs_since_marker(marker: object) -> str:
+    """Normalize a logs_since marker to the encoded JSON string.
+
+    The tool returns an encoded JSON string. FastMCP pre-parses JSON-looking
+    strings into dicts before the handler runs because the parameter type is a
+    union, not bare ``str`` (``FuncMetadata.pre_parse_json``). Clients that
+    JSON-decode the returned marker also pass a dict. Accept both; reject
+    anything else as ``bad_marker``.
+    """
+    if isinstance(marker, str):
+        return marker
+    if isinstance(marker, dict):
+        try:
+            return json.dumps(marker, separators=(",", ":"), sort_keys=True)
+        except (TypeError, ValueError) as error:
+            raise ToolError("bad_marker") from error
+    raise ToolError("bad_marker")
+
+
 def _profile_dirs_from_runs(runs: list[dict[str, Any]]) -> list[str]:
     candidates = sorted(
         {str(item.get("profiles")) for item in runs if item.get("profiles")}
@@ -1659,6 +1768,189 @@ async def execute_ui_dialog(
     raise ToolError(f"timeout waiting for ui_dialog id={command_id}{suffix}")
 
 
+def _parse_wait_for_box_s(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ToolError("bad_args: wait_for_box_s must be a finite float >= 0")
+    converted = float(value)
+    if not math.isfinite(converted) or converted < 0.0:
+        raise ToolError("bad_args: wait_for_box_s must be a finite float >= 0")
+    if converted > BOX_WAIT_MAX_S:
+        raise ToolError(
+            f"bad_args: wait_for_box_s must be <= {BOX_WAIT_MAX_S:g}"
+        )
+    return converted
+
+
+def _box_from_status(status: object) -> dict[str, Any]:
+    if not isinstance(status, dict):
+        return empty_box(occupied=True)
+    box = status.get("box")
+    if not isinstance(box, dict):
+        return empty_box(occupied=True)
+    payload = dict(box)
+    if not isinstance(payload.get("runs"), list):
+        payload["runs"] = []
+    if not isinstance(payload.get("foreign"), list):
+        payload["foreign"] = []
+    if not isinstance(payload.get("ports_in_use"), list):
+        payload["ports_in_use"] = []
+    if not isinstance(payload.get("queue"), list):
+        payload["queue"] = []
+    if payload.get("occupied") is not False:
+        payload["occupied"] = bool(payload.get("occupied", True))
+    return payload
+
+
+def _box_head_is(box: dict[str, Any], session_id: str) -> bool:
+    queue = box.get("queue")
+    if not isinstance(queue, list) or not queue:
+        return False
+    head = queue[0]
+    if not isinstance(head, dict):
+        return False
+    session = head.get("session")
+    return session in {session_id, session_id[:12]}
+
+
+def _box_ready_for(box: dict[str, Any], session_id: str) -> bool:
+    if box.get("occupied") is True:
+        return False
+    return _box_head_is(box, session_id)
+
+
+def _enrich_active_run_result(
+    result: dict[str, Any],
+    box: dict[str, Any],
+    *,
+    caller_session: str | None = None,
+) -> dict[str, Any]:
+    extra = occupancy_error_fields(box, caller_session=caller_session)
+    payload = dict(result)
+    payload.update(extra)
+    payload["run_id"] = None
+    payload["status"] = "failed"
+    payload["error_code"] = "active_run_exists"
+    return payload
+
+
+def _failed_active_run_result(
+    *,
+    project: str,
+    mode: str,
+    box: object,
+    started: float,
+    caller_session: str | None = None,
+) -> dict[str, Any]:
+    extra = occupancy_error_fields(box, caller_session=caller_session)
+    return {
+        "status": "failed",
+        "project": project,
+        "mode": mode,
+        "run_id": None,
+        "phase": "executing",
+        "elapsed_s": round(time.monotonic() - started, 3),
+        "artifacts_paths": [],
+        "error_code": "active_run_exists",
+        "cleanup_degraded": False,
+        "server_alive": None,
+        "client_alive": None,
+        **extra,
+    }
+
+
+async def _heartbeat_box_claim(
+    client: Any,
+    ticket: str,
+    *,
+    sleep_fn: Callable[[float], Awaitable[None]] | None = None,
+) -> None:
+    """Refresh a claimed box ticket while the launch holds tool_lock.
+
+    Must not take ``tool_lock``: the launch already holds it. The daemon
+    call only needs to bump ``touched_at`` on the claim. Transient
+    transport errors must not stop the heartbeat.
+    """
+
+    sleeper = sleep_fn or asyncio.sleep
+    while True:
+        await sleeper(BOX_CLAIM_HEARTBEAT_S)
+        try:
+            await client.session_box_status(wait=True, ticket=ticket)
+        except Exception:
+            continue
+
+
+async def execute_wait_for_box(
+    client: Any,
+    wait_s: float,
+    *,
+    sleep_fn: Callable[[float], Awaitable[None]] | None = None,
+    time_fn: Callable[[], float] | None = None,
+    poll_interval_s: float = BOX_WAIT_POLL_S,
+) -> dict[str, Any]:
+    """Wait until the box is free and this waiter is FIFO head.
+
+    Probes under ``tool_lock`` and sleeps outside it, same rule as
+    ``wait_for`` / ``ui_dialog``. Does not take a lease and does not
+    require the caller to heartbeat.
+    """
+
+    sleeper = sleep_fn or asyncio.sleep
+    clock = time_fn or time.monotonic
+    poll = max(float(poll_interval_s), BOX_WAIT_MIN_POLL_S)
+    deadline = clock() + float(wait_s)
+    ticket: str | None = None
+    box = empty_box(occupied=True)
+    session_id = str(getattr(getattr(client, "identity", None), "session_id", "") or "")
+    try:
+        while True:
+            async with client.tool_lock:
+                status = await client.session_box_status(wait=True, ticket=ticket)
+            if isinstance(status, dict):
+                box = _box_from_status(status)
+                next_ticket = status.get("box_ticket")
+                wait_error = status.get("box_wait_error")
+                if wait_error in {"box_ticket_invalid", "box_wait_cancelled"}:
+                    ticket = None
+                elif isinstance(next_ticket, str) and next_ticket:
+                    ticket = next_ticket
+            else:
+                wait_error = "box_status_invalid"
+            if wait_error == "box_queue_saturated":
+                return {
+                    "ok": False,
+                    "ticket": ticket,
+                    "box": box,
+                    "error": "box_queue_saturated",
+                }
+            ready = (
+                isinstance(ticket, str)
+                and ticket
+                and wait_error is None
+                and _box_ready_for(box, session_id)
+            )
+            if ready:
+                async with client.tool_lock:
+                    claimed = await client.session_box_status(
+                        wait=True, ticket=ticket, claim=True
+                    )
+                if isinstance(claimed, dict):
+                    box = _box_from_status(claimed)
+                return {"ok": True, "ticket": ticket, "box": box}
+            remaining = deadline - clock()
+            if remaining <= 0.0:
+                return {"ok": False, "ticket": ticket, "box": box}
+            await sleeper(min(poll, remaining))
+    except BaseException:
+        if ticket:
+            try:
+                async with client.tool_lock:
+                    await client.session_box_status(done=True, ticket=ticket)
+            except Exception:
+                pass
+        raise
+
+
 def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     runtime: Any = ClientRuntime(config) if config.mode == "client" else Runtime(config)
 
@@ -1797,7 +2089,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with client.tool_lock:
             return await client.session_release(lease_token)
 
-    @app.tool(description="Read redacted daemon/queue/self coordination state.")
+    @app.tool(
+        description=(
+            "Read redacted daemon/queue/self coordination state, including "
+            "box occupancy (managed runs, foreign DayZDiag, ports_in_use, "
+            "and the box wait FIFO)."
+        )
+    )
     async def session_status() -> dict[str, Any]:
         client = _client_runtime()
         async with client.tool_lock:
@@ -1822,7 +2120,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Queue and run an approved DayZ test project; lease ownership and "
-            "heartbeat remain internal to the tool."
+            "heartbeat remain internal to the tool. wait_for_box_s>0 waits "
+            "until session_status.box is free (FIFO, no tool_lock while "
+            f"sleeping). 0 is the immediate reject. wait_for_box_s must be <= "
+            f"{BOX_WAIT_MAX_S:g}. Choose port= from "
+            "session_status.box.ports_in_use."
         )
     )
     async def dayz_test_run(
@@ -1844,48 +2146,118 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         height: int = 1080,
         player_name: str = "Dev",
         server_wait_s: int = 60,
+        wait_for_box_s: float = 0.0,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
+        wait_s = _parse_wait_for_box_s(wait_for_box_s)
         client = _client_runtime()
+        started = time.monotonic()
+        box_ticket: str | None = None
+        claim_task: asyncio.Task[None] | None = None
+        caller_session = str(getattr(client.identity, "session_id", "") or "") or None
 
         async def report(stage: str, message: str | None) -> None:
             await report_dayz_progress(ctx, stage, message)
 
-        async with client.tool_lock:
-            try:
-                with _typed_dayz_test_value_errors():
-                    return await dayz_test_tool.execute_dayz_test_run(
-                        client,
+        async def peek_box() -> dict[str, Any]:
+            async with client.tool_lock:
+                return _box_from_status(await client.session_status())
+
+        try:
+            if wait_s > 0.0:
+                await report("queued", "waiting for box")
+                waited = await execute_wait_for_box(client, wait_s)
+                ticket = waited.get("ticket")
+                box_ticket = ticket if isinstance(ticket, str) else None
+                if not waited.get("ok"):
+                    failed = _failed_active_run_result(
                         project=project,
                         mode=mode,
-                        mission=mission,
-                        build=build,
-                        clean=clean,
-                        pack_only=pack_only,
-                        preflight=preflight,
-                        run_id=run_id,
-                        extra_mods=extra_mods,
-                        base_mods=base_mods,
-                        server_mods=server_mods,
-                        no_base_mods=no_base_mods,
-                        no_file_patching=no_file_patching,
-                        port=port,
-                        width=width,
-                        height=height,
-                        player_name=player_name,
-                        server_wait_s=server_wait_s,
-                        progress_cb=report,
+                        box=waited.get("box"),
+                        started=started,
+                        caller_session=caller_session,
                     )
-            except dayz_test_tool.DayzTestToolError as error:
-                raise ToolError(error.code) from None
-            except ToolError:
-                raise
-            except Exception as exc:
-                # F1.4: the ToolError carries the exception TYPE only. The message
-                # can hold host paths, so it must not cross the MCP wire; FastMCP
-                # serializes str(exc) alone. `from exc` keeps the cause in
-                # __cause__ for LOCAL diagnosis (F5.1 needs it), not for the wire.
-                raise ToolError(f"dayz_test_failed:{type(exc).__name__}") from exc
+                    if waited.get("error") == "box_queue_saturated":
+                        failed["error_code"] = "box_queue_saturated"
+                        failed["hint"] = "retry with wait_for_box_s=<n>"
+                    return failed
+                if box_ticket:
+                    claim_task = asyncio.create_task(
+                        _heartbeat_box_claim(client, box_ticket)
+                    )
+
+            execute_error: dayz_test_tool.DayzTestToolError | None = None
+            result: dict[str, Any] | None = None
+            async with client.tool_lock:
+                try:
+                    with _typed_dayz_test_value_errors():
+                        result = await dayz_test_tool.execute_dayz_test_run(
+                            client,
+                            project=project,
+                            mode=mode,
+                            mission=mission,
+                            build=build,
+                            clean=clean,
+                            pack_only=pack_only,
+                            preflight=preflight,
+                            run_id=run_id,
+                            extra_mods=extra_mods,
+                            base_mods=base_mods,
+                            server_mods=server_mods,
+                            no_base_mods=no_base_mods,
+                            no_file_patching=no_file_patching,
+                            port=port,
+                            width=width,
+                            height=height,
+                            player_name=player_name,
+                            server_wait_s=server_wait_s,
+                            progress_cb=report,
+                        )
+                except dayz_test_tool.DayzTestToolError as error:
+                    execute_error = error
+                except ToolError:
+                    raise
+                except Exception as exc:
+                    # F1.4: the ToolError carries the exception TYPE only. The message
+                    # can hold host paths, so it must not cross the MCP wire; FastMCP
+                    # serializes str(exc) alone. `from exc` keeps the cause in
+                    # __cause__ for LOCAL diagnosis (F5.1 needs it), not for the wire.
+                    raise ToolError(f"dayz_test_failed:{type(exc).__name__}") from exc
+            if execute_error is not None:
+                if execute_error.code == "active_run_exists":
+                    return _failed_active_run_result(
+                        project=project,
+                        mode=mode,
+                        box=await peek_box(),
+                        started=started,
+                        caller_session=caller_session,
+                    )
+                raise ToolError(execute_error.code) from None
+            if (
+                isinstance(result, dict)
+                and result.get("error_code") == "active_run_exists"
+            ):
+                return _enrich_active_run_result(
+                    result,
+                    await peek_box(),
+                    caller_session=caller_session,
+                )
+            if result is None:
+                raise ToolError("dayz_test_failed:RuntimeError")
+            return result
+        finally:
+            if claim_task is not None:
+                claim_task.cancel()
+                try:
+                    await claim_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if box_ticket:
+                try:
+                    async with client.tool_lock:
+                        await client.session_box_status(done=True, ticket=box_ticket)
+                except Exception:
+                    pass
 
     @app.tool(
         description=(
@@ -1937,14 +2309,24 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             "Read RPT/script log lines appended since a marker, from the "
             "active run's _server and _client profiles. Without a marker, "
-            "reads the current launch (not the historic dump). No lease."
+            "reads the current launch (not the historic dump). No lease. "
+            "Pass back the marker this tool returns unchanged: encoded JSON "
+            "string or the decoded object {path:[offset,size,identity]}."
         )
     )
     async def logs_since(
-        marker: str | None = None,
+        marker: str | dict[str, Any] | None = None,
         max_lines: int = 200,
         run_id: str | None = None,
     ) -> dict[str, Any]:
+        """Drain RPT/script logs since a previous marker.
+
+        ``marker`` is the exact value returned by a previous call. Accepted
+        input: ``None`` (session-stored marker, or current launch if none),
+        the encoded JSON string, or the decoded dict
+        ``{path: [offset, size, identity]}``. The response ``marker`` stays
+        the encoded JSON string so existing consumers keep parsing it.
+        """
         if (
             not isinstance(max_lines, int)
             or isinstance(max_lines, bool)
@@ -1952,7 +2334,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         ):
             raise ToolError("bad_args")
         client = _client_runtime()
-        source = log_marker_state["marker"] if marker is None else marker
+        source = (
+            log_marker_state["marker"]
+            if marker is None
+            else _coerce_logs_since_marker(marker)
+        )
         try:
             markers = log_tail.decode_marker(source)
         except log_tail.LogTailError:
@@ -2690,6 +3076,38 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         args = {"path": path, "button": int(button)}
         async with runtime.tool_lock:
             return await runtime.call_bridge("ui_click", args, "client", _timeout(timeout_s))
+
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Rebuild a client preview root from a .layout file on "
+        "disk and return the engine rects of the resulting tree, so UI can be "
+        "iterated without repacking the mod. Only $profile: paths are re-read from "
+        "disk; an addon-prefixed path is served by the PBO. mode='close' unlinks "
+        "the preview and loads nothing. A missing file returns layout_not_found "
+        "instead of killing the client."
+    ))
+    async def ui_reload_layout(
+        path: str = "",
+        mode: str = "reload",
+        limit: int = 256,
+        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(mode, str) or mode not in {"reload", "close"}:
+            raise ToolError("bad_args")
+        if not isinstance(path, str):
+            raise ToolError("bad_args")
+        if mode == "reload" and path == "":
+            raise ToolError("bad_args")
+        if mode == "close" and path != "":
+            raise ToolError("bad_args")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 512:
+            raise ToolError("bad_args")
+        args: dict[str, Any] = {"mode": mode, "limit": int(limit)}
+        if path != "":
+            args["path"] = path
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "ui_reload_layout", args, "client", _timeout(timeout_s)
+            )
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Client modal (acknowledge/confirm/form). "

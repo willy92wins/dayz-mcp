@@ -30,6 +30,9 @@ class RetailQuarantineTest(unittest.TestCase):
     def setUp(self) -> None:
         self.events: list[dict[str, object]] = []
         self.state = loopback.ServerState("key")
+        from tests.fence_helpers import bind_both_peers
+
+        bind_both_peers(self.state)
         self.coordinator = SessionCoordinator(
             token_fn=lambda: "token",
             id_fn=lambda: "lease",

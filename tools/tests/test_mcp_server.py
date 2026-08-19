@@ -18,6 +18,11 @@ class MCPServerTest(unittest.TestCase):
         self.key = "test-key"
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), mcp_server.Handler)
         self.httpd.state = mcp_server.ServerState(self.key)  # type: ignore[attr-defined]
+        from tests.fence_helpers import INST_CLIENT, INST_SERVER, bind_both_peers
+
+        bind_both_peers(self.httpd.state)
+        self.inst_server = INST_SERVER
+        self.inst_client = INST_CLIENT
         self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         self.thread.start()
         host, port = self.httpd.server_address
@@ -78,15 +83,19 @@ class MCPServerTest(unittest.TestCase):
         status, client_body = self.request("POST", "/enqueue", {"cmd": "camera_set", "args": {"cam_mode": "orient"}})
         self.assertEqual(status, 200)
 
-        status, body = self.request("GET", "/poll")
+        status, body = self.request("GET", "/poll", query={"inst": self.inst_server})
         self.assertEqual(status, 200)
         self.assertEqual([command["id"] for command in body["commands"]], [server_body["id"]])
 
-        status, body = self.request("GET", "/poll", query={"peer": "client"})
+        status, body = self.request(
+            "GET", "/poll", query={"peer": "client", "inst": self.inst_client}
+        )
         self.assertEqual(status, 200)
         self.assertEqual([command["id"] for command in body["commands"]], [client_body["id"]])
 
-        status, body = self.request("GET", "/poll", query={"peer": "server"})
+        status, body = self.request(
+            "GET", "/poll", query={"peer": "server", "inst": self.inst_server}
+        )
         self.assertEqual(status, 200)
         self.assertEqual(body, {"commands": []})
 

@@ -13,6 +13,7 @@ from typing import Callable
 
 
 SESSION_TTL_S = 120.0
+BOX_CLAIM_TTL_S = 600.0
 WAIT_MAX_S = 30.0
 MAX_SESSION_QUEUE = 64
 READ_ONLY_COMMANDS = frozenset(
@@ -245,6 +246,10 @@ class SessionCoordinator:
         self._queue: list[_Ticket] = []
         self._queue_reservations: list[_Ticket] = []
         self._operation_tombstones: dict[tuple[ClientIdentity, str], float] = {}
+        self._box_queue: list[_Ticket] = []
+        self._box_tombstones: dict[tuple[str, str], float] = {}
+        self._box_claiming: str | None = None
+        self._box_claimed_at: float | None = None
         self._invalid_tokens: dict[str, tuple[ClientIdentity, str]] = {}
         self._revision = 0
         self._cleanup_worker_slots = threading.BoundedSemaphore(
@@ -287,12 +292,11 @@ class SessionCoordinator:
                     return existing
                 if self._operation_tombstoned_locked(client, operation_id):
                     return 409, {"error": "operation_cancelled"}
-                if len(self._operation_tombstones) >= MAX_OPERATION_TOMBSTONES:
-                    return 503, {
-                        "error": "operation_tombstones_saturated",
-                        "count": len(self._operation_tombstones),
-                        "capacity": MAX_OPERATION_TOMBSTONES,
-                    }
+                if (
+                    len(self._operation_tombstones) >= MAX_OPERATION_TOMBSTONES
+                    and not self._admission_privileged_locked(client)
+                ):
+                    return 503, self._tombstone_saturated_error_locked()
                 if self._client_has_other_operation_locked(client, operation_id):
                     return 409, {"error": "operation_conflict"}
             if (
@@ -711,12 +715,11 @@ class SessionCoordinator:
                 return existing
             if self._operation_tombstoned_locked(client, operation_id):
                 return 409, {"error": "operation_cancelled"}
-            if len(self._operation_tombstones) >= MAX_OPERATION_TOMBSTONES:
-                return 503, {
-                    "error": "operation_tombstones_saturated",
-                    "count": len(self._operation_tombstones),
-                    "capacity": MAX_OPERATION_TOMBSTONES,
-                }
+            if (
+                len(self._operation_tombstones) >= MAX_OPERATION_TOMBSTONES
+                and not self._admission_privileged_locked(client)
+            ):
+                return 503, self._tombstone_saturated_error_locked()
             if self._client_has_other_operation_locked(client, operation_id):
                 return 409, {"error": "operation_conflict"}
             if self._queue_capacity_locked() >= MAX_SESSION_QUEUE:
@@ -791,14 +794,13 @@ class SessionCoordinator:
             operation_admitted = (
                 self._operation_state_locked(client, operation_id) is not None
             )
-            if key not in self._operation_tombstones and len(
-                self._operation_tombstones
-            ) >= MAX_OPERATION_TOMBSTONES and not operation_admitted:
-                return 503, {
-                    "error": "operation_tombstones_saturated",
-                    "count": len(self._operation_tombstones),
-                    "capacity": MAX_OPERATION_TOMBSTONES,
-                }
+            if (
+                key not in self._operation_tombstones
+                and len(self._operation_tombstones) >= MAX_OPERATION_TOMBSTONES
+                and not operation_admitted
+                and not self._admission_privileged_locked(client)
+            ):
+                return 503, self._tombstone_saturated_error_locked()
             # Saturation fences only unseen admission. Cleanup of an operation
             # already admitted must retain its cancellation marker so it cannot
             # publish late or block the queue until lease/ticket expiry.
@@ -1797,6 +1799,127 @@ class SessionCoordinator:
                 "cleanup_degraded": self._unique(degraded),
             }
 
+    def box_queue_public(self) -> list[dict[str, object]]:
+        with self._condition:
+            self._purge_box_locked()
+            now = self._time_fn()
+            return [
+                {
+                    "session": ticket.client.public_payload()["session"],
+                    "waiting_s": max(0.0, now - ticket.created_at),
+                }
+                for ticket in self._box_queue
+            ]
+
+    def box_is_claimed(self) -> bool:
+        with self._condition:
+            self._purge_box_locked()
+            return self._box_claiming is not None
+
+    def box_blocks_start(self, client: ClientIdentity) -> bool:
+        with self._condition:
+            self._purge_box_locked()
+            return (
+                self._box_claiming is not None
+                and self._box_claiming != client.session_id
+            )
+
+    def box_claim_public(self) -> dict[str, object]:
+        with self._condition:
+            self._purge_box_locked()
+            if self._box_claiming is None:
+                return {"claimed": False, "claimed_s": None}
+            now = self._time_fn()
+            started = self._box_claimed_at
+            claimed_s = (
+                max(0.0, now - started) if isinstance(started, (int, float)) else 0.0
+            )
+            return {"claimed": True, "claimed_s": claimed_s}
+
+    def box_wait_touch(
+        self,
+        client: ClientIdentity,
+        ticket_id: object = None,
+        *,
+        done: bool = False,
+        claim: bool = False,
+    ) -> dict[str, object]:
+        """Join, refresh, claim, or leave the box FIFO.
+
+        Same TTL, capacity and tombstone constants as the lease queue. Tickets
+        are request-bound and are not written into the durable snapshot.
+        """
+
+        with self._condition:
+            self._purge_box_locked()
+            if done:
+                self._box_leave_locked(client, ticket_id)
+                return {"box_ticket": None}
+            existing = self._box_ticket_for_client_locked(client)
+            supplied = ticket_id if isinstance(ticket_id, str) and ticket_id else None
+            if supplied is not None and self._box_tombstoned_locked(
+                client.session_id, supplied
+            ):
+                return {"box_ticket": None, "box_wait_error": "box_wait_cancelled"}
+            if existing is None:
+                if supplied is not None:
+                    return {"box_ticket": None, "box_wait_error": "box_ticket_invalid"}
+                if len(self._box_tombstones) >= MAX_OPERATION_TOMBSTONES:
+                    return {
+                        "box_ticket": None,
+                        "box_wait_error": "box_queue_saturated",
+                        "hint": "retry with wait_for_box_s=<n>",
+                    }
+                if len(self._box_queue) >= MAX_SESSION_QUEUE:
+                    return {"box_ticket": None, "box_wait_error": "queue_full"}
+                now = self._time_fn()
+                ticket = _Ticket(
+                    self._id_fn(),
+                    client,
+                    "box_wait",
+                    now,
+                    now,
+                )
+                self._box_queue.append(ticket)
+                self._bump_revision_locked()
+                self._condition.notify_all()
+                existing = ticket
+            else:
+                existing.touched_at = self._time_fn()
+            if claim and self._box_queue and self._box_queue[0] is existing:
+                if self._box_claiming != client.session_id:
+                    self._box_claimed_at = self._time_fn()
+                self._box_claiming = client.session_id
+            return {
+                "box_ticket": existing.ticket_id,
+                "box_position": self._box_queue.index(existing) + 1,
+                "box_claimed": self._box_claiming == client.session_id,
+            }
+
+    def durable_revision(self) -> int:
+        with self._condition:
+            return self._revision
+
+    def note_run_reaped(self, owner_session_id: str | None) -> None:
+        with self._condition:
+            before = self._revision
+            if isinstance(owner_session_id, str) and owner_session_id:
+                self._box_leave_session_locked(owner_session_id)
+            self._expire_due()
+            if self._revision == before:
+                self._bump_revision_locked()
+            self._condition.notify_all()
+        try:
+            self._audit(
+                {
+                    "event": "run_reaped_wake",
+                    "owner_session": owner_session_id,
+                    "decision": "woke",
+                }
+            )
+        except Exception:
+            pass
+
     def snapshot_payload(self) -> dict[str, object]:
         with self._condition:
             return self._snapshot_payload_locked()
@@ -1956,6 +2079,7 @@ class SessionCoordinator:
 
     def _expire_due(self, protect_ticket_id: str | None = None) -> list[str]:
         self._purge_operation_tombstones_locked()
+        self._purge_box_locked()
         degraded = self._cancel_expired_tickets_locked(protect_ticket_id)
         if (
             self._active is not None
@@ -2649,6 +2773,37 @@ class SessionCoordinator:
             and all(ord(character) >= 32 for character in operation_id)
         )
 
+    def _admission_privileged_locked(self, client: ClientIdentity) -> bool:
+        if self._active is not None and self._active.client == client:
+            return True
+        if self._box_claiming == client.session_id:
+            return True
+        return False
+
+    def _oldest_tombstone_retry_after_locked(self) -> float:
+        if not self._operation_tombstones:
+            return 0.0
+        oldest_expires_at = min(self._operation_tombstones.values())
+        remaining = float(oldest_expires_at) - float(self._time_fn())
+        if remaining < 0.0:
+            return 0.0
+        if remaining > OPERATION_TOMBSTONE_TTL_S:
+            return float(OPERATION_TOMBSTONE_TTL_S)
+        return remaining
+
+    def _tombstone_saturated_error_locked(self) -> dict:
+        retry_after_s = self._oldest_tombstone_retry_after_locked()
+        return {
+            "error": "operation_tombstones_saturated",
+            "count": len(self._operation_tombstones),
+            "capacity": MAX_OPERATION_TOMBSTONES,
+            "retry_after_s": retry_after_s,
+            "hint": (
+                f"wait {retry_after_s:.0f}s then retry session_acquire_wait; "
+                "do not spin"
+            ),
+        }
+
     def _purge_operation_tombstones_locked(self) -> None:
         now = self._time_fn()
         expired = [
@@ -2659,6 +2814,98 @@ class SessionCoordinator:
         for key in expired:
             self._operation_tombstones.pop(key, None)
         if expired:
+            self._bump_revision_locked()
+            self._condition.notify_all()
+
+    def _purge_box_locked(self) -> None:
+        now = self._time_fn()
+        changed = False
+        expired_tombstones = [
+            key
+            for key, expires_at in self._box_tombstones.items()
+            if expires_at <= now
+        ]
+        for key in expired_tombstones:
+            self._box_tombstones.pop(key, None)
+            changed = True
+        kept: list[_Ticket] = []
+        for ticket in self._box_queue:
+            claimed = self._box_claiming == ticket.client.session_id
+            ttl = BOX_CLAIM_TTL_S if claimed else SESSION_TTL_S
+            if now - ticket.touched_at >= ttl:
+                self._box_tombstones[(ticket.client.session_id, ticket.ticket_id)] = (
+                    now + OPERATION_TOMBSTONE_TTL_S
+                )
+                if claimed:
+                    self._box_claiming = None
+                    self._box_claimed_at = None
+                changed = True
+                continue
+            kept.append(ticket)
+        if len(kept) != len(self._box_queue):
+            self._box_queue = kept
+            changed = True
+        if changed:
+            self._bump_revision_locked()
+            self._condition.notify_all()
+
+    def _box_tombstoned_locked(self, session_id: str, ticket_id: str) -> bool:
+        return (session_id, ticket_id) in self._box_tombstones
+
+    def _box_ticket_for_client_locked(self, client: ClientIdentity) -> _Ticket | None:
+        for ticket in self._box_queue:
+            if ticket.client.session_id == client.session_id:
+                return ticket
+        return None
+
+    def _box_leave_session_locked(self, session_id: str) -> None:
+        now = self._time_fn()
+        remaining: list[_Ticket] = []
+        removed = False
+        for ticket in self._box_queue:
+            if ticket.client.session_id == session_id:
+                self._box_tombstones[(ticket.client.session_id, ticket.ticket_id)] = (
+                    now + OPERATION_TOMBSTONE_TTL_S
+                )
+                removed = True
+                continue
+            remaining.append(ticket)
+        if self._box_claiming == session_id:
+            self._box_claiming = None
+            self._box_claimed_at = None
+            removed = True
+        if removed:
+            self._box_queue = remaining
+            self._bump_revision_locked()
+            self._condition.notify_all()
+
+    def _box_leave_locked(self, client: ClientIdentity, ticket_id: object) -> None:
+        if ticket_id in (None, ""):
+            self._box_leave_session_locked(client.session_id)
+            return
+        now = self._time_fn()
+        remaining: list[_Ticket] = []
+        removed = False
+        for ticket in self._box_queue:
+            match_ticket = (
+                isinstance(ticket_id, str)
+                and ticket_id
+                and ticket.ticket_id == ticket_id
+                and ticket.client.session_id == client.session_id
+            )
+            if match_ticket:
+                self._box_tombstones[(ticket.client.session_id, ticket.ticket_id)] = (
+                    now + OPERATION_TOMBSTONE_TTL_S
+                )
+                removed = True
+                continue
+            remaining.append(ticket)
+        if self._box_claiming == client.session_id:
+            self._box_claiming = None
+            self._box_claimed_at = None
+            removed = True
+        if removed:
+            self._box_queue = remaining
             self._bump_revision_locked()
             self._condition.notify_all()
 

@@ -36,6 +36,9 @@ class X5ToolsTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         runtime.start_loopback()
+        from tests.fence_helpers import bind_both_peers
+
+        bind_both_peers(runtime.state)
         self.runtimes.append(runtime)
         return app, runtime
 

@@ -30,6 +30,9 @@ def _method_body(source: str, signature: str) -> str:
 class InventoryGiveIngressTest(unittest.TestCase):
     def setUp(self) -> None:
         self.state = loopback.ServerState("test-key")
+        from tests.fence_helpers import bind_both_peers
+
+        bind_both_peers(self.state)
 
     def test_happy_path_server_mutating(self) -> None:
         self.assertIn(COMMAND, loopback.SERVER_COMMANDS)

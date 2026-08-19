@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 from dayz_mcp import server as server_module
 from dayz_mcp.server import EXPECTED_BRIDGE_VERSION, ServerConfig, Runtime, build_app
+from tests.fence_helpers import INST_CLIENT, INST_SERVER, bind_both_peers
 
 
 def _content_json(content: Any) -> dict[str, Any]:
@@ -96,6 +97,7 @@ class FakePeer:
     def run(self) -> None:
         while not self.stop_event.is_set():
             query = {"peer": self.peer}
+            query["inst"] = INST_SERVER if self.peer == "server" else INST_CLIENT
             if self.version is not None:
                 query["ver"] = self.version
             try:
@@ -107,7 +109,12 @@ class FakePeer:
                     if self.result_delay_s > 0.0:
                         time.sleep(self.result_delay_s)
                     result = self.responder(command)
-                    self.request("POST", "/result", payload=result)
+                    self.request(
+                        "POST",
+                        "/result",
+                        payload=result,
+                        query={"inst": query["inst"]},
+                    )
             except Exception:
                 time.sleep(0.02)
             time.sleep(0.02)
@@ -126,6 +133,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
     def build_started(self, **config_kwargs: Any):
         app, runtime = build_app(ServerConfig(key=self.key, port=0, log_sink=lambda _message: None, **config_kwargs))
         runtime.start_loopback()
+        bind_both_peers(runtime.state)
         self.runtimes.append(runtime)
         return app, runtime
 

@@ -127,6 +127,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected RestContext m_Ctx;
 	protected string m_Url;
 	protected string m_Key;
+	protected string m_PeerInstance;
 	protected string m_PollVersion;
 	protected float m_PollHz;
 	protected float m_Accum;
@@ -153,6 +154,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected ref MCPDialogSink m_DialogSink;
 	protected MCPJob m_DialogJob;
 	protected bool m_DialogHostTried;
+	//! Hot-UI preview root. Not ref: the workspace owns the widget tree; this
+	//! pointer only exists so the next reload can Unlink the previous one.
+	protected Widget m_UiPreviewRoot;
 
 	void MCPClientBridge()
 	{
@@ -163,6 +167,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_TickPollSent = 0;
 		m_TickPollCallback = 0;
 		m_PollVersion = "";
+		m_PeerInstance = "";
 		m_PollInFlight = false;
 		m_Configured = false;
 		m_InitFailureLogged = false;
@@ -294,6 +299,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		m_Url = cfg.url;
 		m_Key = cfg.key;
+		m_PeerInstance = "";
+		if (cfg.instance != "")
+		{
+			m_PeerInstance = cfg.instance;
+		}
 		if (cfg.pollHz > 0.0)
 		{
 			m_PollHz = cfg.pollHz;
@@ -310,7 +320,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_Configured = true;
 		m_Backoff = 0.0;
 		m_Accum = 0.0;
-		Log("client config loaded path=" + path + " url=" + m_Url + " keylen=" + m_Key.Length() + " poll_hz=" + m_PollHz);
+		Log("client config loaded path=" + path + " url=" + m_Url + " keylen=" + m_Key.Length() + " instlen=" + m_PeerInstance.Length() + " poll_hz=" + m_PollHz);
 	}
 
 	protected void LogInitFailure(string reason)
@@ -339,6 +349,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_CallbackRefs.Insert(cb);
 		string request = "poll?peer=client&key=" + m_Key;
 		request = request + "&ver=" + GetPollVersion();
+		if (m_PeerInstance != "")
+		{
+			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
+		}
 		m_Ctx.GET(cb, request);
 	}
 
@@ -602,6 +616,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "ui_click")
 		{
 			postNow = DispatchUiClick(command, result);
+		}
+		else if (command.cmd == "ui_reload_layout")
+		{
+			postNow = DispatchUiReloadLayout(command, result);
 		}
 		else if (command.cmd == "action_use")
 		{
@@ -1199,6 +1217,98 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		result.ok = true;
+		return true;
+	}
+
+	//! Hot UI iteration: rebuild a standalone preview root from a .layout on disk
+	//! and report the engine rects of the resulting tree. $profile: is the only
+	//! prefix the engine re-reads without a repack; an addon-prefixed path is
+	//! served by the PBO and never sees a loose file (measured 2026-08-19).
+	//! mode="close" unlinks the preview and loads nothing.
+	protected bool DispatchUiReloadLayout(MCPCommand command, MCPResult result)
+	{
+		MCPArgs args = command.args;
+		if (!args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		bool closing = (args.mode == "close");
+		if (!closing && args.path == "")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		if (!GetGame())
+		{
+			result.ok = false;
+			result.error = "no_game";
+			return true;
+		}
+
+		WorkspaceWidget workspace = GetGame().GetWorkspace();
+		if (!workspace)
+		{
+			result.ok = false;
+			result.error = "no_workspace";
+			return true;
+		}
+
+		// Unlink first, always: CreateWidgets stacks a second root on top of the
+		// first, and the returned snapshot would stop describing what is on screen.
+		if (m_UiPreviewRoot)
+		{
+			m_UiPreviewRoot.Unlink();
+			m_UiPreviewRoot = null;
+		}
+
+		MCPUiSnapshot snap = new MCPUiSnapshot();
+		if (closing)
+		{
+			result.ui = snap;
+			result.source = "";
+			result.ok = true;
+			Log("ui_reload_layout closed preview");
+			return true;
+		}
+
+		// FileExist (1_core\proto\ensystem.c:397) resolves VFS paths and is the only
+		// guard between here and a CTD: CreateWidgets on a missing layout dies inside
+		// the native call, taking the client with it.
+		if (!FileExist(args.path))
+		{
+			result.ok = false;
+			result.error = "layout_not_found";
+			return true;
+		}
+
+		m_UiPreviewRoot = workspace.CreateWidgets(args.path);
+		if (!m_UiPreviewRoot)
+		{
+			result.ok = false;
+			result.error = "layout_load_failed";
+			return true;
+		}
+
+		int limit = UI_TREE_DEFAULT_LIMIT;
+		if (args.limit > 0)
+		{
+			limit = args.limit;
+		}
+		if (limit > UI_TREE_MAX_LIMIT)
+		{
+			limit = UI_TREE_MAX_LIMIT;
+		}
+
+		CollectUiNodes(m_UiPreviewRoot, snap, limit);
+		result.ui = snap;
+		result.source = args.path;
+		result.ok = true;
+		Log(string.Format("ui_reload_layout loaded %1 nodes=%2", args.path, snap.nodes.Count()));
 		return true;
 	}
 
@@ -3102,7 +3212,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		MCPClientResultCallback cb = new MCPClientResultCallback(this);
 		m_CallbackRefs.Insert(cb);
-		m_Ctx.POST(cb, "result?key=" + m_Key, body);
+		string resultRequest = "result?key=" + m_Key;
+		if (m_PeerInstance != "")
+		{
+			resultRequest = resultRequest + "&inst=" + EncodeQueryValue(m_PeerInstance);
+		}
+		m_Ctx.POST(cb, resultRequest, body);
 		string okStr = "0";
 		if (result.ok)
 		{
@@ -3148,17 +3263,31 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	void Shutdown()
 	{
+		bool postedTerminal = false;
 		if (m_Dialog && m_Dialog.IsOpen())
 		{
 			m_Dialog.FinishDisconnected();
 		}
 
-		// Best-effort: POST disconnected, then reset() drops pending REST buffers
-		// (restapi.c:130-133). The result may never reach Python; that is a
-		// transport timeout, not a dialog timed_out. No sync wait is allowed.
+		// Shutdown is only reached from ~MissionGameplay / ~MCPClientBridge, so
+		// no later OnTick exists on this mission. reset() clears pending REST
+		// requests (restapi.c:130-133). After a terminal dialog POST, skip it
+		// and keep callback refs: RestApi is process-scoped and can finish the
+		// already-pushed request. A delayed reset() is unsafe because
+		// GetRestContext reuses the same context for the next mission.
 		if (m_DialogJob && m_DialogJob.dialog && m_DialogJob.dialog.state != "")
 		{
 			PostUiDialogJob(m_DialogJob);
+			postedTerminal = true;
+			Log("client shutdown posted dialog terminal; rest reset skipped");
+		}
+
+		// The preview root outlives the mission otherwise: the workspace survives
+		// a mission change and the next one would start with a stale tree on top.
+		if (m_UiPreviewRoot)
+		{
+			m_UiPreviewRoot.Unlink();
+			m_UiPreviewRoot = null;
 		}
 
 		if (m_Dialog)
@@ -3179,13 +3308,19 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		if (m_Ctx)
 		{
-			m_Ctx.reset();
+			if (!postedTerminal)
+			{
+				m_Ctx.reset();
+			}
 			m_Ctx = null;
 		}
 
 		if (m_CallbackRefs)
 		{
-			m_CallbackRefs.Clear();
+			if (!postedTerminal)
+			{
+				m_CallbackRefs.Clear();
+			}
 		}
 
 		if (m_Pending)

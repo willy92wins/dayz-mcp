@@ -1,4 +1,4 @@
-const string MCP_BRIDGE_VERSION = "7";
+const string MCP_BRIDGE_VERSION = "8";
 const float MCP_ARG_FLOAT_UNSET = float.MAX;
 const int MCP_FIXTURE_SEQ_UNSET = -2147483647;
 
@@ -7,6 +7,7 @@ class MCPConfig
 	string url;
 	string key;
 	float pollHz;
+	string instance;
 };
 
 // ui_dialog wire field. Key is default_text; default is reserved in Enforce.

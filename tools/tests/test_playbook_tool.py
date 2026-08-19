@@ -448,7 +448,7 @@ class PlaybookFixturesStillGreenTest(unittest.TestCase):
             playbook, PLAYBOOKS / "fixtures" / "place_safely"
         )
         self.assertEqual(report["overall"], "PASS")
-        self.assertGreaterEqual(len(report["results"]), 4)
+        self.assertGreaterEqual(len(report["results"]), 5)
         self.assertTrue(all(item["match"] for item in report["results"]))
 
 

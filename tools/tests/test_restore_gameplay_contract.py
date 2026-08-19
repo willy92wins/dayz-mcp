@@ -35,6 +35,9 @@ class RestoreGameplayIngressContractTest(unittest.TestCase):
         self.assertEqual(loopback.peer_for_command("restore_gameplay"), "client")
 
         state = loopback.ServerState("test-key")
+        from tests.fence_helpers import bind_both_peers
+
+        bind_both_peers(state)
         status, body = state.enqueue_command("restore_gameplay", {})
         self.assertEqual((status, body["peer"]), (200, "client"))
         self.assertEqual(

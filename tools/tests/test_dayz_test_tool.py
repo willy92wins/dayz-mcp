@@ -171,6 +171,42 @@ class DayzTestToolRequestTest(unittest.TestCase):
         self.assertIs(selected, lfv)
         self.assertEqual(run["run_id"], RUN_ID)
 
+    def test_stop_resolves_never_started_unacked_exited_run(self) -> None:
+        policy = _policy()
+        status = {
+            "runs": [
+                {
+                    "run_id": RUN_ID,
+                    "state": "EXITED",
+                    "mod": "@ExampleMod",
+                    "profiles": r"P:\ExampleMod_Suite\_client\profiles",
+                    "launch_acknowledged": False,
+                }
+            ]
+        }
+
+        selected, run = dayz_test_tool.resolve_stop_run(
+            status, _sealed(policy), RUN_ID
+        )
+
+        self.assertIs(selected, policy)
+        self.assertEqual(run["run_id"], RUN_ID)
+
+    def test_stop_rejects_acked_exited_run(self) -> None:
+        status = {
+            "runs": [
+                {
+                    "run_id": RUN_ID,
+                    "state": "EXITED",
+                    "mod": "@ExampleMod",
+                    "profiles": r"P:\ExampleMod_Suite\_client\profiles",
+                    "launch_acknowledged": True,
+                }
+            ]
+        }
+        with self.assertRaisesRegex(dayz_test_tool.DayzTestToolError, "run_not_active"):
+            dayz_test_tool.resolve_stop_run(status, _sealed(_policy()), RUN_ID)
+
 
 class DayzTestTerminalTest(unittest.TestCase):
     def test_parse_success_terminal(self) -> None:
@@ -814,6 +850,49 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["phase"], "completed")
         self.assertIsNone(result["error_code"])
         self.assertFalse(result["cleanup_degraded"])
+
+    async def test_worker_failed_carries_lifecycle_start_error(self) -> None:
+        policy = _policy()
+        runtime = _Runtime(
+            lifecycle={"runs": [], "last_start_error": "instance_config_missing"}
+        )
+
+        async def launch(_raw_request: bytes, **kwargs: object) -> int:
+            kwargs["output_sink"](
+                "stdout",
+                _terminal(
+                    {
+                        "cleanup_degraded": True,
+                        "error_code": "worker_failed",
+                        "exit_code": 2,
+                        "ok": False,
+                        "run_id": RUN_ID,
+                    }
+                ),
+            )
+            return 2
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch,
+        ):
+            result = await dayz_test_tool.execute_dayz_test_run(
+                runtime,
+                project="ExampleMod",
+                mode="offline",
+            )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "instance_config_missing")
+        self.assertEqual(result["run_id"], RUN_ID)
+        self.assertGreaterEqual(runtime.lifecycle_calls, 1)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ from dayz_mcp import control_client, core, host_config, server
 from dayz_mcp.server import ServerConfig
 from tests.test_daemon import DaemonHttpServer, _config, _free_port, _http
 from tests.test_mcp_tools import _content_json
+from tests.fence_helpers import INST_CLIENT, INST_SERVER
 
 
 def _fixture_client_runtime(
@@ -88,12 +89,20 @@ class GamePeer:
     def _run(self) -> None:
         while not self._stop.is_set():
             query = {"peer": self.peer}
+            query["inst"] = INST_SERVER if self.peer == "server" else INST_CLIENT
             if self.version is not None:
                 query["ver"] = self.version
             try:
                 _status, body = _http(self.base, "GET", "/poll", self.key, query=query)
                 for command in body.get("commands", []):
-                    _http(self.base, "POST", "/result", self.key, payload=self.responder(command))
+                    _http(
+                        self.base,
+                        "POST",
+                        "/result",
+                        self.key,
+                        payload=self.responder(command),
+                        query={"inst": query["inst"]},
+                    )
             except Exception:
                 pass
             time.sleep(0.02)

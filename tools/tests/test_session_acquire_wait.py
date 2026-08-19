@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -9,6 +10,7 @@ from dayz_mcp import server
 from dayz_mcp.server import ServerConfig
 from dayz_mcp.session_coordination import (
     MAX_OPERATION_TOMBSTONES,
+    OPERATION_TOMBSTONE_TTL_S,
     SessionCoordinator,
 )
 from tests.test_session_coordination import AuditSink, FakeClock, SequentialIds, _identity
@@ -131,6 +133,127 @@ class OperationQueueCoordinatorTests(unittest.TestCase):
             (503, "operation_tombstones_saturated"),
         )
 
+    def test_box_claimer_enqueue_is_not_fenced_when_tombstones_saturated(self) -> None:
+        for index in range(MAX_OPERATION_TOMBSTONES):
+            status, _payload = self.coordinator.cancel_operation(
+                _identity("a"), f"operation-{index}"
+            )
+            self.assertEqual(status, 200)
+        owner = _identity("L")
+        claimed = self.coordinator.box_wait_touch(owner, claim=True)
+        self.assertTrue(claimed.get("box_claimed"))
+        waiter = _identity("W")
+        waiting = self.coordinator.box_wait_touch(waiter, claim=False)
+        self.assertFalse(waiting.get("box_claimed"))
+        status, payload = self.coordinator.enqueue(owner, "build", "op-L")
+        self.assertNotEqual(status, 503)
+        self.assertNotEqual(payload.get("error"), "operation_tombstones_saturated")
+        self.assertEqual((status, payload.get("status")), (202, "queued"))
+        blocked_waiter = self.coordinator.enqueue(waiter, "build", "op-W")
+        self.assertEqual(
+            (blocked_waiter[0], blocked_waiter[1]["error"]),
+            (503, "operation_tombstones_saturated"),
+        )
+
+    def test_box_claimer_acquire_with_new_operation_id_is_not_fenced_when_saturated(
+        self,
+    ) -> None:
+        for index in range(MAX_OPERATION_TOMBSTONES):
+            status, _payload = self.coordinator.cancel_operation(
+                _identity("a"), f"operation-{index}"
+            )
+            self.assertEqual(status, 200)
+        owner = _identity("L")
+        claimed = self.coordinator.box_wait_touch(owner, claim=True)
+        self.assertTrue(claimed.get("box_claimed"))
+        self.assertIsNone(self.coordinator.snapshot_payload()["active"])
+        status, payload = self.coordinator.acquire(owner, "build", "op-L")
+        self.assertNotEqual(status, 503)
+        self.assertNotEqual(payload.get("error"), "operation_tombstones_saturated")
+        self.assertEqual((status, payload.get("status")), (200, "active"))
+        blocked = self.coordinator.acquire(_identity("b"), "blocked", "op-stranger")
+        self.assertEqual(
+            (blocked[0], blocked[1]["error"]),
+            (503, "operation_tombstones_saturated"),
+        )
+
+    def test_saturated_error_tells_stranger_to_wait_then_retry(self) -> None:
+        for index in range(MAX_OPERATION_TOMBSTONES):
+            status, _payload = self.coordinator.cancel_operation(
+                _identity("a"), f"operation-{index}"
+            )
+            self.assertEqual(status, 200)
+        status, payload = self.coordinator.enqueue(_identity("b"), "blocked", "unseen")
+        self.assertEqual((status, payload.get("error")), (503, "operation_tombstones_saturated"))
+        hint = payload.get("hint")
+        self.assertIsInstance(hint, str)
+        self.assertIn("session_acquire_wait", hint)
+        self.assertIn("do not spin", hint)
+        retry_after_s = payload.get("retry_after_s")
+        self.assertIsInstance(retry_after_s, float)
+        self.assertGreaterEqual(retry_after_s, 0.0)
+        self.assertLessEqual(retry_after_s, float(OPERATION_TOMBSTONE_TTL_S))
+
+    def test_box_claimer_cancel_of_unseen_operation_is_not_fenced_when_saturated(
+        self,
+    ) -> None:
+        for index in range(MAX_OPERATION_TOMBSTONES):
+            status, _payload = self.coordinator.cancel_operation(
+                _identity("a"), f"operation-{index}"
+            )
+            self.assertEqual(status, 200)
+        owner = _identity("L")
+        claimed = self.coordinator.box_wait_touch(owner, claim=True)
+        self.assertTrue(claimed.get("box_claimed"))
+        cancelled = self.coordinator.cancel_operation(owner, "op-L-unseen")
+        self.assertNotEqual(cancelled[0], 503)
+        self.assertNotEqual(
+            cancelled[1].get("error"), "operation_tombstones_saturated"
+        )
+        self.assertEqual((cancelled[0], cancelled[1].get("cancelled")), (200, True))
+        snapshot = self.coordinator.snapshot_payload()["operation_tombstones"]
+        self.assertEqual(snapshot["count"], MAX_OPERATION_TOMBSTONES + 1)
+        blocked = self.coordinator.cancel_operation(_identity("b"), "op-stranger")
+        self.assertEqual(
+            (blocked[0], blocked[1]["error"]),
+            (503, "operation_tombstones_saturated"),
+        )
+
+    def test_lease_holder_is_not_fenced_when_tombstones_saturated(self) -> None:
+        owner = _identity("L")
+        queued = self.coordinator.enqueue(owner, "build", "operation-lease")[1]
+        active = self.coordinator.wait(owner, queued["ticket"], 0.0)
+        self.assertEqual((active[0], active[1]["status"]), (200, "active"))
+        self.assertFalse(self.coordinator.box_claim_public()["claimed"])
+        for index in range(MAX_OPERATION_TOMBSTONES):
+            status, _payload = self.coordinator.cancel_operation(
+                _identity("a"), f"operation-{index}"
+            )
+            self.assertEqual(status, 200)
+        enqueued = self.coordinator.enqueue(owner, "build", "op-L-other")
+        self.assertNotEqual(enqueued[0], 503)
+        self.assertNotEqual(
+            enqueued[1].get("error"), "operation_tombstones_saturated"
+        )
+        self.assertEqual(
+            (enqueued[0], enqueued[1].get("error")),
+            (409, "operation_conflict"),
+        )
+        acquired = self.coordinator.acquire(owner, "build", "op-L-other-2")
+        self.assertNotEqual(acquired[0], 503)
+        self.assertNotEqual(
+            acquired[1].get("error"), "operation_tombstones_saturated"
+        )
+        self.assertEqual(
+            (acquired[0], acquired[1].get("error")),
+            (409, "operation_conflict"),
+        )
+        blocked = self.coordinator.enqueue(_identity("b"), "blocked", "unseen")
+        self.assertEqual(
+            (blocked[0], blocked[1]["error"]),
+            (503, "operation_tombstones_saturated"),
+        )
+
     def test_cancel_exact_active_operation_releases_without_token(self) -> None:
         queued = self.coordinator.enqueue(
             _identity("a"), "build", "operation-a"
@@ -233,6 +356,124 @@ class ClientAcquireWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(runtime.active_ticket)
         self.assertIsNone(runtime.active_lease_token)
         self.assertIsNone(runtime.active_operation_id)
+
+    async def test_session_acquire_wait_toolerror_includes_tombstone_recipe(self) -> None:
+        runtime = self.runtime()
+        saturated = {
+            "error": "operation_tombstones_saturated",
+            "count": MAX_OPERATION_TOMBSTONES,
+            "capacity": MAX_OPERATION_TOMBSTONES,
+            "retry_after_s": 120.0,
+            "hint": (
+                "wait 120s then retry session_acquire_wait; "
+                "do not spin"
+            ),
+        }
+
+        def request_with_refresh(
+            *,
+            method: str,
+            path: str,
+            query: dict[str, str],
+            body: bytes | None,
+            headers: dict[str, str],
+            deadline: float,
+        ) -> tuple[int, bytes]:
+            if path == "/session/enqueue":
+                return 503, json.dumps(saturated).encode("utf-8")
+            payload = json.loads((body or b"{}").decode("utf-8"))
+            if path == "/session/cancel-operation":
+                return 200, json.dumps(
+                    {
+                        "cancelled": True,
+                        "operation_id": payload.get("operation_id"),
+                    }
+                ).encode("utf-8")
+            raise AssertionError(path)
+
+        runtime._control._credential_provider.request_with_refresh = (
+            request_with_refresh
+        )
+        with patch.object(
+            type(runtime._control.policy), "revalidate", return_value=None
+        ):
+            with self.assertRaises(server.ToolError) as raised:
+                await runtime.session_acquire_wait("build", 1.0)
+        message = str(raised.exception)
+        self.assertIn("operation_tombstones_saturated", message)
+        self.assertIn("session_acquire_wait", message)
+        self.assertIn("do not spin", message)
+        self.assertNotEqual(message, "operation_tombstones_saturated")
+
+    async def test_unknown_remote_code_with_hint_is_still_masked(self) -> None:
+        leaked_code = "leaked_internal_code"
+        leaked_hint = "secret-hint-do-not-surface"
+
+        def _attach_http(runtime: server.ClientRuntime, payload: dict[str, object]) -> None:
+            def request_with_refresh(
+                *,
+                method: str,
+                path: str,
+                query: dict[str, str],
+                body: bytes | None,
+                headers: dict[str, str],
+                deadline: float,
+            ) -> tuple[int, bytes]:
+                if path == "/session/enqueue":
+                    return 503, json.dumps(payload).encode("utf-8")
+                request_payload = json.loads((body or b"{}").decode("utf-8"))
+                if path == "/session/cancel-operation":
+                    return 200, json.dumps(
+                        {
+                            "cancelled": True,
+                            "operation_id": request_payload.get("operation_id"),
+                        }
+                    ).encode("utf-8")
+                raise AssertionError(path)
+
+            runtime._control._credential_provider.request_with_refresh = (
+                request_with_refresh
+            )
+
+        unknown_runtime = self.runtime()
+        _attach_http(
+            unknown_runtime,
+            {"error": leaked_code, "hint": leaked_hint},
+        )
+        with patch.object(
+            type(unknown_runtime._control.policy), "revalidate", return_value=None
+        ):
+            with self.assertRaises(server.ToolError) as unknown_raised:
+                await unknown_runtime.session_acquire_wait("build", 1.0)
+        unknown_message = str(unknown_raised.exception)
+        self.assertEqual(unknown_message, "remote_error")
+        self.assertNotIn(leaked_code, unknown_message)
+        self.assertNotIn(leaked_hint, unknown_message)
+
+        recipe_runtime = self.runtime()
+        _attach_http(
+            recipe_runtime,
+            {
+                "error": "operation_tombstones_saturated",
+                "count": MAX_OPERATION_TOMBSTONES,
+                "capacity": MAX_OPERATION_TOMBSTONES,
+                "retry_after_s": 120.0,
+                "hint": (
+                    "wait 120s then retry session_acquire_wait; "
+                    "do not spin"
+                ),
+            },
+        )
+        with patch.object(
+            type(recipe_runtime._control.policy), "revalidate", return_value=None
+        ):
+            with self.assertRaises(server.ToolError) as recipe_raised:
+                await recipe_runtime.session_acquire_wait("build", 1.0)
+        recipe = str(recipe_raised.exception)
+        self.assertIn("operation_tombstones_saturated", recipe)
+        self.assertIn("session_acquire_wait", recipe)
+        self.assertIn("do not spin", recipe)
+        self.assertNotEqual(recipe, "operation_tombstones_saturated")
 
     async def test_progress_failure_preserves_primary_exception_after_cleanup(self) -> None:
         runtime = self.runtime()

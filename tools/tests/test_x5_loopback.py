@@ -150,7 +150,11 @@ class X5LoopbackTest(unittest.TestCase):
         def audit(_expr: str, _verdict: str, _main_fn: str, _command_id: int | None) -> None:
             raise OSError("audit locked")
 
-        self.start_server(loopback.ServerState(self.key, enable_exec_enforce=True, exec_allowlist={"allowed"}, exec_audit=audit))
+        state = loopback.ServerState(self.key, enable_exec_enforce=True, exec_allowlist={"allowed"}, exec_audit=audit)
+        from tests.fence_helpers import bind_both_peers
+
+        bind_both_peers(state)
+        self.start_server(state)
         status, body = self.request("POST", "/enqueue", {"cmd": "exec_enforce", "args": {"expr": "allowed"}})
         self.assertEqual(status, 503)
         self.assertEqual(body, {"error": "audit_failed"})
@@ -169,6 +173,9 @@ class X5LoopbackTest(unittest.TestCase):
             exec_allowlist={"allowed"},
             exec_audit=lambda expr, verdict, _fn, cid: audited.append((expr, verdict, cid)),
         )
+        from tests.fence_helpers import bind_both_peers
+
+        bind_both_peers(state)
         for _ in range(loopback.MAX_QUEUE):
             status, _ = state.enqueue_command("query_player_state", {}, peer="server")
             self.assertEqual(status, 200)

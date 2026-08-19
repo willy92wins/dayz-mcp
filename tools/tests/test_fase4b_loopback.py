@@ -14,6 +14,9 @@ class Fase4BLoopbackTest(unittest.TestCase):
     def start_server(self, enable_exec_enforce: bool = False) -> None:
         self.key = "test-key"
         state = loopback.ServerState(self.key, enable_exec_enforce=enable_exec_enforce)
+        from tests.fence_helpers import bind_both_peers
+
+        bind_both_peers(state)
         self.httpd = loopback.create_http_server(0, state, log_sink=lambda _message: None)
         self.state = state
         self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)

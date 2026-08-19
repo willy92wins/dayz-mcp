@@ -13,12 +13,14 @@ import urllib.request
 from dayz_mcp import loopback
 from dayz_mcp import server
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
+from tests.fence_helpers import INST_CLIENT, INST_SERVER, accredited_poll, bind_both_peers
 
 
 class LoopbackTest(unittest.TestCase):
     def setUp(self) -> None:
         self.key = "test-key"
         self.state = loopback.ServerState(self.key)
+        bind_both_peers(self.state)
         self.httpd = loopback.create_http_server(0, self.state, log_sink=lambda _message: None)
         self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         self.thread.start()
@@ -96,11 +98,16 @@ class LoopbackTest(unittest.TestCase):
         self.assertEqual(status, 200)
         command_id = body["id"]
 
-        status, body = self.request("GET", "/poll")
+        status, body = self.request("GET", "/poll", query={"inst": INST_SERVER})
         self.assertEqual(status, 200)
         self.assertEqual(body["commands"][0]["id"], command_id)
 
-        status, body = self.request("POST", "/result", {"id": command_id, "ok": 1, "value": 7})
+        status, body = self.request(
+            "POST",
+            "/result",
+            {"id": command_id, "ok": 1, "value": 7},
+            query={"inst": INST_SERVER},
+        )
         self.assertEqual(status, 200)
         self.assertEqual(body, {"ok": True})
 
@@ -128,7 +135,7 @@ class LoopbackTest(unittest.TestCase):
         self.request("POST", "/enqueue", {"cmd": "query_player_state", "args": {}})
 
         t0 = time.monotonic()
-        status, body = self.request("GET", "/poll")
+        status, body = self.request("GET", "/poll", query={"inst": INST_SERVER})
         first_elapsed = time.monotonic() - t0
         self.assertEqual(status, 200)
         self.assertEqual(len(body["commands"]), 1)
@@ -136,7 +143,7 @@ class LoopbackTest(unittest.TestCase):
 
         self.request("POST", "/enqueue", {"cmd": "query_player_state", "args": {}})
         t1 = time.monotonic()
-        status, body = self.request("GET", "/poll")
+        status, body = self.request("GET", "/poll", query={"inst": INST_SERVER})
         second_elapsed = time.monotonic() - t1
         self.assertEqual(status, 200)
         self.assertEqual(len(body["commands"]), 1)
@@ -157,10 +164,12 @@ class LoopbackTest(unittest.TestCase):
         status, payload = self.state.enqueue_command("camera_get", {}, peer="client")
         self.assertEqual(status, 200)
         command_id = payload["id"]
-        status, poll = self.state.record_poll("client", version="4~game")
+        status, poll = accredited_poll(self.state, "client", version="4~game")
         self.assertEqual(status, 200)
         self.assertEqual(poll["commands"][0]["id"], command_id)
-        status, result = self.state.store_result({"id": command_id, "ok": 1})
+        status, result = self.state.store_result(
+            {"id": command_id, "ok": 1}, instance=INST_CLIENT
+        )
         self.assertEqual(status, 200)
         self.assertIsNotNone(self.state.take_result(command_id))
         self.assertIsNotNone(self.state.take_result(command_id, remove=True))
@@ -197,8 +206,12 @@ class LoopbackTest(unittest.TestCase):
         self.assertEqual((first["peer"], second["peer"]), ("client", "client"))
         self.assertNotEqual(first["id"], second["id"])
 
-        self.state.store_result({"id": first["id"], "ok": 1, "cursor": 0})
-        self.state.store_result({"id": second["id"], "ok": 1, "cursor": 64})
+        self.state.store_result(
+            {"id": first["id"], "ok": 1, "cursor": 0}, instance=INST_CLIENT
+        )
+        self.state.store_result(
+            {"id": second["id"], "ok": 1, "cursor": 64}, instance=INST_CLIENT
+        )
         self.assertEqual(self.state.take_result(first["id"])["cursor"], 0)
         self.assertEqual(self.state.take_result(second["id"])["cursor"], 64)
 
@@ -383,6 +396,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         coordinator.test_audit_events = audit_events  # type: ignore[attr-defined]
         state.coordination = coordinator
         state.retail_probe = lambda: {"known": True, "processes": []}
+        bind_both_peers(state)
         status, active = coordinator.acquire(client, "queue test")
         self.assertEqual(status, 200)
         return state, coordinator, client, active["lease_token"], clock
@@ -402,7 +416,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         self.assertEqual(state.pending_for_owner(client.session_id), 1)
         self.assertGreater(coordinator.status(client)["owner"]["expires_in_s"], 299.0)
 
-        status, poll = state.record_poll("server")
+        status, poll = accredited_poll(state, "server")
         self.assertEqual(status, 200)
         self.assertEqual(
             poll["commands"],
@@ -415,7 +429,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
             ],
         )
 
-        state.store_result({"id": command_id, "ok": 1})
+        state.store_result({"id": command_id, "ok": 1}, instance=INST_SERVER)
         self.assertLessEqual(coordinator.status(client)["owner"]["expires_in_s"], 120.0)
         self.assertEqual(state.pending_for_owner(client.session_id), 1)
         state.take_result(command_id, remove=True)
@@ -456,8 +470,10 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
                     identity_payload=COORDINATED_IDENTITY,
                     lease_token=token,
                 )
-                state.record_poll("client")
-                state.store_result({"id": release["id"], "ok": ok_value})
+                accredited_poll(state, "client")
+                state.store_result(
+                    {"id": release["id"], "ok": ok_value}, instance=INST_CLIENT
+                )
                 coordinator.release(client, token)
                 self.assertEqual(cleanup_flags[-1], expected_cleanup)
 
@@ -495,7 +511,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
             lease_token=token,
         )
         clock.advance(loopback.COMMAND_TTL_S + 1.0)
-        state.record_poll("client")
+        accredited_poll(state, "client")
         coordinator.release(client, token)
         self.assertTrue(cleanup_flags[-1])
 
@@ -514,7 +530,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         result = state.cancel_owner_pending(client.session_id, "owner_release")
         self.assertEqual(result, {"cancelled": 1})
         self.assertEqual(state.take_result(owned["id"])["error"], "owner_release")
-        _, poll = state.record_poll("server")
+        _, poll = accredited_poll(state, "server")
         self.assertEqual([command["id"] for command in poll["commands"]], [unowned_read["id"]])
 
     def test_stale_discard_finishes_operation_pin(self) -> None:
@@ -527,7 +543,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
             operation_timeout_s=300.0,
         )
         clock.advance(loopback.COMMAND_TTL_S + 1.0)
-        _, poll = state.record_poll("server")
+        _, poll = accredited_poll(state, "server")
         self.assertEqual(poll["commands"], [])
         self.assertEqual(state.take_result(queued["id"])["error"], "stale_discarded")
         self.assertLess(coordinator.status(client)["owner"]["expires_in_s"], 100.0)
@@ -578,7 +594,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         self.assertEqual(enqueue_result[0], (409, {"error": "lease_invalid"}))
         self.assertEqual(release_result[0][0], 200)
 
-        _, poll = state.record_poll("server")
+        _, poll = accredited_poll(state, "server")
         self.assertEqual(poll["commands"], [])
         self.assertEqual(state.pending_for_owner(client.session_id), 0)
 
@@ -665,7 +681,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         )
         self.assertEqual(status, 409)
         self.assertEqual(payload["error"], "version_blocked")
-        self.assertEqual(payload["expected"], "7")
+        self.assertEqual(payload["expected"], "8")
         self.assertEqual(payload["state"], "legacy_blocked")
 
     def test_lease_required_includes_version_block_fields(self) -> None:
@@ -682,7 +698,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         )
         self.assertEqual(payload["error"], "lease_required")
         self.assertEqual(payload["version_state"], "version_mismatch")
-        self.assertEqual(payload["expected"], "7")
+        self.assertEqual(payload["expected"], "8")
         self.assertIn(status, {403, 423})
 
     def test_post_authorize_queue_full_aborts(self) -> None:
@@ -819,20 +835,23 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
 
     def test_internal_vehicle_release_result_is_purged_without_owner_mapping(self) -> None:
         state = loopback.ServerState("k")
+        bind_both_peers(state)
         cleanup = state.cleanup_owner(
             "released-owner", "released-lease", "owner_release", True
         )
         self.assertEqual(cleanup["vehicle_release_enqueued"], 1)
         self.assertEqual(state.pending_for_owner("released-owner"), 0)
 
-        _, poll = state.record_poll("client")
+        _, poll = accredited_poll(state, "client")
         self.assertEqual(len(poll["commands"]), 1)
         command_id = poll["commands"][0]["id"]
         self.assertEqual(poll["commands"][0]["cmd"], "vehicle_release")
         self.assertNotIn(command_id, state._command_owner)
         self.assertIn(command_id, state._fire_and_forget_ids)
 
-        status, _ = state.store_result({"id": command_id, "ok": 1})
+        status, _ = state.store_result(
+            {"id": command_id, "ok": 1}, instance=INST_CLIENT
+        )
         self.assertEqual(status, 200)
         self.assertIsNone(state.take_result(command_id))
         self.assertNotIn(command_id, state._fire_and_forget_ids)
@@ -842,31 +861,38 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
     def test_internal_vehicle_release_ttl_discard_purges_result_and_id(self) -> None:
         clock = FakeClock()
         state = loopback.ServerState("k", time_fn=clock)
+        bind_both_peers(state)
         state.cleanup_owner(
             "released-owner", "released-lease", "owner_release", True
         )
-        command_id = state._queues["client"][0]["id"]
+        command_id = state._bound_queues[INST_CLIENT][0]["id"]
 
         clock.advance(loopback.COMMAND_TTL_S + 1.0)
-        _, poll = state.record_poll("client")
+        _, poll = accredited_poll(state, "client")
         self.assertEqual(poll["commands"], [])
         self.assertIsNone(state.take_result(command_id))
         self.assertNotIn(command_id, state._fire_and_forget_ids)
         self.assertEqual(state.status_snapshot()["results_pending"], 0)
         self.assertEqual(state.pending_for_owner("released-owner"), 0)
 
-    def test_internal_vehicle_release_reconnect_discard_purges_result_and_id(self) -> None:
+    def test_internal_vehicle_release_survives_reconnect_gap_on_bound_queue(self) -> None:
         clock = FakeClock()
         state = loopback.ServerState("k", time_fn=clock)
-        state.record_poll("client")
+        bind_both_peers(state)
+        accredited_poll(state, "client")
         state.cleanup_owner(
             "released-owner", "released-lease", "owner_release", True
         )
-        command_id = state._queues["client"][0]["id"]
+        command_id = state._bound_queues[INST_CLIENT][0]["id"]
 
         clock.advance(loopback.PEER_RECONNECT_GAP_S + 1.0)
-        _, poll = state.record_poll("client")
-        self.assertEqual(poll["commands"], [])
+        _, poll = accredited_poll(state, "client")
+        # Bound queues are not flushed on reconnect gap (D-55.5).
+        self.assertEqual([command["id"] for command in poll["commands"]], [command_id])
+        status, _ = state.store_result(
+            {"id": command_id, "ok": 1}, instance=INST_CLIENT
+        )
+        self.assertEqual(status, 200)
         self.assertIsNone(state.take_result(command_id))
         self.assertNotIn(command_id, state._fire_and_forget_ids)
         self.assertEqual(state.status_snapshot()["results_pending"], 0)
@@ -967,6 +993,7 @@ class StaleCommandHygieneTest(unittest.TestCase):
             exec_audit=lambda *a: audit_calls.append(a),
             time_fn=clock,
         )
+        bind_both_peers(state)
         status, payload = state.enqueue_command(
             "exec_enforce", {"expr": "probe()", "main_fn": "Main"}, peer="server"
         )
@@ -986,6 +1013,7 @@ class LoopbackHttpBodyTest(unittest.TestCase):
     def setUp(self) -> None:
         self.key = "test-key"
         self.state = loopback.ServerState(self.key)
+        bind_both_peers(self.state)
         self.httpd = loopback.create_http_server(0, self.state, log_sink=lambda _message: None)
         self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         self.thread.start()
@@ -1066,7 +1094,9 @@ class LoopbackHttpBodyTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertIn("id", body)
-        status, poll = self.request("GET", "/poll", query={"peer": "client"})
+        status, poll = self.request(
+            "GET", "/poll", query={"peer": "client", "inst": INST_CLIENT}
+        )
         self.assertEqual(status, 200)
         self.assertEqual(poll["commands"][0]["cmd"], "ui_dialog")
 

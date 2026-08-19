@@ -1,0 +1,35 @@
+{
+  "name": "red_crowded",
+  "params": {
+    "x": 7512.0,
+    "z": 7502.0,
+    "clear_r": 15.0
+  },
+  "responses": {
+    "S1": {
+      "ok": 1,
+      "y": 315.5601,
+      "type": "cp_grass",
+      "normal": [0.0, 1.0, 0.0]
+    },
+    "S2": {
+      "ok": 1,
+      "raycast": {
+        "hit": true,
+        "pos": [7512.0, 315.5603, 7502.0]
+      }
+    },
+    "S3": {
+      "ok": 1,
+      "players": []
+    },
+    "S4": {
+      "ok": 1,
+      "count_total": 26,
+      "entities": []
+    }
+  },
+  "expect_overall": "PASS_WITH_WARNINGS",
+  "expect_stopped_at": null,
+  "expect_reason": "crowded_spot"
+}

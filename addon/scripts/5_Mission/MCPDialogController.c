@@ -30,6 +30,17 @@ class MCPDialogController : ScriptedWidgetEventHandler
 	protected const int MAX_FIELDS = 6;
 	static const string LAYOUT_PATH = "DayZ_MCP/gui/layouts/mcp_dialog.layout";
 
+	// Hot-layout probe (2026-08-19). The engine serves the packed layout when the
+	// same path also exists loose -- measured. Untested, and worth one flight:
+	// whether it resolves a path that is NOT in the PBO at all. If either of the
+	// first two loads, a layout can be iterated without repacking.
+	// Order matters: the packed path is last so the dialog survives every outcome.
+	static ref array<string> LAYOUT_PROBE_PATHS = {
+		"$profile:mcp_hot.layout",
+		"DayZ_MCP/gui/layouts/hot/mcp_hot.layout",
+		"DayZ_MCP/gui/layouts/mcp_dialog.layout"
+	};
+
 	protected int m_State;
 	protected string m_Kind;
 	protected int m_FieldCount;
@@ -151,13 +162,29 @@ class MCPDialogController : ScriptedWidgetEventHandler
 			return false;
 		}
 
-		m_Root = workspace.CreateWidgets(LAYOUT_PATH);
+		string chosenPath = "";
+		for (int i = 0; i < LAYOUT_PROBE_PATHS.Count(); i++)
+		{
+			string candidate = LAYOUT_PROBE_PATHS.Get(i);
+			bool present = FileExist(candidate);
+			Print(string.Format("[MCP-DIALOG] probe idx=%1 path=%2 file_exist=%3", i, candidate, present));
+			if (!present)
+				continue;
+			m_Root = workspace.CreateWidgets(candidate);
+			if (m_Root)
+			{
+				chosenPath = candidate;
+				break;
+			}
+			Print(string.Format("[MCP-DIALOG] probe idx=%1 exists but CreateWidgets returned null", i));
+		}
 		if (!m_Root)
 		{
 			m_LastHostError = "host_create_failed";
 			Print(string.Format("[MCP-DIALOG] host skipped reason=%1", m_LastHostError));
 			return false;
 		}
+		Print(string.Format("[MCP-DIALOG] probe WINNER=%1", chosenPath));
 
 		if (!CacheWidgets())
 		{
@@ -179,7 +206,7 @@ class MCPDialogController : ScriptedWidgetEventHandler
 		m_Root.Show(false);
 		m_Root.SetFlags(WidgetFlags.IGNOREPOINTER);
 		m_LastHostError = "";
-		Print(string.Format("[MCP-DIALOG] host created path=%1", LAYOUT_PATH));
+		Print(string.Format("[MCP-DIALOG] host created path=%1", chosenPath));
 		return true;
 	}
 

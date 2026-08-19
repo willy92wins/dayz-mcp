@@ -29,15 +29,15 @@ def _function_source(text: str, name: str) -> str:
 
 
 class Batch6Test(unittest.TestCase):
-    def test_expected_bridge_version_is_7(self) -> None:
-        self.assertEqual(core.EXPECTED_BRIDGE_VERSION, "7")
+    def test_expected_bridge_version_is_8(self) -> None:
+        self.assertEqual(core.EXPECTED_BRIDGE_VERSION, "8")
 
-    def test_mcp_bridge_version_const_is_7(self) -> None:
+    def test_mcp_bridge_version_const_is_8(self) -> None:
         messages = (
             addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
         ).read_text(encoding="utf-8")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "7";', messages)
-        self.assertNotIn('const string MCP_BRIDGE_VERSION = "6";', messages)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "8";', messages)
+        self.assertNotIn('const string MCP_BRIDGE_VERSION = "7";', messages)
 
     def test_entities_query_in_server_commands(self) -> None:
         self.assertIn("entities_query", loopback.SERVER_COMMANDS)

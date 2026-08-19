@@ -199,7 +199,10 @@ def resolve_stop_run(
     run_id: str,
 ) -> tuple[dayz_test_request.RequestProjectPolicy, dict[str, object]]:
     run = _exact_run(status, run_id)
-    if run.get("state") not in {"RUNNING", "RUNNING_IDLE"}:
+    never_started = (
+        run.get("state") == "EXITED" and run.get("launch_acknowledged") is False
+    )
+    if not never_started and run.get("state") not in {"RUNNING", "RUNNING_IDLE"}:
         _fail("run_not_active")
     policies = _semantic_policies(sealed_policies)
     matches = [item for item in policies if run.get("mod") == "@" + item.mod]
@@ -496,6 +499,15 @@ async def _execute_request(
     _validate_terminal_context(
         terminal, preflight=preflight, expected_run_id=expected_run_id
     )
+    if not terminal.ok and terminal.error_code == "worker_failed":
+        try:
+            failed_status = await runtime.lifecycle_status()
+        except Exception:
+            failed_status = None
+        if isinstance(failed_status, dict):
+            reason = failed_status.get("last_start_error")
+            if type(reason) is str and reason:
+                terminal = replace(terminal, error_code=reason)
     server_alive: bool | None = None
     client_alive: bool | None = None
     if terminal.ok and not preflight and terminal.run_id:

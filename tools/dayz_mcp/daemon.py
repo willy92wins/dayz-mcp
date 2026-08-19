@@ -317,6 +317,7 @@ def build_server_state(
     *,
     daemon_generation: str | None = None,
     activate_coordination: bool = False,
+    port: int | None = None,
 ) -> ServerState:
     """Build a ServerState wired with the daemon's version gate + exec chokepoint
     (the policy that loopback.enqueue_command/record_poll enforce)."""
@@ -329,6 +330,15 @@ def build_server_state(
         expected_game_version=getattr(config, "expected_game_version", None),
     )[0]
     generation = daemon_generation or uuid.uuid4().hex
+    # Derived here rather than demanded of every caller: prepare() can only
+    # seed a missing bridge config if the state knows the port (BUG-105).
+    if isinstance(port, int) and not isinstance(port, bool):
+        config_port: int | None = port
+    else:
+        try:
+            config_port = int(getattr(config, "port", 8765))
+        except (TypeError, ValueError):
+            config_port = None
     state = ServerState(
         key,
         enable_exec_enforce=enable_exec,
@@ -336,6 +346,7 @@ def build_server_state(
         exec_allowlist=exec_allowlist,
         exec_audit=exec_audit,
         coordination=None,
+        config_port=config_port,
     )
     state.daemon_generation = generation
     if activate_coordination:
@@ -522,6 +533,7 @@ def _activate_server_coordination(
             )
         ),
         recovery_fault_arm=arm_lifecycle_recovery_fault,
+        bindings=state,
     )
     if recovered_lifecycle_fault is None:
         bounded_io(

@@ -1186,6 +1186,10 @@ class CoordinationSnapshotStore:
         with self._lock:
             return self._write_coordination_locked(persisted)
 
+    def persisted_revision(self) -> int | None:
+        with self._lock:
+            return self._last_revision
+
     def ensure_coordination(self, payload: dict[str, object]) -> bool:
         """Persist a WAL snapshot or accept an equal/newer durable snapshot."""
 

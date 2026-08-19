@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import unittest
@@ -8,6 +9,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -15,7 +18,9 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 from dayz_mcp import loopback
+from dayz_mcp.runtime_state import CoordinationSnapshotStore, RuntimePaths
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
+from tests.fence_helpers import INST_CLIENT, INST_SERVER, bind_both_peers
 
 
 IDENTITY_A = {
@@ -64,6 +69,14 @@ class SnapshotStore:
         self.return_value = True
         self.lock_probe: SessionCoordinator | None = None
 
+    def persisted_revision(self) -> int | None:
+        if not self.payloads:
+            return None
+        revision = self.payloads[-1].get("revision")
+        if isinstance(revision, int) and not isinstance(revision, bool):
+            return revision
+        return None
+
     def write_coordination(self, payload: dict[str, object]) -> bool:
         self.payloads.append(payload)
         if self.lock_probe is not None:
@@ -93,6 +106,7 @@ class SessionHttpTest(unittest.TestCase):
         self.audit_events: list[dict[str, object]] = []
         self.store = SnapshotStore()
         self.state = loopback.ServerState(self.key)
+        bind_both_peers(self.state)
 
         def audit(event: dict[str, object]) -> bool:
             self.audit_events.append(event)
@@ -471,7 +485,7 @@ class SessionHttpTest(unittest.TestCase):
         self.assertEqual(done["result"]["error"], "owner_release")
 
         status, polled = _http(
-            self.base, "GET", "/poll", self.key, query={"peer": "server"}
+            self.base, "GET", "/poll", self.key, query={"peer": "server", "inst": INST_SERVER}
         )
         self.assertEqual(status, 200)
         self.assertEqual([item["id"] for item in polled["commands"]], [foreign_read["id"]])
@@ -497,7 +511,7 @@ class SessionHttpTest(unittest.TestCase):
         self.assertEqual(released["cleanup"]["vehicle_release_enqueued"], 1)
 
         status, polled = _http(
-            self.base, "GET", "/poll", self.key, query={"peer": "client"}
+            self.base, "GET", "/poll", self.key, query={"peer": "client", "inst": INST_CLIENT}
         )
         self.assertEqual(status, 200)
         self.assertEqual(len(polled["commands"]), 1)
@@ -606,6 +620,169 @@ class SessionHttpTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIsNotNone(self.state.status_snapshot()["last_client_request_at"])
 
+    def test_box_wait_fifo_over_http(self) -> None:
+        # RED if /session/status ignores box_wait and does not persist FIFO order.
+        status, first = self.request(
+            "/session/status",
+            {"identity": IDENTITY_A, "box_wait": True},
+        )
+        self.assertEqual(status, 200)
+        self.assertIsInstance(first.get("box_ticket"), str)
+        self.assertEqual(first.get("box_position"), 1)
+        self.assertEqual(first["box"]["queue"][0]["session"], "A")
 
-if __name__ == "__main__":
-    unittest.main()
+        status, second = self.request(
+            "/session/status",
+            {"identity": IDENTITY_B, "box_wait": True},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(second.get("box_position"), 2)
+        self.assertFalse(second.get("box_claimed"))
+
+        status, stolen = self.request(
+            "/session/status",
+            {
+                "identity": IDENTITY_B,
+                "box_wait": True,
+                "box_ticket": second["box_ticket"],
+                "box_wait_claim": True,
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(stolen.get("box_claimed"))
+
+        status, done = self.request(
+            "/session/status",
+            {
+                "identity": IDENTITY_A,
+                "box_wait_done": True,
+                "box_ticket": first["box_ticket"],
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertIsNone(done.get("box_ticket"))
+        self.assertEqual(len(done["box"]["queue"]), 1)
+        self.assertEqual(done["box"]["queue"][0]["session"], "B")
+
+    def test_get_status_does_not_attach_box(self) -> None:
+        # RED if GET /status grows a box key (health-probe budget).
+        status, body = _http(self.base, "GET", "/status", self.key)
+        self.assertEqual(status, 200)
+        self.assertNotIn("box", body)
+
+    def test_session_status_without_revision_change_does_not_write_coordination(self) -> None:
+        self.acquire()
+        after_acquire = len(self.store.payloads)
+        self.assertGreater(after_acquire, 0)
+        for _ in range(5):
+            status, body = self.request("/session/status", {"identity": IDENTITY_A})
+            self.assertEqual(status, 200)
+            self.assertNotEqual(body.get("cleanup_degraded"), ["snapshot_failed"])
+        self.assertEqual(len(self.store.payloads), after_acquire)
+
+    def test_box_wait_refresh_does_not_write_coordination(self) -> None:
+        status, first = self.request(
+            "/session/status",
+            {"identity": IDENTITY_A, "box_wait": True},
+        )
+        self.assertEqual(status, 200)
+        ticket = first.get("box_ticket")
+        self.assertIsInstance(ticket, str)
+        after_ticket = len(self.store.payloads)
+        self.assertGreater(after_ticket, 0)
+        for _ in range(5):
+            status, body = self.request(
+                "/session/status",
+                {
+                    "identity": IDENTITY_A,
+                    "box_wait": True,
+                    "box_ticket": ticket,
+                },
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body.get("box_ticket"), ticket)
+            self.assertNotEqual(body.get("cleanup_degraded"), ["snapshot_failed"])
+        self.assertEqual(len(self.store.payloads), after_ticket)
+
+    def test_acquire_that_grants_lease_writes_coordination(self) -> None:
+        before = len(self.store.payloads)
+        self.acquire()
+        after_grant = len(self.store.payloads)
+        self.assertGreater(after_grant, before)
+        status, queued = self.request(
+            "/session/acquire", {"identity": IDENTITY_B, "purpose": "queued"}
+        )
+        self.assertEqual(status, 202)
+        self.assertGreater(len(self.store.payloads), after_grant)
+
+
+class ProductionCoordinationStorePersistSkipTest(unittest.TestCase):
+    """Skip of `_persist_coordination` must bind to CoordinationSnapshotStore,
+    not to the SnapshotStore test double."""
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.key = "session-key"
+        self.state = loopback.ServerState(self.key)
+        bind_both_peers(self.state)
+        self.coordinator = SessionCoordinator()
+        self.state.coordination = self.coordinator  # type: ignore[attr-defined]
+        self.state.retail_probe = lambda: {"known": True, "processes": []}
+        paths = RuntimePaths.from_env({"LOCALAPPDATA": self.temporary.name})
+        store = CoordinationSnapshotStore(paths, "generation-test")
+        self.write_calls: list[dict[str, object]] = []
+        original_write = store.write_coordination
+
+        def counting_write(payload: dict[str, object]) -> bool:
+            self.write_calls.append(payload)
+            return original_write(payload)
+
+        store.write_coordination = counting_write  # type: ignore[method-assign]
+        self.store = store
+        self.state.coordination_store = store  # type: ignore[attr-defined]
+        self.state.daemon_generation = "generation-test"  # type: ignore[attr-defined]
+        self.httpd = loopback.create_http_server(
+            0, self.state, log_sink=lambda _message: None, reclaim_orphans=False
+        )
+        self.thread = threading.Thread(
+            target=self.httpd.serve_forever,
+            kwargs={"poll_interval": 0.01},
+            daemon=True,
+        )
+        self.thread.start()
+        host, port = self.httpd.server_address
+        self.base = f"http://{host}:{port}"
+
+    def tearDown(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=2.0)
+        self.temporary.cleanup()
+
+    def request(self, path: str, payload: dict) -> tuple[int, dict]:
+        return _http(self.base, "POST", path, self.key, payload)
+
+    def test_status_poll_skip_uses_production_persisted_revision(self) -> None:
+        self.assertIs(type(self.store), CoordinationSnapshotStore)
+        with patch("dayz_mcp.runtime_state.os.replace", wraps=os.replace) as replace_call:
+            status, body = self.request(
+                "/session/acquire", {"identity": IDENTITY_A, "purpose": "test"}
+            )
+            self.assertEqual(status, 200)
+            self.assertNotEqual(body.get("cleanup_degraded"), ["snapshot_failed"])
+            self.assertEqual(len(self.write_calls), 1)
+            self.assertEqual(replace_call.call_count, 1)
+            disk_after_grant = self.store.coordination_path.read_bytes()
+            self.assertTrue(disk_after_grant)
+            for _ in range(3):
+                status, body = self.request(
+                    "/session/status", {"identity": IDENTITY_A}
+                )
+                self.assertEqual(status, 200)
+                self.assertNotEqual(body.get("cleanup_degraded"), ["snapshot_failed"])
+            self.assertEqual(len(self.write_calls), 1)
+            self.assertEqual(replace_call.call_count, 1)
+            self.assertEqual(self.store.coordination_path.read_bytes(), disk_after_grant)
+            persisted = self.store.persisted_revision()
+            self.assertIsInstance(persisted, int)
+            self.assertEqual(persisted, self.coordinator.durable_revision())

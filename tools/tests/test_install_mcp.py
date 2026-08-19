@@ -1303,6 +1303,31 @@ class PublicToolCountDocsTest(unittest.TestCase):
         self.assertIn("python install_mcp.py --register", tools_readme)
         self.assertNotIn("when run with `-Register`", tools_readme)
 
+    def test_architecture_tool_count_matches_instantiated_app(self) -> None:
+        from dayz_mcp.server import ServerConfig, build_app
+
+        app, _runtime = build_app(
+            ServerConfig(key="k", port=0, log_sink=lambda _message: None)
+        )
+        without = {tool.name for tool in app._tool_manager.list_tools()}
+        without.discard("ui_dialog")
+        architecture = (TOOLS_DIR.parent / "dayz-mcp-architecture.md").read_text(
+            encoding="utf-8"
+        )
+        formula = (
+            f"{len(without)} tools (+ `exec_enforce` when an allowlist is configured)"
+        )
+        self.assertIn(formula, architecture)
+        self.assertNotIn("Tool surface (11 tools, 6 dominios)", architecture)
+        for name in (
+            "ui_tree",
+            "ui_set_text",
+            "ui_click",
+            "ui_dialog",
+            "ui_reload_layout",
+        ):
+            self.assertIn(f"`{name}`", architecture)
+
 
 if __name__ == "__main__":
     unittest.main()

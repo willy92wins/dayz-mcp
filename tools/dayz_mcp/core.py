@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-EXPECTED_BRIDGE_VERSION = "7"
+EXPECTED_BRIDGE_VERSION = "8"
 
 # Peer version_state values that must block command delivery / enqueue.
 BLOCKED_VERSION_STATES = {"legacy_blocked", "version_mismatch"}
@@ -69,6 +69,9 @@ def _peer_status(
         "version": version,
         "version_state": state,
         "version_detail": detail,
+        "binding_state": peer_snapshot.get("binding_state"),
+        "instance_prefix": peer_snapshot.get("instance_prefix"),
+        "bound_last_poll_age_s": peer_snapshot.get("bound_last_poll_age_s"),
     }
 
 
@@ -97,7 +100,7 @@ def build_status(
         expected_game_version=expected_game_version,
         expected_bridge_version=expected_bridge_version,
     )
-    return {
+    payload = {
         "server_peer": server_peer,
         "client_peer": client_peer,
         "results_pending": snapshot["results_pending"],
@@ -109,6 +112,10 @@ def build_status(
         "expected_game_version": expected_game_version,
         "require_version": require_version,
     }
+    fence = snapshot.get("fence")
+    if isinstance(fence, dict):
+        payload["fence"] = fence
+    return payload
 
 
 def load_exec_allowlist(path: str | None) -> set[str]:

@@ -1,0 +1,117 @@
+{
+  "name": "red_peers_not_ready",
+  "params": {
+    "run_id": "abfd8d1d-f9ca-4daf-ba84-6e0c9cdfa734"
+  },
+  "responses": {
+    "S1": {
+      "owner": {
+        "state": "active",
+        "lease_id": "lease-a",
+        "purpose": "launch",
+        "client": {
+          "platform": "claude",
+          "session": "abfd8d1d-f9c",
+          "started_at_utc": "2026-08-19T03:54:00Z",
+          "task_label": "playbook"
+        },
+        "expires_in_s": 90.0
+      },
+      "queue": [],
+      "self": {"state": "active", "lease_id": "lease-a", "position": 0},
+      "claimable": false,
+      "audit_fault": null,
+      "lifecycle_recovery_fault": null,
+      "operation_tombstones": {"count": 0, "capacity": 4096},
+      "cleanup_degraded": [],
+      "daemon_generation": "generation-a",
+      "pending_commands": 0,
+      "box": {
+        "occupied": true,
+        "runs": [
+          {
+            "run_id": "abfd8d1d-f9ca-4daf-ba84-6e0c9cdfa734",
+            "mod": "@SameMod",
+            "label": "same",
+            "age_s": 3.0,
+            "owner_session": "A",
+            "state": "RUNNING"
+          }
+        ],
+        "foreign": [],
+        "ports_in_use": [2302],
+        "queue": []
+      }
+    },
+    "S2": {
+      "owner": {
+        "state": "active",
+        "lease_id": "lease-a",
+        "purpose": "launch",
+        "client": {
+          "platform": "claude",
+          "session": "abfd8d1d-f9c",
+          "started_at_utc": "2026-08-19T03:54:00Z",
+          "task_label": "playbook"
+        },
+        "expires_in_s": 90.0
+      },
+      "queue": [],
+      "self": {"state": "active", "lease_id": "lease-a", "position": 0},
+      "claimable": false,
+      "audit_fault": null,
+      "lifecycle_recovery_fault": null,
+      "operation_tombstones": {"count": 0, "capacity": 4096},
+      "cleanup_degraded": [],
+      "daemon_generation": "generation-a",
+      "pending_commands": 0,
+      "box": {
+        "occupied": true,
+        "runs": [
+          {
+            "run_id": "abfd8d1d-f9ca-4daf-ba84-6e0c9cdfa734",
+            "mod": "@SameMod",
+            "label": "same",
+            "age_s": 3.0,
+            "owner_session": "A",
+            "state": "RUNNING"
+          }
+        ],
+        "foreign": [],
+        "ports_in_use": [2302],
+        "queue": []
+      }
+    },
+    "S3": {
+      "server_peer": {
+        "last_poll_age_s": null,
+        "queue_depth": 0,
+        "version": null,
+        "version_state": "legacy",
+        "version_detail": "poll did not include ver=",
+        "binding_state": null,
+        "instance_prefix": null,
+        "bound_last_poll_age_s": null
+      },
+      "client_peer": {
+        "last_poll_age_s": null,
+        "queue_depth": 0,
+        "version": null,
+        "version_state": "legacy",
+        "version_detail": "poll did not include ver=",
+        "binding_state": null,
+        "instance_prefix": null,
+        "bound_last_poll_age_s": null
+      },
+      "results_pending": 0,
+      "version_state": {"server": "legacy", "client": "legacy"},
+      "server_version": "8",
+      "expected_game_version": null,
+      "require_version": true,
+      "ready": {"ready": false, "reason": "no_run"}
+    }
+  },
+  "expect_overall": "FAIL",
+  "expect_stopped_at": "S3",
+  "expect_reason": "peers_not_ready"
+}

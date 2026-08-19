@@ -53,10 +53,11 @@ There is no embedded fallback for interactive agent sessions. If client/daemon d
 
 Mutating work uses the request-bound high-level queue by default:
 
-1. `session_acquire_wait(purpose, max_wait_s)` remains queued until it returns an active lease or fails. It never returns `queued`.
-2. Run only the required mutating operations. The lease/ticket TTL is 120 seconds; heartbeat is for active exclusive work only.
-3. `session_release(lease_token)` as soon as exclusive work ends.
-4. `session_status()` before handoff; confirm the caller has no lease/ticket and no pending commands. Report any degraded cleanup.
+1. `session_status()` first: `owner`/`queue`/`claimable` describe the **lease**. `box` describes the **game box** (managed `runs`, unmanaged `foreign` DayZDiag, `ports_in_use`, and the box wait FIFO). A free lease does not mean a free box.
+2. `session_acquire_wait(purpose, max_wait_s)` remains queued until it returns an active lease or fails. It never returns `queued`.
+3. Run only the required mutating operations. The lease/ticket TTL is 120 seconds; heartbeat is for active exclusive work only.
+4. `session_release(lease_token)` as soon as exclusive work ends.
+5. `session_status()` before handoff; confirm the caller has no lease/ticket and no pending commands. Report any degraded cleanup.
 
 `session_acquire` and `session_wait` remain low-level compatibility tools. A caller that uses them owns its loop and must call `session_cancel(ticket)` when abandoning a queued ticket. The high-level call installs an operation tombstone on timeout, cancellation or transport failure, including when its first HTTP request completes late. The long wait is tied to the live MCP request/host; it is not a durable job and does not resume after host restart.
 
@@ -73,6 +74,10 @@ A mutation without a lease returns `lease_required`. Call `session_acquire_wait`
 ## Managed lifecycle and administration
 
 Use `dayz_test_run(project, mode, ...)` for normal MCP launches. The call remains open while it waits in the FIFO and while the test runs; it acquires, heartbeats and releases the lease internally. Projects and paths come only from the sealed `dayz-test-v1` policy. Use `dayz_test_stop(run_id)` to queue adoption and shutdown of that exact managed run. Neither tool accepts or returns a lease token, executable, PID, argv or arbitrary path.
+
+The box is a second resource. `wait_for_box_s=0` (default) fails immediately with `active_run_exists` if the box is occupied. `wait_for_box_s=<n>` waits up to n seconds (max 600, same order as `wait_for`), FIFO among waiters, without holding `tool_lock` and without requiring a lease heartbeat. A claimed head uses a 600 s claim TTL, not the 120 s waiter TTL; `dayz_test_run` heartbeats that claim until the launch returns, so a build longer than 120 s does not hand the box to the next waiter. While a session holds that claim, `dayz_test_run` from any other session is rejected (`active_run_exists`) even if no run is registered yet. On timeout the same `active_run_exists` is returned, enriched in the MCP tool (not on the sealed lifecycle wire) with `occupied_by_run_id`/`mod`/`label`/`age_s` when the occupant is a managed run, or `foreign=true` plus `port`/mods when it is not. The failed result keeps `run_id` null; the occupant's id is `occupied_by_run_id`. The stop recipe is only emitted when the caller owns the run or it is `RUNNING_IDLE`; otherwise retry with `wait_for_box_s=<n>` (and never terminate a foreign process). `box_queue_saturated` means the box wait FIFO is full — retry with `wait_for_box_s=<n>` after a waiter leaves.
+
+Pick a free game port from `session_status.box.ports_in_use` and pass a different `port=` to `dayz_test_run`. There is no reservation registry.
 
 The stable progress stages are `validating`, `queued`, `executing` and `finalizing`. A successful non-preflight run returns its `run_id`; preserve that identifier for the later stop call. `artifacts_paths` contains only approved profile directories.
 
@@ -110,8 +115,8 @@ Short call sequences for a cold consumer. Use `playbook_run(name, params)` for a
 
 ### Wait for a player
 
-1. `session_status()` — confirm the lease is claimable (no blocking owner).
-2. `bridge_status()` — `version_state` is ok and `server_peer.last_poll_age_s` is small. The first call of a session may return `daemon_unavailable`; retry once.
+1. `session_status()` — confirm the lease is claimable (no blocking owner) and read `box` (occupied runs/foreign/ports) before launching.
+2. `bridge_status()` — `version_state` is ok and `server_peer.last_poll_age_s` is small. The first call of a session may return `daemon_unavailable`; retry once. Box occupancy lives on `session_status`, not on the cheap `/status` health probe.
 3. `wait_for(condition="log_matches", pattern="OnStoreLoad SUCCESS")` — player finished `OnStoreLoad`. Other Diag 1.29 needles that do appear: `"Create entity type 'SurvivorM_"` and `config loaded`. Never wait for `connected to server`; that string is not written.
 4. `wait_for(condition="players_at_least", value=1)` — at least one connected player.
 5. `query_all_players()` — `{ok: 1, players: [{uid, pos: [x, y, z], health (0..1), in_vehicle}]}`. An empty `players` list is success with zero players, not an error. `uid` is SteamID64 (`PlayerIdentity.GetPlainId()`).

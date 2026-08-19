@@ -24,6 +24,8 @@ gates. A FAIL on that expect is downgraded to WARN and the verdict reason is
 | id | when to use | status | requires |
 | --- | --- | --- | --- |
 | place_safely | Before spawn or teleport to `(x, z)`: solid ground, clear vertical column, no players inside `clear_r`. | DRAFT | bridge 7; `surface_query`, `scene_raycast`, `query_all_players`, `entities_query` |
+| box_is_mine | Before a mutating verb: this session holds the lease, no unmanaged DayZDiag, `box.runs[0].run_id` is the run I intend to handle. | DRAFT | bridge 8; `session_status` |
+| run_really_started | After `dayz_test_run` returns a `run_id`: that id is in `session_status.box.runs`, `state` is `RUNNING`, and `bridge_status.ready.reason` is `ready`. Complements `last_start_error` on the compact. | DRAFT | bridge 8; `session_status`, `bridge_status` |
 
 ## Running
 

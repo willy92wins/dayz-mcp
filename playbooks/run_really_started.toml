@@ -1,0 +1,34 @@
+id = "run_really_started"
+version = "1.0.0"
+status = "DRAFT"
+# DRAFT: no measured thresholds. Complements last_start_error on the dayz_test_run compact.
+summary = "After dayz_test_run returns a run_id: that id is session_status.box.runs[0], its state is RUNNING, and bridge_status.ready.reason is ready. Complements last_start_error (dayz_test_tool remaps worker_failed); does not call dayz_test_run (denied inside playbooks). ready is the peer-liveness gate, not a mission-tick oracle."
+requires_bridge = "8"
+requires_tools = ["session_status", "bridge_status"]
+
+[params]
+run_id = ""
+
+[[steps]]
+id = "S1"
+tool = "session_status"
+args = {}
+expect = [ { field = "box.runs.0.run_id", op = "eq", value = "$run_id" } ]
+on_fail = { action = "STOP", reason = "run_missing" }
+
+[[steps]]
+id = "S2"
+tool = "session_status"
+args = {}
+expect = [ { field = "box.runs.0.state", op = "eq", value = "RUNNING" } ]
+on_fail = { action = "STOP", reason = "not_running" }
+
+[[steps]]
+id = "S3"
+tool = "bridge_status"
+args = {}
+expect = [
+  { field = "ready.ready", op = "eq", value = true },
+  { field = "ready.reason", op = "eq", value = "ready" },
+]
+on_fail = { action = "STOP", reason = "peers_not_ready" }

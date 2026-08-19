@@ -330,3 +330,129 @@ Aceptación detallada: `plans/2026-07-14-agent-session-coordination-design.md` �
   y fases tomadas de `dayz-mcp-architecture.md` (diseño cerrado, ~2.5M tokens de research +
   spot-check directo de APIs load-bearing). Decisiones de arranque: POC server-side (modded
   MissionServer), transporte HTTP crudo, no-bloqueo probado por tick-counter + RTT.
+
+## Changelog de contrato — 2026-08-18 (`ui_dialog` y `playbook_run`)
+
+Publicación de la fase 4 del plan `plans/2026-08-17-ui-dialog-plan-fusionado.md` §4. No reabre
+A–H de arriba: añade superficie y un campo podable en `MCPResult`. Límites y estados copiados
+del árbol (no de memoria). Marcado `[EXACT]` = leído en esta copia.
+
+### `ui_dialog` — firma, `kind` y límites `[EXACT]`
+
+Tool MCP (`tools/dayz_mcp/server.py:2699-2713`) y comando de puente del mismo nombre
+(`tools/dayz_mcp/loopback.py:64`, peer `client`). Exige lease: no está en
+`READ_ONLY_COMMANDS` (`tools/dayz_mcp/session_coordination.py:18-38`).
+
+```
+ui_dialog(kind, title, message="", fields=None, timeout_s=60.0)
+```
+
+| Campo | Regla `[EXACT]` | Sitio |
+|---|---|---|
+| `kind` | `acknowledge` \| `confirm` \| `form` | `ui_dialog.py:16`, `server.py:2700` |
+| `title` | str, 1..80 chars **tras strip** | `ui_dialog.py:20-21,97-99` |
+| `message` | str, 0..600 chars (sin strip de longitud). **Obligatorio no vacío** (tras strip) en `acknowledge` y `confirm`. Opcional en `form` | `ui_dialog.py:22,101-105` |
+| `fields` | solo si `kind="form"` (otro `kind` + `fields` → `bad_args`). Lista de **1..6** objetos | `ui_dialog.py:23-24,118-127` |
+| `timeout_s` | número finito **5.0..240.0**; default 60.0 | `ui_dialog.py:28-30,107-116` |
+
+Cada elemento de `fields` acepta en la tool las claves exactas `{id, label}` más opcionales
+`{required: bool = true, default: str = ""}` (`ui_dialog.py:34,37,175-198`). Ninguna otra clave
+(`ui_dialog.py:156-159`). En el cable Enforce la clave es `default_text` (`default` es reservada):
+`bridge_args` traduce (`ui_dialog.py:229-251`; DTO `MCPDialogField` en
+`DayZ_MCP\scripts\5_Mission\MCPMessages.c:12-19`).
+
+- `id` casa `^[a-z][a-z0-9_]{0,31}$` y es **único** en la lista (`ui_dialog.py:32,165-167,131-138`).
+- `label` 1..60 chars tras strip (`ui_dialog.py:25-26,168-173`).
+- `default` / `default_text` ≤ 256 chars (`ui_dialog.py:27,186-196`).
+- 7 campos (N+1) → `bad_args` **antes** de encolar (`ui_dialog.py:126-127`).
+- Presupuesto Python del puente = `timeout_s + 10.0` (`BRIDGE_SLACK_S`, `ui_dialog.py:31,67-69`)
+  → ≤ 250 s, por debajo de `MAX_TIMEOUT_S` 300.0 (`server.py:50`). El `operation_timeout_s`
+  encolado es ese presupuesto, no el timeout del jugador. El sondeo usa
+  `WAIT_FOR_MIN_POLL_INTERVAL_S` 0.5 s (`server.py:57,1650`).
+
+Alcance v1: el cliente local donde corre el puente. Sin `target_player`. Relación con
+`notify_players`: no se duplica; el toast vanilla sigue unidireccional. `ui_dialog` existe
+cuando hay que **saber** que el jugador respondió.
+
+### Cinco estados terminales `[EXACT]`
+
+`completed` · `cancelled` · `timed_out` · `disconnected` · `rejected`
+(`ui_dialog.py:17-19`; contrato `plans/2026-08-18-ui-dialog-contrato-v1.md:157-159`).
+
+`cancelled` y `timed_out` son **respuestas válidas**: `ok` true y `state` lo dice. **Nunca** se
+convierten en `choice:"no"` ni en error de tool (`ui_dialog.py:339-343`;
+contrato v1 `:157-159` y `:287-288`). Cancelar una confirmación (botón Cancelar) no es «No».
+Nada de `values` parciales si el jugador no envía. `timed_out` lo produce el job del cliente
+cuando el jugador no contesta; el vencimiento del presupuesto Python **sin** resultado es
+transporte (`ToolError("timeout waiting for ui_dialog …")`, `server.py:1659`) y no se falsifica
+como `timed_out`.
+
+`rejected` exige `reason:"busy"` (`ui_dialog.py:333-337`): segundo diálogo con uno abierto,
+rápido, sin alterar el primero (`MCPClientBridge.c:1214-1223`).
+
+### Resultado público (aplanado) `[EXACT]`
+
+El cable anida el desenlace bajo `dialog` porque `MCPResult.state` ya es `ref MCPPlayerState`
+(`MCPMessages.c:407-408,463-464`). Python (`interpret_result`, `ui_dialog.py:270-365`) valida
+el objeto y devuelve al agente:
+
+`{ok, state, dismissed_by?, choice?, values?, values_by_id?, reason?, elapsed_s}`
+más passthrough de `id` y `_server` si vienen.
+
+- `values`: array ordenado `{id, value}` en el **orden declarado** de `fields`
+  (`ui_dialog.py:368-388`). Python añade `values_by_id` (dict) cuando hay `values`
+  (`ui_dialog.py:360-364`).
+- `dialog` ausente o no-objeto → `ToolError("bridge_bad_result: dialog missing")`
+  (`ui_dialog.py:291-293`).
+- `state` fuera del enum, `values` que no casan con los ids declarados (mismo conjunto,
+  mismo orden) o `choice` fuera de `yes`/`no` → `ToolError("bridge_bad_result: …")`
+  (`ui_dialog.py:295-297,324-328,368-388`).
+- Enforce emite strings sin asignar como `""` y arrays como `[]`. Python normaliza **antes**
+  de validar: `choice`/`dismissed_by`/`reason` `== ""` → ausente; `values == []` → ausente
+  salvo `completed` de `form` (`ui_dialog.py:307-316`). `elapsed_s` sigue obligatorio
+  (`ui_dialog.py:299-301`).
+- `ok` true en todo estado terminal (contrato v1.1 `:397-398`).
+
+### Dos familias de error `[EXACT]`
+
+1. **`bad_args: <campo> …`** — del llamante, en la tool MCP (`ui_dialog.py:72-73,92-94` y
+   el resto de `_bad` / `UiDialogError`; `server.py:1624-1625` lo reexpone como `ToolError`).
+   En el daemon (`POST /enqueue`) el token es solo `"bad_args"`, sin eco del texto del
+   llamante (`ui_dialog.py:203-211,224-225`).
+2. **`bridge_bad_result: …`** — del puente / resultado mal formado
+   (`ui_dialog.py:254-255,277-280`).
+
+### Cambio observable para un consumidor ya existente
+
+`MCPResult` gana el miembro `ref MCPDialogResult dialog` (`MCPMessages.c:463-464`). Es la
+única clave de primer nivel nueva. En Python `dialog` entra en `PRUNABLE_FIELDS`
+(`tools/dayz_mcp/result_prune.py:45`): los verbos que no lo rellenan lo omiten (vacío /
+`null` = no asignado). **Excepción semántica**: `("ui_dialog", "dialog")` está en
+`SEMANTIC_EMPTY_FIELDS` (`result_prune.py:53-55`) — un objeto vacío en `ui_dialog` es un
+defecto del puente, no ruido a esconder.
+
+`ui_tree` / `ui_set_text` / `ui_click` / `action_use` / `notify_players` no cambian de
+firma ni de semántica por este campo (se poda cuando van vacíos).
+
+### `playbook_run(name, params)` — una línea `[EXACT]`
+
+`playbook_run(name, params)` (`server.py:2875-2890`) corre un checklist nombrado
+(`playbooks/<name>.toml`) contra las tools **ya registradas de la misma sesión/lease**;
+no lanza DayZ; tope 32 pasos; `certified` es **siempre false** hoy
+(`certified_reason: "no_frozen_registry"`, `playbook_tool.py:25,140-141,244-245`).
+
+### Versión de puente (esta copia) `[EXACT]`
+
+Leída al redactar: `MCP_BRIDGE_VERSION = "7"`
+(`DayZ_MCP\scripts\5_Mission\MCPMessages.c:1`) y `EXPECTED_BRIDGE_VERSION = "7"`
+(`tools/dayz_mcp/core.py:17`). El contrato v1.1 declara **objetivo 8** (bump post-gate,
+`plans/2026-08-18-ui-dialog-contrato-v1.md:376`). En el HANDOFF vivo el bump 7→8 está
+aplazado (D-52); esta copia sigue en 7. Si el orquestador lo movió después de esta
+lectura, el número de aquí queda desfasado.
+
+### Qué no entra (plan fusionado §7 + aparcados)
+
+RPC cliente→servidor · jugadores remotos · cola de diálogos · `ui_open` / `ui_close` ·
+tres tools públicas · duplicar `notify_players` · un layout por pregunta ·
+`CreateWidgets` por apertura · tratar cancelar/timeout como `"no"` · devolver texto
+parcial · heredar de Dabs · recarga de layouts en caliente.

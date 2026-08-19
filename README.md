@@ -1,7 +1,7 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 49 typed
+game, put the world into a state, act, and read back what the engine did — 51 typed
 tools (+ `exec_enforce` when an allowlist is configured), server-authoritative, no
 keyboard, no OCR.**
 
@@ -33,6 +33,7 @@ what the blades add up to.
 | **Build + launch** | `dayz_test_run(project, mode, build=True, …)` | Packs the mod with AddonBuilder, starts a diag server and/or client with it loaded, waits for readiness. Managed run, returns a `run_id`. |
 | **Set up the scene** | `world_spawn`, `player_teleport`, `vehicle_enter`, `inventory_give`, `world_time_set`, `world_weather_set`, `engine_set` | Put the world into the state the test needs — deterministically, from script. |
 | **Act** | `vehicle_control`, `object_anim`, `camera_set`, `notify_players` | Drive, animate, frame the shot. |
+| **Iterate the UI** | `ui_reload_layout`, `ui_tree`, `capture_screenshot` | Reload a `.layout` written into the client's profile directory and read back the rectangles the engine computed for it. The file is re-read on every call, so a panel can be edited and re-measured in seconds instead of one repack-and-boot per change. |
 | **Observe** | `wait_for`, `logs_since`, `query_player_state`, `object_inspect`, `vehicle_telemetry`, `vehicle_trace`, `scene_raycast`, `surface_query`, `capture_screenshot` | Structured state from the server, log tails since a cursor, 20 Hz vehicle traces, raycasts, frames. Data an agent can assert on, not pixels to squint at. |
 | **Reset + repeat** | `restore_gameplay`, `dayz_test_stop`, `session_acquire_wait`, `session_release`, `session_status` | Return the world to normal, stop the managed run, hand the game to the next session. |
 
@@ -63,7 +64,7 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` is broken in the diag build (T165276), so frames
 come from an external window grab of the rendered client, which only reads pixels.
 
-**50 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**51 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle and session coordination:
 `action_use`, `bridge_status`, `camera_get`, `camera_set`, `capture_screenshot`,
 `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `inventory_give`,
@@ -72,7 +73,7 @@ vehicle, camera, telemetry, lifecycle and session coordination:
 `pipeline_resolve`, `playbook_run`, `player_teleport`, `query_all_players`, `query_get_in_condition`,
 `query_player_state`, `restore_gameplay`, `scene_raycast`, `session_acquire`,
 `session_acquire_wait`, `session_cancel`, `session_heartbeat`, `session_release`,
-`session_status`, `session_wait`, `surface_query`, `telemetry_read`, `ui_click`,
+`session_status`, `session_wait`, `surface_query`, `telemetry_read`, `ui_click`, `ui_reload_layout`,
 `ui_set_text`, `ui_tree`, `vehicle_control`, `vehicle_enter`, `vehicle_get_in_client`,
 `vehicle_prepare_fixture`, `vehicle_release`, `vehicle_telemetry`, `vehicle_trace`,
 `wait_for`, `world_spawn`, `world_time_set`, `world_weather_set`.

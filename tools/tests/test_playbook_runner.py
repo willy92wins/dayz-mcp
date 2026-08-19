@@ -78,6 +78,49 @@ class FixtureReplayTest(unittest.TestCase):
     def test_red_player_near_fixture(self) -> None:
         self._assert_expect("red_player_near.json")
 
+    def test_red_crowded_fixture(self) -> None:
+        self._assert_expect("red_crowded.json")
+
+
+class AllPlaybooksFixtureContractTest(unittest.TestCase):
+    def test_every_toml_loads_and_has_red_per_on_fail(self) -> None:
+        tomls = sorted(PLAYBOOKS.glob("*.toml"))
+        self.assertGreaterEqual(len(tomls), 3)
+        for path in tomls:
+            with self.subTest(playbook=path.stem):
+                playbook = runner.load_playbook(path)
+                runner.validate_schema(playbook)
+                fixture_dir = PLAYBOOKS / "fixtures" / path.stem
+                self.assertTrue(fixture_dir.is_dir(), path.stem)
+                report = runner.run_fixture_dir(playbook, fixture_dir)
+                self.assertEqual(report["overall"], "PASS", path.stem)
+                seen = {
+                    item["verdict"]["reason"]
+                    for item in report["results"]
+                    if item["verdict"]["overall"] in {"FAIL", "PASS_WITH_WARNINGS"}
+                }
+                cals = runner.calibrations_by_name(playbook)
+                for step in playbook["steps"]:
+                    reason = step["on_fail"]["reason"]
+                    uses_uncal = any(
+                        exp.get("tol_ref")
+                        and cals.get(exp.get("tol_ref"), {}).get("state")
+                        == "uncalibrated"
+                        for exp in (step.get("expect") or [])
+                    )
+                    if uses_uncal:
+                        self.assertTrue(
+                            reason in seen
+                            or runner.UNCALIBRATED_REASON in seen,
+                            f"{path.stem} missing RED for {reason}",
+                        )
+                    else:
+                        self.assertIn(
+                            reason,
+                            seen,
+                            f"{path.stem} missing RED for {reason}",
+                        )
+
 
 class SchemaBiteTest(unittest.TestCase):
     def test_unknown_op_names_step(self) -> None:

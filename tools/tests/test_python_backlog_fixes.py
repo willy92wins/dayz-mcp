@@ -198,6 +198,9 @@ class PythonBacklogFixesTest(unittest.IsolatedAsyncioTestCase):
             exec_allowlist={"Probe()"},
             exec_audit=blocking_audit,
         )
+        from tests.fence_helpers import bind_both_peers
+
+        bind_both_peers(state)
         runtime = server.Runtime(
             server.ServerConfig(
                 key="fixture-key",

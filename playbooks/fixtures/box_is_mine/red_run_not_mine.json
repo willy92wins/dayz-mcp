@@ -1,0 +1,128 @@
+{
+  "name": "red_run_not_mine",
+  "params": {
+    "run_id": "abfd8d1d-f9ca-4daf-ba84-6e0c9cdfa734"
+  },
+  "responses": {
+    "S1": {
+      "owner": {
+        "state": "active",
+        "lease_id": "lease-a",
+        "purpose": "mutate",
+        "client": {
+          "platform": "claude",
+          "session": "abfd8d1d-f9c",
+          "started_at_utc": "2026-08-19T03:54:00Z",
+          "task_label": "playbook"
+        },
+        "expires_in_s": 90.0
+      },
+      "queue": [],
+      "self": {"state": "active", "lease_id": "lease-a", "position": 0},
+      "claimable": false,
+      "audit_fault": null,
+      "lifecycle_recovery_fault": null,
+      "operation_tombstones": {"count": 0, "capacity": 4096},
+      "cleanup_degraded": [],
+      "daemon_generation": "generation-a",
+      "pending_commands": 0,
+      "box": {
+        "occupied": true,
+        "runs": [
+          {
+            "run_id": "run-existing",
+            "mod": "@Other",
+            "label": "foreign-run",
+            "age_s": 12.0,
+            "owner_session": "other",
+            "state": "RUNNING"
+          }
+        ],
+        "foreign": [],
+        "ports_in_use": [2302],
+        "queue": []
+      }
+    },
+    "S2": {
+      "owner": {
+        "state": "active",
+        "lease_id": "lease-a",
+        "purpose": "mutate",
+        "client": {
+          "platform": "claude",
+          "session": "abfd8d1d-f9c",
+          "started_at_utc": "2026-08-19T03:54:00Z",
+          "task_label": "playbook"
+        },
+        "expires_in_s": 90.0
+      },
+      "queue": [],
+      "self": {"state": "active", "lease_id": "lease-a", "position": 0},
+      "claimable": false,
+      "audit_fault": null,
+      "lifecycle_recovery_fault": null,
+      "operation_tombstones": {"count": 0, "capacity": 4096},
+      "cleanup_degraded": [],
+      "daemon_generation": "generation-a",
+      "pending_commands": 0,
+      "box": {
+        "occupied": true,
+        "runs": [
+          {
+            "run_id": "run-existing",
+            "mod": "@Other",
+            "label": "foreign-run",
+            "age_s": 12.0,
+            "owner_session": "other",
+            "state": "RUNNING"
+          }
+        ],
+        "foreign": [],
+        "ports_in_use": [2302],
+        "queue": []
+      }
+    },
+    "S3": {
+      "owner": {
+        "state": "active",
+        "lease_id": "lease-a",
+        "purpose": "mutate",
+        "client": {
+          "platform": "claude",
+          "session": "abfd8d1d-f9c",
+          "started_at_utc": "2026-08-19T03:54:00Z",
+          "task_label": "playbook"
+        },
+        "expires_in_s": 90.0
+      },
+      "queue": [],
+      "self": {"state": "active", "lease_id": "lease-a", "position": 0},
+      "claimable": false,
+      "audit_fault": null,
+      "lifecycle_recovery_fault": null,
+      "operation_tombstones": {"count": 0, "capacity": 4096},
+      "cleanup_degraded": [],
+      "daemon_generation": "generation-a",
+      "pending_commands": 0,
+      "box": {
+        "occupied": true,
+        "runs": [
+          {
+            "run_id": "run-existing",
+            "mod": "@Other",
+            "label": "foreign-run",
+            "age_s": 12.0,
+            "owner_session": "other",
+            "state": "RUNNING"
+          }
+        ],
+        "foreign": [],
+        "ports_in_use": [2302],
+        "queue": []
+      }
+    }
+  },
+  "expect_overall": "FAIL",
+  "expect_stopped_at": "S3",
+  "expect_reason": "run_not_mine"
+}

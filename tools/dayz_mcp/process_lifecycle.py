@@ -6,11 +6,14 @@ import json
 import os
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from dayz_mcp.instance_fence import BindingPrepareError
 from dayz_mcp.runtime_state import RuntimePaths, atomic_write_bytes
 from dayz_mcp.session_coordination import (
     AuthorizationDecision,
@@ -30,6 +33,10 @@ _ACTIVE_STATES = RUN_STATES - {"EXITED"}
 _REAPABLE_STATES = frozenset({"RUNNING", "RUNNING_IDLE", "UNRECONCILED"})
 _HEX = frozenset("0123456789abcdef")
 _IDENTITY_SCHEMES = frozenset({"legacy-wmi-v1", "psutil-argv-v2"})
+_BOX_MOD_CAP = 12
+_BOX_OCCUPANCY_CACHE_S = 1.5
+_ACTIVE_RUN_STOP_HINT = "stop it with dayz_test_stop(run_id={run_id})"
+_ACTIVE_RUN_WAIT_HINT = "retry with wait_for_box_s=<n>"
 
 
 def _valid_uuid4(value: object) -> bool:
@@ -49,6 +56,247 @@ def _valid_sha256(value: object) -> bool:
         and value == value.casefold()
         and all(character in _HEX for character in value)
     )
+
+
+def _default_argv_of(pid: int) -> list[str] | None:
+    try:
+        from dayz_mcp.native_process_snapshot import command_argv_of
+    except Exception:
+        return None
+    return command_argv_of(pid)
+
+
+def _parse_port_token(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    try:
+        port = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if 1 <= port <= 65535:
+        return port
+    return None
+
+
+def _public_profiles_label(value: object) -> str | None:
+    """Publish a directory basename, never a host-absolute path."""
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    path = value.replace("/", "\\").rstrip("\\")
+    parts = [part for part in path.split("\\") if part]
+    if not parts:
+        return None
+    if parts[-1].casefold() == "profiles" and len(parts) >= 2:
+        return parts[-2]
+    return parts[-1]
+
+
+def _summarize_mod_tokens(raw: list[str]) -> list[str]:
+    names: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item:
+            continue
+        name = item.replace("/", "\\").rstrip("\\")
+        base = name.rsplit("\\", 1)[-1]
+        if not base or base in names:
+            continue
+        names.append(base)
+        if len(names) >= _BOX_MOD_CAP:
+            break
+    return names
+
+
+def parse_dayz_launch_argv(argv: object) -> dict[str, object]:
+    """Extract public -port/-mod/-profiles tokens from a DayZDiag argv."""
+
+    ports: list[int] = []
+    mods: list[str] = []
+    profiles: str | None = None
+    if not isinstance(argv, list):
+        return {"ports": ports, "mods": mods, "profiles": profiles}
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if not isinstance(argument, str) or not argument:
+            index += 1
+            continue
+        if argument.startswith("-port="):
+            port = _parse_port_token(argument[6:])
+            if port is not None and port not in ports:
+                ports.append(port)
+        elif argument == "-port" and index + 1 < len(argv):
+            port = _parse_port_token(argv[index + 1])
+            if port is not None and port not in ports:
+                ports.append(port)
+            index += 1
+        elif argument.startswith("-mod=") or argument.startswith("-serverMod="):
+            payload = argument.split("=", 1)[1]
+            mods.extend(part for part in payload.split(";") if part)
+        elif argument.startswith("-profiles="):
+            profiles = argument[10:] or None
+        index += 1
+    return {
+        "ports": ports,
+        "mods": _summarize_mod_tokens(mods),
+        "profiles": profiles,
+    }
+
+
+def _utc_epoch(value: object) -> float | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z") or text.endswith("z"):
+        text = text[:-1] + "+00:00"
+    if "." in text:
+        head, rest = text.split(".", 1)
+        digits = ""
+        suffix = rest
+        for offset, char in enumerate(rest):
+            if char.isdigit():
+                digits += char
+                continue
+            suffix = rest[offset:]
+            break
+        else:
+            suffix = ""
+        text = f"{head}.{(digits + '000000')[:6]}{suffix}"
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+def _run_age_s(run: RunRecord, now: float) -> float:
+    stamps = [
+        stamp
+        for stamp in (_utc_epoch(record.creation_time_utc) for record in run.processes)
+        if stamp is not None
+    ]
+    if not stamps:
+        return 0.0
+    return max(0.0, now - min(stamps))
+
+
+def empty_box(*, occupied: bool) -> dict[str, object]:
+    return {
+        "occupied": occupied,
+        "runs": [],
+        "foreign": [],
+        "ports_in_use": [],
+        "queue": [],
+    }
+
+
+def _copy_box(payload: dict[str, object]) -> dict[str, object]:
+    runs = payload.get("runs")
+    foreign = payload.get("foreign")
+    ports = payload.get("ports_in_use")
+    queue = payload.get("queue")
+    return {
+        "occupied": bool(payload.get("occupied")),
+        "runs": [dict(item) for item in runs] if isinstance(runs, list) else [],
+        "foreign": [dict(item) for item in foreign] if isinstance(foreign, list) else [],
+        "ports_in_use": list(ports) if isinstance(ports, list) else [],
+        "queue": list(queue) if isinstance(queue, list) else [],
+    }
+
+
+def _wait_hint(box: object) -> str:
+    if not isinstance(box, dict):
+        return _ACTIVE_RUN_WAIT_HINT
+    claimed_s = box.get("claimed_s")
+    if (
+        isinstance(claimed_s, (int, float))
+        and not isinstance(claimed_s, bool)
+        and claimed_s >= 0
+    ):
+        return f"retry with wait_for_box_s=<n> (claimed for {float(claimed_s):.0f}s)"
+    return _ACTIVE_RUN_WAIT_HINT
+
+
+def _caller_owns_run(item: dict[str, object], caller_session: str | None) -> bool:
+    if item.get("state") == "RUNNING_IDLE":
+        return True
+    owner = item.get("owner_session")
+    if not isinstance(owner, str) or not owner:
+        return False
+    if not isinstance(caller_session, str) or not caller_session:
+        return False
+    return owner in {caller_session, caller_session[:12]}
+
+
+def occupancy_error_fields(
+    box: object, *, caller_session: str | None = None
+) -> dict[str, object]:
+    """Public active_run_exists extras derived from a box snapshot."""
+
+    payload: dict[str, object] = {
+        "occupied_by_run_id": None,
+        "mod": "",
+        "label": "",
+        "age_s": 0.0,
+        "foreign": False,
+        "hint": _wait_hint(box),
+    }
+    if not isinstance(box, dict):
+        payload["foreign"] = True
+        return payload
+    runs = box.get("runs")
+    if isinstance(runs, list):
+        for item in runs:
+            if not isinstance(item, dict):
+                continue
+            run_id = item.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                continue
+            payload["occupied_by_run_id"] = run_id
+            payload["mod"] = item.get("mod") if isinstance(item.get("mod"), str) else ""
+            payload["label"] = (
+                item.get("label") if isinstance(item.get("label"), str) else ""
+            )
+            age = item.get("age_s")
+            payload["age_s"] = (
+                float(age)
+                if isinstance(age, (int, float)) and not isinstance(age, bool)
+                else 0.0
+            )
+            payload["foreign"] = False
+            payload["hint"] = (
+                _ACTIVE_RUN_STOP_HINT.format(run_id=run_id)
+                if _caller_owns_run(item, caller_session)
+                else _wait_hint(box)
+            )
+            return payload
+    foreign = box.get("foreign")
+    if isinstance(foreign, list):
+        for item in foreign:
+            if not isinstance(item, dict):
+                continue
+            mods = item.get("mods")
+            port = item.get("port")
+            has_port = (
+                isinstance(port, int)
+                and not isinstance(port, bool)
+                and 1 <= port <= 65535
+            )
+            has_mods = isinstance(mods, list) and any(
+                isinstance(part, str) and part for part in mods
+            )
+            if not has_port and not has_mods:
+                continue
+            if has_mods:
+                payload["mod"] = ";".join(
+                    part for part in mods if isinstance(part, str) and part
+                )
+            payload["foreign"] = True
+            payload["port"] = port if has_port else None
+            payload["hint"] = _wait_hint(box)
+            return payload
+    if box.get("occupied") is True:
+        payload["foreign"] = True
+    return payload
 
 
 @dataclass(frozen=True)
@@ -546,6 +794,8 @@ class ProcessLifecycle:
         launcher: Launcher | None = None,
         id_fn: Callable[[], str] | None = None,
         recovery_fault_arm: RecoveryFaultArm | None = None,
+        argv_of: Callable[[int], list[str] | None] | None = None,
+        bindings: object | None = None,
     ) -> None:
         self.coordinator = coordinator
         self.manifest = manifest
@@ -557,8 +807,54 @@ class ProcessLifecycle:
         self.launcher = launcher or self._launch
         self.id_fn = id_fn or (lambda: uuid.uuid4().hex)
         self.recovery_fault_arm = recovery_fault_arm
+        self.argv_of = argv_of or _default_argv_of
+        self.bindings = bindings
+        self._box_cache: tuple[float, dict[str, object]] | None = None
         self._operation_lock = threading.RLock()
         self._command_id = -1
+        self._last_start_error: str | None = None
+
+    def _prepare_instance(
+        self,
+        run_id: str,
+        role: str,
+        profiles_dir: str,
+        replacing_role: bool,
+    ) -> tuple[str | None, str | None]:
+        bindings = self.bindings
+        if bindings is None:
+            return None, None
+        try:
+            if replacing_role:
+                bindings.retire_role(run_id, role, "replace-role")
+            minted = bindings.prepare(run_id, role, profiles_dir)
+        except BindingPrepareError as exc:
+            return None, exc.code
+        except Exception:
+            return None, "instance_config_missing"
+        if not isinstance(minted, str) or not minted:
+            return None, "instance_config_missing"
+        return minted, None
+
+    def _confirm_instance(self, minted: str | None, record: ProcessRecord) -> None:
+        bindings = self.bindings
+        if bindings is None or minted is None:
+            return
+        bindings.confirm(minted, record)
+
+    def _retire_minted(
+        self, run_id: str, role: str, minted: str | None, reason: str
+    ) -> None:
+        bindings = self.bindings
+        if bindings is None or minted is None:
+            return
+        bindings.retire_role(run_id, role, reason)
+
+    def _retire_run_bindings(self, run_id: str, reason: str) -> None:
+        bindings = self.bindings
+        if bindings is None:
+            return
+        bindings.retire_run(run_id, reason)
 
     def _launch(self, argv: list[str], cwd: str, window_style: str) -> object:
         kwargs: dict[str, object] = {"cwd": cwd, "close_fds": True}
@@ -808,6 +1104,7 @@ class ProcessLifecycle:
     ) -> dict[str, object]:
         """Leave every failed Popen attempt in a durable, reconcilable state."""
 
+        self._last_start_error = confirmed_error
         confirmed_closed = launched is None or self._terminate_open_handle(launched)
         persistence_failed = False
         if confirmed_closed:
@@ -954,6 +1251,14 @@ class ProcessLifecycle:
                     )
             elif active:
                 return self._start_rejection(client, authority, "active_run_exists")
+            blocker = getattr(self.coordinator, "box_blocks_start", None)
+            if callable(blocker) and blocker(client):
+                return self._start_rejection(
+                    client,
+                    authority,
+                    "active_run_exists",
+                    audit_reason="box_claimed",
+                )
             registered_pids = {
                 record.pid for run in active for record in run.processes
             }
@@ -1032,6 +1337,8 @@ class ProcessLifecycle:
 
             launched: object | None = None
             record: ProcessRecord | None = None
+            minted: str | None = None
+            launch_role = str(parsed["role"])
             try:
                 if self._quarantined():
                     return self._settle_failed_launch(
@@ -1041,6 +1348,18 @@ class ProcessLifecycle:
                         launched=None,
                         record=None,
                         confirmed_error="retail_quarantine",
+                    )
+                minted, prepare_error = self._prepare_instance(
+                    run_id, launch_role, str(parsed["profiles"]), existing is not None
+                )
+                if prepare_error is not None:
+                    return self._settle_failed_launch(
+                        client=client,
+                        previous=previous,
+                        provisional=provisional,
+                        launched=None,
+                        record=None,
+                        confirmed_error=prepare_error,
                     )
                 try:
                     launched = self.launcher(
@@ -1052,6 +1371,7 @@ class ProcessLifecycle:
                     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
                         raise OSError("invalid_launcher_pid")
                 except Exception:
+                    self._retire_minted(run_id, launch_role, minted, "launch_failed")
                     return self._settle_failed_launch(
                         client=client,
                         previous=previous,
@@ -1065,8 +1385,9 @@ class ProcessLifecycle:
                     actual = self.guard.snapshot(pid)
                 except Exception:
                     actual = {"error": "guard_unavailable", "exit_code": 3}
-                record = self._record_from_snapshot(actual, str(parsed["role"]))
+                record = self._record_from_snapshot(actual, launch_role)
                 if record is None:
+                    self._retire_minted(run_id, launch_role, minted, "launch_failed")
                     return self._settle_failed_launch(
                         client=client,
                         previous=previous,
@@ -1075,6 +1396,7 @@ class ProcessLifecycle:
                         record=None,
                         confirmed_error="identity_unavailable",
                     )
+                self._confirm_instance(minted, record)
 
                 completed = RunRecord.from_payload(dataclasses.asdict(provisional))
                 completed.processes.append(record)
@@ -1082,6 +1404,7 @@ class ProcessLifecycle:
                 try:
                     self.manifest.replace(completed)
                 except Exception:
+                    self._retire_minted(run_id, launch_role, minted, "launch_failed")
                     return self._settle_failed_launch(
                         client=client,
                         previous=previous,
@@ -1097,6 +1420,7 @@ class ProcessLifecycle:
                     "run_id": run_id,
                     "state": "RUNNING",
                 }
+                self._last_start_error = None
                 return self._terminal_outcome(
                     result,
                     "lifecycle_start_outcome",
@@ -1290,7 +1614,14 @@ class ProcessLifecycle:
             run = self.manifest.get(run_id)
             if run is None:
                 return self._reject_reserved(authority, command, "run_not_found", 404)
-            if (
+            never_started = (
+                run.state == "EXITED"
+                and run.launch_acknowledged is False
+                and not run.processes
+                and run.owner_session_id is None
+                and run.owner_lease_id is None
+            )
+            if not never_started and (
                 run.owner_session_id != client.session_id
                 or run.owner_lease_id != authority[1]
                 or run.state != "RUNNING"
@@ -1503,6 +1834,7 @@ class ProcessLifecycle:
                     "state": "EXITED",
                     "terminated": terminated,
                 }
+                self._retire_run_bindings(run_id, "stopped")
                 return self._terminal_outcome(
                     result,
                     "lifecycle_stop_outcome",
@@ -1687,6 +2019,7 @@ class ProcessLifecycle:
                         current.processes = []
                         self.manifest.replace(current)
                         released.append(current.run_id)
+                        self._retire_run_bindings(current.run_id, "released")
                     released.extend(
                         self.manifest.release_owner(session_id, lease_id)
                     )
@@ -1788,6 +2121,7 @@ class ProcessLifecycle:
                 self.manifest.replace(run)
             except Exception:
                 return {"terminal_safe": False, "error": "manifest_drift"}
+            self._retire_run_bindings(run_id, "recovery_repaired")
             return {
                 "terminal_safe": True,
                 "run_id": run_id,
@@ -1873,6 +2207,7 @@ class ProcessLifecycle:
                     restored.replace(run)
                 except Exception:
                     return self._manifest_repair_failure("manifest_drift")
+                self._retire_run_bindings(run.run_id, "manifest_repaired")
             try:
                 restored.recover_after_restart()
             except Exception:
@@ -1935,6 +2270,7 @@ class ProcessLifecycle:
             foreign_pids=list(buckets["foreign"]),
         ):
             return "audit_failed"
+        owner_session_id = run.owner_session_id
         run.owner_session_id = None
         run.owner_lease_id = None
         run.processes = []
@@ -1943,10 +2279,14 @@ class ProcessLifecycle:
             self.manifest.replace(run)
         except Exception:
             return "manifest_failed"
+        self._retire_run_bindings(run.run_id, "reaped")
+        self._box_cache = None
+        self.coordinator.note_run_reaped(owner_session_id)
         return ""
 
     def _reap_dead_runs_locked(self) -> list[str]:
-        """Caller holds _operation_lock and has already passed quarantine."""
+        """Caller holds _operation_lock. Safe under retail quarantine: never
+        terminates, only retires runs whose owned processes are already gone."""
         reaped: list[str] = []
         for run in self.manifest.list_runs():
             if run.state not in _REAPABLE_STATES:
@@ -1963,11 +2303,17 @@ class ProcessLifecycle:
         gone or foreign, so a crashed DayZ never permanently blocks the box (the run
         would otherwise linger active and fail every start/adopt/stop until a manual
         admin reconcile). Safe by construction — reaps only zero-owned-process runs
-        and never calls terminate. Skipped whole under retail quarantine."""
+        and never calls terminate. Runs under retail quarantine; that pass is
+        audited so a later ghost can be told apart from a skipped reaper."""
         with self._operation_lock:
             self._require_legacy_identity_safe()
             if self._quarantined():
-                return []
+                self._audit(
+                    "reap_under_quarantine",
+                    None,
+                    "retail_quarantine",
+                    "continued",
+                )
             return self._reap_dead_runs_locked()
 
     def reap_dead_run(
@@ -2017,11 +2363,14 @@ class ProcessLifecycle:
         legacy_error = self._legacy_identity_error()
         if legacy_error is not None:
             return legacy_error
-        return {
+        payload: dict[str, object] = {
             "runs": [dataclasses.asdict(run) for run in self.manifest.list_runs()],
             "retail_quarantine": self._quarantined(),
             "client": client.public_payload(),
         }
+        if self._last_start_error is not None:
+            payload["last_start_error"] = self._last_start_error
+        return payload
 
     def public_status(self) -> dict[str, object]:
         legacy_error = self._legacy_identity_error()
@@ -2034,6 +2383,121 @@ class ProcessLifecycle:
             "runs": [dataclasses.asdict(run) for run in active_runs],
             "runs_retired": len(runs) - len(active_runs),
             "retail_quarantine": self._quarantined(),
+        }
+
+    def _diag_snapshot(
+        self,
+    ) -> tuple[str | None, list[dict[str, object]] | None]:
+        if self.diag_probe is None:
+            return "diag_snapshot_unknown", None
+        try:
+            result = self.diag_probe()
+        except Exception:
+            return "diag_snapshot_unknown", None
+        if not isinstance(result, dict) or result.get("known") is not True:
+            return "diag_snapshot_unknown", None
+        processes = result.get("processes")
+        if not isinstance(processes, list):
+            return "diag_snapshot_unknown", None
+        observed: list[dict[str, object]] = []
+        for process in processes:
+            if not isinstance(process, dict):
+                return "diag_snapshot_unknown", None
+            pid = process.get("pid")
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                return "diag_snapshot_unknown", None
+            observed.append(process)
+        return None, observed
+
+    def box_occupancy(self, *, now: float | None = None) -> dict[str, object]:
+        """Observe managed runs plus live DayZDiag not owned by this lifecycle.
+
+        Reuses ``diag_probe`` (the same scan ``start_run`` uses to reject a
+        foreign diag). Argv decode is per-PID enrichment, not a second scan.
+        An unknown snapshot is occupied: launching would be a guess.
+        """
+
+        if now is None and self._box_cache is not None:
+            cached_at, cached = self._box_cache
+            if time.monotonic() - cached_at < _BOX_OCCUPANCY_CACHE_S:
+                return _copy_box(cached)
+        snapshot = self._box_occupancy_uncached(
+            time.time() if now is None else float(now)
+        )
+        if now is None:
+            self._box_cache = (time.monotonic(), snapshot)
+        return _copy_box(snapshot)
+
+    def _box_occupancy_uncached(self, clock: float) -> dict[str, object]:
+        active = [
+            run for run in self.manifest.list_runs() if run.state in _ACTIVE_STATES
+        ]
+        registered_pids = {
+            record.pid for run in active for record in run.processes
+        }
+        runs: list[dict[str, object]] = []
+        ports: list[int] = []
+
+        def _remember_port(port: int) -> None:
+            if port not in ports:
+                ports.append(port)
+
+        def _absorb_argv(pid: int) -> dict[str, object]:
+            try:
+                argv = self.argv_of(pid)
+            except Exception:
+                argv = None
+            parsed = parse_dayz_launch_argv(argv or [])
+            for port in parsed["ports"]:
+                if isinstance(port, int):
+                    _remember_port(port)
+            return parsed
+
+        for run in active:
+            owner = run.owner_session_id
+            for record in run.processes:
+                _absorb_argv(record.pid)
+            runs.append(
+                {
+                    "run_id": run.run_id,
+                    "mod": run.mod,
+                    "label": run.label,
+                    "age_s": round(_run_age_s(run, clock), 3),
+                    "owner_session": owner[:12] if isinstance(owner, str) and owner else None,
+                    "state": run.state,
+                }
+            )
+
+        reason, observed = self._diag_snapshot()
+        foreign: list[dict[str, object]] = []
+        if reason is not None or observed is None:
+            return {
+                "occupied": True,
+                "runs": runs,
+                "foreign": foreign,
+                "ports_in_use": ports,
+                "queue": [],
+            }
+        for process in observed:
+            pid = int(process["pid"])
+            parsed = _absorb_argv(pid)
+            if pid in registered_pids:
+                continue
+            parsed_ports = parsed.get("ports")
+            port = parsed_ports[0] if isinstance(parsed_ports, list) and parsed_ports else None
+            foreign.append(
+                {
+                    "port": port if isinstance(port, int) else None,
+                    "mods": list(parsed.get("mods") or []),
+                    "profiles": _public_profiles_label(parsed.get("profiles")),
+                }
+            )
+        return {
+            "occupied": bool(runs or foreign),
+            "runs": runs,
+            "foreign": foreign,
+            "ports_in_use": ports,
+            "queue": [],
         }
 
     def _reconcile_survivors(
@@ -2102,25 +2566,10 @@ class ProcessLifecycle:
         return True, ""
 
     def _foreign_diag_reason(self, registered_pids: set[int]) -> str | None:
-        if self.diag_probe is None:
-            return "diag_snapshot_unknown"
-        try:
-            result = self.diag_probe()
-        except Exception:
-            return "diag_snapshot_unknown"
-        if not isinstance(result, dict) or result.get("known") is not True:
-            return "diag_snapshot_unknown"
-        processes = result.get("processes")
-        if not isinstance(processes, list):
-            return "diag_snapshot_unknown"
-        observed: set[int] = set()
-        for process in processes:
-            if not isinstance(process, dict):
-                return "diag_snapshot_unknown"
-            pid = process.get("pid")
-            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-                return "diag_snapshot_unknown"
-            observed.add(pid)
+        reason, processes = self._diag_snapshot()
+        if reason is not None or processes is None:
+            return reason or "diag_snapshot_unknown"
+        observed = {int(process["pid"]) for process in processes}
         # Registered PIDs absent from the snapshot are pending reap, not foreign.
         if observed - registered_pids:
             return "foreign_diag_process"
@@ -2230,6 +2679,8 @@ class ProcessLifecycle:
                 self.manifest.replace(run)
             except Exception:
                 return self._error("manifest_failed", 503)
+            if run.state == "EXITED":
+                self._retire_run_bindings(run.run_id, "admin_reconciled")
             result: dict[str, object] = {
                 "reconciled": True,
                 "run_id": run_id,

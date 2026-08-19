@@ -118,9 +118,19 @@ Claude ──stdio/JSON-RPC──> MCP server (Python+FastMCP)
 
 ---
 
-## 4. Tool surface (11 tools, 6 dominios)
+## 4. Tool surface (51 tools (+ `exec_enforce` when an allowlist is configured))
 
-Mapeadas a las APIs verificadas. 9 unguarded, 2 `DIAG`.
+El recuento sale de `tools/tests/test_install_mcp.py::PublicToolCountDocsTest`:
+`build_app` → `app._tool_manager.list_tools()`, descartando `ui_dialog` del número
+público (el README no la nombra; este documento sí). El diseño de 2026-06-06 abajo
+era 11 tools / 6 dominios; eso ya no es la superficie instanciada.
+
+`dayz_test_run` no espera a que el juego esté listo para “parecer éxito”: un arranque
+que no confirma devuelve `status=failed` y `error_code` (no un campo `error`). El
+código concreto viaja en `error_code` (p.ej. `instance_config_missing`); `run_id` no
+es señal de éxito. No hace falta que cada conductor reinvente un poll de 120 s.
+
+Mapeadas a las APIs verificadas. 9 unguarded, 2 `DIAG`. (superficie inicial, 2026-06-06)
 
 - **session:** `session_connect` (Connect + OnClientNewEvent) · `session_status` (player listo?) · `session_disconnect`
 - **world:** `world_spawn` (CreateObjectEx) · `world_time_set` (SetDate/SetTimeMultiplier) · `world_weather_set` (WeatherPhenomenon)
@@ -132,6 +142,16 @@ Mapeadas a las APIs verificadas. 9 unguarded, 2 `DIAG`.
 
 Patrón de diseño (de prior-art Blender/Unreal MCP): `get_property`/`set_property` genéricos donde
 quepa, `status()` antes de mutar, errores de negocio vía MCP `isError` (no excepción de protocolo).
+
+### 4.1 Familia UI (2026-08-19; runs `08343f0c`, `fdf07db7`)
+
+Verbos: `ui_tree`, `ui_set_text`, `ui_click`, `ui_dialog`, `ui_reload_layout`.
+Medido in-game, no re-derivado.
+
+`ui_reload_layout` recarga un `.layout` desde `$profile:` en el cliente vivo y
+devuelve los rects del motor. El fichero se relee en **cada** llamada. El prefijo
+de addon lo sirve el PBO y **solo** el PBO. `FileExist` guarda contra un CTD
+dentro de `CreateWidgets`. Un segundo `CreateWidgets` apila en vez de reemplazar.
 
 ---
 

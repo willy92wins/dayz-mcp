@@ -25,6 +25,7 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import core, daemon, loopback, orphan_guard
 from dayz_mcp.native_process_guard import identity_hashes
 from dayz_mcp.server import ServerConfig
+from tests.fence_helpers import bind_both_peers
 
 
 IDENTITY = {
@@ -91,6 +92,7 @@ class DaemonHttpServer:
             self.state = daemon.build_server_state(
                 config, self.key, activate_coordination=True
             )
+        bind_both_peers(self.state)
         provider = daemon.make_status_provider(config, self.state)
         self.httpd = loopback.create_http_server(
             port, self.state, log_sink=lambda _m: None, reclaim_orphans=False, status_provider=provider

@@ -1,0 +1,31 @@
+id = "box_is_mine"
+version = "1.0.0"
+status = "DRAFT"
+# DRAFT: no measured thresholds. Complements D-55 (commands landing on a foreign game).
+summary = "Before a mutating verb: this session holds the lease, the box has no unmanaged DayZDiag, and box.runs[0] is the run_id I intend to handle. Does NOT acquire/release a lease or launch DayZ (those tools are denied inside playbooks). Complements D-55; does not replace session_acquire_wait."
+requires_bridge = "8"
+requires_tools = ["session_status"]
+
+[params]
+run_id = ""
+
+[[steps]]
+id = "S1"
+tool = "session_status"
+args = {}
+expect = [ { field = "self.state", op = "eq", value = "active" } ]
+on_fail = { action = "STOP", reason = "lease_not_held" }
+
+[[steps]]
+id = "S2"
+tool = "session_status"
+args = {}
+expect = [ { field = "box.foreign", op = "eq", value = [] } ]
+on_fail = { action = "STOP", reason = "foreign_diag" }
+
+[[steps]]
+id = "S3"
+tool = "session_status"
+args = {}
+expect = [ { field = "box.runs.0.run_id", op = "eq", value = "$run_id" } ]
+on_fail = { action = "STOP", reason = "run_not_mine" }

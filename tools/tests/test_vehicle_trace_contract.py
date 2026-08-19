@@ -50,6 +50,9 @@ class VehicleTraceIngressContractTest(unittest.TestCase):
         self.assertEqual(loopback.peer_for_command("vehicle_trace"), "client")
 
         state = loopback.ServerState("test-key")
+        from tests.fence_helpers import bind_both_peers
+
+        bind_both_peers(state)
         valid = {
             "mode": "start",
             "trace_id": "a" * 32,
@@ -130,10 +133,10 @@ class VehicleTraceFastMCPContractTest(unittest.IsolatedAsyncioTestCase):
 
 
 class VehicleTraceEnforceSourceContractTest(unittest.TestCase):
-    def test_bridge_versions_move_together_to_v7(self) -> None:
-        self.assertEqual(server.EXPECTED_BRIDGE_VERSION, "7")
+    def test_bridge_versions_move_together_to_v8(self) -> None:
+        self.assertEqual(server.EXPECTED_BRIDGE_VERSION, "8")
         messages = MESSAGES.read_text(encoding="utf-8")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "7";', messages)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "8";', messages)
 
     def test_hooks_copy_contact_and_do_not_allocate(self) -> None:
         source = CAR_SCRIPT.read_text(encoding="utf-8")

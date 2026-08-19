@@ -29,6 +29,7 @@ class MCPBridge
 	protected RestContext m_Ctx;
 	protected string m_Url;
 	protected string m_Key;
+	protected string m_PeerInstance;
 	protected string m_PollVersion;
 	protected float m_PollHz;
 	protected float m_Accum;
@@ -63,6 +64,7 @@ class MCPBridge
 		m_TickPollSent = 0;
 		m_TickPollCallback = 0;
 		m_PollVersion = "";
+		m_PeerInstance = "";
 		m_PollInFlight = false;
 		m_Configured = false;
 		m_InitFailureLogged = false;
@@ -178,6 +180,11 @@ class MCPBridge
 
 		m_Url = cfg.url;
 		m_Key = cfg.key;
+		m_PeerInstance = "";
+		if (cfg.instance != "")
+		{
+			m_PeerInstance = cfg.instance;
+		}
 		if (cfg.pollHz > 0.0)
 		{
 			m_PollHz = cfg.pollHz;
@@ -194,7 +201,7 @@ class MCPBridge
 		m_Configured = true;
 		m_Backoff = 0.0;
 		m_Accum = 0.0;
-		Log("config loaded path=" + path + " url=" + m_Url + " keylen=" + m_Key.Length() + " poll_hz=" + m_PollHz);
+		Log("config loaded path=" + path + " url=" + m_Url + " keylen=" + m_Key.Length() + " instlen=" + m_PeerInstance.Length() + " poll_hz=" + m_PollHz);
 	}
 
 	protected void LogInitFailure(string reason)
@@ -218,6 +225,10 @@ class MCPBridge
 		m_CallbackRefs.Insert(cb);
 		string request = "poll?key=" + m_Key;
 		request = request + "&ver=" + GetPollVersion();
+		if (m_PeerInstance != "")
+		{
+			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
+		}
 		m_Ctx.GET(cb, request);
 	}
 
@@ -3280,7 +3291,12 @@ class MCPBridge
 
 		MCPResultCallback cb = new MCPResultCallback(this);
 		m_CallbackRefs.Insert(cb);
-		m_Ctx.POST(cb, "result?key=" + m_Key, body);
+		string resultRequest = "result?key=" + m_Key;
+		if (m_PeerInstance != "")
+		{
+			resultRequest = resultRequest + "&inst=" + EncodeQueryValue(m_PeerInstance);
+		}
+		m_Ctx.POST(cb, resultRequest, body);
 		string okStr = "0";
 		if (result.ok) { okStr = "1"; }
 		Log("result posted id=" + result.id + " ok=" + okStr + " sent_tick=" + result.tick_poll_sent + " callback_tick=" + result.tick_poll_callback + " dispatch_tick=" + result.tick_dispatch);

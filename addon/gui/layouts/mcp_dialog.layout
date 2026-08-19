@@ -21,10 +21,12 @@ FrameWidgetClass MCPDialogRoot {
 			vexactpos 0
 			hexactsize 0
 			vexactsize 0
-			style Colorable
+			style rover_sim_colorable
 			{
-				TextWidgetClass Title {
+				MultilineTextWidgetClass Title {
 					name "Title"
+					wrap 1
+					text_proportion 0.36
 					ignorepointer 1
 					color 1 1 1 1
 					position 0.04 0.025
@@ -310,6 +312,8 @@ FrameWidgetClass MCPDialogRoot {
 					vexactpos 0
 					hexactsize 0
 					vexactsize 0
+					color 1 0 0 1
+					inheritalpha 0
 					style EmptyHighlight
 					text "OK"
 					text_proportion 0.5
@@ -324,6 +328,8 @@ FrameWidgetClass MCPDialogRoot {
 					vexactpos 0
 					hexactsize 0
 					vexactsize 0
+					color 1 0 0 1
+					inheritalpha 0
 					style EmptyHighlight
 					text "Yes"
 					text_proportion 0.5
@@ -338,6 +344,8 @@ FrameWidgetClass MCPDialogRoot {
 					vexactpos 0
 					hexactsize 0
 					vexactsize 0
+					color 1 0 0 1
+					inheritalpha 0
 					style EmptyHighlight
 					text "No"
 					text_proportion 0.5
@@ -352,6 +360,8 @@ FrameWidgetClass MCPDialogRoot {
 					vexactpos 0
 					hexactsize 0
 					vexactsize 0
+					color 1 0 0 1
+					inheritalpha 0
 					style EmptyHighlight
 					text "Submit"
 					text_proportion 0.45
@@ -366,6 +376,8 @@ FrameWidgetClass MCPDialogRoot {
 					vexactpos 0
 					hexactsize 0
 					vexactsize 0
+					color 1 0 0 1
+					inheritalpha 0
 					style EmptyHighlight
 					text "Cancel"
 					text_proportion 0.45
