@@ -16,6 +16,12 @@ from typing import BinaryIO
 
 from dayz_mcp.dayz_test_request import RequestProjectPolicy
 from dayz_mcp.native_broker_protocol import BrokerKind
+from dayz_mcp.dayz_tools_paths import (
+    addon_builder_exe,
+    addon_helper_exes,
+    external_file_paths,
+    selected_layout,
+)
 from dayz_mcp.native_child_announcement import ChildAnnouncement
 from dayz_mcp.launcher_registry import (
     _OpenedLauncher,
@@ -97,99 +103,18 @@ _FINGERPRINT_KEYS = frozenset(
     }
 )
 _REPRODUCIBILITY_MODES = ("clean-1", "clean-2", "offline")
-_ADDON_BUILDER_PATH = (
-    r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools"
-    r"\Bin\AddonBuilder\AddonBuilder.exe"
-)
-_ADDON_HELPER_PATHS = frozenset(
-    {
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\Binarize\binarize.exe"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\CfgConvert\CfgConvert.exe"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\FileBank.exe"
-        ),
-    }
-)
-_DAYZ_DIAG_PATH = r"C:\Program Files (x86)\Steam\steamapps\common\DayZ\DayZDiag_x64.exe"
-_EXTERNAL_PATHS = frozenset(
-    {
-        ntpath.normcase(_ADDON_BUILDER_PATH),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\AddonBuilder.exe.config"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\log4net.dll"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\NDesk.Options.dll"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\SharedResources.dll"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\SteamHelper.dll"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\SteamLayerWrap.dll"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\steam_api.dll"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\Utils.dll"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\en-US\SharedResources.resources.dll"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\logger.xml"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\steam_appid.txt"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\Binarize\binarize.exe"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\Binarize\steam_api64.dll"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\Binarize\bin.txt"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\Binarize\bin\config.cpp"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\CfgConvert\CfgConvert.exe"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\FileBank.exe"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\NativeMethods.dll"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\log4net.dll"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\LibCommon.dll"
-        ),
-        ntpath.normcase(
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\exclude.lst"
-        ),
-        ntpath.normcase(r"C:\Program Files (x86)\Steam\steamclient.dll"),
-        ntpath.normcase(r"C:\Program Files (x86)\Steam\Steam.dll"),
-        ntpath.normcase(r"C:\Program Files (x86)\Steam\CSERHelper.dll"),
-        ntpath.normcase(r"C:\Program Files (x86)\Steam\GameOverlayRenderer.dll"),
-        ntpath.normcase(r"C:\Program Files (x86)\Steam\tier0_s.dll"),
-        ntpath.normcase(r"C:\Program Files (x86)\Steam\vstdlib_s.dll"),
-        ntpath.normcase(_DAYZ_DIAG_PATH),
-    }
-)
+def _addon_builder_path() -> str:
+    return addon_builder_exe()
+
+
+def _addon_helper_paths() -> frozenset[str]:
+    return frozenset(ntpath.normcase(path) for path in addon_helper_exes())
+
+
+def _external_paths() -> frozenset[str]:
+    return frozenset(
+        ntpath.normcase(str(path)) for path in external_file_paths(selected_layout())
+    )
 
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _kernel32.GetSystemDirectoryW.argtypes = (
@@ -471,7 +396,7 @@ def _validate_external_path(value: object) -> Path:
         not pure.is_absolute()
         or len(pure.drive) != 2
         or value.startswith(("\\\\", "\\?\\", "\\.\\"))
-        or ntpath.normcase(value) not in _EXTERNAL_PATHS
+        or ntpath.normcase(value) not in _external_paths()
     ):
         _invalid()
     return Path(value)
@@ -556,7 +481,7 @@ def _parse_manifest(value: object) -> tuple[list[dict[str, object]], dict[str, s
         identities != sorted(identities, key=lambda item: (item[0], item[1].casefold()))
         or len({(kind, path.casefold()) for kind, path in identities}) != len(identities)
         or {ntpath.normcase(path) for kind, path in identities if kind == "external"}
-        != _EXTERNAL_PATHS
+        != _external_paths()
     ):
         _invalid()
     return validated, hashes
@@ -751,7 +676,7 @@ def load_verified_bundle(opened_launcher: object) -> VerifiedNativeBundle:
                 elif (
                     item["kind"] == "external"
                     and ntpath.normcase(announced_path)
-                    == ntpath.normcase(_ADDON_BUILDER_PATH)
+                    == ntpath.normcase(_addon_builder_path())
                 ):
                     kinds = (BrokerKind.ADDON_BUILDER,)
                 for kind in kinds:
@@ -768,7 +693,7 @@ def load_verified_bundle(opened_launcher: object) -> VerifiedNativeBundle:
                     process_identities.add(identity)
                 elif (
                     item["kind"] == "external"
-                    and ntpath.normcase(announced_path) in _ADDON_HELPER_PATHS
+                    and ntpath.normcase(announced_path) in _addon_helper_paths()
                 ):
                     addon_helper_descriptors.append(
                         DebugAddonHelperDescriptor(

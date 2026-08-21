@@ -9,6 +9,10 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from dayz_mcp.dayz_tools_paths import addon_builder_exe
+
+_ADDON_BUILDER_ANNOUNCE = addon_builder_exe().encode("utf-8")
+
 
 def _handle_value(value: object) -> int:
     raw = getattr(value, "value", value)
@@ -967,10 +971,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
         fake.pipe_bytes[23] = bytearray(
             _announcement_frame(
                 kind=3,
-                path=(
-                    b"C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ Tools"
-                    b"\\Bin\\AddonBuilder\\AddonBuilder.exe"
-                ),
+                path=_ADDON_BUILDER_ANNOUNCE,
             )
         )
         fake.completion_events = [
@@ -1025,10 +1026,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
         fake.pipe_bytes[23] = bytearray(
             _announcement_frame(
                 kind=3,
-                path=(
-                    b"C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ Tools"
-                    b"\\Bin\\AddonBuilder\\AddonBuilder.exe"
-                ),
+                path=_ADDON_BUILDER_ANNOUNCE,
             )
         )
         fake.completion_events = [
@@ -1092,10 +1090,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
         fake.pipe_bytes[23] = bytearray(
             _announcement_frame(
                 kind=3,
-                path=(
-                    b"C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ Tools"
-                    b"\\Bin\\AddonBuilder\\AddonBuilder.exe"
-                ),
+                path=_ADDON_BUILDER_ANNOUNCE,
             )
         )
         fake.completion_events = [
@@ -1154,10 +1149,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
         fake.pipe_bytes[23] = bytearray(
             _announcement_frame(
                 kind=3,
-                path=(
-                    b"C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ Tools"
-                    b"\\Bin\\AddonBuilder\\AddonBuilder.exe"
-                ),
+                path=_ADDON_BUILDER_ANNOUNCE,
             )
         )
         fake.completion_events = [
@@ -1221,10 +1213,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
     def test_second_announced_addon_builder_fails_before_continue(self) -> None:
         backend = self._backend()
         fake = _FakeKernel32()
-        addon_path = (
-            b"C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ Tools"
-            b"\\Bin\\AddonBuilder\\AddonBuilder.exe"
-        )
+        addon_path = _ADDON_BUILDER_ANNOUNCE
         fake.pipe_bytes[23] = bytearray(
             _announcement_frame(kind=3, path=addon_path)
             + _announcement_frame(kind=3, path=addon_path, sequence=2)
@@ -1323,10 +1312,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
     def test_partial_pending_announcement_blocks_addon_helper_fallback(self) -> None:
         backend = self._backend()
         fake = _FakeKernel32()
-        addon_path = (
-            b"C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ Tools"
-            b"\\Bin\\AddonBuilder\\AddonBuilder.exe"
-        )
+        addon_path = _ADDON_BUILDER_ANNOUNCE
         pending = _announcement_frame(sequence=2)[:20]
         fake.pipe_bytes[23] = bytearray(
             _announcement_frame(kind=3, path=addon_path) + pending

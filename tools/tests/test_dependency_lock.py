@@ -33,13 +33,6 @@ EXPECTED_LOCK = {
             "sha256": "BD7C0FDDB23B9BA583B7BD250F16D6D720249D28A21B108AA787EA2F032DF2B2",
             "size": 8943,
         },
-        "historical_dayz_test_oracle": {
-            "location": "project_relative",
-            "path": "test-contracts/task9-protocol-docs/skills/dayz-test-ingame/templates/dayz-test.ps1",
-            "role": "static_oracle_only",
-            "sha256": "3AE0911F682F051C48FCA398D7E6CF2896D2ECDCBD6E068FB3D72125216D8912",
-            "size": 29540,
-        },
         "psutil_license": {
             "location": "project_relative",
             "path": "tools/vendor/psutil/LICENSE",
@@ -213,19 +206,28 @@ class DependencyLockTest(unittest.TestCase):
 
     def test_all_existing_file_artifacts_match_live_bytes(self) -> None:
         payload = self._payload()
-        file_items = list(payload["artifacts"].values())
-        for toolchain in payload["toolchains"].values():
-            file_items.extend(toolchain["files"].values())
         checked = 0
-        for item in file_items:
-            path = PROJECT_ROOT / PurePosixPath(item["path"]) if item.get("location") == "project_relative" else Path(item["path"])
-            if not path.is_file():
-                continue
+        for name, item in payload["artifacts"].items():
+            path = PROJECT_ROOT / PurePosixPath(item["path"])
+            self.assertTrue(
+                path.is_file(),
+                f"locked project_relative artifact missing: {name} -> {item['path']}",
+            )
             with self.subTest(path=str(path)):
                 raw = path.read_bytes()
                 self.assertEqual(len(raw), item["size"])
                 self.assertEqual(hashlib.sha256(raw).hexdigest().upper(), item["sha256"])
                 checked += 1
+        for toolchain in payload["toolchains"].values():
+            for item in toolchain["files"].values():
+                path = Path(item["path"])
+                if not path.is_file():
+                    continue
+                with self.subTest(path=str(path)):
+                    raw = path.read_bytes()
+                    self.assertEqual(len(raw), item["size"])
+                    self.assertEqual(hashlib.sha256(raw).hexdigest().upper(), item["sha256"])
+                    checked += 1
         self.assertGreater(checked, 0, "no locked artifact was present to verify")
 
     def test_tree_digests_match_live_bytes(self) -> None:
@@ -257,10 +259,11 @@ class DependencyLockTest(unittest.TestCase):
     def test_registry_is_empty_and_ps1_remains_static_non_launcher_evidence(self) -> None:
         payload = self._payload()
         registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
-        oracle = payload["artifacts"]["historical_dayz_test_oracle"]
+        self.assertNotIn("historical_dayz_test_oracle", payload["artifacts"])
+        self.assertFalse(
+            any("test-contracts/" in item["path"] for item in payload["artifacts"].values())
+        )
         self.assertEqual(registry, {"format_version": 1, "launchers": []})
-        self.assertEqual(oracle["role"], "static_oracle_only")
-        self.assertEqual(Path(oracle["path"]).suffix.casefold(), ".ps1")
         self.assertNotIn("dayz-test.ps1", REGISTRY_PATH.read_text(encoding="utf-8").casefold())
         static_inspection_exclusions = {
             "dayz_mcp/doctor.py": {"dayz-test.ps1"},
@@ -313,6 +316,26 @@ class DependencyLockTest(unittest.TestCase):
                             for ancestor in ancestors
                         )
                     )
+
+
+    def test_psutil_lock_pin_matches_vendored_manifest(self) -> None:
+        payload = self._payload()
+        wheel = payload["artifacts"]["psutil_wheel"]
+        license_item = payload["artifacts"]["psutil_license"]
+        manifest = json.loads(
+            (TOOLS_DIR / "vendor" / "psutil" / "SHA256SUMS.json").read_text(encoding="utf-8")
+        )
+        by_name = {entry["filename"]: entry for entry in manifest["files"]}
+        wheel_entry = by_name["psutil-7.2.2-cp37-abi3-win_amd64.whl"]
+        license_entry = by_name["LICENSE"]
+        self.assertEqual(wheel["path"], "tools/vendor/psutil/psutil-7.2.2-cp37-abi3-win_amd64.whl")
+        self.assertEqual(wheel["size"], wheel_entry["bytes"])
+        self.assertEqual(wheel["sha256"], wheel_entry["sha256"].upper())
+        self.assertEqual(license_item["path"], "tools/vendor/psutil/LICENSE")
+        self.assertEqual(license_item["size"], license_entry["bytes"])
+        self.assertEqual(license_item["sha256"], license_entry["sha256"].upper())
+        requirements = (TOOLS_DIR / "requirements-mcp.txt").read_text(encoding="utf-8")
+        self.assertRegex(requirements, r"(?m)^psutil==7\.2\.2$")
 
 
 if __name__ == "__main__":

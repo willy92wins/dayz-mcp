@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dayz_mcp import launcher_registry, native_bundle
+from dayz_mcp.dayz_tools_paths import addon_helper_exes
 from dayz_mcp.native_broker_protocol import BrokerKind
 from dayz_mcp.native_child_announcement import ChildAnnouncement
 from dayz_mcp.request_path_authority import PathIdentity
@@ -41,9 +42,7 @@ class NativeBundleTest(unittest.TestCase):
                     {
                         str(Path(path).resolve(strict=True)).casefold()
                         for path in (
-                            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\Binarize\binarize.exe",
-                            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\CfgConvert\CfgConvert.exe",
-                            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\FileBank.exe",
+                            *addon_helper_exes(),
                         )
                     },
                 )

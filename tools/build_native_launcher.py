@@ -23,6 +23,7 @@ from dayz_mcp.dayz_test_request import (
     _valid_mod_entry,
     _valid_string_list,
 )
+from dayz_mcp.dayz_tools_paths import external_file_paths, require_dayz_layout
 
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -68,37 +69,8 @@ PACKAGED_MODULES = (
     # ModuleNotFoundError inside app.pyz, not a build error.
     "win32_fileinfo.py",
 )
-EXTERNAL_FILES = (
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\AddonBuilder.exe"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\AddonBuilder.exe.config"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\log4net.dll"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\NDesk.Options.dll"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\SharedResources.dll"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\SteamHelper.dll"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\SteamLayerWrap.dll"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\steam_api.dll"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\Utils.dll"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\en-US\SharedResources.resources.dll"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\logger.xml"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\steam_appid.txt"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\Binarize\binarize.exe"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\Binarize\steam_api64.dll"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\Binarize\bin.txt"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\Binarize\bin\config.cpp"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\CfgConvert\CfgConvert.exe"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\FileBank.exe"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\NativeMethods.dll"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\log4net.dll"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\LibCommon.dll"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\exclude.lst"),
-    Path(r"C:\Program Files (x86)\Steam\steamclient.dll"),
-    Path(r"C:\Program Files (x86)\Steam\Steam.dll"),
-    Path(r"C:\Program Files (x86)\Steam\CSERHelper.dll"),
-    Path(r"C:\Program Files (x86)\Steam\GameOverlayRenderer.dll"),
-    Path(r"C:\Program Files (x86)\Steam\tier0_s.dll"),
-    Path(r"C:\Program Files (x86)\Steam\vstdlib_s.dll"),
-    Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ\DayZDiag_x64.exe"),
-)
+def external_files() -> tuple[Path, ...]:
+    return external_file_paths(require_dayz_layout())
 
 
 class _FILE_ATTRIBUTE_TAG_INFO(ctypes.Structure):
@@ -757,7 +729,7 @@ def _manifest(staging: Path) -> dict[str, object]:
         key=lambda path: path.relative_to(staging).as_posix().casefold(),
     )
     entries = [_bundle_entry(path, staging) for path in bundle_files]
-    entries.extend(_external_entry(path) for path in EXTERNAL_FILES)
+    entries.extend(_external_entry(path) for path in external_files())
     entries.sort(key=lambda item: (item["kind"], str(item["path"]).casefold()))
     hashes = {name: _sha256(TOOLS_DIR / "dayz_mcp" / name) for name in PACKAGED_MODULES}
     return {

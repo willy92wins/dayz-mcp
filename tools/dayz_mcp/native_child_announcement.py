@@ -5,6 +5,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
+from dayz_mcp.dayz_tools_paths import addon_builder_exe
 from dayz_mcp.native_broker_protocol import BrokerKind
 from dayz_mcp.request_path_authority import PathIdentity
 
@@ -15,10 +16,6 @@ _VERSION = 1
 _MAX_BUFFER_BYTES = 65_536
 _MAX_PATH_BYTES = 2047
 _PYTHON_PATH = r"runtime\python.exe"
-_ADDON_PATH = (
-    r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools"
-    r"\Bin\AddonBuilder\AddonBuilder.exe"
-)
 
 
 class ChildAnnouncementError(ValueError):
@@ -87,7 +84,7 @@ class ChildAnnouncementDecoder:
                 except UnicodeError:
                     _invalid()
                 expected_path = (
-                    _ADDON_PATH
+                    addon_builder_exe()
                     if kind is BrokerKind.ADDON_BUILDER
                     else _PYTHON_PATH
                 )

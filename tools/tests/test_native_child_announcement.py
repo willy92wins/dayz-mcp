@@ -3,6 +3,7 @@ from __future__ import annotations
 import struct
 import unittest
 
+from dayz_mcp.dayz_tools_paths import addon_builder_exe
 from dayz_mcp.native_child_announcement import (
     ChildAnnouncementDecoder,
     ChildAnnouncementError,
@@ -11,10 +12,7 @@ from dayz_mcp.native_broker_protocol import BrokerKind
 
 
 _HEADER = struct.Struct("<4sBBHII32sQ16s")
-_ADDON = (
-    r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools"
-    r"\Bin\AddonBuilder\AddonBuilder.exe"
-)
+_ADDON = addon_builder_exe()
 
 
 def _frame(

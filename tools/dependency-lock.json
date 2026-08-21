@@ -7,13 +7,6 @@
       "sha256": "330B04E8D7AB06E7EE850326C1CAE180F119ED21486745DC0EC9BAAE203C653B",
       "size": 45
     },
-    "historical_dayz_test_oracle": {
-      "location": "project_relative",
-      "path": "test-contracts/task9-protocol-docs/skills/dayz-test-ingame/templates/dayz-test.ps1",
-      "role": "static_oracle_only",
-      "sha256": "3AE0911F682F051C48FCA398D7E6CF2896D2ECDCBD6E068FB3D72125216D8912",
-      "size": 29540
-    },
     "psutil_license": {
       "location": "project_relative",
       "path": "tools/vendor/psutil/LICENSE",

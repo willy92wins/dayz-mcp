@@ -207,54 +207,23 @@ class NativeLauncherBundleTest(unittest.TestCase):
         identities = [(item["kind"], item["path"]) for item in payload["entries"]]
         self.assertEqual(identities, sorted(identities, key=lambda item: (item[0], item[1].casefold())))
         self.assertIn(("bundle", "build-contract.json"), identities)
-        self.assertIn(("external", r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\AddonBuilder.exe"), identities)
-        self.assertIn(("external", r"C:\Program Files (x86)\Steam\steamapps\common\DayZ\DayZDiag_x64.exe"), identities)
-        addon_root = r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder"
-        self.assertTrue(
-            {
-                ("external", addon_root + "\\" + name)
-                for name in (
-                    "AddonBuilder.exe.config",
-                    "log4net.dll",
-                    "NDesk.Options.dll",
-                    "SharedResources.dll",
-                    "SteamHelper.dll",
-                    "SteamLayerWrap.dll",
-                    "steam_api.dll",
-                    "Utils.dll",
-                    r"en-US\SharedResources.resources.dll",
-                    "logger.xml",
-                    "steam_appid.txt",
-                )
-            }.issubset(set(identities))
+        import ntpath
+        from dayz_mcp.dayz_tools_paths import (
+            DIAG_NAME,
+            STEAM_RELATIVE_FILES,
+            TOOLS_RELATIVE_FILES,
         )
-        helper_roots = {
-            "binarize": r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\Binarize",
-            "cfgconvert": r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\CfgConvert",
-            "filebank": r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils",
-        }
-        expected_helpers = {
-            ("external", helper_roots["binarize"] + "\\binarize.exe"),
-            ("external", helper_roots["binarize"] + "\\steam_api64.dll"),
-            ("external", helper_roots["binarize"] + "\\bin.txt"),
-            ("external", helper_roots["binarize"] + r"\bin\config.cpp"),
-            ("external", helper_roots["cfgconvert"] + "\\CfgConvert.exe"),
-            ("external", helper_roots["filebank"] + "\\FileBank.exe"),
-            ("external", helper_roots["filebank"] + "\\NativeMethods.dll"),
-            ("external", helper_roots["filebank"] + "\\log4net.dll"),
-            ("external", helper_roots["filebank"] + "\\LibCommon.dll"),
-            ("external", helper_roots["filebank"] + "\\exclude.lst"),
-        }
-        self.assertTrue(expected_helpers.issubset(set(identities)))
+
+        external_paths = [path for kind, path in identities if kind == "external"]
+        folded = [ntpath.normcase(path) for path in external_paths]
+        for parts in TOOLS_RELATIVE_FILES:
+            tail = ntpath.normcase(ntpath.join(*parts))
+            self.assertTrue(any(item.endswith(tail) for item in folded), parts)
+        for name in STEAM_RELATIVE_FILES:
+            tail = ntpath.normcase(name)
+            self.assertTrue(any(ntpath.basename(item) == tail for item in folded), name)
         self.assertTrue(
-            {
-                ("external", r"C:\Program Files (x86)\Steam\steamclient.dll"),
-                ("external", r"C:\Program Files (x86)\Steam\Steam.dll"),
-                ("external", r"C:\Program Files (x86)\Steam\CSERHelper.dll"),
-                ("external", r"C:\Program Files (x86)\Steam\GameOverlayRenderer.dll"),
-                ("external", r"C:\Program Files (x86)\Steam\tier0_s.dll"),
-                ("external", r"C:\Program Files (x86)\Steam\vstdlib_s.dll"),
-            }.issubset(set(identities))
+            any(ntpath.basename(item) == ntpath.normcase(DIAG_NAME) for item in folded)
         )
         self.assertFalse(
             any(path.casefold().endswith("\\dssignfile.exe") for _kind, path in identities)
