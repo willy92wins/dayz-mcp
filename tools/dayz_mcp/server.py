@@ -158,6 +158,19 @@ _DAYZ_TEST_VALUE_ERROR_CODES = {
     "invalid_dayz_test_path_authority": "bad_mod_authority",
     "invalid_dayz_test_policy": "launcher_policy_invalid",
     "invalid_dayz_test_request": "bad_dayz_test_request",
+    # The run-manifest side of the same path. None of these were mapped, so a
+    # launch that got past the parse failed as a bare "dayz_test_failed:ValueError"
+    # with nothing to search for. Reported 2026-08-21 by a session that spent the
+    # diagnosis by hand on a cause `python -m dayz_mcp.doctor` names in one line
+    # (RUN_PREPRUNE_BACKUP_SLOTS_EXHAUSTED). The codes stay constant strings: the
+    # point is a searchable name on the wire, not the offending path.
+    "invalid_native_launcher_transaction": "launcher_transaction_invalid",
+    "invalid_process_record": "process_record_invalid",
+    "invalid_run_manifest": "run_manifest_invalid",
+
+    "invalid_run_record": "run_record_invalid",
+    "run_exists": "run_exists",
+    "run_not_found": "run_not_found",
 }
 
 
