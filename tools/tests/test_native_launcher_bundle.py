@@ -734,5 +734,37 @@ class PackagedModuleClosureTest(unittest.TestCase):
         self.assertEqual(missing, [], "PACKAGED_MODULES is not import-closed")
 
 
+class PackagedModuleListsAgreeTest(unittest.TestCase):
+    """The builder's PACKAGED_MODULES and the verifier's copy must be the same set.
+
+    native_bundle.py is the verifier and ships INSIDE app.pyz, so it cannot import the
+    builder to learn the list: the duplication is deliberate. What was missing is
+    anything holding the two copies together. On 2026-08-21 win32_fileinfo.py was added
+    to the builder's list only; the bundle then built fine and was rejected at install
+    with a bare invalid_native_launcher_bundle, because the verifier's frozen member set
+    did not contain it. The error names neither list, so the cause is invisible from the
+    message alone.
+    """
+
+    def test_builder_and_verifier_agree_on_the_packaged_set(self) -> None:
+        builder = importlib.import_module(BUILD_MODULE)
+        from dayz_mcp import native_bundle
+
+        self.assertEqual(
+            set(builder.PACKAGED_MODULES),
+            set(native_bundle._APP_PACKAGED_MODULES),
+            "build_native_launcher.PACKAGED_MODULES and "
+            "native_bundle._APP_PACKAGED_MODULES have drifted apart",
+        )
+
+    def test_the_member_set_is_exactly_the_modules_plus_the_two_fixed_entries(self) -> None:
+        from dayz_mcp import native_bundle
+
+        expected = {"__main__.py", "dayz_mcp/__init__.py"} | {
+            f"dayz_mcp/{name}" for name in native_bundle._APP_PACKAGED_MODULES
+        }
+        self.assertEqual(set(native_bundle._APP_MEMBERS), expected)
+
+
 if __name__ == "__main__":
     unittest.main()

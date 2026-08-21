@@ -35,7 +35,7 @@ class MCPBridge
 	protected float m_Accum;
 	protected float m_ElapsedS;
 	// Backoff at which a poll failure stops looking transient and the credential on
-	// disk is re-read (BUG-071).
+	// disk is re-read.
 	protected const float KEY_RELOAD_BACKOFF_S = 4.0;
 	protected float m_Backoff;
 	protected int m_Tick;
@@ -375,7 +375,7 @@ class MCPBridge
 		}
 	}
 
-	// BUG-071: the key is read once at configure time and never again, so rotating
+	// The key is read once at configure time and never again, so rotating
 	// it -- or a port reclaim handing the socket to a differently keyed holder --
 	// leaves the bridge polling with a dead credential until the mission restarts.
 	// The only visible symptom was the backoff above climbing to its 30 s cap.
@@ -2333,7 +2333,7 @@ class MCPBridge
 			return;
 		}
 
-		// BUG-066(c): the attachment-slot family, not the belongs-to family.
+		// The attachment-slot family, not the belongs-to family.
 		// GetSlotIdCount/GetSlotId report the slots THIS entity can be attached
 		// INTO (inventory.c:171,175), so a CivilianSedan -- which attaches to no
 		// parent -- yielded one invalid id and GetSlotName returned "".
@@ -3487,6 +3487,6 @@ class MCPBridge
 
 	protected void Log(string message)
 	{
-		Print("[MCP-POC] " + message);
+		Print("[DayZ-MCP] " + message);
 	}
 }

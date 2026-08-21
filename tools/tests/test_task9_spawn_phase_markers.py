@@ -107,8 +107,13 @@ BRIDGE = WORKSPACE_ROOT / "scripts" / "5_Mission" / "MCPBridge.c"
 # boundary (measured on `tools/publish/included.json`), so a deliberate red in the private
 # tree publishes as a suite that fails on clone -- which is exactly the credential this
 # project cannot afford to lose.
-BRIDGE_SHA256 = "ADD51C9BFBFEA3F2350F09BDC5609FB4AE04DA8E02B8EF290D4F9724274EB5FA"
-BASE_BRIDGE_SHA256 = "7CC833DE5FAB15B57B09851406F7075B1ACD637E1A299F876F4CE800AE57F201"
+# Re-congelados sobre el bridge con el tag renombrado [MCP-POC] -> [DayZ-MCP] (S-5, :3490)
+# mas tres comentarios sin codigo de tracker privado. El renombrado NO es cosmetico: los seis
+# .ps1 de fase parsean ese prefijo (run-poc, run-fase1/2/3, run-s0-gate, spike0/mcp-grab-diag),
+# 21 sitios cambiados a la vez y verificados por conteo en los dos lados.
+# Gate in-game: run 2b710858-ca97-4772-bd98-79846e4817d9, servidor diag 1.29.163709 el 2026-08-21 15:11 con PBO repackeado: Module Mission 217x files 508x classes cero errores; script.log imprime '[DayZ-MCP] config loaded ... poll_hz=5' y CERO ocurrencias de [MCP-POC] en los 7.6 MB del log ni en el RPT
+BRIDGE_SHA256 = "66D68A4EDEFB0B04970E4D4F6E8814EB57C22113E76E5E239CA5A776E65284BE"
+BASE_BRIDGE_SHA256 = "3B2ED73FE02B11A122612030ED3BFD067BCB5B4CE18BD28EDD5F3304803CF4A2"
 
 MARKERS = (
     'Log("spawn phase id=" + command.id + " phase=validate_begin");',

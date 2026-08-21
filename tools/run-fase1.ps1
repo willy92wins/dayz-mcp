@@ -204,7 +204,7 @@ function Invoke-DayZMcpPboBuild($BuilderPath, $WorkDriveRoot) {
   $bytes = [System.IO.File]::ReadAllBytes($pbo)
   $pboAscii = -join ($bytes | ForEach-Object { if ($_ -ge 32 -and $_ -le 126) { [char]$_ } else { " " } })
   $hasMcpBridgeScript = $pboAscii.Contains("scripts\5_Mission\MCPBridge.c")
-  $hasMcpPocMarker = $pboAscii.Contains("[MCP-POC]")
+  $hasMcpPocMarker = $pboAscii.Contains("[DayZ-MCP]")
   if (-not ($hasMcpBridgeScript -and $hasMcpPocMarker)) {
     Write-Host "===== ADDONBUILDER OUTPUT BEGIN ====="
     if ($output) { Write-Host $output } else { Write-Host "(no stdout/stderr)" }
@@ -229,7 +229,7 @@ function Get-CombinedEvidence($Roots, $Since) {
       continue
     }
     $matches = @($text -split "`r?`n" | Where-Object {
-      $_ -match "DayZ_MCP|@DayZ_MCP|Addons|\.pbo|mod loaded|loaded mod|missionScriptModule|Compile|Cannot|undefined|error|5_Mission|\[MCP-POC\]|PlayerConnect|connect|Client"
+      $_ -match "DayZ_MCP|@DayZ_MCP|Addons|\.pbo|mod loaded|loaded mod|missionScriptModule|Compile|Cannot|undefined|error|5_Mission|\[DayZ-MCP\]|PlayerConnect|connect|Client"
     } | Select-Object -First 260)
     if ($matches.Count -gt 0) {
       $linesOut += "### $($file.FullName)"
@@ -247,7 +247,7 @@ function Get-McpMarkers($Roots, $Since) {
     if (-not $text) {
       continue
     }
-    $matches = @($text -split "`r?`n" | Where-Object { $_ -match "\[MCP-POC\]" })
+    $matches = @($text -split "`r?`n" | Where-Object { $_ -match "\[DayZ-MCP\]" })
     if ($matches.Count -gt 0) {
       $linesOut += "### $($file.FullName)"
       $linesOut += $matches
@@ -425,7 +425,7 @@ $init += "		GetGame().SelectPlayer(identity, m_player);"
 $init += "		if (m_player)"
 $init += "		{"
 $init += "			m_player.SetPosition(fixedPos);"
-$init += "			Print(""[MCP-POC] spawn_actual="" + fixedPos[0] + "" "" + fixedPos[1] + "" "" + fixedPos[2]);"
+$init += "			Print(""[DayZ-MCP] spawn_actual="" + fixedPos[0] + "" "" + fixedPos[1] + "" "" + fixedPos[2]);"
 $init += "		}"
 $init += "		return m_player;"
 $init += "	}"

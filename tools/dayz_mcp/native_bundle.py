@@ -71,6 +71,7 @@ _APP_PACKAGED_MODULES = frozenset(
         "normal_daemon_policy.py",
         "pinned_keyfile.py",
         "server_cli.py",
+        "win32_fileinfo.py",
     }
 )
 _APP_MEMBERS = frozenset(
