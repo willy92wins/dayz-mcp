@@ -6,7 +6,11 @@
 > si no, cae a window-grab del cliente — ver §6 y el caveat T165276.)
 > **Base:** 2 workflows de investigación (≈2.5M tokens) + spot-check directo de Claude sobre
 > cada API load-bearing (leídas en el source vanilla bajo `<vanilla scripts root>`).
-> Generado 2026-06-06. Documento de diseño; aún NO implementado.
+> Generado 2026-06-06 como documento de diseño. **Implementado y en produccion desde
+> entonces**: el servidor expone hoy 53 tools y el puente va por `MCP_BRIDGE_VERSION = "8"`.
+> Esto queda como el diseño original — util para entender por que las piezas son como son,
+> no como descripcion del estado actual. Para eso, `README.md` (superficie de tools) y el
+> bloque LIVE-STATE de `HANDOFF.md`.
 
 ---
 
@@ -118,7 +122,7 @@ Claude ──stdio/JSON-RPC──> MCP server (Python+FastMCP)
 
 ---
 
-## 4. Tool surface (51 tools (+ `exec_enforce` when an allowlist is configured))
+## 4. Tool surface (53 tools (+ `exec_enforce` when an allowlist is configured))
 
 El recuento sale de `tools/tests/test_install_mcp.py::PublicToolCountDocsTest`:
 `build_app` → `app._tool_manager.list_tools()`, descartando `ui_dialog` del número
@@ -145,7 +149,12 @@ quepa, `status()` antes de mutar, errores de negocio vía MCP `isError` (no exce
 
 ### 4.1 Familia UI (2026-08-19; runs `08343f0c`, `fdf07db7`)
 
-Verbos: `ui_tree`, `ui_set_text`, `ui_click`, `ui_dialog`, `ui_reload_layout`.
+Verbos: `ui_tree`, `ui_set_text`, `ui_click`, `ui_dialog`, `ui_reload_layout`, `ui_focus`.
+`ui_focus` da el foco de teclado a un widget por nombre y responde `ok` solo si
+`GetFocus()` devuelve el que se pidio; un widget sin inputs contesta `found` con
+`focus_not_taken`. Existe porque el relleno del estado Focus de
+`ButtonWidget/EmptyHighlight` no se puede observar de ninguna otra forma sin
+un humano al teclado, y `ui_click` no da foco: llama `OnClick` directamente.
 Medido in-game, no re-derivado.
 
 `ui_reload_layout` recarga un `.layout` desde `$profile:` en el cliente vivo y
@@ -272,7 +281,7 @@ mirar la carpeta) para no diseñar la fase 3 sobre una API rota.
 
 ---
 
-## 10. Nivel de verificación (R22)
+## 10. Nivel de verificación
 
 - **Verificado por Claude** (leído en source esta sesión, el proto existe): TODAS las APIs de §2 — Connect, OnClientNewEvent/CreateCharacter/InvokeOnConnect, CreateObjectEx, SetTimeMultiplier, StartCommand_Vehicle, Car setters, IsGettingIn, SetCameraEx/GetCamera, SetWidgetWorld, RestApi GET/POST async y `*_now`, RestCallback, JsonFileLoader/JsonSerializer, ExecuteEnforceScript, TickScheduler. **`MakeScreenshot`: el proto existe (proto.c:142) pero su RUNTIME se reporta roto — ver abajo.**
 - **De W2 (subagentes) + prior-art web, NO re-verificado por mí:** los patrones MCP (Blender/Unreal/Unity/Godot), límites de ImageContent (<1 MB), y los comportamientos runtime (latencia por tick, frame-lag de captura, `WeatherPhenomenon.Set`).

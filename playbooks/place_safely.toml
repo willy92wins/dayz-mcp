@@ -1,9 +1,9 @@
 id = "place_safely"
 version = "1.0.0"
 status = "DRAFT"            # DRAFT | PROBED | CALIBRATED | FROZEN
-# DRAFT: canopy_dy is uncalibrated; S2 FAIL becomes WARN and does not certify a clear canopy.
-summary = "Is (x,z) safe to spawn/teleport to? Checks solid ground, the vertical column and nearby players. Does NOT check lateral solids; while DRAFT the canopy gate is uncalibrated and only WARNs."
-requires_bridge = "7"
+# canopy_dy CALIBRATED 2026-08-19: S2 already stops. status stays DRAFT because the lifecycle still requires
+# a cold probe by two independent agents, and that has not been done.
+summary = "Is (x,z) safe to spawn/teleport to? Checks solid ground, the vertical column and nearby players. Does NOT check lateral solids. The canopy gate is calibrated (2026-08-19) and STOPS: on clear ground raycast and surface agree to within 8 ULP of float32, an obstructed site sat 4.89 m up (the ray hit something at that height; with intersect=geom the report does not record what)."
 requires_tools = ["surface_query", "scene_raycast", "query_all_players", "entities_query"]
 
 [params]                     # defaults; the CLI may override them
@@ -14,12 +14,24 @@ clear_r = 15.0
 [[calibration]]
 name = "canopy_dy"
 threshold = 0.05
-state = "uncalibrated"       # uncalibrated NEVER gates: degrades that expect FAIL to WARN
+state = "calibrated"         # 9 clear sites measured (2026-08-19); the threshold already gates
 n_sites_required = 3
 [[calibration.measured]]
 site = [7512.0, 7502.0]
 value = 0.0002
 source = "raycast 315.5603 vs surface_query 315.5601, in-game 2026-08-16"
+[[calibration.measured]]
+site = [7762.0, 7752.0]
+value = 0.000244140625
+source = "run 959c3807 + fe063bec, in-game 2026-08-19: 9 clear sites, max dy 0.000244 m (8 ULP of float32); one obstructed site returned 4.89 m -- the ray hit something at that height, and intersect=geom does not record WHAT"
+[[calibration.measured]]
+site = [7462.0, 7452.0]
+value = 0.000244140625
+source = "run 959c3807 + fe063bec, in-game 2026-08-19: 9 clear sites, max dy 0.000244 m (8 ULP of float32); one obstructed site returned 4.89 m -- the ray hit something at that height, and intersect=geom does not record WHAT"
+[[calibration.measured]]
+site = [7712.0, 7702.0]
+value = 0.0
+source = "run 959c3807 + fe063bec, in-game 2026-08-19: 9 clear sites, max dy 0.000244 m (8 ULP of float32); one obstructed site returned 4.89 m -- the ray hit something at that height, and intersect=geom does not record WHAT"
 
 [[steps]]
 id = "S1"

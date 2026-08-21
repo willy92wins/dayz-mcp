@@ -107,3 +107,46 @@ class LogsSinceMarkerRoundtripTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Exception) as ctx:
             await self.app.call_tool("logs_since", {"marker": "{not json"})
         self.assertIn("bad_marker", str(ctx.exception))
+
+    async def test_session_marker_is_keyed_by_run_id(self) -> None:
+        # D39: cursors must not cross between runs. A call for run-a must not
+        # consume the session cursor of run-b, and vice versa. Both runs are
+        # given the SAME profiles dir on purpose: identical paths is the hardest
+        # case for a per-run cursor, since only the key can keep them apart.
+        self.runtime.lifecycle_status.return_value = {
+            "runs": [
+                {"run_id": "run-a", "profiles": str(self.profiles)},
+                {"run_id": "run-b", "profiles": str(self.profiles)},
+            ]
+        }
+        first_a = _content_json(
+            await self.app.call_tool("logs_since", {"run_id": "run-a"})
+        )
+        self.assertEqual(first_a["ok"], 1)
+        marker_a = first_a["marker"]
+
+        with self.log.open("a", encoding="utf-8") as handle:
+            handle.write("appended for a\n")
+
+        # A different run_id starts from its own (empty) cursor, so it re-reads
+        # the whole file instead of resuming where run-a left off.
+        first_b = _content_json(
+            await self.app.call_tool("logs_since", {"run_id": "run-b"})
+        )
+        self.assertEqual(first_b["ok"], 1)
+        emitted_b = {
+            Path(item["path"]).name: item["lines"] for item in first_b["files"]
+        }
+        self.assertIn("boot line", emitted_b[self.log.name])
+        self.assertIn("appended for a", emitted_b[self.log.name])
+
+        # run-a's stored cursor still points past "boot line", so it only sees
+        # the line appended after it.
+        second_a = _content_json(
+            await self.app.call_tool("logs_since", {"run_id": "run-a"})
+        )
+        emitted_a = {
+            Path(item["path"]).name: item["lines"] for item in second_a["files"]
+        }
+        self.assertEqual(emitted_a[self.log.name], ["appended for a"])
+        self.assertNotEqual(second_a["marker"], marker_a)

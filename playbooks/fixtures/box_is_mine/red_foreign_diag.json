@@ -22,7 +22,7 @@
       "claimable": false,
       "audit_fault": null,
       "lifecycle_recovery_fault": null,
-      "operation_tombstones": {"count": 0, "capacity": 4096},
+      "operation_tombstones": {"count": 0, "capacity": 4096, "saturated": false},
       "cleanup_degraded": [],
       "daemon_generation": "generation-a",
       "pending_commands": 0,
@@ -46,7 +46,8 @@
           }
         ],
         "ports_in_use": [2302, 2402],
-        "queue": []
+        "queue": [],
+        "scan_known": true
       }
     },
     "S2": {
@@ -67,7 +68,7 @@
       "claimable": false,
       "audit_fault": null,
       "lifecycle_recovery_fault": null,
-      "operation_tombstones": {"count": 0, "capacity": 4096},
+      "operation_tombstones": {"count": 0, "capacity": 4096, "saturated": false},
       "cleanup_degraded": [],
       "daemon_generation": "generation-a",
       "pending_commands": 0,
@@ -91,7 +92,8 @@
           }
         ],
         "ports_in_use": [2302, 2402],
-        "queue": []
+        "queue": [],
+        "scan_known": true
       }
     }
   },

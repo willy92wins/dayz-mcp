@@ -45,7 +45,7 @@ from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
 
 
 DEFAULT_TOOL_TIMEOUT_S = 15.0
-# BUG-027: upper bound for per-tool bridge timeouts. 300 s, not 120 s, because
+# Upper bound for per-tool bridge timeouts. 300 s, not 120 s, because
 # dayz_test_run in mode=all measured 28.6 s and the operation pin already caps
 # at MAX_OPERATION_PIN_S=300.0 (session_coordination).
 MAX_TIMEOUT_S = 300.0
@@ -150,7 +150,7 @@ _STALE_TICKET_ERRORS = frozenset({"ticket_expired", "ticket_invalid"})
 _STALE_LEASE_ERRORS = frozenset({"lease_expired", "lease_invalid"})
 # Constant ValueError tokens raised along the dayz_test request path, mapped to
 # caller-facing codes. The tokens are fixed strings that carry no host paths, so
-# translating them preserves F1.4 while replacing a bare
+# translating them keeps host paths off the wire while replacing a bare
 # "dayz_test_failed:ValueError". The parse rejects before accreditation runs
 # (native_launcher_transaction.py:108 vs :112), so both stages need an entry.
 # Any ValueError not listed here keeps propagating untouched.
@@ -317,6 +317,18 @@ def _target_peer_down(
     return not _peer_is_live(status_snapshot.get("server_peer")) and not _peer_is_live(
         status_snapshot.get("client_peer")
     )
+
+
+def _bridge_error(result: dict[str, Any]) -> ToolError:
+    # The message stays a fixed code; the bridge's object_id (sent on a
+    # spawn timeout, MCPBridge.c:3272) rides in a structured attribute so the
+    # caller can clean up instead of duplicating, without the message carrying
+    # host content across the MCP wire.
+    error = ToolError(str(result.get("error") or "bridge_error"))
+    object_id = result.get("object_id")
+    if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
+        error.object_id = object_id
+    return error
 
 
 def _public_enqueue_error(
@@ -532,7 +544,7 @@ class Runtime:
                 # matched a business error (`0 is False` is False) and surfaced
                 # bridge failures as success. Treat any falsy ok as a ToolError.
                 if not result.get("ok"):
-                    raise ToolError(str(result.get("error") or result))
+                    raise _bridge_error(result)
                 return result_prune.prune_unfilled_fields(cmd, result)
             await asyncio.sleep(POLL_INTERVAL_S)
 
@@ -562,7 +574,7 @@ class Runtime:
         if result is None:
             return None
         if not result.get("ok"):
-            raise ToolError(str(result.get("error") or result))
+            raise _bridge_error(result)
         return result_prune.prune_unfilled_fields(cmd, result)
 
     async def abandon_bridge(self, command_id: int, reason: str) -> None:
@@ -595,7 +607,7 @@ class ClientRuntime:
     """Client-mode runtime: proxies bridge calls over HTTP to the broker daemon.
 
     Holds NO loopback bind, so no orphan-guard is needed here. The daemon owns the
-    version gate, exec chokepoint, E4 lock and idle watchdog; this only forwards
+    version gate, exec chokepoint, exclusive loopback bind and idle watchdog; this only forwards
     (POST /enqueue + GET /await) and reads /status. The daemon is discovered via
     GET /status and lazily spawned (detached) on first need; a connection failure
     triggers one re-spawn + retry, so an idle-reaped daemon self-heals.
@@ -930,7 +942,7 @@ class ClientRuntime:
         waiting for GET /status. A failed spawn leaves ``_spawn_attempted`` set
         so later misses fail fast. The flag clears when /status is healthy.
         Does not attach a parent-death watchdog: the daemon outlives this
-        session (D-14).
+        session.
         """
         startup_deadline = self._time_fn() + self._startup_budget_s
         if deadline is not None:
@@ -1156,7 +1168,7 @@ class ClientRuntime:
                 result = payload.get("result") or {}
                 # Bridge serializes ok as int 0/1; treat any falsy ok as an error.
                 if not result.get("ok"):
-                    raise ToolError(str(result.get("error") or result))
+                    raise _bridge_error(result)
                 return result_prune.prune_unfilled_fields(cmd, result)
             remaining = deadline - self._time_fn()
             if remaining <= 0.0:
@@ -1228,7 +1240,7 @@ class ClientRuntime:
         if payload.get("status") == "done":
             result = payload.get("result") or {}
             if not result.get("ok"):
-                raise ToolError(str(result.get("error") or result))
+                raise _bridge_error(result)
             return result_prune.prune_unfilled_fields(cmd, result)
         return None
 
@@ -1311,6 +1323,12 @@ def _timeout(timeout_s: float) -> float:
     if value > MAX_TIMEOUT_S:
         raise ToolError("bad_timeout")
     return value
+
+
+# Mirrors VEHICLE_CONTROL_MAX_TTL_S in addon/scripts/5_Mission/MCPClientBridge.c:114.
+# The bridge only honours hold_ttl_s <= this value; above it the control silently
+# falls back to VEHICLE_CONTROL_DEFAULT_TTL_S (3.0 s). Keep in sync with the bridge.
+VEHICLE_CONTROL_MAX_TTL_S = 30.0
 
 
 def _finite_float(value: float, error: str = "bad_args") -> float:
@@ -1455,6 +1473,11 @@ def _coerce_logs_since_marker(marker: object) -> str:
     raise ToolError("bad_marker")
 
 
+# Run states whose client window may still be on screen, so a capture should be
+# aimed at it. Anything else (EXITED, FAILED) has no window to disambiguate.
+_CAPTURE_LIVE_RUN_STATES = frozenset({"STARTING", "RUNNING", "RUNNING_IDLE", "STOPPING"})
+
+
 def _profile_dirs_from_runs(runs: list[dict[str, Any]]) -> list[str]:
     candidates = sorted(
         {str(item.get("profiles")) for item in runs if item.get("profiles")}
@@ -1484,7 +1507,11 @@ async def _wait_for_script_log_paths(runtime: Any) -> list[str]:
 
 
 def _offset_before_last_lines(data: bytes, lookback_lines: int) -> int:
-    """Byte offset of the start of the last ``lookback_lines`` lines."""
+    """Byte offset of the start of the last ``lookback_lines`` lines.
+
+    The result is always ``0`` or the byte just after a ``\\n``: a reader
+    resuming there sees whole lines, never a half-line.
+    """
     if lookback_lines <= 0 or not data:
         return len(data)
     parts = data.split(b"\n")
@@ -1499,18 +1526,67 @@ def _offset_before_last_lines(data: bytes, lookback_lines: int) -> int:
             break
         offset += len(part) + 1
         seen += 1
+    # `offset` is measured from byte 0 of `data` (each skipped line contributes
+    # its length plus its terminating newline), so it is already an absolute
+    # file offset; no window base is added.
     return min(offset, len(data))
 
 
+def _offset_before_last_lines_in_window(
+    window: bytes, window_start: int, lookback_lines: int
+) -> int:
+    """Absolute offset of the start of the last ``lookback_lines`` lines.
+
+    ``window`` is the tail of the file starting at ``window_start``, not the whole
+    file, and that is what makes this fiddly in two places:
+
+    * unless the window starts at byte 0 its first line is a fragment cut by the
+      window boundary. It is not a line, so it is neither counted nor returned --
+      but its bytes still have to be added to the offset, or the result lands
+      mid-line and the reader gets half a line as though it were whole;
+    * when the window holds fewer complete lines than were asked for, the honest
+      answer is the first complete line IN THE WINDOW. Returning 0 would point at
+      the start of a file that may be hundreds of MB, which is the read this
+      function exists to avoid.
+    """
+    if lookback_lines <= 0 or not window:
+        return window_start + len(window)
+    parts = window.split(b"\n")
+    base = window_start
+    if window_start > 0:
+        base += len(parts[0]) + 1      # skip the boundary fragment, bytes included
+        parts = parts[1:]
+    if not parts:
+        return base
+    line_count = len(parts) - 1 if parts[-1] == b"" else len(parts)
+    skip = max(0, line_count - lookback_lines)
+    offset = base
+    for part in parts[:skip]:
+        offset += len(part) + 1
+    return min(offset, window_start + len(window))
+
+
 def _marker_rewound(path: str, lookback_lines: int) -> log_tail.TailMarker:
+    """Marker rewound by ``lookback_lines``, reading only the file's tail.
+
+    D40: this used to read the file whole. DayZ RPTs reach hundreds of MB in a
+    long session, and every ``wait_for(log_matches, lookback_lines>0)`` paid for
+    it. ``log_tail`` already caps its own reads at ``MAX_TAIL_BYTES``; this now
+    respects the same ceiling. Size comes from ``os.fstat`` on the open handle,
+    not from ``stat(path)``: the game is appending to this file while we read it,
+    so the size has to describe the bytes we actually took.
+    """
     file_path = Path(path)
     with file_path.open("rb") as handle:
-        data = handle.read()
-        size = len(data)
+        size = os.fstat(handle.fileno()).st_size
         identity = log_tail._file_identity(
             handle, min(log_tail.IDENTITY_PREFIX_BYTES, size)
         )
-    offset = _offset_before_last_lines(data, lookback_lines)
+        read_size = min(size, log_tail.MAX_TAIL_BYTES)
+        window_start = size - read_size
+        handle.seek(window_start)
+        window = handle.read(read_size)
+    offset = _offset_before_last_lines_in_window(window, window_start, lookback_lines)
     return log_tail.TailMarker(
         path=str(file_path), offset=offset, size=size, identity=identity
     )
@@ -2218,10 +2294,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 except ToolError:
                     raise
                 except Exception as exc:
-                    # F1.4: the ToolError carries the exception TYPE only. The message
+                    # The ToolError carries the exception TYPE only. The message
                     # can hold host paths, so it must not cross the MCP wire; FastMCP
                     # serializes str(exc) alone. `from exc` keeps the cause in
-                    # __cause__ for LOCAL diagnosis (F5.1 needs it), not for the wire.
+                    # __cause__ for LOCAL diagnosis (needed to see why build:true failed), not for the wire.
                     raise ToolError(f"dayz_test_failed:{type(exc).__name__}") from exc
             if execute_error is not None:
                 if execute_error.code == "active_run_exists":
@@ -2284,10 +2360,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             except ToolError:
                 raise
             except Exception as exc:
-                # F1.4: the ToolError carries the exception TYPE only. The message
+                # The ToolError carries the exception TYPE only. The message
                 # can hold host paths, so it must not cross the MCP wire; FastMCP
                 # serializes str(exc) alone. `from exc` keeps the cause in
-                # __cause__ for LOCAL diagnosis (F5.1 needs it), not for the wire.
+                # __cause__ for LOCAL diagnosis (needed to see why build:true failed), not for the wire.
                 raise ToolError(f"dayz_test_failed:{type(exc).__name__}") from exc
 
     @app.tool(description="Read the authoritative server-side player state.")
@@ -2303,7 +2379,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     # F2.1: marker state lives per MCP session (this process), so a caller can
     # poll without threading the marker through every call. Passing `marker`
     # explicitly still wins, which is what makes the tool replayable.
-    log_marker_state: dict[str, str] = {"marker": ""}
+    # Keyed by run_id (or "__all__" when run_id is None) so cursors do not
+    # cross between runs.
+    log_marker_state: dict[str, str] = {}
 
     @app.tool(
         description=(
@@ -2334,8 +2412,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         ):
             raise ToolError("bad_args")
         client = _client_runtime()
+        marker_key = run_id if run_id is not None else "__all__"
         source = (
-            log_marker_state["marker"]
+            log_marker_state.get(marker_key, "")
             if marker is None
             else _coerce_logs_since_marker(marker)
         )
@@ -2362,6 +2441,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         start_epoch = _run_start_epoch(runs)
 
         files: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
         remaining = max_lines
         updated = dict(markers)
         # Only logs from this launch: DayZ writes the RPT and the script log
@@ -2374,7 +2454,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     result = log_tail.read_since(
                         log_path, markers.get(log_path), max_lines=remaining
                     )
-                except log_tail.LogTailError:
+                except log_tail.LogTailError as exc:
+                    errors.append({"path": log_path, "error": str(exc)})
                     continue
                 # The marker advances only over the lines handed over, so a cap
                 # withholds lines for the next call instead of skipping them.
@@ -2392,8 +2473,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 )
 
         encoded = log_tail.encode_marker(updated)
-        log_marker_state["marker"] = encoded
-        return {"ok": 1, "files": files, "marker": encoded}
+        log_marker_state[marker_key] = encoded
+        response: dict[str, Any] = {"ok": 1, "files": files, "marker": encoded}
+        if errors:
+            response["errors"] = errors
+        return response
 
     @app.tool(
         description=(
@@ -2415,7 +2499,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Delete an object "
-            "previously returned by world_spawn.object_id."
+            "previously returned by world_spawn.object_id. Returns ok with "
+            "deleted=0 (success, nothing removed) when the id is unknown or "
+            "already gone — check the `deleted` field to know whether anything "
+            "was actually removed."
         )
     )
     async def object_delete(object_id: int, timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
@@ -2510,18 +2597,25 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         max_lines: int = 0,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
+        # Name the field that is wrong. A bare "bad_args" makes the caller guess
+        # between mode, type and radius, which is the whole cost of the error;
+        # the codes below follow the same shape the rest of the surface uses
+        # (bad_throttle, bad_steer, bad_hold_ttl_s...). Field names are not host
+        # content, so they may cross the wire; paths may not.
         if mode == "object_at":
             args = {"mode": mode, "type": type, "pos": _require_vec3(pos, "telemetry_pos"), "radius": float(radius)}
-            if args["type"] == "" or args["radius"] <= 0.0 or not math.isfinite(args["radius"]):
-                raise ToolError("bad_args")
+            if args["type"] == "":
+                raise ToolError("bad_type")
+            if args["radius"] <= 0.0 or not math.isfinite(args["radius"]):
+                raise ToolError("bad_radius")
         elif mode == "fixture_jsonl":
             args = {"mode": mode, "path": path, "max_lines": int(max_lines)}
         else:
-            raise ToolError("bad_args")
+            raise ToolError("bad_mode")
         async with runtime.tool_lock:
             return await runtime.call_bridge("telemetry_read", args, "server", _timeout(timeout_s))
 
-    @app.tool(description="Diagnose whether a normal get-in would be available on a vehicle and which gate blocks it.")
+    @app.tool(description="Diagnose whether a normal get-in would be available on a vehicle and which gate blocks it. Pass a concrete `component` (a seat/action component index, not the default -1): with the default the bridge returns a partial diagnostic (`partial=true`, `available=false`, `first_block=\"no_component\"`) that only lists per-seat occupancy/through/area and never reports reachability or a usable `available`.")
     async def query_get_in_condition(
         pos: list[float],
         component: int = -1,
@@ -2531,7 +2625,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("query_get_in_condition", args, "server", _timeout(timeout_s))
 
-    # F3.2: general fixture prep for any CarScript (no classname allowlist).
+    # General fixture prep for any CarScript (no classname allowlist).
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Prepare a vehicle "
@@ -2561,7 +2655,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "vehicle_prepare_fixture", args, "server", _timeout(timeout_s)
             )
 
-    # F3.1: pure read of terrain under (x, z).
+    # Pure read of terrain under (x, z).
     @app.tool(description="Query terrain surface Y, type, and normal at world (x, z).")
     async def surface_query(
         x: float,
@@ -2572,7 +2666,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("surface_query", args, "server", _timeout(timeout_s))
 
-    # F3.3: mutating teleport of a connected player.
+    # Mutating teleport of a connected player.
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Teleport a "
@@ -2594,7 +2688,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("player_teleport", args, "server", _timeout(timeout_s))
 
-    # F3.4: read or write entity animation phase.
+    # Read or write entity animation phase.
     @app.tool(
         description=(
             f"{LEASE_TOOL_LINE} "
@@ -2623,7 +2717,41 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("object_anim", args, "server", _timeout(timeout_s))
 
-    # F3.5: spawn into a player's inventory.
+    # Probe verb: drive an infected server-side via its AI input controller.
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} "
+            "Impose heading/speed on an infected by classname near pos, through its "
+            "AI input controller. heading is DEGREES (0=north), speed 0-5 "
+            "(0 idle, 1 walk, 2 run, 3 sprint). Pass mode='release' to hand control "
+            "back to the vanilla AI. The override may need reapplying each tick; if "
+            "the infected does not move, that is the finding."
+        )
+    )
+    async def infected_drive(
+        type: str,
+        pos: list[float],
+        heading: float | None = None,
+        speed: float | None = None,
+        mode: str | None = None,
+        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(type, str) or type == "":
+            raise ToolError("bad_args")
+        args: dict[str, Any] = {"type": type, "pos": _require_vec3(pos, "pos")}
+        if mode is not None:
+            if mode != "release" or heading is not None or speed is not None:
+                raise ToolError("bad_args")
+            args["mode"] = mode
+        else:
+            if heading is None or speed is None:
+                raise ToolError("bad_args")
+            args["heading"] = _finite_float(heading)
+            args["speed"] = _finite_float(speed)
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("infected_drive", args, "server", _timeout(timeout_s))
+
+    # Spawn into a player's inventory.
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Spawn classname "
@@ -2650,7 +2778,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("inventory_give", args, "server", _timeout(timeout_s))
 
-    # F3.6: memory points + bounding_center. Missing points are exists:false, ok:true.
+    # Memory points + bounding_center. Missing points are exists:false, ok:true.
     @app.tool(
         description=(
             "Inspect an object near pos: memory points (exists+pos) and optional "
@@ -2794,7 +2922,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         settle_ticks: int = 3,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
-        # BUG-076: the wire value is `lookat`, but the vector argument sitting
+        # The wire value is `lookat`, but the vector argument sitting
         # right beside it is `look_at`, so a caller naturally spells the mode
         # with the underscore and gets a bare `bad_args`. Normalize rather than
         # widen the wire: the branches below forward cam_mode verbatim, so
@@ -2864,6 +2992,48 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         # (an over-budget result is rejected outright -> lost capture). resolve_request_budget clamps a
         # caller-requested max_tokens to the safe cap; <=0 means "use the safe cap".
         eff_max_tokens = mcp_capture.resolve_request_budget(max_tokens)
+        # D05: with two DayZ windows open, picking by process name alone can
+        # photograph the wrong world and certify a subject that was never there.
+        # A run records only its _server profiles dir, so derive the _client
+        # sibling: the client is launched with that path on its command line,
+        # which is what makes cmdline_match identify the window. client_pid is
+        # only a fallback -- the recorded pid comes from the launcher
+        # (process_lifecycle.py:1365-1372) and a DayZDiag window can be owned by
+        # a different process (mcp_capture.py:330, mcp-grab.ps1:28-30). With no
+        # live run both stay empty and capture behaves exactly as before.
+        cmdline_match = ""
+        client_pid = 0
+        status_fn = getattr(runtime, "lifecycle_status", None)
+        if status_fn is not None:
+            try:
+                status = status_fn()
+                if asyncio.iscoroutine(status):
+                    status = await status
+            except Exception:
+                status = None      # fail-open: a capture beats no capture
+            if isinstance(status, dict):
+                runs = [
+                    item
+                    for item in (status.get("runs") or [])
+                    if isinstance(item, dict)
+                    and item.get("state") in _CAPTURE_LIVE_RUN_STATES
+                ]
+                for profiles_dir in _profile_dirs_from_runs(runs):
+                    if Path(profiles_dir).parent.name.casefold() == "_client":
+                        cmdline_match = profiles_dir
+                        break
+                for run in runs:
+                    for proc in run.get("processes") or []:
+                        if not isinstance(proc, dict):
+                            continue
+                        if str(proc.get("role", "")).casefold() != "client":
+                            continue
+                        pid = proc.get("pid")
+                        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+                            client_pid = pid
+                            break
+                    if client_pid:
+                        break
         async with runtime.tool_lock:
             result = await asyncio.to_thread(
                 mcp_capture.capture_dual,
@@ -2871,6 +3041,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 max_tokens=eff_max_tokens,
                 frames=frames,
                 process_name=process_name,
+                cmdline_match=cmdline_match,
+                client_pid=client_pid,
                 fmt=fmt,
                 quality=quality,
                 crop=crop,
@@ -2965,7 +3137,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad_brake")
         if not math.isfinite(h) or (h != 0.0 and h != 1.0):
             raise ToolError("bad_handbrake")
-        if not math.isfinite(ttl) or ttl < 0.0:
+        if not math.isfinite(ttl) or ttl < 0.0 or ttl > VEHICLE_CONTROL_MAX_TTL_S:
             raise ToolError("bad_hold_ttl_s")
         args = {"throttle": t, "steer": s, "brake": b, "handbrake": h, "hold_ttl_s": ttl}
         async with runtime.tool_lock:
@@ -3110,6 +3282,27 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
 
     @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Give keyboard focus to a client widget by name. "
+        "Walks to the topmost ancestor, SetActiveWindow(..., false) so the "
+        "engine does not steal focus onto the first focusable child, then "
+        "SetFocus. ok is true only when GetFocus() equals the target; a "
+        "widget that cannot take focus (plain TextWidget, NoFocus, disabled) "
+        "returns found=true and error=focus_not_taken. ui_click does not "
+        "focus: it calls OnClick directly."
+    ))
+    async def ui_focus(
+        path: str,
+        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(path, str) or path == "":
+            raise ToolError("bad_args")
+        args = {"path": path}
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "ui_focus", args, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(description=(
         f"{LEASE_TOOL_LINE} Client modal (acknowledge/confirm/form). "
         "Blocks up to timeout_s for the local player's answer; "
         "cancelled and timed_out are valid."
@@ -3146,7 +3339,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if not isinstance(classname, str):
             raise ToolError("bad_args")
         radius_value = _finite_float(radius)
-        if radius_value <= 0.0:
+        if radius_value <= 0.0 or radius_value > 200.0:
             raise ToolError("bad_args")
         args: dict[str, Any] = {"action": action, "radius": radius_value}
         if classname != "":

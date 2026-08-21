@@ -79,11 +79,11 @@ SCALE_WIDTHS = {
     "full": 8192,
 }
 
-# Canonical host-side grab lives in spike0/mcp-grab.ps1 (single source of truth: this module, the
-# spike0 enumerator and the A6 gate all call it). The old embedded CopyFromScreen-of-rect snippet
-# captured stale desktop content; mcp-grab.ps1 uses PrintWindow(PW_RENDERFULLCONTENT) -> the window's
-# own surface, robust to occlusion. See that file's header for the root cause (2026-06-14).
-GRAB_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spike0", "mcp-grab.ps1")
+# Canonical host-side grab, sibling of this module (single source of truth: this module, the spike0
+# enumerator and the A6 gate all call it). The old embedded CopyFromScreen-of-rect snippet captured
+# stale desktop content; mcp-grab.ps1 uses PrintWindow(PW_RENDERFULLCONTENT) -> the window's own
+# surface, robust to occlusion. See that file's header for the root cause (2026-06-14).
+GRAB_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp-grab.ps1")
 
 try:
     LANCZOS = Image.Resampling.LANCZOS

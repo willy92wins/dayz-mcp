@@ -493,6 +493,10 @@ class MCPBridge
 		{
 			postNow = DispatchObjectAnim(command, result);
 		}
+		else if (command.cmd == "infected_drive")
+		{
+			postNow = DispatchInfectedDrive(command, result);
+		}
 		else if (command.cmd == "inventory_give")
 		{
 			postNow = DispatchInventoryGive(command, result);
@@ -1222,6 +1226,95 @@ class MCPBridge
 		result.phase = entity.GetAnimationPhase(command.args.source);
 		result.source = command.args.source;
 		result.type = command.args.type;
+		result.ok = true;
+		return true;
+	}
+
+	// Impose heading/speed on an infected server-side through its AI input controller.
+	// Vanilla precedent: PluginDayZInfectedDebug drives a possessed infected the same
+	// way (plugindayzinfecteddebug.c:385); combo order follows dayzanimal.c:548-550.
+	// Heading arrives in degrees and is converted here (OverrideHeading takes radians).
+	// mode "release" hands control back to the vanilla AI.
+	protected bool DispatchInfectedDrive(MCPCommand command, MCPResult result)
+	{
+		if (!command.args || command.args.type == "" || !command.args.pos || command.args.pos.Count() != 3)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		float px = command.args.pos.Get(0);
+		float py = command.args.pos.Get(1);
+		float pz = command.args.pos.Get(2);
+		if (!IsFiniteFloat(px) || !IsFiniteFloat(py) || !IsFiniteFloat(pz))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		bool release = command.args.mode == "release";
+		bool headingUnset = command.args.heading == MCP_ARG_FLOAT_UNSET;
+		bool speedUnset = command.args.speed == MCP_ARG_FLOAT_UNSET;
+		if (!release && (headingUnset || speedUnset))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (!release && (!IsFiniteFloat(command.args.heading) || !IsFiniteFloat(command.args.speed)))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		string error = "";
+		Object match = FindUniqueObjectNearType(command.args.type, Vector(px, py, pz), OBJECT_LOOKUP_RADIUS, error);
+		if (!match)
+		{
+			result.ok = false;
+			result.error = error;
+			return true;
+		}
+
+		DayZInfected infected = DayZInfected.Cast(match);
+		if (!infected)
+		{
+			result.ok = false;
+			result.error = "not_infected";
+			return true;
+		}
+
+		DayZInfectedInputController controller = infected.GetInputController();
+		if (!controller)
+		{
+			result.ok = false;
+			result.error = "no_input_controller";
+			return true;
+		}
+
+		if (release)
+		{
+			controller.OverrideMovementSpeed(false, 0.0);
+			controller.OverrideHeading(false, 0.0);
+			controller.OverrideTurnSpeed(false, 0.0);
+		}
+		else
+		{
+			controller.OverrideTurnSpeed(true, Math.PI2);
+			controller.OverrideMovementSpeed(true, command.args.speed);
+			controller.OverrideHeading(true, command.args.heading * Math.DEG2RAD);
+		}
+
+		vector current = infected.GetPosition();
+		result.pos_real = new array<float>();
+		result.pos_real.Insert(current[0]);
+		result.pos_real.Insert(current[1]);
+		result.pos_real.Insert(current[2]);
+		result.type = command.args.type;
+		result.found = true;
 		result.ok = true;
 		return true;
 	}

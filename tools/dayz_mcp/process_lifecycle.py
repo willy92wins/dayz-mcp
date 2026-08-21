@@ -200,6 +200,9 @@ def _copy_box(payload: dict[str, object]) -> dict[str, object]:
         "foreign": [dict(item) for item in foreign] if isinstance(foreign, list) else [],
         "ports_in_use": list(ports) if isinstance(ports, list) else [],
         "queue": list(queue) if isinstance(queue, list) else [],
+        # Additive. Missing/unknown → False (fail-closed). Distinguishes a
+        # clean empty foreign list from a scan that never ran.
+        "scan_known": payload.get("scan_known") is True,
     }
 
 
@@ -2415,6 +2418,8 @@ class ProcessLifecycle:
         Reuses ``diag_probe`` (the same scan ``start_run`` uses to reject a
         foreign diag). Argv decode is per-PID enrichment, not a second scan.
         An unknown snapshot is occupied: launching would be a guess.
+        ``scan_known`` is False on that path (empty ``foreign`` is not proof
+        of an empty box).
         """
 
         if now is None and self._box_cache is not None:
@@ -2477,6 +2482,7 @@ class ProcessLifecycle:
                 "foreign": foreign,
                 "ports_in_use": ports,
                 "queue": [],
+                "scan_known": False,
             }
         for process in observed:
             pid = int(process["pid"])
@@ -2498,6 +2504,7 @@ class ProcessLifecycle:
             "foreign": foreign,
             "ports_in_use": ports,
             "queue": [],
+            "scan_known": True,
         }
 
     def _reconcile_survivors(

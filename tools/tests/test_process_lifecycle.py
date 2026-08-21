@@ -1043,7 +1043,7 @@ class ProcessLifecycleTest(unittest.TestCase):
         # Guard reports a confirmed-dead PID exactly as process-guard.ps1 does (exit 4).
         self.guard.snapshots[pid] = {"error": "process_not_found", "exit_code": 4}
 
-    def test_reaper_retires_run_with_all_dead_processes(self) -> None:  # SC-001, SC-004
+    def test_reaper_retires_run_with_all_dead_processes(self) -> None:  # all-dead PIDs retire the run; never terminate
         self.add_run(process(48976), owner=None, state="RUNNING_IDLE")
         self._dead(48976)
         self.assertEqual(self.lifecycle.reap_dead_runs(), ["run-existing"])
@@ -1055,7 +1055,7 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertEqual(self.guard.terminate_calls, [])
         self.assertIn("run_reaped", [event["event"] for event in self.audit.events])
 
-    def test_reaper_retires_running_run_and_leaves_lease_intact(self) -> None:  # SC-001, H1
+    def test_reaper_retires_running_run_and_leaves_lease_intact(self) -> None:  # crash of a RUNNING run must not touch the live lease
         # The delicate branch: a RUNNING run owned by a live lease whose game crashed.
         # Reap retires the run (manifest only) and must NOT touch the coordinator lease.
         self.add_run(process(48976), owner="A", state="RUNNING")
@@ -1082,7 +1082,7 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertEqual(stored.processes, [])
         self.assertEqual(self.guard.terminate_calls, [])
 
-    def test_reaper_skips_live_run(self) -> None:  # SC-003
+    def test_reaper_skips_live_run(self) -> None:
         rec = process(48976)
         self.add_run(rec, owner=None, state="RUNNING_IDLE")
         self.guard.snapshots[48976] = snapshot(rec)
@@ -1096,7 +1096,7 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertEqual(self.lifecycle.reap_dead_runs(), [])
         self.assertEqual(self.store.get("run-existing").state, "RUNNING_IDLE")
 
-    def test_reaper_retires_under_retail_quarantine(self) -> None:  # SC-005 / BUG-104
+    def test_reaper_retires_under_retail_quarantine(self) -> None:  # reaper stays a no-terminate path under quarantine
         self.add_run(process(48976), owner=None, state="RUNNING_IDLE")
         self._dead(48976)
         self.probe_result = {"known": True, "processes": [{"pid": 5, "name": "DayZ_x64.exe"}]}
@@ -1105,14 +1105,14 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertEqual(self.store.get("run-existing").state, "EXITED")
         self.assertEqual(self.guard.terminate_calls, [])
 
-    def test_reaper_audit_before_act_is_fail_closed(self) -> None:  # SC-007
+    def test_reaper_audit_before_act_is_fail_closed(self) -> None:
         self.add_run(process(48976), owner=None, state="RUNNING_IDLE")
         self._dead(48976)
         self.audit.fail_events.add("run_reaped")
         self.assertEqual(self.lifecycle.reap_dead_runs(), [])
         self.assertEqual(self.store.get("run-existing").state, "RUNNING_IDLE")
 
-    def test_reap_dead_run_agent_callable_retires_all_dead(self) -> None:  # SC-005
+    def test_reap_dead_run_agent_callable_retires_all_dead(self) -> None:
         self.add_run(process(48976), owner=None, state="RUNNING_IDLE")
         self._dead(48976)
         result = self.lifecycle.reap_dead_run(IDENTITY_A, self.token_a, "run-existing")
@@ -1120,7 +1120,7 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertEqual(self.store.get("run-existing").state, "EXITED")
         self.assertEqual(self.guard.terminate_calls, [])
 
-    def test_reap_dead_run_rejects_live_run(self) -> None:  # SC-005 (dangerous case stays gated)
+    def test_reap_dead_run_rejects_live_run(self) -> None:  # dangerous case stays gated
         rec = process(48976)
         self.add_run(rec, owner=None, state="RUNNING_IDLE")
         self.guard.snapshots[48976] = snapshot(rec)
@@ -1129,14 +1129,14 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertEqual(result["_http_status"], 409)
         self.assertEqual(self.store.get("run-existing").state, "RUNNING_IDLE")
 
-    def test_reap_dead_run_reports_manifest_failure_distinctly(self) -> None:  # R9 H4/H1 fix
+    def test_reap_dead_run_reports_manifest_failure_distinctly(self) -> None:  # manifest_failed stays a distinct 503
         self.add_run(process(48976), owner=None, state="RUNNING_IDLE")
         self._dead(48976)
         self.store.replace = lambda _run: (_ for _ in ()).throw(OSError("disk full"))  # type: ignore[method-assign]
         result = self.lifecycle.reap_dead_run(IDENTITY_A, self.token_a, "run-existing")
         self.assertEqual((result["error"], result["_http_status"]), ("manifest_failed", 503))
 
-    def test_reap_dead_run_requires_lease(self) -> None:  # SC-005 (lease gate)
+    def test_reap_dead_run_requires_lease(self) -> None:  # lease gate
         self.add_run(process(48976), owner=None, state="RUNNING_IDLE")
         self._dead(48976)
         result = self.lifecycle.reap_dead_run(IDENTITY_B, None, "run-existing")
@@ -1144,7 +1144,7 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertEqual(self.store.get("run-existing").state, "RUNNING_IDLE")
 
     def test_stop_unknown_guard_unavailable_to_unreconciled_clears_owner(self) -> None:
-        # SC-009 / F-07: unknown guard snapshot stays fail-closed; owner cleared.
+        # Unknown guard snapshot stays fail-closed; owner cleared.
         rec = process(48101, "server")
         self.add_run(rec, owner="A", state="RUNNING")
         self.guard.snapshots[rec.pid] = {
@@ -1165,7 +1165,7 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertEqual(self.guard.terminate_calls, [])
 
     def test_stop_unknown_incomplete_identity_to_unreconciled_clears_owner(self) -> None:
-        # SC-009 / F-07: incomplete identity is unknown, not foreign; owner cleared.
+        # Incomplete identity is unknown, not foreign; owner cleared.
         rec = process(48102, "server")
         self.add_run(rec, owner="A", state="RUNNING")
         self.guard.snapshots[rec.pid] = {
@@ -1334,11 +1334,11 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertEqual(result["terminated"], 1)
         stored = self.store.get(run.run_id)
         self.assertEqual(stored.state, "UNRECONCILED")
-        self.assertIsNone(stored.owner_session_id)  # F-07 (site 3: terminate-fail)
+        self.assertIsNone(stored.owner_session_id)  # owner cleared on terminate-fail
         self.assertIsNone(stored.owner_lease_id)
         self.assertEqual([item.pid for item in self.guard.terminate_calls], [104, 105])
 
-    def test_stop_quarantine_midloop_to_unreconciled_clears_owner(self) -> None:  # SC-009 / F-07 (site 2)
+    def test_stop_quarantine_midloop_to_unreconciled_clears_owner(self) -> None:  # owner cleared on mid-loop quarantine
         record = process(48976)
         self.add_run(record, owner="A", state="RUNNING")
         self.guard.snapshots[record.pid] = snapshot(record)  # phase-1 passes (alive, matching)

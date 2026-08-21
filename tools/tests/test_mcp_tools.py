@@ -318,7 +318,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         session_status.assert_awaited_once()
 
     async def test_dayz_test_untyped_failure_carries_the_exception_type(self) -> None:
-        # F1.4: the bare `except Exception` swallowed the cause, which is exactly
+        # The bare `except Exception` swallowed the cause, which is exactly
         # what makes build:true undiagnosable. A non-existent `project` would NOT
         # exercise this branch -- it leaves through DayzTestToolError -- so the
         # gate needs an untyped error, and that typed error is the control below.
@@ -403,7 +403,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("bad_args", str(bad_notify.exception))
 
     async def test_camera_set_look_at_alias_is_normalized_for_the_wire(self) -> None:
-        # BUG-076: `lookat` is the value the game matches on
+        # `lookat` is the value the game matches on
         # (MCPClientBridge.c:1741), but the vector argument beside it is spelled
         # `look_at`, so callers reach for the underscore and get a bare bad_args.
         # The alias must be NORMALIZED, not merely accepted: every branch forwards
@@ -437,7 +437,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn(mode, message)
 
     async def test_timeout_has_an_upper_bound(self) -> None:
-        # BUG-027 / F1.3: only <=0 and non-finite were rejected, so a caller could
+        # Only <=0 and non-finite were rejected, so a caller could
         # pin an operation far past MAX_OPERATION_PIN_S. The 299 s call below is
         # the negative control: it must still be accepted and complete.
         app, runtime = self.build_started()
@@ -456,7 +456,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(accepted["ok"])
 
     async def test_bridge_business_error_is_tool_error(self) -> None:
-        # GATE4B-001: a bridge result with int ok=0 must surface as a ToolError,
+        # A bridge result with int ok=0 must surface as a ToolError,
         # not be returned as success (0 is not False, so `is False` missed it).
         app, runtime = self.build_started()
 
@@ -618,7 +618,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("dayz_test_failed", message, f"{tool}/{token}")
 
             # Negative control: an unmapped ValueError keeps travelling as its
-            # type alone, so the translation stays a whitelist and F1.4 holds.
+            # type alone, so the translation stays a whitelist and host paths stay off the wire.
             async def unmapped(*_args: object, **_kwargs: object) -> dict[str, Any]:
                 raise ValueError(r"boom C:\Users\host\secret")
 
@@ -649,7 +649,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         mapping = server_module._DAYZ_TEST_VALUE_ERROR_CODES
         self.assertEqual(tokens - set(mapping), set(), "unmapped ValueError tokens")
         for token, code in mapping.items():
-            # F1.4: the code crosses the wire, so it must be a bare identifier
+            # The code crosses the wire, so it must be a bare identifier
             # and never carry a host path.
             self.assertTrue(code.isidentifier(), token)
 

@@ -1,4 +1,4 @@
-"""In-memory instance bindings for D-55 v1 fencing.
+"""In-memory instance bindings for fencing commands away from a foreign game.
 
 Bindings are not persisted. After a daemon restart the map is empty and a
 live game that still sends its old inst= is unbound_after_restart.

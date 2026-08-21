@@ -1,5 +1,5 @@
 {
-  "name": "pass",
+  "name": "red_peers_not_ready",
   "params": {
     "run_id": "abfd8d1d-f9ca-4daf-ba84-6e0c9cdfa734"
   },
@@ -131,7 +131,7 @@
         "version": "8~1.29.0",
         "version_state": "ok",
         "version_detail": "version accepted",
-        "binding_state": null,
+        "binding_state": "AMBIGUOUS",
         "instance_prefix": null,
         "bound_last_poll_age_s": null
       },
@@ -141,7 +141,7 @@
         "version": "8~1.29.0",
         "version_state": "ok",
         "version_detail": "version accepted",
-        "binding_state": null,
+        "binding_state": "AMBIGUOUS",
         "instance_prefix": null,
         "bound_last_poll_age_s": null
       },
@@ -150,10 +150,10 @@
       "server_version": "8",
       "expected_game_version": null,
       "require_version": true,
-      "ready": {"ready": true, "reason": "ready"}
+      "ready": {"ready": false, "reason": "binding_ambiguous"}
     }
   },
-  "expect_overall": "PASS",
-  "expect_stopped_at": null,
-  "expect_reason": null
+  "expect_overall": "FAIL",
+  "expect_stopped_at": "S4",
+  "expect_reason": "peers_not_ready"
 }

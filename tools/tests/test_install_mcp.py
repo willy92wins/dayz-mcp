@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -1291,6 +1292,23 @@ class PublicToolCountDocsTest(unittest.TestCase):
             f"{len(without)} tools (+ `exec_enforce` when an allowlist is configured)"
         )
         self.assertIn(formula, readme)
+        # The formula alone is not enough: the opening paragraph states the count
+        # too. On 2026-08-21 that let the README ship 52 in the headline and 53 in
+        # the section at once, green. Pin EVERY count to the instantiated app
+        # instead of pinning one spelling of it -- which is why this pattern is
+        # deliberately looser than `formula`: it matches any "N tools" in the
+        # README, with or without the exec_enforce caveat trailing it. Requiring
+        # the caveat in every count would dictate WHERE the caveat lives, and the
+        # headline is a claim about what the server is, not the place to qualify a
+        # tool that does not execute on a headless diag server at all.
+        counts = re.findall(
+            r"(\d+)\s+(?:typed\s+)?tools\b",
+            readme,
+        )
+        self.assertGreaterEqual(len(counts), 2, "README lost one of its tool counts")
+        self.assertEqual(
+            set(counts), {str(len(without))}, f"README disagrees with itself: {counts}"
+        )
         self.assertNotIn("39 tools", readme)
         self.assertIn("--pin-clis", readme)
         self.assertIn("python install_mcp.py --register", readme)
@@ -1318,6 +1336,9 @@ class PublicToolCountDocsTest(unittest.TestCase):
             f"{len(without)} tools (+ `exec_enforce` when an allowlist is configured)"
         )
         self.assertIn(formula, architecture)
+        # Same trap as the README: the intro states the count in prose, where the
+        # formula cannot match. Pin it to the app as well.
+        self.assertIn(f"expone hoy {len(without)} tools", architecture)
         self.assertNotIn("Tool surface (11 tools, 6 dominios)", architecture)
         for name in (
             "ui_tree",

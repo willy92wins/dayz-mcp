@@ -174,7 +174,7 @@ class ShouldReclaimDiscriminatorTest(unittest.TestCase):
         self.assertEqual(killed, [self.PID])
 
     def test_serving_orphan_with_dead_ancestor_is_preserved(self) -> None:
-        # BUG-070: ancestry said orphan, but the holder was still answering. The old
+        # Ancestry said orphan, but the holder was still answering. The old
         # code killed it and the bridge was left talking to a differently-keyed
         # holder. Identity and ancestry are unchanged here; only health differs.
         result, killed = self._run(responsive=True)
@@ -327,7 +327,7 @@ class TryReclaimPortDecisionTest(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(guard.terminate_calls, [])
         self.assertTrue(
-            any("argv unavailable; preserving E4" in line for line in logs),
+            any("argv unavailable; preserving the exclusive bind" in line for line in logs),
             logs,
         )
 
@@ -367,7 +367,7 @@ class TryReclaimPortDecisionTest(unittest.TestCase):
 
 
 class ReclaimAncestorWalkTest(unittest.TestCase):
-    """C1 judges liveness past the venv launcher, on the real ancestor."""
+    """Reclaim judges liveness past the venv launcher, on the real ancestor."""
 
     VENV = r"C:\venv\Scripts\python.exe"
     OURS = [
@@ -621,7 +621,7 @@ class ReclaimIntegrationTest(unittest.TestCase):
             proc.wait(timeout=5)
             self.assertIsNotNone(proc.poll(), "squatter should have been terminated")
 
-            # E4 bind succeeds again on the reclaimed port.
+            # Exclusive bind succeeds again on the reclaimed port.
             httpd = loopback.create_http_server(port, loopback.ServerState("k"), reclaim_orphans=False)
             httpd.server_close()
         finally:
@@ -656,7 +656,7 @@ class ReclaimIntegrationTest(unittest.TestCase):
                 expected_executable=expected_executable,
                 expected_argv=expected_argv,
             )
-            self.assertFalse(reclaimed, f"live parent should preserve E4; logs={logs}")
+            self.assertFalse(reclaimed, f"live parent should preserve the exclusive bind; logs={logs}")
             self.assertIsNone(proc.poll(), "live-parent squatter must not be terminated")
         finally:
             if proc is not None and proc.poll() is None:

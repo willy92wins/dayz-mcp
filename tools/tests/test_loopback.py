@@ -887,7 +887,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
 
         clock.advance(loopback.PEER_RECONNECT_GAP_S + 1.0)
         _, poll = accredited_poll(state, "client")
-        # Bound queues are not flushed on reconnect gap (D-55.5).
+        # Bound queues are not flushed on reconnect gap.
         self.assertEqual([command["id"] for command in poll["commands"]], [command_id])
         status, _ = state.store_result(
             {"id": command_id, "ok": 1}, instance=INST_CLIENT
@@ -900,7 +900,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
 
 
 class StaleCommandHygieneTest(unittest.TestCase):
-    """BUG-041: the daemon must not deliver a previous session's queued commands
+    """The daemon must not deliver a previous session's queued commands
     to a freshly (re)connected peer. record_poll expires by TTL and flushes on a
     reconnect gap. A fake clock makes both paths deterministic."""
 

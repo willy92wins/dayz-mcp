@@ -2,8 +2,8 @@
 
 The daemon decouples the loopback from any one Cowork session so that MANY
 sessions (each a ``--client`` MCP server) can drive ONE DayZ game at once. It
-owns the ServerState, the version gate, the exec chokepoint, the E4 exclusive
-bind, and the idle self-shutdown. It is spawned DETACHED by the first session and
+owns the ServerState, the version gate, the exec chokepoint, the exclusive
+loopback-port bind, and the idle self-shutdown. It is spawned DETACHED by the first session and
 is meant to OUTLIVE that session.
 
 Lifecycle (deliberately different from the embedded server.py):
@@ -331,7 +331,7 @@ def build_server_state(
     )[0]
     generation = daemon_generation or uuid.uuid4().hex
     # Derived here rather than demanded of every caller: prepare() can only
-    # seed a missing bridge config if the state knows the port (BUG-105).
+    # seed a missing bridge config if the state knows the port.
     if isinstance(port, int) and not isinstance(port, bool):
         config_port: int | None = port
     else:

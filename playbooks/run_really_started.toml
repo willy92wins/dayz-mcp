@@ -3,7 +3,6 @@ version = "1.0.0"
 status = "DRAFT"
 # DRAFT: no measured thresholds. Complements last_start_error on the dayz_test_run compact.
 summary = "After dayz_test_run returns a run_id: that id is session_status.box.runs[0], its state is RUNNING, and bridge_status.ready.reason is ready. Complements last_start_error (dayz_test_tool remaps worker_failed); does not call dayz_test_run (denied inside playbooks). ready is the peer-liveness gate, not a mission-tick oracle."
-requires_bridge = "8"
 requires_tools = ["session_status", "bridge_status"]
 
 [params]

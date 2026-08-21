@@ -81,7 +81,7 @@ class RestoreGameplayEnforceSourceContractTest(unittest.TestCase):
         self.assertIn("result.ok = true;", branch_body)
 
     def test_restore_gameplay_command_releases_the_camera_like_shutdown(self) -> None:
-        # BUG-075: the command branch only called RestoreGameplay, which covers
+        # The command branch only called RestoreGameplay, which covers
         # simulation, controls and HUD and never the camera, so the tool answered
         # ok:1 with the view still locked to the debug camera and reconnecting was
         # the only way out. Shutdown already performed the full teardown, so the

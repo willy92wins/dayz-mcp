@@ -118,7 +118,7 @@ def _reachable_kill_hits(
 
 
 class ReapDeadRunsLockedTerminateInvariantTest(unittest.TestCase):
-    """BUG-104: the locked reaper must stay a no-terminate path, or quarantine
+    """The locked reaper must stay a no-terminate path, or quarantine
     cannot be allowed to let it run."""
 
     DECLARED_EXCEPTIONS: dict[str, str] = {}

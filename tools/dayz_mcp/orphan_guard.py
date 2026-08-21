@@ -1,7 +1,7 @@
 """Orphan-proofing for the loopback bind: parent-death watchdog + port reclaim.
 
-The MCP server holds 127.0.0.1:<port> through an exclusive bind (E4 lock,
-``ExclusiveThreadingHTTPServer`` in loopback.py). A clean shutdown frees the port
+The MCP server holds 127.0.0.1:<port> through an exclusive bind
+(``ExclusiveThreadingHTTPServer`` in loopback.py). A clean shutdown frees the port
 because stdin EOF returns ``app.run()`` and the lifespan calls ``stop_loopback()``.
 When the parent (Claude Code / node) dies ABRUPTLY on Windows the child never sees
 that EOF, ``app.run()`` blocks forever, and the orphaned process keeps the port —
@@ -16,7 +16,7 @@ Two coupled mechanisms, both stdlib-only (no psutil):
    confirmed-dead-parent ``dayz_mcp`` orphan still holds the port (e.g. the process
    was SIGKILLed before the watchdog could run, or a legacy build with no watchdog),
    terminate that orphan and retry the bind ONCE. A LIVE instance (parent alive) is
-   never touched, so the E4 fail-closed lock is preserved.
+   never touched, so the exclusive fail-closed lock is preserved.
 
 Threading: the watchdog runs on one daemon thread blocked in WaitForSingleObject.
 Platform: the Windows ctypes path is the one that matters for the real environment;
@@ -314,7 +314,7 @@ def walk_past_redirectors(
     On Windows the venv ``Scripts\\python.exe`` is a launcher that spawns the base
     interpreter as a child, so the server's immediate parent is that launcher. The
     launcher OUTLIVES Claude Code (it only waits on its child) and never trips a
-    watchdog bound to it, and reclaim reads it as a live parent — that is C1.
+    watchdog bound to it, and reclaim reads it as a live parent.
     Skipping the launcher layer makes the watchdog watch the real ancestor
     (Claude/node) and the reclaim discriminator judge the real ancestor's liveness.
 
@@ -480,7 +480,7 @@ def install_parent_death_watchdog(
     process exits. Returns ARMED or DISABLED. Helpers are injectable for testing.
 
     The immediate parent is the venv launcher, which outlives Claude Code, so the
-    watchdog walks past launcher layers and watches the first real ancestor (C1).
+    watchdog walks past launcher layers and watches the first real ancestor.
     """
     open_handle = open_handle or open_parent_wait_handle
     wait_for_exit = wait_for_exit or wait_for_parent_exit
@@ -547,13 +547,13 @@ def try_reclaim_port(
 
     Returns True only when an orphan was found, terminated, and the port came free.
     Never terminates this process or a live instance. Liveness is judged on the
-    listener's real ancestor (past the venv launcher layer, C1), not its immediate
+    listener's real ancestor (past the venv launcher layer), not its immediate
     parent. Helpers are injectable so the discriminator and kill/free path can be
     exercised deterministically in tests.
 
-    Ancestry is necessary but NOT sufficient (BUG-070): a holder that still answers
+    Ancestry is necessary but NOT sufficient: a holder that still answers
     HTTP is preserved even when its ancestor is gone, mirroring the daemon guard in
-    Part 2b. The two discriminators stay separate per mode (LL-156) -- health is an
+    Part 2b. The two discriminators stay separate per mode -- health is an
     additional AND here, never a replacement for the ancestry test.
     """
     from dayz_mcp.native_process_guard import NativeProcessGuard, identity_hashes
@@ -595,7 +595,7 @@ def try_reclaim_port(
         return False
     observed_argv = get_argv(pid_a)
     if observed_argv is None:
-        log(f"RECLAIM: pid={pid_a} image={image} argv unavailable; preserving E4")
+        log(f"RECLAIM: pid={pid_a} image={image} argv unavailable; preserving the exclusive bind")
         return False
     if (
         classify_dayz_argv(observed_argv) != "legacy_embedded"
@@ -608,27 +608,27 @@ def try_reclaim_port(
         return False
     immediate_parent = get_parent(pid_a)
     if immediate_parent is None:
-        log(f"RECLAIM: pid={pid_a} image={image} parent_pid unavailable; preserving E4 lock")
+        log(f"RECLAIM: pid={pid_a} image={image} parent_pid unavailable; preserving the exclusive bind")
         return False
     # The listener's immediate parent is the venv launcher, which outlives Claude
-    # Code (C1); judge liveness on the real ancestor so a dead-Claude orphan whose
+    # Code; judge liveness on the real ancestor so a dead-Claude orphan whose
     # launcher is still alive is reclaimed, while a live session is preserved.
     ancestor = walk_past_redirectors(
         immediate_parent, self_exe, get_parent=get_parent, get_full_path=get_full_path
     )
     if ancestor is None:
-        log(f"RECLAIM: pid={pid_a} image={image} true ancestor unresolved; preserving E4 lock")
+        log(f"RECLAIM: pid={pid_a} image={image} true ancestor unresolved; preserving the exclusive bind")
         return False
     parent_alive = is_alive(ancestor)
 
     if parent_alive:
         log(
             f"RECLAIM: pid={pid_a} image={image} parent_pid={immediate_parent} ancestor={ancestor} "
-            f"parent_alive={parent_alive} is not a reclaimable orphan; preserving E4 lock"
+            f"parent_alive={parent_alive} is not a reclaimable orphan; preserving the exclusive bind"
         )
         return False
 
-    # BUG-070: ancestry alone decided the kill, so an orphan that was STILL SERVING
+    # Ancestry alone decided the kill, so an orphan that was STILL SERVING
     # got terminated -- the symptom was a healthy endpoint dying and the bridge then
     # talking to a differently-keyed holder (poll error=5, blind backoff). The daemon
     # path never had this hole: a holder answering ANY HTTP status reads as alive.
@@ -931,14 +931,14 @@ def try_reclaim_unresponsive_listener(
     image = get_image(pid_a) or ""
     image_name = ntpath.basename(image).casefold()
     if not (image_name.startswith("python") and image_name.endswith(".exe")):
-        log(f"RECLAIM(daemon): pid={pid_a} image={image} not python; preserving E4 lock")
+        log(f"RECLAIM(daemon): pid={pid_a} image={image} not python; preserving the exclusive bind")
         return False
     observed_argv = get_argv(pid_a)
     if observed_argv is None:
-        log(f"RECLAIM(daemon): pid={pid_a} image={image} argv unavailable; preserving E4 lock")
+        log(f"RECLAIM(daemon): pid={pid_a} image={image} argv unavailable; preserving the exclusive bind")
         return False
     if classify_dayz_argv(observed_argv) != expected_type or observed_argv != expected_argv:
-        log(f"RECLAIM(daemon): pid={pid_a} policy mismatch; preserving E4 lock")
+        log(f"RECLAIM(daemon): pid={pid_a} policy mismatch; preserving the exclusive bind")
         return False
 
     try:

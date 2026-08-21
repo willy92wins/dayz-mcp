@@ -63,6 +63,7 @@ SERVER_COMMANDS = {
     "object_anim",
     "inventory_give",
     "object_inspect",
+    "infected_drive",
     "entities_query",
 }
 CLIENT_COMMANDS = {
@@ -80,6 +81,7 @@ CLIENT_COMMANDS = {
     "ui_set_text",
     "ui_click",
     "ui_reload_layout",
+    "ui_focus",
     "ui_dialog",
     "action_use",
 }
@@ -88,6 +90,30 @@ CREDENTIAL_RECOVERY_TTL_S = 300.0
 CREDENTIAL_RECOVERY_COUNT_MAX = 2_147_483_647
 EXEC_COMMANDS = {"exec_enforce"}
 WHITELISTED_COMMANDS = SERVER_COMMANDS | CLIENT_COMMANDS
+# Whitelisted verbs that validate_command_args does NOT schema-check. Each is
+# either read-only / single-arg or validated by its server.py tool. Keep in sync
+# with SERVER_COMMANDS | CLIENT_COMMANDS: any whitelisted verb not in this set
+# and not handled by an `if cmd == ...` branch is rejected as bad_args.
+_SCHEMALESS_COMMANDS = {
+    "query_player_state",
+    "query_all_players",
+    "world_spawn",
+    "vehicle_enter",
+    "vehicle_drive",
+    "scene_raycast",
+    "telemetry_read",
+    "query_get_in_condition",
+    "world_time_set",
+    "world_weather_set",
+    "camera_set",
+    "camera_get",
+    "drive_probe_client",
+    "vehicle_get_in_client",
+    "engine_set",
+    "vehicle_control",
+    "vehicle_telemetry",
+    "vehicle_release",
+}
 VALID_PEERS = {"server", "client"}
 SESSION_ROUTES = {
     "/session/acquire": "acquire",
@@ -114,7 +140,7 @@ ADMIN_ROUTES = {
     "/admin/lifecycle-recovery-repair": "lifecycle-recovery-repair",
 }
 MAX_QUEUE = 64
-# Stale-command hygiene (BUG-041): a client that crashed/relaunched must not
+# Stale-command hygiene: a client that crashed/relaunched must not
 # inherit commands queued for the previous session. record_poll drops commands
 # older than COMMAND_TTL_S, and flushes the peer's whole queue when the gap since
 # its last poll exceeds PEER_RECONNECT_GAP_S (the previous game/session is gone).
@@ -289,7 +315,7 @@ def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
         return True, None
 
     if cmd == "vehicle_prepare_fixture":
-        # F3.2: any CarScript classname is accepted; non-vehicles fail in the
+        # Any CarScript classname is accepted; non-vehicles fail in the
         # bridge with fixture_not_vehicle after CarScript.Cast.
         if set(args) != {"mode", "type", "pos", "radius"}:
             return False, "bad_args"
@@ -337,6 +363,39 @@ def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
             if any(not _is_real_number(component) for component in pos):
                 return False, "bad_args"
         except (OverflowError, ValueError):
+            return False, "bad_args"
+        return True, None
+
+    if cmd == "infected_drive":
+        # drive: {type,pos,heading,speed}; release: {type,pos,mode}.
+        keys = set(args)
+        if keys != {"type", "pos", "heading", "speed"} and keys != {"type", "pos", "mode"}:
+            return False, "bad_args"
+        type_name = args.get("type")
+        if not isinstance(type_name, str) or type_name == "":
+            return False, "bad_args"
+        pos = args.get("pos")
+        if not isinstance(pos, list) or len(pos) != 3:
+            return False, "bad_args"
+        try:
+            if any(not _is_real_number(component) for component in pos):
+                return False, "bad_args"
+        except (OverflowError, ValueError):
+            return False, "bad_args"
+        if "mode" in args:
+            if args.get("mode") != "release":
+                return False, "bad_args"
+            return True, None
+        try:
+            if not _is_real_number(args.get("heading")):
+                return False, "bad_args"
+            if not _is_real_number(args.get("speed")):
+                return False, "bad_args"
+        except (OverflowError, ValueError):
+            return False, "bad_args"
+        if not (-360.0 <= float(args.get("heading")) <= 360.0):
+            return False, "bad_args"
+        if not (0.0 <= float(args.get("speed")) <= 5.0):
             return False, "bad_args"
         return True, None
 
@@ -519,6 +578,15 @@ def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
                 return False, "bad_args"
         return True, None
 
+    if cmd == "ui_focus":
+        # path is a widget NAME, same resolver as ui_tree / ui_click.
+        if set(args) != {"path"}:
+            return False, "bad_args"
+        path = args.get("path")
+        if not isinstance(path, str) or path == "":
+            return False, "bad_args"
+        return True, None
+
     if cmd == "ui_dialog":
         return ui_dialog.validate_command_args(args)
 
@@ -542,13 +610,44 @@ def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
                 return False, "bad_args"
         if "radius" in args:
             try:
-                if not _is_real_number(args.get("radius")) or float(args.get("radius")) <= 0.0:
+                if not _is_real_number(args.get("radius")) or float(args.get("radius")) <= 0.0 or float(args.get("radius")) > 200.0:
                     return False, "bad_args"
             except (OverflowError, ValueError):
                 return False, "bad_args"
         return True, None
 
-    return True, None
+    # exec_enforce is NOT schema-less: it has its own validation + audit path in
+    # _enqueue_exec_enforce (allowlist check, durable "allowed"/"denied" audit,
+    # 429 queue-full, 503 audit-failed). We only gate the arg *shape* here so the
+    # verb reaches that path instead of being rejected as bad_args before it can
+    # return its own 429/503/403. expr/main_fn are optional strings; timeout_s is
+    # an optional positive number. Anything else is a genuine bad_args.
+    if cmd == "exec_enforce":
+        keys = set(args)
+        if keys - {"expr", "main_fn", "timeout_s"}:
+            return False, "bad_args"
+        if "expr" in args and not isinstance(args.get("expr"), str):
+            return False, "bad_args"
+        if "main_fn" in args and not isinstance(args.get("main_fn"), str):
+            return False, "bad_args"
+        if "timeout_s" in args:
+            timeout_s = args.get("timeout_s")
+            if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)):
+                return False, "bad_args"
+            try:
+                if not math.isfinite(float(timeout_s)) or float(timeout_s) <= 0.0:
+                    return False, "bad_args"
+            except (OverflowError, ValueError):
+                return False, "bad_args"
+        return True, None
+
+    # Verbs whitelisted but intentionally schema-less here: their args are
+    # validated by their server.py tool (or are read-only / single-arg). Adding a
+    # new schema-less verb MUST be added to this set so the omission is visible.
+    if cmd in _SCHEMALESS_COMMANDS:
+        return True, None
+
+    return False, "bad_args"
 
 
 class TestIdentityOverride:
@@ -657,7 +756,7 @@ class ServerState:
         self._credential_recovery_count = 0
         self._last_credential_recovery_at: float | None = None
         # Injectable monotonic clock. Defaults to time.monotonic; tests inject a
-        # fake so the BUG-041 TTL / reconnect-flush logic is deterministic.
+        # fake so the stale-command TTL / reconnect-flush logic is deterministic.
         self._time_fn = time_fn or time.monotonic
 
     def _now(self) -> float:
@@ -666,7 +765,7 @@ class ServerState:
     def _seed_bridge_config(self, config_path: Path) -> bool:
         """Write the bridge config a launched role needs when the deploy left none.
 
-        BUG-105: fencing turned `<profiles>\\dayz_mcp.json` into a launch
+        Fencing turned `<profiles>\\dayz_mcp.json` into a launch
         precondition, but install_mcp.py writes it only into the `_mcp_config`
         templates and into roots it is explicitly pointed at, so a role it never
         saw refused to launch. Seeding is confined to a profiles directory that
@@ -975,9 +1074,9 @@ class ServerState:
             return None
 
     def _lookup_connected_pid(self, sock: object) -> int | None:
-        # Direct scan (ronda 3). A 50ms table cache never contained the
+        # Direct scan. A 50ms table cache never contained the
         # connection of the next request (new TCP per poll); useful hit
-        # rate measured 0. NUEVO-3: a failed lookup is instance_unattributed
+        # rate measured 0. A failed lookup is instance_unattributed
         # this tick only. Keep-alive on the bridge (Enforce) is out of v1.
         if sock is None:
             return None
@@ -1581,7 +1680,7 @@ class ServerState:
                     bind_label = "instance_role_mismatch"
                     self._peer_last_class[peer] = bind_label
                 elif source_pid is None:
-                    # NUEVO-3: TCP miss this tick. Binding stays as-is;
+                    # TCP miss this tick. Binding stays as-is;
                     # commands are not delivered (fail-closed).
                     bind_label = "instance_unattributed"
                     self._peer_last_class[peer] = bind_label
@@ -1666,6 +1765,14 @@ class ServerState:
                     if peer_for_command(str(command_name or "")) != peer:
                         remaining.append(command)
                         continue
+                    # Second layer of the same fail-closed rule, and deliberately
+                    # redundant: enqueue_command already refuses a mutation from an
+                    # unbound peer with 409 legacy_unbound, so this branch is not
+                    # reachable through the normal path. Verified by mutation on
+                    # 2026-08-20 -- disabling it leaves the whole suite green, which
+                    # says "unreachable", NOT "unneeded". It is what still holds if a
+                    # future ingress path forgets the check, so do not delete it as
+                    # dead code.
                     if (
                         isinstance(command_name, str)
                         and command_requires_lease(command_name)
@@ -2988,9 +3095,9 @@ def read_key(path: str) -> str:
 
 class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
     # HTTPServer defaults allow_reuse_address to 1. On Windows, SO_REUSEADDR lets a
-    # second process LISTEN on an already-bound port, which defeats the E4 single
+    # second process LISTEN on an already-bound port, which defeats the exclusive
     # instance lock (two loopbacks would silently split bridge polls). Exclusive
-    # bind makes the second bind fail with EADDRINUSE (GATE4A-002).
+    # bind makes the second bind fail with EADDRINUSE.
     allow_reuse_address = False
 
 
@@ -3016,7 +3123,7 @@ def _bind_exclusive(port: int, log_sink: LogSink, reclaim_orphans: bool) -> "Exc
         ):
             raise
         # A confirmed-dead-parent dayz_mcp orphan was terminated and the port came
-        # free; retry the exclusive bind exactly once. E4 stays intact — the bind is
+        # free; retry the exclusive bind exactly once. The exclusive lock stays intact — the bind is
         # still ExclusiveThreadingHTTPServer with allow_reuse_address False.
         return ExclusiveThreadingHTTPServer(("127.0.0.1", port), Handler)
 

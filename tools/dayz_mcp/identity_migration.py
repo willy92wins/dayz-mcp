@@ -103,9 +103,18 @@ from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.server_cli import parse_server_tail_silent
 
 
-MIGRATION_DIR = Path(
-    r"P:\DayZ_MCP_dev\reports\security\migration\P0S-IDENTITY-V2"
-)
+_MIGRATION_SUBDIR = ("migration", "P0S-IDENTITY-V2")
+
+
+def default_migration_dir(paths: RuntimePaths) -> Path:
+    """Runs-backup destination, derived from the machine-local runtime root.
+
+    Derived from RuntimePaths rather than hardcoded: an absolute drive letter
+    made daemon startup depend on the authoring machine, and every DayZ modder
+    has a P: work drive that Bohemia's tooling requires, so the failure was to
+    silently create this tree inside it.
+    """
+    return paths.root.joinpath(*_MIGRATION_SUBDIR)
 BACKUP_NAME = "runs.pre-v2.json"
 RECEIPT_NAME = "runs-backup-receipt.json"
 _LOCK_NAME = ".runs-v1.lock"
@@ -1247,7 +1256,7 @@ def ensure_runs_v1_backup(
     paths: RuntimePaths,
     port: int,
     *,
-    migration_dir: Path = MIGRATION_DIR,
+    migration_dir: Path | None = None,
     allowed_current_identity: Mapping[str, object] | None = None,
     allowed_launch_ancestor_identity: Mapping[str, object] | None = None,
     scan_fn: Callable[..., tuple[int, ...]] = scan_dayz_mcp_processes,
@@ -1270,6 +1279,8 @@ def ensure_runs_v1_backup(
     ):
         raise RunsBackupGateError("invalid_allowed_process_identity")
     source_path = _absolute(paths.runs_path)
+    if migration_dir is None:
+        migration_dir = default_migration_dir(paths)
     destination_dir = _absolute(migration_dir)
     backup_path = destination_dir / BACKUP_NAME
     receipt_path = destination_dir / RECEIPT_NAME
@@ -1285,7 +1296,7 @@ def ensure_runs_v1_backup(
     )
 
     with _exclusive_gate_lock(destination_dir / _LOCK_NAME):
-        # BUG-080: quiescence is a precondition for WRITING -- it exists so that
+        # Quiescence is a precondition for WRITING -- it exists so that
         # nothing mutates runs while it is copied. Once the receipt is published
         # and no transaction artifact remains there is nothing left to write, and
         # demanding an empty machine buys no safety while making the daemon

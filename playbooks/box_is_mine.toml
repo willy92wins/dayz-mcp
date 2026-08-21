@@ -1,10 +1,9 @@
 id = "box_is_mine"
 version = "1.0.0"
 status = "DRAFT"
-# DRAFT: no measured thresholds. Complements D-55 (commands landing on a foreign game).
-summary = "Before a mutating verb: this session holds the lease, the box has no unmanaged DayZDiag, and box.runs[0] is the run_id I intend to handle. Does NOT acquire/release a lease or launch DayZ (those tools are denied inside playbooks). Complements D-55; does not replace session_acquire_wait."
-requires_bridge = "8"
-requires_tools = ["session_status"]
+# DRAFT: no measured thresholds. Complements instance fencing (commands landing on a foreign game).
+summary = "Before a mutating verb: this session holds the lease, the diag scan is known and lists no unmanaged DayZDiag, box.runs[0] is the run_id I intend to handle, and bridge_status.ready.ready is true (instance fence via compute_bridge_ready). S1–S3 are three session_status reads, not one atomic snapshot. runs.0 is an index, not membership: a ghost run at [0] fails as run_not_mine even if the intended run sits later in the list. Does NOT acquire/release a lease or launch DayZ (those tools are denied inside playbooks). Complements instance fencing; does not replace session_acquire_wait."
+requires_tools = ["session_status", "bridge_status"]
 
 [params]
 run_id = ""
@@ -20,7 +19,10 @@ on_fail = { action = "STOP", reason = "lease_not_held" }
 id = "S2"
 tool = "session_status"
 args = {}
-expect = [ { field = "box.foreign", op = "eq", value = [] } ]
+expect = [
+  { field = "box.scan_known", op = "eq", value = true },
+  { field = "box.foreign", op = "eq", value = [] },
+]
 on_fail = { action = "STOP", reason = "foreign_diag" }
 
 [[steps]]
@@ -29,3 +31,13 @@ tool = "session_status"
 args = {}
 expect = [ { field = "box.runs.0.run_id", op = "eq", value = "$run_id" } ]
 on_fail = { action = "STOP", reason = "run_not_mine" }
+
+[[steps]]
+id = "S4"
+tool = "bridge_status"
+args = {}
+expect = [
+  { field = "ready.ready", op = "eq", value = true },
+  { field = "ready.reason", op = "eq", value = "ready" },
+]
+on_fail = { action = "STOP", reason = "peers_not_ready" }

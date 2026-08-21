@@ -1,4 +1,4 @@
-"""Unit tests for instance fencing (D-55 v1, spec §8.1).
+"""Unit tests for instance fencing.
 
 Each test is written so it is RED against the pre-fence tree: either an
 assertion on new behavior, or a reference to a symbol the old code lacks.
@@ -850,10 +850,10 @@ def _profile_dir(root: Path, name: str) -> Path:
 
 
 class ProductionAttributionFenceTest(unittest.TestCase):
-    """CRITICO-2 / ronda 3: el camino prepare+confirm + resolve_poll_pid.
+    """prepare+confirm + resolve_poll_pid path.
 
-    No usa install_bound_peer ni _test_identity_override. El PID sale de
-    connections_fn contra ESTE socket.
+    Does not use install_bound_peer or _test_identity_override. The PID comes from
+    connections_fn against THIS socket.
     """
 
     def setUp(self) -> None:
@@ -1484,7 +1484,7 @@ class Round5FenceRegressionTest(unittest.TestCase):
 
 
 class MissingBridgeConfigRegressionTest(unittest.TestCase):
-    """BUG-105: the fence turned `<profiles>\\dayz_mcp.json` into a launch
+    """The fence turned `<profiles>\\dayz_mcp.json` into a launch
     precondition that nothing in the deploy path establishes.
 
     Every other test in this module builds the config through `_profile_dir`, so

@@ -49,7 +49,7 @@ class VehiclePrepareFixtureTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["peer"], "server")
 
-        # F3.2: any non-empty classname is accepted at ingress.
+        # Any non-empty classname is accepted at ingress.
         status, body = self.state.enqueue_command(
             COMMAND, {**VALID_ARGS, "type": "OffroadHatchback"}
         )
@@ -112,7 +112,7 @@ class VehiclePrepareFixtureTest(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, body)
 
-        # F3.2: classname allowlist must stay gone.
+        # Classname allowlist must stay gone.
         self.assertNotIn("ExampleCar", body)
         self.assertEqual(body.count("car.OnDebugSpawn();"), 1)
         forbidden = [

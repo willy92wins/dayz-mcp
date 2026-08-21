@@ -63,6 +63,10 @@ PACKAGED_MODULES = (
     "normal_daemon_policy.py",
     "pinned_keyfile.py",
     "server_cli.py",
+    # Pulled in on 2026-08-21 by pinned_keyfile: the duplicated FILE_STANDARD_INFO
+    # moved here, and a packaged module importing an unpackaged one is a
+    # ModuleNotFoundError inside app.pyz, not a build error.
+    "win32_fileinfo.py",
 )
 EXTERNAL_FILES = (
     Path(r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\AddonBuilder.exe"),

@@ -81,7 +81,7 @@ class RunsBackupGateTest(unittest.TestCase):
         self.assertTrue((self.migration / "runs-backup-receipt.json").is_file())
 
     def test_settled_migration_ignores_blockers_that_only_gate_writing(self) -> None:
-        # BUG-080: the quiescence assert ran before the receipt fast path, so a
+        # The quiescence assert ran before the receipt fast path, so a
         # migration that had finished long ago still demanded an empty machine.
         # Once every open session's `-m dayz_mcp` client counted as a blocker, no
         # daemon could boot at all: each candidate died at its startup deadline

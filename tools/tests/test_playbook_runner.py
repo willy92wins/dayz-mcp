@@ -75,6 +75,9 @@ class FixtureReplayTest(unittest.TestCase):
     def test_red_canopy_fixture(self) -> None:
         self._assert_expect("red_canopy.json")
 
+    def test_red_canopy_low_fixture(self) -> None:
+        self._assert_expect("red_canopy_low.json")
+
     def test_red_player_near_fixture(self) -> None:
         self._assert_expect("red_player_near.json")
 
@@ -270,7 +273,12 @@ class MinDistXzTest(unittest.TestCase):
 class UncalibratedDowngradeTest(unittest.TestCase):
     def test_uncalibrated_warns_calibrated_fails(self) -> None:
         fixture = load_named_fixture("red_canopy.json")
-        uncal = runner.run_fixture(load_place(), fixture)
+        # Both states are forced. Reading whatever place_safely happens to declare
+        # today makes this test fail the day the threshold gets calibrated, which
+        # is a change in the data, not in the downgrade semantics under test.
+        uncalibrated = load_place()
+        uncalibrated["calibration"][0]["state"] = "uncalibrated"
+        uncal = runner.run_fixture(uncalibrated, fixture)
         self.assertEqual(uncal["overall"], "PASS_WITH_WARNINGS")
         self.assertIsNone(uncal["stopped_at"])
         self.assertEqual(uncal["reason"], "uncalibrated_gate_downgraded")
@@ -286,6 +294,20 @@ class UncalibratedDowngradeTest(unittest.TestCase):
 class CliExitCodeTest(unittest.TestCase):
     def test_exit_0_on_pass_fixture_file(self) -> None:
         code = runner.main([str(PLACE), "--fixtures", str(FIXTURES / "pass.json")])
+        self.assertEqual(code, 0)
+
+    def test_exit_0_on_pass_with_warnings_fixture_file(self) -> None:
+        """PASS_WITH_WARNINGS is a pass, and playbooks/README.md promises exit 0 for it.
+
+        Nothing defended that promise. The exit code comes from PASS_OVERALL
+        (runner.py:60); dropping PASS_WITH_WARNINGS out of that frozenset left every
+        test in this module green -- measured by the mutation run of 2026-08-21. The
+        overall assertion below is the precondition: if this fixture ever stops warning,
+        the test says so instead of quietly re-testing the plain PASS path.
+        """
+        verdict = runner.run_fixture(load_place(), load_named_fixture("red_crowded.json"))
+        self.assertEqual(verdict["overall"], "PASS_WITH_WARNINGS")
+        code = runner.main([str(PLACE), "--fixtures", str(FIXTURES / "red_crowded.json")])
         self.assertEqual(code, 0)
 
     def test_exit_1_on_fail_fixture_file(self) -> None:
@@ -314,6 +336,141 @@ class ImportHasNoSideEffectsTest(unittest.TestCase):
         self.assertTrue(callable(runner.run_playbook))
         self.assertTrue(callable(runner.validate_schema))
         self.assertTrue(callable(runner.main))
+
+
+class CalibratedMeasuredSitesTest(unittest.TestCase):
+    """n_sites_required is a shipped-playbook invariant, not a runtime near() input.
+
+    README says the runner reads only threshold and state; this test is the
+    reader for 'no measured data means the calibration stays uncalibrated'.
+    """
+
+    def test_calibrated_entries_meet_n_sites_required(self) -> None:
+        tomls = sorted(PLAYBOOKS.glob("*.toml"))
+        self.assertGreaterEqual(len(tomls), 3)
+        for path in tomls:
+            with self.subTest(playbook=path.name):
+                playbook = runner.load_playbook(path)
+                for cal in playbook.get("calibration") or []:
+                    if not isinstance(cal, dict):
+                        continue
+                    if cal.get("state") == "uncalibrated":
+                        continue
+                    n_req = cal.get("n_sites_required")
+                    measured = cal.get("measured") or []
+                    self.assertIsInstance(n_req, int)
+                    self.assertNotIsInstance(n_req, bool)
+                    self.assertGreaterEqual(n_req, 1, path.name)
+                    self.assertIsInstance(measured, list)
+                    self.assertGreaterEqual(
+                        len(measured),
+                        n_req,
+                        f"{path.name} calibration {cal.get('name')!r} has "
+                        f"{len(measured)} measured sites, needs {n_req}",
+                    )
+
+
+class FixtureReadyMatchesProducerTest(unittest.TestCase):
+    def test_bridge_status_ready_matches_compute_bridge_ready(self) -> None:
+        tools_dir = Path(__file__).resolve().parents[1]
+        if str(tools_dir) not in sys.path:
+            sys.path.insert(0, str(tools_dir))
+        from dayz_mcp.server import compute_bridge_ready
+
+        checked = 0
+        for path in sorted((PLAYBOOKS / "fixtures").glob("*/*.json")):
+            fixture = runner.load_fixture(path)
+            for step_id, payload in (fixture.get("responses") or {}).items():
+                if not isinstance(payload, dict):
+                    continue
+                if "server_peer" not in payload or "client_peer" not in payload:
+                    continue
+                if "ready" not in payload:
+                    continue
+                checked += 1
+                self.assertEqual(
+                    payload["ready"],
+                    compute_bridge_ready(payload),
+                    f"{path.parent.name}/{path.name} {step_id}",
+                )
+        self.assertGreaterEqual(checked, 1)
+
+
+class SessionStatusFixtureShapeTest(unittest.TestCase):
+    def _session_status_payloads(self):
+        for path in sorted((PLAYBOOKS / "fixtures").glob("*/*.json")):
+            fixture = runner.load_fixture(path)
+            for step_id, payload in (fixture.get("responses") or {}).items():
+                if not isinstance(payload, dict):
+                    continue
+                if "self" not in payload or "box" not in payload:
+                    continue
+                yield path, step_id, payload
+
+    def test_operation_tombstones_has_producer_keys(self) -> None:
+        seen = 0
+        for path, step_id, payload in self._session_status_payloads():
+            tombs = payload.get("operation_tombstones")
+            self.assertIsInstance(tombs, dict, f"{path.name} {step_id}")
+            self.assertEqual(
+                set(tombs),
+                {"count", "capacity", "saturated"},
+                f"{path.name} {step_id}",
+            )
+            seen += 1
+        self.assertGreaterEqual(seen, 1)
+
+    def test_require_version_true_never_pairs_with_legacy(self) -> None:
+        seen = 0
+        for path in sorted((PLAYBOOKS / "fixtures").glob("*/*.json")):
+            fixture = runner.load_fixture(path)
+            for step_id, payload in (fixture.get("responses") or {}).items():
+                if not isinstance(payload, dict) or "server_peer" not in payload:
+                    continue
+                if payload.get("require_version") is not True:
+                    continue
+                seen += 1
+                for peer_key in ("server_peer", "client_peer"):
+                    peer = payload.get(peer_key) or {}
+                    if peer.get("version") is None:
+                        self.assertEqual(
+                            peer.get("version_state"),
+                            "legacy_blocked",
+                            f"{path.name} {step_id} {peer_key}",
+                        )
+        self.assertGreaterEqual(seen, 1)
+
+
+class RequiresBridgeAbsentTest(unittest.TestCase):
+    """requires_bridge is not a gate. Re-adding it to a shipped TOML fails this test."""
+
+    def test_requires_bridge_is_not_a_gate(self) -> None:
+        tomls = sorted(PLAYBOOKS.glob("*.toml"))
+        self.assertGreaterEqual(len(tomls), 3)
+        for path in tomls:
+            with self.subTest(playbook=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertNotRegex(
+                    text,
+                    r"(?m)^\s*requires_bridge\b",
+                    f"{path.name} declares requires_bridge; the runner never checks it",
+                )
+        playbook = {
+            "id": "probe",
+            "version": "0",
+            "status": "DRAFT",
+            "requires_tools": ["surface_query"],
+            "steps": [
+                {
+                    "id": "S1",
+                    "tool": "surface_query",
+                    "args": {},
+                    "expect": [{"field": "ok", "op": "eq", "value": 1}],
+                    "on_fail": {"action": "STOP", "reason": "x"},
+                }
+            ],
+        }
+        runner.validate_schema(playbook)
 
 
 if __name__ == "__main__":

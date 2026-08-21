@@ -9,6 +9,9 @@ import unicodedata
 from ctypes import wintypes
 from pathlib import Path
 
+from dayz_mcp.win32_fileinfo import FILE_STANDARD_INFO as _FILE_STANDARD_INFO
+from dayz_mcp.win32_fileinfo import bind_common_kernel32
+
 
 _GENERIC_READ = 0x80000000
 _FILE_SHARE_READ = 0x00000001
@@ -33,49 +36,9 @@ class _FILE_ATTRIBUTE_TAG_INFO(ctypes.Structure):
     ]
 
 
-class _FILE_STANDARD_INFO(ctypes.Structure):
-    _fields_ = [
-        ("AllocationSize", ctypes.c_longlong),
-        ("EndOfFile", ctypes.c_longlong),
-        ("NumberOfLinks", wintypes.DWORD),
-        ("DeletePending", wintypes.BOOL),
-        ("Directory", wintypes.BOOL),
-    ]
-
-
-_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-_kernel32.CreateFileW.argtypes = (
-    wintypes.LPCWSTR,
-    wintypes.DWORD,
-    wintypes.DWORD,
-    wintypes.LPVOID,
-    wintypes.DWORD,
-    wintypes.DWORD,
-    wintypes.HANDLE,
-)
-_kernel32.CreateFileW.restype = wintypes.HANDLE
-_kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-_kernel32.CloseHandle.restype = wintypes.BOOL
-_kernel32.GetFileType.argtypes = (wintypes.HANDLE,)
-_kernel32.GetFileType.restype = wintypes.DWORD
+_kernel32 = bind_common_kernel32()
 _kernel32.GetFileAttributesW.argtypes = (wintypes.LPCWSTR,)
 _kernel32.GetFileAttributesW.restype = wintypes.DWORD
-_kernel32.GetDriveTypeW.argtypes = (wintypes.LPCWSTR,)
-_kernel32.GetDriveTypeW.restype = wintypes.UINT
-_kernel32.GetFileInformationByHandleEx.argtypes = (
-    wintypes.HANDLE,
-    ctypes.c_int,
-    wintypes.LPVOID,
-    wintypes.DWORD,
-)
-_kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
-_kernel32.GetFinalPathNameByHandleW.argtypes = (
-    wintypes.HANDLE,
-    wintypes.LPWSTR,
-    wintypes.DWORD,
-    wintypes.DWORD,
-)
-_kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
 _kernel32.ReadFile.argtypes = (
     wintypes.HANDLE,
     wintypes.LPVOID,

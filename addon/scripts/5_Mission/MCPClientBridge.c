@@ -132,7 +132,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected float m_PollHz;
 	protected float m_Accum;
 	// Backoff at which a poll failure stops looking transient and the credential on
-	// disk is re-read (BUG-071).
+	// disk is re-read.
 	protected const float KEY_RELOAD_BACKOFF_S = 4.0;
 	protected float m_Backoff;
 	protected int m_Tick;
@@ -448,7 +448,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 	}
 
-	// BUG-071: the key is read once at configure time and never again, so rotating
+	// The key is read once at configure time and never again, so rotating
 	// it -- or a port reclaim handing the socket to a differently keyed holder --
 	// leaves the bridge polling with a dead credential until the mission restarts.
 	// The only visible symptom was the backoff above climbing to its 30 s cap.
@@ -551,7 +551,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		result.tick_dispatch = m_Tick;
 		bool postNow = true;
 
-		// Fail-closed readiness gate (BUG-041): every client command touches the
+		// Fail-closed readiness gate: every client command touches the
 		// local player/camera/vehicle, which the engine has not built during
 		// preload. A stale command delivered before the client is in-game crashed
 		// the native camera path; reject the whole class before any handler runs.
@@ -620,6 +620,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "ui_reload_layout")
 		{
 			postNow = DispatchUiReloadLayout(command, result);
+		}
+		else if (command.cmd == "ui_focus")
+		{
+			postNow = DispatchUiFocus(command, result);
 		}
 		else if (command.cmd == "action_use")
 		{
@@ -1309,6 +1313,99 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		result.source = args.path;
 		result.ok = true;
 		Log(string.Format("ui_reload_layout loaded %1 nodes=%2", args.path, snap.nodes.Count()));
+		return true;
+	}
+
+	//! Keyboard-focus a named widget. SetActiveWindow(resetFocus=false) first so
+	//! the engine does not steal focus onto the first focusable child
+	//! (1_core\proto\enwidgets.c:694). ok is GetFocus()==target, not "SetFocus
+	//! ran"; a widget without inputs (TextWidget, NoFocus) fails with
+	//! focus_not_taken while found stays true (enwidgets.c:697).
+	protected bool DispatchUiFocus(MCPCommand command, MCPResult result)
+	{
+		MCPArgs args;
+		string error;
+		Widget target;
+		Widget topmost;
+		Widget parent;
+		Widget focused;
+		bool activeOk;
+		string activeStr;
+		string okStr;
+		MCPUiSnapshot snap;
+		MCPUiNode node;
+
+		if (!command.args || command.args.path == "")
+		{
+			result.ok = false;
+			result.found = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		args = command.args;
+		error = "";
+		target = ResolveUiRoot(args, error);
+		if (!target)
+		{
+			result.ok = false;
+			result.found = false;
+			result.error = error;
+			return true;
+		}
+
+		result.found = true;
+
+		topmost = target;
+		parent = topmost.GetParent();
+		while (parent)
+		{
+			topmost = parent;
+			parent = topmost.GetParent();
+		}
+
+		activeOk = SetActiveWindow(topmost, false);
+		SetFocus(target);
+
+		focused = GetFocus();
+		result.ok = (focused == target);
+		if (focused)
+		{
+			result.source = focused.GetName();
+		}
+		else
+		{
+			result.source = "";
+		}
+
+		if (result.ok)
+		{
+			result.error = "";
+		}
+		else
+		{
+			result.error = "focus_not_taken";
+		}
+
+		snap = new MCPUiSnapshot();
+		node = new MCPUiNode();
+		FillUiNode(target, node);
+		snap.nodes.Insert(node);
+		result.ui = snap;
+
+		// Enforce: a bool is not concatenated into a string anywhere in this file.
+		// The one other place that logs one converts it first (:3221-3226); same here.
+		activeStr = "0";
+		if (activeOk)
+		{
+			activeStr = "1";
+		}
+		okStr = "0";
+		if (result.ok)
+		{
+			okStr = "1";
+		}
+		Log("ui_focus path=" + args.path + " active=" + activeStr + " ok=" + okStr + " source=" + result.source);
 		return true;
 	}
 
@@ -2869,7 +2966,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPCamera camera = new MCPCamera();
 		camera.applied_mode = mode;
 
-		// Defense in depth for the Dispatch readiness gate (BUG-041): the native
+		// Defense in depth for the Dispatch readiness gate: the native
 		// camera getters deref an unbuilt world camera before the client is
 		// in-game and crash. Reached via the camera_set job report too, which
 		// does not re-enter Dispatch. pos/matrix/dir stay empty (ctor-initialized).
@@ -3154,7 +3251,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 	}
 
-	// BUG-075: RestoreGameplay covers simulation, controls and HUD and never the
+	// RestoreGameplay covers simulation, controls and HUD and never the
 	// camera, so the restore_gameplay command answered ok:1 with the view still
 	// locked to the debug camera -- and camera_set has no off mode, so reconnecting
 	// was the only way out. Shutdown already performed the full teardown; sharing

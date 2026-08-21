@@ -120,7 +120,7 @@ def build_status(
 
 def load_exec_allowlist(path: str | None) -> set[str]:
     """Load the exec allowlist JSON. ``utf-8-sig`` tolerates a BOM that Windows
-    editors prepend, which plain utf-8 choked on at startup (GATE4B-002)."""
+    editors prepend, which plain utf-8 choked on at startup."""
     if path is None:
         return set()
     with open(path, "r", encoding="utf-8-sig") as handle:

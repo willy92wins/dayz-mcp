@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Python 3.14 on the host. The fallback documented by the phase plan is `py -3.10`.
+- Python 3.14 on the host. That is the **effective** requirement, not a suggestion: the installer asks the `py` launcher for 3.14 specifically, so a host that only has 3.10–3.13 cannot install through it even though `pyproject.toml` declares `requires-python = ">=3.10"`. The two are not reconciled; 3.14 is what works today.
 - Bridge tools require a running DayZ instance. Managed test instances can be queued and controlled directly with `dayz_test_run` and `dayz_test_stop`; existing external harnesses remain compatible.
 - The bridge still authenticates with an API key in the query string because DayZ `RestContext.SetHeader()` cannot send arbitrary headers. Bind remains `127.0.0.1`.
 
@@ -61,7 +61,7 @@ Mutating work uses the request-bound high-level queue by default:
 
 `session_acquire` and `session_wait` remain low-level compatibility tools. A caller that uses them owns its loop and must call `session_cancel(ticket)` when abandoning a queued ticket. The high-level call installs an operation tombstone on timeout, cancellation or transport failure, including when its first HTTP request completes late. The long wait is tied to the live MCP request/host; it is not a durable job and does not resume after host restart.
 
-`install_mcp.py --pin-clis` then `install_mcp.py --register` also applies a seven-day host-side wait budget atomically to both user configs: Claude `timeout = 604800000` ms and Codex `tool_timeout_sec = 604800`. Queue cancellation remains explicit; this budget prevents the host from cutting off a healthy FIFO wait during normal long-running work. The writer holds both Windows files with `share=0`, verifies writes through the same handles and uses a restricted recovery journal; a busy or conflicting config fails closed without forcing a host shutdown. Existing host processes must be restarted or a new session opened before the new timeout is effective.
+`install_mcp.py --pin-clis` then `install_mcp.py --register` also applies a seven-day host-side wait budget atomically to both user configs: Claude `timeout = 604800000` ms and Codex `tool_timeout_sec = 604800`. This is the host/agent-side ceiling on how long a single MCP request may stay open. It is a different clock from the daemon's `--idle-timeout 1800` (30 min), which is the daemon-side self-shutdown after 1800 s with no game polls and no client requests: the daemon can exit and free the port long before the host budget elapses, and the next client re-spawns it. Queue cancellation remains explicit; the host budget prevents the host from cutting off a healthy FIFO wait during normal long-running work. The writer holds both Windows files with `share=0`, verifies writes through the same handles and uses a restricted recovery journal; a busy or conflicting config fails closed without forcing a host shutdown. Existing host processes must be restarted or a new session opened before the new timeout is effective.
 
 Read-only tools do not require a lease. Never use another session's token or terminate a process to advance the FIFO queue.
 
@@ -121,7 +121,7 @@ Short call sequences for a cold consumer. Use `playbook_run(name, params)` for a
 4. `wait_for(condition="players_at_least", value=1)` — at least one connected player.
 5. `query_all_players()` — `{ok: 1, players: [{uid, pos: [x, y, z], health (0..1), in_vehicle}]}`. An empty `players` list is success with zero players, not an error. `uid` is SteamID64 (`PlayerIdentity.GetPlainId()`).
 
-`wait_for` on timeout still returns `ok: true` with `satisfied: false` and `timed_out: true`. Gate on `satisfied`, not `ok`. `timeout_s` is capped at 600. With the game off, the first probe aborts with `version_blocked` or `daemon_unavailable`.
+`wait_for` on timeout still returns `ok: true` with `satisfied: false` and `timed_out: true`. Gate on `satisfied`, not `ok`. `timeout_s` is capped at 600. With the game off, the first probe aborts with `game_not_ready` (the daemon is up but the target peer is down, so the `version_blocked`/`lease_required` enqueue error is remapped to `game_not_ready:reason=...`); with no daemon at all it aborts with `daemon_unavailable`.
 
 `logs_since(marker=None, max_lines=200)` reads the active run's `script_*.log` and `.RPT` (server and client) and returns a `marker` for the next call. No lease. Player chat is not exposed: `wait_for` `log_matches` and `logs_since` read script/RPT only, where chat does not appear. With `-adminlog` the server writes a profiles `.ADM` file (`Chat("Name"(id=<hash>)): text`, plus Connect/Disconnect); no tool reads it — inspect `.ADM` by hand.
 
@@ -157,4 +157,4 @@ These mailbox tools work with no game and no daemon.
 - `PROCESS_SCAN_DECODE_FAILED`: process-scan output could not be decoded; fail-closed and distinct from a missing process.
 - `RUN_PREPRUNE_BACKUP_SLOTS_EXHAUSTED`: all ten `runs.json.bak-preprune*` slots are taken, so the load-time prune refuses to run and the manifest keeps growing. Retire the stale backups to restore pruning; the doctor still performs no cleanup.
 
-`telemetry_read` is exposed as-is. Known residual backlog remains BUG-010/011/012: fixture line caps, radius/Inf hardening, and JSON-lines schema validation.
+`telemetry_read` is exposed as-is. Known residual backlog: fixture line caps, radius/Inf hardening, and JSON-lines schema validation.

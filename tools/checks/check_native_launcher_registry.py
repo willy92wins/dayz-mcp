@@ -62,7 +62,7 @@ def main() -> int:
                         f"{key}: registry={deployed.get(key)!r} bundle={expected.get(key)!r}"
                     )
 
-    # Provenance (BUG-072). Distinct from the drift comparison above: a registry
+    # Provenance. Distinct from the drift comparison above: a registry
     # rewritten in place with the RIGHT content still matches the bundle and still
     # passes that check, while the receipt chain is already broken underneath.
     try:

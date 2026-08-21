@@ -97,7 +97,7 @@ class LauncherRegistryUpdateTest(unittest.TestCase):
             self.assertFalse(fresh.exists())
 
     def test_provenance_tracks_the_recorded_chain_and_catches_in_place_rewrites(self) -> None:
-        # BUG-072. The four states are asserted on ONE registry as it moves, because
+        # The four states are asserted on ONE registry as it moves, because
         # what matters is the transition between them, not each label in isolation.
         with TemporaryDirectory() as directory:
             root = Path(directory)

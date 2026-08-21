@@ -119,6 +119,10 @@ class MCPArgs
 	float timeout_s;
 	ref array<ref MCPDialogField> fields;
 
+	// F3.7 infected_drive - heading in DEGREES (bridge converts to radians).
+	float heading;
+	float speed;
+
 	void MCPArgs()
 	{
 		pos = new array<float>();
@@ -141,6 +145,8 @@ class MCPArgs
 		fog = MCP_ARG_FLOAT_UNSET;
 		phase = MCP_ARG_FLOAT_UNSET;
 		timeout_s = 0.0;
+		heading = MCP_ARG_FLOAT_UNSET;
+		speed = MCP_ARG_FLOAT_UNSET;
 	}
 };
 

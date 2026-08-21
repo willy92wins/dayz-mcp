@@ -116,11 +116,6 @@ def _canonical_existing_file(value: object) -> str:
     return str(resolved)
 
 
-def canonical_existing_file(value: object) -> str:
-    """Return an absolute canonical regular file or fail closed."""
-    return _canonical_existing_file(value)
-
-
 def require_matching_keyfile(value: object, expected: str) -> str:
     actual = _canonical_existing_file(value)
     if os.path.normcase(os.path.normpath(actual)) != os.path.normcase(

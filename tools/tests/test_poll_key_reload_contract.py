@@ -29,7 +29,7 @@ def _method_body(source: str, signature: str) -> str:
 
 
 class PollKeyReloadContractTest(unittest.TestCase):
-    """BUG-071: the API key was read once at configure time and never again.
+    """The API key was read once at configure time and never again.
 
     After a key rotation -- or a port reclaim handing the socket to a
     differently keyed holder -- the bridge kept polling with a dead credential
@@ -61,8 +61,8 @@ class PollKeyReloadContractTest(unittest.TestCase):
                     reload_body.index("if (cfg.key == m_Key)"),
                     reload_body.index("m_Backoff = 0.0;"),
                 )
-                # Identity is not a secret and must not ride the key-reload path
-                # (D-55.2): a live process cannot adopt a later run's instance.
+                # Identity is not a secret and must not ride the key-reload path:
+                # a live process cannot adopt a later run's instance.
                 self.assertIn("protected string m_PeerInstance;", source)
                 self.assertNotIn("m_PeerInstance", reload_body)
 

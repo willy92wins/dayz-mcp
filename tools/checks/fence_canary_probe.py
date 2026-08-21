@@ -1,4 +1,4 @@
-"""Synthetic fencing probe (gate D-55.9).
+"""Synthetic fencing probe (replaces launching a second DayZDiag as a canary).
 
 The old canary launched a second DayZDiag with a copied profile so two
 PIDs would present the same instance. That is unworkable: both clients

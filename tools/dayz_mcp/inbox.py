@@ -26,9 +26,9 @@ def _utc_now() -> tuple[str, str]:
 
 
 def _append_jsonl(record: dict) -> None:
-    # append unico <4KB en volumen local = las lineas de procesos concurrentes
-    # no se intercalan; por eso este fichero NUNCA se reescribe, solo se
-    # appendea (las resoluciones tambien son appends).
+    # a unique append <4KB on a local volume = concurrent processes' lines
+    # do not interleave; that is why this file is NEVER rewritten, only
+    # appended (resolutions are appends too).
     os.makedirs(INBOX_DIR, exist_ok=True)
     payload = (
         json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"

@@ -70,7 +70,7 @@ class WatchdogInstallTest(unittest.TestCase):
 
 
 class WalkPastRedirectorsTest(unittest.TestCase):
-    """The C1 fix in isolation: skip our venv launcher layer(s) and resolve the real
+    """Skip our venv launcher layer(s) and resolve the real
     ancestor. The immediate parent is the venv launcher (it outlives Claude Code); the
     watchdog/reclaim must look past it. Fully hermetic via injected facts."""
 
@@ -253,7 +253,7 @@ while True:
 
 class WatchdogIntegrationTest(unittest.TestCase):
     def test_ancestor_walk_frees_port_when_true_grandparent_dies(self) -> None:
-        # Real C1 topology: base-python grandparent G -> venv launcher A -> child B.
+        # Real topology: base-python grandparent G -> venv launcher A -> child B.
         # B's watchdog must skip A and watch G; killing only G must free B's port.
         base_python = getattr(sys, "_base_executable", None) or orphan_guard.full_image_path_of(os.getpid())
         venv_python = sys.executable

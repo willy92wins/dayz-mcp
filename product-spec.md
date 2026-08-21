@@ -10,7 +10,8 @@
 
 Un **servidor MCP** que expone DayZ (DayZDiag) como **tools tipadas** para que un agente
 **conduzca el juego y extraiga datos estructurados**, server-authoritative, **sin teclas SO
-ni OCR**. "Terminado" = la **tool surface completa** (11 tools / 6 dominios, ver
+ni OCR**. "Terminado" = la **tool surface completa** (11 tools / 6 dominios en el alcance
+original; hoy son 53 tools registradas, ver `README.md`), ver
 `dayz-mcp-architecture.md` §4) operativa vía MCP stdio, con **seguridad fail-closed**, y
 captura visual por **window-grab** del cliente renderizado. Se entrega por las 5 fases del
 §8 del architecture doc (POC → Control → Observación → Visual → MCP completo).
@@ -26,7 +27,7 @@ planificar/implementar una fase se detecta que (a) un criterio **choca** con su 
 **criterio que falta**, hay que **surfacearlo en el Grill de plan (Modo B)** ANTES de
 implementar. El usuario adjudica; todo cambio baja al *Changelog de alcance*.
 
-## Criterios de aceptación verificables (R26)
+## Criterios de aceptación verificables
 
 > Estado: ✓ hecho · ⏳ en curso · ❓ sin empezar · [verify] correcto offline, falta validación in-game.
 
@@ -38,10 +39,10 @@ implementar. El usuario adjudica; todo cambio baja al *Changelog de alcance*.
 
 | # | Criterio | Cómo se verifica | Estado |
 |---|----------|------------------|--------|
-| A1 | `query_player_state` devuelve la **posición autoritativa** del player | pos devuelta == coord del **spawn determinista de la mission de test** (no la tool `world_spawn`; la mission *setea* la coord, el POC la *lee*), error < 0.5 m | ✓ **in-game 2026-06-07 (re-cert X.5)** — bridge vs marker independiente = **0.0313 m** < 0.5 m (`target`=marker, fallback a `playerReadyPos` eliminado, R21 P1-1) |
+| A1 | `query_player_state` devuelve la **posición autoritativa** del player | pos devuelta == coord del **spawn determinista de la mission de test** (no la tool `world_spawn`; la mission *setea* la coord, el POC la *lee*), error < 0.5 m | ✓ **in-game 2026-06-07 (re-cert X.5)** — bridge vs marker independiente = **0.0313 m** < 0.5 m (`target`=marker, fallback a `playerReadyPos` eliminado) |
 | A2 | El round-trip **no bloquea el tick** `[intent: el RTT no debe congelar el sim]` | el tick avanza durante un GET async en vuelo: `tick_poll_callback − tick_poll_sent` ≥ 5 con `/poll` retrasado por el server | ✓ **in-game 2026-06-07** (ticks_in_flight=4741 con delay 600ms; run_045213) |
 | A3 | **Correlation-id** casa pedido↔resultado | 2 comandos encolados resuelven cada uno a su propio resultado, sin cruce | ✓ **in-game 2026-06-07** (ids 9,10, pos_distance 0.0) |
-| A4 | **Fail-closed (R6)** | request sin key → 401; key incorrecta → 401; comando fuera de whitelist → rechazado; si el servidor no puede confirmar bind 127.0.0.1 → aborta al arrancar | ✓ **in-game 2026-06-07** (sin key→401, key mala→401, `/enqueue` sin key→401, `evil`→400) |
+| A4 | **Fail-closed** | request sin key → 401; key incorrecta → 401; comando fuera de whitelist → rechazado; si el servidor no puede confirmar bind 127.0.0.1 → aborta al arrancar | ✓ **in-game 2026-06-07** (sin key→401, key mala→401, `/enqueue` sin key→401, `evil`→400) |
 | A5 | **Resiliencia** del lazo | servidor Python caído: el mod no crashea ni spamea (reintenta en cadencia con backoff); al volver el servidor, el round-trip se reanuda solo | ✓ **in-game 2026-06-07** (server caído 6s: backoff `error=7` 1→2, sin crash; post-relaunch `ok=1`) |
 
 ### B — Control (fase 1)
@@ -69,8 +70,8 @@ implementar. El usuario adjudica; todo cambio baja al *Changelog de alcance*.
 
 | # | Criterio | Cómo se verifica | Estado |
 |---|----------|------------------|--------|
-| D1 | `camera_set`/`camera_get` posan y miden la cámara | **`Camera.GetCurrentCamera().GetTransform`** == pose comandada (tolerancia), conserva roll (set vía `SetOrientation` yaw/pitch/roll; NO el indexado `GetCamera(0,…)`, solo GAME_TEMPLATE — D-11) | ✓ **in-game 2026-06-10** (`camera_set`/`camera_get`: matrix==pose `matrix_max_error 3.4e-05`, roll preservado, pos 3.9e-05 m, fov exacto; fail-closed cliente OK; GATE=PASS) |
-| D2 | `capture_screenshot` entrega PNG por window-grab (**síncrono, readiness-gated, sin job-id** — CONFLICT-2) | imagen no-negra con contenido real, **≤ ~25k tokens (Claude Code; NO 1MB)** vía downscale agresivo (CONFLICT-1), tras gate de estabilidad de frame **externo** (frame-diff host-side) | ✓ **in-game 2026-06-10** (host-side: selector `class=='DayZ'`+DPI-aware, best-of-N, downscale a presupuesto, ImageContent síncrono; frame real meanB 155 / nonBlack 0.9999, ≤ tokens; GATE=PASS) |
+| D1 | `camera_set`/`camera_get` posan y miden la cámara | **`Camera.GetCurrentCamera().GetTransform`** == pose comandada (tolerancia), conserva roll (set vía `SetOrientation` yaw/pitch/roll; NO el indexado `GetCamera(0,…)`, solo GAME_TEMPLATE) | ✓ **in-game 2026-06-10** (`camera_set`/`camera_get`: matrix==pose `matrix_max_error 3.4e-05`, roll preservado, pos 3.9e-05 m, fov exacto; fail-closed cliente OK; GATE=PASS) |
+| D2 | `capture_screenshot` entrega PNG por window-grab (**síncrono, readiness-gated, sin job-id**) | imagen no-negra con contenido real, **≤ ~25k tokens (Claude Code; NO 1MB)** vía downscale agresivo, tras gate de estabilidad de frame **externo** (frame-diff host-side) | ✓ **in-game 2026-06-10** (host-side: selector `class=='DayZ'`+DPI-aware, best-of-N, downscale a presupuesto, ImageContent síncrono; frame real meanB 155 / nonBlack 0.9999, ≤ tokens; GATE=PASS) |
 
 ### E — MCP completo & seguridad endurecida (fase 4)
 
@@ -78,10 +79,10 @@ implementar. El usuario adjudica; todo cambio baja al *Changelog de alcance*.
 
 | # | Criterio | Cómo se verifica | Estado |
 |---|----------|------------------|--------|
-| E1 | Tool surface completa vía **MCP stdio** | las **12 tools canónicas** (lista en `plans/2026-06-10-fase4-mcp.md` §2; con install default `tools/list` muestra 11 — `exec_enforce` solo con flag ON) aparecen y responden desde un cliente MCP real | ✓ **in-game 2026-06-10 (gate 4A+4B)** — 9 tools 4A (gate 4A) + `world_time_set`/`world_weather_set`/`exec_enforce` (gate 4B: tools/list=12 con flag, applied read-after-write, rangos fail-closed). Caveat: la EJECUCIÓN de `exec_enforce` es limitación de engine (GATE4B-LIM, ver Fuera de alcance) |
-| E2 | Seguridad endurecida | **handshake de versión bridge+juego** validado fail-closed (`ver=` en `/poll`; sin snapshot ERPCs — el transporte T-A no usa RPCs); `exec_enforce` OFF-default + allowlist exacta + audit log (breakglass auditado) | ✓ **in-game 2026-06-10 (gate 4B)** — handshake `version_state` 4 casos (ok / bridge-version mala / game-version mala / legacy_blocked) fail-closed; key/whitelist/bind ✓ (A4); `exec_enforce` gating exacto + audit JSONL + OFF-default ✓ (la ejecución del script es limitación de engine, GATE4B-LIM) |
-| E3 | Packaging / install | instala y arranca con un comando documentado (host-path test, no rutas de sandbox) | ✓ **in-game 2026-06-10 (gate 4A)** — `install-mcp.ps1` end-to-end en venv limpio (fix GATE4A-001 Pillow) + registro `claude mcp add` real |
-| E4 | Concurrencia | lock de instancia (bind exclusivo del puerto loopback) + mutex global de tool-calls (el SDK MCP no serializa): dos tool-calls no corrompen estado/cámara | ✓ **in-game 2026-06-10 (gate 4A)** — lock exclusivo verificado con 2ª instancia real (fix GATE4A-002 `allow_reuse_address` Windows) + 2 `camera_set` paralelas serializadas sin corrupción |
+| E1 | Tool surface completa vía **MCP stdio** | las **12 tools canónicas** (lista en `plans/2026-06-10-fase4-mcp.md` §2; con install default `tools/list` muestra 11 — `exec_enforce` solo con flag ON) aparecen y responden desde un cliente MCP real | ✓ **in-game 2026-06-10 (gate 4A+4B)** — 9 tools 4A (gate 4A) + `world_time_set`/`world_weather_set`/`exec_enforce` (gate 4B: tools/list=12 con flag, applied read-after-write, rangos fail-closed). Caveat: la EJECUCIÓN de `exec_enforce` es limitación de engine (ver Fuera de alcance) |
+| E2 | Seguridad endurecida | **handshake de versión bridge+juego** validado fail-closed (`ver=` en `/poll`; sin snapshot ERPCs — el transporte T-A no usa RPCs); `exec_enforce` OFF-default + allowlist exacta + audit log (breakglass auditado) | ✓ **in-game 2026-06-10 (gate 4B)** — handshake `version_state` 4 casos (ok / bridge-version mala / game-version mala / legacy_blocked) fail-closed; key/whitelist/bind ✓ (A4); `exec_enforce` gating exacto + audit JSONL + OFF-default ✓ (la ejecución del script es limitación de engine) |
+| E3 | Packaging / install | instala y arranca con un comando documentado (host-path test, no rutas de sandbox) | ✓ **in-game 2026-06-10 (gate 4A)** — `install-mcp.ps1` end-to-end en venv limpio (Pillow added to requirements) + registro `claude mcp add` real |
+| E4 | Concurrencia | lock de instancia (bind exclusivo del puerto loopback) + mutex global de tool-calls (el SDK MCP no serializa): dos tool-calls no corrompen estado/cámara | ✓ **in-game 2026-06-10 (gate 4A)** — lock exclusivo verificado con 2ª instancia real (`allow_reuse_address` left False on Windows) + 2 `camera_set` paralelas serializadas sin corrupción |
 
 ### F — Broker / multi-sesión (refactor 2026-06-23)
 
@@ -154,7 +155,7 @@ efectiva mixta 2 Claude + 2 Codex de H1 sigue sin verificación in-game.
 
 Aceptación detallada: `plans/2026-07-14-agent-session-coordination-design.md` §13.
 
-## Fuera de alcance (explícito) — R25
+## Fuera de alcance (explícito)
 
 - **Teclas SO / OCR / inyección de input raw**: el control es engine-native; el único elemento
   externo es el window-grab **pasivo** (lee píxeles, no inyecta input).
@@ -167,7 +168,7 @@ Aceptación detallada: `plans/2026-07-14-agent-session-coordination-design.md` �
 - **Exposición a red / multi-usuario**: solo `127.0.0.1`, local single-user. Nada de `0.0.0.0`.
 - **Arreglar `MakeScreenshot`**: está roto en el engine (T165276); no es nuestro trabajo — se
   rodea con window-grab.
-- **Ejecución funcional de `exec_enforce` en el server headless** (GATE4B-LIM, 2026-06-10):
+- **Ejecución funcional de `exec_enforce` en el server headless** (2026-06-10):
   `ExecuteEnforceScript` es proto "Developer only" (`game.c:776`) y devuelve `false` en el
   server diag `NO_GUI` incluso con el wrapper vanilla EXACTO del script-console — limitación de
   engine análoga a `MakeScreenshot`. Lo que la tool SÍ garantiza y está verificado in-game es la
@@ -175,7 +176,7 @@ Aceptación detallada: `plans/2026-07-14-agent-session-coordination-design.md` �
   el efecto del script en el server headless es best-effort, no contractual. No es nuestro trabajo
   hacer funcionar una API Developer-only en contexto headless.
 
-## Referencia de paridad (anatomía del "MCP que controla un juego") — LL-030
+## Referencia de paridad (anatomía del "MCP que controla un juego")
 
 > Aquí el referente no es un vanilla DayZ sino el **prior-art de MCP servers de control de
 > juego/3D**. De ahí sale la anatomía de "qué trae de serie un MCP server de este tipo".
@@ -443,12 +444,11 @@ no lanza DayZ; tope 32 pasos; `certified` es **siempre false** hoy
 
 ### Versión de puente (esta copia) `[EXACT]`
 
-Leída al redactar: `MCP_BRIDGE_VERSION = "7"`
-(`DayZ_MCP\scripts\5_Mission\MCPMessages.c:1`) y `EXPECTED_BRIDGE_VERSION = "7"`
-(`tools/dayz_mcp/core.py:17`). El contrato v1.1 declara **objetivo 8** (bump post-gate,
-`plans/2026-08-18-ui-dialog-contrato-v1.md:376`). En el HANDOFF vivo el bump 7→8 está
-aplazado (D-52); esta copia sigue en 7. Si el orquestador lo movió después de esta
-lectura, el número de aquí queda desfasado.
+El bump 7→8 que este documento daba por aplazado (D-52) **ya se aplicó**. Verificado
+2026-08-20: `MCP_BRIDGE_VERSION = "8"` (`addon/scripts/5_Mission/MCPMessages.c:1`) y
+`EXPECTED_BRIDGE_VERSION = "8"` (`tools/dayz_mcp/core.py:17`). Los dos lados coinciden,
+que es lo único que este apartado necesita afirmar; el número concreto se lee del
+código, no de aquí.
 
 ### Qué no entra (plan fusionado §7 + aparcados)
 

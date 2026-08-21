@@ -67,7 +67,7 @@ class IdentityAndClassificationTest(unittest.TestCase):
         self.assertTrue(command_requires_lease("brand_new_tool"))
 
     def test_query_all_players_is_a_pure_read(self) -> None:
-        # F1.1: it only reads authoritative server state, so it must not gate on
+        # It only reads authoritative server state, so it must not gate on
         # the lease. Negative control below: mutating verbs still require it.
         self.assertFalse(command_requires_lease("query_all_players"))
         for mutating in ("world_spawn", "object_delete"):

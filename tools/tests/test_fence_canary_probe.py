@@ -1,4 +1,4 @@
-"""Offline tests for the synthetic fencing probe (gate D-55.9 replacement).
+"""Offline tests for the synthetic fencing probe (replacement for launching a second DayZDiag).
 
 All cases run against an in-process ServerState. They must not open a
 socket to the live daemon port (8765) or touch a real DayZ process.
@@ -254,7 +254,7 @@ class ProbeOnServerStateTest(unittest.TestCase):
         self.assertNotEqual(result["verdict"], probe.VERDICT_PASS)
 
     def test_negative_control_collapsed_resolve_poll_pid_is_not_pass(self) -> None:
-        """BUG-101-shaped discriminator: resolve_poll_pid always returns the
+        """Collapsed discriminator: resolve_poll_pid always returns the
         bound PID, so a second presenter is invisible. The probe must not PASS.
 
         install_bound_peer installs TestIdentityOverride, which is the same

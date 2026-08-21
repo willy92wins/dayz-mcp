@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ast
 import importlib
 import inspect
 import json
@@ -670,6 +671,67 @@ class NativeLauncherBundleTest(unittest.TestCase):
         manifest_sha = hashlib.sha256((BUNDLE_DIR / "closure-manifest.json").read_bytes()).hexdigest().upper().encode("ascii")
         marker = b"DAYZ_MCP_MANIFEST_SHA256=" + manifest_sha
         self.assertEqual(pe.count(marker), 1)
+
+
+class PackagedModuleClosureTest(unittest.TestCase):
+    """PACKAGED_MODULES must be closed under its own dayz_mcp imports.
+
+    app.pyz carries exactly the modules PACKAGED_MODULES names. A packaged module
+    that imports an unpackaged sibling builds fine and then raises
+    ModuleNotFoundError at runtime, inside a bundle that has already shipped.
+
+    That is not hypothetical: on 2026-08-21 the duplicated FILE_STANDARD_INFO in
+    pinned_keyfile.py and request_path_authority.py was unified into a new
+    win32_fileinfo.py, and pinned_keyfile -- which IS packaged -- began importing a
+    module that was not. The bundle's own drift check caught the edit, but only
+    because the bundle happened to be stale; a fresh build would have been quietly
+    broken. This test reads source, needs no built bundle, and so also runs in a
+    clone that has none.
+    """
+
+    def test_every_dayz_mcp_import_of_a_packaged_module_is_itself_packaged(self) -> None:
+        builder = importlib.import_module(BUILD_MODULE)
+        packaged = set(builder.PACKAGED_MODULES)
+        package_dir = TOOLS_DIR / "dayz_mcp"
+        missing: list[str] = []
+        def runtime_nodes(tree: ast.AST):
+            """Every node except the bodies of `if TYPE_CHECKING:` blocks.
+
+            Those imports are erased at runtime, so a type-only reference to an
+            unpackaged module is not a packaging hole. native_process_guard.py
+            imports ProcessRecord that way and must not be reported.
+            """
+            for node in ast.iter_child_nodes(tree):
+                if isinstance(node, ast.If) and _is_type_checking(node.test):
+                    for branch in node.orelse:  # an `else:` under it still runs
+                        yield branch
+                        yield from runtime_nodes(branch)
+                    continue
+                yield node
+                yield from runtime_nodes(node)
+
+        def _is_type_checking(test: ast.expr) -> bool:
+            return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+                isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+            )
+
+        for name in sorted(packaged):
+            tree = ast.parse((package_dir / name).read_text(encoding="utf-8"), filename=name)
+            for node in runtime_nodes(tree):
+                imported: list[str] = []
+                if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("dayz_mcp"):
+                    tail = (node.module or "").split(".")
+                    if len(tail) > 1:
+                        imported.append(tail[1] + ".py")
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        parts = alias.name.split(".")
+                        if parts[0] == "dayz_mcp" and len(parts) > 1:
+                            imported.append(parts[1] + ".py")
+                for sibling in imported:
+                    if sibling not in packaged and (package_dir / sibling).is_file():
+                        missing.append(f"{name} imports {sibling}, which is not packaged")
+        self.assertEqual(missing, [], "PACKAGED_MODULES is not import-closed")
 
 
 if __name__ == "__main__":

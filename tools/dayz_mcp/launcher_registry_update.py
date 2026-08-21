@@ -300,7 +300,7 @@ def describe_registry_provenance(
 ) -> dict[str, object]:
     """Report whether the live registry bytes came from a RECORDED transition.
 
-    BUG-072: the supported flow only ever moves the registry through
+    The supported flow only ever moves the registry through
     _install_transition / _rollback_transition, and each leaves a receipt. Anything
     that rewrites the file in place -- an editor, an ad-hoc script, a second session
     -- leaves content that no receipt describes. The damage stays invisible until

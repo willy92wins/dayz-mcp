@@ -234,7 +234,6 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         second = self._client(srv, client_platform="codex")
 
         self.assertNotEqual(first.identity.session_id, second.identity.session_id)
-        self.assertEqual(first.identity.session_id, first.identity.session_id)
 
     def test_task_label_uses_environment_fallback_and_is_capped_at_120(self) -> None:
         srv = self._daemon()
@@ -691,7 +690,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no_players", str(err.exception))
 
     async def test_timeout_includes_liveness(self) -> None:
-        # F1.2: the timeout must carry the peer's measured liveness instead of a
+        # The timeout must carry the peer's measured liveness instead of a
         # fixed string. Daemon alive with no game peer polling -> never polled.
         srv = self._daemon()  # no game peer → command never resolves
         runtime = self._client(srv)
@@ -706,7 +705,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("queue_depth", message)
 
     async def test_timeout_degrades_when_peer_status_is_unavailable(self) -> None:
-        # F1.2 negative control: inject a bridge_status_payload failure. The happy
+        # Negative control: inject a bridge_status_payload failure. The happy
         # path alone would stay green even if the degradation path were broken.
         srv = self._daemon()
         runtime = self._client(srv)
@@ -723,7 +722,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("queue_depth", message)
 
     async def test_malformed_status_never_replaces_the_timeout_error(self) -> None:
-        # H1 (Grok R21 of F1.2): the guard covered only the fetch, so a /status
+        # The guard covered only the fetch, so a /status
         # answering 200 with an odd shape raised INSIDE the timeout handler and
         # substituted the timeout ToolError with an unrelated AttributeError or
         # TypeError. The invariant: the caller always learns it timed out.
@@ -810,7 +809,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(released["released"])
 
     async def test_pure_read_of_all_players_needs_no_lease_while_mutations_do(self) -> None:
-        # F1.1: the observable is the MCP contract, not the HTTP layer. With no
+        # The observable is the MCP contract, not the HTTP layer. With no
         # lease held, query_all_players completes; the mutating verbs below are
         # the negative control -- without them a fully broken gate still passes.
         srv = self._daemon()
@@ -840,7 +839,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("lease_required", str(denied.exception), name)
 
     async def test_all_players_read_is_not_blocked_by_another_sessions_lease(self) -> None:
-        # F1.1 second acceptance clause of the plan: with ANOTHER session holding
+        # Second acceptance clause: with ANOTHER session holding
         # the lease, the pure read still completes. Negative control: the foreign
         # lease does not let this session mutate either.
         srv = self._daemon()
