@@ -99,6 +99,18 @@ READY_REASONS = frozenset({
     "creation_time_unreadable",
 })
 WAIT_FOR_LOOKBACK_MAX = 2000
+# lookback_from="launch" scans each current-launch log from byte 0 instead of
+# rewinding a line count. Measured 2026-08-21: the "[DayZ-MCP] config loaded"
+# line a caller waits on after a launch sat at line 20 of a 132,632-line script
+# log, and was absent from that launch's RPT entirely (0 hits in 165,669 lines,
+# because the RPT only starts mirroring SCRIPT output ~16 s in). No value of
+# lookback_lines reaches that, so waiting on a startup line could not work.
+WAIT_FOR_LOOKBACK_FROM = frozenset({"lines", "launch"})
+# Ceiling for one launch scan. It runs under tool_lock, so it is bounded rather
+# than open-ended, and a file past the ceiling is reported as scan_truncated
+# instead of being quietly half-read.
+WAIT_FOR_LAUNCH_SCAN_MAX_BYTES = 64 * 1024 * 1024
+_LAUNCH_SCAN_CHUNK_BYTES = 1024 * 1024
 _REMOTE_ERROR_CODES = frozenset({
     "audit_failed",
     "bad_args",
@@ -1632,9 +1644,16 @@ def _log_markers_with_lookback(
 
 def _new_log_lines(
     paths: list[str], markers: dict[str, log_tail.TailMarker]
-) -> tuple[list[str], dict[str, log_tail.TailMarker]]:
+) -> tuple[list[str], dict[str, log_tail.TailMarker], dict[str, int]]:
+    """New lines since ``markers``, plus how many each file contributed.
+
+    A path missing from the returned counts could not be read at all. That is
+    the difference between "the file had nothing new" and "the file was never
+    opened", and wait_for used to collapse both into silence.
+    """
     lines: list[str] = []
     updated = dict(markers)
+    counts: dict[str, int] = {}
     for path in paths:
         try:
             result = log_tail.read_since(path, markers.get(path))
@@ -1642,7 +1661,119 @@ def _new_log_lines(
             continue
         updated[path] = result["marker"]
         lines.extend(result["lines"])
-    return lines, updated
+        counts[path] = len(result["lines"])
+    return lines, updated, counts
+
+
+def _scan_log_for_pattern(
+    path: str, pattern: str, max_bytes: int
+) -> tuple[str | None, int, bool]:
+    """First line of ``path`` containing ``pattern``, scanning from byte 0.
+
+    Streams in chunks and returns on the first hit, so a whole launch is
+    reachable without holding the file in memory. ``read_since`` cannot serve
+    this: it keeps the NEWEST ``max_bytes``, which is right for tailing and
+    wrong for a line printed at mission start.
+
+    Splits on LF and drops a trailing CR, matching what ``read_since`` hands the
+    matcher, so one pattern behaves the same on both paths.
+    """
+    scanned = 0
+    consumed = 0
+    carry = b""
+    truncated = False
+    try:
+        with open(path, "rb") as handle:
+            while True:
+                budget = max_bytes - consumed
+                if budget <= 0:
+                    # Measured, not assumed: only truncated if bytes remain.
+                    truncated = bool(handle.read(1))
+                    break
+                chunk = handle.read(min(_LAUNCH_SCAN_CHUNK_BYTES, budget))
+                if not chunk:
+                    break
+                consumed += len(chunk)
+                carry += chunk
+                start = 0
+                while True:
+                    end = carry.find(b"\n", start)
+                    if end == -1:
+                        break
+                    line = carry[start:end].decode("utf-8", errors="replace")
+                    line = line.rstrip("\r")
+                    start = end + 1
+                    scanned += 1
+                    if pattern in line:
+                        return line, scanned, False
+                carry = carry[start:]
+    except OSError as error:
+        raise log_tail.LogTailError("log_unavailable") from error
+    if carry:
+        line = carry.decode("utf-8", errors="replace").rstrip("\r")
+        scanned += 1
+        if pattern in line:
+            return line, scanned, truncated
+    return None, scanned, truncated
+
+
+def _log_label(path: str) -> str:
+    """Side-qualified file name for the wire; no host path leaves the daemon."""
+    item = Path(path)
+    side = item.parent.parent.name
+    return f"{side}/{item.name}" if side.startswith("_") else item.name
+
+
+def _record_scan(
+    paths: list[str],
+    counts: dict[str, int],
+    seen: list[str],
+    totals: dict[str, int],
+    unreadable: set[str],
+) -> None:
+    """Fold one probe's per-file counts into the cumulative scan report."""
+    for path in paths:
+        if path not in totals:
+            seen.append(path)
+            totals[path] = 0
+        if path in counts:
+            totals[path] += counts[path]
+            unreadable.discard(path)
+        else:
+            unreadable.add(path)
+
+
+def _scanned_report(
+    paths: list[str],
+    totals: dict[str, int],
+    unreadable: set[str],
+    lookback_from: str,
+    scan_truncated: bool,
+) -> dict[str, Any]:
+    """What wait_for actually read, so a no-match is visible as a no-match.
+
+    Reported by two sessions on 2026-08-21: ``observed`` carries only the last
+    line of the newest file, so when the RPT sorts newest it looks like the
+    script log was never opened. It was; nothing in it matched. Names are
+    side-qualified file names, never host paths -- this crosses the MCP wire.
+    """
+    files = [
+        {
+            "name": _log_label(path),
+            "lines": totals.get(path, 0),
+            "readable": path not in unreadable,
+        }
+        for path in paths
+    ]
+    report: dict[str, Any] = {
+        "pattern_kind": "substring",
+        "lookback_from": lookback_from,
+        "files": files,
+        "lines_total": sum(int(item["lines"]) for item in files),
+    }
+    if lookback_from == "launch":
+        report["scan_truncated"] = scan_truncated
+    return report
 
 
 def _wait_for_response(
@@ -1652,8 +1783,9 @@ def _wait_for_response(
     probes: int,
     observed: Any,
     satisfied: bool,
+    scanned: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    response = {
         "ok": satisfied,
         "satisfied": satisfied,
         "condition": condition,
@@ -1663,6 +1795,9 @@ def _wait_for_response(
         "timed_out": not satisfied,
         "tool": "wait_for",
     }
+    if scanned is not None:
+        response["scanned"] = scanned
+    return response
 
 
 async def execute_wait_for(
@@ -1673,8 +1808,13 @@ async def execute_wait_for(
     timeout_s: float = 180.0,
     poll_interval_s: float = 2.0,
     lookback_lines: int = 200,
+    lookback_from: str = "lines",
 ) -> dict[str, Any]:
     """Poll until a wait_for condition holds.
+
+    ``pattern`` is a plain substring, never a regex -- see the matcher below.
+    ``lookback_from="launch"`` scans this launch's logs from byte 0 once before
+    polling, then tails from the end like the default.
 
     Any tool that waits on a human or a slow condition takes the lock
     per probe and sleeps outside it (``wait_for``, ``ui_dialog``,
@@ -1710,18 +1850,60 @@ async def execute_wait_for(
         or lookback_lines > WAIT_FOR_LOOKBACK_MAX
     ):
         raise ToolError("bad_args: lookback_lines must be in 0..2000")
+    if lookback_from not in WAIT_FOR_LOOKBACK_FROM:
+        raise ToolError('bad_args: lookback_from must be "lines" or "launch"')
 
     started = time.monotonic()
     deadline = started + timeout_s
     probes = 0
     observed: Any = None
     log_markers: dict[str, log_tail.TailMarker] = {}
+    seen_paths: list[str] = []
+    scanned_lines: dict[str, int] = {}
+    unreadable: set[str] = set()
+    scan_truncated = False
+
+    def scan_summary() -> dict[str, Any] | None:
+        if condition != "log_matches":
+            return None
+        return _scanned_report(
+            seen_paths, scanned_lines, unreadable, lookback_from, scan_truncated
+        )
 
     if condition == "log_matches":
         async with runtime.tool_lock:
-            log_markers = _log_markers_with_lookback(
-                await _wait_for_script_log_paths(runtime), lookback_lines
+            probe_paths = await _wait_for_script_log_paths(runtime)
+            # Markers FIRST, then the launch scan. A line written between the
+            # two is read twice, which costs nothing; the other order drops it.
+            log_markers = (
+                _log_markers_at_end(probe_paths)
+                if lookback_from == "launch"
+                else _log_markers_with_lookback(probe_paths, lookback_lines)
             )
+            if lookback_from == "launch":
+                for path in probe_paths:
+                    try:
+                        line, count, cut = _scan_log_for_pattern(
+                            path, pattern, WAIT_FOR_LAUNCH_SCAN_MAX_BYTES
+                        )
+                    except log_tail.LogTailError:
+                        _record_scan(
+                            [path], {}, seen_paths, scanned_lines, unreadable
+                        )
+                        continue
+                    _record_scan(
+                        [path], {path: count}, seen_paths, scanned_lines, unreadable
+                    )
+                    scan_truncated = scan_truncated or cut
+                    if line is not None:
+                        return _wait_for_response(
+                            condition=condition,
+                            started=started,
+                            probes=1,
+                            observed=line,
+                            satisfied=True,
+                            scanned=scan_summary(),
+                        )
 
     while time.monotonic() < deadline:
         async with runtime.tool_lock:
@@ -1761,9 +1943,14 @@ async def execute_wait_for(
                     else observed <= value
                 )
             else:
-                lines, log_markers = _new_log_lines(
-                    await _wait_for_script_log_paths(runtime), log_markers
+                probe_paths = await _wait_for_script_log_paths(runtime)
+                lines, log_markers, counts = _new_log_lines(probe_paths, log_markers)
+                _record_scan(
+                    probe_paths, counts, seen_paths, scanned_lines, unreadable
                 )
+                # Substring, not regex. A caller who sends an escaped pattern
+                # gets a silent no-match, which is why scanned exists and why
+                # the tool description names the contract.
                 matched = next((line for line in lines if pattern in line), None)
                 satisfied = matched is not None
                 observed = matched if matched is not None else (lines[-1] if lines else "")
@@ -1774,6 +1961,7 @@ async def execute_wait_for(
                 probes=probes,
                 observed=observed,
                 satisfied=True,
+                scanned=scan_summary(),
             )
         # Sleep outside the lock. Do not wrap this loop in tool_lock.
         await asyncio.sleep(poll_interval_s)
@@ -1784,6 +1972,7 @@ async def execute_wait_for(
         probes=probes,
         observed=observed,
         satisfied=False,
+        scanned=scan_summary(),
     )
 
 
@@ -3365,9 +3554,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Block until a condition holds. condition ENUM: players_at_least, "
-            "players_at_most, log_matches. lookback_lines (default 200) "
-            "rewinds initial log markers N lines so a just-written match is "
-            "not missed. ok is true only if satisfied."
+            "players_at_most, log_matches. pattern is a plain SUBSTRING, not a "
+            r"regex: pass '[MOD]', never '\[MOD\]'. lookback_lines (default "
+            "200) rewinds initial log markers N lines; lookback_from='launch' "
+            "instead scans this launch's logs from byte 0, the only way to "
+            "reach a line printed at mission start. ok is true only if "
+            "satisfied. scanned reports which log files were read and how many "
+            "lines each gave, so a no-match is visible as a no-match."
         )
     )
     async def wait_for(
@@ -3377,6 +3570,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: float = 180.0,
         poll_interval_s: float = 2.0,
         lookback_lines: int = 200,
+        lookback_from: Literal["lines", "launch"] = "lines",
     ) -> dict[str, Any]:
         # wait_for, ui_dialog, and playbook_run: do not wrap the whole body
         # in tool_lock. Any tool that waits on a human or a slow condition
@@ -3391,6 +3585,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             timeout_s=timeout_s,
             poll_interval_s=poll_interval_s,
             lookback_lines=lookback_lines,
+            lookback_from=lookback_from,
         )
 
     def _pipeline_platform() -> str:

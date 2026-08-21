@@ -47,7 +47,7 @@ build, run, measure, fix — the way this repo itself was developed and gated.
 | Move, equip, stage | `player_teleport`, `inventory_give`, `world_spawn`, `object_delete`, `object_anim`, `vehicle_prepare_fixture` |
 | Set the stage | `world_time_set`, `world_weather_set`, `engine_set` |
 | Talk to players | `notify_players` |
-| Watch | `logs_since` (tail from a cursor), `wait_for` (block on a condition or a log pattern), `telemetry_read`, `vehicle_telemetry` |
+| Watch | `logs_since` (tail from a cursor), `wait_for` (block on a condition or a log substring), `telemetry_read`, `vehicle_telemetry` |
 | Undo, hand over | `restore_gameplay`, `session_acquire_wait` / `session_release` / `session_status` |
 
 Everything server-side works against a headless server — it returns data, not frames.
@@ -107,7 +107,7 @@ Numbers from in-game runs. Each citation is the line that records the figure, no
 
 **`exec_enforce` does not execute on a headless diag server.** `ExecuteEnforceScript` is marked Developer-only (`game.c:776`) and returned `false` under `NO_GUI`, including with the vanilla script-console wrapper (`product-spec.md:171-177`; `reviews/2026-06-10-fase4b-gate-ingame.md:55-66`). Allowlist gating and JSONL audit are verified in-game; script effect is not a contract. The tool is opt-in breakglass, not a general interpreter (`product-spec.md:167`).
 
-**`wait_for` and `logs_since` read script logs and `.RPT` only.** Player chat is not in those files. With `-adminlog`, chat lands in a profiles `.ADM` that no tool reads (`tools/README-mcp.md:126`; `tools/dayz_mcp/server.py:2062-2063`). `wait_for` on timeout still returns `ok: true` with `satisfied: false` — gate on `satisfied` (`tools/README-mcp.md:124`).
+**`wait_for` and `logs_since` read script logs and `.RPT` only.** Player chat is not in those files. With `-adminlog`, chat lands in a profiles `.ADM` that no tool reads (`tools/README-mcp.md:126`; `tools/dayz_mcp/server.py:2062-2063`). `wait_for` on timeout still returns `ok: true` with `satisfied: false` — gate on `satisfied` (`tools/README-mcp.md:124`). Its `pattern` is a plain substring, never a regex: `[DayZ-MCP]`, not `\[DayZ-MCP\]`. For a line printed at mission start, pass `lookback_from="launch"`; `lookback_lines` cannot reach that far back.
 
 **Synchronous RestApi calls block the sim.** `POST_now` is documented as a thread-blocking operation (`restapi.c:125-128`). The bridge uses callback `GET`/`POST` only (`dayz-mcp-architecture.md:272`).
 
