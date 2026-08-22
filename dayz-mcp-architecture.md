@@ -7,7 +7,7 @@
 > **Base:** 2 workflows de investigación (≈2.5M tokens) + spot-check directo de Claude sobre
 > cada API load-bearing (leídas en el source vanilla bajo `<vanilla scripts root>`).
 > Generado 2026-06-06 como documento de diseño. **Implementado y en produccion desde
-> entonces**: el servidor expone hoy 53 tools y el puente va por `MCP_BRIDGE_VERSION = "8"`.
+> entonces**: el servidor expone hoy 54 tools y el puente va por `MCP_BRIDGE_VERSION = "8"`.
 > Esto queda como el diseño original — util para entender por que las piezas son como son,
 > no como descripcion del estado actual. Para eso, `README.md` (superficie de tools) y el
 > bloque LIVE-STATE de `HANDOFF.md`.
@@ -122,11 +122,11 @@ Claude ──stdio/JSON-RPC──> MCP server (Python+FastMCP)
 
 ---
 
-## 4. Tool surface (53 tools (+ `exec_enforce` when an allowlist is configured))
+## 4. Tool surface (54 tools (+ `exec_enforce` when an allowlist is configured))
 
 El recuento sale de `tools/tests/test_install_mcp.py::PublicToolCountDocsTest`:
-`build_app` → `app._tool_manager.list_tools()`, descartando `ui_dialog` del número
-público (el README no la nombra; este documento sí). El diseño de 2026-06-06 abajo
+`build_app` → `app._tool_manager.list_tools()`, sin descartar tools del número
+público. El diseño de 2026-06-06 abajo
 era 11 tools / 6 dominios; eso ya no es la superficie instanciada.
 
 `dayz_test_run` no espera a que el juego esté listo para “parecer éxito”: un arranque

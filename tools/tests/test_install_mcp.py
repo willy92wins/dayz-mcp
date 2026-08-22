@@ -1268,7 +1268,6 @@ class PublicToolCountDocsTest(unittest.TestCase):
             ServerConfig(key="k", port=0, log_sink=lambda _message: None)
         )
         without = {tool.name for tool in app._tool_manager.list_tools()}
-        without.discard("ui_dialog")
         tmp = TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         allow_path = Path(tmp.name) / "allowlist.json"
@@ -1283,7 +1282,6 @@ class PublicToolCountDocsTest(unittest.TestCase):
             )
         )
         with_exec = {tool.name for tool in app_with._tool_manager.list_tools()}
-        with_exec.discard("ui_dialog")
 
         self.assertNotIn("exec_enforce", without)
         self.assertEqual(with_exec, without | {"exec_enforce"})
@@ -1313,7 +1311,6 @@ class PublicToolCountDocsTest(unittest.TestCase):
         self.assertIn("--pin-clis", readme)
         self.assertIn("python install_mcp.py --register", readme)
         self.assertIn("does not read that pin", readme)
-        self.assertNotIn("ui_dialog", readme)
         for name in sorted(without):
             self.assertIn(f"`{name}`", readme)
         tools_readme = (TOOLS_DIR / "README-mcp.md").read_text(encoding="utf-8")
@@ -1328,7 +1325,6 @@ class PublicToolCountDocsTest(unittest.TestCase):
             ServerConfig(key="k", port=0, log_sink=lambda _message: None)
         )
         without = {tool.name for tool in app._tool_manager.list_tools()}
-        without.discard("ui_dialog")
         architecture = (TOOLS_DIR.parent / "dayz-mcp-architecture.md").read_text(
             encoding="utf-8"
         )

@@ -105,7 +105,9 @@ class WeakAgentCatalogTest(unittest.IsolatedAsyncioTestCase):
 
 
 class WeakAgentWaitForTest(unittest.IsolatedAsyncioTestCase):
-    def test_wait_for_response_ok_follows_satisfied(self) -> None:
+    def test_wait_for_timeout_ok_stays_true(self) -> None:
+        # Timeout is a normal result. Clients that treat ok:false as a tool
+        # error would convert a quiet wait into a failure.
         unsatisfied = server._wait_for_response(
             condition="players_at_least",
             started=time.monotonic(),
@@ -113,7 +115,8 @@ class WeakAgentWaitForTest(unittest.IsolatedAsyncioTestCase):
             observed=0,
             satisfied=False,
         )
-        self.assertIs(unsatisfied["ok"], False)
+        self.assertIs(unsatisfied["ok"], True)
+        self.assertIs(unsatisfied["satisfied"], False)
         self.assertTrue(unsatisfied["timed_out"])
         self.assertEqual(unsatisfied["tool"], "wait_for")
         satisfied = server._wait_for_response(
@@ -124,6 +127,7 @@ class WeakAgentWaitForTest(unittest.IsolatedAsyncioTestCase):
             satisfied=True,
         )
         self.assertIs(satisfied["ok"], True)
+        self.assertIs(satisfied["satisfied"], True)
         self.assertFalse(satisfied["timed_out"])
 
     async def test_wait_for_bad_args_name_the_field(self) -> None:

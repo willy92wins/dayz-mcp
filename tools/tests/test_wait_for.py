@@ -75,7 +75,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         result = await server.execute_wait_for(
             runtime, "players_at_least", value=1, timeout_s=0.6, poll_interval_s=0.5
         )
-        self.assertFalse(result["ok"])
+        self.assertTrue(result["ok"])
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
         self.assertEqual(result["tool"], "wait_for")
@@ -157,7 +157,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
                 lookback_lines=0,
             )
 
-        self.assertFalse(result["ok"])
+        self.assertTrue(result["ok"])
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
         self.assertEqual(result["tool"], "wait_for")
@@ -212,6 +212,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
                 lookback_lines=5,
             )
 
+        self.assertTrue(result["ok"])
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
 
@@ -236,6 +237,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
                 lookback_lines=0,
             )
 
+        self.assertTrue(result["ok"])
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
 

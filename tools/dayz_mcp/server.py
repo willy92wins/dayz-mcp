@@ -1886,7 +1886,8 @@ def _wait_for_response(
     scanned: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     response = {
-        "ok": satisfied,
+        # Timeout is a normal result, not a tool error. Gate on satisfied.
+        "ok": True,
         "satisfied": satisfied,
         "condition": condition,
         "elapsed_s": time.monotonic() - started,
@@ -3665,8 +3666,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             r"regex: pass '[MOD]', never '\[MOD\]'. lookback_lines (default "
             "200) rewinds initial log markers N lines; lookback_from='launch' "
             "instead scans this launch's logs from byte 0, the only way to "
-            "reach a line printed at mission start. ok is true only if "
-            "satisfied. scanned reports which log files were read and how many "
+            "reach a line printed at mission start. On timeout still returns "
+            "ok: true with satisfied: false -- gate on satisfied, not ok. "
+            "scanned reports which log files were read and how many "
             "lines each gave, so a no-match is visible as a no-match."
         )
     )

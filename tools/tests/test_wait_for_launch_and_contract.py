@@ -126,6 +126,8 @@ class PatternIsASubstringTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("SUBSTRING", description)
         self.assertIn(r"\[MOD\]", description)
         self.assertIn("lookback_from", description)
+        self.assertIn("gate on satisfied, not ok", description)
+        self.assertNotIn("ok is true only if satisfied", description)
 
 
 class LaunchScanReachesTheStartOfTheLaunchTest(unittest.IsolatedAsyncioTestCase):
