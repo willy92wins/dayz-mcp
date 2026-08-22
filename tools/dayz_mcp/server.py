@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
@@ -184,6 +185,33 @@ _DAYZ_TEST_VALUE_ERROR_CODES = {
     "run_exists": "run_exists",
     "run_not_found": "run_not_found",
 }
+
+
+def _log_opaque_failure(runtime: Any, tool: str, exc: BaseException) -> None:
+    """Write the dropped cause to the LOCAL log, never to the wire.
+
+    The wire carries the exception type alone because the message can hold host
+    paths, and that protection stays. What was missing is the other half: nothing
+    printed the cause anywhere, so `dayz_test_failed:ValueError` reached the caller
+    with the answer one frame away in ``__cause__``. Two sessions spent an afternoon
+    each on that silence on 2026-08-21. The client process's stderr is local, so the
+    full chain belongs there.
+
+    Never raises: a diagnostic that masks the failure it describes is worse than none.
+    """
+    sink = getattr(runtime, "_log", None)
+    if not callable(sink):
+        return
+    try:
+        detail = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        ).rstrip()
+        sink(f"[{tool}] opaque failure; full cause (local only):\n{detail}")
+    except Exception:
+        try:
+            sink(f"[{tool}] opaque failure: {type(exc).__name__}")
+        except Exception:
+            pass
 
 
 def _is_safe_error_token(value: str) -> bool:
@@ -2524,6 +2552,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     # can hold host paths, so it must not cross the MCP wire; FastMCP
                     # serializes str(exc) alone. `from exc` keeps the cause in
                     # __cause__ for LOCAL diagnosis (needed to see why build:true failed), not for the wire.
+                    _log_opaque_failure(client, "dayz_test_run", exc)
                     raise ToolError(f"dayz_test_failed:{type(exc).__name__}") from exc
             if execute_error is not None:
                 if execute_error.code == "active_run_exists":
@@ -2590,6 +2619,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 # can hold host paths, so it must not cross the MCP wire; FastMCP
                 # serializes str(exc) alone. `from exc` keeps the cause in
                 # __cause__ for LOCAL diagnosis (needed to see why build:true failed), not for the wire.
+                _log_opaque_failure(client, "dayz_test_stop", exc)
                 raise ToolError(f"dayz_test_failed:{type(exc).__name__}") from exc
 
     @app.tool(description="Read the authoritative server-side player state.")
