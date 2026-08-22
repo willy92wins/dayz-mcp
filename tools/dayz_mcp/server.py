@@ -1504,8 +1504,23 @@ def _sibling_profile_dirs(profiles: list[str]) -> list[str]:
 
 
 def _run_start_epoch(runs: list[dict[str, Any]]) -> float | None:
-    times: list[float] = []
+    """Start of the launch in progress: the newest run's earliest process.
+
+    `min` inside a run is when that run started -- process_lifecycle._run_age_s
+    aggregates the same way. `max` across runs keeps the floor on the current
+    launch, so a second live run cannot pull it back and readmit the first
+    one's logs as if they belonged to this one.
+
+    Only a live run reaches here with a stamp at all: RunRecord.validate makes
+    EXITED carry an empty `processes` and RUNNING/RUNNING_IDLE a non-empty one.
+    With a single live run -- the only shape observed on this host across the
+    store and its six pre-prune backups -- both aggregations return the same
+    float, so this is a guard rather than a repair.
+    """
+
+    starts: list[float] = []
     for run in runs:
+        times: list[float] = []
         for proc in run.get("processes") or []:
             if not isinstance(proc, dict):
                 continue
@@ -1518,7 +1533,9 @@ def _run_start_epoch(runs: list[dict[str, Any]]) -> float | None:
                 )
             except ValueError:
                 continue
-    return min(times) if times else None
+        if times:
+            starts.append(min(times))
+    return max(starts) if starts else None
 
 
 def _newest_rpt_and_script(dated: list[tuple[float, str]]) -> list[str]:
