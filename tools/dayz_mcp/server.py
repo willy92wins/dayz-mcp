@@ -2687,7 +2687,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             "Read RPT/script log lines appended since a marker, from the "
             "active run's _server and _client profiles. Without a marker, "
-            "reads the current launch (not the historic dump). No lease. "
+            "reads the tail of the current launch -- each file is capped at "
+            "its last 256 KiB -- never a historic dump. No lease. "
             "Pass back the marker this tool returns unchanged: encoded JSON "
             "string or the decoded object {path:[offset,size,identity]}."
         )

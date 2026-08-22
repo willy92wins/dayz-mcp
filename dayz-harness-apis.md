@@ -5,7 +5,11 @@
 > verificación adversarial (cite-then-verify por subagente), **menos 4 descartadas por
 > `#ifdef GAME_TEMPLATE`**, **más 12** de una 2ª ronda, **más** spot-check directo de Claude
 > sobre las 5 afirmaciones load-bearing (leídas en el source con mis propios ojos — ver §Trampas).
-> Catálogo: **128 símbolos únicos**. No sustituye a la skill `enforce-script-reference`; es un
+> Catálogo: **128 símbolos únicos** (122 cosechadas − 4 `GAME_TEMPLATE` + 12 de 2ª ronda
+= 130 brutas; 2 colisiones colapsan al deduplicar). El fichero además cita posiciones
+en la prosa y algunas entradas comparten posición bajo otro nombre, por lo que lleva
+**más citas `path:line` únicas (135) que entradas de catálogo**; no falta nada.
+No sustituye a la skill `enforce-script-reference`; es un
 > índice operativo para construir el harness. Generado 2026-06-06.
 
 ## Trampas verificadas (lo que casi contamina la referencia)

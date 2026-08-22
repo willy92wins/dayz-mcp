@@ -85,11 +85,11 @@ the acceptance contract is in [`product-spec.md`](product-spec.md).
 
 Numbers from in-game runs. Each citation is the line that records the figure, not a design target.
 
-**A1 — authoritative player position, 2026-06-07.** `query_player_state` against an independent mission marker (`target=marker`). An earlier harness compared the bridge to its own spawn write and printed 0.000 m; that comparison was discarded. Recert distance: **0.0313 m** (`product-spec.md:42`). The on-disk verdict stores **0.031348823463742695 m** (`tools/poc-verdict.json:117`). Pass line was < 0.5 m. 0.0313 m is the player's vertical settle (`HANDOFF.md:2081-2084`).
+**A1 — authoritative player position, 2026-06-07.** `query_player_state` against an independent mission marker (`target=marker`). An earlier harness compared the bridge to its own spawn write and printed 0.000 m; that comparison was discarded. Recert distance: **0.0313 m** (`product-spec.md:42`). The on-disk verdict stores **0.031348823463742695 m** (`tools/poc-verdict.json:117`). Pass line was < 0.5 m. 0.0313 m is the player's vertical settle (`HANDOFF.md`, fase-0 closure note).
 
 **A2 — async round-trip does not stall the tick, 2026-06-07.** Python held `/poll` for 600 ms. The sim kept ticking: `ticks_in_flight = tick_poll_callback - tick_poll_sent` = **4668**, the figure the in-tree verdict carries and a clone can read for itself (`tools/poc-verdict.json:140`). The original 2026-06-07 run recorded 4741 (`product-spec.md:43`, run_045213; `reviews/2026-06-07-r21-claude-poc-code.md:40`). Pass line is ≥ 5; a blocking `RestContext.GET_now` would read ~0. The diag `fps_in_flight` on that run (~7901) is a tick-counter artifact, not production 60 Hz (`reviews/2026-06-07-r21-claude-poc-code.md:40-41`).
 
-**Infected heading, 2026-08-20.** `infected_drive` with heading 90° (east, +X). Authoritative heading via `entities_query`: **92.1°** (error 2.1°). Run `1a1cb6e1-7230-43c4-9164-41ab3b0be936` (`HANDOFF.md:218-223`; `tools/tests/test_task9_spawn_phase_markers.py:101-105`). Same run: 76.6 m walked *away* from a player the infected had been attacking at 0.95 m. Inverse command 270° measured **270.1°**, 41.7 m in 46 s, 0.02 m lateral deviation. `mode="release"` returns control to vanilla AI (turns to 171.7° on its own, drops to 0.25 m/s).
+**Infected heading, 2026-08-20.** `infected_drive` with heading 90° (east, +X). Authoritative heading via `entities_query`: **92.1°** (error 2.1°). Run `1a1cb6e1-7230-43c4-9164-41ab3b0be936` (`tools/tests/test_task9_spawn_phase_markers.py:101-105`; `HANDOFF.md`, `infected_drive` promotion note). Same run: 76.6 m walked *away* from a player the infected had been attacking at 0.95 m. Inverse command 270° measured **270.1°**, 41.7 m in 46 s, 0.02 m lateral deviation. `mode="release"` returns control to vanilla AI (turns to 171.7° on its own, drops to 0.25 m/s).
 
 **B3 probe — server-side car drive discarded, 2026-06-08.** Fixture ready, throttle 1.0, `NetworkMoveStrategy.PHYSICS`: `engine_on_server=1`, `speedo≈0`, `pos_delta≈0` (`product-spec.md:56`). Vanilla `ActionStartEngine` returns on `INSTANCETYPE_SERVER` when the vehicle is PHYSICS (`actionstartengine.c:51-58`). Decision: do not drive cars from `MissionServer` (`product-spec.md:325`; `decisions/decision-log.md:15`). Cars move from the owning client (`vehicle_control`). Infected use a different controller; that path is the heading measurement above.
 
@@ -101,28 +101,29 @@ Numbers from in-game runs. Each citation is the line that records the figure, no
 
 **`SetTimeMultiplier(0)` freezes the entire simulation**, animations included (`world.c:19`; `dayz-mcp-architecture.md:185-187`). Condition lighting and weather after seating and animations have finished, not before a pending get-in.
 
-**`infected_drive` `speed` is not metres per second.** `speed=3` measured **0.91 m/s** (`HANDOFF.md:233`; `tools/tests/test_task9_spawn_phase_markers.py:105`). The scale is uncalibrated.
+**`infected_drive` `speed` is not metres per second.** `speed=3` measured **0.91 m/s** (`tools/tests/test_task9_spawn_phase_markers.py:105`; `HANDOFF.md`, same note). The scale is uncalibrated.
 
 **PHYSICS cars do not move from the server.** See the B3 probe above. `vehicle_control` is the client-owner path.
 
 **`exec_enforce` does not execute on a headless diag server.** `ExecuteEnforceScript` is marked Developer-only (`game.c:776`) and returned `false` under `NO_GUI`, including with the vanilla script-console wrapper (`product-spec.md:171-177`; `reviews/2026-06-10-fase4b-gate-ingame.md:55-66`). Allowlist gating and JSONL audit are verified in-game; script effect is not a contract. The tool is opt-in breakglass, not a general interpreter (`product-spec.md:167`).
 
-**`wait_for` and `logs_since` read script logs and `.RPT` only.** Player chat is not in those files. With `-adminlog`, chat lands in a profiles `.ADM` that no tool reads (`tools/README-mcp.md:126`; `tools/dayz_mcp/server.py:2062-2063`). `wait_for` on timeout still returns `ok: true` with `satisfied: false` — gate on `satisfied` (`tools/README-mcp.md:124`). Its `pattern` is a plain substring, never a regex: `[DayZ-MCP]`, not `\[DayZ-MCP\]`. For a line printed at mission start, pass `lookback_from="launch"`; `lookback_lines` cannot reach that far back.
+**`wait_for` and `logs_since` read script logs and `.RPT` only.** Player chat is not in those files. With `-adminlog`, chat lands in a profiles `.ADM` that no tool reads (see the `wait_for`/`logs_since` notes in `tools/README-mcp.md` and those tools' descriptions in `tools/dayz_mcp/server.py`). `wait_for` on timeout still returns `ok: true` with `satisfied: false` — gate on `satisfied` (`tools/README-mcp.md:124`). Its `pattern` is a plain substring, never a regex: `[DayZ-MCP]`, not `\[DayZ-MCP\]`. For a line printed at mission start, pass `lookback_from="launch"`; `lookback_lines` cannot reach that far back.
 
-**Synchronous RestApi calls block the sim.** `POST_now` is documented as a thread-blocking operation (`restapi.c:125-128`). The bridge uses callback `GET`/`POST` only (`dayz-mcp-architecture.md:272`).
+**Synchronous RestApi calls block the sim.** `POST_now` is documented as a thread-blocking operation (`restapi.c:125-128`). The bridge uses callback `GET`/`POST` only (`dayz-mcp-architecture.md` §9, "Bloqueo del loop").
 
 **No OS keystrokes, no OCR, no second game process.** Control is `CreateObjectEx` / `StartCommand_Vehicle` / `MissionServer` reads (`product-spec.md:160-166`). Several agent sessions share one running instance through one daemon.
 
-**Not tested — not claimed** (`HANDOFF.md:249-258`):
+**Not tested — not claimed** (`HANDOFF.md`, open-questions note):
 
-- Navmesh follow: `AIWorld.FindPath`, `RaycastNavMesh`, `SampleNavmeshPosition`, `PGFilter.SetCost` (`aiworld.c:67,98,110,122`). `AIWorld` has a private constructor (`aiworld.c:72`); `new PGFilter()` has not been instantiated in-game.
+- Navmesh follow: `AIWorld.FindPath`, `RaycastNavMesh`, `SampleNavmeshPosition`, `PGFilter.SetCost` (all in `aiworld.c`; the four protos are adjacent but none has been driven). `AIWorld` has a private constructor (`aiworld.c`, `private void AIWorld()`); `new PGFilter()` has not been instantiated in-game.
 - Survivor locomotion overrides: `HumanInputController.OverrideMovementSpeed` / `OverrideMovementAngle` / `OverrideAimChangeX` / `OverrideAimChangeY` (`human.c:234-243`) and the vanilla bot FSM under `4_world/systems/bot/`. Whether a synthetic survivor population is viable is open.
-- Calibrating `infected_drive` `speed` to m/s (`HANDOFF.md:258`).
+- Calibrating `infected_drive` `speed` to m/s (same note).
 
 ## What you need
 
 - Windows, with DayZ and DayZ Tools installed (the server talks to `DayZDiag_x64`)
-- Python **3.10 or newer**
+- Python **3.14** — the installer asks `py` for 3.14 specifically; `pyproject.toml`
+  still declares `>=3.10`, see `tools/README-mcp.md`
 - A DayZ server you are allowed to run mods on. The daemon binds `127.0.0.1` only and
   sits on the same machine as the game it drives — there is no remote mode and no
   multi-user mode, by design. The reference deployment is a local DayZDiag server plus
@@ -132,7 +133,7 @@ Numbers from in-game runs. Each citation is the line that records the figure, no
 
 | | |
 |---|---|
-| [`addon/`](addon/) | The in-game bridge, in Enforce Script. A `modded class MissionServer` that dispatches commands on `OnUpdate` and answers over HTTP. Build it into a PBO, or run it with file patching. |
+| [`addon/`](addon/) | The in-game bridge, in Enforce Script. A `modded class MissionServer` that dispatches commands on `OnUpdate` and answers over HTTP. Build it into a PBO, or run it with file patching. Tracked in git; the development tree sparse-excludes it, so it exists in a full clone but not in every checkout. |
 | [`tools/`](tools/) | The Python MCP server, its installer, and the offline gates. |
 
 The mod **pulls** commands and **pushes** results; the Python side is a passive
@@ -225,8 +226,8 @@ cd tools
 ```
 
 Tests that need a built launcher, an installed registry or development-only
-evidence skip with the reason named, so a fresh clone is green rather than red for
-things it was never given.
+evidence skip with the reason named, so a fresh clone is red only for real
+regressions (one known startup flake, `test_bug046_startup_deadlock`, aside).
 
 ## Licence
 

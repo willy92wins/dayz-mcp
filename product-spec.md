@@ -340,8 +340,7 @@ del árbol (no de memoria). Marcado `[EXACT]` = leído en esta copia.
 
 ### `ui_dialog` — firma, `kind` y límites `[EXACT]`
 
-Tool MCP (`tools/dayz_mcp/server.py:2699-2713`) y comando de puente del mismo nombre
-(`tools/dayz_mcp/loopback.py:64`, peer `client`). Exige lease: no está en
+Tool MCP (`tools/dayz_mcp/server.py`, `async def ui_dialog`) y comando de puente del mismo nombre (`tools/dayz_mcp/loopback.py`, `CLIENT_COMMANDS`, peer `client`). Exige lease: no está en
 `READ_ONLY_COMMANDS` (`tools/dayz_mcp/session_coordination.py:18-38`).
 
 ```
@@ -350,7 +349,7 @@ ui_dialog(kind, title, message="", fields=None, timeout_s=60.0)
 
 | Campo | Regla `[EXACT]` | Sitio |
 |---|---|---|
-| `kind` | `acknowledge` \| `confirm` \| `form` | `ui_dialog.py:16`, `server.py:2700` |
+| `kind` | `acknowledge` \| `confirm` \| `form` | `ui_dialog.py`, `KINDS` |
 | `title` | str, 1..80 chars **tras strip** | `ui_dialog.py:20-21,97-99` |
 | `message` | str, 0..600 chars (sin strip de longitud). **Obligatorio no vacío** (tras strip) en `acknowledge` y `confirm`. Opcional en `form` | `ui_dialog.py:22,101-105` |
 | `fields` | solo si `kind="form"` (otro `kind` + `fields` → `bad_args`). Lista de **1..6** objetos | `ui_dialog.py:23-24,118-127` |
@@ -369,7 +368,7 @@ Cada elemento de `fields` acepta en la tool las claves exactas `{id, label}` má
 - Presupuesto Python del puente = `timeout_s + 10.0` (`BRIDGE_SLACK_S`, `ui_dialog.py:31,67-69`)
   → ≤ 250 s, por debajo de `MAX_TIMEOUT_S` 300.0 (`server.py:50`). El `operation_timeout_s`
   encolado es ese presupuesto, no el timeout del jugador. El sondeo usa
-  `WAIT_FOR_MIN_POLL_INTERVAL_S` 0.5 s (`server.py:57,1650`).
+  `WAIT_FOR_MIN_POLL_INTERVAL_S` 0.5 s (`server.py`, constante y bucle de sondeo).
 
 Alcance v1: el cliente local donde corre el puente. Sin `target_player`. Relación con
 `notify_players`: no se duplica; el toast vanilla sigue unidireccional. `ui_dialog` existe
@@ -389,12 +388,12 @@ transporte (`ToolError("timeout waiting for ui_dialog …")`, `server.py:1659`) 
 como `timed_out`.
 
 `rejected` exige `reason:"busy"` (`ui_dialog.py:333-337`): segundo diálogo con uno abierto,
-rápido, sin alterar el primero (`MCPClientBridge.c:1214-1223`).
+rápido, sin alterar el primero (`MCPClientBridge.c`, `rejected.reason = "busy"`).
 
 ### Resultado público (aplanado) `[EXACT]`
 
 El cable anida el desenlace bajo `dialog` porque `MCPResult.state` ya es `ref MCPPlayerState`
-(`MCPMessages.c:407-408,463-464`). Python (`interpret_result`, `ui_dialog.py:270-365`) valida
+(`MCPMessages.c`, `class MCPResult` / `ref MCPDialogResult dialog`). Python (`interpret_result`, `ui_dialog.py:270-365`) valida
 el objeto y devuelve al agente:
 
 `{ok, state, dismissed_by?, choice?, values?, values_by_id?, reason?, elapsed_s}`
@@ -417,7 +416,7 @@ más passthrough de `id` y `_server` si vienen.
 ### Dos familias de error `[EXACT]`
 
 1. **`bad_args: <campo> …`** — del llamante, en la tool MCP (`ui_dialog.py:72-73,92-94` y
-   el resto de `_bad` / `UiDialogError`; `server.py:1624-1625` lo reexpone como `ToolError`).
+   el resto de `_bad` / `UiDialogError`; `server.py` lo reexpone como `ToolError` en su manejo de `UiDialogError`).
    En el daemon (`POST /enqueue`) el token es solo `"bad_args"`, sin eco del texto del
    llamante (`ui_dialog.py:203-211,224-225`).
 2. **`bridge_bad_result: …`** — del puente / resultado mal formado
@@ -425,7 +424,7 @@ más passthrough de `id` y `_server` si vienen.
 
 ### Cambio observable para un consumidor ya existente
 
-`MCPResult` gana el miembro `ref MCPDialogResult dialog` (`MCPMessages.c:463-464`). Es la
+`MCPResult` gana el miembro `ref MCPDialogResult dialog` (`MCPMessages.c`, dentro de `class MCPResult`). Es la
 única clave de primer nivel nueva. En Python `dialog` entra en `PRUNABLE_FIELDS`
 (`tools/dayz_mcp/result_prune.py:45`): los verbos que no lo rellenan lo omiten (vacío /
 `null` = no asignado). **Excepción semántica**: `("ui_dialog", "dialog")` está en
@@ -437,7 +436,7 @@ firma ni de semántica por este campo (se poda cuando van vacíos).
 
 ### `playbook_run(name, params)` — una línea `[EXACT]`
 
-`playbook_run(name, params)` (`server.py:2875-2890`) corre un checklist nombrado
+`playbook_run(name, params)` (`server.py`, `async def playbook_run`) corre un checklist nombrado
 (`playbooks/<name>.toml`) contra las tools **ya registradas de la misma sesión/lease**;
 no lanza DayZ; tope 32 pasos; `certified` es **siempre false** hoy
 (`certified_reason: "no_frozen_registry"`, `playbook_tool.py:25,140-141,244-245`).
