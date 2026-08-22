@@ -4,6 +4,7 @@ import asyncio
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Make tools/ importable whether run via discover or by module name.
@@ -12,6 +13,23 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 from dayz_mcp import server
+
+def _live_run(profiles: Path) -> dict:
+    """A RUNNING run: a process stamped just now, so its logs clear the floor.
+
+    `wait_for` derives the launch floor from the earliest process of the newest
+    run and refuses a snapshot with no live run at all, so a fixture without a
+    process no longer describes anything the lifecycle can produce.
+    """
+
+    stamp = (datetime.now(timezone.utc) - timedelta(seconds=30)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    return {
+        "run_id": "run-a",
+        "profiles": str(profiles),
+        "processes": [{"pid": 4242, "creation_time_utc": stamp}],
+    }
 
 
 class _FakeRuntime:
@@ -126,7 +144,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
             log.write_text("MATCH already here\n", encoding="utf-8")
 
             async def lifecycle_status() -> dict:
-                return {"runs": [{"run_id": "run-a", "profiles": str(profiles)}]}
+                return {"runs": [_live_run(profiles)]}
 
             runtime = _FakeRuntime()
             runtime.lifecycle_status = lifecycle_status
@@ -155,7 +173,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
             log.write_text("".join(lines), encoding="utf-8")
 
             async def lifecycle_status() -> dict:
-                return {"runs": [{"run_id": "run-a", "profiles": str(profiles)}]}
+                return {"runs": [_live_run(profiles)]}
 
             runtime = _FakeRuntime()
             runtime.lifecycle_status = lifecycle_status
@@ -181,7 +199,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
             log.write_text("".join(lines), encoding="utf-8")
 
             async def lifecycle_status() -> dict:
-                return {"runs": [{"run_id": "run-a", "profiles": str(profiles)}]}
+                return {"runs": [_live_run(profiles)]}
 
             runtime = _FakeRuntime()
             runtime.lifecycle_status = lifecycle_status
@@ -205,7 +223,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
             log.write_text("BTCOpenResponse\n", encoding="utf-8")
 
             async def lifecycle_status() -> dict:
-                return {"runs": [{"run_id": "run-a", "profiles": str(profiles)}]}
+                return {"runs": [_live_run(profiles)]}
 
             runtime = _FakeRuntime()
             runtime.lifecycle_status = lifecycle_status

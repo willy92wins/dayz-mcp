@@ -27,6 +27,7 @@ import asyncio
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -36,14 +37,36 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import log_tail, server
 
 
+def _live_process(pid: int = 4242) -> dict:
+    """A process stamp recent enough that files written in the test pass the floor."""
+
+    stamp = (datetime.now(timezone.utc) - timedelta(seconds=30)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    return {"pid": pid, "creation_time_utc": stamp}
+
+
 class _FakeRuntime:
     """Only what execute_wait_for touches: a lock and a lifecycle snapshot."""
 
-    def __init__(self, profiles: Path) -> None:
+    def __init__(
+        self, profiles: Path, runs: list[dict] | None = None
+    ) -> None:
         self.tool_lock = asyncio.Lock()
+        snapshot = (
+            list(runs)
+            if runs is not None
+            else [
+                {
+                    "run_id": "run-a",
+                    "profiles": str(profiles),
+                    "processes": [_live_process()],
+                }
+            ]
+        )
 
         async def lifecycle_status() -> dict:
-            return {"runs": [{"run_id": "run-a", "profiles": str(profiles)}]}
+            return {"runs": snapshot}
 
         self.lifecycle_status = lifecycle_status
 

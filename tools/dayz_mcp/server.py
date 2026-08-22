@@ -1621,6 +1621,10 @@ async def _wait_for_script_log_paths(runtime: Any) -> list[str]:
     if not profiles:
         raise ToolError("no_active_run")
     start_epoch = _run_start_epoch(runs)
+    if start_epoch is None:
+        # No live run: the newest-file fallback would scan a dead launch
+        # and wait_for could report satisfied:true on a line hours old.
+        raise ToolError("no_active_run")
     paths: list[str] = []
     for profiles_dir in profiles:
         paths.extend(_current_launch_logs(profiles_dir, start_epoch))
