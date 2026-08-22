@@ -214,6 +214,33 @@ def _log_opaque_failure(runtime: Any, tool: str, exc: BaseException) -> None:
             pass
 
 
+def _wire_safe_error(runtime: Any, tool: str, detail: object) -> str:
+    """Reduce a backend error to the token the wire may carry.
+
+    A capture failure reports what actually broke, and what broke is described
+    with a host path: `mcp_capture` names GRAB_SCRIPT when the grab script is
+    missing, forwards the grab backend's stderr when it fails, and forwards the
+    exception text otherwise. Any of those puts C:\\Users\\<name>\\... in front of
+    whoever called the tool, on a wire that reaches other machines.
+
+    The leading token before the first colon is our own constant
+    (`capture_backend_failed`, `capture_timeout`), so that part travels and the
+    detail goes to the local log -- the same split `_typed_dayz_test_value_errors`
+    already applies, for the same reason. A token that is not identifier-shaped is
+    replaced rather than trusted: the point is a searchable name, never the text.
+    """
+    text = str(detail)
+    token = text.split(":", 1)[0].strip()
+    if text != token:
+        sink = getattr(runtime, "_log", None)
+        if callable(sink):
+            try:
+                sink(f"[{tool}] error detail (local only): {text}")
+            except Exception:
+                pass
+    return token if _is_safe_error_token(token) else f"{tool}_failed"
+
+
 def _is_safe_error_token(value: str) -> bool:
     """True for a bare identifier-shaped token, which cannot hold a host path.
 
@@ -3306,7 +3333,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 save_dir=save_dir,
             )
         if result.get("isError"):
-            raise ToolError(str(result.get("error") or result))
+            raise ToolError(
+                _wire_safe_error(
+                    runtime, "capture_screenshot", result.get("error") or result
+                )
+            )
         inline = result.get("inline") or {}
         data = inline.get("data")
         if not isinstance(data, str):
