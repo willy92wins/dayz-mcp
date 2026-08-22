@@ -366,7 +366,7 @@ Cada elemento de `fields` acepta en la tool las claves exactas `{id, label}` má
 - `default` / `default_text` ≤ 256 chars (`ui_dialog.py:27,186-196`).
 - 7 campos (N+1) → `bad_args` **antes** de encolar (`ui_dialog.py:126-127`).
 - Presupuesto Python del puente = `timeout_s + 10.0` (`BRIDGE_SLACK_S`, `ui_dialog.py:31,67-69`)
-  → ≤ 250 s, por debajo de `MAX_TIMEOUT_S` 300.0 (`server.py:50`). El `operation_timeout_s`
+  → ≤ 250 s, por debajo de `MAX_TIMEOUT_S` 300.0 (`server.py`). El `operation_timeout_s`
   encolado es ese presupuesto, no el timeout del jugador. El sondeo usa
   `WAIT_FOR_MIN_POLL_INTERVAL_S` 0.5 s (`server.py`, constante y bucle de sondeo).
 
@@ -384,7 +384,7 @@ convierten en `choice:"no"` ni en error de tool (`ui_dialog.py:339-343`;
 contrato v1 `:157-159` y `:287-288`). Cancelar una confirmación (botón Cancelar) no es «No».
 Nada de `values` parciales si el jugador no envía. `timed_out` lo produce el job del cliente
 cuando el jugador no contesta; el vencimiento del presupuesto Python **sin** resultado es
-transporte (`ToolError("timeout waiting for ui_dialog …")`, `server.py:1659`) y no se falsifica
+transporte (`ToolError("timeout waiting for ui_dialog …")`, `execute_ui_dialog` en `server.py`) y no se falsifica
 como `timed_out`.
 
 `rejected` exige `reason:"busy"` (`ui_dialog.py:333-337`): segundo diálogo con uno abierto,
