@@ -461,6 +461,73 @@ class LifecycleHttpTest(unittest.TestCase):
                 any(call[0] == "repair-manifest" for call in self.lifecycle.calls)
             )
 
+    def test_lifecycle_recovery_repair_resumes_from_repairing(self) -> None:
+        # F-02: a failed re-arm used to leave the pointer in repairing, and the
+        # gate only admitted repaired/armed, so retry 409'd on both heads.
+        attempts = {"n": 0}
+
+        class FlakyLifecycle(FakeLifecycle):
+            def repair_recovery_fault(self, fault):
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    return {"terminal_safe": False, "error": "cleanup_failed"}
+                return super().repair_recovery_fault(fault)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = RuntimePaths(
+                root,
+                root / "audit",
+                root / "coordination.json",
+                root / "runs.json",
+            )
+            store = LifecycleRecoveryFaultStore(
+                paths,
+                fault_id_fn=lambda: "11111111-1111-4111-8111-111111111111",
+                utc_now_fn=lambda: "2026-07-22T00:00:00Z",
+            )
+            backup_receipt = store.create_manifest_backup(
+                b'{"version":1,"runs":[]}\n'
+            )
+            active = store.arm(
+                scope="run",
+                reason="cleanup_failed",
+                manifest_sha256=hashlib.sha256(b"corrupt").hexdigest(),
+                backup_receipt_sha256=backup_receipt,
+                run_id="R",
+                launch_operation_id="22222222-2222-4222-8222-222222222222",
+                run_record_sha256="c" * 64,
+            )
+            original_transition = store.transition
+
+            def transition_no_rearm(fault_id_arg, expected, **values):
+                if values.get("state") == "armed":
+                    raise OSError("rearm failed")
+                return original_transition(fault_id_arg, expected, **values)
+
+            store.transition = transition_no_rearm  # type: ignore[method-assign]
+            self.state.lifecycle = FlakyLifecycle()
+            self.state.lifecycle_recovery_fault_store = store
+            self.state.coordination.arm_lifecycle_recovery_fault(active)
+            fault_id = active["fault"]["fault_id"]
+            armed_head = active["pointer"]["head_event_sha256"]
+
+            first_status, first = loopback._repair_lifecycle_recovery_fault(
+                self.state, fault_id, armed_head
+            )
+            self.assertEqual((first_status, first.get("error")), (409, "cleanup_failed"))
+            stuck = store.load_active()
+            self.assertEqual(stuck["event"]["state"], "repairing")
+            repairing_head = stuck["pointer"]["head_event_sha256"]
+            self.assertNotEqual(repairing_head, armed_head)
+
+            second_status, second = loopback._repair_lifecycle_recovery_fault(
+                self.state, fault_id, repairing_head
+            )
+            self.assertEqual((second_status, second.get("repaired")), (200, True))
+            self.assertEqual(store.load_active()["event"]["state"], "repaired")
+            self.assertEqual(attempts["n"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

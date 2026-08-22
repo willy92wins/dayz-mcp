@@ -5,6 +5,7 @@ import io
 import os
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -1634,6 +1635,13 @@ class CoordinatorWalIntegrationTests(unittest.TestCase):
         released = coordinator.release(_identity("a"), active["lease_token"])
 
         self.assertEqual((released[0], released[1]["released"]), (200, True))
+        self.assertNotIn("audit_failed", released[1].get("cleanup_degraded") or [])
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         self.assertEqual(self.fault_store.load_with_sha(), (None, None))
         persisted = json.loads(self.paths.coordination_path.read_text(encoding="utf-8"))
         self.assertIsNone(persisted["active"])
@@ -1641,6 +1649,55 @@ class CoordinatorWalIntegrationTests(unittest.TestCase):
         self.assertFalse(persisted["handoff_pending"])
         names = [event["event"] for event in self.events]
         self.assertLess(names.index("session_release_started"), names.index("session_release_finished"))
+
+    def test_slow_successful_release_audit_is_not_reported_failed(self) -> None:
+        finished = threading.Event()
+
+        def audit(event: dict[str, object]) -> bool:
+            self.events.append(dict(event))
+            if event.get("event") == "session_release_finished":
+                time.sleep(0.2)
+                finished.set()
+            return True
+
+        coordinator = SessionCoordinator(
+            token_fn=lambda: "secret-token",
+            id_fn=lambda: "lease-1",
+            fault_id_fn=lambda: "fault-1",
+            daemon_generation="generation-a",
+            utc_now_fn=lambda: "2026-07-22T00:00:00Z",
+            audit=audit,
+            fault_arm=self.fault_store.arm,
+            fault_transition=self.fault_store.transition,
+            fault_clear=self.fault_store.clear,
+            persist_snapshot=self.snapshot_store.write_coordination,
+        )
+        active = coordinator.acquire(_identity("a"), "drive")[1]
+        released = coordinator.release(_identity("a"), active["lease_token"])
+
+        self.assertEqual((released[0], released[1]["released"]), (200, True))
+        self.assertEqual(released[1]["cleanup_degraded"], [])
+        self.assertTrue(coordinator.snapshot_payload()["handoff_pending"])
+        with coordinator._condition:
+            self.assertFalse(coordinator._handoff_audit_failed)
+
+        self.assertTrue(finished.wait(1.0))
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
+        for thread in threading.enumerate():
+            if thread.name.startswith("dayz-mcp-release-audit-"):
+                thread.join(1.0)
+        snapshot = coordinator.snapshot_payload()
+        self.assertFalse(snapshot["handoff_pending"])
+        self.assertIsNone(snapshot["audit_fault"])
+        self.assertIn(
+            "session_release_finished",
+            [event["event"] for event in self.events],
+        )
 
     def test_release_terminal_audit_failure_latches_durable_fault(self) -> None:
         def audit(event: dict[str, object]) -> bool:

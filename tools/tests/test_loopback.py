@@ -12,7 +12,11 @@ import urllib.request
 
 from dayz_mcp import loopback
 from dayz_mcp import server
-from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
+from dayz_mcp.session_coordination import (
+    ClientIdentity,
+    MAX_SESSION_QUEUE,
+    SessionCoordinator,
+)
 from tests.fence_helpers import INST_CLIENT, INST_SERVER, accredited_poll, bind_both_peers
 
 
@@ -254,6 +258,8 @@ class LoopbackTest(unittest.TestCase):
             ("notify_players", {"show_time": 0.0, "title": "Game Master"}),
             ("notify_players", {"show_time": 5.0, "title": ""}),
             ("notify_players", {"show_time": 5.0, "title": "Game Master", "detail": 3}),
+            ("object_delete", {"object_id": 7, "unexpected": "x"}),
+            ("notify_players", {"show_time": 5.0, "title": "Game Master", "unexpected": "x"}),
         ]
         for verb, args in bad_cases:
             with self.subTest(verb=verb, args=args):
@@ -1207,6 +1213,75 @@ class LoopbackHttpBodyTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertIn("id", body)
+
+    def test_idle_tcp_connections_do_not_spawn_past_http_worker_ceiling(self) -> None:
+        # F-03: a connecting socket used to cost a thread before auth.
+        self.assertEqual(loopback.MAX_HTTP_WORKERS, MAX_SESSION_QUEUE + 32)
+        parsed = urllib.parse.urlparse(self.base)
+        host = parsed.hostname or "127.0.0.1"
+        port = int(parsed.port or 80)
+        extra = 8
+        baseline = threading.active_count()
+        socks: list[socket.socket] = []
+        try:
+            for _ in range(loopback.MAX_HTTP_WORKERS + extra):
+                sock = socket.create_connection((host, port), timeout=2.0)
+                sock.settimeout(0.5)
+                socks.append(sock)
+            deadline = time.monotonic() + 5.0
+            peak = 0
+            while time.monotonic() < deadline:
+                peak = max(peak, threading.active_count() - baseline)
+                if peak >= loopback.MAX_HTTP_WORKERS:
+                    time.sleep(0.15)
+                    peak = max(peak, threading.active_count() - baseline)
+                    break
+                time.sleep(0.01)
+            self.assertGreaterEqual(
+                peak,
+                loopback.MAX_HTTP_WORKERS,
+                "accept loop never filled the worker ceiling; test would be vacuous",
+            )
+            self.assertLessEqual(
+                peak,
+                loopback.MAX_HTTP_WORKERS + 3,
+                f"idle TCP spawned {peak} threads (ceiling {loopback.MAX_HTTP_WORKERS})",
+            )
+        finally:
+            for sock in socks:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        deadline = time.monotonic() + 2.0
+        while threading.active_count() > baseline + 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        status, _body = self.request("GET", "/status")
+        self.assertEqual(status, 200)
+
+
+class ResultCapTests(unittest.TestCase):
+    def test_results_are_capped_dropping_oldest_first(self) -> None:
+        # F-11: /await defaults to remove=0, so finished results used to grow
+        # without a bound. Oldest insertion is the one that must disappear.
+        state = loopback.ServerState("result-cap-key")
+        bind_both_peers(state)
+        ids: list[int] = []
+        overflow = 3
+        for _ in range(loopback.MAX_RESULTS + overflow):
+            status, body = state.enqueue_command("query_player_state", {})
+            self.assertEqual(status, 200)
+            accredited_poll(state, "server")
+            store_status, _stored = state.store_result(
+                {"id": body["id"], "ok": 1}, instance=INST_SERVER
+            )
+            self.assertEqual(store_status, 200)
+            ids.append(body["id"])
+        self.assertEqual(state.status_snapshot()["results_pending"], loopback.MAX_RESULTS)
+        for evicted_id in ids[:overflow]:
+            self.assertIsNone(state.take_result(evicted_id))
+        self.assertIsNotNone(state.take_result(ids[-1]))
+        self.assertIsNotNone(state.take_result(ids[overflow]))
 
 
 if __name__ == "__main__":

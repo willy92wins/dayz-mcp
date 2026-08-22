@@ -126,6 +126,29 @@ class CommandValidationCoverageTest(unittest.TestCase):
         )
         self.assertTrue(ok_release, f"infected_drive (release) rejected: {err_release!r}")
 
+    def test_schemed_verbs_reject_unexpected_keys(self) -> None:
+        # F-12: verbs that already have a schema must fail closed on extra keys.
+        # _SCHEMALESS_COMMANDS are intentionally not covered here.
+        ok_delete, err_delete = loopback.validate_command_args(
+            "object_delete", {"object_id": 1, "unexpected": "x"}
+        )
+        self.assertFalse(ok_delete)
+        self.assertEqual(err_delete, "bad_args")
+        ok_notify, err_notify = loopback.validate_command_args(
+            "notify_players",
+            {"show_time": 1.0, "title": "t", "unexpected": "x"},
+        )
+        self.assertFalse(ok_notify)
+        self.assertEqual(err_notify, "bad_args")
+        ok_clean, err_clean = loopback.validate_command_args(
+            "object_delete", {"object_id": 1}
+        )
+        self.assertTrue(ok_clean, err_clean)
+        ok_notify_clean, err_notify_clean = loopback.validate_command_args(
+            "notify_players", {"show_time": 1.0, "title": "t"}
+        )
+        self.assertTrue(ok_notify_clean, err_notify_clean)
+
 
 if __name__ == "__main__":
     unittest.main()

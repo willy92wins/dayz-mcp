@@ -38,6 +38,7 @@ from dayz_mcp.instance_fence import (
 )
 from dayz_mcp.session_coordination import (
     ClientIdentity,
+    MAX_SESSION_QUEUE,
     SessionCoordinator,
     command_requires_lease,
 )
@@ -94,6 +95,9 @@ WHITELISTED_COMMANDS = SERVER_COMMANDS | CLIENT_COMMANDS
 # either read-only / single-arg or validated by its server.py tool. Keep in sync
 # with SERVER_COMMANDS | CLIENT_COMMANDS: any whitelisted verb not in this set
 # and not handled by an `if cmd == ...` branch is rejected as bad_args.
+# Extra keys are not rejected here. Closing these 18 key sets means copying
+# each verb's bridge/tool arg contract into this ingress; that is a separate
+# change. Schemed verbs below already fail closed on unknown keys.
 _SCHEMALESS_COMMANDS = {
     "query_player_state",
     "query_all_players",
@@ -140,6 +144,20 @@ ADMIN_ROUTES = {
     "/admin/lifecycle-recovery-repair": "lifecycle-recovery-repair",
 }
 MAX_QUEUE = 64
+# Unconsumed /result rows. /await defaults to remove=0, so COMMAND_TTL_S
+# (pending commands) does not bound this dict. 4x MAX_QUEUE holds four full
+# in-flight cycles of peek-then-take; the oldest insertion is dropped first.
+MAX_RESULTS = MAX_QUEUE * 4
+# Worker ceiling for ExclusiveThreadingHTTPServer.process_request.
+# Bind is 127.0.0.1: this is local availability, not remote exposure, so the
+# number tracks the broker rather than a large internet backlog.
+# The coordinator admits MAX_SESSION_QUEUE Cowork sessions against one game;
+# each queued session may hold one POST /wait. Add 2 game-bridge /poll
+# sockets, the active session's /enqueue+/await, /status probes, and
+# headroom for a short legitimate burst while waits are held. Exceeding the
+# ceiling closes the accepted socket without a worker (reject, do not queue):
+# Handler.timeout already bounds each worker's duration, not concurrency.
+MAX_HTTP_WORKERS = MAX_SESSION_QUEUE + 32
 # Stale-command hygiene: a client that crashed/relaunched must not
 # inherit commands queued for the previous session. record_poll drops commands
 # older than COMMAND_TTL_S, and flushes the peer's whole queue when the gap since
@@ -458,6 +476,10 @@ def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
         return True, None
 
     if cmd == "object_delete":
+        # Closed key set: this socket is authenticated ingress, not only the
+        # FastMCP surface, so extra keys must not ride through.
+        if set(args) != {"object_id"}:
+            return False, "bad_args"
         object_id = args.get("object_id")
         if not isinstance(object_id, int) or isinstance(object_id, bool):
             return False, "bad_args"
@@ -466,6 +488,8 @@ def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
         return True, None
 
     if cmd == "notify_players":
+        if set(args) - {"show_time", "title", "detail", "icon", "uid"}:
+            return False, "bad_args"
         if not _is_real_number(args.get("show_time")) or float(args["show_time"]) <= 0.0:
             return False, "bad_args"
         title = args.get("title")
@@ -1940,6 +1964,7 @@ class ServerState:
             self._results.pop(command_id, None)
         elif command_id not in self._results:
             self._results[command_id] = {"id": command_id, "ok": False, "error": reason}
+            self._trim_results_locked()
         self._enqueued_at.pop(command_id, None)
         self._operation_deadlines.pop(command_id, None)
         self._command_fence.pop(command_id, None)
@@ -1982,6 +2007,22 @@ class ServerState:
                             values.append(item)
                     result["cleanup_degraded"] = values
                 self._audit_degraded_count += 1
+
+    def _evict_result_locked(self, command_id: int) -> None:
+        # Caller holds self._lock. Drops one stored result and the metadata
+        # take_result(remove=True) would have dropped. finish_operation_exact
+        # already ran at store time (or discard already queued it).
+        self._results.pop(command_id, None)
+        self._enqueued_at.pop(command_id, None)
+        self._operation_deadlines.pop(command_id, None)
+        self._command_owner.pop(command_id, None)
+
+    def _trim_results_locked(self) -> None:
+        # Caller holds self._lock. Dict insertion order is store order; the
+        # oldest unread result is the first key.
+        while len(self._results) > MAX_RESULTS:
+            oldest_id = next(iter(self._results))
+            self._evict_result_locked(oldest_id)
 
     def store_result(
         self, body: dict, instance: str | None = None
@@ -2060,6 +2101,7 @@ class ServerState:
                     meta["rtt_s"] = t_result - t_enqueue
                 stored["_server"] = meta
                 self._results[command_id] = stored
+                self._trim_results_locked()
                 owner = self._command_owner.get(command_id)
                 if owner is not None:
                     owner_operation = (owner[0], owner[1], command_id)
@@ -2895,17 +2937,26 @@ def _repair_lifecycle_recovery_fault(
     if event.get("state") == "repaired":
         coordinator.clear_lifecycle_recovery_fault(fault_id)
         return 200, {"repaired": True, "fault_id": fault_id}
-    if event.get("state") != "armed":
-        return 409, {"error": "lifecycle_recovery_cas_conflict"}
     manifest_sha = fault.get("manifest_sha256")
-    try:
-        repairing_head = store.transition(
-            fault_id,
-            expected_head_sha256,
-            state="repairing",
-            expected_manifest_sha256=manifest_sha,
-        )
-    except (OSError, RuntimeError, ValueError):
+    event_state = event.get("state")
+    if event_state == "armed":
+        try:
+            repairing_head = store.transition(
+                fault_id,
+                expected_head_sha256,
+                state="repairing",
+                expected_manifest_sha256=manifest_sha,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return 409, {"error": "lifecycle_recovery_cas_conflict"}
+    elif event_state == "repairing":
+        # Resume from an in-progress repair. Same shape as
+        # _repair_coordination_audit_fault, which continues from repairing
+        # instead of demanding a fresh start. A failed re-arm leaves the
+        # pointer here; refusing it made retry unrecoverable (409 on the
+        # repairing head and 409 on the armed head).
+        repairing_head = expected_head_sha256
+    else:
         return 409, {"error": "lifecycle_recovery_cas_conflict"}
     try:
         if fault.get("scope") == "manifest":
@@ -3106,6 +3157,28 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
     # instance lock (two loopbacks would silently split bridge polls). Exclusive
     # bind makes the second bind fail with EADDRINUSE.
     allow_reuse_address = False
+
+    def __init__(self, *args, **kwargs):
+        self._http_workers = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        # Auth runs in the handler, after a worker exists. An idle TCP has
+        # already cost a thread, so the ceiling is on spawn, not on /status.
+        if not self._http_workers.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._http_workers.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._http_workers.release()
 
 
 def _is_address_in_use(exc: OSError) -> bool:

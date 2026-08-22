@@ -40,6 +40,10 @@ READ_ONLY_COMMANDS = frozenset(
 MAX_OPERATION_PIN_S = 300.0
 MAX_CLEANUP_WORKERS = 4
 MAX_RELEASE_AUDIT_WORKERS = 1
+# HTTP wait bound for the release ledger thread. Expiry is not a terminal
+# audit fault: the worker may still finish, and snapshot handoff_pending
+# already names that live wait. Raising this number would only hide the
+# pending window; it is not required once pending and failed are distinct.
 RELEASE_AUDIT_TIMEOUT_S = 0.05
 MAX_OPERATION_TOMBSTONES = 128
 OPERATION_TOMBSTONE_TTL_S = 120.0
@@ -1986,7 +1990,7 @@ class SessionCoordinator:
             self._bump_revision_locked()
             expired_tickets = self._remove_expired_tickets_locked(None)
             self._condition.notify_all()
-            audit_ok, audit_worker_started = self._write_release_audits_bounded_locked(
+            audit_outcome = self._write_release_audits_bounded_locked(
                 lease=lease,
                 started_event=started_event,
                 audit_reason=audit_reason,
@@ -1997,7 +2001,7 @@ class SessionCoordinator:
                 expired_tickets=expired_tickets,
                 wait_s=RELEASE_AUDIT_TIMEOUT_S,
             )
-            if not audit_ok and not audit_worker_started:
+            if audit_outcome == "not_started":
                 self._handoff_audit_failed = True
                 self._latch_wal_fault_locked("audit_failed", "audit_failed")
                 return False
@@ -2267,7 +2271,7 @@ class SessionCoordinator:
                 self._cleanup_timeout_s - cleanup_duration_s,
             ),
         )
-        audit_ok, audit_worker_started = self._write_release_audits_bounded_locked(
+        audit_outcome = self._write_release_audits_bounded_locked(
             lease=lease,
             started_event=started_event,
             audit_reason=audit_reason,
@@ -2278,9 +2282,16 @@ class SessionCoordinator:
             expired_tickets=expired_tickets,
             wait_s=audit_wait_s,
         )
-        if not audit_ok:
+        # cleanup_degraded is the observed-fault bag (audit_failed,
+        # cleanup_failed, snapshot_failed). A wait expiry while the worker
+        # is still running is not a fault: status already publishes that
+        # window as handoff_pending with cleanup_degraded=[], and control
+        # clients treat any non-empty cleanup_degraded as a conflict.
+        # audit_failed stays reserved for a terminal result (worker did not
+        # start, or it finished failed inside wait_s).
+        if audit_outcome in {"failed", "not_started"}:
             degraded.append("audit_failed")
-            if not audit_worker_started:
+            if audit_outcome == "not_started":
                 self._handoff_audit_failed = True
         self._condition.notify_all()
         return cleanup_result, self._unique(degraded)
@@ -2321,22 +2332,20 @@ class SessionCoordinator:
                 self._bump_revision_locked()
                 expired_tickets = self._remove_expired_tickets_locked(None)
                 self._condition.notify_all()
-                audit_ok, audit_worker_started = (
-                    self._write_release_audits_bounded_locked(
-                        lease=lease,
-                        started_event=started_event,
-                        audit_reason=audit_reason,
-                        cleanup_timed_out=True,
-                        cleanup_duration_s=cleanup_duration_s,
-                        cleanup_summary=cleanup_summary,
-                        cleanup_degraded=self._unique(
-                            [str(item) for item in degraded]
-                        ),
-                        expired_tickets=expired_tickets,
-                        wait_s=RELEASE_AUDIT_TIMEOUT_S,
-                    )
+                audit_outcome = self._write_release_audits_bounded_locked(
+                    lease=lease,
+                    started_event=started_event,
+                    audit_reason=audit_reason,
+                    cleanup_timed_out=True,
+                    cleanup_duration_s=cleanup_duration_s,
+                    cleanup_summary=cleanup_summary,
+                    cleanup_degraded=self._unique(
+                        [str(item) for item in degraded]
+                    ),
+                    expired_tickets=expired_tickets,
+                    wait_s=RELEASE_AUDIT_TIMEOUT_S,
                 )
-                if not audit_ok and not audit_worker_started:
+                if audit_outcome == "not_started":
                     self._handoff_audit_failed = True
                 self._condition.notify_all()
 
@@ -2358,7 +2367,7 @@ class SessionCoordinator:
         cleanup_degraded: list[str],
         expired_tickets: list[_Ticket],
         wait_s: float,
-    ) -> tuple[bool, bool]:
+    ) -> str:
         if not self._release_audit_worker_slots.acquire(blocking=False):
             return False, False
 
@@ -2461,8 +2470,10 @@ class SessionCoordinator:
             self._condition.acquire()
         if start_error:
             self._release_audit_worker_slots.release()
-            return False, False
-        return done.is_set() and result.get("ok") is True, True
+            return "not_started"
+        if not done.is_set():
+            return "pending"
+        return "ok" if result.get("ok") is True else "failed"
 
     def _claim_head_from_wait_locked(
         self, ticket: _Ticket
