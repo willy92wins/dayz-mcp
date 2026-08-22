@@ -22,14 +22,6 @@ class RuntimeHttpAllowance:
 
 
 @dataclass(frozen=True)
-class RuntimeHttpExclusion:
-    protocol: str
-    owner: str
-    reason: str
-    evidence: tuple[str, ...]
-
-
-@dataclass(frozen=True)
 class ProcessCreationFinding:
     relative_path: str
     line: int
@@ -62,23 +54,6 @@ RUNTIME_HTTP_ALLOWLIST = {
         owner="H10 unauthenticated listener probe",
         reason="Nominal liveness probe sends no API key, identity, lease, or body.",
     ),
-}
-
-RUNTIME_HTTP_EXCLUSIONS = {
-    "mcp_client.py": RuntimeHttpExclusion(
-        protocol="legacy_loopback_harness",
-        owner="DayZ_MCP phase-gate harness",
-        reason=(
-            "Historical phase runner paired only with mcp_server.py's bare loopback; "
-            "it is not a normal-daemon discovery, admin, lifecycle, or stdio client."
-        ),
-        evidence=(
-            "run-poc.ps1",
-            "run-fase1.ps1",
-            "run-fase2.ps1",
-            "run-fase3.ps1",
-        ),
-    )
 }
 
 _HTTP_CALLABLES = frozenset(
@@ -1143,9 +1118,6 @@ def _imported_modules(
 def _runtime_sources(tools_dir: Path) -> tuple[Path, ...]:
     package = tools_dir / "dayz_mcp"
     sources = list(package.rglob("*.py")) if package.is_dir() else []
-    legacy_candidate = tools_dir / "mcp_client.py"
-    if legacy_candidate.is_file():
-        sources.append(legacy_candidate)
     modules = {_module_name(tools_dir, path): path for path in sources}
     available = frozenset(modules)
     roots = {name for name in _PRODUCTIVE_ROOT_MODULES if name in modules}
@@ -1167,8 +1139,6 @@ def _runtime_sources(tools_dir: Path) -> tuple[Path, ...]:
             except (OSError, UnicodeError, SyntaxError):
                 continue
             pending.extend(_imported_modules(tree, name, available) - selected)
-    if "mcp_client" in modules:
-        selected.add("mcp_client")
     return tuple(
         sorted(
             (modules[name] for name in selected),
@@ -1225,8 +1195,6 @@ def audit_runtime_http(tools_dir: Path) -> tuple[RuntimeHttpFinding, ...]:
     parsed: list[tuple[Path, str, ast.Module]] = []
     for path in _runtime_sources(tools_dir):
         relative = path.relative_to(tools_dir).as_posix()
-        if relative in RUNTIME_HTTP_EXCLUSIONS:
-            continue
         try:
             source = path.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(path))

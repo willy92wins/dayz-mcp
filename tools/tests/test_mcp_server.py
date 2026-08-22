@@ -10,14 +10,14 @@ import urllib.parse
 import urllib.request
 from http.server import ThreadingHTTPServer
 
-import mcp_server
+from dayz_mcp import loopback
 
 
 class MCPServerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.key = "test-key"
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), mcp_server.Handler)
-        self.httpd.state = mcp_server.ServerState(self.key)  # type: ignore[attr-defined]
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), loopback.Handler)
+        self.httpd.state = loopback.ServerState(self.key)  # type: ignore[attr-defined]
         from tests.fence_helpers import INST_CLIENT, INST_SERVER, bind_both_peers
 
         bind_both_peers(self.httpd.state)
@@ -113,7 +113,7 @@ class MCPServerTest(unittest.TestCase):
         self.assertEqual(body, {"error": "bad_peer"})
 
     def test_queue_cap_returns_429(self) -> None:
-        for _ in range(mcp_server.MAX_QUEUE):
+        for _ in range(loopback.MAX_QUEUE):
             status, body = self.request("POST", "/enqueue", {"cmd": "query_player_state", "args": {}})
             self.assertEqual(status, 200)
             self.assertIn("id", body)

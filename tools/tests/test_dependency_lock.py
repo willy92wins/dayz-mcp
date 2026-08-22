@@ -267,12 +267,6 @@ class DependencyLockTest(unittest.TestCase):
         self.assertNotIn("dayz-test.ps1", REGISTRY_PATH.read_text(encoding="utf-8").casefold())
         static_inspection_exclusions = {
             "dayz_mcp/doctor.py": {"dayz-test.ps1"},
-            "dayz_mcp/security_runtime_audit.py": {
-                "run-poc.ps1",
-                "run-fase1.ps1",
-                "run-fase2.ps1",
-                "run-fase3.ps1",
-            },
         }
         for source_path in (TOOLS_DIR / "dayz_mcp").rglob("*.py"):
             relative = source_path.relative_to(TOOLS_DIR).as_posix()
@@ -305,17 +299,7 @@ class DependencyLockTest(unittest.TestCase):
                         )
                     )
                 else:
-                    self.assertTrue(
-                        any(
-                            isinstance(ancestor, ast.Assign)
-                            and any(
-                                isinstance(target, ast.Name)
-                                and target.id == "RUNTIME_HTTP_EXCLUSIONS"
-                                for target in ancestor.targets
-                            )
-                            for ancestor in ancestors
-                        )
-                    )
+                    self.fail(f"unscoped powershell mention in {relative}")
 
 
     def test_psutil_lock_pin_matches_vendored_manifest(self) -> None:

@@ -266,36 +266,7 @@ def shadowed(urllib, http):
             self.assertIn((function, "dynamic_http"), observed)
         self.assertFalse(any(function == "shadowed" for function, _kind in observed))
 
-    def test_mcp_client_exclusion_is_narrow_owned_and_evidenced(self) -> None:
-        auditor = self._auditor()
-        candidates = {
-            path.relative_to(TOOLS_DIR).as_posix()
-            for path in auditor._runtime_sources(TOOLS_DIR)
-        }
-        self.assertIn("mcp_client.py", candidates)
-        exclusion = auditor.RUNTIME_HTTP_EXCLUSIONS["mcp_client.py"]
-        self.assertEqual(exclusion.protocol, "legacy_loopback_harness")
-        self.assertEqual(exclusion.owner, "DayZ_MCP phase-gate harness")
-        self.assertIn("mcp_server.py", exclusion.reason)
-        self.assertEqual(
-            set(exclusion.evidence),
-            {
-                "run-poc.ps1",
-                "run-fase1.ps1",
-                "run-fase2.ps1",
-                "run-fase3.ps1",
-            },
-        )
-
-        client_source = (TOOLS_DIR / "mcp_client.py").read_text(encoding="utf-8")
-        self.assertNotIn("dayz_mcp.daemon", client_source)
-        self.assertNotIn("verified_daemon_http_request", client_source)
-        for name in exclusion.evidence:
-            source = (TOOLS_DIR / name).read_text(encoding="utf-8")
-            self.assertIn('"mcp_server.py"', source, name)
-            self.assertIn('"mcp_client.py"', source, name)
-
-    def test_exclusion_does_not_hide_same_named_package_module(self) -> None:
+    def test_same_named_package_module_is_audited_through_its_alias(self) -> None:
         auditor = self._auditor()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

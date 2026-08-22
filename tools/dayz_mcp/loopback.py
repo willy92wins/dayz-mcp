@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
 import errno
 import hmac
 import json
@@ -3287,31 +3286,3 @@ class LoopbackServer:
             self.thread.join(timeout=timeout)
         self.httpd = None
         self.thread = None
-
-
-def main(argv: list[str] | None = None, log_sink: LogSink | None = None) -> int:
-    parser = argparse.ArgumentParser(description="DayZ MCP POC loopback server")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--keyfile", required=True)
-    args = parser.parse_args(argv)
-
-    key = read_key(args.keyfile)
-    httpd = create_http_server(
-        args.port,
-        ServerState(key, config_port=args.port),
-        log_sink=log_sink or _default_log_sink,
-    )
-    host, port = httpd.server_address
-    (log_sink or _default_log_sink)(f"LISTEN host={host} port={port}")
-    try:
-        httpd.serve_forever(poll_interval=0.1)
-    except KeyboardInterrupt:
-        return 130
-    finally:
-        httpd.server_close()
-
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
