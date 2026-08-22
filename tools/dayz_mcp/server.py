@@ -186,6 +186,21 @@ _DAYZ_TEST_VALUE_ERROR_CODES = {
 }
 
 
+def _is_safe_error_token(value: str) -> bool:
+    """True for a bare identifier-shaped token, which cannot hold a host path.
+
+    Deliberately strict: no dot, colon, separator, space or quote survives, so a
+    stdlib message (`invalid literal for int() with base 10: 'x'`) is rejected
+    and stays mute, while a source constant (`invalid_session_lease`) passes.
+    """
+    return (
+        3 <= len(value) <= 64
+        and value[0].isascii()
+        and value[0].isalpha()
+        and all(char.isascii() and (char.isalnum() or char == "_") for char in value)
+    )
+
+
 @contextmanager
 def _typed_dayz_test_value_errors() -> Iterator[None]:
     """Type the constant ValueError tokens of the dayz_test request path.
@@ -198,10 +213,19 @@ def _typed_dayz_test_value_errors() -> Iterator[None]:
     try:
         yield
     except ValueError as error:
-        code = _DAYZ_TEST_VALUE_ERROR_CODES.get(str(error))
-        if code is None:
-            raise
-        raise dayz_test_tool.DayzTestToolError(code) from None
+        token = str(error)
+        code = _DAYZ_TEST_VALUE_ERROR_CODES.get(token)
+        if code is not None:
+            raise dayz_test_tool.DayzTestToolError(code) from None
+        if _is_safe_error_token(token):
+            # Not curated, but a bare identifier cannot carry a host path, and a
+            # named failure beats `dayz_test_failed:ValueError` -- a string that
+            # matches nothing and sends whoever hit it to read source. Measured
+            # 2026-08-21: a session spent two hours on exactly that silence while
+            # the map held 9 tokens and the path raised far more. The map above
+            # now only exists to RENAME the few tokens whose own name is poor.
+            raise dayz_test_tool.DayzTestToolError(token) from None
+        raise
 
 
 _CONTROL_CLIENT_ERROR_CODES = frozenset({
