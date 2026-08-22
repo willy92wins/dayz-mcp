@@ -93,6 +93,16 @@ def _doc(rel: str) -> str:
     return _doc_path(rel).read_text(encoding="utf-8", errors="replace")
 
 
+def _published_docs(names: tuple[str, ...]) -> list[str]:
+    """Of `names`, the ones this tree actually carries.
+
+    Internal documents are excluded from the published tree, so a clone has only
+    a subset. Checking the subset keeps the assertion meaningful there instead of
+    raising FileNotFoundError on the first absent one.
+    """
+    return [rel for rel in names if _doc_path(rel).is_file()]
+
+
 def _module_text(rel: str) -> str:
     """Ground truth: always the real tree, never the backup replay."""
     return (_TOOLS / rel).read_text(encoding="utf-8")
@@ -287,6 +297,8 @@ class HandoffLineCiteDocsTest(unittest.TestCase):
     drift-by-construction. Cite the section or the stable artifact instead."""
 
     def test_readme_cites_handoff_without_line_numbers(self) -> None:
+        if not (REPO / "HANDOFF.md").is_file():
+            self.skipTest("HANDOFF.md is internal and absent from a published tree")
         handoff = (REPO / "HANDOFF.md").read_text(
             encoding="utf-8", errors="replace")
         if "LIVE-STATE" not in handoff:
@@ -357,8 +369,13 @@ class VanillaSymbolCitationsDocsTest(unittest.TestCase):
                 return parts
             return None
 
+        docnames = _published_docs(
+            ("README.md", "dayz-mcp-architecture.md", "CLAUDE.md")
+        )
+        if not docnames:
+            self.skipTest("none of the cited documents is present in this tree")
         offenders: list[str] = []
-        for docname in ("README.md", "dayz-mcp-architecture.md", "CLAUDE.md"):
+        for docname in docnames:
             text = _doc(docname)
             cache: dict[str, list[list[str]]] = {}
             for m in cite_re.finditer(text):

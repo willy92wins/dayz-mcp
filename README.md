@@ -227,7 +227,11 @@ cd tools
 
 Tests that need a built launcher, an installed registry or development-only
 evidence skip with the reason named, so a fresh clone is red only for real
-regressions (one known startup flake, `test_bug046_startup_deadlock`, aside).
+regressions — with one exception. The process tests in
+`test_bug046_startup_deadlock` spawn a real daemon and wait 12 s for it; on a
+loaded machine that wait expires, and because one of them checks four crash
+stages a single flaky run reports up to five `TimeoutExpired` errors from that
+module alone. Errors from anywhere else are worth reporting.
 
 ## Licence
 
