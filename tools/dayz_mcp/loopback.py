@@ -2354,6 +2354,13 @@ class ServerState:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "DayZMCPPOC/0.1"
+    # Socket deadline for one accepted connection. socketserver applies it with
+    # connection.settimeout(), so every blocking recv/send on that socket is
+    # bounded — including the request-line read that otherwise holds a worker
+    # thread forever when a local client connects and sends nothing. 35s sits
+    # strictly above the POST /wait long-poll ceiling so a max-length wait still
+    # has headroom on the same socket.
+    timeout = 35.0
 
     def log_message(self, format: str, *args: object) -> None:
         return
