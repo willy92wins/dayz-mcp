@@ -1969,10 +1969,13 @@ async def execute_wait_for(
     poll_interval_s: float = 2.0,
     lookback_lines: int = 200,
     lookback_from: str = "lines",
+    marker: str | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Poll until a wait_for condition holds.
 
     ``pattern`` is a plain substring, never a regex -- see the matcher below.
+    ``marker`` is a logs_since cursor. When present for ``log_matches``, it
+    replaces the heuristic lookback and both lookback arguments are ignored.
     ``lookback_from="launch"`` scans this launch's logs from byte 0 once before
     polling, then tails from the end like the default.
 
@@ -2003,15 +2006,22 @@ async def execute_wait_for(
     if poll_value <= 0.0:
         raise ToolError("bad_args: poll_interval_s must be > 0")
     poll_interval_s = max(poll_value, WAIT_FOR_MIN_POLL_INTERVAL_S)
-    if (
-        not isinstance(lookback_lines, int)
-        or isinstance(lookback_lines, bool)
-        or lookback_lines < 0
-        or lookback_lines > WAIT_FOR_LOOKBACK_MAX
-    ):
-        raise ToolError("bad_args: lookback_lines must be in 0..2000")
-    if lookback_from not in WAIT_FOR_LOOKBACK_FROM:
-        raise ToolError('bad_args: lookback_from must be "lines" or "launch"')
+    marker_state: dict[str, log_tail.TailMarker] | None = None
+    if condition == "log_matches" and marker is not None:
+        try:
+            marker_state = log_tail.decode_marker(_coerce_logs_since_marker(marker))
+        except log_tail.LogTailError:
+            raise ToolError("bad_marker") from None
+    else:
+        if (
+            not isinstance(lookback_lines, int)
+            or isinstance(lookback_lines, bool)
+            or lookback_lines < 0
+            or lookback_lines > WAIT_FOR_LOOKBACK_MAX
+        ):
+            raise ToolError("bad_args: lookback_lines must be in 0..2000")
+        if lookback_from not in WAIT_FOR_LOOKBACK_FROM:
+            raise ToolError('bad_args: lookback_from must be "lines" or "launch"')
 
     started = time.monotonic()
     deadline = started + timeout_s
@@ -2022,12 +2032,13 @@ async def execute_wait_for(
     scanned_lines: dict[str, int] = {}
     unreadable: set[str] = set()
     scan_truncated = False
+    scan_mode = "marker" if marker_state is not None else lookback_from
 
     def scan_summary() -> dict[str, Any] | None:
         if condition != "log_matches":
             return None
         return _scanned_report(
-            seen_paths, scanned_lines, unreadable, lookback_from, scan_truncated
+            seen_paths, scanned_lines, unreadable, scan_mode, scan_truncated
         )
 
     if condition == "log_matches":
@@ -2035,12 +2046,15 @@ async def execute_wait_for(
             probe_paths = await _wait_for_script_log_paths(runtime)
             # Markers FIRST, then the launch scan. A line written between the
             # two is read twice, which costs nothing; the other order drops it.
-            log_markers = (
-                _log_markers_at_end(probe_paths)
-                if lookback_from == "launch"
-                else _log_markers_with_lookback(probe_paths, lookback_lines)
-            )
-            if lookback_from == "launch":
+            if marker_state is not None:
+                log_markers = marker_state
+            else:
+                log_markers = (
+                    _log_markers_at_end(probe_paths)
+                    if lookback_from == "launch"
+                    else _log_markers_with_lookback(probe_paths, lookback_lines)
+                )
+            if marker_state is None and lookback_from == "launch":
                 for path in probe_paths:
                     try:
                         line, count, cut = _scan_log_for_pattern(
@@ -2389,6 +2403,23 @@ async def execute_wait_for_box(
         raise
 
 
+def _session_status_blocked_on(status: dict[str, Any]) -> str | None:
+    """Return the next queue a caller should join, if a resource is busy."""
+
+    if isinstance(status.get("owner"), dict):
+        return (
+            "session lease; next: call session_acquire_wait(purpose=...) "
+            "to join the lease FIFO"
+        )
+    box = status.get("box")
+    if isinstance(box, dict) and box.get("occupied") is True:
+        return (
+            "DayZ test box; next: call dayz_test_run(..., wait_for_box_s=<n>) "
+            "to join the box FIFO"
+        )
+    return None
+
+
 def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     runtime: Any = ClientRuntime(config) if config.mode == "client" else Runtime(config)
 
@@ -2462,7 +2493,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             "Preferred: use this, not session_acquire. Wait in the FIFO until "
             "this request acquires the lease or its maximum wait expires; "
-            "never returns a queued result."
+            "never returns a queued result. Lease TTL is "
+            f"{config.session_ttl_s:g} s; renewal is internal."
         )
     )
     async def session_acquire_wait(
@@ -2531,13 +2563,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             "Read redacted daemon/queue/self coordination state, including "
             "box occupancy (managed runs, foreign DayZDiag, ports_in_use, "
-            "and the box wait FIFO)."
+            "and the box wait FIFO). blocked_on names the resource and next "
+            "queue, or is null when neither lease nor box is busy. Lease TTL "
+            f"is {config.session_ttl_s:g} s; renewal is internal."
         )
     )
     async def session_status() -> dict[str, Any]:
         client = _client_runtime()
         async with client.tool_lock:
-            return await client.session_status()
+            status = await client.session_status()
+            status["blocked_on"] = _session_status_blocked_on(status)
+            return status
 
     async def report_dayz_progress(
         ctx: Context | None, stage: str, message: str | None
@@ -3888,10 +3924,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             "Block until a condition holds. condition ENUM: players_at_least, "
             "players_at_most, log_matches. pattern is a plain SUBSTRING, not a "
-            r"regex: pass '[MOD]', never '\[MOD\]'. lookback_lines (default "
-            "200) rewinds initial log markers N lines; lookback_from='launch' "
-            "instead scans this launch's logs from byte 0, the only way to "
-            "reach a line printed at mission start. On timeout still returns "
+            r"regex: pass '[MOD]', never '\[MOD\]'. For log_matches, marker "
+            "is the exact cursor returned by logs_since; when present, "
+            "lookback_lines and lookback_from are ignored. Without marker, "
+            "lookback_lines (default 200) rewinds N lines, or "
+            "lookback_from='launch' scans from byte 0. That heuristic can match "
+            "a line written before the caller's action and cause a false positive. "
+            "On timeout still returns "
             "ok: true with satisfied: false -- gate on satisfied, not ok. "
             "scanned reports which log files were read and how many "
             "lines each gave, so a no-match is visible as a no-match."
@@ -3905,6 +3944,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         poll_interval_s: float = 2.0,
         lookback_lines: int = 200,
         lookback_from: Literal["lines", "launch"] = "lines",
+        marker: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # wait_for, ui_dialog, and playbook_run: do not wrap the whole body
         # in tool_lock. Any tool that waits on a human or a slow condition
@@ -3920,6 +3960,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             poll_interval_s=poll_interval_s,
             lookback_lines=lookback_lines,
             lookback_from=lookback_from,
+            marker=marker,
         )
 
     def _pipeline_platform() -> str:
