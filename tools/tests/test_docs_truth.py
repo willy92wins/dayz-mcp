@@ -47,6 +47,7 @@ Out of scope, on purpose (an honest watchdog beats a pretend-complete one):
 from __future__ import annotations
 
 import ast
+import importlib.util
 import os
 import re
 import sys
@@ -310,6 +311,36 @@ class FreshCloneFlakeDocsTest(unittest.TestCase):
             "test_bug046_startup_deadlock", readme,
             "README discusses fresh-clone colour but does not name the known "
             "flake test the tree carries")
+
+
+class ReadmePathLineCitesDocsTest(unittest.TestCase):
+    """Every path:line cite in README.md must resolve in this tree.
+
+    Bare `file.c:N` (no directory) is a vanilla DayZ script and is listed,
+    not failed. Unpublished trees (HANDOFF.md, reviews/, decisions/,
+    poc-verdict.json) must not be mentioned at all.
+    """
+
+    def test_readme_path_line_cites_resolve_in_tree(self) -> None:
+        checker = REPO / "tools" / "checks" / "check_readme_cites.py"
+        if not checker.is_file():
+            self.skipTest("tools/checks/check_readme_cites.py absent")
+        spec = importlib.util.spec_from_file_location(
+            "check_readme_cites", checker)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        result = mod.check(readme=_doc_path("README.md"), repo=REPO)
+        self.assertEqual(
+            result["missing"], [],
+            f"README cites files a clone does not have: {result['missing']}")
+        self.assertEqual(
+            result["short"], [],
+            f"README cites a line past EOF: {result['short']}")
+        self.assertEqual(
+            result["unpublished"], [],
+            f"README names unpublished paths: {result['unpublished']}")
 
 
 class HandoffLineCiteDocsTest(unittest.TestCase):
