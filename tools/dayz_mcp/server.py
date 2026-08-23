@@ -71,6 +71,13 @@ RETAIL_QUARANTINE_RECIPE = (
     "retail_quarantine: a DayZ retail process is running on this machine; "
     "mutations are blocked until no DayZ retail process is running"
 )
+_RETAIL_QUARANTINE_REASONS = frozenset({
+    "no_probe",
+    "probe_error",
+    "probe_malformed",
+    "probe_unknown",
+    "retail_present",
+})
 LEASE_TOOL_LINE = "Requires a lease (session_acquire_wait)."
 DAEMON_AUTOSPAWN_DISABLED = (
     "daemon_autospawn_disabled: start the daemon (--daemon) or omit "
@@ -440,6 +447,12 @@ def _bridge_error(result: dict[str, Any]) -> ToolError:
     return error
 
 
+def _retail_quarantine_recipe(reason: object) -> str:
+    if isinstance(reason, str) and reason in _RETAIL_QUARANTINE_REASONS:
+        return f"{RETAIL_QUARANTINE_RECIPE}; reason: {reason}"
+    return RETAIL_QUARANTINE_RECIPE
+
+
 def _public_enqueue_error(
     payload: dict[str, Any],
     *,
@@ -449,7 +462,7 @@ def _public_enqueue_error(
     """Map a remote enqueue payload to the caller-facing ToolError string."""
     code = _remote_error_code(payload)
     if code == "retail_quarantine":
-        return RETAIL_QUARANTINE_RECIPE
+        return _retail_quarantine_recipe(payload.get("reason"))
     if code == "lease_required":
         if (
             isinstance(payload, dict)
@@ -893,7 +906,7 @@ class ClientRuntime:
 
         def public_error_code(error: ControlClientError) -> str:
             if error.code == "retail_quarantine":
-                return RETAIL_QUARANTINE_RECIPE
+                return _retail_quarantine_recipe(error.hint)
             if error.code == "lease_required":
                 return LEASE_REQUIRED_RECIPE
             if error.hint and (
@@ -1408,27 +1421,39 @@ def required_keyfile(config: ServerConfig) -> str:
     return config.keyfile
 
 
+def _bad_args(field: str, value: object, requirement: str) -> str:
+    return f"bad_args: {field} {value!r} must {requirement}"
+
+
 def _require_vec3(value: list[float] | None, name: str) -> list[float]:
+    error = (
+        "bad_pos"
+        if name == "pos"
+        else _bad_args(name, value, "be a list of 3 finite numbers")
+    )
     if not isinstance(value, list) or len(value) != 3:
-        raise ToolError("bad_args" if name != "pos" else "bad_pos")
+        raise ToolError(error)
     try:
         vec = [float(value[0]), float(value[1]), float(value[2])]
     except (TypeError, ValueError) as exc:
-        raise ToolError("bad_args" if name != "pos" else "bad_pos") from exc
+        raise ToolError(error) from exc
     if not all(math.isfinite(item) for item in vec):
-        raise ToolError("bad_args" if name != "pos" else "bad_pos")
+        raise ToolError(error)
     return vec
 
 
-def _require_float_list(value: list[float] | None, count: int) -> list[float]:
+def _require_float_list(
+    value: list[float] | None, count: int, name: str = "value"
+) -> list[float]:
+    error = _bad_args(name, value, f"be a list of {count} finite numbers")
     if not isinstance(value, list) or len(value) != count:
-        raise ToolError("bad_args")
+        raise ToolError(error)
     try:
         items = [float(item) for item in value]
     except (TypeError, ValueError) as exc:
-        raise ToolError("bad_args") from exc
+        raise ToolError(error) from exc
     if not all(math.isfinite(item) for item in items):
-        raise ToolError("bad_args")
+        raise ToolError(error)
     return items
 
 
@@ -1451,25 +1476,44 @@ VEHICLE_CONTROL_MAX_TTL_S = 30.0
 
 
 def _finite_float(value: float, error: str = "bad_args") -> float:
+    resolved_error = (
+        _bad_args("value", value, "be a finite number")
+        if error == "bad_args"
+        else error
+    )
     try:
         converted = float(value)
     except (TypeError, ValueError) as exc:
-        raise ToolError(error) from exc
+        raise ToolError(resolved_error) from exc
     if not math.isfinite(converted):
-        raise ToolError(error)
+        raise ToolError(resolved_error)
     return converted
 
 
-def _optional_finite_float(value: float | None, error: str = "bad_args") -> float | None:
+def _optional_finite_float(
+    value: float | None, error: str = "bad_args"
+) -> float | None:
     if value is None:
         return None
     return _finite_float(value, error)
 
 
-def _require_range(value: float, minimum: float, maximum: float, error: str = "bad_args") -> float:
-    converted = _finite_float(value, error)
+def _require_range(
+    value: float,
+    minimum: float,
+    maximum: float,
+    error: str = "bad_args",
+) -> float:
+    resolved_error = (
+        _bad_args(
+            "value", value, f"be a finite number from {minimum} to {maximum}"
+        )
+        if error == "bad_args"
+        else error
+    )
+    converted = _finite_float(value, resolved_error)
     if converted < minimum or converted > maximum:
-        raise ToolError(error)
+        raise ToolError(resolved_error)
     return converted
 
 
@@ -2731,7 +2775,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             or isinstance(max_lines, bool)
             or not 1 <= max_lines <= 2000
         ):
-            raise ToolError("bad_args")
+            raise ToolError(
+                _bad_args("max_lines", max_lines, "be an int from 1 to 2000")
+            )
         client = _client_runtime()
         marker_key = run_id if run_id is not None else "__all__"
         source = (
@@ -2803,7 +2849,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             f"{LEASE_TOOL_LINE} Spawn a DayZ object through the existing "
-            "world_spawn bridge command."
+            "world_spawn bridge command. rotation is an RF_* CreateObjectEx "
+            "flag integer, not an angle; 0 uses the bridge default RF_DEFAULT."
         )
     )
     async def world_spawn(
@@ -2828,10 +2875,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     )
     async def object_delete(object_id: int, timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         if not isinstance(object_id, int) or isinstance(object_id, bool):
-            raise ToolError("bad_args")
+            raise ToolError(
+                _bad_args("object_id", object_id, "be a positive int")
+            )
         parsed_id = object_id
         if parsed_id <= 0:
-            raise ToolError("bad_args")
+            raise ToolError(
+                _bad_args("object_id", object_id, "be a positive int")
+            )
         args = {"object_id": parsed_id}
         async with runtime.tool_lock:
             return await runtime.call_bridge("object_delete", args, "server", _timeout(timeout_s))
@@ -2839,8 +2890,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Send a vanilla "
-            "notification popup. uid empty (default) broadcasts to every "
-            "connected player; a non-empty uid targets that identity."
+            "notification popup. show_time is the display duration in seconds. "
+            "uid empty (default) broadcasts to every connected player; a "
+            "non-empty uid targets that identity."
         )
     )
     async def notify_players(
@@ -2851,11 +2903,22 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         uid: str = "",
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
-        show_time_value = _finite_float(show_time)
-        if show_time_value <= 0.0 or not isinstance(title, str) or title == "":
-            raise ToolError("bad_args")
-        if not isinstance(detail, str) or not isinstance(icon, str) or not isinstance(uid, str):
-            raise ToolError("bad_args")
+        show_time_error = _bad_args(
+            "show_time", show_time, "be a finite number greater than 0"
+        )
+        show_time_value = _finite_float(show_time, show_time_error)
+        if show_time_value <= 0.0:
+            raise ToolError(show_time_error)
+        if not isinstance(title, str) or title == "":
+            raise ToolError(
+                _bad_args("title", title, "be a non-empty string")
+            )
+        if not isinstance(detail, str):
+            raise ToolError(_bad_args("detail", detail, "be a string"))
+        if not isinstance(icon, str):
+            raise ToolError(_bad_args("icon", icon, "be a string"))
+        if not isinstance(uid, str):
+            raise ToolError(_bad_args("uid", uid, "be a string"))
         args: dict[str, Any] = {
             "show_time": show_time_value,
             "title": title,
@@ -2896,18 +2959,35 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         intersect: str = "view",
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
+        radius_error = _bad_args(
+            "radius", radius, "be a non-negative finite number"
+        )
         args = {
             "from": _require_vec3(from_pos, "from"),
             "to": _require_vec3(to, "to"),
             "method": method,
             "ignore": ignore,
-            "radius": float(radius),
+            "radius": _finite_float(radius, radius_error),
             "intersect": intersect,
         }
-        if args["radius"] < 0.0 or not math.isfinite(args["radius"]) or method not in {"rvproxy", "bullet"}:
-            raise ToolError("bad_args")
-        if ignore not in {"", "player"} or intersect not in {"view", "fire", "geom", "ifire"}:
-            raise ToolError("bad_args")
+        if args["radius"] < 0.0:
+            raise ToolError(radius_error)
+        if method not in {"rvproxy", "bullet"}:
+            raise ToolError(
+                _bad_args("method", method, "be one of 'rvproxy' or 'bullet'")
+            )
+        if ignore not in {"", "player"}:
+            raise ToolError(
+                _bad_args("ignore", ignore, "be empty or 'player'")
+            )
+        if intersect not in {"view", "fire", "geom", "ifire"}:
+            raise ToolError(
+                _bad_args(
+                    "intersect",
+                    intersect,
+                    "be one of 'view', 'fire', 'geom', or 'ifire'",
+                )
+            )
         async with runtime.tool_lock:
             return await runtime.call_bridge("scene_raycast", args, "server", _timeout(timeout_s))
 
@@ -2964,10 +3044,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(type, str) or type == "":
-            raise ToolError("bad_args")
-        radius_value = _finite_float(radius)
+            raise ToolError(_bad_args("type", type, "be a non-empty string"))
+        radius_error = _bad_args(
+            "radius", radius, "be a finite number greater than 0"
+        )
+        radius_value = _finite_float(radius, radius_error)
         if radius_value <= 0.0:
-            raise ToolError("bad_args")
+            raise ToolError(radius_error)
         args = {
             "mode": "object_at",
             "type": type,
@@ -2986,7 +3069,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         z: float,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
-        args = {"x": _finite_float(x), "z": _finite_float(z)}
+        args = {
+            "x": _finite_float(x, _bad_args("x", x, "be a finite number")),
+            "z": _finite_float(z, _bad_args("z", z, "be a finite number")),
+        }
         async with runtime.tool_lock:
             return await runtime.call_bridge("surface_query", args, "server", _timeout(timeout_s))
 
@@ -3005,7 +3091,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(uid, str):
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("uid", uid, "be a string"))
         args: dict[str, Any] = {"pos": _require_vec3(pos, "pos")}
         if uid != "":
             args["uid"] = uid
@@ -3017,7 +3103,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             f"{LEASE_TOOL_LINE} "
             "Read or set an entity animation phase by classname near pos. "
-            "Omit phase to read; provide phase to SetAnimationPhase."
+            "phase is a unitless value passed unchanged to Entity.SetAnimationPhase; "
+            "omit phase to read with GetAnimationPhase."
         )
     )
     async def object_anim(
@@ -3028,16 +3115,18 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(type, str) or type == "":
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("type", type, "be a non-empty string"))
         if not isinstance(source, str) or source == "":
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("source", source, "be a non-empty string"))
         args: dict[str, Any] = {
             "type": type,
             "pos": _require_vec3(pos, "pos"),
             "source": source,
         }
         if phase is not None:
-            args["phase"] = _finite_float(phase)
+            args["phase"] = _finite_float(
+                phase, _bad_args("phase", phase, "be a finite unitless number")
+            )
         async with runtime.tool_lock:
             return await runtime.call_bridge("object_anim", args, "server", _timeout(timeout_s))
 
@@ -3061,17 +3150,35 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(type, str) or type == "":
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("type", type, "be a non-empty string"))
         args: dict[str, Any] = {"type": type, "pos": _require_vec3(pos, "pos")}
         if mode is not None:
-            if mode != "release" or heading is not None or speed is not None:
-                raise ToolError("bad_args")
+            if mode != "release":
+                raise ToolError(_bad_args("mode", mode, "be 'release' or omitted"))
+            if heading is not None:
+                raise ToolError(
+                    _bad_args("heading", heading, "be omitted when mode is 'release'")
+                )
+            if speed is not None:
+                raise ToolError(
+                    _bad_args("speed", speed, "be omitted when mode is 'release'")
+                )
             args["mode"] = mode
         else:
-            if heading is None or speed is None:
-                raise ToolError("bad_args")
-            args["heading"] = _finite_float(heading)
-            args["speed"] = _finite_float(speed)
+            if heading is None:
+                raise ToolError(
+                    _bad_args("heading", heading, "be provided when mode is omitted")
+                )
+            if speed is None:
+                raise ToolError(
+                    _bad_args("speed", speed, "be provided when mode is omitted")
+                )
+            args["heading"] = _finite_float(
+                heading, _bad_args("heading", heading, "be a finite number of degrees")
+            )
+            args["speed"] = _finite_float(
+                speed, _bad_args("speed", speed, "be a finite number")
+            )
         async with runtime.tool_lock:
             return await runtime.call_bridge("infected_drive", args, "server", _timeout(timeout_s))
 
@@ -3091,11 +3198,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(classname, str) or classname == "":
-            raise ToolError("bad_args")
+            raise ToolError(
+                _bad_args("classname", classname, "be a non-empty string")
+            )
         if dest not in {"hands", "inventory"}:
-            raise ToolError("bad_args")
+            raise ToolError(
+                _bad_args("dest", dest, "be one of 'hands' or 'inventory'")
+            )
         if not isinstance(uid, str):
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("uid", uid, "be a string"))
         args: dict[str, Any] = {"classname": classname, "dest": dest}
         if uid != "":
             args["uid"] = uid
@@ -3116,11 +3227,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(type, str) or type == "":
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("type", type, "be a non-empty string"))
         if not isinstance(want, list) or len(want) == 0:
-            raise ToolError("bad_args")
+            raise ToolError(
+                _bad_args("want", want, "be a non-empty list of non-empty strings")
+            )
         if any(not isinstance(item, str) or item == "" for item in want):
-            raise ToolError("bad_args")
+            raise ToolError(
+                _bad_args("want", want, "be a non-empty list of non-empty strings")
+            )
         args = {"type": type, "pos": _require_vec3(pos, "pos"), "want": list(want)}
         async with runtime.tool_lock:
             return await runtime.call_bridge("object_inspect", args, "server", _timeout(timeout_s))
@@ -3140,11 +3255,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         limit: int = 32,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
-        radius_value = _finite_float(radius)
+        radius_error = _bad_args(
+            "radius", radius, "be a finite number greater than 0 and at most 200"
+        )
+        radius_value = _finite_float(radius, radius_error)
         if radius_value <= 0.0 or radius_value > 200.0:
-            raise ToolError("bad_args")
+            raise ToolError(radius_error)
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 128:
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("limit", limit, "be an int from 1 to 128"))
         args = {
             "pos": _require_vec3(pos, "pos"),
             "radius": radius_value,
@@ -3227,7 +3345,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Set server weather "
-            "overcast, rain, or fog forecast values."
+            "overcast, rain, or fog forecast values. time is the transition "
+            "duration in seconds; min_duration is the minimum hold duration "
+            "in seconds passed to the weather phenomenon Set method."
         )
     )
     async def world_weather_set(
@@ -3239,9 +3359,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         args: dict[str, Any] = {}
-        overcast_value = _optional_finite_float(overcast)
-        rain_value = _optional_finite_float(rain)
-        fog_value = _optional_finite_float(fog)
+        overcast_value = _optional_finite_float(
+            overcast,
+            _bad_args("overcast", overcast, "be a finite number from 0 to 1"),
+        )
+        rain_value = _optional_finite_float(
+            rain, _bad_args("rain", rain, "be a finite number from 0 to 1")
+        )
+        fog_value = _optional_finite_float(
+            fog, _bad_args("fog", fog, "be a finite number from 0 to 1")
+        )
         if overcast_value is not None:
             args["overcast"] = _require_range(overcast_value, 0.0, 1.0, "bad_overcast")
         if rain_value is not None:
@@ -3250,8 +3377,22 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["fog"] = _require_range(fog_value, 0.0, 1.0, "bad_fog")
         if not args:
             raise ToolError("no_weather_fields")
-        args["time"] = _require_range(time, 0.0, float("inf"))
-        args["min_duration"] = _require_range(min_duration, 0.0, float("inf"))
+        args["time"] = _require_range(
+            time,
+            0.0,
+            float("inf"),
+            _bad_args("time", time, "be a non-negative finite number of seconds"),
+        )
+        args["min_duration"] = _require_range(
+            min_duration,
+            0.0,
+            float("inf"),
+            _bad_args(
+                "min_duration",
+                min_duration,
+                "be a non-negative finite number of seconds",
+            ),
+        )
         async with runtime.tool_lock:
             return await runtime.call_bridge("world_weather_set", args, "server", _timeout(timeout_s))
 
@@ -3260,6 +3401,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "through the existing camera_set bridge command. "
         "cam_mode: orient (cam_pos + cam_orientation), lookat (cam_pos + look_at), "
         "matrix (cam_matrix of 12), free (cam_pos, then look_at or cam_orientation). "
+        "cam_orientation is [yaw, pitch, roll] in degrees. fov is the FOV angle "
+        "in radians; 0 leaves the current/default FOV unchanged. "
         "cam_mode look_at is accepted as an alias of lookat and is sent as lookat."
     ))
     async def camera_set(
@@ -3285,7 +3428,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         elif cam_mode == "lookat":
             args = {"cam_mode": cam_mode, "cam_pos": _require_vec3(cam_pos, "cam_pos"), "look_at": _require_vec3(look_at, "look_at")}
         elif cam_mode == "matrix":
-            args = {"cam_mode": cam_mode, "cam_matrix": _require_float_list(cam_matrix, 12)}
+            args = {
+                "cam_mode": cam_mode,
+                "cam_matrix": _require_float_list(cam_matrix, 12, "cam_matrix"),
+            }
         elif cam_mode == "free":
             args = {"cam_mode": cam_mode, "cam_pos": _require_vec3(cam_pos, "cam_pos")}
             if look_at is not None:
@@ -3297,9 +3443,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "bad_args: cam_mode must be one of orient, lookat, matrix, free "
                 "(look_at is accepted as an alias of lookat)"
             )
-        fov_value = float(fov)
-        if fov_value < 0.0 or not math.isfinite(fov_value):
-            raise ToolError("bad_args")
+        fov_error = _bad_args(
+            "fov", fov, "be a non-negative finite number of radians"
+        )
+        fov_value = _finite_float(fov, fov_error)
+        if fov_value < 0.0:
+            raise ToolError(fov_error)
         args["fov"] = fov_value
         args["settle_ticks"] = int(settle_ticks)
         async with runtime.tool_lock:
@@ -3322,7 +3471,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(description=(
         "Capture a screenshot from the DayZDiag window. Returns inline JPEG ImageContent fit to the "
         "client's MAX_MCP_OUTPUT_TOKENS budget (default 25000 -> ~600px wide; raise that client env var for bigger inline frames: 50000 -> ~860px/2x px, 75000 -> ~1070px/3x, 100000 -> ~native; max_tokens spends LESS than the cap, above-cap is clamped). Use scale='full' to spend a raised inline budget on resolution (the default scale='small' is a hard 512px cap). crop ('center', 'center:0.4', or normalized 'l,t,r,b') zooms on the subject; "
-        "for optical zoom set a narrow fov via camera_set first. fmt='webp' is ~15% smaller (opt-in; Claude Code has known webp MIME bugs, JPEG stays default). save_fullres=True also writes the "
+        "for optical zoom set a narrow fov in radians via camera_set first. fmt='webp' is ~15% smaller (opt-in; Claude Code has known webp MIME bugs, JPEG stays default). save_fullres=True also writes the "
         "native-resolution frame to disk and returns its path in a JSON text block — read that file for "
         "fine detail, bypassing the inline token budget. Without window focus, the frame can be frozen. "
         "With two DayZ clients, capture targets the live run's client through cmdline_match/client_pid."
@@ -3581,9 +3730,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str):
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("path", path, "be a string"))
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 512:
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("limit", limit, "be an int from 1 to 512"))
         args: dict[str, Any] = {"limit": int(limit)}
         if path != "":
             args["path"] = path
@@ -3600,9 +3749,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str) or path == "":
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("path", path, "be a non-empty string"))
         if not isinstance(text, str):
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("text", text, "be a string"))
         args = {"path": path, "text": text}
         async with runtime.tool_lock:
             return await runtime.call_bridge("ui_set_text", args, "client", _timeout(timeout_s))
@@ -3617,9 +3766,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str) or path == "":
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("path", path, "be a non-empty string"))
         if not isinstance(button, int) or isinstance(button, bool) or button < 0 or button > 2:
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("button", button, "be an int from 0 to 2"))
         args = {"path": path, "button": int(button)}
         async with runtime.tool_lock:
             return await runtime.call_bridge("ui_click", args, "client", _timeout(timeout_s))
@@ -3639,15 +3788,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(mode, str) or mode not in {"reload", "close"}:
-            raise ToolError("bad_args")
+            raise ToolError(
+                _bad_args("mode", mode, "be one of 'reload' or 'close'")
+            )
         if not isinstance(path, str):
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("path", path, "be a string"))
         if mode == "reload" and path == "":
-            raise ToolError("bad_args")
+            raise ToolError(
+                _bad_args("path", path, "be non-empty when mode is 'reload'")
+            )
         if mode == "close" and path != "":
-            raise ToolError("bad_args")
+            raise ToolError(
+                _bad_args("path", path, "be empty when mode is 'close'")
+            )
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 512:
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("limit", limit, "be an int from 1 to 512"))
         args: dict[str, Any] = {"mode": mode, "limit": int(limit)}
         if path != "":
             args["path"] = path
@@ -3670,7 +3825,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str) or path == "":
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("path", path, "be a non-empty string"))
         args = {"path": path}
         async with runtime.tool_lock:
             return await runtime.call_bridge(
@@ -3710,12 +3865,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(action, str) or action == "":
-            raise ToolError("bad_args")
+            raise ToolError(_bad_args("action", action, "be a non-empty string"))
         if not isinstance(classname, str):
-            raise ToolError("bad_args")
-        radius_value = _finite_float(radius)
+            raise ToolError(_bad_args("classname", classname, "be a string"))
+        radius_error = _bad_args(
+            "radius",
+            radius,
+            "be a finite number greater than 0 and at most 200",
+        )
+        radius_value = _finite_float(radius, radius_error)
         if radius_value <= 0.0 or radius_value > 200.0:
-            raise ToolError("bad_args")
+            raise ToolError(radius_error)
         args: dict[str, Any] = {"action": action, "radius": radius_value}
         if classname != "":
             args["classname"] = classname
