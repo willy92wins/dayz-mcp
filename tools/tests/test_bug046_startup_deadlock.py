@@ -23,6 +23,7 @@ from dayz_mcp.identity_migration import (
     scan_dayz_mcp_processes,
 )
 from dayz_mcp.daemon import DAEMON_STARTUP_BUDGET_S, build_daemon_argv
+from dayz_mcp.daemon_contract import daemon_runtime_cwd
 from dayz_mcp.host_config import CLAUDE_TIMEOUT_MS, CODEX_TIMEOUT_SECONDS
 from dayz_mcp.runtime_state import RuntimePaths
 
@@ -76,6 +77,32 @@ def fixture_daemon_argv(port: int, keyfile: Path) -> list[str]:
         ),
         python=sys.executable,
     )
+
+
+def fixture_daemon_cwd() -> str:
+    """Return the cwd a fixture-spawned daemon will accredit.
+
+    Crash-fixture sitecustomize imports dayz_mcp during site initialization,
+    which binds the interpreter's installed package. run_daemon then accredits
+    daemon_runtime_cwd() of that import. Spawning with a different cwd lets
+    unauthenticated /status answer while accredited startup never completes,
+    so the idle watchdog is never armed and communicate() times out.
+    """
+    for finder in sys.meta_path:
+        module_name = getattr(finder, "__module__", None)
+        if not isinstance(module_name, str) or not module_name:
+            continue
+        module = sys.modules.get(module_name)
+        mapping = getattr(module, "MAPPING", None) if module is not None else None
+        if not isinstance(mapping, dict):
+            continue
+        located = mapping.get("dayz_mcp")
+        if not isinstance(located, str) or not located:
+            continue
+        root = Path(located).resolve().parent
+        if (root / "dayz_mcp" / "daemon_contract.py").is_file():
+            return str(root)
+    return daemon_runtime_cwd()
 
 
 def write_client_host_fixture(home: Path, keyfile: Path) -> None:
@@ -801,6 +828,7 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
                 port = unused_port()
                 keyfile = base / "fixture.key"
                 keyfile.write_text("fixture-key", encoding="ascii")
+                cwd = fixture_daemon_cwd()
                 base_environment = os.environ.copy()
                 base_environment["LOCALAPPDATA"] = str(localappdata)
                 first_environment = fixture_environment(
@@ -812,7 +840,7 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
 
                 first = subprocess.run(
                     fixture_daemon_argv(port, keyfile),
-                    cwd=str(Path(__file__).resolve().parents[1]),
+                    cwd=cwd,
                     env=first_environment,
                     capture_output=True,
                     text=True,
@@ -829,7 +857,7 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
                 )
                 second = subprocess.Popen(
                     fixture_daemon_argv(port, keyfile),
-                    cwd=str(Path(__file__).resolve().parents[1]),
+                    cwd=cwd,
                     env=second_environment,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
@@ -877,6 +905,7 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
             ports = (unused_port(), unused_port())
             keyfile = base / "fixture.key"
             keyfile.write_text("fixture-key", encoding="ascii")
+            cwd = fixture_daemon_cwd()
             base_environment = os.environ.copy()
             base_environment["LOCALAPPDATA"] = str(localappdata)
             environment = fixture_environment(
@@ -893,7 +922,7 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
                 children.append(
                     subprocess.Popen(
                         fixture_daemon_argv(port, keyfile),
-                        cwd=str(Path(__file__).resolve().parents[1]),
+                        cwd=cwd,
                         env=environment,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.PIPE,
