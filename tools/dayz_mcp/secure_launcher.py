@@ -40,21 +40,38 @@ class _IncrementalRedactor:
         return self._consume(final=True)
 
     def _consume(self, *, final: bool) -> bytes:
+        # pop(0) memmoves the unread tail on every unmatched byte.
+        # find() on each miss scans the remaining buffer, so a repeated
+        # secret plus an absent one is O(n^2). Advance one byte on
+        # mismatch and drop the consumed prefix once. The suffix shorter
+        # than the longest secret stays in pending so a secret split
+        # across feed() calls still matches.
+        pending = self._pending
+        if not pending:
+            return b""
         output = bytearray()
-        while self._pending and (final or len(self._pending) >= self._max_secret):
+        index = 0
+        length = len(pending)
+        secrets = self._secrets
+        max_secret = self._max_secret
+        limit = length if final else length - max_secret + 1
+        while index < limit:
             matched = next(
                 (
                     secret
-                    for secret in self._secrets
-                    if self._pending.startswith(secret)
+                    for secret in secrets
+                    if pending.startswith(secret, index)
                 ),
                 None,
             )
             if matched is not None:
-                del self._pending[: len(matched)]
+                index += len(matched)
                 output.extend(b"[REDACTED]")
             else:
-                output.append(self._pending.pop(0))
+                output.append(pending[index])
+                index += 1
+        if index:
+            del pending[:index]
         return bytes(output)
 
 

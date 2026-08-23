@@ -7,6 +7,7 @@ import io
 import json
 import os
 import struct
+import time
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -378,6 +379,33 @@ class SecureLauncherRegistryTests(unittest.TestCase):
             reject(fixture, error_code="registry_reparse")
 
 
+def _legacy_pop0_redact(secrets: tuple[bytes, ...], chunks: tuple[bytes, ...]) -> bytes:
+    """Byte-identical predecessor of _IncrementalRedactor._consume (pop(0))."""
+
+    pending = bytearray()
+    max_secret = max((len(value) for value in secrets if value), default=1)
+    kept = tuple(sorted({value for value in secrets if value}, key=len, reverse=True))
+    output = bytearray()
+
+    def consume(*, final: bool) -> None:
+        while pending and (final or len(pending) >= max_secret):
+            matched = next(
+                (secret for secret in kept if pending.startswith(secret)),
+                None,
+            )
+            if matched is not None:
+                del pending[: len(matched)]
+                output.extend(b"[REDACTED]")
+            else:
+                output.append(pending.pop(0))
+
+    for chunk in chunks:
+        pending.extend(chunk)
+        consume(final=False)
+    consume(final=True)
+    return bytes(output)
+
+
 class PrivateIncrementalRedactorTests(unittest.TestCase):
     def test_redacts_two_secrets_split_across_arbitrary_chunks(self) -> None:
         self.assertTrue(hasattr(launcher, "_IncrementalRedactor"))
@@ -397,6 +425,77 @@ class PrivateIncrementalRedactorTests(unittest.TestCase):
         )
         self.assertNotIn(b"identity-secret", output)
         self.assertNotIn(b"lease-secret", output)
+
+    def _redact(self, secrets: tuple[bytes, ...], chunks: tuple[bytes, ...]) -> bytes:
+        redactor = launcher._IncrementalRedactor(secrets)  # type: ignore[attr-defined]
+        output = b"".join(redactor.feed(chunk) for chunk in chunks)
+        return output + redactor.flush()
+
+    def test_redactor_matches_legacy_pop0_including_split_secrets(self) -> None:
+        cases = (
+            ((b"identity-secret", b"lease-secret"), (b"before identity-", b"secret middle lease-", b"secret after")),
+            ((b"aa",), (b"a", b"aa", b"a")),
+            ((b"secret", b"sec"), (b"xxsec", b"retxxsecxx")),
+            ((b"ab",), (b"", b"ab", b"")),
+            ((b"token",), (b"no-match-here",)),
+            ((b"xy",), tuple(bytes([byte]) for byte in b"abxycdxy")),
+            ((b"long-secret-value",), (b"long-se", b"cret-value-tail")),
+        )
+        for secrets, chunks in cases:
+            with self.subTest(secrets=secrets, chunks=chunks):
+                self.assertEqual(
+                    self._redact(secrets, chunks),
+                    _legacy_pop0_redact(secrets, chunks),
+                )
+
+    def test_unmatched_feed_is_linear_not_pop0(self) -> None:
+        payload = bytes(range(256)) * 400
+        secret = b"this-secret-does-not-appear"
+        chunks = (payload,)
+        current = self._redact((secret,), chunks)
+        legacy = _legacy_pop0_redact((secret,), chunks)
+        self.assertEqual(current, legacy)
+        self.assertEqual(current, payload)
+
+    def test_repeated_and_absent_real_secrets_stay_linear_across_sizes(self) -> None:
+        identity = '{"session_id":"identity-secret"}'
+        lease = "lease-secret"
+        secrets = (
+            identity.encode("utf-8"),
+            identity.encode("utf-16le"),
+            lease.encode("utf-8"),
+            lease.encode("utf-16le"),
+        )
+        repeated = lease.encode("utf-8")
+        absent = identity.encode("utf-16le")
+        # Unmatched filler keeps pending large so pop(0) memmoves the
+        # tail on every miss. A dense ".lease-secret" stream only pops
+        # the separator and hides that cost under 0.30 s at 200 kB.
+        unit = b"X" * 256 + repeated
+        small = unit * 4
+        self.assertEqual(
+            self._redact(secrets, (small,)),
+            _legacy_pop0_redact(secrets, (small,)),
+        )
+        self.assertNotIn(absent, small)
+
+        sizes = (100_000, 400_000)
+        timings: list[float] = []
+        for size in sizes:
+            payload = (unit * (size // len(unit) + 1))[:size]
+            self.assertIn(repeated, payload)
+            self.assertNotIn(absent, payload)
+            started = time.perf_counter()
+            output = self._redact(secrets, (payload,))
+            timings.append(time.perf_counter() - started)
+            for secret in secrets:
+                self.assertNotIn(secret, output)
+            self.assertIn(b"[REDACTED]", output)
+
+        # 4x size: indexed growth measured ~3.6-4.6x, pop(0) ~10x. 7x sits
+        # between them and holds under load, where an absolute cap accused
+        # the correct implementation (0.666 s with a valid 4.63x slope).
+        self.assertLess(timings[-1] / timings[0], 7.0)
 
 
 class SecureLauncherRuntimeTests(unittest.TestCase):
