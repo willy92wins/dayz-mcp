@@ -276,397 +276,417 @@ def _safe_operation_timeout(value: object) -> tuple[float, bool]:
     return seconds, True
 
 
+_FieldValidator = Callable[[object], bool]
+_SchemaVariant = tuple[
+    frozenset[str],
+    frozenset[str],
+    dict[str, _FieldValidator],
+]
+_DelegatedValidator = Callable[[dict], tuple[bool, str | None]]
+_CommandSchema = tuple[tuple[_SchemaVariant, ...], _DelegatedValidator | None]
+
+
+def _schema_variant(
+    *,
+    required: tuple[str, ...] = (),
+    optional: tuple[str, ...] = (),
+    validators: dict[str, _FieldValidator] | None = None,
+) -> _SchemaVariant:
+    return frozenset(required), frozenset(optional), validators or {}
+
+
+def _command_schema(
+    *variants: _SchemaVariant,
+    delegated: _DelegatedValidator | None = None,
+) -> _CommandSchema:
+    return variants, delegated
+
+
+def _is_strict_bool(value: object) -> bool:
+    return isinstance(value, bool)
+
+
+def _is_string(value: object) -> bool:
+    return isinstance(value, str)
+
+
+def _is_non_empty_string(value: object) -> bool:
+    return isinstance(value, str) and value != ""
+
+
+def _equal_to(expected: object) -> _FieldValidator:
+    def validate(value: object) -> bool:
+        return value == expected
+
+    return validate
+
+
+def _one_of(*accepted: object) -> _FieldValidator:
+    accepted_values = frozenset(accepted)
+
+    def validate(value: object) -> bool:
+        return value in accepted_values
+
+    return validate
+
+
+def _integer_in_range(
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> _FieldValidator:
+    def validate(value: object) -> bool:
+        if not isinstance(value, int) or _is_strict_bool(value):
+            return False
+        if minimum is not None and value < minimum:
+            return False
+        if maximum is not None and value > maximum:
+            return False
+        return True
+
+    return validate
+
+
+def _real_in_range(
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+    minimum_inclusive: bool = True,
+) -> _FieldValidator:
+    def validate(value: object) -> bool:
+        if not _is_real_number(value):
+            return False
+        number = float(value)
+        if minimum is not None:
+            if minimum_inclusive and number < minimum:
+                return False
+            if not minimum_inclusive and number <= minimum:
+                return False
+        if maximum is not None and number > maximum:
+            return False
+        return True
+
+    return validate
+
+
+def _reject_numeric_errors(validator: _FieldValidator) -> _FieldValidator:
+    def validate(value: object) -> bool:
+        try:
+            return validator(value)
+        except (OverflowError, ValueError):
+            return False
+
+    return validate
+
+
+def _is_real_vector3(value: object) -> bool:
+    if not isinstance(value, list) or len(value) != 3:
+        return False
+    try:
+        return all(_is_real_number(component) for component in value)
+    except (OverflowError, ValueError):
+        return False
+
+
+def _is_non_empty_string_list(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) > 0
+        and all(isinstance(item, str) and item != "" for item in value)
+    )
+
+
+def _lower_hex(length: int) -> _FieldValidator:
+    def validate(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and len(value) == length
+            and all(character in "0123456789abcdef" for character in value)
+        )
+
+    return validate
+
+
+def _validate_ui_dialog_args(args: dict) -> tuple[bool, str | None]:
+    return ui_dialog.validate_command_args(args)
+
+
+_SAFE_FINITE_REAL = _reject_numeric_errors(_real_in_range())
+_SAFE_POSITIVE_REAL = _reject_numeric_errors(
+    _real_in_range(minimum=0.0, minimum_inclusive=False)
+)
+_SAFE_RADIUS_200 = _reject_numeric_errors(
+    _real_in_range(minimum=0.0, maximum=200.0, minimum_inclusive=False)
+)
+
+
+# Command schemas keep the authenticated ingress contract in one place. Variants
+# preserve alternate payload shapes without duplicating command dispatch logic.
+_COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
+    "restore_gameplay": _command_schema(_schema_variant()),
+    "vehicle_trace": _command_schema(
+        _schema_variant(
+            required=(
+                "mode",
+                "trace_id",
+                "cursor",
+                "limit",
+                "sample_hz",
+                "max_samples",
+            ),
+            validators={
+                "mode": _one_of("start", "status", "stop", "read", "clear"),
+                "trace_id": _lower_hex(32),
+                "cursor": _integer_in_range(minimum=0),
+                "limit": _integer_in_range(minimum=1, maximum=64),
+                "sample_hz": _integer_in_range(minimum=20, maximum=60),
+                "max_samples": _integer_in_range(minimum=2, maximum=8192),
+            },
+        )
+    ),
+    # Any CarScript classname is accepted; non-vehicles fail in the bridge
+    # after CarScript.Cast.
+    "vehicle_prepare_fixture": _command_schema(
+        _schema_variant(
+            required=("mode", "type", "pos", "radius"),
+            validators={
+                "mode": _equal_to("object_at"),
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "radius": _SAFE_POSITIVE_REAL,
+            },
+        )
+    ),
+    # World bounds require GetWorldSize in the bridge; non-finite coordinates
+    # are rejected here before they can reach the consumer.
+    "surface_query": _command_schema(
+        _schema_variant(
+            required=("x", "z"),
+            validators={
+                "x": _SAFE_FINITE_REAL,
+                "z": _SAFE_FINITE_REAL,
+            },
+        )
+    ),
+    "player_teleport": _command_schema(
+        _schema_variant(
+            required=("pos",),
+            optional=("uid",),
+            validators={
+                "uid": _is_string,
+                "pos": _is_real_vector3,
+            },
+        )
+    ),
+    "infected_drive": _command_schema(
+        _schema_variant(
+            required=("type", "pos", "heading", "speed"),
+            validators={
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "heading": _reject_numeric_errors(
+                    _real_in_range(minimum=-360.0, maximum=360.0)
+                ),
+                "speed": _reject_numeric_errors(
+                    _real_in_range(minimum=0.0, maximum=5.0)
+                ),
+            },
+        ),
+        _schema_variant(
+            required=("type", "pos", "mode"),
+            validators={
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "mode": _equal_to("release"),
+            },
+        ),
+    ),
+    # An absent phase reads the source; a present phase writes it.
+    "object_anim": _command_schema(
+        _schema_variant(
+            required=("type", "pos", "source"),
+            optional=("phase",),
+            validators={
+                "type": _is_non_empty_string,
+                "source": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "phase": _SAFE_FINITE_REAL,
+            },
+        )
+    ),
+    "inventory_give": _command_schema(
+        _schema_variant(
+            required=("classname", "dest"),
+            optional=("uid",),
+            validators={
+                "uid": _is_string,
+                "classname": _is_non_empty_string,
+                "dest": _one_of("hands", "inventory"),
+            },
+        )
+    ),
+    "object_inspect": _command_schema(
+        _schema_variant(
+            required=("type", "pos", "want"),
+            validators={
+                "type": _is_non_empty_string,
+                "want": _is_non_empty_string_list,
+                "pos": _is_real_vector3,
+            },
+        )
+    ),
+    # Exact keys keep authenticated socket ingress fail-closed.
+    "object_delete": _command_schema(
+        _schema_variant(
+            required=("object_id",),
+            validators={"object_id": _integer_in_range(minimum=1)},
+        )
+    ),
+    "notify_players": _command_schema(
+        _schema_variant(
+            required=("show_time", "title"),
+            optional=("detail", "icon", "uid"),
+            validators={
+                "show_time": _real_in_range(
+                    minimum=0.0,
+                    minimum_inclusive=False,
+                ),
+                "title": _is_non_empty_string,
+                "detail": _is_string,
+                "icon": _is_string,
+                "uid": _is_string,
+            },
+        )
+    ),
+    "entities_query": _command_schema(
+        _schema_variant(
+            required=("pos", "radius"),
+            optional=("limit",),
+            validators={
+                "pos": _is_real_vector3,
+                "radius": _SAFE_RADIUS_200,
+                "limit": _integer_in_range(minimum=1, maximum=128),
+            },
+        )
+    ),
+    "ui_tree": _command_schema(
+        _schema_variant(
+            optional=("path", "limit"),
+            validators={
+                "path": _is_string,
+                "limit": _integer_in_range(minimum=1, maximum=512),
+            },
+        )
+    ),
+    "ui_set_text": _command_schema(
+        _schema_variant(
+            required=("path", "text"),
+            validators={
+                "path": _is_non_empty_string,
+                "text": _is_string,
+            },
+        )
+    ),
+    "ui_click": _command_schema(
+        _schema_variant(
+            required=("path",),
+            optional=("button",),
+            validators={
+                "path": _is_non_empty_string,
+                "button": _integer_in_range(minimum=0, maximum=2),
+            },
+        )
+    ),
+    # This path names a layout file, not a widget. Close carries no path.
+    "ui_reload_layout": _command_schema(
+        _schema_variant(
+            required=("path",),
+            optional=("limit",),
+            validators={
+                "path": _is_non_empty_string,
+                "limit": _integer_in_range(minimum=1, maximum=512),
+            },
+        ),
+        _schema_variant(
+            required=("mode", "path"),
+            optional=("limit",),
+            validators={
+                "mode": _one_of("reload"),
+                "path": _is_non_empty_string,
+                "limit": _integer_in_range(minimum=1, maximum=512),
+            },
+        ),
+        _schema_variant(
+            required=("mode",),
+            optional=("path", "limit"),
+            validators={
+                "mode": _one_of("close"),
+                "path": _equal_to(""),
+                "limit": _integer_in_range(minimum=1, maximum=512),
+            },
+        ),
+    ),
+    # Focus resolves a widget name through the same path as tree and click.
+    "ui_focus": _command_schema(
+        _schema_variant(
+            required=("path",),
+            validators={"path": _is_non_empty_string},
+        )
+    ),
+    "ui_dialog": _command_schema(delegated=_validate_ui_dialog_args),
+    "action_use": _command_schema(
+        _schema_variant(
+            required=("action",),
+            optional=("classname", "pos", "radius"),
+            validators={
+                "action": _is_non_empty_string,
+                "classname": _is_string,
+                "pos": _is_real_vector3,
+                "radius": _SAFE_RADIUS_200,
+            },
+        )
+    ),
+    # Only payload shape is checked here. Allowlisting, audit, and queue errors
+    # remain in the dedicated enqueue path.
+    "exec_enforce": _command_schema(
+        _schema_variant(
+            optional=("expr", "main_fn", "timeout_s"),
+            validators={
+                "expr": _is_string,
+                "main_fn": _is_string,
+                "timeout_s": _SAFE_POSITIVE_REAL,
+            },
+        )
+    ),
+}
+
+
+def _matches_schema_variant(
+    args: dict,
+    keys: set[str],
+    variant: _SchemaVariant,
+) -> bool:
+    required, optional, validators = variant
+    if not required.issubset(keys) or keys - required - optional:
+        return False
+    for field, validator in validators.items():
+        if field in args and not validator(args[field]):
+            return False
+    return True
+
+
 def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
-    if cmd == "restore_gameplay":
-        if args:
-            return False, "bad_args"
-        return True, None
+    schema = _COMMAND_ARG_SCHEMAS.get(cmd)
+    if schema is not None:
+        variants, delegated = schema
+        if delegated is not None:
+            return delegated(args)
 
-    if cmd == "vehicle_trace":
-        if set(args) != {
-            "mode",
-            "trace_id",
-            "cursor",
-            "limit",
-            "sample_hz",
-            "max_samples",
-        }:
-            return False, "bad_args"
-        mode = args.get("mode")
-        trace_id = args.get("trace_id")
-        cursor = args.get("cursor")
-        limit = args.get("limit")
-        sample_hz = args.get("sample_hz")
-        max_samples = args.get("max_samples")
-        if mode not in {"start", "status", "stop", "read", "clear"}:
-            return False, "bad_args"
-        if (
-            not isinstance(trace_id, str)
-            or len(trace_id) != 32
-            or any(character not in "0123456789abcdef" for character in trace_id)
-        ):
-            return False, "bad_args"
-        if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0:
-            return False, "bad_args"
-        if (
-            not isinstance(limit, int)
-            or isinstance(limit, bool)
-            or limit < 1
-            or limit > 64
-        ):
-            return False, "bad_args"
-        if (
-            not isinstance(sample_hz, int)
-            or isinstance(sample_hz, bool)
-            or sample_hz < 20
-            or sample_hz > 60
-        ):
-            return False, "bad_args"
-        if (
-            not isinstance(max_samples, int)
-            or isinstance(max_samples, bool)
-            or max_samples < 2
-            or max_samples > 8192
-        ):
-            return False, "bad_args"
-        return True, None
-
-    if cmd == "vehicle_prepare_fixture":
-        # Any CarScript classname is accepted; non-vehicles fail in the
-        # bridge with fixture_not_vehicle after CarScript.Cast.
-        if set(args) != {"mode", "type", "pos", "radius"}:
-            return False, "bad_args"
-        if args.get("mode") != "object_at":
-            return False, "bad_args"
-        type_name = args.get("type")
-        if not isinstance(type_name, str) or type_name == "":
-            return False, "bad_args"
-        pos = args.get("pos")
-        radius = args.get("radius")
-        if not isinstance(pos, list) or len(pos) != 3:
-            return False, "bad_args"
-        try:
-            if any(not _is_real_number(component) for component in pos):
-                return False, "bad_args"
-            if not _is_real_number(radius) or float(radius) <= 0.0:
-                return False, "bad_args"
-        except (OverflowError, ValueError):
-            return False, "bad_args"
-        return True, None
-
-    if cmd == "surface_query":
-        # Fail closed: exact keys, finite x/z. World bounds are enforced in the
-        # bridge (needs GetWorldSize); non-finite is rejected here so the
-        # consumer never enqueues NaN/Inf.
-        if set(args) != {"x", "z"}:
-            return False, "bad_args"
-        try:
-            if not _is_real_number(args.get("x")) or not _is_real_number(args.get("z")):
-                return False, "bad_args"
-        except (OverflowError, ValueError):
-            return False, "bad_args"
-        return True, None
-
-    if cmd == "player_teleport":
         keys = set(args)
-        if keys != {"pos"} and keys != {"pos", "uid"}:
-            return False, "bad_args"
-        if "uid" in args and not isinstance(args.get("uid"), str):
-            return False, "bad_args"
-        pos = args.get("pos")
-        if not isinstance(pos, list) or len(pos) != 3:
-            return False, "bad_args"
-        try:
-            if any(not _is_real_number(component) for component in pos):
-                return False, "bad_args"
-        except (OverflowError, ValueError):
-            return False, "bad_args"
-        return True, None
-
-    if cmd == "infected_drive":
-        # drive: {type,pos,heading,speed}; release: {type,pos,mode}.
-        keys = set(args)
-        if keys != {"type", "pos", "heading", "speed"} and keys != {"type", "pos", "mode"}:
-            return False, "bad_args"
-        type_name = args.get("type")
-        if not isinstance(type_name, str) or type_name == "":
-            return False, "bad_args"
-        pos = args.get("pos")
-        if not isinstance(pos, list) or len(pos) != 3:
-            return False, "bad_args"
-        try:
-            if any(not _is_real_number(component) for component in pos):
-                return False, "bad_args"
-        except (OverflowError, ValueError):
-            return False, "bad_args"
-        if "mode" in args:
-            if args.get("mode") != "release":
-                return False, "bad_args"
+        if any(_matches_schema_variant(args, keys, variant) for variant in variants):
             return True, None
-        try:
-            if not _is_real_number(args.get("heading")):
-                return False, "bad_args"
-            if not _is_real_number(args.get("speed")):
-                return False, "bad_args"
-        except (OverflowError, ValueError):
-            return False, "bad_args"
-        if not (-360.0 <= float(args.get("heading")) <= 360.0):
-            return False, "bad_args"
-        if not (0.0 <= float(args.get("speed")) <= 5.0):
-            return False, "bad_args"
-        return True, None
+        return False, "bad_args"
 
-    if cmd == "object_anim":
-        # phase optional: absent = read, present = SetAnimationPhase.
-        keys = set(args)
-        if keys != {"type", "pos", "source"} and keys != {"type", "pos", "source", "phase"}:
-            return False, "bad_args"
-        type_name = args.get("type")
-        source = args.get("source")
-        if not isinstance(type_name, str) or type_name == "":
-            return False, "bad_args"
-        if not isinstance(source, str) or source == "":
-            return False, "bad_args"
-        pos = args.get("pos")
-        if not isinstance(pos, list) or len(pos) != 3:
-            return False, "bad_args"
-        try:
-            if any(not _is_real_number(component) for component in pos):
-                return False, "bad_args"
-            if "phase" in args and not _is_real_number(args.get("phase")):
-                return False, "bad_args"
-        except (OverflowError, ValueError):
-            return False, "bad_args"
-        return True, None
-
-    if cmd == "inventory_give":
-        keys = set(args)
-        if keys != {"classname", "dest"} and keys != {"classname", "dest", "uid"}:
-            return False, "bad_args"
-        if "uid" in args and not isinstance(args.get("uid"), str):
-            return False, "bad_args"
-        classname = args.get("classname")
-        dest = args.get("dest")
-        if not isinstance(classname, str) or classname == "":
-            return False, "bad_args"
-        if dest not in {"hands", "inventory"}:
-            return False, "bad_args"
-        return True, None
-
-    if cmd == "object_inspect":
-        if set(args) != {"type", "pos", "want"}:
-            return False, "bad_args"
-        type_name = args.get("type")
-        want = args.get("want")
-        if not isinstance(type_name, str) or type_name == "":
-            return False, "bad_args"
-        if not isinstance(want, list) or len(want) == 0:
-            return False, "bad_args"
-        if any(not isinstance(item, str) or item == "" for item in want):
-            return False, "bad_args"
-        pos = args.get("pos")
-        if not isinstance(pos, list) or len(pos) != 3:
-            return False, "bad_args"
-        try:
-            if any(not _is_real_number(component) for component in pos):
-                return False, "bad_args"
-        except (OverflowError, ValueError):
-            return False, "bad_args"
-        return True, None
-
-    if cmd == "object_delete":
-        # Closed key set: this socket is authenticated ingress, not only the
-        # FastMCP surface, so extra keys must not ride through.
-        if set(args) != {"object_id"}:
-            return False, "bad_args"
-        object_id = args.get("object_id")
-        if not isinstance(object_id, int) or isinstance(object_id, bool):
-            return False, "bad_args"
-        if object_id <= 0:
-            return False, "bad_args"
-        return True, None
-
-    if cmd == "notify_players":
-        if set(args) - {"show_time", "title", "detail", "icon", "uid"}:
-            return False, "bad_args"
-        if not _is_real_number(args.get("show_time")) or float(args["show_time"]) <= 0.0:
-            return False, "bad_args"
-        title = args.get("title")
-        if not isinstance(title, str) or title == "":
-            return False, "bad_args"
-        detail = args.get("detail", "")
-        icon = args.get("icon", "")
-        if not isinstance(detail, str) or not isinstance(icon, str):
-            return False, "bad_args"
-        if "uid" in args and not isinstance(args.get("uid"), str):
-            return False, "bad_args"
-        return True, None
-
-    if cmd == "entities_query":
-        keys = set(args)
-        if keys != {"pos", "radius"} and keys != {"pos", "radius", "limit"}:
-            return False, "bad_args"
-        pos = args.get("pos")
-        radius = args.get("radius")
-        if not isinstance(pos, list) or len(pos) != 3:
-            return False, "bad_args"
-        try:
-            if any(not _is_real_number(component) for component in pos):
-                return False, "bad_args"
-            if not _is_real_number(radius) or float(radius) <= 0.0 or float(radius) > 200.0:
-                return False, "bad_args"
-        except (OverflowError, ValueError):
-            return False, "bad_args"
-        if "limit" in args:
-            limit = args.get("limit")
-            if (
-                not isinstance(limit, int)
-                or isinstance(limit, bool)
-                or limit < 1
-                or limit > 128
-            ):
-                return False, "bad_args"
-        return True, None
-
-    if cmd == "ui_tree":
-        keys = set(args)
-        if keys - {"path", "limit"}:
-            return False, "bad_args"
-        if "path" in args and not isinstance(args.get("path"), str):
-            return False, "bad_args"
-        if "limit" in args:
-            limit = args.get("limit")
-            if (
-                not isinstance(limit, int)
-                or isinstance(limit, bool)
-                or limit < 1
-                or limit > 512
-            ):
-                return False, "bad_args"
-        return True, None
-
-    if cmd == "ui_set_text":
-        if set(args) != {"path", "text"}:
-            return False, "bad_args"
-        path = args.get("path")
-        text = args.get("text")
-        if not isinstance(path, str) or path == "":
-            return False, "bad_args"
-        if not isinstance(text, str):
-            return False, "bad_args"
-        return True, None
-
-    if cmd == "ui_click":
-        keys = set(args)
-        if keys != {"path"} and keys != {"path", "button"}:
-            return False, "bad_args"
-        path = args.get("path")
-        if not isinstance(path, str) or path == "":
-            return False, "bad_args"
-        if "button" in args:
-            button = args.get("button")
-            if (
-                not isinstance(button, int)
-                or isinstance(button, bool)
-                or button < 0
-                or button > 2
-            ):
-                return False, "bad_args"
-        return True, None
-
-    if cmd == "ui_reload_layout":
-        # path is a FILE path here, not a widget name: this verb is the only client
-        # command that reads from disk. mode=close carries no path by construction.
-        keys = set(args)
-        if keys - {"path", "mode", "limit"}:
-            return False, "bad_args"
-        mode = args.get("mode", "reload")
-        if mode not in {"reload", "close"}:
-            return False, "bad_args"
-        path = args.get("path", "")
-        if not isinstance(path, str):
-            return False, "bad_args"
-        if mode == "reload" and path == "":
-            return False, "bad_args"
-        if mode == "close" and path != "":
-            return False, "bad_args"
-        if "limit" in args:
-            limit = args.get("limit")
-            if (
-                not isinstance(limit, int)
-                or isinstance(limit, bool)
-                or limit < 1
-                or limit > 512
-            ):
-                return False, "bad_args"
-        return True, None
-
-    if cmd == "ui_focus":
-        # path is a widget NAME, same resolver as ui_tree / ui_click.
-        if set(args) != {"path"}:
-            return False, "bad_args"
-        path = args.get("path")
-        if not isinstance(path, str) or path == "":
-            return False, "bad_args"
-        return True, None
-
-    if cmd == "ui_dialog":
-        return ui_dialog.validate_command_args(args)
-
-    if cmd == "action_use":
-        keys = set(args)
-        if keys - {"action", "classname", "pos", "radius"}:
-            return False, "bad_args"
-        action = args.get("action")
-        if not isinstance(action, str) or action == "":
-            return False, "bad_args"
-        if "classname" in args and not isinstance(args.get("classname"), str):
-            return False, "bad_args"
-        if "pos" in args:
-            pos = args.get("pos")
-            if not isinstance(pos, list) or len(pos) != 3:
-                return False, "bad_args"
-            try:
-                if any(not _is_real_number(component) for component in pos):
-                    return False, "bad_args"
-            except (OverflowError, ValueError):
-                return False, "bad_args"
-        if "radius" in args:
-            try:
-                if not _is_real_number(args.get("radius")) or float(args.get("radius")) <= 0.0 or float(args.get("radius")) > 200.0:
-                    return False, "bad_args"
-            except (OverflowError, ValueError):
-                return False, "bad_args"
-        return True, None
-
-    # exec_enforce is NOT schema-less: it has its own validation + audit path in
-    # _enqueue_exec_enforce (allowlist check, durable "allowed"/"denied" audit,
-    # 429 queue-full, 503 audit-failed). We only gate the arg *shape* here so the
-    # verb reaches that path instead of being rejected as bad_args before it can
-    # return its own 429/503/403. expr/main_fn are optional strings; timeout_s is
-    # an optional positive number. Anything else is a genuine bad_args.
-    if cmd == "exec_enforce":
-        keys = set(args)
-        if keys - {"expr", "main_fn", "timeout_s"}:
-            return False, "bad_args"
-        if "expr" in args and not isinstance(args.get("expr"), str):
-            return False, "bad_args"
-        if "main_fn" in args and not isinstance(args.get("main_fn"), str):
-            return False, "bad_args"
-        if "timeout_s" in args:
-            timeout_s = args.get("timeout_s")
-            if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)):
-                return False, "bad_args"
-            try:
-                if not math.isfinite(float(timeout_s)) or float(timeout_s) <= 0.0:
-                    return False, "bad_args"
-            except (OverflowError, ValueError):
-                return False, "bad_args"
-        return True, None
-
-    # Verbs whitelisted but intentionally schema-less here: their args are
-    # validated by their server.py tool (or are read-only / single-arg). Adding a
-    # new schema-less verb MUST be added to this set so the omission is visible.
     if cmd in _SCHEMALESS_COMMANDS:
         return True, None
 
