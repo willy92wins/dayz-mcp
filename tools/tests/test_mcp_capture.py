@@ -85,6 +85,67 @@ class MCPCaptureTest(unittest.TestCase):
         if isinstance(result, Image.Image):
             result.close()
 
+    def test_capture_dual_reports_the_selected_frames_identity_and_hashes(self) -> None:
+        colors = ((10, 20, 30), (80, 100, 120), (81, 101, 121))
+        windows = (
+            {
+                "pid": 1101,
+                "class": "DayZ",
+                "title": "first",
+                "left": 10,
+                "top": 20,
+                "width": 2,
+                "height": 2,
+            },
+            {
+                "pid": 2202,
+                "class": "DayZ",
+                "title": "selected",
+                "left": 30,
+                "top": 40,
+                "width": 2,
+                "height": 2,
+            },
+            {
+                "pid": 3303,
+                "class": "DayZ",
+                "title": "last",
+                "left": 50,
+                "top": 60,
+                "width": 2,
+                "height": 2,
+            },
+        )
+        backend_hashes = ("1" * 64, "2" * 64, "3" * 64)
+        capture_index = 0
+
+        def capture_frame(output_path: str, **_: object) -> dict[str, object]:
+            nonlocal capture_index
+            index = capture_index
+            capture_index += 1
+            Image.new("RGB", (2, 2), colors[index]).save(output_path, format="PNG")
+            return {
+                "ok": True,
+                "error": "",
+                "method": "printwindow",
+                "window": windows[index],
+                "stats": {"meanBrightness": 96.0, "nonBlackRatio": 1.0},
+                "sha256": backend_hashes[index],
+                "client": {"left": 0, "top": 0, "width": 2, "height": 2},
+                "clientStats": {"meanBrightness": 96.0, "nonBlackRatio": 1.0},
+            }
+
+        with mock.patch.object(mcp_capture, "_run_window_capture", side_effect=capture_frame):
+            result = mcp_capture.capture_dual(frames=3)
+
+        meta = result["meta"]
+        self.assertEqual(windows[1], meta.get("window"))
+        self.assertEqual(backend_hashes[1], meta.get("backend_sha256"))
+        self.assertEqual(
+            "5404c70428b88bac746c2fad022b29fc754c259f23d3022233a8b02923d01e80",
+            meta.get("frame_sha256"),
+        )
+
     def test_stable_frame_rejects_unverified_client_stats(self) -> None:
         cases: tuple[object, ...] = (
             None,

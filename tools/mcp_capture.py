@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import math
@@ -417,6 +418,8 @@ def grab_stable_frame(
             return _error("frame_client_area_unverified")
         if float(mean) <= 1.0 and float(nonblack) <= 0.01:
             return _error("frame_client_all_black")
+        chosen.info["window"] = chosen_result.get("window")
+        chosen.info["sha256"] = chosen_result.get("sha256")
         return chosen
 
 
@@ -489,6 +492,10 @@ def capture_dual(
             "crop": crop or "",
             "inline_mimeType": inline.get("mimeType"),
             "inline_base64_len": len(inline.get("data") or ""),
+            "window": chosen.info.get("window"),
+            "backend_sha256": chosen.info.get("sha256"),
+            # Hash the selected full-resolution RGB pixels, independent of inline encoding.
+            "frame_sha256": hashlib.sha256(chosen.tobytes()).hexdigest(),
         },
     }
     if save_fullres:
