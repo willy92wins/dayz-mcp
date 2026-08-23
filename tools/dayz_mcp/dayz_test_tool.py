@@ -13,6 +13,7 @@ from dayz_mcp.launcher_registry import open_approved_launcher
 
 
 _MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal"})
+_BRIDGE_MOD_NAMES = frozenset({"dayz_mcp", "@dayz_mcp"})
 _TERMINAL_KEYS = frozenset(
     {"cleanup_degraded", "error_code", "exit_code", "ok", "run_id"}
 )
@@ -159,6 +160,12 @@ def build_run_request(
         )
     except (TypeError, ValueError):
         _fail("bad_dayz_test_request")
+    effective_mods = [selected.mod, *(public_extra or [])]
+    if not kill and not any(
+        ntpath.basename(mod).casefold() in _BRIDGE_MOD_NAMES
+        for mod in effective_mods
+    ):
+        _fail("bridge_mod_missing: add extra_mods=['@DayZ_MCP']")
     return parsed.canonical_bytes, selected
 
 

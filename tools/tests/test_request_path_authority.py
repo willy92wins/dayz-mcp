@@ -379,12 +379,14 @@ class RequestPathAuthorityTests(unittest.TestCase):
                 (sealed,),
                 project=policy.mod,
                 mode="offline",
-                extra_mods=[absolute],
+                extra_mods=[absolute, "@DayZ_MCP"],
             )
             parsed = request_module.parse_dayz_test_request(
                 raw, policies=(policy,)
             )
-            self.assertEqual(parsed.payload["extra_mods"], [absolute])
+            self.assertEqual(
+                parsed.payload["extra_mods"], [absolute, "@DayZ_MCP"]
+            )
 
 
 if __name__ == "__main__":
