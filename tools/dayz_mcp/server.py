@@ -39,7 +39,7 @@ from dayz_mcp.daemon_policy import load_normal_daemon_policy
 from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import LoopbackServer, read_key
-from dayz_mcp.server_cli import build_server_parser
+from dayz_mcp.server_cli import CLIENT_PLATFORM_ALIASES, build_server_parser
 from dayz_mcp.process_lifecycle import empty_box, occupancy_error_fields
 from dayz_mcp.session_coordination import ClientIdentity
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
@@ -500,6 +500,7 @@ class ServerConfig:
     exec_audit_path: str | None = None
     log_sink: Callable[[str], None] | None = None
     client_platform: str = "unknown"
+    client_platform_raw: str = ""
     task_label: str = ""
     session_ttl_s: float = 120.0
     runtime_dir: str | None = None
@@ -838,6 +839,11 @@ class ClientRuntime:
             session_id=str(uuid.uuid4()),
             task_label=(config.task_label or os.environ.get("DAYZ_MCP_TASK_LABEL", ""))[:120],
         )
+        if config.client_platform_raw:
+            self._log(
+                "CLIENT: platform alias normalized "
+                f"raw={config.client_platform_raw} canonical={config.client_platform}"
+            )
         self._control = ControlClient(
             policy=daemon_policy,
             identity=ControlIdentity(**self.identity.to_payload()),
@@ -3886,6 +3892,9 @@ def parse_args(argv: list[str] | None = None) -> ServerConfig:
     parser = build_server_parser()
     parser.allow_abbrev = False
     args = parser.parse_args(argv)
+    client_platform_raw = (
+        args.client_platform if args.client_platform in CLIENT_PLATFORM_ALIASES else ""
+    )
     return ServerConfig(
         mode=args.mode,
         port=args.port,
@@ -3896,7 +3905,10 @@ def parse_args(argv: list[str] | None = None) -> ServerConfig:
         enable_exec_enforce=bool(args.enable_exec_enforce),
         exec_allowlist=args.exec_allowlist,
         exec_audit_path=args.exec_audit_path,
-        client_platform=args.client_platform,
+        client_platform=CLIENT_PLATFORM_ALIASES.get(
+            args.client_platform, args.client_platform
+        ),
+        client_platform_raw=client_platform_raw,
         task_label=args.task_label,
         auto_spawn_daemon=bool(args.auto_spawn_daemon),
     )

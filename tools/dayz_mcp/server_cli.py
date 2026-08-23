@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from typing import Literal
 
 
+CANONICAL_CLIENT_PLATFORMS = ("claude", "codex", "unknown")
+CLIENT_PLATFORM_ALIASES = {"grok": "unknown"}
+
+
 @dataclass(frozen=True)
 class ServerCliParse:
     status: Literal["parsed", "terminal", "invalid"]
@@ -54,7 +58,9 @@ def _configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--exec-allowlist")
     parser.add_argument("--exec-audit-path")
     parser.add_argument(
-        "--client-platform", choices=("claude", "codex", "unknown"), default="unknown"
+        "--client-platform",
+        choices=(*CANONICAL_CLIENT_PLATFORMS, *CLIENT_PLATFORM_ALIASES),
+        default="unknown",
     )
     parser.add_argument("--task-label", default="")
     parser.add_argument(
