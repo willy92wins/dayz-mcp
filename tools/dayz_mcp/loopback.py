@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
-from dayz_mcp import daemon_credential, orphan_guard, ui_dialog
+from dayz_mcp import daemon_credential, orphan_guard, pinned_keyfile, ui_dialog
 from dayz_mcp.core import (
     BLOCKED_VERSION_STATES,
     EXPECTED_BRIDGE_VERSION,
@@ -3143,11 +3143,37 @@ def _repair_coordination_audit_fault(
 
 
 def read_key(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as handle:
-        key = handle.read().strip()
-    if not key:
-        raise ValueError("empty keyfile")
-    return key
+    """Read the daemon auth key through the pinned local-disk contract.
+
+    Standalone daemon and embedded loopback both authenticate the
+    loopback with this secret. The previous implementation was a raw
+    unbounded text read of the configured path: no size cap, no disk-type
+    check, and it followed reparse points. That is hardening of a
+    privileged secret load, not a demonstrated exploit -- exploitability
+    depends on who can replace the configured path. Reparse substitution
+    was not reproduced here (creating a symlink needs a privilege this
+    process did not have). Client credentials, doctor, and the
+    admin/lifecycle CLIs already use the pinned reader.
+
+    The signed reader collapses every failure to invalid_daemon_keyfile
+    and is not edited here, so this wrapper cannot name the check that
+    failed. It keeps that token so existing matchers still fire, and
+    lists the contract a user can inspect (local regular file, size,
+    encoding) without echoing key bytes. Odd files that used to pass
+    (oversize, BOM, relative path, extra hard links) are rejected; they
+    already fail every other reader in this tree.
+    """
+    try:
+        return pinned_keyfile.read_pinned_keyfile(path)
+    except ValueError as error:
+        if str(error) != "invalid_daemon_keyfile":
+            raise
+        raise ValueError(
+            "invalid_daemon_keyfile: must be a local regular disk file "
+            "with one hard link and no reparse points, at most 4096 bytes, "
+            "UTF-8 without BOM, and a single-line key of at most 1024 "
+            "characters"
+        ) from None
 
 
 class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
