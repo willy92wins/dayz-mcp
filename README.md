@@ -124,6 +124,12 @@ the acceptance contract is in [`product-spec.md`](product-spec.md).
   sits on the same machine as the game it drives — there is no remote mode and no
   multi-user mode, by design. The reference deployment is a local DayZDiag server plus
   a client for visual capture; the server-side verbs need only the bridge mod loaded.
+- An agent that already knows DayZ modding. These tools expose the game; they do not
+  teach it. Unless your assistant brings its own crystallized domain knowledge, pair
+  this server with the same author's
+  [DayZ Modding Knowledge Pack](https://github.com/willy92wins/DayZ-Modding-Knowledge-Pack):
+  16 domain playbooks, the py3d MLOD toolchain, an Enforce linter and a UI lab, every
+  claim carrying `path:line` evidence.
 
 ## Two halves
 
