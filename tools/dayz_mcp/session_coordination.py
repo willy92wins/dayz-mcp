@@ -2369,7 +2369,10 @@ class SessionCoordinator:
         wait_s: float,
     ) -> str:
         if not self._release_audit_worker_slots.acquire(blocking=False):
-            return False, False
+            # Slot exhausted: no worker starts, so callers must apply the
+            # not_started side effects (audit_failed + _handoff_audit_failed).
+            # A tuple never matches those string checks.
+            return "not_started"
 
         done = threading.Event()
         result: dict[str, bool] = {}

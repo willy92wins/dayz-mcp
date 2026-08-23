@@ -945,6 +945,39 @@ class SessionCoordinatorTest(unittest.TestCase):
         self.clock.advance(20.0)
         self.assertEqual(self.coordinator.status(self.a)["self"]["state"], "none")
 
+    def test_saturated_release_audit_slots_return_not_started_and_degrade(self) -> None:
+        token = self.coordinator.acquire(self.a, "drive")[1]["lease_token"]
+        slots = self.coordinator._release_audit_worker_slots
+        held = 0
+        while slots.acquire(blocking=False):
+            held += 1
+        self.assertGreater(held, 0)
+        try:
+            with self.coordinator._condition:
+                lease = self.coordinator._active
+                self.assertIsNotNone(lease)
+                outcome = self.coordinator._write_release_audits_bounded_locked(
+                    lease=lease,
+                    started_event="session_release_started",
+                    audit_reason="owner_release",
+                    cleanup_timed_out=False,
+                    cleanup_duration_s=0.0,
+                    cleanup_summary={},
+                    cleanup_degraded=[],
+                    expired_tickets=[],
+                    wait_s=0.0,
+                )
+            status, body = self.coordinator.release(self.a, token)
+            degraded = body.get("cleanup_degraded") or []
+            handoff_failed = self.coordinator._handoff_audit_failed
+        finally:
+            for _ in range(held):
+                slots.release()
+        self.assertEqual(
+            (type(outcome).__name__, outcome, status, degraded, handoff_failed),
+            ("str", "not_started", 200, ["audit_failed"], True),
+        )
+
     def test_release_and_expiry_invalidate_even_when_audit_fails(self) -> None:
         token = self.coordinator.acquire(self.a, "drive")[1]["lease_token"]
         self.audit.fail_events.add("session_release_started")
