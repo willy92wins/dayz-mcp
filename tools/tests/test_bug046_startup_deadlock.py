@@ -22,7 +22,7 @@ from dayz_mcp.identity_migration import (
     ensure_runs_v1_backup,
     scan_dayz_mcp_processes,
 )
-from dayz_mcp.daemon import build_daemon_argv
+from dayz_mcp.daemon import DAEMON_STARTUP_BUDGET_S, build_daemon_argv
 from dayz_mcp.host_config import CLAUDE_TIMEOUT_MS, CODEX_TIMEOUT_SECONDS
 from dayz_mcp.runtime_state import RuntimePaths
 
@@ -835,9 +835,13 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
                     stderr=subprocess.PIPE,
                     text=True,
                 )
-                deadline = time.monotonic() + 8.0
+                deadline = time.monotonic() + DAEMON_STARTUP_BUDGET_S
                 payload: dict[str, object] | None = None
-                while time.monotonic() < deadline and payload is None:
+                while (
+                    payload is None
+                    and second.poll() is None
+                    and time.monotonic() < deadline
+                ):
                     url = (
                         f"http://127.0.0.1:{port}/status?key="
                         + urllib.parse.quote("fixture-key", safe="")
@@ -908,9 +912,13 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
                 ]
                 for waiter in waiters:
                     waiter.start()
-                deadline = time.monotonic() + 8.0
+                deadline = time.monotonic() + DAEMON_STARTUP_BUDGET_S
                 payloads: dict[int, dict[str, object]] = {}
-                while time.monotonic() < deadline and not payloads:
+                while (
+                    not payloads
+                    and any(child.poll() is None for child in children)
+                    and time.monotonic() < deadline
+                ):
                     for port in ports:
                         url = (
                             f"http://127.0.0.1:{port}/status?key="
