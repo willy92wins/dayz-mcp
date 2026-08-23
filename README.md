@@ -222,11 +222,12 @@ cd tools
 ```
 
 Tests that need a built launcher, an installed registry or development-only
-evidence skip with the reason named, so a fresh clone is red only for real
-regressions — with one exception. The process tests in
-`test_bug046_startup_deadlock` spawn a real daemon and wait 12 s for it; on a
-loaded machine that wait expires. One of those tests checks four crash stages.
-Errors from anywhere else are worth reporting.
+evidence skip with the reason named. Everything else passes on a fresh clone, so
+anything red is worth reporting.
+
+The virtualenv has to be the one the installer creates, at `tools/.venv-mcp`:
+the daemon resolves that path when it checks its own identity, and an environment
+somewhere else fails at startup rather than falling back.
 
 ## Licence
 

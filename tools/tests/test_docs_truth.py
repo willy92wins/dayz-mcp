@@ -294,23 +294,34 @@ class LogsSinceTailCapDocsTest(unittest.TestCase):
             "logs_since description cap disagrees with log_tail.MAX_TAIL_BYTES")
 
 
-class FreshCloneFlakeDocsTest(unittest.TestCase):
-    """README's fresh-clone colour claim must name the known flake the tree
-    actually carries (A5)."""
+class FreshCloneGreenClaimDocsTest(unittest.TestCase):
+    """A green fresh clone was measured under one condition, so the README that
+    claims it has to state that condition (A5).
 
-    def test_readme_names_the_known_flake(self) -> None:
-        if not (REPO / "tools" / "tests" / "test_bug046_startup_deadlock.py"
-                ).is_file():
-            self.skipTest("known-flake test absent; README claim unconstrained")
+    This replaces a check that required the README to name
+    `test_bug046_startup_deadlock` as a known flake. It is not one: a clone with
+    its own `tools/.venv-mcp` runs the suite green. The five errors that looked
+    like a flake came from driving a COPY of the tree with the development venv,
+    whose editable finder maps `dayz_mcp` back to the original checkout -- the
+    daemon child then imports one tree while its cwd is another, and startup
+    never converges. That is a property of the measuring rig, not of the code,
+    and the README should not warn readers about it.
+
+    What survives is the reason the old check existed: the colour claim must not
+    be free of preconditions."""
+
+    _CLAIM = "passes on a fresh clone"
+    _PRECONDITION = "tools/.venv-mcp"
+
+    def test_green_claim_states_the_environment_it_needs(self) -> None:
         readme = _doc("README.md")
-        self.assertNotIn(
-            "green rather than red", readme,
-            "README promises an unqualified green fresh clone while the tree "
-            "carries a known startup flake; name it or drop the promise")
+        if self._CLAIM not in readme:
+            self.skipTest("README makes no fresh-clone colour claim")
         self.assertIn(
-            "test_bug046_startup_deadlock", readme,
-            "README discusses fresh-clone colour but does not name the known "
-            "flake test the tree carries")
+            self._PRECONDITION, readme,
+            "README says a fresh clone passes but never says the venv must be "
+            "the installer's at tools/.venv-mcp; the daemon resolves that exact "
+            "path and fails at startup from anywhere else")
 
 
 class ReadmePathLineCitesDocsTest(unittest.TestCase):
