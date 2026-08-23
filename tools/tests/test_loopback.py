@@ -65,6 +65,109 @@ class LoopbackTest(unittest.TestCase):
             finally:
                 exc.close()
 
+    def _enable_coordination(self) -> tuple[dict[str, object], str]:
+        identity_payload: dict[str, object] = {
+            "platform": "codex",
+            "pid": 101,
+            "ppid": 10,
+            "started_at_utc": "2026-07-14T20:00:00Z",
+            "session_id": "retail-reason-owner",
+            "task_label": "retail reason",
+        }
+        client = ClientIdentity.from_payload(identity_payload)
+        coordinator = SessionCoordinator(
+            token_fn=lambda: "retail-token",
+            id_fn=lambda: "retail-lease",
+            audit=lambda _event: True,
+            cleanup=lambda session_id, lease_id, reason, vehicle_active: self.state.cleanup_owner(
+                session_id, lease_id, reason, vehicle_active
+            ),
+        )
+        self.state.coordination = coordinator
+        status, active = coordinator.acquire(client, "retail reason test")
+        self.assertEqual(status, 200)
+        return identity_payload, active["lease_token"]
+
+    def _assert_retail_quarantine_reason(
+        self,
+        identity_payload: dict[str, object],
+        lease_token: str,
+        expected_reason: str,
+    ) -> None:
+        status, body = self.request(
+            "POST",
+            "/enqueue",
+            {
+                "cmd": "world_spawn",
+                "args": {"type": "X", "pos": [1, 2, 3]},
+                "identity": identity_payload,
+                "lease_token": lease_token,
+            },
+        )
+        self.assertEqual(
+            (status, body),
+            (
+                409,
+                {
+                    "error": "retail_quarantine",
+                    "reason": expected_reason,
+                },
+            ),
+        )
+
+    def test_retail_quarantine_409_reports_probe_error(self) -> None:
+        identity_payload, lease_token = self._enable_coordination()
+
+        def broken_probe():
+            raise RuntimeError("probe unavailable")
+
+        self.state.retail_probe = broken_probe
+        self._assert_retail_quarantine_reason(
+            identity_payload, lease_token, "probe_error"
+        )
+
+    def test_retail_quarantine_409_distinguishes_malformed_and_unknown_probe(
+        self,
+    ) -> None:
+        identity_payload, lease_token = self._enable_coordination()
+        cases = (
+            ([], "probe_malformed"),
+            ({"known": "yes", "processes": []}, "probe_malformed"),
+            ({"known": False, "processes": []}, "probe_unknown"),
+        )
+        for probe_result, expected_reason in cases:
+            with self.subTest(
+                probe_result=probe_result, expected_reason=expected_reason
+            ):
+                self.state.retail_probe = lambda result=probe_result: result
+                self._assert_retail_quarantine_reason(
+                    identity_payload, lease_token, expected_reason
+                )
+
+    def test_retail_quarantine_409_distinguishes_process_shape_and_presence(
+        self,
+    ) -> None:
+        identity_payload, lease_token = self._enable_coordination()
+        cases = (
+            ({"known": True, "processes": {}}, "probe_malformed"),
+            ({"known": True, "processes": [{"pid": 123}]}, "retail_present"),
+        )
+        for probe_result, expected_reason in cases:
+            with self.subTest(
+                probe_result=probe_result, expected_reason=expected_reason
+            ):
+                self.state.retail_probe = lambda result=probe_result: result
+                self._assert_retail_quarantine_reason(
+                    identity_payload, lease_token, expected_reason
+                )
+
+    def test_retail_quarantine_409_reports_no_probe(self) -> None:
+        identity_payload, lease_token = self._enable_coordination()
+        self.state.retail_probe = None
+        self._assert_retail_quarantine_reason(
+            identity_payload, lease_token, "no_probe"
+        )
+
     def test_credential_recovery_telemetry_expires_and_saturates(self) -> None:
         now = [100.0]
         state = loopback.ServerState("fixture-key", time_fn=lambda: now[0])

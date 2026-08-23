@@ -1226,21 +1226,32 @@ class ServerState:
                     payload["detail"] = blocked.get("detail")
             return decision.http_status, payload
 
-        if command_requires_lease(safe_cmd) and self._retail_quarantined():
+        retail_quarantine_reason = (
+            self._retail_quarantine_reason()
+            if command_requires_lease(safe_cmd)
+            else None
+        )
+        if retail_quarantine_reason is not None:
             owner_session_id = decision.owner_session_id
             if (
                 owner_session_id is None
                 or decision.lease_id is None
                 or decision.reservation_id is None
             ):
-                return 409, {"error": "retail_quarantine"}
+                return 409, {
+                    "error": "retail_quarantine",
+                    "reason": retail_quarantine_reason,
+                }
             rejected = self.coordination.reject_reservation(
                 owner_session_id,
                 decision.lease_id,
                 decision.reservation_id,
                 "retail_quarantine",
             )
-            rejected_payload: dict[str, object] = {"error": rejected.error}
+            rejected_payload: dict[str, object] = {
+                "error": rejected.error,
+                "reason": retail_quarantine_reason,
+            }
             if rejected.cleanup_degraded:
                 rejected_payload["cleanup_degraded"] = list(
                     rejected.cleanup_degraded
@@ -2257,17 +2268,31 @@ class ServerState:
         return cleanup
 
     def _retail_quarantined(self) -> bool:
+        return self._retail_quarantine_reason() is not None
+
+    def _retail_quarantine_reason(self) -> str | None:
         probe = self.retail_probe
         if probe is None:
-            return self.coordination is not None
+            if self.coordination is not None:
+                return "no_probe"
+            return None
         try:
             result = probe()
         except Exception:
-            return True
-        if not isinstance(result, dict) or result.get("known") is not True:
-            return True
+            return "probe_error"
+        if not isinstance(result, dict):
+            return "probe_malformed"
+        known = result.get("known")
+        if known is False:
+            return "probe_unknown"
+        if known is not True:
+            return "probe_malformed"
         processes = result.get("processes")
-        return not isinstance(processes, list) or bool(processes)
+        if not isinstance(processes, list):
+            return "probe_malformed"
+        if processes:
+            return "retail_present"
+        return None
 
     def set_poll_delay(self, delay_ms: int) -> tuple[int, dict]:
         if delay_ms < 0 or delay_ms > 5000:
