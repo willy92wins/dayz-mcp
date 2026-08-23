@@ -11,8 +11,8 @@
 Un **servidor MCP** que expone DayZ (DayZDiag) como **tools tipadas** para que un agente
 **conduzca el juego y extraiga datos estructurados**, server-authoritative, **sin teclas SO
 ni OCR**. "Terminado" = la **tool surface completa** (11 tools / 6 dominios en el alcance
-original; hoy son 54 tools registradas, ver `README.md`), ver
-`dayz-mcp-architecture.md` §4) operativa vía MCP stdio, con **seguridad fail-closed**, y
+original, ver `dayz-mcp-architecture.md` §4; hoy son 54 tools registradas, ver
+`README.md`) operativa vía MCP stdio, con **seguridad fail-closed**, y
 captura visual por **window-grab** del cliente renderizado. Se entrega por las 5 fases del
 §8 del architecture doc (POC → Control → Observación → Visual → MCP completo).
 
