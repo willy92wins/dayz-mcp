@@ -3705,7 +3705,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "List approved dayz_test_run project names from the sealed "
-            "request policy (the `mod` field). No host paths."
+            "request policy (the `mod` field). No host paths. The policy is "
+            "produced by build_native_launcher.py; a clone that has not "
+            "built it fails with launcher_policy_missing."
         )
     )
     async def list_projects() -> dict[str, Any]:

@@ -327,7 +327,14 @@ def _artifact_paths(
 
 
 def list_project_names() -> dict[str, object]:
-    """Approved `dayz_test_run` project names. No host paths or file ids."""
+    """Approved `dayz_test_run` project names. No host paths or file ids.
+
+    The sealed policy is a build artifact of build_native_launcher.py and is
+    gitignored, so a clone does not have it until that build runs.
+    FileNotFoundError is that absence (launcher_policy_missing). A present
+    file that cannot be read or parsed, or a document that is not an object,
+    stays launcher_policy_invalid.
+    """
     path = (
         Path(__file__).resolve().parents[1]
         / "native-launchers"
@@ -336,6 +343,10 @@ def list_project_names() -> dict[str, object]:
     )
     try:
         data = json.loads(path.read_bytes().decode("utf-8-sig"))
+    except FileNotFoundError:
+        # FileNotFoundError is an OSError; it must be caught first so a
+        # clone that has not built the launcher is not reported as invalid.
+        _fail("launcher_policy_missing")
     except (OSError, UnicodeError, json.JSONDecodeError):
         _fail("launcher_policy_invalid")
     projects: list[dict[str, str]] = []

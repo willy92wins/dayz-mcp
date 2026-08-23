@@ -35,6 +35,31 @@ def _sealed(*policies: dayz_test_request.RequestProjectPolicy) -> tuple[object, 
     return tuple(types.SimpleNamespace(policy=policy) for policy in policies)
 
 
+def _list_projects_path(payload: bytes | BaseException) -> type:
+    """Path stand-in so list_project_names never leaves the fixture."""
+
+    class _PolicyPath:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def resolve(self) -> _PolicyPath:
+            return self
+
+        @property
+        def parents(self) -> tuple[_PolicyPath, _PolicyPath]:
+            return (self, self)
+
+        def __truediv__(self, _other: object) -> _PolicyPath:
+            return self
+
+        def read_bytes(self) -> bytes:
+            if isinstance(payload, BaseException):
+                raise payload
+            return payload
+
+    return _PolicyPath
+
+
 def _terminal(value: dict[str, object]) -> bytes:
     return json.dumps(
         value,
@@ -675,6 +700,35 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertTrue(all(set(item) == {"name"} for item in payload["projects"]))
+
+    def test_list_project_names_missing_policy_is_not_invalid(self) -> None:
+        """A clone has no sealed policy; that is missing, not corrupt.
+
+        FileNotFoundError is an OSError. If the read except swallows OSError
+        as launcher_policy_invalid, this assertion goes red.
+        """
+        with patch.object(
+            dayz_test_tool, "Path", _list_projects_path(FileNotFoundError())
+        ):
+            with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                dayz_test_tool.list_project_names()
+        self.assertEqual(caught.exception.code, "launcher_policy_missing")
+
+    def test_list_project_names_unreadable_policy_stays_invalid(self) -> None:
+        cases: tuple[tuple[str, bytes | BaseException], ...] = (
+            ("broken-json", b"{not json"),
+            ("non-object", b"[1]"),
+            ("undecodable", b"\x80"),
+            ("permission", PermissionError()),
+        )
+        for label, payload in cases:
+            with self.subTest(label=label):
+                with patch.object(
+                    dayz_test_tool, "Path", _list_projects_path(payload)
+                ):
+                    with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                        dayz_test_tool.list_project_names()
+                self.assertEqual(caught.exception.code, "launcher_policy_invalid")
 
     async def test_run_rejects_busy_session_before_opening_launcher(self) -> None:
         runtime = _Runtime()
