@@ -67,6 +67,10 @@ WAIT_FOR_CONDITIONS = frozenset({
     "log_matches",
 })
 LEASE_REQUIRED_RECIPE = "lease_required: call session_acquire_wait(purpose=...)"
+RETAIL_QUARANTINE_RECIPE = (
+    "retail_quarantine: a DayZ retail process is running on this machine; "
+    "mutations are blocked until no DayZ retail process is running"
+)
 LEASE_TOOL_LINE = "Requires a lease (session_acquire_wait)."
 DAEMON_AUTOSPAWN_DISABLED = (
     "daemon_autospawn_disabled: start the daemon (--daemon) or omit "
@@ -135,6 +139,7 @@ _REMOTE_ERROR_CODES = frozenset({
     "not_found",
     "not_whitelisted",
     "queue_full",
+    "retail_quarantine",
     "coordination_audit_fault",
     "coordination_repairing",
     "operation_cancelled",
@@ -443,6 +448,8 @@ def _public_enqueue_error(
 ) -> str:
     """Map a remote enqueue payload to the caller-facing ToolError string."""
     code = _remote_error_code(payload)
+    if code == "retail_quarantine":
+        return RETAIL_QUARANTINE_RECIPE
     if code == "lease_required":
         if (
             isinstance(payload, dict)
@@ -879,6 +886,8 @@ class ClientRuntime:
             return await method(*args, **kwargs)
 
         def public_error_code(error: ControlClientError) -> str:
+            if error.code == "retail_quarantine":
+                return RETAIL_QUARANTINE_RECIPE
             if error.code == "lease_required":
                 return LEASE_REQUIRED_RECIPE
             if error.hint and (
@@ -2855,7 +2864,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Seat the first "
-            "player in the driver seat of a vehicle near pos."
+            "player in the driver seat of a vehicle near pos. seated=1 "
+            "confirms the command was accepted, not the final seated state. "
+            "engine_set and vehicle_control require client-side ownership; "
+            "establish it with vehicle_get_in_client."
         )
     )
     async def vehicle_enter(pos: list[float], timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
@@ -3178,7 +3190,33 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 raise ToolError("bad_time_multiplier")
             args["time_multiplier"] = multiplier
         async with runtime.tool_lock:
-            return await runtime.call_bridge("world_time_set", args, "server", _timeout(timeout_s))
+            result = await runtime.call_bridge(
+                "world_time_set", args, "server", _timeout(timeout_s)
+            )
+
+        applied = result.get("applied")
+        requested_date = {
+            "year": year_value,
+            "month": month_value,
+            "day": day_value,
+            "hour": hour_value,
+            "minute": minute_value,
+        }
+        date_applied = isinstance(applied, dict) and all(
+            applied.get(field) == value for field, value in requested_date.items()
+        )
+        multiplier_applied: bool | None = None
+        if time_multiplier is not None and isinstance(applied, dict):
+            applied_multiplier = applied.get("time_multiplier")
+            if isinstance(applied_multiplier, (int, float)) and not isinstance(
+                applied_multiplier, bool
+            ):
+                multiplier_applied = float(applied_multiplier) == multiplier
+
+        response = dict(result)
+        response["date_applied"] = date_applied
+        response["multiplier_applied"] = multiplier_applied
+        return response
 
     @app.tool(
         description=(
@@ -3280,7 +3318,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "client's MAX_MCP_OUTPUT_TOKENS budget (default 25000 -> ~600px wide; raise that client env var for bigger inline frames: 50000 -> ~860px/2x px, 75000 -> ~1070px/3x, 100000 -> ~native; max_tokens spends LESS than the cap, above-cap is clamped). Use scale='full' to spend a raised inline budget on resolution (the default scale='small' is a hard 512px cap). crop ('center', 'center:0.4', or normalized 'l,t,r,b') zooms on the subject; "
         "for optical zoom set a narrow fov via camera_set first. fmt='webp' is ~15% smaller (opt-in; Claude Code has known webp MIME bugs, JPEG stays default). save_fullres=True also writes the "
         "native-resolution frame to disk and returns its path in a JSON text block — read that file for "
-        "fine detail, bypassing the inline token budget."
+        "fine detail, bypassing the inline token budget. Without window focus, the frame can be frozen. "
+        "With two DayZ clients, capture targets the live run's client through cmdline_match/client_pid."
     ))
     async def capture_screenshot(
         scale: str = "small",
@@ -3411,14 +3450,34 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Start or stop the "
-            "owned vehicle's engine."
+            "owned vehicle's engine. This requires client-side ownership "
+            "established with vehicle_get_in_client. command_sent reports "
+            "bridge acceptance; state_confirmed reports matching engine "
+            "readback when available, otherwise null (accepted, not confirmed)."
         )
     )
     async def engine_set(mode: str, timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         if mode not in ("start", "stop"):
             raise ToolError("bad_mode")
         async with runtime.tool_lock:
-            return await runtime.call_bridge("engine_set", {"mode": mode}, "client", _timeout(timeout_s))
+            result = await runtime.call_bridge(
+                "engine_set", {"mode": mode}, "client", _timeout(timeout_s)
+            )
+
+        actual = result.get("engine_on_server")
+        if isinstance(actual, bool):
+            engine_on = actual
+        elif type(actual) is int and actual in (0, 1):
+            engine_on = bool(actual)
+        else:
+            engine_on = None
+
+        response = dict(result)
+        response["command_sent"] = True
+        response["state_confirmed"] = (
+            None if engine_on is None else engine_on == (mode == "start")
+        )
+        return response
 
     @app.tool(
         description=(
