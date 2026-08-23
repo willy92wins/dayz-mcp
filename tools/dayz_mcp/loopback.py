@@ -1967,7 +1967,9 @@ class ServerState:
         self._enqueued_at.pop(command_id, None)
         self._operation_deadlines.pop(command_id, None)
         self._command_fence.pop(command_id, None)
-        owner = self._command_owner.get(command_id)
+        # Discard is terminal for owner attribution. A leftover mapping
+        # makes pending_for_owner over-count until MAX_RESULTS eviction.
+        owner = self._command_owner.pop(command_id, None)
         command_name = command.get("cmd")
         if owner is not None and isinstance(command_name, str):
             finished_operations.append(

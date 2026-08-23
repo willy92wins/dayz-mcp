@@ -539,6 +539,25 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         _, poll = accredited_poll(state, "server")
         self.assertEqual([command["id"] for command in poll["commands"]], [unowned_read["id"]])
 
+    def test_cancel_owner_pending_drops_command_owner_entries(self) -> None:
+        state, _coordinator, client, token, _clock = self._coordinated_state()
+        owned_n = 3
+        for _ in range(owned_n):
+            status, _queued = state.enqueue_command(
+                "world_spawn",
+                {"type": "X", "pos": [1, 2, 3]},
+                identity_payload=COORDINATED_IDENTITY,
+                lease_token=token,
+            )
+            self.assertEqual(status, 200)
+        self.assertEqual(state.pending_for_owner(client.session_id), owned_n)
+        self.assertEqual(len(state._command_owner), owned_n)
+
+        result = state.cancel_owner_pending(client.session_id, "owner_release")
+        self.assertEqual(result, {"cancelled": owned_n})
+        self.assertEqual(state._command_owner, {})
+        self.assertEqual(state.pending_for_owner(client.session_id), 0)
+
     def test_stale_discard_finishes_operation_pin(self) -> None:
         state, coordinator, client, token, clock = self._coordinated_state()
         _, queued = state.enqueue_command(
