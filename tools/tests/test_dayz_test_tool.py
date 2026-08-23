@@ -948,6 +948,63 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["run_id"], RUN_ID)
         self.assertGreaterEqual(runtime.lifecycle_calls, 1)
 
+    async def test_stdout_overflow_sentinel_is_rejected_by_real_parser(self) -> None:
+        policy = _policy()
+        runtime = _Runtime()
+        seen_len: list[int] = []
+        real_parse = dayz_test_tool.parse_worker_terminal
+        valid = _terminal(
+            {
+                "cleanup_degraded": False,
+                "error_code": None,
+                "exit_code": 0,
+                "ok": True,
+                "run_id": RUN_ID,
+            }
+        )
+        # Compact five-key terminals stay well under the 4096 cap; 4097
+        # is overflow, not a valid payload the parser could accept.
+        self.assertLess(len(valid), 4096)
+        self.assertEqual(len(b"{" + (b" " * 4094) + b"}"), 4096)
+
+        def parse_and_record(
+            stdout: bytes, stderr: bytes, process_exit_code: int
+        ) -> dayz_test_tool.WorkerTerminal:
+            seen_len.append(len(stdout))
+            self.assertEqual(stderr, b"")
+            self.assertEqual(process_exit_code, 0)
+            return real_parse(stdout, stderr, process_exit_code)
+
+        async def launch(_raw_request: bytes, **kwargs: object) -> int:
+            await kwargs["execution_started_cb"]()
+            kwargs["output_sink"]("stdout", b"{" + (b" " * 4094) + b"}")
+            kwargs["output_sink"]("stdout", b"X")
+            return 0
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch,
+        ), patch.object(
+            dayz_test_tool, "parse_worker_terminal", side_effect=parse_and_record
+        ):
+            with self.assertRaisesRegex(
+                dayz_test_tool.DayzTestToolError, "terminal_invalid"
+            ):
+                await dayz_test_tool.execute_dayz_test_run(
+                    runtime,
+                    project="ExampleMod",
+                    mode="offline",
+                )
+
+        self.assertEqual(seen_len, [4097])
+
 
 if __name__ == "__main__":
     unittest.main()

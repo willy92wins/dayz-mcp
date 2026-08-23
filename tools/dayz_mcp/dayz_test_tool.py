@@ -491,6 +491,10 @@ async def _execute_request(
         if channel not in {"stdout", "stderr"} or type(chunk) is not bytes:
             _fail("terminal_invalid")
         target = stdout if channel == "stdout" else stderr
+        # parse_worker_terminal accepts 1..4096 bytes. One extra byte is
+        # the overflow sentinel that trips that length check. Truncating
+        # at 4096 would hide overflow from it. Valid terminals are far
+        # smaller than the cap, so 4097 is never acceptance.
         if len(target) <= 4096:
             target.extend(chunk[: 4097 - len(target)])
 
