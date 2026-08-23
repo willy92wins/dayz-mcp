@@ -14,6 +14,9 @@ $ErrorActionPreference = "Stop"
 $ToolsRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $VenvDir = Join-Path $ToolsRoot ".venv-mcp"
 $Requirements = Join-Path $ToolsRoot "requirements-mcp.txt"
+# Floor matches pyproject.toml requires-python. The py launcher has no range
+# syntax; Resolve-HostPython reads `py -0p` and refuses anything older.
+$MinPythonVersion = [version]"3.11"
 if ($KeyFile -eq "") {
   $KeyFile = Join-Path $ToolsRoot ".dayz_mcp.key"
 }
@@ -33,14 +36,108 @@ function New-DayZMcpToken {
   return $token
 }
 
-function Invoke-Python {
-  param([string[]]$Arguments)
+function ConvertFrom-PyLauncherList {
+  param([string]$ListText)
+  $rows = @()
+  if (-not $ListText) { return $rows }
+  foreach ($line in ($ListText -split '\r?\n')) {
+    $match = [regex]::Match($line, '^\s*-V:(\S+)\s+(\*)?\s*(.+?)\s*$')
+    if (-not $match.Success) { continue }
+    $tag = $match.Groups[1].Value
+    $versionMatch = [regex]::Match($tag, '(\d+)\.(\d+)(?:\.(\d+))?')
+    if (-not $versionMatch.Success) { continue }
+    $patch = 0
+    if ($versionMatch.Groups[3].Success -and $versionMatch.Groups[3].Value) {
+      $patch = [int]$versionMatch.Groups[3].Value
+    }
+    $exe = $match.Groups[3].Value.Trim()
+    if (-not $exe -or $exe -eq '*') { continue }
+    $major = [int]$versionMatch.Groups[1].Value
+    $minor = [int]$versionMatch.Groups[2].Value
+    $rows += [pscustomobject]@{
+      Tag = $tag
+      Version = [version]"$major.$minor.$patch"
+      Default = [bool]$match.Groups[2].Value
+      Path = $exe
+    }
+  }
+  return $rows
+}
+
+function Select-PythonFromLauncherList {
+  param(
+    [string]$ListText,
+    [version]$Minimum = $MinPythonVersion
+  )
+  $chosen = $null
+  foreach ($row in @(ConvertFrom-PyLauncherList $ListText)) {
+    if ($row.Version -lt $Minimum) { continue }
+    if (
+      $null -eq $chosen -or
+      $row.Version -gt $chosen.Version -or
+      (
+        $row.Version -eq $chosen.Version -and
+        $row.Default -and
+        -not $chosen.Default
+      )
+    ) {
+      $chosen = $row
+    }
+  }
+  if ($null -eq $chosen) { return $null }
+  return [string]$chosen.Path
+}
+
+function Get-PythonFileVersion {
+  param([string]$Exe)
+  if (-not $Exe) { return $null }
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $out = & $Exe -c "import sys; print('%d.%d.%d' % (sys.version_info[0], sys.version_info[1], sys.version_info[2]))" 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $text = if ($out -is [array]) { [string]$out[-1] } else { [string]$out }
+    $text = $text.Trim()
+    if ($text -notmatch '^\d+\.\d+\.\d+$') { return $null }
+    return [version]$text
+  } catch {
+    return $null
+  } finally {
+    $ErrorActionPreference = $previous
+  }
+}
+
+function Resolve-HostPython {
   $py = Get-Command py -ErrorAction SilentlyContinue
   if ($py) {
-    & $py.Source -3.14 @Arguments
-    return
+    $list = & $py.Source -0p 2>&1 | Out-String
+    $exe = Select-PythonFromLauncherList -ListText $list
+    if (-not $exe) {
+      throw "Python $MinPythonVersion or newer is required; the py launcher listed no matching interpreter."
+    }
+    $ver = Get-PythonFileVersion $exe
+    if ($null -eq $ver -or $ver -lt $MinPythonVersion) {
+      throw "Python at $exe is below the required $MinPythonVersion floor."
+    }
+    return $exe
   }
-  & python @Arguments
+  $python = Get-Command python -ErrorAction SilentlyContinue
+  if (-not $python) {
+    throw "Python $MinPythonVersion or newer is required; neither the py launcher nor python.exe was found."
+  }
+  $ver = Get-PythonFileVersion $python.Source
+  if ($null -eq $ver -or $ver -lt $MinPythonVersion) {
+    $shown = if ($null -eq $ver) { "unreadable" } else { "$ver" }
+    throw "python.exe reports $shown; Python $MinPythonVersion or newer is required."
+  }
+  return $python.Source
+}
+
+function Invoke-Python {
+  param([string[]]$Arguments)
+  $exe = Resolve-HostPython
+  Write-Host "using $exe"
+  & $exe @Arguments
 }
 
 function Write-DayZMcpConfig {

@@ -53,6 +53,10 @@ class PackagingDeclarationsTest(unittest.TestCase):
             source = TOOLS_DIR / f"{module}.py"
             self.assertTrue(source.is_file(), f"missing module: {module}")
 
+    def test_requires_python_is_the_language_floor(self) -> None:
+        self.assertEqual(
+            self.document["project"]["requires-python"], ">=3.11")
+
 
 if __name__ == "__main__":
     unittest.main()

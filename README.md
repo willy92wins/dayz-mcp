@@ -122,8 +122,7 @@ Numbers from in-game runs. Each citation is the line that records the figure, no
 ## What you need
 
 - Windows, with DayZ and DayZ Tools installed (the server talks to `DayZDiag_x64`)
-- Python **3.14** — the installer asks `py` for 3.14 specifically; `pyproject.toml`
-  still declares `>=3.10`, see `tools/README-mcp.md`
+- Python **3.11 or newer**
 - A DayZ server you are allowed to run mods on. The daemon binds `127.0.0.1` only and
   sits on the same machine as the game it drives — there is no remote mode and no
   multi-user mode, by design. The reference deployment is a local DayZDiag server plus

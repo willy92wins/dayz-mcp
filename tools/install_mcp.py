@@ -16,6 +16,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
+# Floor matches pyproject.toml requires-python; host_config imports tomllib.
+MIN_PYTHON = (3, 11)
+if sys.version_info < MIN_PYTHON:
+    sys.stderr.write(
+        f"Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer is required; "
+        f"this interpreter is {sys.version_info[0]}.{sys.version_info[1]}\n"
+    )
+    raise SystemExit(2)
+
 from dayz_mcp.host_config import (
     CLAUDE_TIMEOUT_MS,
     CODEX_TIMEOUT_SECONDS,

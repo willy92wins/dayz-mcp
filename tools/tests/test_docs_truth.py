@@ -170,35 +170,56 @@ class CanopyCalibrationDocsTest(unittest.TestCase):
 
 
 class InstallerPythonDocsTest(unittest.TestCase):
-    """QUICKSTART/README must state the Python the installer actually pins
-    (A3). Ground truth: the `py -X.Y` invocation in install-mcp.ps1."""
+    """QUICKSTART/README/README-mcp must state the Python floor declared in
+    pyproject.toml and enforced by the installer (A3)."""
 
-    def _installer_python(self) -> str:
-        ps1 = (REPO / "tools" / "install-mcp.ps1").read_text(encoding="utf-8")
-        m = re.search(r"& \$py\.Source -(3\.\d+)", ps1)
-        self.assertIsNotNone(
-            m, "installer py-launcher invocation moved in install-mcp.ps1")
+    def _requires_python(self) -> str:
+        text = (REPO / "tools" / "pyproject.toml").read_text(encoding="utf-8")
+        m = re.search(r'(?m)^requires-python\s*=\s*"([^"]+)"\s*$', text)
+        self.assertIsNotNone(m, "requires-python vanished from pyproject.toml")
         return m.group(1)
 
-    def test_quickstart_states_installer_python(self) -> None:
-        doc = _doc("QUICKSTART.md")
-        self.assertIn(
-            self._installer_python(), doc,
-            "QUICKSTART 'You need' must name the Python the installer asks "
-            "the py launcher for")
-        self.assertNotRegex(
-            doc, r"3\.10\+|3\.10 or newer",
-            "QUICKSTART promises 3.10+ suffices; the installer's py path asks "
-            "for one specific version and 3.10-3.13 hosts die at step 2")
+    def _declared_floor(self) -> str:
+        req = self._requires_python()
+        m = re.fullmatch(r">=3\.(\d+)", req)
+        self.assertIsNotNone(
+            m, f"requires-python is not a simple >=3.N floor: {req!r}")
+        return f"3.{m.group(1)}"
 
-    def test_readme_states_installer_python(self) -> None:
-        doc = _doc("README.md")
+    def _installer_floor(self) -> str:
+        ps1 = (REPO / "tools" / "install-mcp.ps1").read_text(encoding="utf-8")
+        m = re.search(
+            r'\$MinPythonVersion\s*=\s*\[version\]\s*"3\.(\d+)"', ps1)
+        self.assertIsNotNone(
+            m, "installer $MinPythonVersion constant moved in install-mcp.ps1")
+        self.assertIsNone(
+            re.search(r"& \$py\.Source -3\.\d+", ps1),
+            "installer still pins an exact py -3.N; it must select >= floor")
+        return f"3.{m.group(1)}"
+
+    def _assert_floor_prose(self, rel: str) -> None:
+        floor = self._installer_floor()
+        self.assertEqual(self._declared_floor(), floor)
+        doc = _doc(rel)
         self.assertIn(
-            self._installer_python(), doc,
-            "README prerequisites must name the Python the installer asks for")
+            f"{floor} or newer", doc,
+            f"{rel} must state the Python floor as '{floor} or newer'")
         self.assertNotRegex(
             doc, r"3\.10\+|3\.10 or newer",
-            "README promises 3.10+ suffices; see install-mcp.ps1")
+            f"{rel} still claims 3.10 works")
+        self.assertNotRegex(
+            doc,
+            r"not reconciled|explains the split|effective requirement",
+            f"{rel} still documents a packaging/installer split")
+
+    def test_quickstart_states_python_floor(self) -> None:
+        self._assert_floor_prose("QUICKSTART.md")
+
+    def test_readme_states_python_floor(self) -> None:
+        self._assert_floor_prose("README.md")
+
+    def test_readme_mcp_states_python_floor(self) -> None:
+        self._assert_floor_prose("tools/README-mcp.md")
 
 
 class SparseAddonDocsTest(unittest.TestCase):

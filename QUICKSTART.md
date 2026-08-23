@@ -7,9 +7,7 @@ This recipe targets a full clone of the public repository. The development
 tree sparse-excludes `addon/` (see `.git/info/sparse-checkout`), so step 3 has
 nothing to pack there — its Enforce source lives in a sibling tree.
 
-**You need** Windows, DayZ **and** DayZ Tools from Steam, Python **3.14** (the installer
-asks the `py` launcher for 3.14 specifically; 3.10–3.13 cannot install through it even
-though `pyproject.toml` declares `>=3.10` — `tools\README-mcp.md` explains the split),
+**You need** Windows, DayZ **and** DayZ Tools from Steam, Python **3.11 or newer**,
 and a DayZ server you may load mods on. The daemon binds `127.0.0.1` and drives a game on the same machine;
 there is no remote mode.
 

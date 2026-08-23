@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Python 3.14 on the host. That is the **effective** requirement, not a suggestion: the installer asks the `py` launcher for 3.14 specifically, so a host that only has 3.10–3.13 cannot install through it even though `pyproject.toml` declares `requires-python = ">=3.10"`. The two are not reconciled; 3.14 is what works today.
+- Python 3.11 or newer on the host.
 - Bridge tools require a running DayZ instance. Managed test instances can be queued and controlled directly with `dayz_test_run` and `dayz_test_stop`; existing external harnesses remain compatible.
 - The bridge still authenticates with an API key in the query string because DayZ `RestContext.SetHeader()` cannot send arbitrary headers. Bind remains `127.0.0.1`.
 

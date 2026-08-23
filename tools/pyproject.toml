@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dayz-mcp-tools"
 version = "0.0.0"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 # Kept in lockstep with requirements-mcp.txt, which is what install-mcp.ps1
 # provisions the venv from. tests/test_packaging_declarations.py gates the pair.
 dependencies = [
