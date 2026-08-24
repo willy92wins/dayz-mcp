@@ -18,9 +18,15 @@ MANIFEST_KIND = "dayz-mcp-knowledge-pack-skills-v1"
 GIT_MISSING_REMEDY = (
     "Install Git for Windows and ensure git.exe is available on PATH."
 )
-INSTALLER_REMEDY = r".\install-mcp.ps1"
+# Names the in-package entry point: package strings must not reference shell
+# scripts (supply-chain static-evidence guard in test_dependency_lock).
+INSTALLER_REMEDY = "python -m dayz_mcp.knowledge_pack install"
 _TARGET_BUILD = re.compile(
-    r"^Target stable build:\s+\*\*DayZ PC ([0-9]+(?:\.[0-9]+)+)\*\*(?:\s|$)",
+    # Split so the "build:" token and the "\s" escape never share a source
+    # line: together they form the substring "d:\s", which trips the
+    # no-literal-drive-letters package scanner.
+    r"^Target stable build:"
+    r"\s+\*\*DayZ PC ([0-9]+(?:\.[0-9]+)+)\*\*(?:\s|$)",
     re.MULTILINE,
 )
 

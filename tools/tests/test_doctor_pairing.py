@@ -149,7 +149,9 @@ class DoctorKnowledgePackPairingTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(finding["severity"], "WARN")
         self.assertEqual(finding["path"], str(self.pack.resolve()))
-        self.assertEqual(finding["remedy"], r".\install-mcp.ps1")
+        self.assertEqual(
+            finding["remedy"], "python -m dayz_mcp.knowledge_pack install"
+        )
 
     def test_pack_game_drift_warns_when_doctor_knows_the_game_version(self) -> None:
         self.write_pack()
