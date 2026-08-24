@@ -30,6 +30,7 @@ from dayz_mcp.host_config import (
     CODEX_TIMEOUT_SECONDS,
     apply_host_timeouts,
 )
+from dayz_mcp.knowledge_pack import KnowledgePackError, install_knowledge_pack
 
 
 TOOLS_ROOT = Path(__file__).resolve().parent
@@ -79,6 +80,7 @@ class InstallerOptions:
     claude_exe: Path | None
     codex_exe: Path | None
     tools_root: Path
+    skip_knowledge_pack: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -747,6 +749,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-game-version", default="")
     parser.add_argument("--idle-timeout-seconds", type=float, default=1800.0)
     parser.add_argument("--allow-legacy", action="store_true")
+    parser.add_argument("--skip-knowledge-pack", action="store_true")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--register", action="store_true")
     mode.add_argument("--pin-clis", action="store_true")
@@ -789,6 +792,7 @@ def parse_args(
         claude_exe=Path(args.claude_exe) if args.claude_exe else None,
         codex_exe=Path(args.codex_exe) if args.codex_exe else None,
         tools_root=canonical_tools,
+        skip_knowledge_pack=args.skip_knowledge_pack,
     )
 
 
@@ -1221,12 +1225,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             options,
             base_python=Path(sys.executable),
         )
-    except (InstallerContractError, InstallerExecutionError, OSError, ValueError) as error:
+        result["knowledge_pack"] = (
+            {"status": "skipped"}
+            if options.skip_knowledge_pack
+            else install_knowledge_pack(
+                sync=options.register,
+                python_executable=Path(str(result["venv_python"])),
+            )
+        )
+    except (
+        InstallerContractError,
+        InstallerExecutionError,
+        KnowledgePackError,
+        OSError,
+        ValueError,
+    ) as error:
         code = getattr(error, "code", None)
         if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9_:-]+", code):
             text = str(error)
             code = text if re.fullmatch(r"[A-Za-z0-9_:-]+", text) else "installer_failed"
         payload: dict[str, str] = {"status": "error", "error": code}
+        remedy = getattr(error, "remedy", None)
+        if isinstance(remedy, str) and remedy:
+            payload["remedy"] = remedy
         detail = str(error)
         if detail and detail != code:
             payload["detail"] = detail

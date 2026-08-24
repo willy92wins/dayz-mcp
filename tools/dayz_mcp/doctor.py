@@ -18,6 +18,12 @@ from dayz_mcp import accredited_daemon_transport as transport
 from dayz_mcp import daemon_policy, orphan_guard
 from dayz_mcp import pinned_keyfile
 from dayz_mcp.daemon_policy import AccreditedDaemonPolicy
+from dayz_mcp.knowledge_pack import (
+    INSTALLER_REMEDY,
+    default_manifest_path,
+    resolve_pack_dir,
+    target_game_build,
+)
 from dayz_mcp.native_process_guard import NativeProcessGuard
 from dayz_mcp.process_lifecycle import (
     ProcessRecord,
@@ -94,6 +100,8 @@ class DoctorSources:
     runtime_paths: RuntimePaths
     scan_roots: tuple[Path, ...]
     expected_command: str
+    knowledge_pack_dir: Path | None = None
+    knowledge_pack_manifest_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -224,6 +232,7 @@ def default_sources(policy: AccreditedDaemonPolicy) -> DoctorSources:
         raise ValueError("invalid_daemon_policy")
     codex = shutil.which("codex.cmd") or "codex.cmd"
     guard = NativeProcessGuard()
+    knowledge_pack_dir = resolve_pack_dir()
 
     def daemon_status(port: int, keyfile: str) -> dict[str, object]:
         policy.revalidate()
@@ -244,6 +253,8 @@ def default_sources(policy: AccreditedDaemonPolicy) -> DoctorSources:
         runtime_paths=RuntimePaths.from_env(),
         scan_roots=(Path(__file__).resolve().parents[3],),
         expected_command=sys.executable,
+        knowledge_pack_dir=knowledge_pack_dir,
+        knowledge_pack_manifest_path=default_manifest_path(knowledge_pack_dir),
     )
 
 
@@ -419,6 +430,60 @@ def _parse_registration(
 
 def _finding(code: str, *, severity: str = "FAIL", **details: object) -> dict[str, object]:
     return {"code": code, "severity": severity, **details}
+
+
+def _check_knowledge_pack(
+    sources: DoctorSources,
+    registrations: dict[str, _Registration],
+    findings: list[dict[str, object]],
+) -> None:
+    pack_dir = sources.knowledge_pack_dir
+    manifest_path = sources.knowledge_pack_manifest_path
+    if pack_dir is None or manifest_path is None:
+        return
+    pack = Path(pack_dir).resolve()
+    manifest = Path(manifest_path).resolve()
+    if not pack.is_dir():
+        findings.append(
+            _finding(
+                "KNOWLEDGE_PACK_MISSING",
+                severity="WARN",
+                path=str(pack),
+                remedy=INSTALLER_REMEDY,
+            )
+        )
+        return
+    if not manifest.is_file():
+        findings.append(
+            _finding(
+                "PACK_SKILLS_UNREGISTERED",
+                severity="INFO",
+                manifest_path=str(manifest),
+                pack_dir=str(pack),
+            )
+        )
+
+    known_versions = {
+        registration.policy.expected_game_version
+        for registration in registrations.values()
+        if registration.policy.expected_game_version
+    }
+    if len(known_versions) != 1:
+        return
+    pack_build = target_game_build(pack)
+    if pack_build is None:
+        return
+    game_build = next(iter(known_versions))
+    if pack_build != game_build:
+        findings.append(
+            _finding(
+                "KNOWLEDGE_PACK_GAME_DRIFT",
+                severity="WARN",
+                game_build=game_build,
+                pack_build=pack_build,
+                pack_dir=str(pack),
+            )
+        )
 
 
 def _safe_snapshot(
@@ -1036,6 +1101,7 @@ def _diagnose(sources: DoctorSources, *, require_clean: bool) -> dict[str, objec
         )
     _check_runs(sources, managed, findings)
     _check_launchers(sources.scan_roots, findings)
+    _check_knowledge_pack(sources, registrations, findings)
 
     findings.sort(
         key=lambda item: (

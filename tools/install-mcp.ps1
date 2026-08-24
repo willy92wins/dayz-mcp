@@ -7,7 +7,8 @@ param(
   [string]$ExpectedGameVersion = "",
   [double]$IdleTimeoutSeconds = 1800,
   [switch]$AllowLegacy,
-  [switch]$Register
+  [switch]$Register,
+  [switch]$SkipKnowledgePack
 )
 
 $ErrorActionPreference = "Stop"
@@ -422,6 +423,19 @@ $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 & $VenvPython -m pip install --upgrade pip
 & $VenvPython -m pip install -r $Requirements
 & $VenvPython -m pip install -e $ToolsRoot
+
+if (-not $SkipKnowledgePack) {
+  $knowledgePackArgs = @("-m", "dayz_mcp.knowledge_pack", "install")
+  if ($Register) {
+    $knowledgePackArgs += "--sync"
+  }
+  & $VenvPython @knowledgePackArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "Knowledge Pack installation failed"
+  }
+} else {
+  Write-Host "Knowledge Pack installation skipped by -SkipKnowledgePack."
+}
 
 if (-not (Test-Path -LiteralPath $KeyFile)) {
   $key = New-DayZMcpToken
