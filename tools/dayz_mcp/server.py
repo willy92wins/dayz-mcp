@@ -2461,6 +2461,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         ),
         lifespan=lifespan,
     )
+    from dayz_mcp.knowledge import register_knowledge_tools
+
+    register_knowledge_tools(app)
 
     def _client_runtime() -> ClientRuntime:
         if config.mode != "client" or not isinstance(runtime, ClientRuntime):
