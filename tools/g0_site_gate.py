@@ -327,7 +327,10 @@ def canopy_gate(daemon: g.Daemon, x: float, z: float) -> dict:
             "from": [x, y + 30.0, z],
             "to": [x, y - 5.0, z],
             "method": "rvproxy",
-            "ignore": "",
+            # Ignore players: the player often stands inside the probed column
+            # (left there by a previous phase) and the ray hits their head at
+            # dy ~1.671 m. That signature demoted x4300 in round 13.
+            "ignore": "player",
             "radius": 0.05,
             "intersect": "geom",
         },

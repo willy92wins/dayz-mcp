@@ -435,6 +435,9 @@ class PlaybookRunExecuteTest(unittest.IsolatedAsyncioTestCase):
             "scene_raycast",
             "query_all_players",
             "entities_query",
+            # The entities_query tool now follows up with a players probe to
+            # stamp reliability (fb-20260824-123204-638e).
+            "query_all_players",
         ])
         self.assertIn("from", calls[1][1])
         self.assertFalse(runtime.tool_lock.locked())

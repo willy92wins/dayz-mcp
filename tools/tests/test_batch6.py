@@ -29,15 +29,18 @@ def _function_source(text: str, name: str) -> str:
 
 
 class Batch6Test(unittest.TestCase):
-    def test_expected_bridge_version_is_8(self) -> None:
-        self.assertEqual(core.EXPECTED_BRIDGE_VERSION, "8")
+    def test_expected_bridge_version_is_9(self) -> None:
+        # Bumped 8 -> 9 on 2026-08-24 with the object_id resolution + instant
+        # phase writes (fb-20260824-133301-ecf5); the equality gate in core.py
+        # forces a matched daemon/PBO pair.
+        self.assertEqual(core.EXPECTED_BRIDGE_VERSION, "9")
 
-    def test_mcp_bridge_version_const_is_8(self) -> None:
+    def test_mcp_bridge_version_const_is_9(self) -> None:
         messages = (
             addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
         ).read_text(encoding="utf-8")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "8";', messages)
-        self.assertNotIn('const string MCP_BRIDGE_VERSION = "7";', messages)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "9";', messages)
+        self.assertNotIn('const string MCP_BRIDGE_VERSION = "8";', messages)
 
     def test_entities_query_in_server_commands(self) -> None:
         self.assertIn("entities_query", loopback.SERVER_COMMANDS)

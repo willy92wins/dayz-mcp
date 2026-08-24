@@ -139,3 +139,41 @@ Run the whole scenario inside **one process lifetime** (managed run start,
 waits, gate, teardown): daemons spawned under a harness command die with its
 process tree, and an externally started daemon is not adoptable by new
 clients. Reference runner: `g_protocol_run.py` (lanes archive 2026-08-24).
+## Multi-agent certification (2026-08-24, bridge v9)
+
+The canonical site's drivability was re-confirmed on the v9 bridge (PBO
+`91A542E17CA91B76DFEE5AB7EE40B5C8FDAB38EA3BEAE7A4AA37A87301DE9127`) by three
+independent external agents, each with a minimal brief (this document's ladder,
+no other context), its own MCP client and its own session lease, sequentially
+against one live game:
+
+| agent | harness | seated | drive XZ | teardown | verdict |
+|---|---|---|---|---|---|
+| Grok 4.6 | grok CLI, zero native tools, MCP only | yes | 163.2 m | deleted + released | PASS |
+| GPT-5.6 | codex exec | yes | 100.6 m | deleted + released | PASS |
+| Ox Alpha (free) | opencode, external skills disabled | yes | 132.5 m | deleted + released | PASS |
+
+Every lane drove `session_acquire_wait -> world_spawn -> vehicle_prepare_fixture
+-> vehicle_get_in_client -> engine_set -> vehicle_control -> vehicle_telemetry
+-> object_anim(object_id) -> object_delete -> session_release` and emitted its
+own verdict JSON. Evidence: `ma_cert_report.json` + per-lane transcripts in the
+session archive.
+
+Instrument findings the shakedown surfaced (both fixed in this tree):
+
+- **Clearance self-collision**: the vertical clearance probe (teleport gate and
+  site-gate canopy) hit the survivor already standing in the probed column
+  (dy 1.671 m = player height). That signature also explains the round-13
+  "canopy +1.67 m" demotion of x4300. Both probes now pass `ignore: "player"`
+  -- players are not cover.
+- **Cadence boundary flake**: the 20 Hz trace sampler delivers 19.996-20.011
+  effective Hz; the strict `>= 20.0` gate flaked on jitter. `MIN_EFFECTIVE_HZ`
+  now carries a 0.5% allowance (19.9).
+
+Known caveat kept honest: an `object_anim` write applies (the door visibly
+moves), but the phase re-read in the same tick can lag the write -- a value
+read one command later reflects the transition (measured 0.0 -> 0.599 -> 1.0
+trajectory). Confirm writes with a follow-up read, not with the write reply
+alone. The site-gate certificate for a release build is produced against that
+build's PBO hash at release time.
+

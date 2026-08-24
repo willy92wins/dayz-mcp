@@ -1172,21 +1172,15 @@ class MCPBridge
 		return true;
 	}
 
-	// F3.4: read GetAnimationPhase or write SetAnimationPhase on Entity (entity.c:12-15).
-	// phase == MCP_ARG_FLOAT_UNSET means read-only.
+	// F3.4: read GetAnimationPhase or write SetAnimationPhaseNow on Entity (entity.c:12-25).
+	// phase == MCP_ARG_FLOAT_UNSET means read-only. Writes use the Now variant: the plain
+	// setter interpolates, so a same-tick read reports the stale pre-write phase.
+	// Resolution: args.object_id > 0 selects from the runtime registry (position-independent,
+	// reaches a client-authoritative fixture whose server replica never left spawn);
+	// otherwise classname near pos within OBJECT_LOOKUP_RADIUS.
 	protected bool DispatchObjectAnim(MCPCommand command, MCPResult result)
 	{
-		if (!command.args || command.args.type == "" || command.args.source == "" || !command.args.pos || command.args.pos.Count() != 3)
-		{
-			result.ok = false;
-			result.error = "bad_args";
-			return true;
-		}
-
-		float px = command.args.pos.Get(0);
-		float py = command.args.pos.Get(1);
-		float pz = command.args.pos.Get(2);
-		if (!IsFiniteFloat(px) || !IsFiniteFloat(py) || !IsFiniteFloat(pz))
+		if (!command.args || command.args.source == "")
 		{
 			result.ok = false;
 			result.error = "bad_args";
@@ -1202,7 +1196,7 @@ class MCPBridge
 		}
 
 		string error = "";
-		Object match = FindUniqueObjectNearType(command.args.type, Vector(px, py, pz), OBJECT_LOOKUP_RADIUS, error);
+		Object match = ResolveCommandObject(command.args, error);
 		if (!match)
 		{
 			result.ok = false;
@@ -1220,12 +1214,16 @@ class MCPBridge
 
 		if (writePhase)
 		{
-			entity.SetAnimationPhase(command.args.source, command.args.phase);
+			entity.SetAnimationPhaseNow(command.args.source, command.args.phase);
 		}
 
 		result.phase = entity.GetAnimationPhase(command.args.source);
 		result.source = command.args.source;
-		result.type = command.args.type;
+		result.type = match.GetType();
+		if (command.args.object_id > 0)
+		{
+			result.object_id = command.args.object_id;
+		}
 		result.ok = true;
 		return true;
 	}
@@ -1430,17 +1428,7 @@ class MCPBridge
 	// (exists:false) with ok:true — never a tool error.
 	protected bool DispatchObjectInspect(MCPCommand command, MCPResult result)
 	{
-		if (!command.args || command.args.type == "" || !command.args.pos || command.args.pos.Count() != 3 || !command.args.want || command.args.want.Count() == 0)
-		{
-			result.ok = false;
-			result.error = "bad_args";
-			return true;
-		}
-
-		float px = command.args.pos.Get(0);
-		float py = command.args.pos.Get(1);
-		float pz = command.args.pos.Get(2);
-		if (!IsFiniteFloat(px) || !IsFiniteFloat(py) || !IsFiniteFloat(pz))
+		if (!command.args || !command.args.want || command.args.want.Count() == 0)
 		{
 			result.ok = false;
 			result.error = "bad_args";
@@ -1448,7 +1436,7 @@ class MCPBridge
 		}
 
 		string error = "";
-		Object match = FindUniqueObjectNearType(command.args.type, Vector(px, py, pz), OBJECT_LOOKUP_RADIUS, error);
+		Object match = ResolveCommandObject(command.args, error);
 		if (!match)
 		{
 			result.ok = false;
@@ -1491,8 +1479,54 @@ class MCPBridge
 
 		result.inspect = inspect;
 		result.type = inspect.type;
+		if (command.args.object_id > 0)
+		{
+			result.object_id = command.args.object_id;
+		}
 		result.ok = true;
 		return true;
+	}
+
+	// Shared resolution for anim/inspect verbs. object_id > 0 selects from the runtime
+	// registry (objects created through world_spawn, fixture cars included) and needs no
+	// position; otherwise classname near pos. object_id_unknown covers never-registered
+	// and already-deleted ids alike (delete removes the registry entry).
+	protected Object ResolveCommandObject(MCPArgs args, out string error)
+	{
+		if (args.object_id > 0)
+		{
+			if (!m_RuntimeObjects || !m_RuntimeObjects.Contains(args.object_id))
+			{
+				error = "object_id_unknown";
+				return null;
+			}
+
+			Object registered = m_RuntimeObjects.Get(args.object_id);
+			if (!registered)
+			{
+				error = "object_id_stale";
+				return null;
+			}
+
+			return registered;
+		}
+
+		if (args.type == "" || !args.pos || args.pos.Count() != 3)
+		{
+			error = "bad_args";
+			return null;
+		}
+
+		float px = args.pos.Get(0);
+		float py = args.pos.Get(1);
+		float pz = args.pos.Get(2);
+		if (!IsFiniteFloat(px) || !IsFiniteFloat(py) || !IsFiniteFloat(pz))
+		{
+			error = "bad_args";
+			return null;
+		}
+
+		return FindUniqueObjectNearType(args.type, Vector(px, py, pz), OBJECT_LOOKUP_RADIUS, error);
 	}
 
 	// Resolve a single world object by classname near pos. Zero matches -> object_not_found;

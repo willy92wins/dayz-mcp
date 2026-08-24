@@ -1,4 +1,4 @@
-const string MCP_BRIDGE_VERSION = "8";
+const string MCP_BRIDGE_VERSION = "9";
 const float MCP_ARG_FLOAT_UNSET = float.MAX;
 const int MCP_FIXTURE_SEQ_UNSET = -2147483647;
 

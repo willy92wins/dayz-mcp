@@ -501,7 +501,9 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             },
         ),
     ),
-    # An absent phase reads the source; a present phase writes it.
+    # An absent phase reads the source; a present phase writes it. The second
+    # variant targets by object_id from the world_spawn registry instead of
+    # classname near pos (fb-20260824-133301-ecf5).
     "object_anim": _command_schema(
         _schema_variant(
             required=("type", "pos", "source"),
@@ -512,7 +514,16 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "pos": _is_real_vector3,
                 "phase": _SAFE_FINITE_REAL,
             },
-        )
+        ),
+        _schema_variant(
+            required=("object_id", "source"),
+            optional=("phase",),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "source": _is_non_empty_string,
+                "phase": _SAFE_FINITE_REAL,
+            },
+        ),
     ),
     "inventory_give": _command_schema(
         _schema_variant(
@@ -533,7 +544,14 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "want": _is_non_empty_string_list,
                 "pos": _is_real_vector3,
             },
-        )
+        ),
+        _schema_variant(
+            required=("object_id", "want"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "want": _is_non_empty_string_list,
+            },
+        ),
     ),
     # Exact keys keep authenticated socket ingress fail-closed.
     "object_delete": _command_schema(

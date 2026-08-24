@@ -59,9 +59,18 @@ def full_image_path_of(pid: int) -> str | None:
 def same_path(first: str | None, second: str | None) -> bool:
     if not first or not second:
         return False
-    return os.path.normcase(os.path.normpath(first)) == os.path.normcase(
+    if os.path.normcase(os.path.normpath(first)) == os.path.normcase(
         os.path.normpath(second)
-    )
+    ):
+        return True
+    # A subst view (P:) and its target (C:) are one file under two spellings;
+    # the string compare alone reports them different and the ancestor walk then
+    # watches the wrong process (fb-20260822-191204-9287). samefile resolves
+    # through handles, so it applies only when both paths exist.
+    try:
+        return os.path.samefile(first, second)
+    except (OSError, ValueError):
+        return False
 
 
 def command_argv_of(pid: int) -> list[str] | None:

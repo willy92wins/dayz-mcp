@@ -46,7 +46,9 @@ class ObjectAnimIngressTest(unittest.TestCase):
         self.assertNotIn(COMMAND, READ_ONLY_COMMANDS)
         self.assertTrue(command_requires_lease(COMMAND))
 
-        for args in (VALID_READ, VALID_WRITE):
+        by_id_read = {"object_id": 5, "source": "Doors1"}
+        by_id_write = {"object_id": 5, "source": "Doors1", "phase": 0.0}
+        for args in (VALID_READ, VALID_WRITE, by_id_read, by_id_write):
             with self.subTest(args=args):
                 status, body = self.state.enqueue_command(COMMAND, dict(args))
                 self.assertEqual(status, 200)
@@ -61,6 +63,10 @@ class ObjectAnimIngressTest(unittest.TestCase):
             {**VALID_READ, "phase": float("nan")},
             {**VALID_READ, "extra": 1},
             {"type": "X", "pos": [0.0, 0.0, 0.0], "source": "Doors1", "phase": True},
+            {"object_id": 0, "source": "Doors1"},
+            {"object_id": 5},
+            {"object_id": 5, "type": "X", "source": "Doors1"},
+            {"object_id": 5, "pos": [0.0, 0.0, 0.0], "source": "Doors1"},
         ]
         for args in invalid:
             with self.subTest(args=args):
@@ -74,9 +80,9 @@ class ObjectAnimEnforceContractTest(unittest.TestCase):
         source = BRIDGE_PATH.read_text(encoding="utf-8")
         body = _method_body(source, "protected bool DispatchObjectAnim(")
         required = [
-            "FindUniqueObjectNearType(",
+            "ResolveCommandObject(command.args, error)",
             "Entity.Cast(match)",
-            "SetAnimationPhase(command.args.source, command.args.phase)",
+            "SetAnimationPhaseNow(command.args.source, command.args.phase)",
             "GetAnimationPhase(command.args.source)",
             "command.args.phase != MCP_ARG_FLOAT_UNSET",
             "result.error = error",
@@ -84,6 +90,12 @@ class ObjectAnimEnforceContractTest(unittest.TestCase):
         for token in required:
             with self.subTest(token=token):
                 self.assertIn(token, body)
+
+        # The registry path and the classname path live in the shared resolver.
+        resolver = _method_body(source, "protected Object ResolveCommandObject(")
+        self.assertIn('error = "object_id_unknown"', resolver)
+        self.assertIn("m_RuntimeObjects.Contains(args.object_id)", resolver)
+        self.assertIn("FindUniqueObjectNearType(args.type", resolver)
 
         # object_not_found lives in the shared lookup helper, not the dispatch body.
         helper = _method_body(source, "protected Object FindUniqueObjectNearType(")
@@ -126,6 +138,15 @@ class ObjectAnimAppToolTest(unittest.IsolatedAsyncioTestCase):
                 },
             )
             call.assert_awaited_once_with(COMMAND, VALID_WRITE, "server", 1.0)
+
+            call.reset_mock()
+            await app.call_tool(
+                COMMAND,
+                {"object_id": 7, "source": "Doors1", "timeout_s": 1.0},
+            )
+            call.assert_awaited_once_with(
+                COMMAND, {"source": "Doors1", "object_id": 7}, "server", 1.0
+            )
 
 
 if __name__ == "__main__":

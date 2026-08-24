@@ -1613,6 +1613,68 @@ def _newest_rpt_and_script(dated: list[tuple[float, str]]) -> list[str]:
     return [path for path in (newest_rpt, newest_script) if path]
 
 
+# Teleport clearance probe (fb-20260824-115220-1bc1): a surface landing must have
+# an uncovered vertical column. Constants mirror the certified site gate probe
+# (tools/g0_site_gate.py canopy_gate, calibrated 2026-08-19 at 0.05 m).
+CLEARANCE_PROBE_UP_M = 30.0
+CLEARANCE_PROBE_DOWN_M = 5.0
+CLEARANCE_TOLERANCE_M = 0.05
+CLEARANCE_LANDING_BAND_M = 0.5
+
+# entities_query is trustworthy only with a player streaming the area: far from
+# every player the engine answers 0 rows or exactly the cap with no error signal
+# (fb-20260824-123204-638e, measured 2026-08-24). 300 m is conservative against
+# the certified corridor probes (player within ~215 m of every sphere).
+ENTITIES_QUERY_BUBBLE_M = 300.0
+
+
+def _annotate_entities_reliability(
+    result: dict[str, Any], players_result: object, pos: list[float]
+) -> dict[str, Any]:
+    """Stamp nearest_player_m and reliability on an entities_query result."""
+    if not isinstance(result, dict) or not result.get("ok"):
+        return result
+    nearest: float | None = None
+    players = []
+    if isinstance(players_result, dict) and players_result.get("ok"):
+        players = players_result.get("players") or []
+    for player in players:
+        ppos = player.get("pos") if isinstance(player, dict) else None
+        if not (isinstance(ppos, list) and len(ppos) == 3):
+            continue
+        try:
+            deltas = [float(a) - float(b) for a, b in zip(ppos, pos)]
+        except (TypeError, ValueError):
+            continue
+        distance = (deltas[0] ** 2 + deltas[1] ** 2 + deltas[2] ** 2) ** 0.5
+        if nearest is None or distance < nearest:
+            nearest = distance
+    if nearest is not None:
+        result["nearest_player_m"] = round(nearest, 1)
+    else:
+        result["nearest_player_m"] = None
+    if nearest is not None and nearest <= ENTITIES_QUERY_BUBBLE_M:
+        result["reliability"] = "player_in_bubble"
+    else:
+        result["reliability"] = "remote_unverified"
+    return result
+
+
+def _object_target_args(
+    type: str, pos: list[float] | None, object_id: int
+) -> dict[str, Any]:
+    """Validate the object_id-or-classname target contract shared by object verbs."""
+    if not isinstance(object_id, int) or isinstance(object_id, bool) or object_id < 0:
+        raise ToolError(_bad_args("object_id", object_id, "be a non-negative int"))
+    if object_id > 0:
+        return {"object_id": object_id}
+    if not isinstance(type, str) or type == "":
+        raise ToolError(
+            _bad_args("type", type, "be a non-empty string when object_id is omitted")
+        )
+    return {"type": type, "pos": _require_vec3(pos, "pos")}
+
+
 def _current_launch_logs(profiles_dir: str, start_epoch: float | None) -> list[str]:
     """Return RPT/script files from the current launch, never historic dumps.
 
@@ -1622,6 +1684,11 @@ def _current_launch_logs(profiles_dir: str, start_epoch: float | None) -> list[s
     paths = log_tail.resolve_log_files(profiles_dir)
     dated: list[tuple[float, str]] = []
     for path in paths:
+        # crash_*.log dumps are excluded even when freshly touched: a crash dump
+        # carries CE world-create noise by the hundred thousand lines and starves
+        # the wait_for scan budget (fb-20260823-130809-413a).
+        if Path(path).name.casefold().startswith("crash"):
+            continue
         try:
             dated.append((Path(path).stat().st_mtime, path))
         except OSError:
@@ -3116,52 +3183,136 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return await runtime.call_bridge("surface_query", args, "server", _timeout(timeout_s))
 
     # Mutating teleport of a connected player.
+    async def _surface_clearance(pos: list[float], timeout: float) -> dict[str, Any] | None:
+        """Covered-column check for a surface landing; None means clear to land.
+
+        Mirrors the certified site gate probe (g0_site_gate.canopy_gate): surface Y
+        at (x, z), then a geom ray from y+30 down to y-5 whose first hit must sit
+        within 0.05 m of the surface. A roof, canopy or water plane over the landing
+        point refuses the teleport instead of burying the player
+        (fb-20260824-115220-1bc1). Probe failures refuse too: unverified is not clear.
+        """
+        x = float(pos[0])
+        y_req = float(pos[1])
+        z = float(pos[2])
+        surface = await runtime.call_bridge(
+            "surface_query", {"x": x, "z": z}, "server", timeout
+        )
+        surface_y = surface.get("y") if isinstance(surface, dict) else None
+        if not (
+            isinstance(surface, dict)
+            and surface.get("ok")
+            and isinstance(surface_y, (int, float))
+        ):
+            return {
+                "ok": False,
+                "error": "clearance_unverified",
+                "detail": "surface_query failed for the target column",
+            }
+        surface_y = float(surface_y)
+        if y_req != 0.0 and y_req > surface_y + CLEARANCE_LANDING_BAND_M:
+            # Explicit above-surface target (roof, platform): not a surface
+            # landing, so the covered-column predicate does not apply.
+            return None
+        ray = await runtime.call_bridge(
+            "scene_raycast",
+            {
+                "from": [x, surface_y + CLEARANCE_PROBE_UP_M, z],
+                "to": [x, surface_y - CLEARANCE_PROBE_DOWN_M, z],
+                "method": "rvproxy",
+                # The probe must ignore players: the column often contains the
+                # very player being teleported, and the ray hits their head at
+                # dy ~1.67 m (measured, multi-agent run 2026-08-24).
+                "ignore": "player",
+                "radius": 0.05,
+                "intersect": "geom",
+            },
+            "server",
+            timeout,
+        )
+        raycast: dict[str, Any] = {}
+        if isinstance(ray, dict) and isinstance(ray.get("raycast"), dict):
+            raycast = ray["raycast"]
+        hit_pos = raycast.get("pos")
+        if not (raycast.get("hit") and isinstance(hit_pos, list) and len(hit_pos) == 3):
+            return {
+                "ok": False,
+                "error": "clearance_unverified",
+                "detail": "clearance ray found no ground at the target column",
+                "surface_y": surface_y,
+            }
+        if abs(float(hit_pos[1]) - surface_y) > CLEARANCE_TOLERANCE_M:
+            return {
+                "ok": False,
+                "error": "clearance_blocked",
+                "surface_y": surface_y,
+                "hit_y": float(hit_pos[1]),
+                "hit_object_type": raycast.get("object_type") or "",
+                "hint": (
+                    "the vertical column is covered (roof/canopy/water); pass "
+                    "skip_clearance_check=true only for intentional covered teleports"
+                ),
+            }
+        return None
+
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Teleport a "
             "connected player to pos. y==0 snaps to SurfaceY (vanilla "
             "script-console contract). uid empty (default) targets the first "
-            "human; a non-empty uid selects by PlayerIdentity.GetPlainId()."
+            "human; a non-empty uid selects by PlayerIdentity.GetPlainId(). "
+            "Surface landings are refused with clearance_blocked when the "
+            "target column is covered (a roof, canopy or water plane would "
+            "bury the player); skip_clearance_check=true bypasses the probe "
+            "for intentional covered/indoor teleports."
         )
     )
     async def player_teleport(
         pos: list[float],
         uid: str = "",
+        skip_clearance_check: bool = False,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a string"))
+        if not isinstance(skip_clearance_check, bool):
+            raise ToolError(
+                _bad_args("skip_clearance_check", skip_clearance_check, "be a bool")
+            )
         args: dict[str, Any] = {"pos": _require_vec3(pos, "pos")}
         if uid != "":
             args["uid"] = uid
         async with runtime.tool_lock:
+            if not skip_clearance_check:
+                refusal = await _surface_clearance(args["pos"], _timeout(timeout_s))
+                if refusal is not None:
+                    return refusal
             return await runtime.call_bridge("player_teleport", args, "server", _timeout(timeout_s))
 
     # Read or write entity animation phase.
     @app.tool(
         description=(
             f"{LEASE_TOOL_LINE} "
-            "Read or set an entity animation phase by classname near pos. "
-            "phase is a unitless value passed unchanged to Entity.SetAnimationPhase; "
-            "omit phase to read with GetAnimationPhase."
+            "Read or set an entity animation phase. Target by object_id (as "
+            "returned by world_spawn; position-independent, reaches a "
+            "client-authoritative fixture whose server replica sits at spawn) "
+            "or by classname near pos. phase is a unitless value; writes apply "
+            "instantly via SetAnimationPhaseNow and the returned phase is "
+            "re-read after the write. Omit phase to read."
         )
     )
     async def object_anim(
-        type: str,
-        pos: list[float],
         source: str,
+        type: str = "",
+        pos: list[float] | None = None,
         phase: float | None = None,
+        object_id: int = 0,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
-        if not isinstance(type, str) or type == "":
-            raise ToolError(_bad_args("type", type, "be a non-empty string"))
         if not isinstance(source, str) or source == "":
             raise ToolError(_bad_args("source", source, "be a non-empty string"))
-        args: dict[str, Any] = {
-            "type": type,
-            "pos": _require_vec3(pos, "pos"),
-            "source": source,
-        }
+        args: dict[str, Any] = {"source": source}
+        args.update(_object_target_args(type, pos, object_id))
         if phase is not None:
             args["phase"] = _finite_float(
                 phase, _bad_args("phase", phase, "be a finite unitless number")
@@ -3255,18 +3406,19 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     # Memory points + bounding_center. Missing points are exists:false, ok:true.
     @app.tool(
         description=(
-            "Inspect an object near pos: memory points (exists+pos) and optional "
-            "bounding_center. Absent memory points return exists:false with ok:true."
+            "Inspect an object: memory points (exists+pos) and optional "
+            "bounding_center. Target by object_id (from world_spawn) or by "
+            "classname near pos. Absent memory points return exists:false "
+            "with ok:true."
         )
     )
     async def object_inspect(
-        type: str,
-        pos: list[float],
         want: list[str],
+        type: str = "",
+        pos: list[float] | None = None,
+        object_id: int = 0,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
-        if not isinstance(type, str) or type == "":
-            raise ToolError(_bad_args("type", type, "be a non-empty string"))
         if not isinstance(want, list) or len(want) == 0:
             raise ToolError(
                 _bad_args("want", want, "be a non-empty list of non-empty strings")
@@ -3275,7 +3427,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(
                 _bad_args("want", want, "be a non-empty list of non-empty strings")
             )
-        args = {"type": type, "pos": _require_vec3(pos, "pos"), "want": list(want)}
+        args: dict[str, Any] = {"want": list(want)}
+        args.update(_object_target_args(type, pos, object_id))
         async with runtime.tool_lock:
             return await runtime.call_bridge("object_inspect", args, "server", _timeout(timeout_s))
 
@@ -3285,7 +3438,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Returns the nearest entries up to limit (default 32, max 128) as "
             "{type, classname, pos, distance} sorted by distance ascending, plus "
             "count_total before the cut. No classname filter; raw nearby objects. "
-            "Absent entities travel as []."
+            "Absent entities travel as []. Rows are trustworthy only with a "
+            "player streaming the area: far from every player the engine "
+            "answers 0-or-cap with no error signal, so the result carries "
+            "nearest_player_m and reliability (player_in_bubble | "
+            "remote_unverified)."
         )
     )
     async def entities_query(
@@ -3308,7 +3465,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "limit": int(limit),
         }
         async with runtime.tool_lock:
-            return await runtime.call_bridge("entities_query", args, "server", _timeout(timeout_s))
+            result = await runtime.call_bridge(
+                "entities_query", args, "server", _timeout(timeout_s)
+            )
+            players = await runtime.call_bridge(
+                "query_all_players", {}, "server", _timeout(timeout_s)
+            )
+        return _annotate_entities_reliability(result, players, args["pos"])
 
     @app.tool(
         description=(

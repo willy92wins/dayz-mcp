@@ -101,25 +101,107 @@ class PlayerTeleportEnforceContractTest(unittest.TestCase):
 
 
 class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
-    async def test_app_tool_registered_and_forwards(self) -> None:
+    async def _build(self):
         app, runtime = server.build_app(
             server.ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
         )
         tools = {tool.name for tool in await app.list_tools()}
         self.assertIn(COMMAND, tools)
+        return app, runtime
 
+    async def test_skip_clearance_forwards_directly(self) -> None:
+        app, runtime = await self._build()
         with patch.object(
             runtime,
             "call_bridge",
             new=AsyncMock(return_value={"ok": 1, "pos_real": [7500.0, 10.0, 7500.0]}),
         ) as call:
             await app.call_tool(
-                COMMAND, {"pos": [7500.0, 0.0, 7500.0], "timeout_s": 1.0}
+                COMMAND,
+                {
+                    "pos": [7500.0, 0.0, 7500.0],
+                    "skip_clearance_check": True,
+                    "timeout_s": 1.0,
+                },
             )
-
         call.assert_awaited_once_with(
             COMMAND, {"pos": [7500.0, 0.0, 7500.0]}, "server", 1.0
         )
+
+    async def test_clear_column_probes_then_teleports(self) -> None:
+        app, runtime = await self._build()
+        responses = [
+            {"ok": 1, "y": 10.0, "type": "cp_concrete2"},
+            {"ok": 1, "raycast": {"hit": True, "pos": [7500.0, 10.02, 7500.0]}},
+            {"ok": 1, "pos_real": [7500.0, 10.0, 7500.0]},
+        ]
+        with patch.object(
+            runtime, "call_bridge", new=AsyncMock(side_effect=responses)
+        ) as call:
+            await app.call_tool(
+                COMMAND, {"pos": [7500.0, 0.0, 7500.0], "timeout_s": 1.0}
+            )
+        self.assertEqual(call.await_count, 3)
+        first, second, third = call.await_args_list
+        self.assertEqual(first.args[0], "surface_query")
+        self.assertEqual(second.args[0], "scene_raycast")
+        self.assertEqual(second.args[1]["from"], [7500.0, 40.0, 7500.0])
+        self.assertEqual(second.args[1]["to"], [7500.0, 5.0, 7500.0])
+        self.assertEqual(second.args[1]["intersect"], "geom")
+        self.assertEqual(second.args[1]["ignore"], "player")
+        self.assertEqual(third.args[0], COMMAND)
+
+    async def test_covered_column_refuses_without_teleporting(self) -> None:
+        app, runtime = await self._build()
+        responses = [
+            {"ok": 1, "y": 10.0},
+            {
+                "ok": 1,
+                "raycast": {
+                    "hit": True,
+                    "pos": [7500.0, 25.0, 7500.0],
+                    "object_type": "Land_Airport_Hangar",
+                },
+            },
+        ]
+        with patch.object(
+            runtime, "call_bridge", new=AsyncMock(side_effect=responses)
+        ) as call:
+            await app.call_tool(
+                COMMAND, {"pos": [7500.0, 0.0, 7500.0], "timeout_s": 1.0}
+            )
+        awaited = [item.args[0] for item in call.await_args_list]
+        self.assertEqual(awaited, ["surface_query", "scene_raycast"])
+
+    async def test_no_ground_hit_refuses_without_teleporting(self) -> None:
+        app, runtime = await self._build()
+        responses = [
+            {"ok": 1, "y": 10.0},
+            {"ok": 1, "raycast": {"hit": False, "pos": []}},
+        ]
+        with patch.object(
+            runtime, "call_bridge", new=AsyncMock(side_effect=responses)
+        ) as call:
+            await app.call_tool(
+                COMMAND, {"pos": [7500.0, 0.0, 7500.0], "timeout_s": 1.0}
+            )
+        awaited = [item.args[0] for item in call.await_args_list]
+        self.assertEqual(awaited, ["surface_query", "scene_raycast"])
+
+    async def test_explicit_above_surface_target_skips_the_column_probe(self) -> None:
+        app, runtime = await self._build()
+        responses = [
+            {"ok": 1, "y": 10.0},
+            {"ok": 1, "pos_real": [7500.0, 50.0, 7500.0]},
+        ]
+        with patch.object(
+            runtime, "call_bridge", new=AsyncMock(side_effect=responses)
+        ) as call:
+            await app.call_tool(
+                COMMAND, {"pos": [7500.0, 50.0, 7500.0], "timeout_s": 1.0}
+            )
+        awaited = [item.args[0] for item in call.await_args_list]
+        self.assertEqual(awaited, ["surface_query", COMMAND])
 
 
 if __name__ == "__main__":

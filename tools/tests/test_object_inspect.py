@@ -42,9 +42,12 @@ class ObjectInspectIngressTest(unittest.TestCase):
         self.assertIn(COMMAND, READ_ONLY_COMMANDS)
         self.assertFalse(command_requires_lease(COMMAND))
 
-        status, body = self.state.enqueue_command(COMMAND, dict(VALID_ARGS))
-        self.assertEqual(status, 200)
-        self.assertEqual(body["peer"], "server")
+        by_id = {"object_id": 5, "want": ["bounding_center"]}
+        for args in (dict(VALID_ARGS), by_id):
+            with self.subTest(args=args):
+                status, body = self.state.enqueue_command(COMMAND, args)
+                self.assertEqual(status, 200)
+                self.assertEqual(body["peer"], "server")
 
     def test_rejects_bad_args(self) -> None:
         invalid = [
@@ -55,6 +58,9 @@ class ObjectInspectIngressTest(unittest.TestCase):
             {**VALID_ARGS, "type": ""},
             {**VALID_ARGS, "pos": [1.0, 2.0]},
             {**VALID_ARGS, "extra": True},
+            {"object_id": 0, "want": ["bounding_center"]},
+            {"object_id": 5},
+            {"object_id": 5, "type": "X", "want": ["bounding_center"]},
         ]
         for args in invalid:
             with self.subTest(args=args):

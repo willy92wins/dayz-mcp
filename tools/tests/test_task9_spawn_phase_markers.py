@@ -112,8 +112,19 @@ BRIDGE = WORKSPACE_ROOT / "scripts" / "5_Mission" / "MCPBridge.c"
 # .ps1 de fase parsean ese prefijo (run-poc, run-fase1/2/3, run-s0-gate, spike0/mcp-grab-diag),
 # 21 sitios cambiados a la vez y verificados por conteo en los dos lados.
 # Gate in-game: run 2b710858-ca97-4772-bd98-79846e4817d9, servidor diag 1.29.163709 el 2026-08-21 15:11 con PBO repackeado: Module Mission 217x files 508x classes cero errores; script.log imprime '[DayZ-MCP] config loaded ... poll_hz=5' y CERO ocurrencias de [MCP-POC] en los 7.6 MB del log ni en el RPT
-BRIDGE_SHA256 = "66D68A4EDEFB0B04970E4D4F6E8814EB57C22113E76E5E239CA5A776E65284BE"
-BASE_BRIDGE_SHA256 = "3B2ED73FE02B11A122612030ED3BFD067BCB5B4CE18BD28EDD5F3304803CF4A2"
+# DELIBERATELY RED from 2026-08-24 (tarde): source-only wave fixes for the inbox arc
+# -- DispatchObjectAnim/DispatchObjectInspect resolve through ResolveCommandObject
+# (args.object_id > 0 -> m_RuntimeObjects registry, position-independent, reaches a
+# client-authoritative fixture whose server replica never left spawn; otherwise classname
+# near pos), writes use SetAnimationPhaseNow (the plain setter interpolates and a same-tick
+# read reports the stale pre-write phase), and MCP_BRIDGE_VERSION bumped 8 -> 9 together
+# with core.EXPECTED_BRIDGE_VERSION (the equality gate forces a matched pair). Offline
+# contracts: tests/test_object_anim.py, tests/test_object_inspect.py,
+# tests/test_wave_fixes_20260824.py. Re-freeze both halves after the in-game gate of this
+# pair (the multi-agent site-certification run on the rebuilt PBO), not before.
+# Re-frozen 2026-08-24 (noche) against the v9 bridge, in-game gate the same day: multi-agent run 2026-08-24 (PBO 91A542E1..., pair v9): version gate ready, wave validation 7/8 live (clearance refusal at sea, object_id resolution, entities reliability, crash-log exclusion), and 3 external agent lanes (Grok 4.6 MCP-only, GPT-5.6 codex exec, Ox Alpha opencode) each drove spawn->fixture->driver seat->100-163 m XZ->door phase by object_id->verified delete->release, 3/3 PASS (ma_cert_report.json)
+BRIDGE_SHA256 = "6A7AC297E4F48C1E186C5C83E8D7177CFD9825686E6193F356ADC22780E7361C"
+BASE_BRIDGE_SHA256 = "FBA9515D11BA135876E2D11329F8C807777E9CDD508AE32CE1BF977C2981761F"
 
 MARKERS = (
     'Log("spawn phase id=" + command.id + " phase=validate_begin");',
