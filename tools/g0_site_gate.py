@@ -25,9 +25,10 @@ ejection confirmed). The get-out action itself is site-independently
 blocked on this stand (fb-20260824-133301-ecf5) and is not a site
 criterion.
 
-First certification 2026-08-24: NWAF [4300.0, 0.0, 10500.0]
-(_site_protocol_verdict.CERTIFIED.json — delta_2s_xz 3.351 m, 70.9 m span,
-heading [0.005, 1.0], trace gates PASS).
+Certified canonical 2026-08-24 (round 13, this reviewed gate): NWAF
+[4200.0, 0.0, 10650.0] — delta_2s_xz 3.216 m, 65.2 m span, heading
+[0.003, 1.0], trace gates PASS, release confirmed. See
+docs/VEHICLE_TESTING.md for the alternates and their demotion reasons.
 """
 
 from __future__ import annotations
@@ -82,10 +83,10 @@ CANOPY_DY_M = 0.05
 ENTITY_LIMIT = 128
 SCAN_ABORT_AFTER_ERRORS = 10
 SURFACE_CACHE_VERSION = 2
-# Canonical site first (frozen 2026-08-24 certification), then measured
+# Canonical site first (round-13 certification, 2026-08-24), then measured
 # alternates. Each must still resolve against the current pavement scan
 # before it is certified — the list is an ordering, not evidence.
-PRIORITY_SITES = ((4300.0, 10500.0), (4600.0, 9950.0), (4350.0, 10400.0))
+PRIORITY_SITES = ((4200.0, 10650.0), (4300.0, 10500.0), (4350.0, 10400.0))
 PRIORITY_PAVEMENT_MAX_DIST_M = 75.0
 
 
