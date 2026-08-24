@@ -92,6 +92,16 @@ the acceptance contract is in [`product-spec.md`](product-spec.md).
 
 ## What this cannot do, and why
 
+### What this is NOT
+
+DayZ-MCP is a local control and observation surface, not a hosted knowledge service.
+
+- It does not require embeddings, a vector store, or a paid service.
+- It does not use OCR to interpret the game.
+- It does not call `SendInput` or synthesize operating-system keystrokes.
+- It sends no usage analytics or other telemetry; runtime game telemetry is read locally.
+- It includes no integrated knowledge database.
+
 **Visual capture is not engine-native.** `MakeScreenshot` exists as a proto (`proto.c:142`) and is a no-op on DayZDiag as well as retail ([T165276](https://feedback.bistudio.com/T165276)). Probe 2026-06-06: `MakeScreenshot("$profile:mcpshot.dds")` twice, zero `.dds` anywhere, `ScreenShots` folder never created (`dayz-mcp-architecture.md:17-24`). `RenderTargetWidget` is display-only — no readback to file or bytes (`dayz-mcp-architecture.md:28-32`). Frames come from an external window-grab of the rendered client (`Graphics.CopyFromScreen`; first probe meanB 65, nbRatio 0.999 — `dayz-mcp-architecture.md:41-42`). That grab is the only non-native piece in the stack. A headless server returns data, not pixels (`dayz-mcp-architecture.md:62-64`; `product-spec.md:162-163`).
 
 **The API key cannot go in an HTTP header.** `RestContext.SetHeader(string)` sets Content-Type only (`restapi.c:135-141`; `tools/README-mcp.md:7`). The key travels as `?key=` (`addon/scripts/5_Mission/MCPBridge.c:226`). The listener binds `127.0.0.1`; there is no `0.0.0.0` mode and no remote mode (`product-spec.md:168`).
@@ -124,12 +134,18 @@ the acceptance contract is in [`product-spec.md`](product-spec.md).
   sits on the same machine as the game it drives — there is no remote mode and no
   multi-user mode, by design. The reference deployment is a local DayZDiag server plus
   a client for visual capture; the server-side verbs need only the bridge mod loaded.
-- An agent that already knows DayZ modding. These tools expose the game; they do not
-  teach it. Unless your assistant brings its own crystallized domain knowledge, pair
-  this server with the same author's
-  [DayZ Modding Knowledge Pack](https://github.com/willy92wins/DayZ-Modding-Knowledge-Pack):
-  16 domain playbooks, the py3d MLOD toolchain, an Enforce linter and a UI lab, every
-  claim carrying `path:line` evidence.
+
+Choose the setup that matches the agent:
+
+- **Experienced DayZ modder:** install DayZ-MCP by itself. The MCP exposes the live
+  engine without adding a knowledge layer.
+- **New to DayZ modding:** use the paired installer. It installs DayZ-MCP with the
+  [DayZ Modding Knowledge Pack](https://github.com/willy92wins/DayZ-Modding-Knowledge-Pack)
+  by default; pass `-SkipKnowledgePack` to opt out.
+- **Agent with its own DayZ knowledge:** DayZ-MCP also works by itself. Its runtime
+  responses remain actionable: `bad_args` names the rejected field and expected unit
+  or scale; `wait_for` reports `satisfied`, `timed_out`, `observed`, and `scanned` so
+  the next step follows evidence; `bridge_status.reason` names the readiness cause.
 
 ## Two halves
 
@@ -221,6 +237,8 @@ in this order:
    ```
 
 ## Tests
+
+The MCP server and its test suite are Windows-only.
 
 ```powershell
 cd tools

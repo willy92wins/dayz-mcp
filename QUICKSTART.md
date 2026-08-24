@@ -7,6 +7,12 @@ Everything else in this repo is optional until this works.
 and a DayZ server you may load mods on. The daemon binds `127.0.0.1` and drives a game on the same machine;
 there is no remote mode.
 
+**GitHub Release variant.** If you downloaded `DayZ_MCP-v<version>-addon.zip`,
+verify it against the `SHA256SUMS.txt` published beside it, then extract the archive
+without changing its layout. It contains `@DayZ_MCP/Addons/DayZ_MCP.pbo` and
+`VERSION.json`. The release asset replaces steps 1 and 3: skip the `P:\` mapping and
+`pack-addon.ps1`, but still complete steps 2, 4, and 5.
+
 **1 — Map the work drive.** DayZ Tools resolve addon sources through `P:\`, and
 `$PBOPREFIX$` is read relative to it. Point it at the folder *containing* `addon`:
 ```powershell
