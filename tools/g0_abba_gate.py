@@ -26,9 +26,15 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_KEYFILE = SCRIPT_DIR / ".dayz_mcp.key"
 DEFAULT_OUT = SCRIPT_DIR / "_g0_abba_verdict.json"
 
-CONTROL_SITE = [6063.01416015625, 0.0, 1971.696044921875]
-RED_SITE = [6063.095703125, 0.0, 1931.7137451171875]
-CONTROL_END = [6062.75634765625, 0.0, 2007.4820556640625]
+# Sites shifted 40 m south of the G0 diagnosis originals on 2026-08-24: the
+# full-throttle ABBA drive (~91 m north) parked the car inside a map-object
+# cluster at z~2063 (entities_query: statics at 3.2/7.4/9.3 m around the stop),
+# leaving ActionGetOutTransport blocked (exit condition false, consistent with
+# an occupied door area) and the site unfinishable. Same line, same surfaces,
+# drives now end 40-80 m clear.
+CONTROL_SITE = [6063.01416015625, 0.0, 1931.696044921875]
+RED_SITE = [6063.095703125, 0.0, 1891.7137451171875]
+CONTROL_END = [6062.75634765625, 0.0, 1967.4820556640625]
 ABBA_SITES = (
     ("CONTROL", CONTROL_SITE),
     ("RED", RED_SITE),
@@ -1450,7 +1456,12 @@ def run_cell(daemon: Daemon, cell: dict[str, object]) -> None:
 
 
 def finish_site(daemon: Daemon, cell: dict[str, object]) -> dict[str, object]:
-    """Execute FINISH_SITE from section 4.6 without deleting an occupied car."""
+    """Execute FINISH_SITE from section 4.6.
+
+    Prefers a clean get-out before deleting the fixture; when the exit action
+    stays blocked, the disposable fixture is force-deleted under the player
+    (engine ejects the occupant; the ejection is then verified).
+    """
 
     cleanup: dict[str, object] = {"status": "CLEANUP_DEGRADED"}
     object_id = cell.get("object_id")
@@ -1526,13 +1537,16 @@ def finish_site(daemon: Daemon, cell: dict[str, object]) -> dict[str, object]:
     cleanup["engine_stop"] = _safe_tool_call(
         daemon, "engine_set", {"mode": "stop", "timeout_s": 30.0}, "client"
     )
-    cleanup["release"] = _safe_tool_call(
-        daemon, "vehicle_release", {"timeout_s": 30.0}, "client"
-    )
+    # vehicle_release runs after the get-out attempt (exit first, then drop
+    # the claim). Early-return branches release explicitly so no path leaks
+    # the claim.
 
     speed = stopped.get("speedo_max")
     if not _is_number(speed) or abs(float(speed)) >= 0.1:
         cleanup["reason"] = "vehicle_not_stopped"
+        cleanup["release"] = _safe_tool_call(
+            daemon, "vehicle_release", {"timeout_s": 30.0}, "client"
+        )
         cleanup["restore"] = _safe_tool_call(
             daemon, "restore_gameplay", {"timeout_s": 30.0}, "client"
         )
@@ -1542,6 +1556,9 @@ def finish_site(daemon: Daemon, cell: dict[str, object]) -> dict[str, object]:
     stopped_pos = extract_pos(stopped)
     if stopped_pos is None:
         cleanup["reason"] = "stopped_position_missing"
+        cleanup["release"] = _safe_tool_call(
+            daemon, "vehicle_release", {"timeout_s": 30.0}, "client"
+        )
         cleanup["restore"] = _safe_tool_call(
             daemon, "restore_gameplay", {"timeout_s": 30.0}, "client"
         )
@@ -1569,6 +1586,9 @@ def finish_site(daemon: Daemon, cell: dict[str, object]) -> dict[str, object]:
             break
         time.sleep(0.25)
     cleanup["SEAT_CHECK"] = seat_check
+    cleanup["release"] = _safe_tool_call(
+        daemon, "vehicle_release", {"timeout_s": 30.0}, "client"
+    )
     if _is_false(seat_check.get("ok")) and seat_check.get("error") == "not_seated":
         deleted = _safe_tool_call(
             daemon,
@@ -1586,10 +1606,42 @@ def finish_site(daemon: Daemon, cell: dict[str, object]) -> dict[str, object]:
             else "CLEANUP_DEGRADED"
         )
     else:
-        cleanup["reason"] = "still_seated"
+        # Telemetry ok means the seat is positively confirmed; any other
+        # non-not_seated answer leaves the state unobserved.
+        if _is_true(seat_check.get("ok")):
+            cleanup["reason"] = "still_seated"
+        else:
+            cleanup["reason"] = "unseating_not_confirmed"
+        # ActionGetOutTransport.Can() stayed false on the 2026-08-24 stand at
+        # two different sites. The fixture is disposable: delete it under the
+        # player and let the engine eject them, then verify the seat cleared.
+        forced = _safe_tool_call(
+            daemon,
+            "object_delete",
+            {"object_id": object_id, "timeout_s": 30.0},
+            "server",
+        )
+        cleanup["forced_delete"] = forced
+        eject_check: dict = {}
+        started = time.monotonic()
+        while time.monotonic() - started <= 5.0:
+            eject_check = _safe_tool_call(
+                daemon, "vehicle_telemetry", {"timeout_s": 30.0}, "client"
+            )
+            if _is_false(eject_check.get("ok")) and eject_check.get("error") == "not_seated":
+                break
+            time.sleep(0.25)
+        cleanup["EJECT_CHECK"] = eject_check
         cleanup["restore"] = _safe_tool_call(
             daemon, "restore_gameplay", {"timeout_s": 30.0}, "client"
         )
+        if (
+            _is_true(forced.get("ok"))
+            and _is_true(forced.get("deleted"))
+            and _is_false(eject_check.get("ok"))
+            and eject_check.get("error") == "not_seated"
+        ):
+            cleanup["status"] = "OK_FORCED_DELETE"
     cell["finished"] = True
     return cleanup
 
@@ -1661,13 +1713,15 @@ def _finish_plan() -> list[str]:
             {"throttle": 0.0, "steer": 0.0, "brake": 1.0, "handbrake": 1.0, "hold_ttl_s": 8.0, "timeout_s": 30.0},
         ),
         _call_text("engine_set", {"mode": "stop", "timeout_s": 30.0}),
-        _call_text("vehicle_release", {"timeout_s": 30.0}),
         _call_text(
             "action_use",
             {"action": "ActionGetOutTransport", "classname": VEHICLE_TYPE, "pos": "STOPPED.pos_real", "radius": 8.0, "timeout_s": 30.0},
         ),
         "REPEAT <=5s: " + _call_text("vehicle_telemetry", {"timeout_s": 30.0}),
+        _call_text("vehicle_release", {"timeout_s": 30.0}),
         "IF not_seated: " + _call_text("object_delete", {"object_id": "S.object_id", "timeout_s": 30.0}),
+        "ELSE forced: " + _call_text("object_delete", {"object_id": "S.object_id", "timeout_s": 30.0})
+        + " + REPEAT <=5s: " + _call_text("vehicle_telemetry", {"timeout_s": 30.0}),
         _call_text("restore_gameplay", {"timeout_s": 30.0}),
     ]
 
@@ -1790,7 +1844,7 @@ def execute(daemon: Daemon, out_path: Path, build: str) -> tuple[dict[str, objec
             finish = finish_site(daemon, cell_record)
             cell_record["finish"] = finish
             _require(
-                finish.get("status") in {"OK", "OK_UNSEATED"},
+                finish.get("status") in {"OK", "OK_UNSEATED", "OK_FORCED_DELETE"},
                 "SETUP_FAILED",
                 "FINISH_SITE",
                 finish,
