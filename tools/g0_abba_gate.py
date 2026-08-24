@@ -1499,7 +1499,19 @@ def finish_site(daemon: Daemon, cell: dict[str, object]) -> dict[str, object]:
         cell["finished"] = True
         return cleanup
     if not _is_true(check.get("ok")):
+        # Seat state is unobservable, but the claim and the fixture are
+        # still ours to drop: leaving them held would contaminate whatever
+        # runs on the box next (the sibling branches all release).
         cleanup["reason"] = "telemetry_failed"
+        cleanup["release"] = _safe_tool_call(
+            daemon, "vehicle_release", {"timeout_s": 30.0}, "client"
+        )
+        cleanup["delete"] = _safe_tool_call(
+            daemon,
+            "object_delete",
+            {"object_id": object_id, "timeout_s": 30.0},
+            "server",
+        )
         cleanup["restore"] = _safe_tool_call(
             daemon, "restore_gameplay", {"timeout_s": 30.0}, "client"
         )
