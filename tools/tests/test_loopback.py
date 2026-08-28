@@ -809,7 +809,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         )
         self.assertEqual(status, 409)
         self.assertEqual(payload["error"], "version_blocked")
-        self.assertEqual(payload["expected"], "8")
+        self.assertEqual(payload["expected"], loopback.EXPECTED_BRIDGE_VERSION)
         self.assertEqual(payload["state"], "legacy_blocked")
 
     def test_lease_required_includes_version_block_fields(self) -> None:
@@ -826,7 +826,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         )
         self.assertEqual(payload["error"], "lease_required")
         self.assertEqual(payload["version_state"], "version_mismatch")
-        self.assertEqual(payload["expected"], "8")
+        self.assertEqual(payload["expected"], loopback.EXPECTED_BRIDGE_VERSION)
         self.assertIn(status, {403, 423})
 
     def test_post_authorize_queue_full_aborts(self) -> None:

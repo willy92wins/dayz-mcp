@@ -770,9 +770,10 @@ class StatusAndVersionFenceTest(unittest.TestCase):
         self.assertFalse(ready["ready"])
         self.assertNotEqual(ready["reason"], "ready")
 
-    def test_version_gate_unchanged_for_v8_without_inst(self) -> None:
+    def test_version_gate_unchanged_for_v9_without_inst(self) -> None:
+        current = "9~1.29.0"
         state, detail = version_state_for(
-            "8~1.29.0",
+            current,
             require_version=False,
             expected_game_version=None,
         )
@@ -786,17 +787,17 @@ class StatusAndVersionFenceTest(unittest.TestCase):
                 expected_game_version=None,
             )[0],
         )
-        runtime.record_poll("server", "8~1.29.0")
+        runtime.record_poll("server", current)
         status, payload = runtime.enqueue_command("player_teleport", dict(TELEPORT))
         self.assertNotEqual(payload.get("error"), "version_blocked")
         self.assertEqual(status, 409)
         self.assertEqual(payload.get("error"), "legacy_unbound")
 
-    def test_expected_bridge_version_stays_8(self) -> None:
-        self.assertEqual(EXPECTED_BRIDGE_VERSION, "8")
+    def test_expected_bridge_version_stays_9(self) -> None:
+        self.assertEqual(EXPECTED_BRIDGE_VERSION, "9")
         messages = (MOD_SCRIPTS / "MCPMessages.c").read_text(encoding="utf-8")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "8";', messages)
-        self.assertNotIn('const string MCP_BRIDGE_VERSION = "9";', messages)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "9";', messages)
+        self.assertNotIn('const string MCP_BRIDGE_VERSION = "8";', messages)
         match = re.search(r"class MCPConfig\s*\{([^}]*)\}", messages)
         self.assertIsNotNone(match)
         self.assertIn("string instance;", match.group(1))

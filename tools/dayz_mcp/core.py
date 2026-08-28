@@ -57,18 +57,26 @@ def _peer_status(
 ) -> dict[str, Any]:
     peer_snapshot = snapshot["peers"][peer]
     version = peer_snapshot.get("version")
+    last_poll_age_s = peer_snapshot.get("last_poll_age_s")
+    observed_this_generation = last_poll_age_s is not None
     state, detail = version_state_for(
         version,
         require_version=require_version,
         expected_game_version=expected_game_version,
         expected_bridge_version=expected_bridge_version,
     )
+    if not observed_this_generation:
+        # version_state stays the computed value so old consumers do not
+        # break; the detail names the real situation (no poll this daemon
+        # generation) instead of a stale "poll omitted ver=".
+        detail = "never_polled_this_generation"
     return {
-        "last_poll_age_s": peer_snapshot.get("last_poll_age_s"),
+        "last_poll_age_s": last_poll_age_s,
         "queue_depth": peer_snapshot.get("queue_depth", 0),
         "version": version,
         "version_state": state,
         "version_detail": detail,
+        "observed_this_generation": observed_this_generation,
         "binding_state": peer_snapshot.get("binding_state"),
         "instance_prefix": peer_snapshot.get("instance_prefix"),
         "bound_last_poll_age_s": peer_snapshot.get("bound_last_poll_age_s"),

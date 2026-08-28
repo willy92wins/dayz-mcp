@@ -2523,8 +2523,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "there; with -adminlog the server .ADM has chat, no tool reads it. "
             "wait_for(log_matches) lookback_lines=200 includes the last N "
             "lines already on disk so a sequential action_use then wait_for "
-            "does not miss a ~200ms response. action_use v1: held item is "
-            "null; componentIndex=-1; classname is exact GetType()."
+            "does not miss a ~200ms response. action_use: held item is the "
+            "ItemBase in the local player's hands (null if empty); "
+            "componentIndex=-1; classname is exact GetType()."
         ),
         lifespan=lifespan,
     )

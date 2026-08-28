@@ -7,11 +7,20 @@ class MCPClientPollCallback : RestCallback
 		m_Bridge = bridge;
 	}
 
+	void DetachBridge()
+	{
+		m_Bridge = null;
+	}
+
 	override void OnSuccess(string data, int dataSize)
 	{
 		if (m_Bridge)
 		{
 			m_Bridge.ReleaseCallback(this);
+			if (!m_Bridge.IsActivePollCallback(this))
+			{
+				return;
+			}
 			m_Bridge.OnPollSuccess(data, dataSize);
 		}
 	}
@@ -21,6 +30,10 @@ class MCPClientPollCallback : RestCallback
 		if (m_Bridge)
 		{
 			m_Bridge.ReleaseCallback(this);
+			if (!m_Bridge.IsActivePollCallback(this))
+			{
+				return;
+			}
 			m_Bridge.OnPollError(errorCode);
 		}
 	}
@@ -30,6 +43,10 @@ class MCPClientPollCallback : RestCallback
 		if (m_Bridge)
 		{
 			m_Bridge.ReleaseCallback(this);
+			if (!m_Bridge.IsActivePollCallback(this))
+			{
+				return;
+			}
 			m_Bridge.OnPollTimeout();
 		}
 	}
@@ -42,6 +59,11 @@ class MCPClientResultCallback : RestCallback
 	void MCPClientResultCallback(MCPClientBridge bridge)
 	{
 		m_Bridge = bridge;
+	}
+
+	void DetachBridge()
+	{
+		m_Bridge = null;
 	}
 
 	override void OnSuccess(string data, int dataSize)
@@ -125,6 +147,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected static ref MCPClientBridge m_Instance;
 
 	protected RestContext m_Ctx;
+	protected RestContext m_PollCtx;
 	protected string m_Url;
 	protected string m_Key;
 	protected string m_PeerInstance;
@@ -134,11 +157,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// Backoff at which a poll failure stops looking transient and the credential on
 	// disk is re-read.
 	protected const float KEY_RELOAD_BACKOFF_S = 4.0;
+	protected const float POLL_WATCHDOG_S = 30.0;
 	protected float m_Backoff;
 	protected int m_Tick;
 	protected int m_TickPollSent;
 	protected int m_TickPollCallback;
 	protected bool m_PollInFlight;
+	protected float m_PollInFlightS;
 	protected bool m_Configured;
 	protected bool m_InitFailureLogged;
 	protected bool m_ControlsSuppressed;
@@ -146,6 +171,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool m_ActiveCamOwned;
 	protected Camera m_ActiveCam;
 	protected ref array<ref RestCallback> m_CallbackRefs;
+	protected ref array<ref RestCallback> m_PollCallbackRefs;
+	protected ref MCPClientPollCallback m_PollCallback;
 	protected ref array<ref MCPCommand> m_Pending;
 	protected ref MCPJobRunner m_JobRunner;
 	protected ref array<Object> m_ReadyObjects;
@@ -169,12 +196,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_PollVersion = "";
 		m_PeerInstance = "";
 		m_PollInFlight = false;
+		m_PollInFlightS = 0.0;
 		m_Configured = false;
 		m_InitFailureLogged = false;
 		m_ControlsSuppressed = false;
 		m_PlayerSimulationDisabled = false;
 		m_ActiveCamOwned = false;
 		m_CallbackRefs = new array<ref RestCallback>();
+		m_PollCallbackRefs = new array<ref RestCallback>();
 		m_Pending = new array<ref MCPCommand>();
 		m_JobRunner = new MCPJobRunner();
 		m_ReadyObjects = new array<Object>();
@@ -231,6 +260,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		if (m_PollInFlight)
 		{
+			m_PollInFlightS = m_PollInFlightS + timeslice;
+			if (m_PollInFlightS >= POLL_WATCHDOG_S)
+			{
+				int pollRefs = 0;
+				if (m_PollCallbackRefs)
+				{
+					pollRefs = m_PollCallbackRefs.Count();
+				}
+				Log("client poll watchdog no callback in_flight_s=" + m_PollInFlightS + " poll_refs=" + pollRefs);
+				AbandonInFlightPoll();
+				OnPollFail("watchdog");
+			}
 			return;
 		}
 
@@ -310,13 +351,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		m_Ctx = api.GetRestContext(m_Url);
-		if (!m_Ctx)
+		m_PollCtx = api.GetRestContext(PollContextUrl(m_Url));
+		if (!m_Ctx || !m_PollCtx)
 		{
 			LogInitFailure("RestContext unavailable");
 			return;
 		}
 
 		m_Ctx.SetHeader("application/json");
+		m_PollCtx.SetHeader("application/json");
 		m_Configured = true;
 		m_Backoff = 0.0;
 		m_Accum = 0.0;
@@ -336,24 +379,54 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	protected void StartPoll()
 	{
-		if (!m_Ctx)
+		if (!m_PollCtx)
 		{
 			return;
 		}
 
 		m_Accum = 0.0;
 		m_PollInFlight = true;
+		m_PollInFlightS = 0.0;
 		m_TickPollSent = m_Tick;
 
-		MCPClientPollCallback cb = new MCPClientPollCallback(this);
-		m_CallbackRefs.Insert(cb);
+		EnsurePollCallback();
+		HoldPollCallback();
 		string request = "poll?peer=client&key=" + m_Key;
 		request = request + "&ver=" + GetPollVersion();
 		if (m_PeerInstance != "")
 		{
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
 		}
-		m_Ctx.GET(cb, request);
+		m_PollCtx.GET(m_PollCallback, request);
+	}
+
+	protected void EnsurePollCallback()
+	{
+		if (!m_PollCallback)
+		{
+			m_PollCallback = new MCPClientPollCallback(this);
+		}
+	}
+
+	protected void HoldPollCallback()
+	{
+		if (!m_PollCallbackRefs || !m_PollCallback)
+		{
+			return;
+		}
+
+		int i = 0;
+		while (i < m_PollCallbackRefs.Count())
+		{
+			if (m_PollCallbackRefs.Get(i) == m_PollCallback)
+			{
+				return;
+			}
+
+			i = i + 1;
+		}
+
+		m_PollCallbackRefs.Insert(m_PollCallback);
 	}
 
 	void OnPollSuccess(string data, int dataSize)
@@ -407,6 +480,40 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 	}
 
+	bool IsActivePollCallback(MCPClientPollCallback cb)
+	{
+		return cb == m_PollCallback;
+	}
+
+	// Poll shares the results RestContext (same URL). GetRestContext caches by
+	// exact string, so a distinct poll base is unreachable, and stripping the
+	// trailing slash makes the engine concatenate base+request into a malformed
+	// URL (error=7). Isolation of stale polls is identity discard of the
+	// abandoned callback, not a second context. AbandonInFlightPoll must not
+	// reset() when m_PollCtx == m_Ctx.
+	protected string PollContextUrl(string url)
+	{
+		return url;
+	}
+
+	// reset() only a distinct poll context (restapi.c:133). Shared results
+	// context must not reset() here (would cancel in-flight POSTs). Detach the
+	// live pointer so the next StartPoll allocates a new callback; keep the
+	// abandoned object in m_PollCallbackRefs until its GET completion calls
+	// ReleaseCallback. Engine retain of RestCallback passed to GET is unknown,
+	// so script-side hold is required either way. An orphan that never
+	// completes stays retained (bounded residual leak: one object per abandon).
+	protected void AbandonInFlightPoll()
+	{
+		m_PollCallback = null;
+
+		if (m_PollCtx && m_PollCtx != m_Ctx)
+		{
+			m_PollCtx.reset();
+			m_PollCtx.SetHeader("application/json");
+		}
+	}
+
 	void OnPollError(int errorCode)
 	{
 		OnPollFail("error=" + errorCode);
@@ -425,6 +532,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		m_PollInFlight = false;
+		m_PollInFlightS = 0.0;
 		m_Accum = 0.0;
 		if (m_Backoff <= 0.0)
 		{
@@ -1696,16 +1804,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
-		// Item is null: ActionInteractBase.UseMainItem() is false
-		// (actioninteractbase.c:71-74). CCINone is not empty-hands.
-		if (!action.Can(player, actionTarget, null))
+		// Held item is the ItemBase in the local player's hands; empty hands stay null.
+		// ActionInteractBase.UseMainItem() is false (actioninteractbase.c:71-74).
+		// CCINone is not empty-hands.
+		ItemBase heldItem = player.GetItemInHands();
+		if (!action.Can(player, actionTarget, heldItem))
 		{
 			result.ok = false;
 			result.error = "condition_failed";
 			return true;
 		}
 
-		amc.PerformActionStart(action, actionTarget, null, NULL);
+		amc.PerformActionStart(action, actionTarget, heldItem, NULL);
 		// PerformActionStart is void. ActionStart can fail in SetupAction
 		// (typically inventory reservation) and return without ctx.Send
 		// (actionmanagerclient.c:638-643). GetRunningAction() is null then.
@@ -3340,17 +3450,33 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	void ReleaseCallback(RestCallback cb)
 	{
-		if (!m_CallbackRefs)
+		int i;
+		i = 0;
+		if (m_CallbackRefs)
+		{
+			while (i < m_CallbackRefs.Count())
+			{
+				if (m_CallbackRefs.Get(i) == cb)
+				{
+					m_CallbackRefs.Remove(i);
+					return;
+				}
+
+				i = i + 1;
+			}
+		}
+
+		if (!m_PollCallbackRefs)
 		{
 			return;
 		}
 
-		int i = 0;
-		while (i < m_CallbackRefs.Count())
+		i = 0;
+		while (i < m_PollCallbackRefs.Count())
 		{
-			if (m_CallbackRefs.Get(i) == cb)
+			if (m_PollCallbackRefs.Get(i) == cb)
 			{
-				m_CallbackRefs.Remove(i);
+				m_PollCallbackRefs.Remove(i);
 				return;
 			}
 
@@ -3403,6 +3529,54 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		RestoreGameplay();
 		ReleaseCamera();
 
+		// Break the callback->bridge->callback-array ref cycle before
+		// contexts are dropped. Shared context plus a posted terminal
+		// POST keeps the arrays, so a never-completing GET must not keep
+		// a live m_Bridge pointer that pins the bridge across missions.
+		int i;
+		if (m_PollCallbackRefs)
+		{
+			i = 0;
+			while (i < m_PollCallbackRefs.Count())
+			{
+				MCPClientPollCallback pollCb = MCPClientPollCallback.Cast(m_PollCallbackRefs.Get(i));
+				if (pollCb)
+				{
+					pollCb.DetachBridge();
+				}
+
+				i = i + 1;
+			}
+		}
+
+		if (m_CallbackRefs)
+		{
+			i = 0;
+			while (i < m_CallbackRefs.Count())
+			{
+				MCPClientResultCallback resultCb = MCPClientResultCallback.Cast(m_CallbackRefs.Get(i));
+				if (resultCb)
+				{
+					resultCb.DetachBridge();
+				}
+
+				i = i + 1;
+			}
+		}
+
+		bool pollDistinct = false;
+		if (m_PollCtx && m_PollCtx != m_Ctx)
+		{
+			pollDistinct = true;
+		}
+		// postedTerminal keeps the result POST alive. Poll is independent:
+		// an unanswered GET must not pin the bridge across missions.
+		if (pollDistinct)
+		{
+			m_PollCtx.reset();
+		}
+		m_PollCtx = null;
+
 		if (m_Ctx)
 		{
 			if (!postedTerminal)
@@ -3411,6 +3585,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			}
 			m_Ctx = null;
 		}
+
+		if (m_PollCallbackRefs)
+		{
+			if (pollDistinct || !postedTerminal)
+			{
+				m_PollCallbackRefs.Clear();
+			}
+		}
+
+		// Contexts already nulled above. Drop the live poll pointer after
+		// teardown so a shared-ctx terminal POST path does not leave it set.
+		m_PollCallback = null;
 
 		if (m_CallbackRefs)
 		{
