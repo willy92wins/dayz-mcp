@@ -23,6 +23,7 @@ CODE_DESC_ENUM_MISMATCH = "DESC-ENUM-MISMATCH"
 _PIPE_ENUM_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*(?:\s*\|\s*[A-Za-z_][A-Za-z0-9_]*)+"
 )
+_MAX_SCHEMA_DEPTH = 64
 
 
 def resolve_effective_schemas() -> dict[str, dict]:
@@ -84,39 +85,81 @@ def _append_json_type(named: list[str], value: Any) -> None:
             _append_json_type(named, item)
 
 
+def _collect_json_types(
+    pschema: dict[str, Any],
+    named: list[str],
+    depth: int,
+    active: set[int],
+) -> None:
+    if depth > _MAX_SCHEMA_DEPTH or id(pschema) in active:
+        return
+    active.add(id(pschema))
+    try:
+        declared = pschema.get("type")
+        if isinstance(declared, (str, list)):
+            _append_json_type(named, declared)
+            return
+        for key in ("anyOf", "oneOf"):
+            alts = pschema.get(key)
+            if not isinstance(alts, list):
+                continue
+            count_before = len(named)
+            for alt in alts:
+                if isinstance(alt, dict):
+                    _collect_json_types(alt, named, depth + 1, active)
+            if len(named) > count_before:
+                return
+    finally:
+        active.remove(id(pschema))
+
+
 def _json_type(pschema: dict[str, Any]) -> str | list[str] | None:
-    declared = pschema.get("type")
-    if isinstance(declared, str):
-        return declared if declared != "null" else None
-    if isinstance(declared, list):
-        named: list[str] = []
-        _append_json_type(named, declared)
-        return _collapse_types(named)
-    named = []
-    for key in ("anyOf", "oneOf"):
-        alts = pschema.get(key)
-        if not isinstance(alts, list):
-            continue
-        for alt in alts:
-            if isinstance(alt, dict):
-                _append_json_type(named, alt.get("type"))
-        if named:
-            return _collapse_types(named)
-    return None
+    named: list[str] = []
+    _collect_json_types(pschema, named, 0, set())
+    return _collapse_types(named)
+
+
+def _append_json_enum(values: list[Any], raw: list[Any]) -> None:
+    for value in raw:
+        if value not in values:
+            values.append(value)
+
+
+def _collect_json_enums(
+    pschema: dict[str, Any],
+    values: list[Any],
+    depth: int,
+    active: set[int],
+) -> bool:
+    if depth > _MAX_SCHEMA_DEPTH or id(pschema) in active:
+        return False
+    active.add(id(pschema))
+    try:
+        raw = pschema.get("enum")
+        if isinstance(raw, list):
+            _append_json_enum(values, raw)
+            return True
+        for key in ("anyOf", "oneOf"):
+            alts = pschema.get(key)
+            if not isinstance(alts, list):
+                continue
+            found = False
+            for alt in alts:
+                if isinstance(alt, dict):
+                    found = (
+                        _collect_json_enums(alt, values, depth + 1, active)
+                        or found
+                    )
+            if found:
+                return True
+        return False
+    finally:
+        active.remove(id(pschema))
 
 
 def _json_enum(pschema: dict[str, Any]) -> list[Any] | None:
-    raw = pschema.get("enum")
-    if isinstance(raw, list):
-        return list(raw)
-    for key in ("anyOf", "oneOf"):
-        alts = pschema.get(key)
-        if not isinstance(alts, list):
-            continue
-        for alt in alts:
-            if isinstance(alt, dict) and isinstance(alt.get("enum"), list):
-                return list(alt["enum"])
-    return None
+    values: list[Any] = []
+    return values if _collect_json_enums(pschema, values, 0, set()) else None
 
 
 def audit_contracts(schemas: dict | None = None) -> list[dict]:
