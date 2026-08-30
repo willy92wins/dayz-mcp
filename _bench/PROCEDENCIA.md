@@ -9,6 +9,16 @@
 ajusta el implementador no mide nada. `run_bench.py` solo descubre, ejecuta y compara los
 veredictos; falla si los recuentos no son exactamente 30 + 5 + 1, mas el modulo real.
 
+La unica excepcion registrada, 2026-08-30: `steal_venv.py` plantaba en una ruta absoluta
+del disco donde se escribio el banco. Su objetivo pasa a derivarse del interprete vivo,
+con la misma expresion que `_cleanup_attack_artifacts` usa en `run_bench.py`, y el `mkdir`
+del objetivo desaparece: solo planta si ese site-packages ya existe. Ningun veredicto
+cambia -- el caso se rechaza porque sus dos entradas lanzan, no por el plantado -- pero
+fuera de aquella maquina el ataque no llegaba a ejecutarse, y entonces el caso ya no
+demostraba que `-S` lo neutraliza; en Windows ademas dejaba ficheros que la limpieza,
+que si deriva su ruta, nunca encuentra. Medido en la maquina original antes y despues:
+2 ficheros plantados en el mismo site-packages y `S7-GATE-FAIL` las dos veces.
+
 ## Como correrlo: el interprete no es cualquiera
 
     <venv>\Scripts\python.exe -I -S -B _gate.py                 # el modulo real
@@ -29,6 +39,18 @@ dependencias tienen que estar en el site-packages del propio interprete:
 
 Si el hijo no las alcanza, el gate lo dice como `S7-GATE-ENVIRONMENT` y **no** lo confunde
 con un defecto del candidato: un fallo de arranque del entorno no se cobra del que se juzga.
+
+## Los controles del propio gate estan duplicados
+
+`_gate.py` no se fia de si mismo: antes de juzgar al candidato corre cinco controles.
+C1 es el modulo real; C2-C5 son `c2_toy.py`, `c3_snapshot_dispatch.py`, `c4_constant.py`
+y `c5_resolver_only.py`, que carga de `_gate-selftest\`. Esos cuatro son copias byte a
+byte de los casos del mismo nombre en `must_reject\`.
+
+Nada mantiene las copias en sincronia: el gate solo mira `_gate-selftest\` y el banco
+solo mira sus tres carpetas, asi que ninguno de los dos depende del otro para correr. El
+precio es que hay que moverlas juntas. Si divergen, el gate se estaria autocomprobando
+contra un fichero distinto del que el banco puntua bajo el mismo nombre en la tabla.
 
 ## `must_reject\` - 30
 
@@ -92,3 +114,17 @@ Este tercer grupo no concede merito. Documenta el limite deliberado: un gate con
 decidir si el candidato hace el trabajo, pero no si lo hizo el. Con el mismo usuario y sistema
 de ficheros, la procedencia no es observable sin aislamiento de sistema operativo. Por eso
 `steal_parent.py` debe seguir verde y la salida del gate declara el limite junto al veredicto.
+
+## El otro limite: el juez fija `PYTHONHASHSEED=0`
+
+`_child_environment` arranca al hijo con `PYTHONHASHSEED=0`. Es lo correcto para un juez
+-- dos corridas del mismo candidato con la misma semilla tienen que dar lo mismo -- pero
+tiene una consecuencia: **el gate no puede ver un no-determinismo de orden de hash.** Un
+candidato que itere un `set` o un `frozenset` da siempre el mismo orden bajo el juez, y
+uno distinto en cada proceso real.
+
+No es teorico. `_audit_param_name_divergence` construia su mapa de uso iterando un
+`frozenset`, y el texto de `evidence` cambiaba entre procesos: 9 de 20 en un sentido, 11
+en el otro. El banco entero y seis rondas adversariales pasaron de largo, porque bajo el
+juez ese codigo es determinista. Se encontro comparando la salida de veinte procesos
+reales, fuera del gate. Esa clase se comprueba aparte; el banco no la cubre.
