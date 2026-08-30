@@ -268,6 +268,18 @@ def _nearest_param_for_span(
     return min(pool, key=sort_key)[2]
 
 
+def _same_values(left: list[Any], right: list[Any]) -> bool:
+    """Order-insensitive equality that does not require hashable members.
+
+    ``audit_contracts`` takes an injected record, so an enum may legitimately
+    carry dicts or lists; hashing them raises TypeError. Membership uses ==,
+    which agrees with set equality for every hashable value.
+    """
+    return all(item in right for item in left) and all(
+        item in left for item in right
+    )
+
+
 def _audit_desc_enum_mismatch(schemas: dict) -> list[dict]:
     findings: list[dict] = []
     for tool_name, spec in schemas.items():
@@ -296,7 +308,7 @@ def _audit_desc_enum_mismatch(schemas: dict) -> list[dict]:
             enum_vals = pinfo.get("enum")
             if not isinstance(enum_vals, list):
                 continue
-            if set(pipe_vals) == set(enum_vals):
+            if _same_values(pipe_vals, enum_vals):
                 continue
             findings.append(
                 {

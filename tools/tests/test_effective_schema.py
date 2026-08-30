@@ -1,7 +1,12 @@
 """Effective schemas are the post-build_app public contract, not the fn body."""
 from __future__ import annotations
 
-from dayz_mcp.effective_schema import audit_contracts, resolve_effective_schemas
+from dayz_mcp.effective_schema import (
+    _json_enum,
+    _json_type,
+    audit_contracts,
+    resolve_effective_schemas,
+)
 
 
 def _param(required: bool, enum=None):
@@ -165,3 +170,45 @@ def test_divergence_evidence_does_not_claim_object_class():
     for item in findings:
         if item.get("tool") == "decode":
             assert "object class" not in str(item.get("evidence", "")).lower()
+
+
+def test_nested_union_keeps_every_branch():
+    """A union inside a union is still a union: no branch may be dropped."""
+    nested = {
+        "anyOf": [
+            {"type": "string"},
+            {"anyOf": [{"type": "integer"}, {"type": "number"}]},
+        ]
+    }
+    assert _json_type(nested) == ["string", "integer", "number"]
+
+
+def test_every_branch_enum_survives_the_union():
+    """Keeping only the first branch's enum invents DESC-ENUM-MISMATCH findings."""
+    per_branch = {
+        "anyOf": [
+            {"type": "string", "enum": ["a", "b"]},
+            {"type": "integer", "enum": [1, 2]},
+        ]
+    }
+    assert _json_enum(per_branch) == ["a", "b", 1, 2]
+
+
+def test_cyclic_schema_resolves_instead_of_recursing():
+    """A self-referencing schema must return a value, not RecursionError."""
+    cyclic: dict = {}
+    cyclic["anyOf"] = [cyclic]
+    assert _json_type(cyclic) is None
+    assert _json_enum(cyclic) is None
+
+
+def test_non_scalar_enum_values_do_not_crash_the_audit():
+    """audit_contracts takes injected records, so its enum compare must not hash."""
+    schemas = {
+        "t": {
+            "description": "mode is alpha|beta.",
+            "params": {"mode": _param(True, [{"alpha": 1}, ["beta"]])},
+        }
+    }
+    findings = audit_contracts(schemas)
+    assert any(item.get("code") == "DESC-ENUM-MISMATCH" for item in findings)

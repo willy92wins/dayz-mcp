@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Structured runtime diagnostics: field- and unit-aware `bad_args`, evidence-rich `wait_for` results, readiness causes from `bridge_status`, and the read-only `python -m dayz_mcp.doctor`.
 - Vehicle entry, control, telemetry, and trace tools; the Group G in-game drivability verdict is pending.
 - Camera capture, UI inspection and interaction, and live `.layout` reload tools.
+- `dayz_mcp.effective_schema`: resolves the tool contract FastMCP publishes after `build_app`, aliases applied, and audits it against the prose each description promises.
 
 ### Security
 
