@@ -151,7 +151,7 @@ def _tool_params(spec: Any) -> dict[str, Any]:
 def _audit_param_name_divergence(schemas: dict) -> list[dict]:
     findings: list[dict] = []
     for synonym_set in PARAM_SYNONYM_SETS:
-        usage: dict[str, list[str]] = {name: [] for name in synonym_set}
+        usage: dict[str, list[str]] = {name: [] for name in sorted(synonym_set)}
         for tool_name, spec in schemas.items():
             for param_name in _tool_params(spec):
                 if param_name in synonym_set:

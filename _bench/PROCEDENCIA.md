@@ -9,6 +9,27 @@
 ajusta el implementador no mide nada. `run_bench.py` solo descubre, ejecuta y compara los
 veredictos; falla si los recuentos no son exactamente 30 + 5 + 1, mas el modulo real.
 
+## Como correrlo: el interprete no es cualquiera
+
+    <venv>\Scripts\python.exe -I -S -B _gate.py                 # el modulo real
+    <venv>\Scripts\python.exe -I -S -B _gate.py --candidate X    # un candidato
+    <venv>\Scripts\python.exe -I -S -B _bench\run_bench.py       # los 37 casos
+    <venv>\Scripts\python.exe -I -S -B _bench\coverage.py        # el inventario de cobertura
+
+Los tres flags son **obligatorios** y sin ellos el gate falla cerrado con
+`S7-GATE-ENVIRONMENT: unsafe judge startup`. `-S` es el que impide que un candidato
+plante un `.pth` en un site-packages escribible y el juez lo importe al arrancar.
+
+★ **Consecuencia que hay que tener en cuenta al montar el entorno:** `-I` implica `-s`, o
+sea que el hijo **NO ve el user site-packages**. Un `pip install --user` no le sirve. Las
+dependencias tienen que estar en el site-packages del propio interprete:
+
+    python -m venv .gate-venv
+    .gate-venv\Scripts\python.exe -m pip install -r tools\requirements-mcp.txt pytest
+
+Si el hijo no las alcanza, el gate lo dice como `S7-GATE-ENVIRONMENT` y **no** lo confunde
+con un defecto del candidato: un fallo de arranque del entorno no se cobra del que se juzga.
+
 ## `must_reject\` - 30
 
 | fichero | origen | por que debe salir ROJO |
