@@ -1,4 +1,4 @@
-const string MCP_BRIDGE_VERSION = "9";
+const string MCP_BRIDGE_VERSION = "10";
 const float MCP_ARG_FLOAT_UNSET = float.MAX;
 const int MCP_FIXTURE_SEQ_UNSET = -2147483647;
 
@@ -67,8 +67,11 @@ class MCPArgs
 	int sample_hz;
 	int max_samples;
 	string path;
+	string root;
+	bool bubble;
 	string text;
 	int button;
+	int dik;
 	int max_lines;
 	int camera;
 	float fov;
@@ -135,6 +138,7 @@ class MCPArgs
 		want = new array<string>();
 		fields = new array<ref MCPDialogField>();
 		component = -1;
+		dik = -1;
 		limit = 64;
 		sample_hz = 20;
 		max_samples = 4096;
@@ -353,6 +357,7 @@ class MCPEntityHit
 {
 	string type;
 	string classname;
+	bool has_cargo;
 	ref array<float> pos;
 	float distance;
 
@@ -405,6 +410,14 @@ class MCPUiSnapshot
 	{
 		nodes = new array<ref MCPUiNode>();
 	}
+};
+
+class MCPUiRequestEcho
+{
+	string requested_path;
+	string requested_root;
+	string requested_text;
+	string matched_path;
 };
 
 class MCPResult
@@ -460,9 +473,15 @@ class MCPResult
 	ref array<ref MCPEntityHit> entities;
 	// Client UI verbs (ui_tree / ui_set_text / ui_click).
 	ref MCPUiSnapshot ui;
+	ref MCPUiRequestEcho ui_request;
 	bool clicked;
 	string handler;
 	int user_id;
+	// key_press: delivered means Mission.OnKeyPress was invoked, not consumed.
+	bool delivered;
+	int dik;
+	// player_respawn: the vanilla request sequence ran; completion is asynchronous.
+	bool requested;
 	// action_use: started means local dispatch only; server ack is not awaited.
 	string action;
 	float distance;

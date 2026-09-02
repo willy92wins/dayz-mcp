@@ -19,7 +19,7 @@ from typing import Annotated, Any, Awaitable, Callable, Iterator, Literal
 
 from mcp.server.fastmcp import Context, FastMCP, Image
 from mcp.server.fastmcp.exceptions import ToolError
-from pydantic import Field
+from pydantic import Field, StrictInt
 
 import mcp_capture
 from dayz_mcp import (
@@ -601,6 +601,12 @@ class Runtime:
         peer_key = "client_peer" if peer == "client" else "server_peer"
         peer_status = snapshot[peer_key]
         state = peer_status["version_state"]
+        if state == "never_polled_this_generation":
+            if snapshot.get("require_version"):
+                raise ToolError(
+                    f"game_not_ready:reason={_game_not_ready_reason(snapshot, peer)}"
+                )
+            return
         if state in {"legacy_blocked", "version_mismatch"}:
             if peer_status.get("last_poll_age_s") is None or not _peer_is_live(peer_status):
                 raise ToolError(
@@ -2665,11 +2671,18 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Queue and run an approved DayZ test project; lease ownership and "
-            "heartbeat remain internal to the tool. wait_for_box_s>0 waits "
+            "heartbeat remain internal to the tool. Release any held session "
+            "lease before calling. mode is server|all|client. "
+            "wait_for_box_s>0 waits "
             "until session_status.box is free (FIFO, no tool_lock while "
             f"sleeping). 0 is the immediate reject. wait_for_box_s must be <= "
             f"{BOX_WAIT_MAX_S:g}. Choose port= from "
-            "session_status.box.ports_in_use."
+            "session_status.box.ports_in_use. width/height are copied into "
+            "the request and the worker passes -x/-y to the client exe, but "
+            "DayZDiag does not honor them as the render viewport "
+            "(profile/DPI win; 1280x720 measured as 846x461). Workaround: "
+            "SetWindowPos host-side, then ui_reload_layout to re-measure "
+            "without reboot."
         )
     )
     async def dayz_test_run(
@@ -3672,6 +3685,36 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return await runtime.call_bridge("restore_gameplay", {}, "client", _timeout(timeout_s))
 
     @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Deliver one non-negative DIK code to "
+        "Mission.OnKeyPress on the client (ESC is dik=1). This is a mission "
+        "callback, not OS input, key-up, hold, or respawn."
+    ))
+    async def key_press(
+        dik: StrictInt,
+        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(dik, int) or isinstance(dik, bool) or dik < 0:
+            raise ToolError(_bad_args("dik", dik, "be a non-negative int"))
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "key_press", {"dik": dik}, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Request a random local-player respawn through the "
+        "same character-selection, death-screen, menu, and mission teardown sequence as "
+        "vanilla InGameMenu.GameRespawn. ok/requested means the request was "
+        "issued; observe player state separately for completion."
+    ))
+    async def player_respawn(
+        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "player_respawn", {}, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(description=(
         "Capture a screenshot from the DayZDiag window. Returns inline JPEG ImageContent fit to the "
         "client's MAX_MCP_OUTPUT_TOKENS budget (default 25000 -> ~600px wide; raise that client env var for bigger inline frames: 50000 -> ~860px/2x px, 75000 -> ~1070px/3x, 100000 -> ~native; max_tokens spends LESS than the cap, above-cap is clamped). Use scale='full' to spend a raised inline budget on resolution (the default scale='small' is a hard 512px cap). crop ('center', 'center:0.4', or normalized 'l,t,r,b') zooms on the subject; "
         "for optical zoom set a narrow fov in radians via camera_set first. fmt='webp' is ~15% smaller (opt-in; Claude Code has known webp MIME bugs, JPEG stays default). save_fullres=True also writes the "
@@ -4019,9 +4062,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "Walks to the topmost ancestor, SetActiveWindow(..., false) so the "
         "engine does not steal focus onto the first focusable child, then "
         "SetFocus. ok is true only when GetFocus() equals the target; a "
-        "widget that cannot take focus (plain TextWidget, NoFocus, disabled) "
-        "returns found=true and error=focus_not_taken. ui_click does not "
-        "focus: it calls OnClick directly."
+        "widget that cannot take focus (NoFocus flag or disabled) returns "
+        "found=true and error=focus_not_taken. A plain TextWidget does take "
+        "focus (ok=1). ui_click does not focus: it calls OnClick directly."
     ))
     async def ui_focus(
         path: str,

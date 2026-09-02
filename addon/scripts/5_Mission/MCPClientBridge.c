@@ -685,6 +685,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			ReleaseCamera();
 			result.ok = true;
 		}
+		else if (command.cmd == "key_press")
+		{
+			postNow = DispatchKeyPress(command, result);
+		}
+		else if (command.cmd == "player_respawn")
+		{
+			postNow = DispatchPlayerRespawn(command, result);
+		}
 		else if (command.cmd == "drive_probe_client")
 		{
 			postNow = DispatchDriveProbeClient(command, result);
@@ -751,6 +759,78 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			PostResult(result);
 		}
+	}
+
+	protected bool DispatchKeyPress(MCPCommand command, MCPResult result)
+	{
+		if (!command.args || command.args.dik < 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		if (!GetGame() || !GetGame().GetMission())
+		{
+			result.ok = false;
+			result.error = "no_mission";
+			return true;
+		}
+
+		int dik = command.args.dik;
+		GetGame().GetMission().OnKeyPress(dik);
+		result.delivered = true;
+		result.dik = dik;
+		result.ok = true;
+		return true;
+	}
+
+	protected bool DispatchPlayerRespawn(MCPCommand command, MCPResult result)
+	{
+		if (!GetGame())
+		{
+			result.ok = false;
+			result.error = "no_game";
+			return true;
+		}
+
+		MissionGameplay missionGP = MissionGameplay.Cast(GetGame().GetMission());
+		if (!missionGP)
+		{
+			result.ok = false;
+			result.error = "no_mission";
+			return true;
+		}
+
+		UIScriptedMenu respawnMenu;
+		UIManager ui = GetGame().GetUIManager();
+		if (ui)
+		{
+			respawnMenu = ui.GetMenu();
+		}
+
+		// Mirror vanilla InGameMenu.GameRespawn (5_Mission/gui/ingamemenu.c).
+		GetGame().GetMenuDefaultCharacterData(false).SetRandomCharacterForced(true);
+		GetGame().RespawnPlayer();
+
+		PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (player)
+		{
+			player.SimulateDeath(true);
+			GetGame().GetCallQueue(CALL_CATEGORY_GUI).Call(player.ShowDeadScreen, true, 0);
+		}
+
+		missionGP.DestroyAllMenus();
+		missionGP.SetPlayerRespawning(true);
+		missionGP.Continue();
+		if (respawnMenu)
+		{
+			respawnMenu.Close();
+		}
+
+		result.requested = true;
+		result.ok = true;
+		return true;
 	}
 
 	protected bool DispatchCameraSet(MCPCommand command, MCPResult result)
@@ -864,6 +944,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			result.ok = false;
 			result.error = "no_pos";
+			return true;
+		}
+
+		if (command.args.seat < 0 || command.args.seat > 63)
+		{
+			result.ok = false;
+			result.error = "bad_args";
 			return true;
 		}
 
@@ -2064,6 +2151,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool InvokeUiClick(Widget target, int mouseButton, out string handlerName)
 	{
 		handlerName = "";
+		if (!GetGame())
+		{
+			return false;
+		}
+
 		Widget cursor = target;
 		while (cursor)
 		{
@@ -2075,6 +2167,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				handlerName = scriptInst.ClassName();
 				return scriptHandler.OnClick(target, 0, 0, mouseButton);
 			}
+			if (scriptInst)
+			{
+				bool scriptConsumed = false;
+				int scriptCalled = g_Game.GameScript.CallFunctionParams(scriptInst, "OnClick", scriptConsumed, new Param4<Widget, int, int, int>(target, 0, 0, mouseButton));
+				if (scriptCalled)
+				{
+					handlerName = scriptInst.ClassName();
+					return scriptConsumed;
+				}
+			}
 
 			Class userInst;
 			cursor.GetUserData(userInst);
@@ -2084,24 +2186,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				handlerName = userInst.ClassName();
 				return userHandler.OnClick(target, 0, 0, mouseButton);
 			}
-
-			// Dabs leaves a ScriptedViewBase (Managed, not an event handler) in userdata.
-			// Its OnClick dispatches by the clicked widget's UserID.
-#ifdef DabsFramework
-			ScriptedViewBase dabsView = ScriptedViewBase.Cast(userInst);
-			if (dabsView)
+			if (userInst)
 			{
-				handlerName = userInst.ClassName();
-				return dabsView.OnClick(target, 0, 0, mouseButton);
+				bool userConsumed = false;
+				int userCalled = g_Game.GameScript.CallFunctionParams(userInst, "OnClick", userConsumed, new Param4<Widget, int, int, int>(target, 0, 0, mouseButton));
+				if (userCalled)
+				{
+					handlerName = userInst.ClassName();
+					return userConsumed;
+				}
 			}
-#endif
 
 			cursor = cursor.GetParent();
-		}
-
-		if (!GetGame())
-		{
-			return false;
 		}
 
 		UIManager ui = GetGame().GetUIManager();
@@ -2272,13 +2368,76 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return true;
 	}
 
+	protected Transport SelectVehicleGetInTransport(MCPJob job, vector pos, string expectedType)
+	{
+		Transport selected;
+		Transport vehicle;
+		Object found;
+		int i;
+		int matches;
+
+		if (!job)
+		{
+			return null;
+		}
+
+		if (expectedType == "")
+		{
+			selected = FindTransportNearClient(pos);
+			if (!selected)
+			{
+				job.error = "no_vehicle";
+			}
+			return selected;
+		}
+
+		m_ReadyObjects.Clear();
+		m_ReadyProxyCargos.Clear();
+		GetGame().GetObjectsAtPosition3D(pos, DRIVE_CLIENT_SEARCH_RADIUS, m_ReadyObjects, m_ReadyProxyCargos);
+
+		selected = null;
+		matches = 0;
+		i = 0;
+		while (i < m_ReadyObjects.Count())
+		{
+			found = m_ReadyObjects.Get(i);
+			vehicle = Transport.Cast(found);
+			if (vehicle && vehicle.GetType() == expectedType)
+			{
+				matches = matches + 1;
+				selected = vehicle;
+			}
+
+			i = i + 1;
+		}
+
+		if (matches == 0)
+		{
+			job.error = "no_vehicle";
+			return null;
+		}
+
+		if (matches != 1)
+		{
+			job.error = "bad_args";
+			return null;
+		}
+
+		return selected;
+	}
+
 	protected bool ProcessVehicleGetInClientPrep(MCPJob job)
 	{
 		PlayerBase player;
 		HumanCommandVehicle vehicleCommand;
 		vector seatPos;
 		Transport foundCar;
-		int seatAnim = 0;
+		Transport observed;
+		int seatIndex;
+		int seatAnim;
+		int crewSize;
+		int crewIndex;
+		string expectedType;
 		HumanCommandVehicle started;
 		CarScript car;
 
@@ -2295,26 +2454,56 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			job.sim_restored = true;
 		}
 
+		seatIndex = 0;
+		expectedType = "";
+		if (job.args)
+		{
+			seatIndex = job.args.seat;
+			expectedType = job.args.type;
+		}
+
+		if (seatIndex < 0 || seatIndex > 63)
+		{
+			job.error = "bad_args";
+			return true;
+		}
+
+		foundCar = Transport.Cast(job.subject);
+		if (!foundCar)
+		{
+			if (!job.args || !ArrayToVector(job.args.pos, seatPos))
+			{
+				job.error = "no_pos";
+				return true;
+			}
+
+			foundCar = SelectVehicleGetInTransport(job, seatPos, expectedType);
+			if (!foundCar)
+			{
+				if (job.error == "")
+				{
+					job.error = "no_vehicle";
+				}
+				return true;
+			}
+
+			crewSize = foundCar.CrewSize();
+			if (seatIndex >= crewSize)
+			{
+				job.error = "bad_args";
+				return true;
+			}
+
+			job.subject = foundCar;
+		}
+
 		vehicleCommand = player.GetCommand_Vehicle();
 		if (!vehicleCommand)
 		{
 			if (!job.seat_attempted)
 			{
-				if (!job.args || !ArrayToVector(job.args.pos, seatPos))
-				{
-					job.error = "no_pos";
-					return true;
-				}
-
-				foundCar = FindTransportNearClient(seatPos);
-				if (!foundCar)
-				{
-					job.error = "no_vehicle";
-					return true;
-				}
-
-				seatAnim = foundCar.GetSeatAnimationType(0);
-				started = player.StartCommand_Vehicle(foundCar, 0, seatAnim);
+				seatAnim = foundCar.GetSeatAnimationType(seatIndex);
+				started = player.StartCommand_Vehicle(foundCar, seatIndex, seatAnim);
 				if (!started)
 				{
 					job.error = "seat_failed";
@@ -2345,49 +2534,90 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 
-		if (vehicleCommand.GetVehicleSeat() != DayZPlayerConstants.VEHICLESEAT_DRIVER)
-		{
-			job.error = "not_seated";
-			return true;
-		}
-
-		car = CarScript.Cast(vehicleCommand.GetTransport());
-		if (!car)
+		observed = vehicleCommand.GetTransport();
+		if (!observed)
 		{
 			job.error = "no_vehicle";
 			return true;
 		}
 
-		job.subject = car;
-
-		if (!job.fixture_attempted)
+		if (!job.subject || observed != job.subject)
 		{
-			if (!IsDriveClientVehicleFixtureReady(car))
+			job.error = "not_seated";
+			return true;
+		}
+
+		crewIndex = observed.CrewMemberIndex(player);
+		if (crewIndex != seatIndex)
+		{
+			job.error = "not_seated";
+			return true;
+		}
+
+		job.subject = observed;
+		car = CarScript.Cast(observed);
+		if (seatIndex == 0 && car)
+		{
+			if (vehicleCommand.GetVehicleSeat() != DayZPlayerConstants.VEHICLESEAT_DRIVER)
 			{
-				// NOTA: OnDebugSpawn client-side es el conditioning dev (DIAG) del coche de test.
-				car.OnDebugSpawn();
+				job.error = "not_seated";
+				return true;
 			}
 
-			job.fixture_attempted = true;
+			if (!job.fixture_attempted)
+			{
+				if (!IsDriveClientVehicleFixtureReady(car))
+				{
+					// NOTA: OnDebugSpawn client-side es el conditioning dev (DIAG) del coche de test.
+					car.OnDebugSpawn();
+				}
+
+				job.fixture_attempted = true;
+			}
+
+			if (IsDriveClientVehicleFixtureReady(car))
+			{
+				job.vehicle_fixture_ready = true;
+				CaptureDriveProbeClientOwnership(job, car);
+				job.phase = DRIVE_CLIENT_PHASE_REPORT;
+				return true;
+			}
+
+			if (m_JobRunner.GetElapsedS() > job.prep_deadline_s)
+			{
+				job.vehicle_fixture_ready = false;
+				CaptureDriveProbeClientOwnership(job, car);
+				job.phase = DRIVE_CLIENT_PHASE_REPORT;
+				return true;
+			}
+
+			return false;
 		}
 
-		if (IsDriveClientVehicleFixtureReady(car))
+		job.phase = DRIVE_CLIENT_PHASE_REPORT;
+		return true;
+	}
+
+	protected string VehicleGetInSeatToken(int vehicleSeat)
+	{
+		if (vehicleSeat == DayZPlayerConstants.VEHICLESEAT_DRIVER)
 		{
-			job.vehicle_fixture_ready = true;
-			CaptureDriveProbeClientOwnership(job, car);
-			job.phase = DRIVE_CLIENT_PHASE_REPORT;
-			return true;
+			return "driver";
 		}
-
-		if (m_JobRunner.GetElapsedS() > job.prep_deadline_s)
+		else if (vehicleSeat == DayZPlayerConstants.VEHICLESEAT_CODRIVER)
 		{
-			job.vehicle_fixture_ready = false;
-			CaptureDriveProbeClientOwnership(job, car);
-			job.phase = DRIVE_CLIENT_PHASE_REPORT;
-			return true;
+			return "codriver";
+		}
+		else if (vehicleSeat == DayZPlayerConstants.VEHICLESEAT_PASSENGER_L)
+		{
+			return "passenger_left";
+		}
+		else if (vehicleSeat == DayZPlayerConstants.VEHICLESEAT_PASSENGER_R)
+		{
+			return "passenger_right";
 		}
 
-		return false;
+		return "unknown";
 	}
 
 	protected bool ProcessDriveProbeClientPrep(MCPJob job)
@@ -2833,11 +3063,37 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		if (job.kind == "vehicle_get_in")
 		{
+			PlayerBase getInPlayer;
+			HumanCommandVehicle getInCommand;
+			Transport getInTransport;
+			int getInCrewIndex;
 			MCPResult resultGetIn = new MCPResult();
 			resultGetIn.id = job.id;
 			resultGetIn.ok = true;
-			resultGetIn.seated = true;
-			resultGetIn.seat = "driver";
+			resultGetIn.seated = false;
+			resultGetIn.seat = "unknown";
+			resultGetIn.type = "";
+			resultGetIn.classname = "";
+			getInPlayer = PlayerBase.Cast(GetGame().GetPlayer());
+			if (getInPlayer)
+			{
+				getInCommand = getInPlayer.GetCommand_Vehicle();
+				if (getInCommand)
+				{
+					getInTransport = getInCommand.GetTransport();
+					if (getInTransport)
+					{
+						resultGetIn.type = getInTransport.GetType();
+						resultGetIn.classname = getInTransport.ClassName();
+						resultGetIn.seat = VehicleGetInSeatToken(getInCommand.GetVehicleSeat());
+						getInCrewIndex = getInTransport.CrewMemberIndex(getInPlayer);
+						if (getInCrewIndex >= 0)
+						{
+							resultGetIn.seated = true;
+						}
+					}
+				}
+			}
 			resultGetIn.vehicle_fixture_ready = job.vehicle_fixture_ready;
 			resultGetIn.net_strategy = job.net_strategy;
 			resultGetIn.is_owner = job.is_owner;

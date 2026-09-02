@@ -789,6 +789,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         state, coordinator, client, token, _clock = self._coordinated_state(
             version_validator=lambda _version: "legacy_blocked"
         )
+        state.record_poll("server")
         self._assert_post_authorize_rejection_aborts(
             state,
             coordinator,
@@ -812,10 +813,57 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         self.assertEqual(payload["expected"], loopback.EXPECTED_BRIDGE_VERSION)
         self.assertEqual(payload["state"], "legacy_blocked")
 
+    def test_never_polled_409_matches_bridge_status_label(self) -> None:
+        state, coordinator, client, token, _clock = self._coordinated_state(
+            version_validator=lambda version: (
+                "legacy_blocked" if version is None else "ok"
+            )
+        )
+        fields = state._version_block_fields("server")
+        self.assertEqual(fields["state"], "never_polled_this_generation")
+        self.assertEqual(fields["detail"], "never_polled_this_generation")
+        self.assertNotEqual(fields["detail"], "poll did not include ver=")
+        status, payload = state.enqueue_command(
+            "world_spawn",
+            {"type": "X", "pos": [1, 2, 3]},
+            peer="server",
+            identity_payload=COORDINATED_IDENTITY,
+            lease_token=token,
+            operation_timeout_s=15.0,
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error"], "version_blocked")
+        self.assertEqual(payload["state"], "never_polled_this_generation")
+        self.assertEqual(payload["detail"], "never_polled_this_generation")
+        self.assertNotIn("poll did not include ver=", str(payload.get("detail")))
+        _ = coordinator
+        _ = client
+
+    def test_lease_required_never_polled_does_not_invent_a_pbo(self) -> None:
+        state, _coordinator, _client, _token, _clock = self._coordinated_state(
+            version_validator=lambda version: (
+                "legacy_blocked" if version is None else "ok"
+            )
+        )
+        status, payload = state.enqueue_command(
+            "world_spawn",
+            {"type": "X", "pos": [1, 2, 3]},
+            peer="server",
+            identity_payload=COORDINATED_IDENTITY,
+            lease_token=None,
+            operation_timeout_s=15.0,
+        )
+        self.assertEqual(payload["error"], "lease_required")
+        self.assertEqual(payload["version_state"], "never_polled_this_generation")
+        self.assertEqual(payload["detail"], "never_polled_this_generation")
+        self.assertNotEqual(payload.get("detail"), "poll did not include ver=")
+        self.assertIn(status, {403, 423})
+
     def test_lease_required_includes_version_block_fields(self) -> None:
         state, coordinator, _client, _token, _clock = self._coordinated_state(
             version_validator=lambda _version: "version_mismatch"
         )
+        state.record_poll("server", version="wrong~1.29.0")
         status, payload = state.enqueue_command(
             "world_spawn",
             {"type": "X", "pos": [1, 2, 3]},

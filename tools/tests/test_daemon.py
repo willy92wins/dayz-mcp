@@ -192,8 +192,10 @@ class DaemonEndpointTest(unittest.TestCase):
         self.assertIsNotNone(srv.state.coordination)
         self.assertIsNotNone(srv.state.coordination_store)
         self.assertNotIn("lease_token", json.dumps(body, separators=(",", ":")))
-        # require_version False + no poll → "legacy" (not blocked).
-        self.assertEqual(body["server_peer"]["version_state"], "legacy")
+        # require_version False + no poll this generation is not a live "legacy" verdict.
+        self.assertEqual(
+            body["server_peer"]["version_state"], "never_polled_this_generation"
+        )
 
     def test_status_requires_key(self) -> None:
         srv = self._daemon()
@@ -352,7 +354,9 @@ class DaemonEndpointTest(unittest.TestCase):
         )
         self.assertEqual(status, 409)
         self.assertEqual(body["error"], "version_blocked")
-        self.assertEqual(body["state"], "legacy_blocked")
+        self.assertEqual(body["state"], "never_polled_this_generation")
+        self.assertEqual(body["detail"], "never_polled_this_generation")
+        self.assertNotEqual(body.get("detail"), "poll did not include ver=")
 
     def test_enqueue_ok_when_version_matches(self) -> None:
         srv = self._daemon(require_version=True, expected_game_version="1.29.0")

@@ -508,6 +508,32 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         status = _content_json(await blocked_app.call_tool("bridge_status", {}))
         self.assertEqual(status["version_state"]["server"], "legacy_blocked")
 
+    async def test_never_polled_is_game_not_ready_before_enqueue(self) -> None:
+        app, runtime = self.build_started(require_version=True)
+        enqueue_calls: list[object] = []
+        original = runtime.state.enqueue_command
+
+        def wrapped(*args: object, **kwargs: object) -> object:
+            enqueue_calls.append(1)
+            return original(*args, **kwargs)
+
+        runtime.state.enqueue_command = wrapped  # type: ignore[method-assign]
+        with self.assertRaises(Exception) as err:
+            await app.call_tool("query_player_state", {"timeout_s": 1.0})
+        _assert_tool_error(self, err.exception)
+        message = str(err.exception)
+        self.assertIn("game_not_ready", message)
+        self.assertNotIn("version_blocked:bridge", message)
+        self.assertNotIn("poll did not include ver=", message)
+        self.assertEqual(enqueue_calls, [])
+        status = _content_json(await app.call_tool("bridge_status", {}))
+        self.assertEqual(
+            status["server_peer"]["version_state"], "never_polled_this_generation"
+        )
+        self.assertEqual(
+            status["client_peer"]["version_state"], "never_polled_this_generation"
+        )
+
     async def test_version_state_mismatch_and_ok(self) -> None:
         app, runtime = self.build_started(expected_game_version="1.29.0")
         self.start_peer(runtime, "server", version="wrong~1.29.0")

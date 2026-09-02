@@ -42,6 +42,7 @@ PRUNABLE_FIELDS = (
     "inspect",
     "entities",
     "ui",
+    "ui_request",
     "dialog",
 )
 

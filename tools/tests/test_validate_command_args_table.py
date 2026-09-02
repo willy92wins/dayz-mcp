@@ -20,6 +20,17 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("extra_mode", {"mode": "restore"}, (False, "bad_args")),
         ("extra_flag", {"force": False}, (False, "bad_args")),
     ),
+    "player_respawn": (
+        ("valid_empty", {}, (True, None)),
+        ("extra_random", {"random": True}, (False, "bad_args")),
+    ),
+    "key_press": (
+        ("valid_esc", {"dik": 1}, (True, None)),
+        ("missing_dik", {}, (False, "bad_args")),
+        ("negative_dik", {"dik": -1}, (False, "bad_args")),
+        ("bool_dik", {"dik": True}, (False, "bad_args")),
+        ("extra_key", {"dik": 1, "extra": None}, (False, "bad_args")),
+    ),
     "vehicle_trace": (
         (
             "valid",

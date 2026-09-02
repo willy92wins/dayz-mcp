@@ -70,6 +70,8 @@ CLIENT_COMMANDS = {
     "camera_set",
     "camera_get",
     "restore_gameplay",
+    "key_press",
+    "player_respawn",
     "drive_probe_client",
     "vehicle_get_in_client",
     "engine_set",
@@ -424,6 +426,13 @@ _SAFE_RADIUS_200 = _reject_numeric_errors(
 # preserve alternate payload shapes without duplicating command dispatch logic.
 _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "restore_gameplay": _command_schema(_schema_variant()),
+    "player_respawn": _command_schema(_schema_variant()),
+    "key_press": _command_schema(
+        _schema_variant(
+            required=("dik",),
+            validators={"dik": _integer_in_range(minimum=0)},
+        )
+    ),
     "vehicle_trace": _command_schema(
         _schema_variant(
             required=(
@@ -1377,7 +1386,17 @@ class ServerState:
             return {}
         with self._lock:
             poll_version = self._poll_versions.get(peer)
+            last_poll_at = self._last_poll_at.get(peer)
         state = self.version_validator(poll_version)
+        if last_poll_at is None:
+            if state not in BLOCKED_VERSION_STATES:
+                return {}
+            return {
+                "state": "never_polled_this_generation",
+                "expected": EXPECTED_BRIDGE_VERSION,
+                "got": None,
+                "detail": "never_polled_this_generation",
+            }
         if state not in BLOCKED_VERSION_STATES:
             return {}
         got: object = None

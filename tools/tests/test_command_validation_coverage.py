@@ -30,6 +30,10 @@ def _minimal_args(cmd: str) -> dict:
     # Verbs with their own `if cmd == ...` branch in validate_command_args.
     if cmd == "restore_gameplay":
         return {}
+    if cmd == "player_respawn":
+        return {}
+    if cmd == "key_press":
+        return {"dik": 1}
     if cmd == "vehicle_trace":
         return {
             "mode": "start",

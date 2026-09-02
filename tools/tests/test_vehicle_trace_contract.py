@@ -133,10 +133,10 @@ class VehicleTraceFastMCPContractTest(unittest.IsolatedAsyncioTestCase):
 
 
 class VehicleTraceEnforceSourceContractTest(unittest.TestCase):
-    def test_bridge_versions_move_together_to_v9(self) -> None:
-        self.assertEqual(server.EXPECTED_BRIDGE_VERSION, "9")
+    def test_bridge_versions_move_together_to_v10(self) -> None:
+        self.assertEqual(server.EXPECTED_BRIDGE_VERSION, "10")
         messages = MESSAGES.read_text(encoding="utf-8")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "9";', messages)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "10";', messages)
 
     def test_hooks_copy_contact_and_do_not_allocate(self) -> None:
         source = CAR_SCRIPT.read_text(encoding="utf-8")
