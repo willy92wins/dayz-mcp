@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from dayz_mcp import dayz_test_request, dayz_test_worker
 from dayz_mcp import dayz_test_tool
+from dayz_mcp.control_client import ControlClientError
 
 
 RUN_ID = "12345678-1234-4234-8234-1234567890ab"
@@ -196,6 +197,19 @@ class DayzTestToolRequestTest(unittest.TestCase):
                 project="ExampleMod",
                 mode="client",
             )
+
+    def test_build_run_request_names_invalid_mode_and_expected_values(self) -> None:
+        with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+            dayz_test_tool.build_run_request(
+                _sealed(_policy()),
+                project="ExampleMod",
+                mode="not-a-mode",
+                extra_mods=["@DayZ_MCP"],
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "bad_dayz_test_request:mode expected server|all|client",
+        )
 
     def test_extension_run_must_be_idle_and_match_selected_project(self) -> None:
         policy = _policy()
@@ -537,7 +551,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 await dayz_test_tool.execute_dayz_test_run(
                     runtime,
                     project="ExampleMod",
-                    mode="offline",
+                    mode="all",
                 )
 
         launch.assert_not_awaited()
@@ -557,7 +571,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
             parsed = dayz_test_request.parse_dayz_test_request(
                 raw_request, policies=(policy,)
             )
-            self.assertEqual(parsed.payload["mode"], "offline")
+            self.assertEqual(parsed.payload["mode"], "all")
             self.assertIs(kwargs["daemon_policy"], runtime.daemon_policy)
             await kwargs["queue_progress_cb"](0.0, None, "En cola (posición 2)")
             await kwargs["execution_started_cb"]()
@@ -592,7 +606,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
             result = await dayz_test_tool.execute_dayz_test_run(
                 runtime,
                 project="ExampleMod",
-                mode="offline",
+                mode="all",
                 extra_mods=["@DayZ_MCP"],
                 progress_cb=report,
             )
@@ -623,7 +637,10 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["run_id"], RUN_ID)
         self.assertEqual(
             result["artifacts_paths"],
-            [r"P:\ExampleMod_Suite\_client\profiles"],
+            [
+                r"P:\ExampleMod_Suite\_server\profiles",
+                r"P:\ExampleMod_Suite\_client\profiles",
+            ],
         )
 
     async def test_typed_readiness_failure_uses_existing_nine_key_result(self) -> None:
@@ -828,8 +845,102 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 dayz_test_tool.DayzTestToolError, "session_busy"
             ):
                 await dayz_test_tool.execute_dayz_test_run(
+                    runtime, project="ExampleMod", mode="all"
+                )
+        opened.assert_not_called()
+        self.assertEqual(runtime.reconcile_calls, 1)
+
+    async def test_run_rejects_public_offline_mode_with_expected_enum(self) -> None:
+        runtime = _Runtime()
+        with patch.object(dayz_test_tool, "open_approved_launcher") as opened:
+            with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                await dayz_test_tool.execute_dayz_test_run(
                     runtime, project="ExampleMod", mode="offline"
                 )
+        self.assertEqual(
+            caught.exception.code,
+            "bad_dayz_test_request:mode expected server|all|client",
+        )
+        opened.assert_not_called()
+
+    async def test_run_names_held_session_lease_on_transition_conflict(self) -> None:
+        runtime = _Runtime()
+        runtime.active_lease_token = "held-lease"
+        runtime.active_operation_id = "11111111-1111-4111-8111-111111111111"
+
+        async def reconcile() -> dict[str, object]:
+            runtime.reconcile_calls += 1
+            raise ControlClientError(
+                "session_transition_conflict",
+                request_stage="post_request",
+                http_bytes_sent=1,
+            )
+
+        runtime.reconcile_idle_session = reconcile  # type: ignore[method-assign]
+        with patch.object(dayz_test_tool, "open_approved_launcher") as opened:
+            with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                await dayz_test_tool.execute_dayz_test_run(
+                    runtime, project="ExampleMod", mode="all"
+                )
+        self.assertEqual(
+            caught.exception.code,
+            "session_transition_conflict: release your session lease first - "
+            "dayz_test_run manages its own lease internally",
+        )
+        opened.assert_not_called()
+        self.assertEqual(runtime.reconcile_calls, 1)
+
+    async def test_run_transition_conflict_without_local_lease_stays_neutral(
+        self,
+    ) -> None:
+        runtime = _Runtime()
+        runtime.active_ticket = "queued-ticket"
+
+        async def reconcile() -> dict[str, object]:
+            runtime.reconcile_calls += 1
+            raise ControlClientError(
+                "session_transition_conflict",
+                request_stage="post_request",
+                http_bytes_sent=1,
+            )
+
+        runtime.reconcile_idle_session = reconcile  # type: ignore[method-assign]
+        with patch.object(dayz_test_tool, "open_approved_launcher") as opened:
+            with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                await dayz_test_tool.execute_dayz_test_run(
+                    runtime, project="ExampleMod", mode="all"
+                )
+        self.assertEqual(
+            caught.exception.code,
+            "session_transition_conflict: a session transition is in flight",
+        )
+        self.assertNotIn("release your session lease first", caught.exception.code)
+        opened.assert_not_called()
+        self.assertEqual(runtime.reconcile_calls, 1)
+
+    async def test_stop_names_held_session_lease_without_naming_run(self) -> None:
+        runtime = _Runtime()
+        runtime.active_lease_token = "held-lease"
+        runtime.active_operation_id = "11111111-1111-4111-8111-111111111111"
+
+        async def reconcile() -> dict[str, object]:
+            runtime.reconcile_calls += 1
+            raise ControlClientError(
+                "session_transition_conflict",
+                request_stage="post_request",
+                http_bytes_sent=1,
+            )
+
+        runtime.reconcile_idle_session = reconcile  # type: ignore[method-assign]
+        with patch.object(dayz_test_tool, "open_approved_launcher") as opened:
+            with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                await dayz_test_tool.execute_dayz_test_stop(runtime, RUN_ID)
+        self.assertEqual(
+            caught.exception.code,
+            "session_transition_conflict: release your session lease first - "
+            "dayz_test_stop manages its own lease internally",
+        )
+        self.assertNotIn("dayz_test_run manages", caught.exception.code)
         opened.assert_not_called()
         self.assertEqual(runtime.reconcile_calls, 1)
 
@@ -848,7 +959,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
 
         runtime.reconcile_idle_session = reconcile  # type: ignore[method-assign]
 
-        await dayz_test_tool._require_idle_session(runtime)
+        await dayz_test_tool._require_idle_session(runtime, tool="dayz_test_run")
 
         self.assertEqual(runtime.reconcile_calls, 1)
         self.assertIsNone(runtime.active_lease_token)
@@ -884,7 +995,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 await dayz_test_tool.execute_dayz_test_run(
                     runtime,
                     project="ExampleMod",
-                    mode="offline",
+                    mode="client",
                     run_id=RUN_ID,
                     extra_mods=["@DayZ_MCP"],
                 )
@@ -1031,7 +1142,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
             result = await dayz_test_tool.execute_dayz_test_run(
                 runtime,
                 project="ExampleMod",
-                mode="offline",
+                mode="all",
                 extra_mods=["@DayZ_MCP"],
             )
 
@@ -1092,7 +1203,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 await dayz_test_tool.execute_dayz_test_run(
                     runtime,
                     project="ExampleMod",
-                    mode="offline",
+                    mode="all",
                     extra_mods=["@DayZ_MCP"],
                 )
 

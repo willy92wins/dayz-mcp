@@ -12,8 +12,21 @@ from dayz_mcp import dayz_test_request, dayz_test_worker, secure_launcher
 from dayz_mcp.launcher_registry import open_approved_launcher
 
 
-_MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal"})
+_MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal", "lfheli"})
 _BRIDGE_MOD_NAMES = frozenset({"dayz_mcp", "@dayz_mcp"})
+_PUBLIC_MODES = frozenset({"server", "all", "client"})
+_ACCEPTED_MODES = _PUBLIC_MODES | {"offline"}
+_HELD_LEASE_RUN = (
+    "session_transition_conflict: release your session lease first - "
+    "dayz_test_run manages its own lease internally"
+)
+_HELD_LEASE_STOP = (
+    "session_transition_conflict: release your session lease first - "
+    "dayz_test_stop manages its own lease internally"
+)
+_TRANSITION_IN_FLIGHT = (
+    "session_transition_conflict: a session transition is in flight"
+)
 _TERMINAL_KEYS = frozenset(
     {"cleanup_degraded", "error_code", "exit_code", "ok", "run_id"}
 )
@@ -116,6 +129,8 @@ def build_run_request(
     kill: bool = False,
 ) -> tuple[bytes, dayz_test_request.RequestProjectPolicy]:
     selected = _selected_policy(sealed_policies, project)
+    if mode not in _ACCEPTED_MODES:
+        _fail("bad_dayz_test_request:mode expected server|all|client")
     if mission not in _MISSION_ALIASES:
         _fail("bad_mission")
     public_extra = _public_mod_list(extra_mods, selected.mod_roots)
@@ -307,13 +322,32 @@ def parse_worker_terminal(
     )
 
 
-async def _require_idle_session(runtime: _Runtime) -> None:
+def _is_session_transition_conflict(error: BaseException) -> bool:
+    return getattr(error, "code", None) == "session_transition_conflict" or str(
+        error
+    ) == "session_transition_conflict"
+
+
+async def _require_idle_session(runtime: _Runtime, *, tool: str) -> None:
     local_busy = any(
         getattr(runtime, name, None) is not None
         for name in ("active_lease_token", "active_ticket", "active_operation_id")
     )
+    held_lease = getattr(runtime, "active_lease_token", None)
+    has_held_lease = isinstance(held_lease, str) and bool(held_lease)
     if local_busy:
-        await runtime.reconcile_idle_session()
+        try:
+            await runtime.reconcile_idle_session()
+        except Exception as error:
+            if _is_session_transition_conflict(error):
+                if has_held_lease:
+                    _fail(
+                        _HELD_LEASE_STOP
+                        if tool == "dayz_test_stop"
+                        else _HELD_LEASE_RUN
+                    )
+                _fail(_TRANSITION_IN_FLIGHT)
+            raise
     if any(
         getattr(runtime, name, None) is not None
         for name in ("active_lease_token", "active_ticket", "active_operation_id")
@@ -582,7 +616,9 @@ async def execute_dayz_test_run(
     started_at = time.monotonic()
     if progress_cb is not None:
         await progress_cb("validating", None)
-    await _require_idle_session(runtime)
+    if mode not in _PUBLIC_MODES:
+        _fail("bad_dayz_test_request:mode expected server|all|client")
+    await _require_idle_session(runtime, tool="dayz_test_run")
     with open_approved_launcher("dayz-test-v1") as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
@@ -633,7 +669,7 @@ async def execute_dayz_test_stop(
     started_at = time.monotonic()
     if progress_cb is not None:
         await progress_cb("validating", None)
-    await _require_idle_session(runtime)
+    await _require_idle_session(runtime, tool="dayz_test_stop")
     with open_approved_launcher("dayz-test-v1") as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
