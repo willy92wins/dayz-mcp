@@ -11,7 +11,7 @@
 Un **servidor MCP** que expone DayZ (DayZDiag) como **tools tipadas** para que un agente
 **conduzca el juego y extraiga datos estructurados**, server-authoritative, **sin teclas SO
 ni OCR**. "Terminado" = la **tool surface completa** (11 tools / 6 dominios en el alcance
-original, ver `dayz-mcp-architecture.md` §4; hoy son 54 tools registradas, ver
+original, ver `dayz-mcp-architecture.md` §4; hoy son 60 tools registradas, ver
 `README.md`) operativa vía MCP stdio, con **seguridad fail-closed**, y
 captura visual por **window-grab** del cliente renderizado. Se entrega por las 5 fases del
 §8 del architecture doc (POC → Control → Observación → Visual → MCP completo).
@@ -54,6 +54,7 @@ implementar. El usuario adjudica; todo cambio baja al *Changelog de alcance*.
 | B1 | `world_spawn` crea la entidad pedida en la pos pedida | entidad existe server-side post-spawn (enumeración / raycast) | ✓ **in-game 2026-06-08** (id=22 `Hatchback_02` found=1, pos_real verificado; + negativos unknown_type/bad_pos×2/bad_flags/args-no-dict→400) |
 | B2 | `vehicle_enter` sienta al player | `GetCommand_Vehicle()!=null` + `!IsGettingIn()` + `GetVehicleSeat()==DayZPlayerConstants.VEHICLESEAT_DRIVER` (constante nombrada, NO literal 0) + 1-2 ticks | ✓ **in-game 2026-06-08** (id=27 seated=1 seat="driver"; requirió fix de deadlines tick→tiempo, anim ~2 s) |
 | B3 | `vehicle_drive` mueve el vehículo | PROBE de decisión completado **in-game 2026-06-08**: motor controlable server-side (`engine_on_server=1`) pero **movimiento client-authoritative** (speedo≈0 / pos_delta≈0 con throttle 1.0, fixture_ready=true, net=PHYSICS — confirma `actionstartengine.c:51-58`). Conducir desde el server **descartado**. | ✓ probe (client-auth); **conducción DIFERIDA a fase client-peer** → retomada por el **grupo G** (fase 5, peer owner) |
+| B4 | Control UI e input engine-native | La superficie pública conduce teclas y widgets sin input del SO. Una búsqueda ambigua falla cerrada o se acota por raíz; cada respuesta identifica la petición y, si existe, el match, y `ui_click` identifica además el handler cuando aplique. El modo completo entrega coordenadas del widget y secuencia `down→up→click`, con bubbling explícito. Gates independientes: una tecla cambia el estado del consumidor y el control no; un `ScriptView` muta estado; homónimos sin raíz devuelven `ambiguous_path`; auth/validación/readiness siguen siendo errores fail-closed. | ❓ |
 
 ### C — Observación sin píxeles (fase 2)
 
@@ -63,6 +64,8 @@ implementar. El usuario adjudica; todo cambio baja al *Changelog de alcance*.
 |---|----------|------------------|--------|
 | C1 | `scene_raycast` devuelve hit estructurado | objeto/dist/normal vs un objeto a distancia conocida | ✓ **in-game 2026-06-08** (run PBO, `C:\tmp\fase2-verdict.json` overall_pass): smoke al suelo, din `Hatchback_02` + estático `Land_Misc_Well_Pump_Blue` (server golpea geo estática), negativo al cielo `hit=0`. **Primaria=`RayCastBullet`** (normal unitaria; el `dir` de `RaycastRVProxy` no lo es). Sin `GetCrosshairObject` (from/to explícitos) |
 | C2 | `telemetry_read` devuelve datos del fixture | parse correcto de un fixture/JSON-lines conocido | ✓ **in-game 2026-06-08** (run PBO): `object_at` (Hatchback `health01=1.0`, pos/orient/vel) + `fixture_jsonl` (`fx2`, value 7.5, 2 líneas) + 5 negativos (bad_args/fixture_not_found/parse_error/type-not-found/ambiguous) |
+| C3 | Observabilidad semántica de cargo, vehículo y presencia | `entities_query` expone capacidad real de cargo (`GetCargo()!=null`), sin listas de classnames; un contenedor vacío da `has_cargo=true` y una entidad sin cargo da `false`. Una consulta remota acreditada sin jugadores devuelve `reason=no_player_connected`, mientras un fallo de consulta conserva `remote_unverified`. `vehicle_telemetry` rellena coherentemente presencia, asiento, tipo y classname para conductor, pasajero y jugador no sentado antes de las métricas exclusivas de `CarScript`. | ❓ |
+| C4 | Esperas headless conservan señales inmediatas | `wait_for(log_matches)` usa un lookback acotado para no perder una respuesta ya emitida justo antes de crear su marker: con una ventana de 200 líneas, el borde 200 satisface y 201 no; en el flujo causal `action→respuesta ya publicada→wait_for`, 200 satisface y 0 vence. El timeout normal sigue siendo `ok=true,satisfied=false`. | ❓ |
 
 ### D — Visual (fase 3)
 
@@ -72,6 +75,7 @@ implementar. El usuario adjudica; todo cambio baja al *Changelog de alcance*.
 |---|----------|------------------|--------|
 | D1 | `camera_set`/`camera_get` posan y miden la cámara | **`Camera.GetCurrentCamera().GetTransform`** == pose comandada (tolerancia), conserva roll (set vía `SetOrientation` yaw/pitch/roll; NO el indexado `GetCamera(0,…)`, solo GAME_TEMPLATE) | ✓ **in-game 2026-06-10** (`camera_set`/`camera_get`: matrix==pose `matrix_max_error 3.4e-05`, roll preservado, pos 3.9e-05 m, fov exacto; fail-closed cliente OK; GATE=PASS) |
 | D2 | `capture_screenshot` entrega la imagen por window-grab (**síncrono, sin job-id, acotado a un run en estado vivo**) | imagen no-negra con contenido real, **JPEG q82 por defecto** (PNG seleccionable, `DEFAULT_FORMAT` en `mcp_capture.py`), **≤ ~25k tokens (Claude Code; NO 1MB)** vía downscale agresivo, y **best-of-N host-side** por frame-diff (`choose_stable_frame` elige el frame de menor delta adyacente: es **selección, no gate**). Lo que SÍ rechaza `grab_stable_frame`: captura fallida, `clientStats` no verificables (`frame_client_area_unverified`) y client-area todo-negro (`frame_client_all_black`); la inestabilidad **no** es motivo de rechazo. El gate de estado es de lifecycle (`_CAPTURE_LIVE_RUN_STATES`), no de readiness in-world | ✓ **in-game 2026-06-10** (host-side: selector `class=='DayZ'`+DPI-aware, best-of-N, downscale a presupuesto, ImageContent síncrono; frame real meanB 155 / nonBlack 0.9999, ≤ tokens; GATE=PASS) |
+| D3 | Espacio de coordenadas de captura | El crop normalizado usa por defecto el client area que comparte coordenadas con `ui_tree`; `crop_space=window` conserva el espacio legacy exterior. Una fixture sintética con chrome y viewport de colores distintos valida píxeles contra un client rect independiente. Pedir `client` con rect ausente o inválido falla cerrado, incluso con crop vacío. | ❓ |
 
 ### E — MCP completo & seguridad endurecida (fase 4)
 
@@ -83,6 +87,8 @@ implementar. El usuario adjudica; todo cambio baja al *Changelog de alcance*.
 | E2 | Seguridad endurecida | **handshake de versión bridge+juego** validado fail-closed (`ver=` en `/poll`; sin snapshot ERPCs — el transporte T-A no usa RPCs); `exec_enforce` OFF-default + allowlist exacta + audit log (breakglass auditado) | ✓ **in-game 2026-06-10 (gate 4B)** — handshake `version_state` 4 casos (ok / bridge-version mala / game-version mala / legacy_blocked) fail-closed; key/whitelist/bind ✓ (A4); `exec_enforce` gating exacto + audit JSONL + OFF-default ✓ (la ejecución del script es limitación de engine) |
 | E3 | Packaging / install | instala y arranca con un comando documentado (host-path test, no rutas de sandbox) | ✓ **in-game 2026-06-10 (gate 4A)** — `install-mcp.ps1` end-to-end en venv limpio (Pillow added to requirements) + registro `claude mcp add` real |
 | E4 | Concurrencia | lock de instancia (bind exclusivo del puerto loopback) + mutex global de tool-calls (el SDK MCP no serializa): dos tool-calls no corrompen estado/cámara | ✓ **in-game 2026-06-10 (gate 4A)** — lock exclusivo verificado con 2ª instancia real (`allow_reuse_address` left False on Windows) + 2 `camera_set` paralelas serializadas sin corrupción |
+| E5 | Superficie autocontenida, interpretable y auditable | El Knowledge Pack se prepara desde MCP usando solo el pack instalado y rutas selladas, valida un índice no vacío antes de reemplazar y conserva el anterior ante fallo. El esquema efectivo se obtiene post-registro/aliases/perfiles, materializa validadores públicos y produce un fingerprint canónico; una sesión con registro obsoleto indica `reopen_mcp_client` sin reiniciar el daemon. Instrucciones y descripciones distinguen classname Enforce de texto visible, transporte `ok` de efecto observado y explican el contrato C4; las resoluciones de inbox conservan JSONL legacy y añaden edad derivada más referencia durable acotada. Mutantes independientes de tool/parámetro/modo cambian el veredicto; snapshots, contadores o expected derivados del mismo input no acreditan PASS. | ❓ |
+| E6 | Integridad de artefactos auxiliares usados por el harness | Un gate de versión compara fuentes independientes del mod y un build se valida en staging antes de publicar: un destino preexistente, un marcador fatal aun con exit 0 o una divergencia source→artefacto fallan. El publish es recuperable; un rebuild determinista puede conservar SHA sólo si el artefacto candidato nació y se validó en staging. Fixtures coherente/drift y success/fatal/stale/publish-failed prueban el consumidor real, no el output contra sí mismo. | ❓ |
 
 ### F — Broker / multi-sesión (refactor 2026-06-23)
 
@@ -111,7 +117,7 @@ implementar. El usuario adjudica; todo cambio baja al *Changelog de alcance*.
 | # | Criterio | Cómo se verifica | Estado |
 |---|----------|------------------|--------|
 | G0 | (Spike S0, de-risk) conducir desde el peer **owner** mueve un coche PHYSICS | `pos_delta>1.0 m` tras 2 s throttle=1.0 (CivilianSedan) **+ reporta `IsOwner()`/`GetOwnerIdentity()`/net id** (evidencia directa de ownership, no solo conductual). STOP si `pos_delta≈0` | ❓ |
-| G1 | Verbos de control en el peer **cliente**: `engine_set`, `vehicle_control` (throttle/steer/brake/handbrake **sostenido + bounded/deadman**), `gear_shift`, `vehicle_telemetry`, `vehicle_release` | gate A: acelera/gira/cambia marcha/frena; el held-state se reaplica cada tick; `vehicle_release` **y** un TTL/deadman auto-sueltan; fail-closed por **rango Y NaN/Inf** | ❓ |
+| G1 | Verbos de control en el peer **cliente**: `engine_set`, `vehicle_control` (throttle/steer/brake/handbrake **sostenido + bounded/deadman**), `vehicle_telemetry`, `vehicle_release`. **No existe ni se exige un verbo público `gear_shift`.** | gate A: acelera/gira/frena y se observa progresión automática de marcha bajo throttle; el held-state se reaplica cada tick; `vehicle_release` **y** un TTL/deadman auto-sueltan; fail-closed por **rango Y NaN/Inf**. La marcha se observa en telemetría, no se ordena mediante una tool inexistente. | ❓ |
 | G2 | `query_get_in_condition` (server) reporta el primer gate que bloquea el radial | gate B: coche OK→`available`; fixture con `component` válido + asiento mapeado pero `CrewCanGetThrough=false`→`first_block`; componentNN ausente→`first_block`. **`component` OBLIGATORIO para un veredicto PASS** (sin él, diagnóstico parcial, nunca PASS) | ❓ |
 | G3 | `vehicle_trace` owner-client entrega un stream atómico pull, append-only y lease-gated del mismo coche/reloj: 20–60 Hz, ≤8192 muestras, chunks ≤64, control solicitado+aplicado, pose/velocidad/dirección, 4 ruedas, engine/marcha, `IsOwner()`/net id y `OnContact` raw no-wheel; release/expiry/shutdown limpia trace+control; artefacto host determinista con hashes calculados | fixtures adversariales RED→GREEN + suite host; source-contract y bridge v6; PACKONLY; control live `CivilianSedan` ≥2 s y ≥20 Hz efectivos con owner/net id estable, readback ≤0,001 y al menos un contacto corporal observado en owner client; bundle repetido byte-idéntico; ausencia de callback/overflow/gap/cleanup/lifecycle limpio = RED | ❓ |
 | G4 | `restore_gameplay` devuelve al jugador local simulación, input y HUD tras control de cámara; `vehicle_get_in_client` aplica el mismo restore idempotente antes del get-in | contratos offline de whitelist/args/peer/tool/dispatch y orden del guard; PACKONLY; gate in-game freecam→restore y freecam→get-in sin `not_seated`. No implica desactivar/borrar la cámara activa | ❓ |
@@ -137,8 +143,9 @@ Aceptación detallada: gates S0/A/B de `plans/2026-06-28-fase5-drivability-auton
 | H8 | Gate combinado real sobre una caja y un juego | 2 Claude + 2 Codex: lecturas paralelas, mutaciones FIFO, release, expiry por caída, adopción/reemplazo seguro y estado final limpio | ✓ in-game — sustitución 4-Codex aprobada |
 | H9 | Adquisición en espera request-bound y liveness de cola | `session_acquire_wait` request-bound nunca devuelve `queued`; timeout/cancel no deja ticket/lease oculto; sólo `session_wait` vivo promueve cabeza; release/expiry no hacen grant ciego; launcher nativo/neutral respecto al consumidor, registrado (path+SHA, sin identidad/token), no autoriza PowerShell ni `.ps1`; gate local `fifo_grants_without_live_wait=0`; gate real 2 Claude+2 Codex abierto hasta proveniencia externa | [verify] offline ✓; falta gate real 2 Claude + 2 Codex |
 | H10 | Acreditación pre-request del daemon y confidencialidad del control | Todo cliente HTTP autenticado acredita sobre el socket loopback ya conectado un owner PID único y estable, executable/argv/cwd canónicos y dos snapshots nativos v2 idénticos **antes de emitir el primer byte HTTP**, incluido `?key` y cualquier body con identidad/lease; listener foreign, rebind, PID reuse/drift o identidad parcial/ambigua fallan cerrados con `http_bytes_sent=0` y `key_disclosed=0`. Gate de routing sobre ClientRuntime, doctor, admin y lifecycle, más fixtures foreign/rebind | ✓ offline |
-| H11 | Ejecución y parada de tests como tools MCP de primera clase | `dayz_test_run` y `dayz_test_stop(run_id)` aparecen como tools tipadas en client mode; la llamada espera FIFO hasta terminar, comunica progreso `validating → queued(position) → executing → finalizing`, reutiliza la transacción nativa H9 y nunca acepta `dev_root`, source, ejecutable, rutas arbitrarias, PID, argv ni lease token. Mission pública se limita a aliases y mods públicos a identificadores relativos de un segmento; defaults internos pueden proceder de la policy sellada. Todo `run_id` de extensión debe estar idle y pertenecer al proyecto seleccionado antes de enqueue; `adopt` cierra la carrera. Run exitoso devuelve `run_id` y queda `RUNNING_IDLE`; stop deriva el proyecto del manifiesto, adquiere lease, adopta y detiene sólo ese run. Resultado compacto y acotado, cancel/fallo sin ticket/lease oculto y cleanup del run nuevo verificados offline; smoke real controlado posterior | ✓ offline + smoke real MERCEDES 2026-07-23; Utopia falla cerrado por crash propio de DayZDiag |
+| H11 | Ejecución y parada de tests como tools MCP de primera clase | `dayz_test_run` y `dayz_test_stop(run_id)` aparecen como tools tipadas en client mode; la llamada espera FIFO hasta terminar, comunica progreso `validating → queued(position) → executing → finalizing`, reutiliza la transacción nativa H9 y nunca acepta `dev_root`, source, ejecutable, PID, argv ni lease token. Mission pública acepta aliases o una ruta absoluta que resuelva dentro de `mission_roots` sellados del proyecto; toda ruta externa o no acreditable falla cerrada. Mods públicos se limitan a identificadores relativos de un segmento; defaults internos pueden proceder de la policy sellada. Antes de crear un server/offline nuevo, un fingerprint por roles protege `<mission>/storage_1`: mismatch o storage legacy rota por rename recuperable el árbol y su marker aplicable; al entrar, todo journal incompleto se compensa y reacredita por digest canónico del árbol o bloquea con `storage_recovery_required`; el aviso de reset de mundo/personaje persiste hasta acreditar storage nuevo. `client`/reattach, kill, preflight y build-only nunca rotan. Todo `run_id` de extensión debe estar idle y pertenecer al proyecto seleccionado antes de enqueue; `adopt` cierra la carrera. Run exitoso devuelve `run_id` y queda `RUNNING_IDLE`; stop deriva el proyecto del manifiesto, adquiere lease, adopta y detiene sólo ese run. Resultado compacto y acotado, cancel/fallo sin ticket/lease oculto y cleanup del run nuevo verificados offline; smoke real controlado posterior | [verify] contrato legacy ✓; extensiones de mission absoluta y storage por modset pendientes |
 | H12 | Recuperación de credencial obsoleta en clientes MCP vivos | Ante un 401 de un daemon ya acreditado, bridge y control revalidan la misma policy/keyfile/provenance, releen la credencial mediante el lector endurecido y reintentan exactamente una vez el mismo request bajo el deadline original. Un segundo 401, una fuente no acreditada o un fallo de acreditación fallan cerrados con código estable y sin secretos. El mecanismo es común a todas las tools, seguro bajo concurrencia, no inicia/reemplaza daemons por un fallo de autenticación y no crea, adopta, libera ni altera leases, tickets, runs u ownership. Un cambio de `daemon_generation` conserva la invalidación H2/H5 | ✓ offline + E2E multiproceso aislado |
+| H13 | Diagnóstico seguro de lifecycle y runs compartidos | Preflight detecta `Steam ActiveProcess` obsoleto antes de lanzar, devuelve PID registrado/vivos acotados más remedio seguro y readiness no equivale a PID vivo; reattach `mode=client` conserva el run y los errores de la matriz `mode × run_id` nombran la restricción concreta; ocupación y `active_run_exists` informan edad/actividad, y el audit existente explica generation de runs activos o retirados sin preemptar. Gates pos/neg/inconclusos prueban cada cláusula y todo fallo de identidad, path, proceso o fuente falla cerrado. | ❓ |
 
 **Excepción de ejecución aprobada 2026-07-16:** mientras no haya créditos Claude, el usuario
 autoriza sustituir el reparto 2+2 de H8 por **4 sesiones Codex fresh**. Para acreditar el gate
@@ -196,6 +203,23 @@ Aceptación detallada: `plans/2026-07-14-agent-session-coordination-design.md` �
   re-verificadas por Claude (`dayz-harness-apis.md` + spot-checks de esta sesión).
 
 ## Changelog de alcance
+
+- **2026-08-31 (protocolo de revisión vigente; última decisión explícita del usuario):** las
+  revisiones de plan aún no iniciadas y la revisión posterior a la implementación usan
+  `cursor-grok-4.6-medium` mediante `cursor-agent`. Cada feedback conserva un único gate formal
+  de plan y otro de bytes finales, ambos en sesiones Grok/Cursor frescas y separados. Las corridas
+  Opus ya iniciadas antes del cambio quedan como descubrimiento histórico y no satisfacen el gate
+  vivo. Sonnet permanece retirado; ninguna preauditoría sustituye el gate Grok/Cursor.
+
+- **2026-08-30 (triaje integral del inbox; decisión explícita del usuario; reclasificación R29):** se añaden
+  **B4, C3, C4, D3, E5, E6 y H13** como criterios pendientes para cerrar control UI/input,
+  observabilidad semántica, esperas headless, crop en client area, superficie autocontenida/auditable,
+  integridad de artefactos auxiliares y diagnóstico operativo. Se enmienda H11 para aceptar una misión absoluta únicamente
+  cuando resuelve dentro de los `mission_roots` sellados; fuera de ellos sigue siendo
+  fail-closed y para aislar `storage_1` por modset antes de lanzamientos nuevos, nunca en reattach.
+  C4 y la redistribución C3/E5/H11/H13 formalizan scope ya aprobado; no añaden una feature al inbox.
+  Ningún criterio nuevo se declara completado por la aprobación del diseño:
+  cada uno requiere sus gates; el protocolo de revisión vigente es el de 2026-08-31.
 
 - **2026-08-07 (Fase 1 + Fase 2 del plan v2 — DOS cambios de contrato observables):**
   el servidor está publicado a la comunidad, así que ambos se declaran aquí.
@@ -293,11 +317,21 @@ Aceptación detallada: `plans/2026-07-14-agent-session-coordination-design.md` �
 - **2026-06-28 (Fase 5 — grill/R22 del plan, adjudicado con usuario)**: nuevo grupo **G (G0-G2)**
   "drivability real & diagnóstico de acceso" — recoge la conducción que **B3 difirió** (server-side
   no mueve PHYSICS) vía peer **owner/cliente** + verbos granulares (`engine_set`/`vehicle_control`/
-  `gear_shift`/`vehicle_telemetry`/`vehicle_release`) + `query_get_in_condition`. Orquestación de la
+  `vehicle_telemetry`/`vehicle_release`) + `query_get_in_condition`. La lista original incluía
+  `gear_shift`; ese requisito quedó retirado por la decisión del 2026-08-29 descrita abajo. Orquestación de la
   escalera = skill `dayz-mcp-verify`, no el MCP. **R22 Codex 2026-06-28**: NEEDS-WORK, 3 P1 + 6 P2
   (F5-001..009), los 9 aceptados → plan v2. F5-001 (cerrar el gate DPF antes de S0) adjudicado con
   el usuario (AskUserQuestion): **añadir grupo G** (vs reabrir B3). Plan:
   `plans/2026-06-28-fase5-drivability-autonoma.md`. Review: `reviews/2026-06-28-plan-review-fase5-codex.md`.
+
+- **2026-08-29 (corrección de contrato G1):** se retira `gear_shift` de la
+  superficie pública exigida. `README.md:65-76` enumera las tools públicas sin
+  ese verbo, mientras el benchmark vivo observó que el sedán vanilla progresa
+  de N a 1ª y después a 2ª bajo `vehicle_control`, sin `gear_shift`
+  (`plans/2026-08-23-showcase-benchmark.md:81,94,101`). El intent de producto se
+  conserva como conducción verificable: G1 exige observar la progresión
+  automática en telemetría, no implementar una primitiva que el consumidor no
+  necesita.
 - **2026-06-23 (Broker / multi-sesión — IMPLEMENTADO, offline-verified)**: refactor Python-only a
   modelo daemon/cliente para que varias sesiones Cowork tengan las tools `dayz-mcp` a la vez sobre
   un único juego. Decisiones (AskUserQuestion, confirmadas con usuario): (a) auto-spawn lazy
@@ -444,8 +478,8 @@ no lanza DayZ; tope 32 pasos; `certified` es **siempre false** hoy
 ### Versión de puente (esta copia) `[EXACT]`
 
 El bump 7→8 que este documento daba por aplazado (D-52) **ya se aplicó**. Verificado
-2026-08-20: `MCP_BRIDGE_VERSION = "8"` (`addon/scripts/5_Mission/MCPMessages.c:1`) y
-`EXPECTED_BRIDGE_VERSION = "8"` (`tools/dayz_mcp/core.py:17`). Los dos lados coinciden,
+2026-08-29: `MCP_BRIDGE_VERSION = "10"` (`addon/scripts/5_Mission/MCPMessages.c:1`) y
+`EXPECTED_BRIDGE_VERSION = "10"` (`tools/dayz_mcp/core.py:17`). Los dos lados coinciden,
 que es lo único que este apartado necesita afirmar; el número concreto se lee del
 código, no de aquí.
 
