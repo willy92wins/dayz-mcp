@@ -48,12 +48,6 @@ _FALLBACK_EXTERNAL = (
     r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\log4net.dll",
     r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\LibCommon.dll",
     r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\exclude.lst",
-    r"C:\Program Files (x86)\Steam\steamclient.dll",
-    r"C:\Program Files (x86)\Steam\Steam.dll",
-    r"C:\Program Files (x86)\Steam\CSERHelper.dll",
-    r"C:\Program Files (x86)\Steam\GameOverlayRenderer.dll",
-    r"C:\Program Files (x86)\Steam\tier0_s.dll",
-    r"C:\Program Files (x86)\Steam\vstdlib_s.dll",
     r"C:\Program Files (x86)\Steam\steamapps\common\DayZ\DayZDiag_x64.exe",
 )
 
@@ -76,11 +70,23 @@ class DayZToolsPathsTest(unittest.TestCase):
             tuple(str(path) for path in external_file_paths(layout)),
             _FALLBACK_EXTERNAL,
         )
-        self.assertEqual(len(_FALLBACK_EXTERNAL), 29)
+        self.assertEqual(len(_FALLBACK_EXTERNAL), 23)
         self.assertEqual(len(TOOLS_RELATIVE_FILES), 22)
-        self.assertEqual(len(STEAM_RELATIVE_FILES), 6)
+        self.assertEqual(STEAM_RELATIVE_FILES, ())
+        # Complementary form: an empty tuple makes any loop over it vacuous, so name the
+        # binaries that must stay out and assert their absence directly.
+        excluded = {
+            "steamclient.dll",
+            "steam.dll",
+            "cserhelper.dll",
+            "gameoverlayrenderer.dll",
+            "tier0_s.dll",
+            "vstdlib_s.dll",
+        }
+        for entry in external_file_paths(layout):
+            self.assertNotIn(entry.name.casefold(), excluded, entry)
 
-    def test_env_relocates_tools_steam_dlls_and_diag_when_layout_is_standard(self) -> None:
+    def test_env_relocates_tools_and_diag_when_layout_is_standard(self) -> None:
         tools = Path(r"D:\SteamLibrary\steamapps\common\DayZ Tools")
         layout = selected_layout(environ={TOOLS_ENV: str(tools)})
         self.assertEqual(layout.tools, tools)
@@ -91,12 +97,13 @@ class DayZToolsPathsTest(unittest.TestCase):
             files[0],
             str(tools / "Bin" / "AddonBuilder" / "AddonBuilder.exe"),
         )
-        self.assertEqual(files[22], r"D:\SteamLibrary\steamclient.dll")
+        # Nothing in the closure sits directly in the Steam root any more.
+        self.assertTrue(all(Path(item).parent != layout.steam for item in files), files)
         self.assertEqual(
             files[-1],
             r"D:\SteamLibrary\steamapps\common\DayZ\DayZDiag_x64.exe",
         )
-        self.assertEqual(len(files), 29)
+        self.assertEqual(len(files), 23)
         self.assertEqual(
             addon_builder_exe(environ={TOOLS_ENV: str(tools)}),
             files[0],

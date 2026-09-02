@@ -219,9 +219,19 @@ class NativeLauncherBundleTest(unittest.TestCase):
         for parts in TOOLS_RELATIVE_FILES:
             tail = ntpath.normcase(ntpath.join(*parts))
             self.assertTrue(any(item.endswith(tail) for item in folded), parts)
-        for name in STEAM_RELATIVE_FILES:
+        # STEAM_RELATIVE_FILES is empty, so a loop over it would assert nothing at all.
+        # State the six names here and require the closure to exclude every one of them.
+        self.assertEqual(STEAM_RELATIVE_FILES, ())
+        for name in (
+            "steamclient.dll",
+            "Steam.dll",
+            "CSERHelper.dll",
+            "GameOverlayRenderer.dll",
+            "tier0_s.dll",
+            "vstdlib_s.dll",
+        ):
             tail = ntpath.normcase(name)
-            self.assertTrue(any(ntpath.basename(item) == tail for item in folded), name)
+            self.assertFalse(any(ntpath.basename(item) == tail for item in folded), name)
         self.assertTrue(
             any(ntpath.basename(item) == ntpath.normcase(DIAG_NAME) for item in folded)
         )

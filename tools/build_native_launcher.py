@@ -54,6 +54,7 @@ PACKAGED_MODULES = (
     "accredited_daemon_transport.py",
     "daemon_contract.py",
     "daemon_policy_contract.py",
+    "dayz_test_modes.py",
     "dayz_test_readiness.py",
     "dayz_test_request.py",
     "dayz_test_worker.py",
