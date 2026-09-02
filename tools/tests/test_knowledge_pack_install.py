@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import io
 import json
+import multiprocessing
 import os
 import sys
 import unittest
@@ -18,11 +19,46 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import install_mcp as installer
+from dayz_mcp import knowledge
 
 try:
     knowledge_pack = importlib.import_module("dayz_mcp.knowledge_pack")
 except ModuleNotFoundError:
     knowledge_pack = None
+
+
+PREPARE_ENTRIES = [
+    {
+        "name": "API",
+        "source_file": "source.md",
+        "evidence": [{"path": "x.c", "line": 1}],
+    }
+]
+
+
+def _run_knowledge_prepare(
+    index_path: str,
+    outcome_queue: object,
+    ready: object,
+    release: object,
+    fail_before_replace: bool,
+) -> None:
+    def before_replace() -> None:
+        ready.set()
+        if not release.wait(10.0):
+            raise RuntimeError("prepare test barrier timeout")
+        if fail_before_replace:
+            raise OSError("injected before replace")
+
+    knowledge._PREPARE_TEST_HOOK = before_replace
+    try:
+        knowledge._publish_index(Path(index_path), PREPARE_ENTRIES)
+    except Exception as error:
+        outcome_queue.put(f"{type(error).__name__}:{error}")
+    else:
+        outcome_queue.put("ok")
+    finally:
+        knowledge._PREPARE_TEST_HOOK = None
 
 
 class RecordingGitRunner:
@@ -313,6 +349,116 @@ class KnowledgePackInstallTest(unittest.TestCase):
                 "status": "error",
             },
         )
+
+    def test_prepare_operations_are_exclusive_and_atomic_between_windows_processes(self) -> None:
+        # "spawn" reproduces two independent Windows windows; fork is the
+        # POSIX equivalent and inherits the same lock primitives, so the
+        # two-process contention contract holds on both platforms.
+        context = multiprocessing.get_context("spawn" if sys.platform == "win32" else "fork")
+        for fail_before_replace in (False, True):
+            with self.subTest(fail_before_replace=fail_before_replace):
+                index_path = self.root / (
+                    "knowledge-success.json"
+                    if not fail_before_replace
+                    else "knowledge-failure.json"
+                )
+                previous = b'{"previous":true}\n'
+                index_path.write_bytes(previous)
+                foreign_candidate = Path(f"{index_path}.candidate.foreign")
+                foreign_candidate.write_bytes(b"foreign")
+                ready = context.Event()
+                release = context.Event()
+                outcomes = context.Queue()
+                winner = context.Process(
+                    target=_run_knowledge_prepare,
+                    args=(str(index_path), outcomes, ready, release, fail_before_replace),
+                )
+                winner.start()
+                loser = None
+                try:
+                    self.assertTrue(ready.wait(10.0), "winner did not reach prepare barrier")
+                    loser = context.Process(
+                        target=_run_knowledge_prepare,
+                        args=(str(index_path), outcomes, context.Event(), context.Event(), False),
+                    )
+                    loser.start()
+                    loser.join(10.0)
+                    self.assertFalse(loser.is_alive(), "loser did not return immediately")
+                    release.set()
+                    winner.join(10.0)
+                    self.assertFalse(winner.is_alive(), "winner did not finish")
+                finally:
+                    release.set()
+                    for process in (winner, loser):
+                        if process is not None:
+                            process.join(5.0)
+                            if process.is_alive():
+                                process.terminate()
+                                process.join(5.0)
+
+                results = {outcomes.get(timeout=2.0), outcomes.get(timeout=2.0)}
+                self.assertIn("KnowledgePrepareConflict:knowledge_prepare_conflict", results)
+                if fail_before_replace:
+                    self.assertIn("OSError:injected before replace", results)
+                    self.assertEqual(index_path.read_bytes(), previous)
+                else:
+                    self.assertIn("ok", results)
+                    expected = (
+                        json.dumps(PREPARE_ENTRIES, ensure_ascii=False, indent=2) + "\n"
+                    ).encode("utf-8")
+                    self.assertEqual(index_path.read_bytes(), expected)
+                self.assertEqual(foreign_candidate.read_bytes(), b"foreign")
+                self.assertEqual(
+                    list(index_path.parent.glob(f"{index_path.name}.candidate.*")),
+                    [foreign_candidate],
+                )
+
+    def test_prepare_lock_rejects_name_surrogate_before_open(self) -> None:
+        lock_path = self.root / "knowledge.json.prepare.lock"
+        with (
+            patch.object(
+                knowledge,
+                "_assert_no_name_surrogates",
+                side_effect=knowledge.KnowledgePrepareConflict("knowledge_prepare_conflict"),
+            ),
+            patch.object(knowledge.os, "open", side_effect=AssertionError("opened too early")),
+        ):
+            with self.assertRaises(knowledge.KnowledgePrepareConflict):
+                with knowledge._exclusive_prepare_lock(lock_path):
+                    pass
+
+    def test_prepare_lock_rejects_existing_non_regular_anchor_before_open(self) -> None:
+        lock_path = self.root / "knowledge.json.prepare.lock"
+        lock_path.mkdir()
+        with patch.object(knowledge.os, "open", side_effect=AssertionError("opened too early")):
+            with self.assertRaises(knowledge.KnowledgePrepareConflict):
+                with knowledge._exclusive_prepare_lock(lock_path):
+                    pass
+
+    def test_prepare_lock_rejects_short_anchor_write(self) -> None:
+        lock_path = self.root / "knowledge.json.prepare.lock"
+        with patch.object(knowledge.os, "write", return_value=0):
+            with self.assertRaises(knowledge.KnowledgePrepareConflict):
+                with knowledge._exclusive_prepare_lock(lock_path):
+                    pass
+
+    def test_prepare_lock_repins_identity_after_acquiring_lock(self) -> None:
+        lock_path = self.root / "knowledge.json.prepare.lock"
+        original = knowledge._regular_lock_identity
+        calls = 0
+
+        def drift_on_second_pin(path: Path, descriptor: int) -> tuple[int, int]:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise knowledge.KnowledgePrepareConflict("knowledge_prepare_conflict")
+            return original(path, descriptor)
+
+        with patch.object(knowledge, "_regular_lock_identity", side_effect=drift_on_second_pin):
+            with self.assertRaises(knowledge.KnowledgePrepareConflict):
+                with knowledge._exclusive_prepare_lock(lock_path):
+                    pass
+        self.assertEqual(calls, 2)
 
 
 if __name__ == "__main__":
