@@ -23,8 +23,9 @@ from dayz_mcp.dayz_tools_paths import (
 )
 
 
-# The 29 absolute paths build_native_launcher.py used to hardcode. Fallback must
-# keep this exact list; only the root is allowed to move.
+# The absolute paths build_native_launcher.py used to hardcode, less the six Steam client
+# DLLs that left the closure: 29 originally, 23 now. Fallback must keep this exact list;
+# only the root is allowed to move.
 _FALLBACK_EXTERNAL = (
     r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\AddonBuilder.exe",
     r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\AddonBuilder.exe.config",

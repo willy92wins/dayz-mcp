@@ -705,10 +705,22 @@ class PackagedModuleClosureTest(unittest.TestCase):
             tree = ast.parse((package_dir / name).read_text(encoding="utf-8"), filename=name)
             for node in runtime_nodes(tree):
                 imported: list[str] = []
-                if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("dayz_mcp"):
-                    tail = (node.module or "").split(".")
-                    if len(tail) > 1:
-                        imported.append(tail[1] + ".py")
+                if isinstance(node, ast.ImportFrom):
+                    # Two import forms reach a sibling without ever spelling
+                    # "dayz_mcp.<module>": the relative `from . import x`, which carries no
+                    # module at all, and `from dayz_mcp import x`, which carries a single
+                    # segment. BUG-113 shipped through the first of those -- dayz_test_request
+                    # imports dayz_test_modes relatively -- so neither may be skipped.
+                    module = node.module or ""
+                    if node.level:
+                        if module:
+                            imported.append(module.split(".")[0] + ".py")
+                        else:
+                            imported.extend(alias.name + ".py" for alias in node.names)
+                    elif module == "dayz_mcp":
+                        imported.extend(alias.name + ".py" for alias in node.names)
+                    elif module.startswith("dayz_mcp."):
+                        imported.append(module.split(".")[1] + ".py")
                 elif isinstance(node, ast.Import):
                     for alias in node.names:
                         parts = alias.name.split(".")
