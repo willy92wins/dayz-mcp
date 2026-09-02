@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import tempfile
 import unittest
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -253,3 +255,174 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
                         lookback_lines=bad,
                     )
                 self.assertIn("lookback_lines", str(ctx.exception))
+
+
+# --- BUG-086: evidence that stands on its own -------------------------------
+#
+# The bug is fixed and was confirmed in-game; the window cases above already
+# cover "inside" and "outside". What none of them proves is the ordering the
+# incident was actually about. They write the needle before wait_for exists, so
+# a build that took its marker at EOF would pass them too -- and taking the
+# marker at EOF is precisely the defect. These cases close that gap without
+# borrowing a verdict from the sibling ticket:
+#
+#   * the causal case publishes through an action that flushes, fsyncs and
+#     closes BEFORE returning, so the response is durable while the marker is
+#     still unborn. That is the sequence action_use -> wait_for;
+#   * the lookback_lines=0 control has to prove it looked. From outside, "read
+#     the file and nothing matched" and "never opened the file" are the same
+#     verdict, so the control asserts a probe and a non-matching line read from
+#     that same file;
+#   * the two cardinality cases pin the inclusive edge of the window at 200
+#     from the literal table below, not from the offset helpers they exercise.
+#
+# Load-bearing mutants, both one line of server.py and both required to go red:
+#   1. drop the dedicated lookback_lines<=0 branch (:1866-1867) AND treat 0 as
+#      the positive default 200 -- the control must fail. Deleting that branch
+#      alone is an equivalent mutant: _offset_before_last_lines_in_window also
+#      returns EOF for lookback_lines<=0 (:1809-1810), so the behaviour does not
+#      change and a red would not mean anything;
+#   2. widen the rewind to _marker_rewound(path, lookback_lines + 1) (:1871) --
+#      OUTSIDE-201 must fail, and the tests stay byte-identical.
+
+
+def _append_durably(path: Path, text: str) -> tuple[int, int]:
+    """Append ``text``, then return ``(size_before, size_after)``.
+
+    The fsync is here for the ordering, not for durability: the bytes have to be
+    on disk and the handle closed before this returns, or the caller cannot
+    claim the response preceded the marker.
+    """
+
+    before = path.stat().st_size
+    with open(path, "a", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return before, path.stat().st_size
+
+
+# label, filler lines written after the needle, satisfied, lines_total.
+# The window is inclusive from EOF, so a needle with 199 complete lines behind
+# it occupies slot 200 and survives; with 200 behind it, slot 201, it does not.
+# Both scan exactly 200 lines: what changes is what is in them.
+_WINDOW_CASES = (
+    ("EDGE-200", 199, True, 200),
+    ("OUTSIDE-201", 200, False, 200),
+)
+
+
+class WaitForBug086EvidenceTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _profiles(directory: str) -> Path:
+        profiles = Path(directory) / "_server" / "profiles"
+        profiles.mkdir(parents=True)
+        return profiles
+
+    async def test_response_durable_before_the_marker_is_still_seen(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profiles = self._profiles(directory)
+            log = profiles / "script.log"
+            log.write_text("".join(f"boot-{i}\n" for i in range(5)), encoding="utf-8")
+
+            needle = f"BUG086-response-{uuid.uuid4().hex}"
+            before, after = _append_durably(log, needle + "\n")
+
+            async def lifecycle_status() -> dict:
+                return {"runs": [_live_run(profiles)]}
+
+            runtime = _FakeRuntime()
+            runtime.lifecycle_status = lifecycle_status
+            result = await server.execute_wait_for(
+                runtime,
+                "log_matches",
+                pattern=needle,
+                timeout_s=1.1,
+                poll_interval_s=0.5,
+            )
+
+        # The offsets, not the clock, are what say the response came first.
+        self.assertGreater(after, before)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["satisfied"])
+        self.assertIn(needle, str(result["observed"]))
+
+    async def test_lookback_zero_reads_the_file_and_does_not_match(self) -> None:
+        seen = {"calls": 0}
+        with tempfile.TemporaryDirectory() as directory:
+            profiles = self._profiles(directory)
+            log = profiles / "script.log"
+            needle = f"BUG086-control-{uuid.uuid4().hex}"
+            other = f"BUG086-unrelated-{uuid.uuid4().hex}"
+            log.write_text(needle + "\n", encoding="utf-8")
+
+            async def lifecycle_status() -> dict:
+                seen["calls"] += 1
+                if seen["calls"] == 2:
+                    # After the marker was taken at EOF and before the first
+                    # probe: a durable line that does NOT carry the needle, so
+                    # the probe has something to read and still cannot match.
+                    _append_durably(log, other + "\n")
+                return {"runs": [_live_run(profiles)]}
+
+            runtime = _FakeRuntime()
+            runtime.lifecycle_status = lifecycle_status
+            result = await server.execute_wait_for(
+                runtime,
+                "log_matches",
+                pattern=needle,
+                timeout_s=1.1,
+                poll_interval_s=0.5,
+                lookback_from="lines",
+                lookback_lines=0,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["satisfied"])
+        self.assertGreaterEqual(result["probes"], 1)
+        scanned = result["scanned"]
+        self.assertGreaterEqual(scanned["lines_total"], 1)
+        entries = [item for item in scanned["files"] if item["lines"] >= 1]
+        self.assertTrue(entries, scanned)
+        self.assertTrue(all(item["readable"] for item in entries), scanned)
+
+    async def test_window_edge_is_inclusive_at_two_hundred(self) -> None:
+        for label, fillers, satisfied, lines_total in _WINDOW_CASES:
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as directory:
+                    profiles = self._profiles(directory)
+                    log = profiles / "script.log"
+                    needle = f"BUG086-{label}-{uuid.uuid4().hex}"
+                    body = ["guard-line\n", needle + "\n"]
+                    body += [f"filler-{i:04d}\n" for i in range(fillers)]
+                    log.write_text("".join(body), encoding="utf-8")
+                    self.assertLess(
+                        log.stat().st_size, server.log_tail.MAX_TAIL_BYTES
+                    )
+
+                    async def lifecycle_status() -> dict:
+                        return {"runs": [_live_run(profiles)]}
+
+                    runtime = _FakeRuntime()
+                    runtime.lifecycle_status = lifecycle_status
+                    result = await server.execute_wait_for(
+                        runtime,
+                        "log_matches",
+                        pattern=needle,
+                        timeout_s=1.1,
+                        poll_interval_s=0.5,
+                        lookback_from="lines",
+                        lookback_lines=200,
+                    )
+
+                self.assertTrue(result["ok"])
+                self.assertIs(result["satisfied"], satisfied)
+                # timed_out is `not satisfied` by construction, so this is a
+                # restatement, not a second measurement. Asserted because the
+                # public contract promises the field, not as corroboration.
+                self.assertIs(result["timed_out"], not satisfied)
+                self.assertEqual(result["scanned"]["lines_total"], lines_total)
+                if satisfied:
+                    self.assertIn(needle, str(result["observed"]))
+                else:
+                    self.assertNotIn(needle, str(result["observed"]))
