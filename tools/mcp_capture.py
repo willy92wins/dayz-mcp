@@ -91,6 +91,35 @@ try:
 except AttributeError:
     LANCZOS = Image.LANCZOS
 
+# --- crop_space: which surface a crop normalizes over -------------------------------------------
+# The grab backend hands back the whole top-level window bitmap (title bar and borders included)
+# plus the client viewport rectangle inside it: mcp-grab.ps1 Get-CaptureGeometry emits
+# ClientRectInWindow as client={left, top, width, height}, relative to that bitmap. "client" (the
+# default) selects that viewport before any crop or downscale, so a normalized bbox refers to the
+# rendered world and not to the chrome around it. "window" keeps the previous behaviour: the crop
+# normalizes over the outer window through the fail-open apply_crop path. The enum is closed.
+CROP_SPACE_CLIENT = "client"
+CROP_SPACE_WINDOW = "window"
+CROP_SPACES = (CROP_SPACE_CLIENT, CROP_SPACE_WINDOW)
+DEFAULT_CROP_SPACE = CROP_SPACE_CLIENT
+
+# Error tokens for the crop_space contract. All three are bare ASCII identifiers: the server-side
+# wire filter keeps identifier-shaped tokens verbatim and mutes anything else, so these names are
+# what a caller can search for. They are never accompanied by an ImageContent and client mode never
+# falls back to the window surface on any of them.
+#   bad_crop_space                caller error: crop_space outside the closed enum
+#   bad_crop                      caller error: crop spec rejected by the strict client parser
+#   frame_client_rect_unverified  capture not accreditable: backend client rect missing or invalid
+ERROR_BAD_CROP_SPACE = "bad_crop_space"
+ERROR_BAD_CROP = "bad_crop"
+ERROR_CLIENT_RECT_UNVERIFIED = "frame_client_rect_unverified"
+
+# Bounds of the "center:F" fraction under the strict client grammar (inclusive).
+CENTER_FRACTION_MIN = 0.05
+CENTER_FRACTION_MAX = 1.0
+
+_RECT_FIELDS = ("left", "top", "width", "height")
+
 
 def _error(error: str) -> dict[str, Any]:
     return {"isError": True, "error": error}
@@ -135,17 +164,14 @@ def encode_bytes(img: Image.Image, fmt: str = DEFAULT_FORMAT, quality: int = DEF
     return buf.getvalue()
 
 
-def apply_crop(img: Image.Image, crop: str) -> Image.Image:
-    """Crop the frame BEFORE the budget downscale so the whole budget is spent on the subject
-    (effective zoom). Accepts:
-      ""                      -> no crop
-      "center" / "center:F"   -> centered box covering fraction F of each axis (default 0.5)
-      "l,t,r,b"               -> normalized bbox in [0,1] (e.g. "0.25,0.1,0.75,0.9")
-    Invalid/degenerate specs return the image unchanged (fail-open: never lose the frame)."""
+def _legacy_crop_box(size: tuple[int, int], crop: str) -> tuple[int, int, int, int] | None:
+    """Box selected by the legacy fail-open crop grammar over an image of `size`, or None when the
+    spec is empty, invalid or degenerate (the caller keeps the whole image). Same arithmetic as the
+    original apply_crop, exposed so window mode can publish the rectangle it actually selected."""
     spec = (crop or "").strip().lower()
     if not spec:
-        return img
-    w, h = img.size
+        return None
+    w, h = size
     try:
         if spec.startswith("center"):
             frac = 0.5
@@ -154,27 +180,118 @@ def apply_crop(img: Image.Image, crop: str) -> Image.Image:
             frac = min(1.0, max(0.05, frac))
             cw, ch = max(1, int(w * frac)), max(1, int(h * frac))
             x0, y0 = (w - cw) // 2, (h - ch) // 2
-            box = (x0, y0, x0 + cw, y0 + ch)
-        else:
-            l, t, r, b = (float(v) for v in spec.split(","))
-            l, t, r, b = max(0.0, l), max(0.0, t), min(1.0, r), min(1.0, b)
-            box = (int(l * w), int(t * h), int(r * w), int(b * h))
-            if box[2] <= box[0] or box[3] <= box[1]:
-                return img
+            return (x0, y0, x0 + cw, y0 + ch)
+        l, t, r, b = (float(v) for v in spec.split(","))
+        l, t, r, b = max(0.0, l), max(0.0, t), min(1.0, r), min(1.0, b)
+        box = (int(l * w), int(t * h), int(r * w), int(b * h))
+        if box[2] <= box[0] or box[3] <= box[1]:
+            return None
+        return box
     except (ValueError, IndexError):
-        return img
-    return img.crop(box)
+        return None
 
 
-def image_content_from_image(
-    img: Image.Image,
+def apply_crop(img: Image.Image, crop: str) -> Image.Image:
+    """Crop the frame BEFORE the budget downscale so the whole budget is spent on the subject
+    (effective zoom). Accepts:
+      ""                      -> no crop
+      "center" / "center:F"   -> centered box covering fraction F of each axis (default 0.5)
+      "l,t,r,b"               -> normalized bbox in [0,1] (e.g. "0.25,0.1,0.75,0.9")
+    Invalid/degenerate specs return the image unchanged (fail-open: never lose the frame).
+    This is the window-space path; client mode uses the strict parser below and never reaches it."""
+    box = _legacy_crop_box(img.size, crop)
+    return img if box is None else img.crop(box)
+
+
+def _strict_crop_box(size: tuple[int, int], crop: str | None) -> tuple[int, int, int, int] | None:
+    """Box selected by `crop` over a surface of `size` under the strict client grammar, or None when
+    the spec must be rejected as bad_crop. Same three forms as apply_crop, no clamps and no
+    fail-open:
+      "" / None       -> the whole surface
+      "center"        -> centered box covering 0.5 of each axis
+      "center:F"      -> F finite and inside [CENTER_FRACTION_MIN, CENTER_FRACTION_MAX]
+      "l,t,r,b"       -> exactly four finite values in [0, 1] with l < r and t < b
+    Any syntax, arity, NaN/Inf, out-of-range or degenerate spec (empty after pixel rounding)
+    returns None. Whitespace is trimmed and the spec is case-folded, nothing else is repaired."""
+    if crop is None:
+        spec = ""
+    elif isinstance(crop, str):
+        spec = crop.strip().lower()
+    else:
+        return None
+    w, h = size
+    if not spec:
+        return (0, 0, w, h)
+    if spec == "center" or spec.startswith("center:"):
+        frac = 0.5
+        if spec != "center":
+            try:
+                frac = float(spec[len("center:"):])
+            except ValueError:
+                return None
+            if not math.isfinite(frac) or frac < CENTER_FRACTION_MIN or frac > CENTER_FRACTION_MAX:
+                return None
+        cw, ch = int(w * frac), int(h * frac)
+        if cw < 1 or ch < 1:
+            return None
+        x0, y0 = (w - cw) // 2, (h - ch) // 2
+        return (x0, y0, x0 + cw, y0 + ch)
+    parts = spec.split(",")
+    if len(parts) != 4:
+        return None
+    try:
+        l, t, r, b = (float(v) for v in parts)
+    except ValueError:
+        return None
+    for value in (l, t, r, b):
+        if not math.isfinite(value) or value < 0.0 or value > 1.0:
+            return None
+    if not (l < r and t < b):
+        return None
+    box = (int(l * w), int(t * h), int(r * w), int(b * h))
+    if box[2] <= box[0] or box[3] <= box[1]:
+        return None
+    return box
+
+
+def _rect_dict(left: int, top: int, width: int, height: int) -> dict[str, int]:
+    """Wire shape of a rectangle, same field names the grab backend uses."""
+    return {"left": int(left), "top": int(top), "width": int(width), "height": int(height)}
+
+
+def _verified_client_rect(rect: object, size: tuple[int, int]) -> tuple[int, int, int, int] | None:
+    """Client viewport as (left, top, width, height) when the backend payload accredits it against
+    a window bitmap of `size`, else None. Strict on purpose: every field must be a plain int (bool,
+    float and numeric strings are rejected), origin >= 0, extent > 0 and the box must fit inside
+    the bitmap. A missing or malformed rect is not "no crop": it is a capture that cannot be
+    accredited, and client mode reports it instead of degrading to the window surface."""
+    if not isinstance(rect, dict):
+        return None
+    values: list[int] = []
+    for field in _RECT_FIELDS:
+        value = rect.get(field)
+        if type(value) is not int:
+            return None
+        values.append(value)
+    left, top, width, height = values
+    if left < 0 or top < 0 or width <= 0 or height <= 0:
+        return None
+    if left + width > size[0] or top + height > size[1]:
+        return None
+    return (left, top, width, height)
+
+
+def _encode_to_budget(
+    rgb: Image.Image,
     scale: str | int = "small",
     max_tokens: int = DEFAULT_MAX_TOKENS,
     fmt: str = DEFAULT_FORMAT,
     quality: int = DEFAULT_QUALITY,
-    crop: str = "",
 ) -> dict[str, Any]:
-    rgb = apply_crop(img.convert("RGB"), crop)
+    """Downscale-to-budget and encode tail shared by every delivery path. Receives the RGB surface
+    already selected (whole window, client viewport or a crop of either) and never crops: the crop
+    decision belongs to the caller, which is what lets client mode reach this point without going
+    through apply_crop."""
     target_chars = max(1, int(max_tokens * CHARS_PER_TOKEN))
     width = min(rgb.width, _target_width(scale))
 
@@ -187,6 +304,20 @@ def image_content_from_image(
             return {"type": "image", "data": encoded, "mimeType": _mime_for(fmt)}
         ratio = max(0.25, min(0.92, (target_chars / len(encoded)) ** 0.5))
         width = max(1, int(width * ratio))
+
+
+def image_content_from_image(
+    img: Image.Image,
+    scale: str | int = "small",
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    fmt: str = DEFAULT_FORMAT,
+    quality: int = DEFAULT_QUALITY,
+    crop: str = "",
+) -> dict[str, Any]:
+    """Legacy window-space delivery: fail-open apply_crop over the frame received, then the shared
+    encode tail. capture_dual(crop_space="window") composes the same two steps; client mode does
+    not use this wrapper."""
+    return _encode_to_budget(apply_crop(img.convert("RGB"), crop), scale=scale, max_tokens=max_tokens, fmt=fmt, quality=quality)
 
 
 def image_content_from_png_bytes(
@@ -222,6 +353,38 @@ def image_content_stats(content: dict[str, Any]) -> dict[str, Any]:
     raw = base64.b64decode(data.encode("ascii"), validate=True)
     with Image.open(io.BytesIO(raw)) as img:
         return image_stats_from_image(img)
+
+
+def _decode_image_content(content: dict[str, Any]) -> Image.Image:
+    """The pixels a consumer of this ImageContent will actually see: decoded from the base64
+    payload, as RGB. Used to measure the delivered surface on the same bytes that are returned."""
+    data = content.get("data")
+    if not isinstance(data, str):
+        raise ValueError("missing image data")
+    raw = base64.b64decode(data.encode("ascii"), validate=True)
+    with Image.open(io.BytesIO(raw)) as img:
+        return img.convert("RGB").copy()
+
+
+def _pixel_sha256(img: Image.Image) -> str:
+    """SHA-256 of the raw RGB bytes of a surface, independent of any encoding."""
+    return hashlib.sha256(img.tobytes()).hexdigest()
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _surface_record(rect: tuple[int, int, int, int], rgb: Image.Image, rect_key: str) -> dict[str, Any]:
+    return {
+        rect_key: _rect_dict(*rect),
+        "pixel_sha256": _pixel_sha256(rgb),
+        "stats": image_stats_from_image(rgb),
+    }
 
 
 def mean_abs_pixel_delta(a: Image.Image, b: Image.Image) -> float:
@@ -420,6 +583,8 @@ def grab_stable_frame(
             return _error("frame_client_all_black")
         chosen.info["window"] = chosen_result.get("window")
         chosen.info["sha256"] = chosen_result.get("sha256")
+        # Client viewport of the SAME chosen frame, verified later by the consumer that needs it.
+        chosen.info["client"] = chosen_result.get("client")
         return chosen
 
 
@@ -476,28 +641,101 @@ def capture_dual(
     save_fullres: bool = False,
     save_dir: str = "",
     fullres_quality: int = 92,
+    crop_space: str = DEFAULT_CROP_SPACE,
 ) -> dict[str, Any]:
     """Single grab -> inline budget-fit ImageContent (always) + optional full-res frame on disk.
+
+    crop_space selects the surface `crop` normalizes over, and the surface delivered when crop is
+    empty. "client" (default) is the rendered viewport accredited by the backend client rect of the
+    SAME chosen frame, cut out before any downscale; "window" is the whole window bitmap through the
+    legacy fail-open apply_crop. Client mode is fail-closed: an unverifiable rect returns
+    frame_client_rect_unverified and a rejected crop returns bad_crop; a crop_space outside the
+    closed enum returns bad_crop_space before any grab. None of those degrades to the window
+    surface or carries an image.
+
+    meta publishes an auditable surface map next to the legacy fields:
+      window_surface     {rect, pixel_sha256, stats} over the whole window RGB (rect is the bitmap
+                         itself, origin 0,0; meta.window keeps the on-screen geometry)
+      client_surface     {rect_window, pixel_sha256, stats} over the native client viewport, or
+                         None in window mode when the backend rect does not verify
+      effective_surface  {rect_window, native_*, delivered_*}: the region actually selected by
+                         crop_space + crop; native_* is measured before the downscale and
+                         delivered_* on the decoded pixels of the ImageContent returned
+    meta.window keeps its legacy {pid, class, title, left, top, width, height}; meta.frame_sha256
+    keeps the SHA-256 of the full window RGB and equals window_surface.pixel_sha256;
+    meta.native_width/native_height keep the whole-window dimensions of the chosen frame. The
+    fullres file, when requested, is the native effective surface (after crops, before downscale),
+    with its file hash in meta.fullres_file_sha256.
+
     Returns {inline, fullres_path, meta} on success or {isError, error} on failure."""
+    if not isinstance(crop_space, str) or crop_space not in CROP_SPACES:
+        return _error(ERROR_BAD_CROP_SPACE)
     chosen = grab_stable_frame(frames=frames, process_name=process_name, method=method, client_pid=client_pid, cmdline_match=cmdline_match)
     if isinstance(chosen, dict):  # error payload
         return chosen
-    inline = image_content_from_image(chosen, scale=scale, max_tokens=max_tokens, fmt=fmt, quality=quality, crop=crop)
-    out: dict[str, Any] = {
-        "inline": inline,
-        "fullres_path": None,
-        "meta": {
-            "native_width": chosen.width,
-            "native_height": chosen.height,
-            "crop": crop or "",
-            "inline_mimeType": inline.get("mimeType"),
-            "inline_base64_len": len(inline.get("data") or ""),
-            "window": chosen.info.get("window"),
-            "backend_sha256": chosen.info.get("sha256"),
-            # Hash the selected full-resolution RGB pixels, independent of inline encoding.
-            "frame_sha256": hashlib.sha256(chosen.tobytes()).hexdigest(),
+
+    window_rgb = chosen
+    window_box = (0, 0, window_rgb.width, window_rgb.height)
+    window_hash = _pixel_sha256(window_rgb)
+
+    client_rect = _verified_client_rect(chosen.info.get("client"), window_rgb.size)
+    client_rgb: Image.Image | None = None
+    client_surface: dict[str, Any] | None = None
+    if client_rect is not None:
+        left, top, width, height = client_rect
+        client_rgb = window_rgb.crop((left, top, left + width, top + height))
+        client_surface = _surface_record(client_rect, client_rgb, "rect_window")
+
+    if crop_space == CROP_SPACE_CLIENT:
+        if client_rect is None or client_rgb is None:
+            return _error(ERROR_CLIENT_RECT_UNVERIFIED)
+        box = _strict_crop_box(client_rgb.size, crop)
+        if box is None:
+            return _error(ERROR_BAD_CROP)
+        effective_native = client_rgb if box == (0, 0, client_rgb.width, client_rgb.height) else client_rgb.crop(box)
+        effective_rect = (client_rect[0] + box[0], client_rect[1] + box[1], box[2] - box[0], box[3] - box[1])
+    else:
+        # Window space: the legacy fail-open path, apply_crop -> encode tail, unchanged semantics.
+        box = _legacy_crop_box(window_rgb.size, crop) or window_box
+        effective_native = apply_crop(window_rgb, crop)
+        effective_rect = (box[0], box[1], box[2] - box[0], box[3] - box[1])
+
+    inline = _encode_to_budget(effective_native, scale=scale, max_tokens=max_tokens, fmt=fmt, quality=quality)
+    delivered = _decode_image_content(inline)
+
+    meta: dict[str, Any] = {
+        "native_width": chosen.width,
+        "native_height": chosen.height,
+        "crop": crop or "",
+        "crop_space": crop_space,
+        "inline_mimeType": inline.get("mimeType"),
+        "inline_base64_len": len(inline.get("data") or ""),
+        "window": chosen.info.get("window"),
+        "backend_sha256": chosen.info.get("sha256"),
+        # Hash the selected full-resolution window RGB pixels, independent of inline encoding.
+        "frame_sha256": window_hash,
+        "window_surface": {
+            "rect": _rect_dict(*window_box),
+            "pixel_sha256": window_hash,
+            "stats": image_stats_from_image(window_rgb),
         },
+        "client_surface": client_surface,
+        "effective_surface": {
+            "rect_window": _rect_dict(*effective_rect),
+            "native_width": effective_native.width,
+            "native_height": effective_native.height,
+            "native_pixel_sha256": _pixel_sha256(effective_native),
+            "native_stats": image_stats_from_image(effective_native),
+            "delivered_width": delivered.width,
+            "delivered_height": delivered.height,
+            "delivered_pixel_sha256": _pixel_sha256(delivered),
+            "delivered_stats": image_stats_from_image(delivered),
+        },
+        "fullres_file_sha256": None,
     }
+    out: dict[str, Any] = {"inline": inline, "fullres_path": None, "meta": meta}
     if save_fullres:
-        out["fullres_path"] = write_fullres(chosen, save_dir=save_dir, quality=fullres_quality)
+        path = write_fullres(effective_native, save_dir=save_dir, quality=fullres_quality)
+        out["fullres_path"] = path
+        meta["fullres_file_sha256"] = _file_sha256(path)
     return out
