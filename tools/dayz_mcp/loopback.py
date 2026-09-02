@@ -5,6 +5,7 @@ import errno
 import hmac
 import json
 import math
+import re
 import sys
 import threading
 import time
@@ -165,12 +166,48 @@ MAX_HTTP_WORKERS = MAX_SESSION_QUEUE + 32
 # its last poll exceeds PEER_RECONNECT_GAP_S (the previous game/session is gone).
 COMMAND_TTL_S = 30.0
 PEER_RECONNECT_GAP_S = 10.0
+# Capability census announced on every poll as `caps=` by both Enforce
+# dispatchers (MCPBridge.c:235, MCPClientBridge.c:423): lowercase command
+# names, comma separated, URL encoded. The daemon STORES it and never
+# derives it -- a census that disagrees with the registered tools is the
+# signal, so repairing it here would delete the finding.
+POLL_CAPS_MAX_NAMES = 64
+POLL_CAPS_MAX_BYTES = 4096
+_POLL_CAPS_NAME = re.compile(r"\A[a-z][a-z0-9_]{0,63}\Z")
 RETIRED_INSTANCE_LIMIT = 64
 # Ceiling for Handler._read_json. Checked against exec_enforce (short
 # allowlisted expr), world_spawn (tiny), pipeline_feedback (not on this
 # socket; 8 KiB inbox cap), ui_tree /result (<=512 nodes) and
 # vehicle_trace /result (limit<=64 samples). None approach 1 MiB.
 MAX_BODY_BYTES = 1 * 1024 * 1024
+
+
+def parse_poll_caps(raw: str | None) -> tuple[tuple[str, ...] | None, str]:
+    """Decode a ``caps=`` census into names plus the reason it is or is not usable.
+
+    Returns ``(None, reason)`` for anything that cannot be trusted. A census is
+    diagnostic: it never blocks a command, because refusing a poll over a
+    cosmetic field would turn a mismatched list into an outage. What it does do
+    is leave the peer visibly ``unknown`` instead of silently believing a
+    truncated or forged list.
+    """
+
+    if not raw:
+        return None, "absent"
+    if len(raw.encode("utf-8", "surrogatepass")) > POLL_CAPS_MAX_BYTES:
+        return None, "oversized"
+    parts = raw.split(",")
+    if len(parts) > POLL_CAPS_MAX_NAMES:
+        return None, "too_many"
+    seen: set[str] = set()
+    for name in parts:
+        if not _POLL_CAPS_NAME.match(name):
+            return None, "malformed"
+        if name in seen:
+            return None, "duplicate"
+        seen.add(name)
+    return tuple(parts), "ok"
+
 
 LogSink = Callable[[str], None]
 VersionValidator = Callable[[str | None], str]
@@ -793,6 +830,10 @@ class ServerState:
         self._ever_bound = False
         self._seen_valid_inst_poll = False
         self._peer_last_class: dict[str, str] = {}
+        # peer -> {generation, commands|None, reason}. Overwritten on every
+        # poll: only the LAST accredited announcement of the CURRENT
+        # generation counts, and nothing here is ever inherited across one.
+        self._peer_caps: dict[str, dict] = {}
         self._bound_last_poll_at: dict[str, float | None] = {
             "server": None,
             "client": None,
@@ -1716,6 +1757,7 @@ class ServerState:
         instance: str | None = None,
         source_pid: int | None = None,
         source_creation_time: str | None = None,
+        caps: str | None = None,
     ) -> tuple[int, dict]:
         if peer not in VALID_PEERS:
             return 400, {"error": "bad_peer"}
@@ -1803,6 +1845,10 @@ class ServerState:
                 self._expire_stale_commands(
                     queue, now, discarded_exec, finished_operations
                 )
+
+            # After the whole binding chain: the census belongs to THIS poll,
+            # so it needs this poll's accreditation, not the previous one's.
+            self._record_poll_caps_locked(peer, caps, accredited)
 
             if not accredited:
                 self._unaccredited_poll_counts[bind_label] = (
@@ -2386,6 +2432,7 @@ class ServerState:
                     "binding_state": bind_state,
                     "instance_prefix": prefix,
                     "bound_last_poll_age_s": bound_age,
+                    "capabilities": self._capabilities_view_locked(peer),
                 }
             rejects = {code: 0 for code in FENCE_MUTATION_REJECT_CODES}
             rejects.update(
@@ -2404,6 +2451,49 @@ class ServerState:
             "last_client_request_at": last_client_request_at,
             "audit_degraded_count": audit_degraded_count,
             "fence": fence,
+        }
+
+    def _record_poll_caps_locked(
+        self, peer: str, raw: str | None, accredited: bool
+    ) -> None:
+        """Keep only the last accredited announcement, tagged with its generation.
+
+        An unaccredited poll may come from anyone, so its census is not stored
+        AND it does not keep the previous one alive: the peer goes back to
+        unknown. That is affordable here precisely because the census gates
+        nothing.
+        """
+
+        if accredited:
+            names, reason = parse_poll_caps(raw)
+        else:
+            names, reason = None, "unaccredited"
+        self._peer_caps[peer] = {
+            "generation": self.daemon_generation,
+            "commands": names,
+            "reason": reason,
+        }
+
+    def _capabilities_view_locked(self, peer: str) -> dict:
+        entry = self._peer_caps.get(peer)
+        if entry is None:
+            return {"state": "unknown", "reason": "absent", "announced_commands": []}
+        if entry["commands"] is None:
+            return {
+                "state": "unknown",
+                "reason": entry["reason"],
+                "announced_commands": [],
+            }
+        if entry["generation"] != self.daemon_generation:
+            return {
+                "state": "unknown",
+                "reason": "stale_generation",
+                "announced_commands": [],
+            }
+        return {
+            "state": "announced",
+            "reason": entry["reason"],
+            "announced_commands": list(entry["commands"]),
         }
 
     def _peer_status_view(
@@ -2926,6 +3016,7 @@ class Handler(BaseHTTPRequestHandler):
         version = qs["ver"][0] if "ver" in qs else None
         inst_raw = qs.get("inst", [""])[0]
         instance = inst_raw if inst_raw else None
+        caps_raw = qs.get("caps", [""])[0]
         source_pid = self.state.resolve_poll_pid(
             instance, getattr(self, "connection", None)
         )
@@ -2934,6 +3025,7 @@ class Handler(BaseHTTPRequestHandler):
             version,
             instance=instance,
             source_pid=source_pid,
+            caps=caps_raw,
         )
         if status != 200:
             self._json(status, payload)

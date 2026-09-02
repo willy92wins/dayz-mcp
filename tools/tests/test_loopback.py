@@ -1457,3 +1457,172 @@ class ResultCapTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+# --- M06: capability census ingress (ficha fb-20260829-023649-8f8c point 9) ---
+#
+# Both Enforce dispatchers announce their own command census on every poll as
+# `caps=`. M06 receives, validates and stores it; comparing it against the tools
+# the daemon registers is M22's job and is deliberately not done here -- the
+# whole value of the census is that it can DISAGREE with the daemon, so a side
+# that repaired it would delete the finding.
+#
+# The census gates nothing. A poll whose census is absent, malformed, oversized
+# or unaccredited still gets its commands; what it loses is the right to be
+# believed, and it says so as `unknown` with a reason.
+
+# label, raw census, expected names, expected reason. Written out rather than
+# generated, so a change in the decoder cannot quietly rewrite its own oracle.
+_CAPS_TABLE = (
+    ("nominal", "entities_query,world_spawn", ("entities_query", "world_spawn"), "ok"),
+    ("single", "ui_dialog", ("ui_dialog",), "ok"),
+    ("digits_and_underscore", "a0_b1", ("a0_b1",), "ok"),
+    ("absent_empty", "", None, "absent"),
+    ("absent_none", None, None, "absent"),
+    ("uppercase", "Entities_Query", None, "malformed"),
+    ("leading_digit", "1abc", None, "malformed"),
+    ("hyphen", "a-b", None, "malformed"),
+    ("empty_member", "a,,b", None, "malformed"),
+    ("space", "a b", None, "malformed"),
+    ("duplicate", "a,a", None, "duplicate"),
+)
+
+
+def _enforce_census(file_name: str, const_name: str) -> str:
+    """The literal a bridge announces, rebuilt from its own source.
+
+    The const is short literals joined with + because Enforce caps a single
+    string literal; the census is longer than that cap.
+    """
+
+    import re as _re
+    from pathlib import Path as _Path
+
+    source = (
+        _Path(__file__).resolve().parents[2]
+        / "addon"
+        / "scripts"
+        / "5_Mission"
+        / file_name
+    ).read_text(encoding="utf-8", errors="replace")
+    line = next(
+        line for line in source.splitlines() if f"{const_name} =" in line
+    )
+    return "".join(_re.findall(r'"([^"]*)"', line))
+
+
+class PollCapabilityIngressTest(unittest.TestCase):
+    def test_decoder_table(self) -> None:
+        for label, raw, names, reason in _CAPS_TABLE:
+            with self.subTest(label):
+                self.assertEqual(loopback.parse_poll_caps(raw), (names, reason))
+
+    def test_limits_reject_only_past_the_boundary(self) -> None:
+        at_limit = ",".join(f"c{index}" for index in range(loopback.POLL_CAPS_MAX_NAMES))
+        over = ",".join(f"c{index}" for index in range(loopback.POLL_CAPS_MAX_NAMES + 1))
+        self.assertEqual(loopback.parse_poll_caps(at_limit)[1], "ok")
+        self.assertEqual(loopback.parse_poll_caps(over)[1], "too_many")
+        # Bytes, not names: one long name is enough to blow the ceiling.
+        self.assertEqual(
+            loopback.parse_poll_caps("a" * (loopback.POLL_CAPS_MAX_BYTES + 1))[1],
+            "oversized",
+        )
+
+    def test_accredited_poll_publishes_its_census(self) -> None:
+        state = loopback.ServerState("k")
+        bind_both_peers(state)
+        status, _payload = state.record_poll(
+            "server",
+            instance=INST_SERVER,
+            source_pid=41001,
+            caps="entities_query,world_spawn",
+        )
+        self.assertEqual(status, 200)
+        view = state.status_snapshot()["peers"]["server"]["capabilities"]
+        self.assertEqual(view["state"], "announced")
+        self.assertEqual(view["reason"], "ok")
+        self.assertEqual(view["announced_commands"], ["entities_query", "world_spawn"])
+        # The other peer never announced anything and must not borrow this one.
+        client = state.status_snapshot()["peers"]["client"]["capabilities"]
+        self.assertEqual(client["state"], "unknown")
+        self.assertEqual(client["announced_commands"], [])
+
+    def test_last_accredited_announcement_replaces_the_previous(self) -> None:
+        state = loopback.ServerState("k")
+        bind_both_peers(state)
+        state.record_poll("server", instance=INST_SERVER, source_pid=41001, caps="a,b")
+        state.record_poll("server", instance=INST_SERVER, source_pid=41001, caps="c")
+        view = state.status_snapshot()["peers"]["server"]["capabilities"]
+        self.assertEqual(view["announced_commands"], ["c"])
+
+    def test_an_invalid_announcement_does_not_keep_the_last_good_one_alive(self) -> None:
+        state = loopback.ServerState("k")
+        bind_both_peers(state)
+        state.record_poll("server", instance=INST_SERVER, source_pid=41001, caps="a,b")
+        state.record_poll("server", instance=INST_SERVER, source_pid=41001, caps="A,B")
+        view = state.status_snapshot()["peers"]["server"]["capabilities"]
+        self.assertEqual(view["state"], "unknown")
+        self.assertEqual(view["reason"], "malformed")
+        self.assertEqual(view["announced_commands"], [])
+
+    def test_unaccredited_poll_stays_unknown_and_is_answered_the_same(self) -> None:
+        # A legacy poll carries no instance, so nothing accredits it. Its census
+        # is not believed -- and the poll itself is answered exactly as it would
+        # be with no census at all, which is what "does not block" means.
+        plain = loopback.ServerState("k")
+        with_caps = loopback.ServerState("k")
+        base_status, base_payload = plain.record_poll("server")
+        status, payload = with_caps.record_poll("server", caps="entities_query")
+        self.assertEqual((status, payload), (base_status, base_payload))
+        view = with_caps.status_snapshot()["peers"]["server"]["capabilities"]
+        self.assertEqual(view["state"], "unknown")
+        self.assertEqual(view["reason"], "unaccredited")
+        self.assertEqual(view["announced_commands"], [])
+
+    def test_a_malformed_census_is_answered_the_same_as_none(self) -> None:
+        plain = loopback.ServerState("k")
+        bind_both_peers(plain)
+        broken = loopback.ServerState("k")
+        bind_both_peers(broken)
+        base = plain.record_poll("server", instance=INST_SERVER, source_pid=41001)
+        got = broken.record_poll(
+            "server", instance=INST_SERVER, source_pid=41001, caps="NOT VALID"
+        )
+        self.assertEqual(got, base)
+        view = broken.status_snapshot()["peers"]["server"]["capabilities"]
+        self.assertEqual((view["state"], view["reason"]), ("unknown", "malformed"))
+
+    def test_census_is_not_inherited_across_generations(self) -> None:
+        state = loopback.ServerState("k")
+        state.daemon_generation = "gen-one"
+        bind_both_peers(state)
+        state.record_poll(
+            "server", instance=INST_SERVER, source_pid=41001, caps="entities_query"
+        )
+        self.assertEqual(
+            state.status_snapshot()["peers"]["server"]["capabilities"]["state"],
+            "announced",
+        )
+        state.daemon_generation = "gen-two"
+        view = state.status_snapshot()["peers"]["server"]["capabilities"]
+        self.assertEqual(view["state"], "unknown")
+        self.assertEqual(view["reason"], "stale_generation")
+        self.assertEqual(view["announced_commands"], [])
+
+    def test_the_ingress_accepts_what_the_bridges_actually_announce(self) -> None:
+        # The seam: this decoder and the two dispatchers have to agree on the
+        # wire form. A census that the bridges send and the daemon rejects would
+        # leave both peers permanently unknown, in green, with nothing to see.
+        for file_name, const_name, required in (
+            ("MCPBridge.c", "SERVER_CAPABILITIES", "entities_query"),
+            ("MCPClientBridge.c", "CLIENT_POLL_CAPS", "ui_dialog"),
+        ):
+            with self.subTest(file_name):
+                census = _enforce_census(file_name, const_name)
+                names, reason = loopback.parse_poll_caps(census)
+                self.assertEqual(reason, "ok", census)
+                self.assertIsNotNone(names)
+                self.assertIn(required, names)
+                self.assertLessEqual(
+                    len(census.encode("utf-8")), loopback.POLL_CAPS_MAX_BYTES
+                )
+                self.assertLessEqual(len(names), loopback.POLL_CAPS_MAX_NAMES)
