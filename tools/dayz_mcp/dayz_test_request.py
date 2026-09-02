@@ -8,6 +8,8 @@ import unicodedata
 import uuid
 from dataclasses import dataclass
 
+from . import dayz_test_modes
+
 
 _REQUEST_KEYS = frozenset(
     {
@@ -35,6 +37,10 @@ _REQUEST_KEYS = frozenset(
         "run_id",
     }
 )
+_MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal", "lfheli"})
+_INVALID_RUN_ID = "invalid_run_id"
+_CLIENT_REQUIRES_RUN_ID = "client_requires_run_id"
+_SERVER_ALL_FORBID_RUN_ID = "server_all_forbid_run_id"
 
 
 def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -56,6 +62,16 @@ def _invalid() -> None:
 
 def _invalid_policy() -> None:
     raise ValueError("invalid_dayz_test_policy")
+
+
+def _request_mode_view() -> tuple[str, tuple[str, ...]]:
+    try:
+        records = dayz_test_modes.mode_records()
+        default = dayz_test_modes.resolve_default_mode(records)
+        names = dayz_test_modes.request_mode_names(records)
+    except dayz_test_modes.ModeAuthorityError:
+        _invalid()
+    return default.name, names
 
 
 def _bounded_int(value: object, minimum: int, maximum: int) -> bool:
@@ -257,7 +273,8 @@ def parse_dayz_test_request(
     if policy is None:
         _invalid()
 
-    mode = value.get("mode", "all")
+    default_mode, request_mode_names = _request_mode_view()
+    mode = value.get("mode", default_mode)
     mission = value.get("mission", "chernarus")
     source = value.get("source")
     extra_mods = value.get("extra_mods", [])
@@ -277,10 +294,10 @@ def parse_dayz_test_request(
     kill = value.get("kill", False)
     run_id = value.get("run_id")
 
-    if mode not in {"offline", "server", "client", "all"}:
+    if mode not in request_mode_names:
         _invalid()
     if not _bounded_text(mission, 1, 520) or (
-        mission not in {"chernarus", "livonia", "sakhal"}
+        mission not in _MISSION_ALIASES
         and not _path_is_within(mission, policy.mission_roots)
     ):
         _invalid()
@@ -319,7 +336,7 @@ def parse_dayz_test_request(
     if not _bounded_int(server_wait_s, 1, 3600):
         _invalid()
     if run_id is not None and not _valid_uuid4(run_id):
-        _invalid()
+        raise ValueError(_INVALID_RUN_ID)
     if no_base_mods and "base_mods" in value and bool(base_mods):
         _invalid()
 
@@ -337,11 +354,12 @@ def parse_dayz_test_request(
         run_id is None or effective_build or pack_only or preflight
     ):
         _invalid()
-    if not preflight:
-        if mode in {"server", "all"} and run_id is not None:
-            _invalid()
-        if mode == "client" and run_id is None:
-            _invalid()
+    if kill and mode != "offline":
+        _invalid()
+    if not kill and mode in {"server", "all"} and run_id is not None:
+        raise ValueError(_SERVER_ALL_FORBID_RUN_ID)
+    if not kill and mode == "client" and run_id is None:
+        raise ValueError(_CLIENT_REQUIRES_RUN_ID)
 
     payload: dict[str, object] = {
         "base_mods": [] if no_base_mods else list(base_mods),
