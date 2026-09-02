@@ -74,5 +74,55 @@ class UiClickScriptViewSourceContractTest(unittest.TestCase):
         self.assertNotIn("Relay_Command", self.body)
 
 
+class UiClickDirectModeContractTest(unittest.TestCase):
+    """mode="direct" (and an omitted mode) keeps the legacy lookup and its return.
+
+    What changed is the resolver in front of it: a ScriptView that is not the
+    active menu is in scope because the named path is resolved over the whole
+    workspace, and a homonym is refused (ambiguous_path) before InvokeUiClick
+    instead of the first one being clicked. These are source gates only; the
+    handler actually reached and the effect on LFPG TEST are measured live.
+    """
+
+    def setUp(self) -> None:
+        self.source = BRIDGE_PATH.read_text(encoding="utf-8")
+        self.dispatch = _method_body(self.source, "protected bool DispatchUiClick(")
+        self.resolver = _method_body(self.source, "protected Widget ResolveUiRoot(")
+
+    def test_direct_is_the_normalised_default_and_invokes_the_legacy_lookup_once(self) -> None:
+        compact = " ".join(self.dispatch.split())
+        self.assertIn('string mode = command.args.mode; if (mode == "") { mode = "direct"; }', compact)
+        self.assertEqual(self.dispatch.count("InvokeUiClick("), 1)
+        self.assertIn(
+            "bool didClick = InvokeUiClick(target, mouseButton, handlerName);", self.dispatch
+        )
+        self.assertIn("result.handler = handlerName;", self.dispatch)
+        self.assertIn("result.clicked = didClick;", self.dispatch)
+
+    def test_unique_resolution_and_mode_gate_precede_the_handler_lookup(self) -> None:
+        order = [
+            self.dispatch.index("ResolveUiRoot(command.args, error)"),
+            self.dispatch.index("if (!target)"),
+            self.dispatch.index("FillUiMatchedPath(target, result);"),
+            self.dispatch.index('if (mode == "complete")'),
+            self.dispatch.index('if (mode != "direct")'),
+            self.dispatch.index("InvokeUiClick("),
+        ]
+        self.assertEqual(order, sorted(order))
+        self.assertNotIn("bubble", self.dispatch)
+
+    def test_named_path_is_resolved_over_the_whole_workspace_before_the_menu_fallback(self) -> None:
+        self.assertNotIn("FindAnyWidget(", self.source)
+        self.assertNotIn("FindWidgetByNameWalk", self.source)
+        self.assertLess(
+            self.resolver.index("ResolveUniqueUiWidget(scope, pathName, pathError)"),
+            self.resolver.index("ui.GetMenu()"),
+        )
+        unique = _method_body(self.source, "protected Widget ResolveUniqueUiWidget(")
+        self.assertIn('error = "ambiguous_path";', unique)
+        self.assertIn('error = "widget_not_found";', unique)
+        self.assertLess(unique.index('"ambiguous_path"'), unique.index("return match.first;"))
+
+
 if __name__ == "__main__":
     unittest.main()

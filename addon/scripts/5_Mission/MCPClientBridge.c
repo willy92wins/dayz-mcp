@@ -112,6 +112,21 @@ class MCPClientDialogSink : MCPDialogSink
 	}
 };
 
+//! Scratch for the UI resolver: how many widgets under a scope carry a name
+//! and the first one seen. The walk stops counting at two, which is all the
+//! contract distinguishes (0, 1, more).
+class MCPUiNameMatch
+{
+	int count;
+	Widget first;
+
+	void MCPUiNameMatch()
+	{
+		count = 0;
+		first = null;
+	}
+};
+
 class MCPClientBridge extends MCPJobRunnerOwner
 {
 	protected const int MAX_DISPATCH_PER_TICK = 4;
@@ -143,6 +158,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const int UI_TREE_DEFAULT_LIMIT = 256;
 	protected const int UI_TREE_MAX_LIMIT = 512;
 	protected const float ACTION_USE_DEFAULT_RADIUS = 5.0;
+	//! Capability census announced on every poll as `caps=`: the exact set of
+	//! command.cmd branches Dispatch() handles before falling to unknown_command,
+	//! sorted bytewise and comma-separated. tools/tests/test_bridge_client_capabilities.py
+	//! cross-checks it against the dispatcher chain; the daemon compares it with
+	//! the tools it registers. Written as short literals joined with +, split at
+	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
+	//! vanilla is 237 bytes and this census is longer than that.
+	protected const string CLIENT_POLL_CAPS = "action_use,camera_get,camera_set,drive_probe_client,engine_set,key_press,player_respawn," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -397,6 +420,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
 		}
+		request = request + "&caps=" + EncodeQueryValue(CLIENT_POLL_CAPS);
 		m_PollCtx.GET(m_PollCallback, request);
 	}
 
@@ -1273,6 +1297,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool DispatchUiTree(MCPCommand command, MCPResult result)
 	{
 		MCPArgs args = command.args;
+		BeginUiRequest(args, result);
 		string error = "";
 		Widget root = ResolveUiRoot(args, error);
 		if (!root)
@@ -1280,6 +1305,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			result.ok = false;
 			result.error = error;
 			return true;
+		}
+		// The active-menu legacy (root and path both empty) is not a name match,
+		// so it carries no matched_path.
+		if (UiRequestNamesTarget(args))
+		{
+			FillUiMatchedPath(root, result);
 		}
 
 		int limit = UI_TREE_DEFAULT_LIMIT;
@@ -1301,6 +1332,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	protected bool DispatchUiSetText(MCPCommand command, MCPResult result)
 	{
+		BeginUiRequest(command.args, result);
+		if (command.args)
+		{
+			// Only set-text echoes the text, and it echoes "" too: an empty
+			// write is a valid request, not an absent field.
+			result.ui_request.requested_text = command.args.text;
+		}
 		if (!command.args || command.args.path == "")
 		{
 			result.ok = false;
@@ -1316,6 +1354,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			result.error = error;
 			return true;
 		}
+		FillUiMatchedPath(target, result);
 
 		string text = command.args.text;
 		EditBoxWidget editBox = EditBoxWidget.Cast(target);
@@ -1367,8 +1406,17 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return true;
 	}
 
+	//! ui_click(path, root?, button, mode, bubble). Resolution comes first and is
+	//! shared with the other UI verbs: an absent or ambiguous target returns
+	//! before any handler runs. mode is normalised only after the unique match:
+	//! "" is direct, and direct keeps the legacy lookup up to the first handler
+	//! and its return. `complete` (engine-owned down->up->click at the measured
+	//! centre) is gated behind a live viability RED; without that receipt the
+	//! bridge refuses it before dispatch instead of degrading it to direct.
+	//! `bubble` only selects branches of `complete`, so direct never reads it.
 	protected bool DispatchUiClick(MCPCommand command, MCPResult result)
 	{
+		BeginUiRequest(command.args, result);
 		if (!command.args || command.args.path == "")
 		{
 			result.ok = false;
@@ -1390,6 +1438,25 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			result.ok = false;
 			result.error = error;
+			return true;
+		}
+		FillUiMatchedPath(target, result);
+
+		string mode = command.args.mode;
+		if (mode == "")
+		{
+			mode = "direct";
+		}
+		if (mode == "complete")
+		{
+			result.ok = false;
+			result.error = "mode_not_implemented";
+			return true;
+		}
+		if (mode != "direct")
+		{
+			result.ok = false;
+			result.error = "bad_args";
 			return true;
 		}
 
@@ -1423,7 +1490,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! and report the engine rects of the resulting tree. $profile: is the only
 	//! prefix the engine re-reads without a repack; an addon-prefixed path is
 	//! served by the PBO and never sees a loose file (measured 2026-08-19).
-	//! mode="close" unlinks the preview and loads nothing.
+	//! mode="close" unlinks the preview and loads nothing. The request echo
+	//! carries the literal path on load and "" on close; `source` carries no UI
+	//! meaning.
 	protected bool DispatchUiReloadLayout(MCPCommand command, MCPResult result)
 	{
 		MCPArgs args = command.args;
@@ -1469,7 +1538,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (closing)
 		{
 			result.ui = snap;
-			result.source = "";
+			result.ui_request = new MCPUiRequestEcho();
+			result.ui_request.requested_path = "";
 			result.ok = true;
 			Log("ui_reload_layout closed preview");
 			return true;
@@ -1505,7 +1575,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		CollectUiNodes(m_UiPreviewRoot, snap, limit);
 		result.ui = snap;
-		result.source = args.path;
+		result.ui_request = new MCPUiRequestEcho();
+		result.ui_request.requested_path = args.path;
 		result.ok = true;
 		Log(string.Format("ui_reload_layout loaded %1 nodes=%2", args.path, snap.nodes.Count()));
 		return true;
@@ -1530,6 +1601,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPUiSnapshot snap;
 		MCPUiNode node;
 
+		BeginUiRequest(command.args, result);
 		if (!command.args || command.args.path == "")
 		{
 			result.ok = false;
@@ -1550,6 +1622,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		result.found = true;
+		FillUiMatchedPath(target, result);
 
 		topmost = target;
 		parent = topmost.GetParent();
@@ -1562,16 +1635,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		activeOk = SetActiveWindow(topmost, false);
 		SetFocus(target);
 
+		// The holder is compared by handle only. No name or path of the widget
+		// that actually holds focus is serialised: ui_request.matched_path
+		// identifies the target, and the holder's identity stays private.
 		focused = GetFocus();
 		result.ok = (focused == target);
-		if (focused)
-		{
-			result.source = focused.GetName();
-		}
-		else
-		{
-			result.source = "";
-		}
 
 		if (result.ok)
 		{
@@ -1600,7 +1668,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			okStr = "1";
 		}
-		Log("ui_focus path=" + args.path + " active=" + activeStr + " ok=" + okStr + " source=" + result.source);
+		Log("ui_focus path=" + args.path + " active=" + activeStr + " ok=" + okStr);
 		return true;
 	}
 
@@ -1968,6 +2036,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return best;
 	}
 
+	//! Common UI resolver (DAG v6 UI contract). `root` names a widget that must
+	//! be unique in the whole workspace; `path` is then a name resolved inside
+	//! that scope. Without `root`, `path` is resolved over the whole workspace,
+	//! ScriptView roots included: 0 matches is widget_not_found, 2 or more is
+	//! ambiguous_path, and the first homonym is never chosen. Only a request with
+	//! both empty keeps the active-menu legacy (ui_tree).
 	protected Widget ResolveUiRoot(MCPArgs args, out string error)
 	{
 		error = "";
@@ -1984,16 +2058,37 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return null;
 		}
 
-		if (args && args.path != "")
+		string rootName = "";
+		string pathName = "";
+		if (args)
 		{
-			Widget named = workspace.FindAnyWidget(args.path);
-			if (!named)
+			rootName = args.root;
+			pathName = args.path;
+		}
+
+		Widget scope = workspace;
+		if (rootName != "")
+		{
+			string rootError = "";
+			scope = ResolveUniqueUiWidget(workspace, rootName, rootError);
+			if (!scope)
 			{
-				named = FindWidgetByNameWalk(workspace, args.path);
+				error = rootError;
+				return null;
 			}
+			if (pathName == "")
+			{
+				return scope;
+			}
+		}
+
+		if (pathName != "")
+		{
+			string pathError = "";
+			Widget named = ResolveUniqueUiWidget(scope, pathName, pathError);
 			if (!named)
 			{
-				error = "widget_not_found";
+				error = pathError;
 				return null;
 			}
 			return named;
@@ -2017,31 +2112,251 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return null;
 	}
 
-	protected Widget FindWidgetByNameWalk(Widget start, string name)
+	//! Resolve `name` to exactly one widget under `scope` (scope included).
+	//! Zero is widget_not_found, two or more is ambiguous_path; only a single
+	//! match is returned, so a homonym can never be picked by walk order.
+	protected Widget ResolveUniqueUiWidget(Widget scope, string name, out string error)
 	{
-		if (!start)
+		MCPUiNameMatch match = new MCPUiNameMatch();
+		CountUiWidgetsNamed(scope, name, match);
+		if (match.count == 0)
 		{
+			error = "widget_not_found";
 			return null;
 		}
-
-		if (start.GetName() == name)
+		if (match.count > 1)
 		{
-			return start;
+			error = "ambiguous_path";
+			return null;
+		}
+		error = "";
+		return match.first;
+	}
+
+	//! Depth-first count of widgets named `name` under `scope`, scope included.
+	//! Stops as soon as two are seen: the resolver only needs 0, 1 or more.
+	protected void CountUiWidgetsNamed(Widget scope, string name, MCPUiNameMatch match)
+	{
+		if (!scope || !match)
+		{
+			return;
+		}
+		if (match.count >= 2)
+		{
+			return;
 		}
 
-		Widget child = start.GetChildren();
+		if (scope.GetName() == name)
+		{
+			match.count = match.count + 1;
+			if (match.count == 1)
+			{
+				match.first = scope;
+			}
+			if (match.count >= 2)
+			{
+				return;
+			}
+		}
+
+		Widget child = scope.GetChildren();
 		while (child)
 		{
-			Widget found = FindWidgetByNameWalk(child, name);
-			if (found)
+			CountUiWidgetsNamed(child, name, match);
+			if (match.count >= 2)
 			{
-				return found;
+				return;
 			}
-
 			child = child.GetSibling();
 		}
+	}
 
-		return null;
+	protected bool UiRequestNamesTarget(MCPArgs args)
+	{
+		if (!args)
+		{
+			return false;
+		}
+		if (args.root != "")
+		{
+			return true;
+		}
+		return args.path != "";
+	}
+
+	//! Request echo for the core UI verbs, created before anything is resolved
+	//! so a verb that fails on its arguments still answers with the envelope:
+	//! an empty one is a visible defect, not noise. requested_path and
+	//! requested_root are the literal inputs. matched_path is filled only by
+	//! FillUiMatchedPath after a unique match and is never copied from the
+	//! request; requested_text is set by ui_set_text alone.
+	protected void BeginUiRequest(MCPArgs args, MCPResult result)
+	{
+		if (!result)
+		{
+			return;
+		}
+		result.ui_request = new MCPUiRequestEcho();
+		if (args)
+		{
+			result.ui_request.requested_path = args.path;
+			result.ui_request.requested_root = args.root;
+		}
+	}
+
+	protected void FillUiMatchedPath(Widget target, MCPResult result)
+	{
+		if (!target || !result || !result.ui_request || !GetGame())
+		{
+			return;
+		}
+		WorkspaceWidget workspace = GetGame().GetWorkspace();
+		if (!workspace)
+		{
+			return;
+		}
+		result.ui_request.matched_path = BuildUiMatchedPath(target, workspace);
+	}
+
+	//! Canonical identity of a resolved widget (DAG v6): a root-to-leaf walk over
+	//! GetParent(), one "/<pct-name>@<ordinal>" segment per node, the name
+	//! percent-encoded byte by byte with uppercase hex outside RFC3986 unreserved,
+	//! the ordinal 0-based among siblings whose GetName() is byte-identical. The
+	//! first segment is always the live workspace name at @0, whatever root the
+	//! caller gave. A segment or ordinal the live handles cannot account for
+	//! yields "" (no identity) rather than a guessed path.
+	protected string BuildUiMatchedPath(Widget target, WorkspaceWidget workspace)
+	{
+		string path = "";
+		string segment = "";
+		if (!target || !workspace)
+		{
+			return "";
+		}
+
+		Widget cursor = target;
+		while (cursor && cursor != workspace)
+		{
+			int ordinal = UiSiblingOrdinal(cursor, workspace);
+			if (ordinal < 0)
+			{
+				return "";
+			}
+			if (!EncodeUiPathSegment(cursor.GetName(), segment))
+			{
+				return "";
+			}
+			path = "/" + segment + "@" + ordinal.ToString() + path;
+			cursor = cursor.GetParent();
+		}
+
+		if (!EncodeUiPathSegment(workspace.GetName(), segment))
+		{
+			return "";
+		}
+		return "/" + segment + "@0" + path;
+	}
+
+	//! 0-based ordinal of `w` among the children of its parent that share its
+	//! byte-exact name. A top-level root that reports no parent has its siblings
+	//! read from the workspace. -1 when `w` is not found among them.
+	protected int UiSiblingOrdinal(Widget w, WorkspaceWidget workspace)
+	{
+		if (!w)
+		{
+			return -1;
+		}
+		Widget parent = w.GetParent();
+		if (!parent)
+		{
+			parent = workspace;
+		}
+		if (!parent || parent == w)
+		{
+			return -1;
+		}
+
+		string name = w.GetName();
+		int ordinal = 0;
+		Widget sibling = parent.GetChildren();
+		while (sibling)
+		{
+			if (sibling == w)
+			{
+				return ordinal;
+			}
+			if (sibling.GetName() == name)
+			{
+				ordinal = ordinal + 1;
+			}
+			sibling = sibling.GetSibling();
+		}
+
+		return -1;
+	}
+
+	//! Percent-encode one path segment byte by byte. string.Length and Substring
+	//! are byte-based (1_core\proto\enstring.c:199,113; the character forms are
+	//! LengthUtf8/SubstringUtf8). Unreserved is RFC3986 ALPHA / DIGIT / "-" "."
+	//! "_" "~", so "%", "/" and "@" are always encoded; hex is uppercase. A
+	//! negative ToAscii is a sign-extended high byte. A code still outside 0..255
+	//! is not a byte: the call returns false and no path is published.
+	protected bool EncodeUiPathSegment(string value, out string encoded)
+	{
+		string hexDigits = "0123456789ABCDEF";
+		string character = "";
+		int code = 0;
+		int highNibble = 0;
+		int lowNibble = 0;
+		int i = 0;
+		encoded = "";
+		while (i < value.Length())
+		{
+			character = value.Substring(i, 1);
+			code = character.ToAscii();
+			if (code < 0)
+			{
+				code = code + 256;
+			}
+			if (code < 0 || code > 255)
+			{
+				encoded = "";
+				return false;
+			}
+			if (IsUiPathUnreserved(code))
+			{
+				encoded = encoded + character;
+			}
+			else
+			{
+				highNibble = code / 16;
+				lowNibble = code - (highNibble * 16);
+				encoded = encoded + "%" + hexDigits.Substring(highNibble, 1) + hexDigits.Substring(lowNibble, 1);
+			}
+			i = i + 1;
+		}
+		return true;
+	}
+
+	protected bool IsUiPathUnreserved(int code)
+	{
+		if (code >= 65 && code <= 90)
+		{
+			return true;
+		}
+		if (code >= 97 && code <= 122)
+		{
+			return true;
+		}
+		if (code >= 48 && code <= 57)
+		{
+			return true;
+		}
+		if (code == 45 || code == 46 || code == 95 || code == 126)
+		{
+			return true;
+		}
+		return false;
 	}
 
 	protected void FillUiNode(Widget w, MCPUiNode node)
