@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"id": "mission_alias_chernarus", "constraint_id": "schema:dayz_test_run:mission", "outcome": "accept", "input": {"mission": "chernarus"}},
+    {"id": "mission_alias_livonia", "constraint_id": "schema:dayz_test_run:mission", "outcome": "accept", "input": {"mission": "livonia"}},
+    {"id": "mission_alias_sakhal", "constraint_id": "schema:dayz_test_run:mission", "outcome": "accept", "input": {"mission": "sakhal"}},
+    {"id": "mission_alias_lfheli", "constraint_id": "schema:dayz_test_run:mission", "outcome": "accept", "input": {"mission": "lfheli"}},
+    {"id": "mission_sealed_path", "constraint_id": "schema:dayz_test_run:mission", "outcome": "accept", "input": {"mission": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZServer\\mpmissions\\dayzOffline.chernarusplus"}},
+    {"id": "mission_external_path", "constraint_id": "schema:dayz_test_run:mission", "outcome": "reject", "input": {"mission": "C:\\outside\\mission"}},
+    {"id": "seat_omitted", "constraint_id": "schema:vehicle_get_in_client:seat_index", "outcome": "accept", "input": {}, "forward": {"MCPArgs.seat": 0}},
+    {"id": "seat_zero", "constraint_id": "schema:vehicle_get_in_client:seat_index", "outcome": "accept", "input": {"seat_index": 0}},
+    {"id": "seat_one", "constraint_id": "schema:vehicle_get_in_client:seat_index", "outcome": "accept", "input": {"seat_index": 1}},
+    {"id": "seat_sixty_three", "constraint_id": "schema:vehicle_get_in_client:seat_index", "outcome": "accept", "input": {"seat_index": 63}},
+    {"id": "seat_bool", "constraint_id": "schema:vehicle_get_in_client:seat_index", "outcome": "reject", "input": {"seat_index": true}},
+    {"id": "seat_string", "constraint_id": "schema:vehicle_get_in_client:seat_index", "outcome": "reject", "input": {"seat_index": "1"}},
+    {"id": "seat_negative", "constraint_id": "schema:vehicle_get_in_client:seat_index", "outcome": "reject", "input": {"seat_index": -1}},
+    {"id": "seat_sixty_four", "constraint_id": "schema:vehicle_get_in_client:seat_index", "outcome": "reject", "input": {"seat_index": 64}},
+    {"id": "type_omitted", "constraint_id": "schema:vehicle_get_in_client:expected_type", "outcome": "accept", "input": {}, "forward_absent": ["MCPArgs.type"]},
+    {"id": "type_civilian_sedan", "constraint_id": "schema:vehicle_get_in_client:expected_type", "outcome": "accept", "input": {"expected_type": "CivilianSedan"}, "forward": {"MCPArgs.type": "CivilianSedan"}},
+    {"id": "type_boat", "constraint_id": "schema:vehicle_get_in_client:expected_type", "outcome": "accept", "input": {"expected_type": "Boat_01_Blue"}, "forward": {"MCPArgs.type": "Boat_01_Blue"}},
+    {"id": "type_non_string", "constraint_id": "schema:vehicle_get_in_client:expected_type", "outcome": "reject", "input": {"expected_type": 1}}
+  ]
+}

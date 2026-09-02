@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "concepts": [
+    {
+      "id": "new_site_guard",
+      "relation": "before",
+      "value": "playbook_run(place_safely) precede sitio nuevo",
+      "source_anchor": "build_app.instructions + playbook:place_safely"
+    },
+    {
+      "id": "spawn_y_provider",
+      "relation": "provides_component",
+      "value": "surface_query.y provee pos[1]",
+      "source_anchor": "build_app.instructions + playbook:place_safely"
+    },
+    {
+      "id": "living_infected_flags",
+      "relation": "applies_to",
+      "value": "flags=3108 se liga a “infectado vivo”; 3108=ECE_PLACE_ON_SURFACE 1060 + ECE_INITAI 2048, incluyendo ECE_CREATEPHYSICS 1024",
+      "source_anchor": "build_app.instructions + P:/scripts/3_game/ce/centraleconomy.c:16-17,37"
+    },
+    {
+      "id": "wait_log_sources",
+      "relation": "reads_excluding",
+      "value": "wait_for/logs_since excluyen .ADM/chat",
+      "source_anchor": "build_app.instructions + execute_wait_for"
+    },
+    {
+      "id": "wait_default_lookback",
+      "relation": "default",
+      "value": "lookback_lines=200 evita perder respuesta corta",
+      "source_anchor": "build_app.wait_for + execute_wait_for"
+    },
+    {
+      "id": "action_use_target_contract",
+      "relation": "tuple",
+      "value": "held item, componentIndex=-1, classname exacto",
+      "source_anchor": "build_app.action_use + MCPClientBridge.DispatchActionUse"
+    }
+  ]
+}

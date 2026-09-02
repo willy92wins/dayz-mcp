@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "profile": "standard",
+      "role": "claude",
+      "config": {"enable_exec_enforce": false, "client_platform": "claude"},
+      "expected_tool_names": [
+        "dayz_knowledge_find", "dayz_knowledge_show", "dayz_knowledge_status", "dayz_knowledge_prepare",
+        "session_acquire", "session_wait", "session_acquire_wait", "lease_acquire", "session_cancel",
+        "session_heartbeat", "session_release", "session_status", "dayz_test_run", "dayz_test_stop",
+        "query_player_state", "query_all_players", "logs_since", "world_spawn", "object_delete",
+        "notify_players", "vehicle_enter", "scene_raycast", "telemetry_read", "query_get_in_condition",
+        "vehicle_prepare_fixture", "surface_query", "player_teleport", "object_anim", "infected_drive",
+        "inventory_give", "object_inspect", "entities_query", "world_time_set", "world_weather_set",
+        "camera_set", "camera_get", "restore_gameplay", "key_press", "player_respawn", "capture_screenshot",
+        "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control", "vehicle_telemetry",
+        "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click", "ui_reload_layout",
+        "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects", "pipeline_feedback",
+        "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema"
+      ]
+    },
+    {
+      "profile": "standard",
+      "role": "codex",
+      "config": {"enable_exec_enforce": false, "client_platform": "codex"},
+      "expected_tool_names": [
+        "dayz_knowledge_find", "dayz_knowledge_show", "dayz_knowledge_status", "dayz_knowledge_prepare",
+        "session_acquire", "session_wait", "session_acquire_wait", "lease_acquire", "session_cancel",
+        "session_heartbeat", "session_release", "session_status", "dayz_test_run", "dayz_test_stop",
+        "query_player_state", "query_all_players", "logs_since", "world_spawn", "object_delete",
+        "notify_players", "vehicle_enter", "scene_raycast", "telemetry_read", "query_get_in_condition",
+        "vehicle_prepare_fixture", "surface_query", "player_teleport", "object_anim", "infected_drive",
+        "inventory_give", "object_inspect", "entities_query", "world_time_set", "world_weather_set",
+        "camera_set", "camera_get", "restore_gameplay", "key_press", "player_respawn", "capture_screenshot",
+        "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control", "vehicle_telemetry",
+        "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click", "ui_reload_layout",
+        "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects", "pipeline_feedback",
+        "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema"
+      ]
+    },
+    {
+      "profile": "exec_enforce",
+      "role": "claude",
+      "config": {"enable_exec_enforce": true, "client_platform": "claude"},
+      "expected_tool_names": [
+        "dayz_knowledge_find", "dayz_knowledge_show", "dayz_knowledge_status", "dayz_knowledge_prepare",
+        "session_acquire", "session_wait", "session_acquire_wait", "lease_acquire", "session_cancel",
+        "session_heartbeat", "session_release", "session_status", "dayz_test_run", "dayz_test_stop",
+        "query_player_state", "query_all_players", "logs_since", "world_spawn", "object_delete",
+        "notify_players", "vehicle_enter", "scene_raycast", "telemetry_read", "query_get_in_condition",
+        "vehicle_prepare_fixture", "surface_query", "player_teleport", "object_anim", "infected_drive",
+        "inventory_give", "object_inspect", "entities_query", "world_time_set", "world_weather_set",
+        "camera_set", "camera_get", "restore_gameplay", "key_press", "player_respawn", "capture_screenshot",
+        "exec_enforce", "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control",
+        "vehicle_telemetry", "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click",
+        "ui_reload_layout", "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects",
+        "pipeline_feedback", "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema"
+      ]
+    },
+    {
+      "profile": "exec_enforce",
+      "role": "codex",
+      "config": {"enable_exec_enforce": true, "client_platform": "codex"},
+      "expected_tool_names": [
+        "dayz_knowledge_find", "dayz_knowledge_show", "dayz_knowledge_status", "dayz_knowledge_prepare",
+        "session_acquire", "session_wait", "session_acquire_wait", "lease_acquire", "session_cancel",
+        "session_heartbeat", "session_release", "session_status", "dayz_test_run", "dayz_test_stop",
+        "query_player_state", "query_all_players", "logs_since", "world_spawn", "object_delete",
+        "notify_players", "vehicle_enter", "scene_raycast", "telemetry_read", "query_get_in_condition",
+        "vehicle_prepare_fixture", "surface_query", "player_teleport", "object_anim", "infected_drive",
+        "inventory_give", "object_inspect", "entities_query", "world_time_set", "world_weather_set",
+        "camera_set", "camera_get", "restore_gameplay", "key_press", "player_respawn", "capture_screenshot",
+        "exec_enforce", "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control",
+        "vehicle_telemetry", "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click",
+        "ui_reload_layout", "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects",
+        "pipeline_feedback", "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema"
+      ]
+    }
+  ]
+}

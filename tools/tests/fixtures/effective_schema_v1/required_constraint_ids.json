@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "required_constraint_ids": [
+    "schema:dayz_test_run:mission",
+    "schema:vehicle_get_in_client:seat_index",
+    "schema:vehicle_get_in_client:expected_type",
+    "manual:new_site_guard",
+    "manual:spawn_y_provider",
+    "manual:living_infected_flags",
+    "manual:wait_log_sources",
+    "manual:wait_default_lookback",
+    "manual:action_use_target_contract"
+  ]
+}
