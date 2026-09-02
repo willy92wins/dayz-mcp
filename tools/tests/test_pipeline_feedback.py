@@ -134,6 +134,103 @@ class InboxTest(unittest.TestCase):
         shown = inbox.read_inbox(include_resolved=True)
         self.assertEqual(shown["entries"][0]["resolution"], "second-fix")
 
+    def test_resolution_evidence_ref_accepts_only_the_four_durable_roots(self) -> None:
+        valid = (
+            "reviews/r.json",
+            "gates/g.md",
+            "reports/a/b.json",
+            "research/x-1/y_2.md",
+        )
+        item = inbox.append_feedback("bug", "evidence", "body")
+        for evidence_ref in valid:
+            with self.subTest(evidence_ref=evidence_ref):
+                record = inbox.append_resolution(item["id"], "fix", evidence_ref=evidence_ref)
+                self.assertEqual(record["evidence_ref"], evidence_ref)
+        raw = inbox.FEEDBACK_PATH.read_text(encoding="utf-8")
+        self.assertIn('"evidence_ref":"research/x-1/y_2.md"', raw)
+
+        invalid = (
+            "",
+            ".",
+            "..",
+            "/reviews/r.json",
+            "C:/reviews/r.json",
+            "reviews\\r.json",
+            "reviews:r.json",
+            "https://example.test/r.json",
+            "other/r.json",
+            "reviews/r/../x.json",
+            "reviews/\x01.json",
+            "reviews/é.json",
+            "reviews/r file.json",
+            "reviews",
+        )
+        for evidence_ref in invalid:
+            with self.subTest(evidence_ref=repr(evidence_ref)):
+                with self.assertRaises(ValueError):
+                    inbox.append_resolution(item["id"], "fix", evidence_ref=evidence_ref)
+
+    def test_latest_resolution_without_evidence_ref_clears_the_previous_ref(self) -> None:
+        item = inbox.append_feedback("bug", "two", "b2")
+        before = inbox.FEEDBACK_PATH.read_bytes()
+        inbox.append_resolution(item["id"], "first-fix", evidence_ref="reviews/first.md")
+        inbox.append_resolution(item["id"], "second-fix", evidence_ref="gates/second.md")
+        shown = inbox.read_inbox(include_resolved=True)
+        resolved = shown["entries"][0]
+        self.assertEqual(resolved["resolution"], "second-fix")
+        self.assertEqual(resolved["evidence_ref"], "gates/second.md")
+        inbox.append_resolution(item["id"], "third-fix")
+        cleared = inbox.read_inbox(include_resolved=True)["entries"][0]
+        self.assertEqual(cleared["resolution"], "third-fix")
+        self.assertNotIn("evidence_ref", cleared)
+        after = inbox.FEEDBACK_PATH.read_bytes()
+        self.assertTrue(after.startswith(before))
+        self.assertEqual(len(after.splitlines()), 4)
+        self.assertNotIn(b"evidence_ref", after.splitlines()[-1])
+        self.assertNotIn(b"age_s", after)
+        self.assertNotIn(b"age_label", after)
+
+    def test_age_boundaries_are_derived_from_original_ts_without_persistence(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime(2026, 1, 2, 0, 0, 0, tzinfo=timezone.utc)
+        cases = ((59, "59s"), (60, "1m"), (3599, "59m"), (3600, "1h"), (86399, "23h"), (86400, "1d"))
+        entries = []
+        for index, (seconds, label) in enumerate(cases):
+            entry_id = f"fb-20260101-0000{index:02d}-abcd"
+            stamp = (now - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            entries.append({"id": entry_id, "ts": stamp, "kind": "bug", "title": "t", "body": "b"})
+        entries.append({
+            "resolves": "fb-20260101-000000-abcd",
+            "ts": "2026-01-02T00:00:00Z",
+            "resolution": "fix",
+            "evidence_ref": "reviews/r.json",
+        })
+        invalid_id = "fb-20260101-000006-abcd"
+        future_id = "fb-20260101-000007-abcd"
+        entries.append({"id": invalid_id, "ts": "not-a-timestamp", "kind": "bug", "title": "t", "body": "b"})
+        entries.append({"id": future_id, "ts": "2026-01-02T00:00:01Z", "kind": "bug", "title": "t", "body": "b"})
+        inbox.INBOX_DIR.mkdir(parents=True)
+        inbox.FEEDBACK_PATH.write_text(
+            "".join(json.dumps(entry, separators=(",", ":")) + "\n" for entry in entries),
+            encoding="utf-8",
+        )
+        result = inbox._read_inbox(now=now, limit=100, include_resolved=True)
+        by_id = {entry["id"]: entry for entry in result["entries"]}
+        for index, (seconds, label) in enumerate(cases):
+            item = by_id[f"fb-20260101-0000{index:02d}-abcd"]
+            self.assertEqual(item["age_s"], seconds)
+            self.assertEqual(item["age_label"], label)
+        self.assertEqual(by_id[invalid_id]["age_s"], None)
+        self.assertEqual(by_id[invalid_id]["age_label"], None)
+        self.assertEqual(by_id[invalid_id]["age_reason"], "invalid_timestamp")
+        self.assertEqual(by_id[future_id]["age_s"], None)
+        self.assertEqual(by_id[future_id]["age_label"], None)
+        self.assertEqual(by_id[future_id]["age_reason"], "future_timestamp")
+        raw = inbox.FEEDBACK_PATH.read_bytes()
+        self.assertNotIn(b"age_s", raw)
+        self.assertNotIn(b"age_label", raw)
+
     def test_malformed_line_is_counted(self) -> None:
         inbox.append_feedback("bug", "ok", "body")
         with inbox.FEEDBACK_PATH.open("a", encoding="utf-8") as handle:

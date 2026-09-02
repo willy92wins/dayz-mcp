@@ -12,6 +12,8 @@ INBOX_DIR = Path(os.environ["LOCALAPPDATA"]) / "DayZ_MCP" / "inbox"
 FEEDBACK_PATH = INBOX_DIR / "feedback.jsonl"
 KINDS = frozenset({"bug", "request", "tool_contribution", "finding"})
 _FEEDBACK_ID_RE = re.compile(r"^fb-\d{8}-\d{6}-[0-9a-f]{4}$")
+_EVIDENCE_ROOTS = frozenset({"reviews", "gates", "reports", "research"})
+_EVIDENCE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _require_str(value: object, field: str = "value") -> str:
@@ -23,6 +25,46 @@ def _require_str(value: object, field: str = "value") -> str:
 def _utc_now() -> tuple[str, str]:
     now = datetime.now(timezone.utc)
     return now.strftime("%Y%m%d-%H%M%S"), now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _validate_evidence_ref(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = _require_str(value, "evidence_ref")
+    if not 1 <= len(value) <= 240:
+        raise ValueError("bad_args: evidence_ref must be 1..240 chars")
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("bad_args: evidence_ref must be ASCII") from exc
+    segments = value.split("/")
+    if len(segments) < 2 or segments[0] not in _EVIDENCE_ROOTS:
+        raise ValueError("bad_args: evidence_ref must be under reviews|gates|reports|research")
+    for segment in segments[1:]:
+        if segment in {".", ".."} or _EVIDENCE_SEGMENT_RE.fullmatch(segment) is None:
+            raise ValueError("bad_args: evidence_ref contains an invalid path segment")
+    return value
+
+
+def _age_fields(ts: object, now: datetime) -> dict[str, object]:
+    if type(ts) is not str:
+        return {"age_s": None, "age_label": None, "age_reason": "invalid_timestamp"}
+    try:
+        original = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return {"age_s": None, "age_label": None, "age_reason": "invalid_timestamp"}
+    if original > now:
+        return {"age_s": None, "age_label": None, "age_reason": "future_timestamp"}
+    age_s = int((now - original).total_seconds())
+    if age_s < 60:
+        age_label = f"{age_s}s"
+    elif age_s < 3600:
+        age_label = f"{age_s // 60}m"
+    elif age_s < 86400:
+        age_label = f"{age_s // 3600}h"
+    else:
+        age_label = f"{age_s // 86400}d"
+    return {"age_s": age_s, "age_label": age_label}
 
 
 def _append_jsonl(record: dict) -> None:
@@ -80,10 +122,12 @@ def append_resolution(
     feedback_id: str,
     resolution: str,
     platform: str = "",
+    evidence_ref: str | None = None,
 ) -> dict:
     feedback_id = _require_str(feedback_id, "feedback_id")
     resolution = _require_str(resolution, "resolution")
     platform = _require_str(platform, "platform")
+    evidence_ref = _validate_evidence_ref(evidence_ref)
     if _FEEDBACK_ID_RE.fullmatch(feedback_id) is None:
         raise ValueError("bad_args: feedback_id must match fb-YYYYMMDD-HHMMSS-xxxx")
     if not 1 <= len(resolution) <= 2000:
@@ -97,11 +141,18 @@ def append_resolution(
         "resolution": resolution,
         "platform": platform,
     }
+    if evidence_ref is not None:
+        record["evidence_ref"] = evidence_ref
     _append_jsonl(record)
     return record
 
 
-def read_inbox(limit: int = 20, kind: str = "", include_resolved: bool = False) -> dict:
+def _read_inbox(
+    limit: int = 20,
+    kind: str = "",
+    include_resolved: bool = False,
+    now: datetime | None = None,
+) -> dict:
     if type(kind) is not str or (kind != "" and kind not in KINDS):
         raise ValueError("bad_args: kind not in bug|request|tool_contribution|finding")
     if type(limit) is not int or not 1 <= limit <= 100:
@@ -131,6 +182,9 @@ def read_inbox(limit: int = 20, kind: str = "", include_resolved: bool = False) 
                 if target in by_id:
                     by_id[target]["resolution"] = obj.get("resolution")
                     by_id[target]["resolved_ts"] = obj.get("ts")
+                    by_id[target].pop("evidence_ref", None)
+                    if obj.get("evidence_ref") is not None:
+                        by_id[target]["evidence_ref"] = obj["evidence_ref"]
                 continue
             entry_id = obj.get("id")
             if type(entry_id) is not str:
@@ -143,7 +197,10 @@ def read_inbox(limit: int = 20, kind: str = "", include_resolved: bool = False) 
     count_total = len(entries)
     unresolved_total = sum(1 for item in entries if "resolution" not in item)
     ranked: list[tuple[str, int, dict]] = []
+    if now is None:
+        now = datetime.now(timezone.utc)
     for index, item in enumerate(entries):
+        item.update(_age_fields(item.get("ts"), now))
         if kind != "" and item.get("kind") != kind:
             continue
         if not include_resolved and "resolution" in item:
@@ -156,3 +213,7 @@ def read_inbox(limit: int = 20, kind: str = "", include_resolved: bool = False) 
         "unresolved_total": unresolved_total,
         "malformed": malformed,
     }
+
+
+def read_inbox(limit: int = 20, kind: str = "", include_resolved: bool = False) -> dict:
+    return _read_inbox(limit=limit, kind=kind, include_resolved=include_resolved)
