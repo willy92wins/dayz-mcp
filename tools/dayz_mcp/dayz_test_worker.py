@@ -148,7 +148,8 @@ def _validate_runtime(
         type(runtime) is not WorkerRuntimePolicy
         or runtime.dev_root != parsed.payload.get("dev_root")
         or runtime.mod != parsed.payload.get("mod")
-        or set(aliases) != {"chernarus", "livonia", "sakhal"}
+        or not {"chernarus", "livonia", "sakhal"}.issubset(aliases)
+        or not all(type(key) is str and key for key in aliases)
         or len(aliases) != len(runtime.mission_aliases)
         or not all(
             _local_path(path)
@@ -544,6 +545,10 @@ async def execute_dayz_test_worker(
             )
         return WorkerResult(0, run_id)
     if payload["preflight"]:
+        # Preflight must fail exactly where a real launch would: resolve the
+        # mission now so an alias missing from this project's runtime is not
+        # reported as success.
+        _mission(payload, runtime)
         return WorkerResult(0, run_id)
 
     if payload["build"]:

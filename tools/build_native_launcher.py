@@ -385,6 +385,8 @@ _POLICY_ENV = "DAYZ_MCP_LAUNCHER_POLICY"
 _MAX_POLICY_BYTES = 65_536
 _MOD_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 _BUILD_SOURCE_BASENAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}")
+# Required alias keys. Projects may add extras; every alias path must stay
+# inside that project's mission_roots.
 _MISSION_ALIAS_KEYS = frozenset({"chernarus", "livonia", "sakhal"})
 _PROJECT_INTENT_KEYS = frozenset(
     {
@@ -491,7 +493,8 @@ def validate_launcher_policy_source(value: object) -> None:
         aliases = project["mission_aliases"]
         if (
             type(aliases) is not dict
-            or set(aliases) != _MISSION_ALIAS_KEYS
+            or not _MISSION_ALIAS_KEYS.issubset(aliases)
+            or not all(type(key) is str and key for key in aliases)
             or not all(_valid_local_absolute_path(item) for item in aliases.values())
             or not all(_path_is_within(item, mission_root_paths) for item in aliases.values())
         ):
@@ -586,7 +589,11 @@ def validate_worker_runtime_document(value: object) -> None:
         if type(project["mod"]) is not str or not project["mod"]:
             raise ValueError("worker_runtime_schema")
         aliases = project["mission_aliases"]
-        if type(aliases) is not dict or set(aliases) != _MISSION_ALIAS_KEYS:
+        if (
+            type(aliases) is not dict
+            or not _MISSION_ALIAS_KEYS.issubset(aliases)
+            or not all(type(key) is str and key for key in aliases)
+        ):
             raise ValueError("worker_runtime_schema")
         basename = project["build_source_basename"]
         if basename is not None and (

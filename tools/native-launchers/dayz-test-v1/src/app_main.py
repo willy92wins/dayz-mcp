@@ -188,7 +188,7 @@ def _worker_runtime(mod: str, dev_root: str) -> dayz_test_worker.WorkerRuntimePo
     if set(item) != {
         "build_source_basename", "build_temp_root", "dev_root", "diag_executable",
         "game_directory", "mission_aliases", "mod", "mods_root"
-    } or not isinstance(item["mission_aliases"], dict) or set(item["mission_aliases"]) != {"chernarus", "livonia", "sakhal"}:
+    } or not isinstance(item["mission_aliases"], dict) or not {"chernarus", "livonia", "sakhal"}.issubset(item["mission_aliases"]) or not all(type(key) is str and key for key in item["mission_aliases"]):
         raise RuntimeError("worker_runtime_invalid")
     return dayz_test_worker.WorkerRuntimePolicy(
         dev_root=item["dev_root"],

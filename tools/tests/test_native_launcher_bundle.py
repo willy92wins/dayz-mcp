@@ -436,9 +436,16 @@ class NativeLauncherBundleTest(unittest.TestCase):
                     "mod", "mods_root",
                 },
             )
-            self.assertEqual(
-                set(project["mission_aliases"]),
-                {"chernarus", "livonia", "sakhal"},
+            self.assertTrue(
+                {"chernarus", "livonia", "sakhal"}.issubset(
+                    project["mission_aliases"]
+                )
+            )
+            self.assertTrue(
+                all(
+                    type(key) is str and key
+                    for key in project["mission_aliases"]
+                )
             )
 
     def test_cpp_broker_preserves_full_frame_and_is_bidirectional(self) -> None:

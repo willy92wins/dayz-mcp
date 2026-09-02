@@ -465,6 +465,49 @@ class DayzTestWorkerTests(unittest.TestCase):
                     )
                 self.assertEqual(raised.exception.code, "runtime_policy_invalid")
 
+    def test_preflight_rejects_alias_missing_from_project_runtime(self) -> None:
+        parsed = dayz_test_request.parse_dayz_test_request(
+            _raw(mission="lfheli", preflight=True), policies=(POLICY,)
+        )
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+            asyncio.run(
+                dayz_test_worker.execute_dayz_test_worker(
+                    parsed.canonical_bytes,
+                    request_sha256=parsed.sha256,
+                    request_policies=(POLICY,),
+                    runtime_policy=RUNTIME,
+                    broker=_Broker(),
+                )
+            )
+        self.assertEqual(raised.exception.code, "runtime_policy_invalid")
+
+    def test_preflight_accepts_alias_present_in_project_runtime(self) -> None:
+        runtime = dataclasses.replace(
+            RUNTIME,
+            mission_aliases=RUNTIME.mission_aliases
+            + (
+                (
+                    "lfheli",
+                    r"C:\Program Files (x86)\Steam\steamapps\common\DayZServer\mpmissions\LFHeli.chernarusplus",
+                ),
+            ),
+        )
+        parsed = dayz_test_request.parse_dayz_test_request(
+            _raw(mission="lfheli", preflight=True), policies=(POLICY,)
+        )
+        broker = _Broker()
+        result = asyncio.run(
+            dayz_test_worker.execute_dayz_test_worker(
+                parsed.canonical_bytes,
+                request_sha256=parsed.sha256,
+                request_policies=(POLICY,),
+                runtime_policy=runtime,
+                broker=broker,
+            )
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(broker.requests, [])
+
     def test_lost_existing_start_response_recovers_only_from_one_role_pid(self) -> None:
         recovered = _LostExistingStartBroker()
         result = self._run(_raw(mode="all"), recovered)
