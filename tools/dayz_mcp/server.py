@@ -398,6 +398,132 @@ def compute_bridge_ready(status: dict[str, Any]) -> dict[str, Any]:
     return {"ready": False, "reason": "no_run"}
 
 
+# peer + command -> the public tool that fronts it, or None when the command is
+# deliberately not exposed. Hand written from the two Enforce dispatchers
+# (MCPBridge.c SERVER_CAPABILITIES, MCPClientBridge.c CLIENT_POLL_CAPS).
+#
+# Explicitly NOT derived from app.list_tools(), from loopback's command lists or
+# from the PBO. The census exists so it CAN disagree with what the daemon
+# registers; a table derived from either side would agree by construction and
+# detect nothing. A command the bridge announces and this table does not know is
+# reported as unmapped rather than silently accepted -- that is the case a new
+# command shipped in the PBO produces, and it should be visible on the first
+# poll instead of on the first failed call.
+_BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
+    "server": {
+        "entities_query": "entities_query",
+        "exec_enforce": None,  # not a public tool by decision
+        "infected_drive": "infected_drive",
+        "inventory_give": "inventory_give",
+        "notify_players": "notify_players",
+        "object_anim": "object_anim",
+        "object_delete": "object_delete",
+        "object_inspect": "object_inspect",
+        "player_teleport": "player_teleport",
+        "query_all_players": "query_all_players",
+        "query_get_in_condition": "query_get_in_condition",
+        "query_player_state": "query_player_state",
+        "scene_raycast": "scene_raycast",
+        "surface_query": "surface_query",
+        "telemetry_read": "telemetry_read",
+        "vehicle_drive": None,  # server-side verb with no public tool of its own
+        "vehicle_enter": "vehicle_enter",
+        "vehicle_prepare_fixture": "vehicle_prepare_fixture",
+        "world_spawn": "world_spawn",
+        "world_time_set": "world_time_set",
+        "world_weather_set": "world_weather_set",
+    },
+    "client": {
+        "action_use": "action_use",
+        "camera_get": "camera_get",
+        "camera_set": "camera_set",
+        "drive_probe_client": None,  # internal probe, never exposed
+        "engine_set": "engine_set",
+        "key_press": "key_press",
+        "player_respawn": "player_respawn",
+        "restore_gameplay": "restore_gameplay",
+        "ui_click": "ui_click",
+        "ui_dialog": "ui_dialog",
+        "ui_focus": "ui_focus",
+        "ui_reload_layout": "ui_reload_layout",
+        "ui_set_text": "ui_set_text",
+        "ui_tree": "ui_tree",
+        "vehicle_control": "vehicle_control",
+        "vehicle_get_in_client": "vehicle_get_in_client",
+        "vehicle_release": "vehicle_release",
+        "vehicle_telemetry": "vehicle_telemetry",
+        "vehicle_trace": "vehicle_trace",
+    },
+}
+
+
+def _compare_bridge_capabilities(
+    peer: str, capabilities: object, registered_tools: frozenset[str]
+) -> dict[str, Any]:
+    """Cross one peer's announced census against the registered tools.
+
+    Three verdicts and never a fourth: ``match`` when every mapped command has
+    its tool and every tool has its command, ``mismatch`` when they disagree --
+    naming exactly which commands -- and ``unknown`` when there is no census to
+    judge. ``unknown`` is not a mismatch: an absent, malformed or unaccredited
+    announcement means we did not look, and saying otherwise would put a red on
+    a bridge that may be perfectly fine.
+    """
+
+    block = capabilities if isinstance(capabilities, dict) else {}
+    mapping = _BRIDGE_COMMAND_TOOLS.get(peer, {})
+    expected_tools = {tool for tool in mapping.values() if tool}
+    registered_bridge_tools = sorted(expected_tools & registered_tools)
+    announced = block.get("announced_commands")
+    if block.get("state") != "announced" or not isinstance(announced, list):
+        return {
+            "state": "unknown",
+            "reason": str(block.get("reason") or "absent"),
+            "announced_commands": [],
+            "registered_bridge_tools": registered_bridge_tools,
+            "announced_without_registered_tool": [],
+            "registered_without_announced_command": [],
+            "unmapped_announced_commands": [],
+        }
+    announced_set = {item for item in announced if isinstance(item, str)}
+    unmapped = sorted(item for item in announced_set if item not in mapping)
+    missing_tool = sorted(
+        item
+        for item in announced_set
+        if mapping.get(item) and mapping[item] not in registered_tools
+    )
+    announced_tools = {mapping[item] for item in announced_set if mapping.get(item)}
+    not_announced = sorted(
+        tool for tool in registered_bridge_tools if tool not in announced_tools
+    )
+    agrees = not (unmapped or missing_tool or not_announced)
+    return {
+        "state": "match" if agrees else "mismatch",
+        "reason": "ok" if agrees else "census_disagrees_with_registered_tools",
+        "announced_commands": sorted(announced_set),
+        "registered_bridge_tools": registered_bridge_tools,
+        "announced_without_registered_tool": missing_tool,
+        "registered_without_announced_command": not_announced,
+        "unmapped_announced_commands": unmapped,
+    }
+
+
+def _with_capability_comparison(
+    payload: dict[str, Any], registered_tools: frozenset[str]
+) -> dict[str, Any]:
+    enriched = dict(payload)
+    for peer, key in (("server", "server_peer"), ("client", "client_peer")):
+        block = enriched.get(key)
+        if not isinstance(block, dict):
+            continue
+        block = dict(block)
+        block["capabilities"] = _compare_bridge_capabilities(
+            peer, block.get("capabilities"), registered_tools
+        )
+        enriched[key] = block
+    return enriched
+
+
 def _with_ready(status: dict[str, Any]) -> dict[str, Any]:
     payload = dict(status)
     payload["ready"] = compute_bridge_ready(payload)
@@ -2544,6 +2670,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("session_tools_require_client_mode")
         return runtime
 
+    # Observed after build_app has finished registering, which is the only
+    # moment the set is complete, and cached because it cannot change afterwards.
+    _registered_tool_names: set[str] = set()
+
+    async def _bridge_tool_names() -> frozenset[str]:
+        if not _registered_tool_names:
+            _registered_tool_names.update(tool.name for tool in await app.list_tools())
+        return frozenset(_registered_tool_names)
+
     @app.tool(
         description="LOW-LEVEL: prefer session_acquire_wait. Acquire or join the FIFO lease."
     )
@@ -3835,7 +3970,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     )
     async def bridge_status() -> dict[str, Any]:
         runtime.touch()
-        return await runtime.bridge_status_payload()
+        payload = await runtime.bridge_status_payload()
+        return _with_capability_comparison(payload, await _bridge_tool_names())
 
     @app.tool(
         description=(

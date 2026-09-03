@@ -8,6 +8,7 @@ import time
 import unittest
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any, Callable
 from unittest.mock import AsyncMock, patch
 
@@ -682,3 +683,114 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- M22: the announced census against the tools the app registers ----------
+#
+# The expected side is the fixture, a second hand-written copy of the map. It is
+# never derived from app.list_tools(), from loopback's lists or from the PBO:
+# the census exists precisely so it CAN disagree with the daemon, and an expected
+# computed from either side would agree by construction and catch nothing.
+
+_CENSUS_FIXTURE = json.loads(
+    (Path(__file__).resolve().parent / "fixtures" / "bridge_capabilities_v1.json")
+    .read_text(encoding="utf-8")
+)
+
+
+def _announced(commands: list[str]) -> dict[str, object]:
+    return {"state": "announced", "reason": "ok", "announced_commands": commands}
+
+
+class BridgeCapabilityComparisonTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        app, _runtime = build_app(
+            ServerConfig(key="k", port=0, log_sink=lambda _message: None)
+        )
+        self.registered = frozenset(tool.name for tool in await app.list_tools())
+
+    def _census(self, peer: str) -> list[str]:
+        return sorted(_CENSUS_FIXTURE["peers"][peer])
+
+    def test_the_shipped_map_and_the_fixture_still_agree(self) -> None:
+        # Two copies on purpose. This is what turns "someone edited one side"
+        # into a red instead of into silent agreement.
+        for peer, expected in _CENSUS_FIXTURE["peers"].items():
+            with self.subTest(peer):
+                self.assertEqual(
+                    server_module._BRIDGE_COMMAND_TOOLS[peer], expected
+                )
+
+    def test_a_complete_census_matches(self) -> None:
+        for peer in ("server", "client"):
+            with self.subTest(peer):
+                result = server_module._compare_bridge_capabilities(
+                    peer, _announced(self._census(peer)), self.registered
+                )
+                self.assertEqual(result["state"], "match")
+                self.assertEqual(result["reason"], "ok")
+                self.assertEqual(result["announced_without_registered_tool"], [])
+                self.assertEqual(result["registered_without_announced_command"], [])
+                self.assertEqual(result["unmapped_announced_commands"], [])
+
+    def test_dropping_one_named_command_is_a_mismatch_that_says_which(self) -> None:
+        for peer, commands in _CENSUS_FIXTURE["discriminating"].items():
+            for dropped in commands:
+                with self.subTest(f"{peer}:{dropped}"):
+                    census = [c for c in self._census(peer) if c != dropped]
+                    result = server_module._compare_bridge_capabilities(
+                        peer, _announced(census), self.registered
+                    )
+                    self.assertEqual(result["state"], "mismatch")
+                    self.assertEqual(
+                        result["registered_without_announced_command"], [dropped]
+                    )
+
+    def test_a_census_announced_on_the_wrong_peer_is_a_mismatch(self) -> None:
+        result = server_module._compare_bridge_capabilities(
+            "client", _announced(self._census("server")), self.registered
+        )
+        self.assertEqual(result["state"], "mismatch")
+        self.assertTrue(result["unmapped_announced_commands"])
+        self.assertIn("entities_query", result["unmapped_announced_commands"])
+
+    def test_a_command_the_map_does_not_know_is_reported_unmapped(self) -> None:
+        # What a PBO that grew a verb looks like: visible on the first poll,
+        # not on the first failed call.
+        census = self._census("client") + ["brand_new_verb"]
+        result = server_module._compare_bridge_capabilities(
+            "client", _announced(census), self.registered
+        )
+        self.assertEqual(result["state"], "mismatch")
+        self.assertEqual(result["unmapped_announced_commands"], ["brand_new_verb"])
+
+    def test_no_usable_census_is_unknown_and_not_a_mismatch(self) -> None:
+        # unknown is not a red: it says we did not look. Calling it mismatch
+        # would put a fault on a bridge that may be perfectly fine.
+        for label, block in (
+            ("absent", {"state": "unknown", "reason": "absent", "announced_commands": []}),
+            (
+                "unaccredited",
+                {"state": "unknown", "reason": "unaccredited", "announced_commands": []},
+            ),
+            ("malformed", {"state": "unknown", "reason": "malformed", "announced_commands": []}),
+            ("not a mapping", "nope"),
+            ("missing list", {"state": "announced", "reason": "ok"}),
+        ):
+            with self.subTest(label):
+                result = server_module._compare_bridge_capabilities(
+                    "client", block, self.registered
+                )
+                self.assertEqual(result["state"], "unknown")
+                self.assertEqual(result["announced_commands"], [])
+
+    def test_every_mapped_tool_is_actually_registered_by_the_app(self) -> None:
+        # The seam in the other direction: the fixture claims a public tool for
+        # each exposed command, and the app has to have it. A typo here would
+        # otherwise show up as a permanent mismatch blamed on the bridge.
+        for peer, mapping in _CENSUS_FIXTURE["peers"].items():
+            for command, tool in mapping.items():
+                if tool is None:
+                    continue
+                with self.subTest(f"{peer}:{command}"):
+                    self.assertIn(tool, self.registered)

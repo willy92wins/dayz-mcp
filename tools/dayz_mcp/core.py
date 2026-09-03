@@ -71,9 +71,19 @@ def _peer_status(
         # generation observed a poll. Label the payload instead.
         state = "never_polled_this_generation"
         detail = "never_polled_this_generation"
+    # M22 carrier (addendum enmienda 2026-09-03). M06 publishes the capability
+    # census on the raw snapshot and M22 compares it against the registered
+    # tools; this dict is the only thing between them, and it is built from a
+    # fixed key set, so anything not named here dies here. The shape is kept
+    # constant -- an older loopback with no census still yields a block that
+    # says unknown, rather than a missing key each consumer has to guess about.
+    capabilities = peer_snapshot.get("capabilities")
+    if not isinstance(capabilities, dict):
+        capabilities = {"state": "unknown", "reason": "absent", "announced_commands": []}
     return {
         "last_poll_age_s": last_poll_age_s,
         "queue_depth": peer_snapshot.get("queue_depth", 0),
+        "capabilities": capabilities,
         "version": version,
         "version_state": state,
         "version_detail": detail,
