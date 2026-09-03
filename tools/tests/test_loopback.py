@@ -1454,9 +1454,6 @@ class ResultCapTests(unittest.TestCase):
         self.assertIsNotNone(state.take_result(ids[overflow]))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 # --- M06: capability census ingress (ficha fb-20260829-023649-8f8c point 9) ---
 #
@@ -1504,10 +1501,23 @@ def _enforce_census(file_name: str, const_name: str) -> str:
         / "5_Mission"
         / file_name
     ).read_text(encoding="utf-8", errors="replace")
-    line = next(
-        line for line in source.splitlines() if f"{const_name} =" in line
-    )
-    return "".join(_re.findall(r'"([^"]*)"', line))
+    # F-04: taking the first line that merely MENTIONS the name would happily
+    # read a comment. The census that reaches the wire is the compiled const, so
+    # the declaration is what this must find: a non-comment line that declares a
+    # const string.
+    candidates = [
+        raw
+        for raw in source.splitlines()
+        if f"{const_name} =" in raw
+        and "const string" in raw
+        and not raw.lstrip().startswith(("//", "/*", "*", "!"))
+    ]
+    if len(candidates) != 1:
+        raise AssertionError(
+            f"{file_name}: expected exactly one const declaration of "
+            f"{const_name}, found {len(candidates)}"
+        )
+    return "".join(_re.findall(r'"([^"]*)"', candidates[0]))
 
 
 class PollCapabilityIngressTest(unittest.TestCase):
@@ -1516,16 +1526,24 @@ class PollCapabilityIngressTest(unittest.TestCase):
             with self.subTest(label):
                 self.assertEqual(loopback.parse_poll_caps(raw), (names, reason))
 
-    def test_limits_reject_only_past_the_boundary(self) -> None:
-        at_limit = ",".join(f"c{index}" for index in range(loopback.POLL_CAPS_MAX_NAMES))
-        over = ",".join(f"c{index}" for index in range(loopback.POLL_CAPS_MAX_NAMES + 1))
+    def test_limits_match_the_contract_and_reject_only_past_the_boundary(self) -> None:
+        # F-02: the numbers below are the ficha's, written out. Deriving them from
+        # the constants under test made this assert nothing -- drop the ceiling to
+        # five names and a derived test still passes, because it moves with the
+        # code it is supposed to pin.
+        self.assertEqual(loopback.POLL_CAPS_MAX_NAMES, 64)
+        self.assertEqual(loopback.POLL_CAPS_MAX_BYTES, 4096)
+        at_limit = ",".join(f"c{index}" for index in range(64))
+        over = ",".join(f"c{index}" for index in range(65))
         self.assertEqual(loopback.parse_poll_caps(at_limit)[1], "ok")
         self.assertEqual(loopback.parse_poll_caps(over)[1], "too_many")
-        # Bytes, not names: one long name is enough to blow the ceiling.
-        self.assertEqual(
-            loopback.parse_poll_caps("a" * (loopback.POLL_CAPS_MAX_BYTES + 1))[1],
-            "oversized",
-        )
+        # Name length has its own boundary and it was never exercised: 64 is the
+        # last legal one, because the pattern allows a head plus 63 more.
+        self.assertEqual(loopback.parse_poll_caps("a" * 64)[1], "ok")
+        self.assertEqual(loopback.parse_poll_caps("a" * 65)[1], "malformed")
+        # Bytes are checked before the names, so one long name blows the ceiling
+        # and reports oversized rather than malformed.
+        self.assertEqual(loopback.parse_poll_caps("a" * 4097)[1], "oversized")
 
     def test_accredited_poll_publishes_its_census(self) -> None:
         state = loopback.ServerState("k")
@@ -1564,14 +1582,36 @@ class PollCapabilityIngressTest(unittest.TestCase):
         self.assertEqual(view["reason"], "malformed")
         self.assertEqual(view["announced_commands"], [])
 
+    @staticmethod
+    def _state_with_a_pending_command(bind: bool = False) -> "loopback.ServerState":
+        """F-03: a differential over two empty answers proves nothing.
+
+        Both sides need a command actually waiting, or a mutant that drops the
+        queue exactly when the census is bad returns the same empty list twice
+        and walks straight through the guard.
+
+        The binding has to exist BEFORE the command is queued: an accredited poll
+        drains the bound queue, so anything enqueued earlier stays in the legacy
+        one and the poll comes back empty for a reason that has nothing to do
+        with the census.
+        """
+
+        state = loopback.ServerState("k")
+        if bind:
+            bind_both_peers(state)
+        status, _body = state.enqueue_command("query_all_players", {}, peer="server")
+        assert status == 200, status
+        return state
+
     def test_unaccredited_poll_stays_unknown_and_is_answered_the_same(self) -> None:
         # A legacy poll carries no instance, so nothing accredits it. Its census
         # is not believed -- and the poll itself is answered exactly as it would
         # be with no census at all, which is what "does not block" means.
-        plain = loopback.ServerState("k")
-        with_caps = loopback.ServerState("k")
+        plain = self._state_with_a_pending_command()
+        with_caps = self._state_with_a_pending_command()
         base_status, base_payload = plain.record_poll("server")
         status, payload = with_caps.record_poll("server", caps="entities_query")
+        self.assertTrue(base_payload["commands"], base_payload)
         self.assertEqual((status, payload), (base_status, base_payload))
         view = with_caps.status_snapshot()["peers"]["server"]["capabilities"]
         self.assertEqual(view["state"], "unknown")
@@ -1579,14 +1619,13 @@ class PollCapabilityIngressTest(unittest.TestCase):
         self.assertEqual(view["announced_commands"], [])
 
     def test_a_malformed_census_is_answered_the_same_as_none(self) -> None:
-        plain = loopback.ServerState("k")
-        bind_both_peers(plain)
-        broken = loopback.ServerState("k")
-        bind_both_peers(broken)
+        plain = self._state_with_a_pending_command(bind=True)
+        broken = self._state_with_a_pending_command(bind=True)
         base = plain.record_poll("server", instance=INST_SERVER, source_pid=41001)
         got = broken.record_poll(
             "server", instance=INST_SERVER, source_pid=41001, caps="NOT VALID"
         )
+        self.assertTrue(base[1]["commands"], base)
         self.assertEqual(got, base)
         view = broken.status_snapshot()["peers"]["server"]["capabilities"]
         self.assertEqual((view["state"], view["reason"]), ("unknown", "malformed"))
@@ -1622,7 +1661,15 @@ class PollCapabilityIngressTest(unittest.TestCase):
                 self.assertEqual(reason, "ok", census)
                 self.assertIsNotNone(names)
                 self.assertIn(required, names)
+                # F-04: a dispatcher census is not one name. If it were, we
+                # read a decoy -- a comment or a doc line -- instead of the
+                # declaration that actually compiles into the poll.
+                self.assertGreater(len(names), 5, census)
                 self.assertLessEqual(
                     len(census.encode("utf-8")), loopback.POLL_CAPS_MAX_BYTES
                 )
                 self.assertLessEqual(len(names), loopback.POLL_CAPS_MAX_NAMES)
+
+
+if __name__ == "__main__":
+    unittest.main()

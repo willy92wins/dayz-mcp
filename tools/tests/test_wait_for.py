@@ -14,7 +14,12 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
+from unittest.mock import AsyncMock, patch
+
 from dayz_mcp import server
+from dayz_mcp.server import ServerConfig, build_app
+from tests.test_client_mode import _fixture_client_runtime
+from tests.test_mcp_tools import _content_json
 
 def _live_run(profiles: Path) -> dict:
     """A RUNNING run: a process stamped just now, so its logs clear the floor.
@@ -344,6 +349,52 @@ class WaitForBug086EvidenceTest(unittest.IsolatedAsyncioTestCase):
         # The offsets, not the clock, are what say the response came first.
         self.assertGreater(after, before)
         self.assertTrue(result["ok"])
+        self.assertTrue(result["satisfied"])
+        self.assertIn(needle, str(result["observed"]))
+
+    async def test_the_public_tool_default_also_sees_the_earlier_response(self) -> None:
+        """Same sequence, but through the tool an agent actually calls.
+
+        The case above accredits the default of execute_wait_for. The registered
+        tool declares its own, and a change there would put BUG-086 back with
+        every case in this class still green -- which is why the ficha asks for
+        the public tool with no lookback_lines argument at all.
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            profiles = self._profiles(directory)
+            log = profiles / "script.log"
+            log.write_text(
+                "".join(f"boot-{index}\n" for index in range(5)), encoding="utf-8"
+            )
+            needle = f"BUG086-public-{uuid.uuid4().hex}"
+
+            config = ServerConfig(
+                mode="client",
+                key="k",
+                port=12345,
+                client_platform="codex",
+                log_sink=lambda _message: None,
+            )
+            runtime = _fixture_client_runtime(config)
+            with patch.object(server, "ClientRuntime", return_value=runtime):
+                app, _built = build_app(config)
+            lifecycle = AsyncMock(return_value={"runs": [_live_run(profiles)]})
+            with patch.object(runtime, "lifecycle_status", new=lifecycle):
+                before, after = _append_durably(log, needle + "\n")
+                result = _content_json(
+                    await app.call_tool(
+                        "wait_for",
+                        {
+                            "condition": "log_matches",
+                            "pattern": needle,
+                            "timeout_s": 1.1,
+                            "poll_interval_s": 0.5,
+                        },
+                    )
+                )
+
+        self.assertGreater(after, before)
         self.assertTrue(result["satisfied"])
         self.assertIn(needle, str(result["observed"]))
 
