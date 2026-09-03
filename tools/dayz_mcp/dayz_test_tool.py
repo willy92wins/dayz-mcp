@@ -10,9 +10,12 @@ from typing import Awaitable, Callable, Protocol
 
 from dayz_mcp import dayz_test_request, dayz_test_worker, secure_launcher
 from dayz_mcp.launcher_registry import open_approved_launcher
-
-
-_MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal", "lfheli"})
+from dayz_mcp.steam_preflight import (
+    REMEDIATION,
+    STEAM_SESSION_STALE,
+    SteamSessionResult,
+    evaluate_steam_session,
+)
 _BRIDGE_MOD_NAMES = frozenset({"dayz_mcp", "@dayz_mcp"})
 _PUBLIC_MODES = frozenset({"server", "all", "client"})
 _ACCEPTED_MODES = _PUBLIC_MODES | {"offline"}
@@ -132,8 +135,6 @@ def build_run_request(
     selected = _selected_policy(sealed_policies, project)
     if mode not in _ACCEPTED_MODES:
         _fail("bad_dayz_test_request:mode expected server|all|client")
-    if mission not in _MISSION_ALIASES:
-        _fail("bad_mission")
     public_extra = _public_mod_list(extra_mods, selected.mod_roots)
     public_base = _public_mod_list(base_mods, selected.mod_roots)
     public_server = _public_mod_list(server_mods, selected.mod_roots)
@@ -493,6 +494,10 @@ def _compact_result(
     server_alive: bool | None = None,
     client_alive: bool | None = None,
     readiness: LaunchReadinessProjection | None = None,
+    phase: str | None = None,
+    steam_registered_pid: int | None = None,
+    steam_live_pids: list[int] | None = None,
+    remediation: str | None = None,
 ) -> dict[str, object]:
     projection = readiness or _NULL_READINESS
     return {
@@ -500,7 +505,7 @@ def _compact_result(
         "project": project,
         "mode": mode,
         "run_id": terminal.run_id,
-        "phase": "completed" if terminal.ok else "executing",
+        "phase": phase if phase is not None else ("completed" if terminal.ok else "executing"),
         "elapsed_s": round(time.monotonic() - started_at, 3),
         "artifacts_paths": artifacts_paths,
         "error_code": terminal.error_code,
@@ -510,6 +515,9 @@ def _compact_result(
         "process_alive": projection.process_alive,
         "bridge_ready": projection.bridge_ready,
         "reason": projection.reason,
+        "steam_registered_pid": steam_registered_pid,
+        "steam_live_pids": steam_live_pids,
+        "remediation": remediation,
     }
 
 
@@ -708,7 +716,35 @@ async def execute_dayz_test_run(
                 player_name=player_name,
                 server_wait_s=server_wait_s,
             )
-            if run_id is not None:
+            if not preflight and mode in {"client", "all"}:
+                try:
+                    steam = evaluate_steam_session()
+                except Exception:
+                    steam = SteamSessionResult(
+                        error_code=STEAM_SESSION_STALE,
+                        steam_registered_pid=None,
+                        steam_live_pids=(),
+                        remediation=REMEDIATION,
+                    )
+                if steam.error_code is not None:
+                    return _compact_result(
+                        terminal=WorkerTerminal(
+                            cleanup_degraded=False,
+                            error_code=steam.error_code,
+                            exit_code=1,
+                            ok=False,
+                            run_id=None,
+                        ),
+                        project=policy.mod,
+                        mode=mode,
+                        started_at=started_at,
+                        artifacts_paths=[],
+                        phase="validating",
+                        steam_registered_pid=steam.steam_registered_pid,
+                        steam_live_pids=list(steam.steam_live_pids[:8]),
+                        remediation=steam.remediation,
+                    )
+            if run_id is not None and not preflight:
                 require_extension_run(await runtime.lifecycle_status(), policy, run_id)
             return await _execute_request(
                 runtime,

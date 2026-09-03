@@ -37,6 +37,13 @@ from dayz_mcp.control_client import ControlClient, ControlClientError, ControlId
 from dayz_mcp.accredited_daemon_transport import AccreditedTransportError
 from dayz_mcp.daemon_policy import load_normal_daemon_policy
 from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
+from dayz_mcp.effective_schema_core import project_server_config_identity
+from dayz_mcp.tool_registry_fingerprint import (
+    AuthorityBundleBytes,
+    capture_registry_snapshot,
+    compare_snapshot_to_authority,
+    read_authority_marker,
+)
 from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import LoopbackServer, read_key
 from dayz_mcp.server_cli import CLIENT_PLATFORM_ALIASES, build_server_parser
@@ -522,6 +529,62 @@ def _with_capability_comparison(
         )
         enriched[key] = block
     return enriched
+
+
+_TOOL_REGISTRY_REMEDIATION = "reopen_mcp_client"
+
+
+def _registry_tool_records(app: FastMCP) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for tool in app._tool_manager.list_tools():
+        schema = tool.parameters if isinstance(getattr(tool, "parameters", None), dict) else {}
+        records.append(
+            {
+                "name": tool.name,
+                "description": tool.description or "",
+                "input_schema": schema,
+                "public_constraints": [],
+                "effect_verification": "wire",
+            }
+        )
+    return records
+
+
+def _capture_process_registry(app: FastMCP, config: ServerConfig) -> Any:
+    profile, role = project_server_config_identity(
+        enable_exec_enforce=config.enable_exec_enforce,
+        client_platform=config.client_platform,
+    )
+    if profile == "unknown" or role == "unknown":
+        profile, role = "standard", "claude"
+    return capture_registry_snapshot(
+        session_id=str(uuid.uuid4()),
+        profile=profile,
+        role=role,
+        captured_at_utc=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        tools=_registry_tool_records(app),
+    )
+
+
+def _frozen_tool_registry_overlay(app: FastMCP, config: ServerConfig) -> dict[str, Any]:
+    snapshot = _capture_process_registry(app, config)
+    authority = read_authority_marker(
+        AuthorityBundleBytes(
+            marker=None,
+            fingerprint_sidecar=None,
+            verdict_sidecar=None,
+            producers_sidecar=None,
+            receipts=None,
+        ),
+        expected_profile=snapshot.profile,
+        expected_role=snapshot.role,
+    )
+    return {
+        "tool_registry_fingerprint": snapshot.fingerprint,
+        "tool_registry_captured_at": snapshot.captured_at_utc,
+        "tool_registry_source_stale": compare_snapshot_to_authority(snapshot, authority),
+        "tool_registry_remediation": _TOOL_REGISTRY_REMEDIATION,
+    }
 
 
 def _with_ready(status: dict[str, Any]) -> dict[str, Any]:
@@ -2673,6 +2736,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     # Observed after build_app has finished registering, which is the only
     # moment the set is complete, and cached because it cannot change afterwards.
     _registered_tool_names: set[str] = set()
+    # Filled at the close of build_app, after every tool is registered. The
+    # overlay is local to this FastMCP process; loopback /status does not
+    # publish it.
+    _tool_registry_overlay: dict[str, Any] = {}
+
+    def _with_tool_registry(payload: dict[str, Any]) -> dict[str, Any]:
+        overlay = dict(payload)
+        overlay.update(_tool_registry_overlay)
+        return overlay
 
     async def _bridge_tool_names() -> frozenset[str]:
         if not _registered_tool_names:
@@ -3971,7 +4043,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def bridge_status() -> dict[str, Any]:
         runtime.touch()
         payload = await runtime.bridge_status_payload()
-        return _with_capability_comparison(payload, await _bridge_tool_names())
+        return _with_tool_registry(
+            _with_capability_comparison(payload, await _bridge_tool_names())
+        )
 
     @app.tool(
         description=(
@@ -4432,6 +4506,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         return await playbook_tool_mod.execute_playbook_run(app, name, params)
 
     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
+    _tool_registry_overlay.update(_frozen_tool_registry_overlay(app, config))
     return app, runtime
 
 

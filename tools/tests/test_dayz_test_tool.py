@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 from dayz_mcp import dayz_test_request, dayz_test_worker
 from dayz_mcp import dayz_test_tool
 from dayz_mcp import server
+from dayz_mcp import steam_preflight
 from dayz_mcp.control_client import ControlClientError
 
 
@@ -159,7 +160,7 @@ class DayzTestToolRequestTest(unittest.TestCase):
                     "mode": "offline",
                     "mission": r"P:\missions\custom.ChernarusPlus",
                 },
-                "bad_mission",
+                "bad_dayz_test_request",
             ),
             (
                 {
@@ -190,6 +191,20 @@ class DayzTestToolRequestTest(unittest.TestCase):
             with self.subTest(arguments=arguments):
                 with self.assertRaisesRegex(dayz_test_tool.DayzTestToolError, code):
                     dayz_test_tool.build_run_request(sealed, **arguments)
+
+    def test_build_run_request_accepts_absolute_mission_inside_roots(self) -> None:
+        policy = _policy()
+        inside = r"P:\ExampleMod_Suite\_server\mpmissions\custom.ChernarusPlus"
+        raw, selected = dayz_test_tool.build_run_request(
+            _sealed(policy),
+            project="ExampleMod",
+            mode="offline",
+            mission=inside,
+            extra_mods=["@DayZ_MCP"],
+        )
+        parsed = dayz_test_request.parse_dayz_test_request(raw, policies=(policy,))
+        self.assertIs(selected, policy)
+        self.assertEqual(parsed.payload["mission"], inside)
 
     def test_build_run_request_delegates_cross_field_validation(self) -> None:
         with self.assertRaisesRegex(
@@ -546,6 +561,20 @@ class _Runtime:
 
 
 class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        patcher = patch.object(
+            dayz_test_tool,
+            "evaluate_steam_session",
+            return_value=steam_preflight.SteamSessionResult(
+                error_code=None,
+                steam_registered_pid=1,
+                steam_live_pids=(1,),
+                remediation=steam_preflight.REMEDIATION,
+            ),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     async def test_run_rejects_missing_bridge_before_secure_launch(self) -> None:
         policy = _policy()
         runtime = _Runtime()
@@ -650,6 +679,9 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "process_alive",
                 "bridge_ready",
                 "reason",
+                "steam_registered_pid",
+                "steam_live_pids",
+                "remediation",
             },
         )
         self.assertEqual(result["status"], "succeeded")
@@ -784,10 +816,232 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "process_alive",
                 "bridge_ready",
                 "reason",
+                "steam_registered_pid",
+                "steam_live_pids",
+                "remediation",
             },
         )
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["error_code"], readiness_code)
+
+    async def test_steam_session_stale_returns_typed_failure_before_launch(self) -> None:
+        policy = _policy()
+        runtime = _Runtime()
+        stale = steam_preflight.SteamSessionResult(
+            error_code=steam_preflight.STEAM_SESSION_STALE,
+            steam_registered_pid=4321,
+            steam_live_pids=(1, 2, 3, 4, 5, 6, 7, 8, 9),
+            remediation="restart Steam",
+        )
+        launch = AsyncMock()
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            new=launch,
+        ), patch.object(
+            dayz_test_tool, "evaluate_steam_session", return_value=stale
+        ):
+            result = await dayz_test_tool.execute_dayz_test_run(
+                runtime,
+                project="ExampleMod",
+                mode="client",
+                preflight=False,
+                run_id=RUN_ID,
+                extra_mods=["@DayZ_MCP"],
+            )
+
+        launch.assert_not_awaited()
+        self.assertEqual(result["status"], "failed")
+        self.assertIsNone(result["run_id"])
+        self.assertEqual(result["phase"], "validating")
+        self.assertEqual(result["artifacts_paths"], [])
+        self.assertEqual(result["error_code"], steam_preflight.STEAM_SESSION_STALE)
+        self.assertEqual(result["steam_registered_pid"], 4321)
+        self.assertEqual(result["steam_live_pids"], [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual(result["remediation"], "restart Steam")
+        self.assertEqual(
+            set(result),
+            {
+                "status",
+                "project",
+                "mode",
+                "run_id",
+                "phase",
+                "elapsed_s",
+                "artifacts_paths",
+                "error_code",
+                "cleanup_degraded",
+                "server_alive",
+                "client_alive",
+                "process_alive",
+                "bridge_ready",
+                "reason",
+                "steam_registered_pid",
+                "steam_live_pids",
+                "remediation",
+            },
+        )
+
+    async def test_steam_evaluator_exception_returns_typed_stale_envelope(self) -> None:
+        policy = _policy()
+        runtime = _Runtime()
+        launch = AsyncMock()
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            new=launch,
+        ), patch.object(
+            dayz_test_tool,
+            "evaluate_steam_session",
+            side_effect=RuntimeError("sonda P2-F"),
+        ):
+            result = await dayz_test_tool.execute_dayz_test_run(
+                runtime,
+                project="ExampleMod",
+                mode="client",
+                preflight=False,
+                run_id=RUN_ID,
+                extra_mods=["@DayZ_MCP"],
+            )
+
+        launch.assert_not_awaited()
+        self.assertEqual(result["status"], "failed")
+        self.assertIsNone(result["run_id"])
+        self.assertEqual(result["phase"], "validating")
+        self.assertEqual(result["artifacts_paths"], [])
+        self.assertEqual(result["error_code"], steam_preflight.STEAM_SESSION_STALE)
+        self.assertIsNone(result["steam_registered_pid"])
+        self.assertEqual(result["steam_live_pids"], [])
+        self.assertEqual(result["remediation"], steam_preflight.REMEDIATION)
+        self.assertEqual(
+            set(result),
+            {
+                "status",
+                "project",
+                "mode",
+                "run_id",
+                "phase",
+                "elapsed_s",
+                "artifacts_paths",
+                "error_code",
+                "cleanup_degraded",
+                "server_alive",
+                "client_alive",
+                "process_alive",
+                "bridge_ready",
+                "reason",
+                "steam_registered_pid",
+                "steam_live_pids",
+                "remediation",
+            },
+        )
+
+    async def test_steam_evaluator_keyboardinterrupt_propagates(self) -> None:
+        policy = _policy()
+        runtime = _Runtime()
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            new=AsyncMock(),
+        ), patch.object(
+            dayz_test_tool,
+            "evaluate_steam_session",
+            side_effect=KeyboardInterrupt,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                await dayz_test_tool.execute_dayz_test_run(
+                    runtime,
+                    project="ExampleMod",
+                    mode="client",
+                    preflight=False,
+                    run_id=RUN_ID,
+                    extra_mods=["@DayZ_MCP"],
+                )
+
+    async def test_steam_session_is_not_consulted_for_preflight_or_server(self) -> None:
+        policy = _policy()
+        calls: list[int] = []
+
+        def _stale_provider(*_args: object, **_kwargs: object) -> object:
+            calls.append(1)
+            return steam_preflight.SteamSessionResult(
+                error_code=steam_preflight.STEAM_SESSION_STALE,
+                steam_registered_pid=1,
+                steam_live_pids=(1,),
+                remediation="restart Steam",
+            )
+
+        async def launch(_raw_request: bytes, **kwargs: object) -> int:
+            parsed = json.loads(_raw_request.decode("utf-8"))
+            await kwargs["execution_started_cb"]()
+            kwargs["output_sink"](
+                "stdout",
+                _terminal(
+                    {
+                        "cleanup_degraded": False,
+                        "error_code": None,
+                        "exit_code": 0,
+                        "ok": True,
+                        "run_id": None if parsed.get("preflight") else RUN_ID,
+                    }
+                ),
+            )
+            return 0
+
+        # preflight=True with mode="client" requires a request run_id
+        # (client_requires_run_id) but then expected_run_id is set and the
+        # terminal of a preflight run has run_id=None, which
+        # _validate_terminal_context rejects (dayz_test_tool.py:527-530).
+        # mode="all" is in {client, all}, so it is still the case that WOULD
+        # consult Steam; preflight is what has to suppress it.
+        for label, arguments in (
+            ("preflight", {"mode": "all", "preflight": True}),
+            ("server", {"mode": "server", "preflight": False}),
+        ):
+            calls.clear()
+            runtime = _Runtime()
+            with self.subTest(label=label), patch.object(
+                dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+            ), patch.object(
+                dayz_test_tool.secure_launcher,
+                "load_verified_bundle",
+                return_value=_Bundle(_sealed(policy)),
+            ), patch.object(
+                dayz_test_tool.secure_launcher,
+                "execute_secure_launcher_request",
+                side_effect=launch,
+            ), patch.object(
+                dayz_test_tool, "evaluate_steam_session", side_effect=_stale_provider
+            ):
+                result = await dayz_test_tool.execute_dayz_test_run(
+                    runtime,
+                    project="ExampleMod",
+                    extra_mods=["@DayZ_MCP"],
+                    **arguments,
+                )
+                self.assertEqual(calls, [])
+                self.assertEqual(result["status"], "succeeded")
 
     async def test_run_fails_when_client_pid_is_already_dead(self) -> None:
         policy = _policy()

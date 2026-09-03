@@ -586,6 +586,47 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(ready["ready"], False)
         self.assertIn(ready["reason"], server_module.READY_REASONS)
 
+    async def test_bridge_status_publishes_frozen_tool_registry_overlay(self) -> None:
+        app, _runtime = self.build_started()
+        status = _content_json(await app.call_tool("bridge_status", {}))
+        for key in (
+            "tool_registry_fingerprint",
+            "tool_registry_captured_at",
+            "tool_registry_source_stale",
+            "tool_registry_remediation",
+        ):
+            self.assertIn(key, status)
+        self.assertEqual(status["tool_registry_remediation"], "reopen_mcp_client")
+        stale = status["tool_registry_source_stale"]
+        self.assertIn(stale, (None, "unknown"))
+        self.assertIsNot(stale, False)
+        with patch.object(server_module, "capture_registry_snapshot") as capture:
+            again = _content_json(await app.call_tool("bridge_status", {}))
+        capture.assert_not_called()
+        self.assertEqual(
+            again["tool_registry_fingerprint"], status["tool_registry_fingerprint"]
+        )
+        self.assertEqual(
+            again["tool_registry_captured_at"], status["tool_registry_captured_at"]
+        )
+
+    async def test_loopback_status_omits_tool_registry_overlay(self) -> None:
+        _app, runtime = self.build_started()
+        assert runtime.loopback is not None and runtime.loopback.httpd is not None
+        host, port = runtime.loopback.httpd.server_address
+        url = f"http://{host}:{port}/status?key={self.key}"
+        with urllib.request.urlopen(url, timeout=2.0) as response:
+            raw = json.loads(response.read().decode("utf-8"))
+        encoded = json.dumps(raw)
+        for key in (
+            "tool_registry_fingerprint",
+            "tool_registry_captured_at",
+            "tool_registry_source_stale",
+            "tool_registry_remediation",
+        ):
+            self.assertNotIn(key, raw)
+            self.assertNotIn(key, encoded)
+
     async def test_shutdown_reuses_port(self) -> None:
         _app, runtime = self.build_started()
         self.assertIsNotNone(runtime.loopback)
