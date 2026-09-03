@@ -19,7 +19,7 @@ from typing import Annotated, Any, Awaitable, Callable, Iterator, Literal
 
 from mcp.server.fastmcp import Context, FastMCP, Image
 from mcp.server.fastmcp.exceptions import ToolError
-from pydantic import Field, StrictInt
+from pydantic import Field, StrictBool, StrictInt
 
 import mcp_capture
 from dayz_mcp import (
@@ -4189,15 +4189,23 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def ui_tree(
         path: str = "",
         limit: int = 256,
+        # Not `str | None`: FastMCP would publish anyOf[string,null] and collapse
+        # explicit root=null into omit (global scope). `str = None` publishes
+        # type:string so Pydantic rejects the null before enqueue.
+        root: str = None,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str):
             raise ToolError(_bad_args("path", path, "be a string"))
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 512:
             raise ToolError(_bad_args("limit", limit, "be an int from 1 to 512"))
+        if root is not None and (not isinstance(root, str) or root == ""):
+            raise ToolError(_bad_args("root", root, "be a non-empty string"))
         args: dict[str, Any] = {"limit": int(limit)}
         if path != "":
             args["path"] = path
+        if root is not None:
+            args["root"] = root
         async with runtime.tool_lock:
             return await runtime.call_bridge("ui_tree", args, "client", _timeout(timeout_s))
 
@@ -4208,13 +4216,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def ui_set_text(
         path: str,
         text: str,
+        # Not `str | None`: FastMCP would publish anyOf[string,null] and collapse
+        # explicit root=null into omit (global scope). `str = None` publishes
+        # type:string so Pydantic rejects the null before enqueue.
+        root: str = None,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str) or path == "":
             raise ToolError(_bad_args("path", path, "be a non-empty string"))
         if not isinstance(text, str):
             raise ToolError(_bad_args("text", text, "be a string"))
-        args = {"path": path, "text": text}
+        if root is not None and (not isinstance(root, str) or root == ""):
+            raise ToolError(_bad_args("root", root, "be a non-empty string"))
+        args: dict[str, Any] = {"path": path, "text": text}
+        if root is not None:
+            args["root"] = root
         async with runtime.tool_lock:
             return await runtime.call_bridge("ui_set_text", args, "client", _timeout(timeout_s))
 
@@ -4225,13 +4241,32 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def ui_click(
         path: str,
         button: int = 0,
+        # Not `str | None`: FastMCP would publish anyOf[string,null] and collapse
+        # explicit root=null into omit (global scope). `str = None` publishes
+        # type:string so Pydantic rejects the null before enqueue.
+        root: str = None,
+        mode: str = "direct",
+        bubble: StrictBool = False,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str) or path == "":
             raise ToolError(_bad_args("path", path, "be a non-empty string"))
         if not isinstance(button, int) or isinstance(button, bool) or button < 0 or button > 2:
             raise ToolError(_bad_args("button", button, "be an int from 0 to 2"))
-        args = {"path": path, "button": int(button)}
+        if not isinstance(mode, str) or mode not in {"direct", "complete"}:
+            raise ToolError(_bad_args("mode", mode, "be one of 'direct' or 'complete'"))
+        if not isinstance(bubble, bool):
+            raise ToolError(_bad_args("bubble", bubble, "be a bool"))
+        if root is not None and (not isinstance(root, str) or root == ""):
+            raise ToolError(_bad_args("root", root, "be a non-empty string"))
+        args: dict[str, Any] = {
+            "path": path,
+            "button": int(button),
+            "mode": mode,
+            "bubble": bubble,
+        }
+        if root is not None:
+            args["root"] = root
         async with runtime.tool_lock:
             return await runtime.call_bridge("ui_click", args, "client", _timeout(timeout_s))
 
@@ -4284,11 +4319,19 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     ))
     async def ui_focus(
         path: str,
+        # Not `str | None`: FastMCP would publish anyOf[string,null] and collapse
+        # explicit root=null into omit (global scope). `str = None` publishes
+        # type:string so Pydantic rejects the null before enqueue.
+        root: str = None,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str) or path == "":
             raise ToolError(_bad_args("path", path, "be a non-empty string"))
-        args = {"path": path}
+        if root is not None and (not isinstance(root, str) or root == ""):
+            raise ToolError(_bad_args("root", root, "be a non-empty string"))
+        args: dict[str, Any] = {"path": path}
+        if root is not None:
+            args["root"] = root
         async with runtime.tool_lock:
             return await runtime.call_bridge(
                 "ui_focus", args, "client", _timeout(timeout_s)

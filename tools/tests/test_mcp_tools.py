@@ -888,8 +888,142 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("client", desc)
 
 
+class UiPublicSurfaceTest(unittest.IsolatedAsyncioTestCase):
+    """Public UI tools accept root; ui_click also accepts mode and bubble."""
+
+    _UI_TOOLS = ("ui_tree", "ui_set_text", "ui_click", "ui_focus")
+
+    def _app(self):
+        return build_app(ServerConfig(key="k", port=0, log_sink=lambda _message: None))
+
+    async def _call(self, tool: str, arguments: dict[str, Any]):
+        app, runtime = self._app()
+        seen: list[dict[str, Any]] = []
+
+        async def recorder(cmd, bridge_args, role, timeout):
+            seen.append(dict(bridge_args))
+            return {"ok": 1}
+
+        with patch.object(runtime, "call_bridge", side_effect=recorder):
+            try:
+                await app.call_tool(tool, arguments)
+                return (seen[0] if seen else None), None
+            except Exception as exc:
+                return (seen[0] if seen else None), exc
+
+    def _base(self, tool: str) -> dict[str, Any]:
+        args: dict[str, Any] = {"path": "Btn"}
+        if tool == "ui_set_text":
+            args["text"] = "x"
+        return args
+
+    async def test_registered_schema_declares_root_on_all_four_ui_tools(self) -> None:
+        app, _runtime = self._app()
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        for name in self._UI_TOOLS:
+            with self.subTest(name):
+                props = (tools[name].inputSchema or {}).get("properties", {})
+                self.assertIn("root", props, props)
+
+    async def test_registered_schema_declares_mode_and_bubble_on_ui_click(self) -> None:
+        app, _runtime = self._app()
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        props = (tools["ui_click"].inputSchema or {}).get("properties", {})
+        self.assertIn("mode", props, props)
+        self.assertIn("bubble", props, props)
+
+    async def test_root_reaches_the_bridge_when_the_caller_sends_it(self) -> None:
+        for tool in self._UI_TOOLS:
+            with self.subTest(tool):
+                sent, err = await self._call(tool, {**self._base(tool), "root": "MiRoot"})
+                self.assertIsNone(err, err)
+                self.assertIsNotNone(sent)
+                self.assertEqual(sent.get("root"), "MiRoot")
+
+    async def test_root_does_not_travel_when_omitted(self) -> None:
+        for tool in self._UI_TOOLS:
+            with self.subTest(tool):
+                sent, err = await self._call(tool, self._base(tool))
+                self.assertIsNone(err, err)
+                self.assertIsNotNone(sent)
+                self.assertNotIn("root", sent)
+
+    async def test_ui_click_always_sends_default_mode_and_bubble(self) -> None:
+        sent, err = await self._call("ui_click", {"path": "Btn"})
+        self.assertIsNone(err, err)
+        self.assertIsNotNone(sent)
+        self.assertEqual(sent.get("mode"), "direct")
+        self.assertIs(sent.get("bubble"), False)
+
+    async def test_ui_click_forwards_complete_mode_and_true_bubble(self) -> None:
+        sent, err = await self._call(
+            "ui_click", {"path": "Btn", "mode": "complete", "bubble": True}
+        )
+        self.assertIsNone(err, err)
+        self.assertIsNotNone(sent)
+        self.assertEqual(sent.get("mode"), "complete")
+        self.assertIs(sent.get("bubble"), True)
+
+    async def test_fail_closed_rejects_before_enqueue(self) -> None:
+        cases = (
+            ("ui_click", {"path": "Btn", "mode": "otro"}),
+            ("ui_click", {"path": "Btn", "mode": 3}),
+            ("ui_click", {"path": "Btn", "bubble": "true"}),
+            ("ui_click", {"path": "Btn", "bubble": 1}),
+            ("ui_click", {"path": "Btn", "root": ""}),
+            ("ui_focus", {"path": "Btn", "root": 7}),
+            ("ui_tree", {"root": ""}),
+            ("ui_set_text", {"path": "Btn", "text": "x", "root": ""}),
+        )
+        for tool, arguments in cases:
+            with self.subTest(tool=tool, arguments=arguments):
+                sent, err = await self._call(tool, arguments)
+                self.assertIsNone(sent)
+                self.assertIsNotNone(err)
+                _assert_tool_error(self, err)
+
+    async def test_ui_tree_rejects_explicit_null_root_before_enqueue(self) -> None:
+        sent, err = await self._call("ui_tree", {**self._base("ui_tree"), "root": None})
+        self.assertIsNone(sent)
+        self.assertIsNotNone(err)
+        _assert_tool_error(self, err)
+
+    async def test_ui_set_text_rejects_explicit_null_root_before_enqueue(self) -> None:
+        sent, err = await self._call(
+            "ui_set_text", {**self._base("ui_set_text"), "root": None}
+        )
+        self.assertIsNone(sent)
+        self.assertIsNotNone(err)
+        _assert_tool_error(self, err)
+
+    async def test_ui_click_rejects_explicit_null_root_before_enqueue(self) -> None:
+        sent, err = await self._call("ui_click", {**self._base("ui_click"), "root": None})
+        self.assertIsNone(sent)
+        self.assertIsNotNone(err)
+        _assert_tool_error(self, err)
+
+    async def test_ui_focus_rejects_explicit_null_root_before_enqueue(self) -> None:
+        sent, err = await self._call("ui_focus", {**self._base("ui_focus"), "root": None})
+        self.assertIsNone(sent)
+        self.assertIsNotNone(err)
+        _assert_tool_error(self, err)
+
+    async def test_existing_path_and_button_guards_still_reject(self) -> None:
+        cases = (
+            ("ui_click", {"path": ""}),
+            ("ui_click", {"path": "Btn", "button": 9}),
+        )
+        for tool, arguments in cases:
+            with self.subTest(arguments=arguments):
+                sent, err = await self._call(tool, arguments)
+                self.assertIsNone(sent)
+                self.assertIsNotNone(err)
+                _assert_tool_error(self, err)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 # --- M22: the announced census against the tools the app registers ----------
