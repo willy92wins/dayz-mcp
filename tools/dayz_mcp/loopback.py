@@ -364,7 +364,15 @@ def _one_of(*accepted: object) -> _FieldValidator:
     accepted_values = frozenset(accepted)
 
     def validate(value: object) -> bool:
-        return value in accepted_values
+        try:
+            return value in accepted_values
+        except TypeError:
+            # A decoded JSON array or object is unhashable, and membership in a
+            # frozenset raises instead of answering. An enum validator has to be
+            # total over everything json.loads can produce: an unhashable value
+            # is simply not one of the accepted ones. Letting the TypeError
+            # escape turns a bad_args into an unhandled exception.
+            return False
 
     return validate
 
@@ -635,29 +643,35 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     ),
     "ui_tree": _command_schema(
         _schema_variant(
-            optional=("path", "limit"),
+            optional=("path", "limit", "root"),
             validators={
                 "path": _is_string,
                 "limit": _integer_in_range(minimum=1, maximum=512),
+                "root": _is_non_empty_string,
             },
         )
     ),
     "ui_set_text": _command_schema(
         _schema_variant(
             required=("path", "text"),
+            optional=("root",),
             validators={
                 "path": _is_non_empty_string,
                 "text": _is_string,
+                "root": _is_non_empty_string,
             },
         )
     ),
     "ui_click": _command_schema(
         _schema_variant(
             required=("path",),
-            optional=("button",),
+            optional=("button", "mode", "bubble", "root"),
             validators={
                 "path": _is_non_empty_string,
                 "button": _integer_in_range(minimum=0, maximum=2),
+                "mode": _one_of("direct", "complete"),
+                "bubble": _is_strict_bool,
+                "root": _is_non_empty_string,
             },
         )
     ),
@@ -694,7 +708,11 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "ui_focus": _command_schema(
         _schema_variant(
             required=("path",),
-            validators={"path": _is_non_empty_string},
+            optional=("root",),
+            validators={
+                "path": _is_non_empty_string,
+                "root": _is_non_empty_string,
+            },
         )
     ),
     "ui_dialog": _command_schema(delegated=_validate_ui_dialog_args),

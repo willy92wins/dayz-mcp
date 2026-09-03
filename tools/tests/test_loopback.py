@@ -1671,5 +1671,97 @@ class PollCapabilityIngressTest(unittest.TestCase):
                 self.assertLessEqual(len(names), loopback.POLL_CAPS_MAX_NAMES)
 
 
+class UiIngressSchemaTest(unittest.TestCase):
+    """Approved UI ingress contract. Cases are written out, not read from the table."""
+
+    def test_accepts_contracted_payloads(self) -> None:
+        cases = (
+            ("ui_tree", {}),
+            ("ui_tree", {"path": "a/b"}),
+            ("ui_tree", {"path": "a/b", "limit": 8}),
+            ("ui_tree", {"root": "MyMenu"}),
+            ("ui_tree", {"root": "MyMenu", "path": "a/b"}),
+            ("ui_set_text", {"path": "a/b", "text": "x"}),
+            ("ui_set_text", {"path": "a/b", "text": ""}),
+            ("ui_set_text", {"path": "a/b", "text": "x", "root": "MyMenu"}),
+            ("ui_click", {"path": "a/b"}),
+            ("ui_click", {"path": "a/b", "button": 1}),
+            ("ui_click", {"path": "a/b", "mode": "direct"}),
+            ("ui_click", {"path": "a/b", "mode": "complete"}),
+            ("ui_click", {"path": "a/b", "bubble": True}),
+            ("ui_click", {"path": "a/b", "bubble": False}),
+            ("ui_click", {"path": "a/b", "root": "MyMenu"}),
+            (
+                "ui_click",
+                {
+                    "path": "a/b",
+                    "root": "MyMenu",
+                    "mode": "direct",
+                    "bubble": True,
+                    "button": 0,
+                },
+            ),
+            ("ui_focus", {"path": "a/b"}),
+            ("ui_focus", {"root": "MyMenu", "path": "a/b"}),
+        )
+        for command, args in cases:
+            with self.subTest(command=command, args=args):
+                self.assertEqual(
+                    loopback.validate_command_args(command, args),
+                    (True, None),
+                )
+
+    def test_rejects_uncontracted_fields_and_values(self) -> None:
+        cases = (
+            ("ui_click", {"path": "a/b", "wiggle": 1}),
+            ("ui_click", {"path": "a/b", "mode": "sideways"}),
+            ("ui_click", {"path": "a/b", "mode": []}),
+            ("ui_click", {"path": "a/b", "mode": {}}),
+            ("ui_click", {"path": "a/b", "mode": ""}),
+            ("ui_click", {"path": "a/b", "bubble": "true"}),
+            ("ui_click", {"path": "a/b", "bubble": 1}),
+            ("ui_click", {}),
+            ("ui_click", {"path": "a/b", "root": ""}),
+            ("ui_click", {"path": "a/b", "root": 123}),
+            ("ui_set_text", {"path": "a/b", "text": "x", "mode": "direct"}),
+            ("ui_set_text", {"path": "a/b", "text": "x", "bubble": True}),
+            ("ui_tree", {"mode": "direct"}),
+            ("ui_focus", {"path": "a/b", "bubble": True}),
+            ("ui_focus", {"path": "a/b", "button": 1}),
+            ("ui_tree", {"root": 5}),
+            ("ui_set_text", {"path": "a/b"}),
+            ("ui_tree", {"root": ""}),
+            ("ui_tree", {"bubble": True}),
+            ("ui_set_text", {"path": "a/b", "text": "x", "root": ""}),
+            ("ui_focus", {"path": "a/b", "mode": "direct"}),
+            ("ui_focus", {"path": "a/b", "root": ""}),
+        )
+        for command, args in cases:
+            with self.subTest(command=command, args=args):
+                self.assertEqual(
+                    loopback.validate_command_args(command, args),
+                    (False, "bad_args"),
+                )
+
+
+class OneOfIsTotalOverJsonTest(unittest.TestCase):
+    """_one_of feeds several commands. An unhashable value must answer, not raise."""
+
+    def test_unhashable_enum_values_are_bad_args_everywhere(self) -> None:
+        cases = (
+            ("ui_click", {"path": "a/b", "mode": []}),
+            ("ui_click", {"path": "a/b", "mode": {}}),
+            # Pre-existing before this lote: measured raising on the live tree.
+            ("ui_reload_layout", {"mode": []}),
+            ("ui_reload_layout", {"mode": {}}),
+        )
+        for command, args in cases:
+            with self.subTest(command=command, args=args):
+                self.assertEqual(
+                    loopback.validate_command_args(command, args),
+                    (False, "bad_args"),
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
