@@ -216,6 +216,54 @@ class DayzTestToolRequestTest(unittest.TestCase):
                 mode="client",
             )
 
+    def test_build_run_request_names_run_id_matrix_causes(self) -> None:
+        sealed = _sealed(_policy())
+        bad_uuid = "not-a-uuid"
+        rows = (
+            (
+                {"mode": "client", "run_id": bad_uuid},
+                "bad_run_id",
+            ),
+            (
+                {"mode": "client", "run_id": None},
+                dayz_test_request._CLIENT_REQUIRES_RUN_ID,
+            ),
+            (
+                {"mode": "server", "run_id": RUN_ID},
+                dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
+            ),
+            (
+                {"mode": "all", "run_id": RUN_ID},
+                dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
+            ),
+        )
+        for arguments, token in rows:
+            for preflight in (False, True):
+                with self.subTest(arguments=arguments, preflight=preflight):
+                    with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                        dayz_test_tool.build_run_request(
+                            sealed,
+                            project="ExampleMod",
+                            extra_mods=["@DayZ_MCP"],
+                            preflight=preflight,
+                            **arguments,
+                        )
+                    self.assertIn(token, caught.exception.code)
+                    self.assertNotEqual(caught.exception.code, "bad_dayz_test_request")
+
+        with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+            dayz_test_tool.build_run_request(
+                sealed,
+                project="ExampleMod",
+                mode="server",
+                run_id=bad_uuid,
+                extra_mods=["@DayZ_MCP"],
+            )
+        self.assertEqual(caught.exception.code, "bad_run_id")
+        self.assertNotIn(
+            dayz_test_request._SERVER_ALL_FORBID_RUN_ID, caught.exception.code
+        )
+
     def test_build_run_request_names_invalid_mode_and_expected_values(self) -> None:
         with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
             dayz_test_tool.build_run_request(
@@ -486,6 +534,16 @@ class DayzTestTerminalTest(unittest.TestCase):
                 success_with_run,
                 preflight=False,
                 expected_run_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            )
+        # preflight client reattach: worker echoes the requested run_id.
+        dayz_test_tool._validate_terminal_context(
+            success_with_run, preflight=True, expected_run_id=RUN_ID
+        )
+        with self.assertRaisesRegex(
+            dayz_test_tool.DayzTestToolError, "terminal_invalid"
+        ):
+            dayz_test_tool._validate_terminal_context(
+                success_without_run, preflight=True, expected_run_id=RUN_ID
             )
 
     def test_stop_artifact_must_be_derived_from_sealed_project(self) -> None:
@@ -1042,6 +1100,57 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(calls, [])
                 self.assertEqual(result["status"], "succeeded")
+
+    async def test_preflight_client_reattach_preserves_requested_run_id(self) -> None:
+        policy = _policy()
+        runtime = _Runtime()
+
+        async def launch(raw_request: bytes, **kwargs: object) -> int:
+            parsed = json.loads(raw_request.decode("utf-8"))
+            self.assertEqual(parsed["mode"], "client")
+            self.assertEqual(parsed["run_id"], RUN_ID)
+            self.assertTrue(parsed["preflight"])
+            await kwargs["execution_started_cb"]()
+            kwargs["output_sink"](
+                "stdout",
+                _terminal(
+                    {
+                        "cleanup_degraded": False,
+                        "error_code": None,
+                        "exit_code": 0,
+                        "ok": True,
+                        "run_id": parsed["run_id"],
+                    }
+                ),
+            )
+            return 0
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch,
+        ), patch.object(
+            dayz_test_tool, "evaluate_steam_session"
+        ) as steam:
+            result = await dayz_test_tool.execute_dayz_test_run(
+                runtime,
+                project="ExampleMod",
+                mode="client",
+                preflight=True,
+                run_id=RUN_ID,
+                extra_mods=["@DayZ_MCP"],
+            )
+
+        steam.assert_not_called()
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["run_id"], RUN_ID)
+        self.assertIsNone(result["error_code"])
 
     async def test_run_fails_when_client_pid_is_already_dead(self) -> None:
         policy = _policy()

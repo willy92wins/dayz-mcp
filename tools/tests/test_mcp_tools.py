@@ -721,6 +721,172 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             # and never carry a host path.
             self.assertTrue(code.isidentifier(), token)
 
+    def test_dayz_test_run_id_matrix_tokens_are_mapped(self) -> None:
+        from dayz_mcp import dayz_test_request
+
+        mapping = server_module._DAYZ_TEST_VALUE_ERROR_CODES
+        self.assertEqual(mapping[dayz_test_request._INVALID_RUN_ID], "bad_run_id")
+        for token in (
+            dayz_test_request._INVALID_RUN_ID,
+            dayz_test_request._CLIENT_REQUIRES_RUN_ID,
+            dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, mapping)
+                self.assertTrue(mapping[token].isidentifier(), token)
+
+    async def test_dayz_test_run_names_run_id_matrix_causes_on_the_wire(self) -> None:
+        from dayz_mcp import dayz_test_request, dayz_test_tool
+        from tests.test_client_mode import _fixture_client_runtime
+        from tests.test_dayz_test_tool import _Bundle, _Opened, _policy, _sealed
+
+        config = ServerConfig(
+            mode="client",
+            key=self.key,
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _message: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        with patch.object(server_module, "ClientRuntime", return_value=runtime):
+            app, _built = build_app(config)
+
+        sealed = _sealed(_policy())
+        bad_uuid = "not-a-uuid"
+        rows = (
+            (
+                {"mode": "client", "run_id": bad_uuid},
+                "bad_run_id",
+            ),
+            (
+                {"mode": "client"},
+                dayz_test_request._CLIENT_REQUIRES_RUN_ID,
+            ),
+            (
+                {"mode": "server", "run_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+                dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
+            ),
+            (
+                {"mode": "all", "run_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+                dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
+            ),
+        )
+        for arguments, token in rows:
+            for preflight in (False, True):
+                args = {
+                    "project": "ExampleMod",
+                    "extra_mods": ["@DayZ_MCP"],
+                    "preflight": preflight,
+                    **arguments,
+                }
+                with self.subTest(args=args):
+                    with patch.object(
+                        dayz_test_tool, "_require_idle_session", new=AsyncMock()
+                    ), patch.object(
+                        dayz_test_tool,
+                        "open_approved_launcher",
+                        return_value=_Opened(),
+                    ), patch.object(
+                        dayz_test_tool.secure_launcher,
+                        "load_verified_bundle",
+                        return_value=_Bundle(sealed),
+                    ):
+                        with self.assertRaises(Exception) as err:
+                            await app.call_tool("dayz_test_run", args)
+                    _assert_tool_error(self, err.exception)
+                    message = str(err.exception)
+                    self.assertIn(token, message)
+                    self.assertNotIn("dayz_test_failed", message)
+
+    async def test_dayz_test_run_preflight_client_reattach_keeps_run_id(self) -> None:
+        from dayz_mcp import dayz_test_tool
+        from tests.test_client_mode import _fixture_client_runtime
+        from tests.test_dayz_test_tool import _Bundle, _Opened, _policy, _sealed
+
+        run_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        config = ServerConfig(
+            mode="client",
+            key=self.key,
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _message: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        with patch.object(server_module, "ClientRuntime", return_value=runtime):
+            app, _built = build_app(config)
+
+        sealed = _sealed(_policy())
+
+        async def launch(_raw: bytes, **kwargs: object) -> int:
+            await kwargs["execution_started_cb"]()
+            kwargs["output_sink"](
+                "stdout",
+                json.dumps(
+                    {
+                        "cleanup_degraded": False,
+                        "error_code": None,
+                        "exit_code": 0,
+                        "ok": True,
+                        "run_id": run_id,
+                    },
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
+            )
+            return 0
+
+        with patch.object(
+            dayz_test_tool, "_require_idle_session", new=AsyncMock()
+        ), patch.object(
+            runtime, "lifecycle_status", new=AsyncMock(return_value={"runs": []})
+        ), patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(sealed),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch,
+        ):
+            raw = await app.call_tool(
+                "dayz_test_run",
+                {
+                    "project": "ExampleMod",
+                    "mode": "client",
+                    "preflight": True,
+                    "run_id": run_id,
+                    "extra_mods": ["@DayZ_MCP"],
+                },
+            )
+        payload = _content_json(raw)
+        self.assertEqual(payload.get("status"), "succeeded")
+        self.assertEqual(payload.get("run_id"), run_id)
+        self.assertNotEqual(payload.get("error_code"), "terminal_invalid")
+
+    async def test_dayz_test_run_description_documents_reattach_matrix(self) -> None:
+        from tests.test_client_mode import _fixture_client_runtime
+
+        config = ServerConfig(
+            mode="client",
+            key=self.key,
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _message: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        with patch.object(server_module, "ClientRuntime", return_value=runtime):
+            app, _built = build_app(config)
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        desc = (tools["dayz_test_run"].description or "").lower()
+        self.assertIn("reattach", desc)
+        self.assertIn("preflight", desc)
+        self.assertIn("run_id", desc)
+        self.assertIn("client", desc)
+
 
 if __name__ == "__main__":
     unittest.main()

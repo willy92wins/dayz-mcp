@@ -190,6 +190,9 @@ _DAYZ_TEST_VALUE_ERROR_CODES = {
     "invalid_dayz_test_path_authority": "bad_mod_authority",
     "invalid_dayz_test_policy": "launcher_policy_invalid",
     "invalid_dayz_test_request": "bad_dayz_test_request",
+    "invalid_run_id": "bad_run_id",
+    "client_requires_run_id": "client_requires_run_id",
+    "server_all_forbid_run_id": "server_all_forbid_run_id",
     # The run-manifest side of the same path. None of these were mapped, so a
     # launch that got past the parse failed as a bare "dayz_test_failed:ValueError"
     # with nothing to search for. Reported 2026-08-21 by a session that spent the
@@ -2880,6 +2883,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Queue and run an approved DayZ test project; lease ownership and "
             "heartbeat remain internal to the tool. Release any held session "
             "lease before calling. mode is server|all|client. "
+            "Reattach sequence: server -> run_id -> client(run_id). "
+            "client requires run_id; server|all forbid run_id. "
+            "preflight does not relax that matrix. "
             "wait_for_box_s>0 waits "
             "until session_status.box is free (FIFO, no tool_lock while "
             f"sleeping). 0 is the immediate reject. wait_for_box_s must be <= "

@@ -175,7 +175,15 @@ def build_run_request(
         parsed = dayz_test_request.parse_dayz_test_request(
             raw, policies=_semantic_policies(sealed_policies)
         )
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        token = str(exc)
+        if token == dayz_test_request._INVALID_RUN_ID:
+            _fail("bad_run_id")
+        if token in {
+            dayz_test_request._CLIENT_REQUIRES_RUN_ID,
+            dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
+        }:
+            _fail(f"bad_dayz_test_request:{token}")
         _fail("bad_dayz_test_request")
     effective_mods = [selected.mod, *(public_extra or [])]
     if not kill and not any(
@@ -529,9 +537,11 @@ def _validate_terminal_context(
 ) -> None:
     if not terminal.ok:
         return
+    if expected_run_id is not None:
+        if terminal.run_id != expected_run_id:
+            _fail("terminal_invalid")
+        return
     if preflight != (terminal.run_id is None):
-        _fail("terminal_invalid")
-    if expected_run_id is not None and terminal.run_id != expected_run_id:
         _fail("terminal_invalid")
 
 
