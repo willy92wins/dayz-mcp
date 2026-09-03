@@ -55,6 +55,7 @@ class _Runtime(Protocol):
 
     async def lifecycle_status(self) -> dict[str, object]: ...
     async def reconcile_idle_session(self) -> dict[str, object]: ...
+    async def bridge_status_payload(self) -> dict[str, object]: ...
 
 
 _ProgressCallback = Callable[[str, str | None], Awaitable[None]]
@@ -433,6 +434,55 @@ def _liveness_from_status(
     return server_alive, client_alive
 
 
+@dataclass(frozen=True)
+class LaunchReadinessProjection:
+    """The single readiness contract: two independent axes and a reason.
+
+    The incident behind this is a launch reported ready because a PID existed.
+    So the axes never feed each other: ``process_alive`` comes only from
+    ``_liveness_from_status``, and ``bridge_ready``/``reason`` only from the
+    validated ``ready`` object of a bridge snapshot. A process that is alive but
+    not polling is alive and not ready, and that has to be sayable.
+    """
+
+    process_alive: bool | None
+    bridge_ready: bool | None
+    reason: str | None
+
+
+# Deliberately NOT an allowlist. compute_bridge_ready returns the value of
+# _FENCE_BLOCK_READY for a blocked binding (server.py:373-376) on top of its
+# seven literals, so the reason space is open and any closed set here would turn
+# a real, informative reason into "unknown" -- the exact silence this contract
+# exists to prevent. What is checked is the SHAPE: a non-empty string.
+_NULL_READINESS = LaunchReadinessProjection(None, None, None)
+
+
+def _project_launch_readiness(
+    client_alive: bool | None, bridge_status_payload: object
+) -> LaunchReadinessProjection:
+    """Project a snapshot already read elsewhere. Pure, and diagnostic only.
+
+    It takes no runtime and no broker on purpose: nothing here -- not a live
+    PID, not a UDP-ready gate -- authorises ownership, adopt, stop or reap.
+
+    A snapshot that is missing, malformed, or whose ``ready`` object does not
+    typecheck leaves the bridge axis null. Promoting it from the PID would be
+    the very defect this contract exists to make visible.
+    """
+
+    if not isinstance(bridge_status_payload, dict):
+        return LaunchReadinessProjection(client_alive, None, None)
+    ready = bridge_status_payload.get("ready")
+    if not isinstance(ready, dict):
+        return LaunchReadinessProjection(client_alive, None, None)
+    flag = ready.get("ready")
+    reason = ready.get("reason")
+    if not isinstance(flag, bool) or not isinstance(reason, str) or not reason:
+        return LaunchReadinessProjection(client_alive, None, None)
+    return LaunchReadinessProjection(client_alive, flag, reason)
+
+
 def _compact_result(
     *,
     terminal: WorkerTerminal,
@@ -442,7 +492,9 @@ def _compact_result(
     artifacts_paths: list[str],
     server_alive: bool | None = None,
     client_alive: bool | None = None,
+    readiness: LaunchReadinessProjection | None = None,
 ) -> dict[str, object]:
+    projection = readiness or _NULL_READINESS
     return {
         "status": "succeeded" if terminal.ok else "failed",
         "project": project,
@@ -455,6 +507,9 @@ def _compact_result(
         "cleanup_degraded": terminal.cleanup_degraded,
         "server_alive": server_alive,
         "client_alive": client_alive,
+        "process_alive": projection.process_alive,
+        "bridge_ready": projection.bridge_ready,
+        "reason": projection.reason,
     }
 
 
@@ -566,12 +621,21 @@ async def _execute_request(
                 terminal = replace(terminal, error_code=reason)
     server_alive: bool | None = None
     client_alive: bool | None = None
+    readiness: LaunchReadinessProjection | None = None
     if terminal.ok and not preflight and terminal.run_id:
         try:
             status = await runtime.lifecycle_status()
         except Exception:
             status = None
         server_alive, client_alive = _liveness_from_status(status, terminal.run_id)
+        if public_mode in {"client", "all"}:
+            try:
+                snapshot = await runtime.bridge_status_payload()
+            except Exception:
+                # A snapshot we could not read is not a bridge that is not
+                # ready; it is no answer, and it says so.
+                snapshot = None
+            readiness = _project_launch_readiness(client_alive, snapshot)
         if public_mode in {"all", "offline"} and client_alive is False:
             terminal = replace(
                 terminal,
@@ -587,6 +651,7 @@ async def _execute_request(
         artifacts_paths=artifacts_paths,
         server_alive=server_alive,
         client_alive=client_alive,
+        readiness=readiness,
     )
 
 

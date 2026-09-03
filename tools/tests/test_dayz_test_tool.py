@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import asyncio
+import inspect
 import os
+import re
 import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from dayz_mcp import dayz_test_request, dayz_test_worker
 from dayz_mcp import dayz_test_tool
+from dayz_mcp import server
 from dayz_mcp.control_client import ControlClientError
 
 
@@ -521,6 +524,17 @@ class _Runtime:
         self.lifecycle = lifecycle or {"runs": []}
         self.lifecycle_calls = 0
         self.reconcile_calls = 0
+        # M19: the bridge snapshot the readiness projection reads. Counted so a
+        # test can say how many times it was consulted, and on which rows.
+        self.bridge_payload: object = {"ready": {"ready": True, "reason": "ready"}}
+        self.bridge_calls = 0
+        self.bridge_raises = False
+
+    async def bridge_status_payload(self) -> dict[str, object]:
+        self.bridge_calls += 1
+        if self.bridge_raises:
+            raise RuntimeError("snapshot unavailable")
+        return self.bridge_payload  # type: ignore[return-value]
 
     async def lifecycle_status(self) -> dict[str, object]:
         self.lifecycle_calls += 1
@@ -630,11 +644,23 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "cleanup_degraded",
                 "server_alive",
                 "client_alive",
+                # M19: the readiness triple is always present, null included. A
+                # key that appears only on some rows is a key no consumer can
+                # branch on.
+                "process_alive",
+                "bridge_ready",
+                "reason",
             },
         )
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["phase"], "completed")
         self.assertEqual(result["run_id"], RUN_ID)
+        # M19 call discipline: mode=all, not preflight, terminal ok -> the
+        # bridge snapshot is consulted exactly once and the triple is filled
+        # from it, never from the PID.
+        self.assertEqual(runtime.bridge_calls, 1)
+        self.assertIs(result["bridge_ready"], True)
+        self.assertEqual(result["reason"], "ready")
         self.assertEqual(
             result["artifacts_paths"],
             [
@@ -643,7 +669,61 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_typed_readiness_failure_uses_existing_nine_key_result(self) -> None:
+    async def test_server_mode_never_consults_the_bridge_snapshot(self) -> None:
+        """Zero snapshot reads outside client|all.
+
+        The ficha allows exactly one read for a successful non-preflight
+        client|all and zero anywhere else. Without this case a build that asks
+        on every row stays green, and then the triple no longer means "the
+        client's bridge" -- it means whatever the daemon happened to answer.
+        Found by a mutant that widened the predicate to every row and survived.
+        """
+
+        policy = _policy()
+        opened = _Opened()
+        bundle = _Bundle(_sealed(policy))
+        runtime = _Runtime()
+
+        async def launch(raw_request: bytes, **kwargs: object) -> int:
+            await kwargs["execution_started_cb"]()
+            kwargs["output_sink"](
+                "stdout",
+                _terminal(
+                    {
+                        "cleanup_degraded": False,
+                        "error_code": None,
+                        "exit_code": 0,
+                        "ok": True,
+                        "run_id": RUN_ID,
+                    }
+                ),
+            )
+            return 0
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=opened
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=bundle,
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch,
+        ):
+            result = await dayz_test_tool.execute_dayz_test_run(
+                runtime,
+                project="ExampleMod",
+                mode="server",
+                extra_mods=["@DayZ_MCP"],
+            )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(runtime.bridge_calls, 0)
+        self.assertIsNone(result["bridge_ready"])
+        self.assertIsNone(result["reason"])
+
+    async def test_typed_readiness_failure_uses_the_same_envelope(self) -> None:
         policy = _policy()
         runtime = _Runtime()
         readiness_code = "readiness_udp_foreign_owner"
@@ -698,6 +778,12 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "cleanup_degraded",
                 "server_alive",
                 "client_alive",
+                # M19: the readiness triple is always present, null included. A
+                # key that appears only on some rows is a key no consumer can
+                # branch on.
+                "process_alive",
+                "bridge_ready",
+                "reason",
             },
         )
         self.assertEqual(result["status"], "failed")
@@ -1212,3 +1298,116 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- M19: the single readiness contract (ficha 21/a396 point 5) -------------
+#
+# The incident this comes from is a launch called ready because a PID existed.
+# So the contract has two axes that never feed each other, and a third field
+# that says WHY the bridge axis holds what it holds. The table below is written
+# out rather than generated: deriving the expectations from the projection would
+# make it agree with itself.
+#
+# label, client_alive, bridge snapshot, expected (process_alive, bridge_ready, reason)
+_PROJECTION_CASES = (
+    (
+        "alive and polling",
+        True,
+        {"ready": {"ready": True, "reason": "ready"}},
+        (True, True, "ready"),
+    ),
+    (
+        "alive but not polling",
+        True,
+        {"ready": {"ready": False, "reason": "client_not_polling"}},
+        (True, False, "client_not_polling"),
+    ),
+    (
+        # The two axes have to be able to disagree, or one of them is decorative.
+        "process gone, snapshot still says ready",
+        False,
+        {"ready": {"ready": True, "reason": "ready"}},
+        (False, True, "ready"),
+    ),
+    ("no snapshot at all", True, None, (True, None, None)),
+    ("snapshot is not a mapping", True, ["ready"], (True, None, None)),
+    ("ready object is not a mapping", True, {"ready": "yes"}, (True, None, None)),
+    (
+        # An unfamiliar reason is transported, not swallowed: the reason space
+        # is the server's to grow, and dropping one would report "unknown" for
+        # an answer that exists.
+        "reason this module has never seen",
+        True,
+        {"ready": {"ready": True, "reason": "some_new_reason"}},
+        (True, True, "some_new_reason"),
+    ),
+    (
+        "reason present but empty",
+        True,
+        {"ready": {"ready": True, "reason": ""}},
+        (True, None, None),
+    ),
+    (
+        "flag is not a boolean",
+        True,
+        {"ready": {"ready": 1, "reason": "ready"}},
+        (True, None, None),
+    ),
+    ("liveness unknown too", None, None, (None, None, None)),
+)
+
+
+class LaunchReadinessProjectionTest(unittest.TestCase):
+    def test_projection_matrix(self) -> None:
+        for label, alive, snapshot, expected in _PROJECTION_CASES:
+            with self.subTest(label):
+                projection = dayz_test_tool._project_launch_readiness(alive, snapshot)
+                self.assertEqual(
+                    (
+                        projection.process_alive,
+                        projection.bridge_ready,
+                        projection.reason,
+                    ),
+                    expected,
+                )
+
+    def test_the_bridge_axis_is_never_promoted_from_the_process_axis(self) -> None:
+        # The whole point: a live process with no readable snapshot stays
+        # unknown on the bridge axis. If this ever returns True, the defect the
+        # contract exists to expose is back.
+        projection = dayz_test_tool._project_launch_readiness(True, None)
+        self.assertIs(projection.process_alive, True)
+        self.assertIsNone(projection.bridge_ready)
+        self.assertIsNone(projection.reason)
+
+    def test_every_reason_the_server_can_emit_survives_the_projection(self) -> None:
+        # Derived from the server, not from prose. The first version of this
+        # contract whitelisted six reasons taken from the tool description; the
+        # server also emits "legacy_unbound" AND every value of
+        # _FENCE_BLOCK_READY, so the whitelist would have reported "unknown" for
+        # real answers. The reason space is open: what must hold is that nothing
+        # the server can say gets dropped on the way through.
+        source = inspect.getsource(server.compute_bridge_ready)
+        emitted = set(re.findall(r'"reason":\s*"([a-z_]+)"', source))
+        emitted |= {
+            value
+            for value in server._FENCE_BLOCK_READY.values()
+            if isinstance(value, str) and value
+        }
+        self.assertGreater(len(emitted), 6, "no se leyo el espacio real de razones")
+        for reason in sorted(emitted):
+            with self.subTest(reason):
+                projection = dayz_test_tool._project_launch_readiness(
+                    True, {"ready": {"ready": False, "reason": reason}}
+                )
+                self.assertIs(projection.bridge_ready, False)
+                self.assertEqual(projection.reason, reason)
+
+    def test_a_reason_that_is_not_a_usable_string_is_no_answer(self) -> None:
+        for bad in (None, "", 7, ["ready"], {}):
+            with self.subTest(repr(bad)):
+                projection = dayz_test_tool._project_launch_readiness(
+                    True, {"ready": {"ready": False, "reason": bad}}
+                )
+                self.assertIsNone(projection.bridge_ready)
+                self.assertIsNone(projection.reason)
