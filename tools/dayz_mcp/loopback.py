@@ -260,6 +260,8 @@ def _box_payload(state: "ServerState") -> dict:
                 "runs": [],
                 "foreign": [],
                 "ports_in_use": [],
+                "scan_known": False,
+                "port_scan_known": False,
             }
         else:
             occupancy = {
@@ -267,6 +269,8 @@ def _box_payload(state: "ServerState") -> dict:
                 "runs": [],
                 "foreign": [],
                 "ports_in_use": [],
+                "scan_known": False,
+                "port_scan_known": False,
             }
     else:
         occupancy = {
@@ -274,6 +278,8 @@ def _box_payload(state: "ServerState") -> dict:
             "runs": [],
             "foreign": [],
             "ports_in_use": [],
+            "scan_known": False,
+            "port_scan_known": False,
         }
     coordination = getattr(state, "coordination", None)
     queue: list = []

@@ -2712,15 +2712,62 @@ def _box_ready_for(box: dict[str, Any], session_id: str) -> bool:
     return _box_head_is(box, session_id)
 
 
+def _port_conflict_fields(box: object, port: int | None) -> dict[str, Any]:
+    """Diagnosis for an active_run_exists that the box alone cannot explain.
+
+    fb-20260904-114520-6927: a launch refused because the requested port is
+    held by a process that is not ours (any image) arrives with a box that
+    reads free -- only DayZ images occupy the box -- so the generic hint told
+    the caller to wait for a box that was never busy. The held port is in
+    foreign_ports; say that, and say when the socket table itself could not be
+    read (waiting does not repair that either).
+    """
+    if not isinstance(box, dict):
+        return {}
+    if box.get("port_scan_known") is False:
+        reason = box.get("port_scan_reason")
+        return {
+            "reason": reason if isinstance(reason, str) and reason else "port_scan_unknown",
+            "hint": (
+                "the daemon could not read the host UDP socket table "
+                "(psutil/netstat): waiting does not help, restore that first"
+            ),
+        }
+    foreign_ports = box.get("foreign_ports")
+    runs = box.get("runs")
+    if isinstance(port, int) and isinstance(foreign_ports, list) and port in foreign_ports:
+        # Any requested port, any image: foreign_ports is the socket table minus
+        # the managed runs. When a run also occupies the box, both blockers are
+        # named -- freeing the box does not free this port.
+        if isinstance(runs, list) and runs:
+            hint = (
+                f"the box is busy (see occupied_by_run_id) AND port {port} is held "
+                "by a process that is not a managed run: after the box frees, pass "
+                "another port= or wait for that holder to exit; waiting for the box "
+                "alone does not free the port"
+            )
+        else:
+            hint = (
+                f"port {port} is held by a process on this host that is not a "
+                "managed run (see session_status.box.foreign_ports): pass another "
+                "port= or wait for its holder to exit; wait_for_box_s does not "
+                "help while the box reads free"
+            )
+        return {"reason": "port_in_use_foreign", "port": port, "hint": hint}
+    return {}
+
+
 def _enrich_active_run_result(
     result: dict[str, Any],
     box: dict[str, Any],
     *,
     caller_session: str | None = None,
+    port: int | None = None,
 ) -> dict[str, Any]:
     extra = occupancy_error_fields(box, caller_session=caller_session)
     payload = dict(result)
     payload.update(extra)
+    payload.update(_port_conflict_fields(box, port))
     payload["run_id"] = None
     payload["status"] = "failed"
     payload["error_code"] = "active_run_exists"
@@ -2734,8 +2781,10 @@ def _failed_active_run_result(
     box: object,
     started: float,
     caller_session: str | None = None,
+    port: int | None = None,
 ) -> dict[str, Any]:
     extra = occupancy_error_fields(box, caller_session=caller_session)
+    extra.update(_port_conflict_fields(box, port))
     return {
         "status": "failed",
         "project": project,
@@ -2810,6 +2859,16 @@ async def execute_wait_for_box(
                     ticket = next_ticket
             else:
                 wait_error = "box_status_invalid"
+            if box.get("port_scan_known") is False:
+                # The box reads occupied because the daemon could not read the
+                # UDP socket table; the FIFO does not repair that, so waiting
+                # would only burn the timeout. Say so at once.
+                return {
+                    "ok": False,
+                    "ticket": ticket,
+                    "box": box,
+                    "error": "port_scan_unknown",
+                }
             if wait_error == "box_queue_saturated":
                 return {
                     "ok": False,
@@ -2854,6 +2913,16 @@ def _session_status_blocked_on(status: dict[str, Any]) -> str | None:
             "to join the lease FIFO"
         )
     box = status.get("box")
+    if isinstance(box, dict) and box.get("port_scan_known") is False:
+        # The box reads occupied because the daemon could not read or
+        # attribute the host UDP socket table; the FIFO does not repair that.
+        reason = box.get("port_scan_reason")
+        reason_text = reason if isinstance(reason, str) and reason else "port_scan_unknown"
+        return (
+            f"DayZ test box, {reason_text}; next: restore the daemon's view of the "
+            "host UDP socket table (psutil/netstat, process attribution) -- "
+            "wait_for_box_s does not help"
+        )
     if isinstance(box, dict) and box.get("occupied") is True:
         return (
             "DayZ test box; next: call dayz_test_run(..., wait_for_box_s=<n>) "
@@ -3038,7 +3107,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Read redacted daemon/queue/self coordination state, including "
-            "box occupancy (managed runs, foreign DayZDiag, ports_in_use, "
+            "box occupancy (managed runs; foreign DayZ processes seen by image "
+            "or by a held UDP port, even without a run record; ports_in_use "
+            "from the socket table; "
             "and the box wait FIFO). blocked_on names the resource and next "
             "queue, or is null when neither lease nor box is busy. Lease TTL "
             f"is {config.session_ttl_s:g} s; renewal is internal."
@@ -3081,7 +3152,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "(a disposable probe need not be registered as a project). "
             "wait_for_box_s>0 waits "
             "until session_status.box is free (FIFO, no tool_lock while "
-            f"sleeping). 0 is the immediate reject. wait_for_box_s must be <= "
+            "sleeping). A DayZ server holding a game port counts as an "
+            "occupied box even without a run record, and a launch onto a "
+            "port held by a process that is not ours is refused "
+            "(active_run_exists; reason port_in_use_foreign names the port) "
+            "by a socket-table read repeated right before the launch; the "
+            "only window left is between that read and DayZ's own bind. "
+            "port_scan_unknown means the daemon could not read the socket "
+            "table: fix the host, waiting does not help. "
+            f"0 is the immediate reject. wait_for_box_s must be <= "
             f"{BOX_WAIT_MAX_S:g}. Choose port= from "
             "session_status.box.ports_in_use. width/height are copied into "
             "the request and the worker passes -x/-y to the client exe, but "
@@ -3140,7 +3219,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         box=waited.get("box"),
                         started=started,
                         caller_session=caller_session,
+                        port=port,
                     )
+                    if waited.get("error") == "port_scan_unknown":
+                        failed["error_code"] = "port_scan_unknown"
                     if waited.get("error") == "box_queue_saturated":
                         failed["error_code"] = "box_queue_saturated"
                         failed["hint"] = "retry with wait_for_box_s=<n>"
@@ -3196,6 +3278,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         box=await peek_box(),
                         started=started,
                         caller_session=caller_session,
+                        port=port,
                     )
                 raise ToolError(execute_error.code) from None
             if (
@@ -3206,6 +3289,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     result,
                     await peek_box(),
                     caller_session=caller_session,
+                    port=port,
                 )
             if result is None:
                 raise ToolError("dayz_test_failed:RuntimeError")

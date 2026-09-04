@@ -523,9 +523,14 @@ def _activate_server_coordination(
         audit=audit_writer.write,
         guard=guard,
         retail_probe=orphan_guard.snapshot_retail_processes,
+        # fb-20260904-114520-6927: a dedicated server that has not bound its
+        # port yet is only visible by name, so the name probe lists it too.
         diag_probe=lambda: orphan_guard.snapshot_processes_by_name(
-            ["DayZDiag_x64.exe"]
+            ["DayZDiag_x64.exe", "DayZServer_x64.exe"]
         ),
+        # fb-20260904-114520-6927: the socket table is the second witness of
+        # the box; a DayZ image holding a UDP port occupies it without a run.
+        port_probe=orphan_guard.snapshot_udp_port_holders,
         game_path=Path(
             os.environ.get(
                 "DAYZ_GAME_PATH",
