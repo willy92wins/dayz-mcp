@@ -38,3 +38,13 @@ _client/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Local artefacts of the e2e harnesses under tools/_broker and tools/_session_coordination:
+# per-run logs, the throwaway daemon key the broker e2e mints, result dumps and host probes.
+# Only the modules the tracked tests import are versioned.
+tools/_broker/*.log
+tools/_broker/.e2e.key
+tools/_broker/e2e_result.json
+tools/_session_coordination/e2e_result.json
+tools/_session_coordination/*probe*.json
+tools/_session_coordination/*preflight*.json
