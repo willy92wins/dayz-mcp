@@ -9,7 +9,7 @@ import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from dayz_mcp import dayz_test_request, dayz_test_worker
+from dayz_mcp import dayz_test_modes, dayz_test_request, dayz_test_worker
 from dayz_mcp import dayz_test_tool
 from dayz_mcp import server
 from dayz_mcp import steam_preflight
@@ -274,7 +274,8 @@ class DayzTestToolRequestTest(unittest.TestCase):
             )
         self.assertEqual(
             caught.exception.code,
-            "bad_dayz_test_request:mode expected server|all|client",
+            "bad_dayz_test_request:mode expected "
+            + "|".join(dayz_test_modes.public_mode_names()),
         )
 
     def test_extension_run_must_be_idle_and_match_selected_project(self) -> None:
@@ -1308,7 +1309,8 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertEqual(
             caught.exception.code,
-            "bad_dayz_test_request:mode expected server|all|client",
+            "bad_dayz_test_request:mode expected "
+            + "|".join(dayz_test_modes.public_mode_names()),
         )
         opened.assert_not_called()
 

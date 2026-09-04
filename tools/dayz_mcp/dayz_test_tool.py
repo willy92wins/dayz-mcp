@@ -8,7 +8,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
-from dayz_mcp import dayz_test_request, dayz_test_worker, secure_launcher
+from dayz_mcp import (
+    dayz_test_modes,
+    dayz_test_request,
+    dayz_test_worker,
+    secure_launcher,
+)
 from dayz_mcp.launcher_registry import open_approved_launcher
 from dayz_mcp.steam_preflight import (
     REMEDIATION,
@@ -17,8 +22,6 @@ from dayz_mcp.steam_preflight import (
     evaluate_steam_session,
 )
 _BRIDGE_MOD_NAMES = frozenset({"dayz_mcp", "@dayz_mcp"})
-_PUBLIC_MODES = frozenset({"server", "all", "client"})
-_ACCEPTED_MODES = _PUBLIC_MODES | {"offline"}
 _HELD_LEASE_RUN = (
     "session_transition_conflict: release your session lease first - "
     "dayz_test_run manages its own lease internally"
@@ -66,6 +69,71 @@ _ProgressCallback = Callable[[str, str | None], Awaitable[None]]
 
 def _fail(code: str) -> None:
     raise DayzTestToolError(code)
+
+
+def _mode_records() -> tuple[dayz_test_modes.ModeRecord, ...]:
+    """The M12 record view, read on every call. A broken view is a bad request.
+
+    dayz_test_request._request_mode_view does the same at the parse layer. A
+    ModeAuthorityError that escaped here would reach the caller as a mute
+    dayz_test_failed:ValueError: its message is prose, not a token.
+    """
+    try:
+        records = dayz_test_modes.mode_records()
+    except dayz_test_modes.ModeAuthorityError:
+        _fail("bad_dayz_test_request")
+    return records
+
+
+def _public_modes() -> frozenset[str]:
+    """The modes dayz_test_run publishes. offline is a teardown role, not one.
+
+    What "public" means belongs to M12 too, so the predicate is its accessor
+    and not a comprehension repeated here.
+    """
+    return frozenset(dayz_test_modes.public_mode_names(_mode_records()))
+
+
+def _accepted_modes() -> frozenset[str]:
+    """The modes the request layer accepts: the public ones plus the roles.
+
+    dayz_test_request gates on the same accessor (dayz_test_request.py:71,
+    :297); this pre-check only names the rejection earlier, and with the
+    public enum.
+    """
+    return frozenset(dayz_test_modes.request_mode_names(_mode_records()))
+
+
+def _mode_expected_error() -> str:
+    """The rejection names the public modes only, in the order they are declared.
+
+    Naming a role here would publish a mode dayz_test_run rejects one layer
+    later, the regression ficha 9d46 warned about.
+    """
+    return "bad_dayz_test_request:mode expected " + "|".join(
+        dayz_test_modes.public_mode_names(_mode_records())
+    )
+
+
+def _mode_record(mode: str) -> dayz_test_modes.ModeRecord | None:
+    """The record of an exact name, or None. Never a fallback record.
+
+    execute_dayz_test_stop projects the label "stop" as its public_mode and
+    that label is not a record, so callers that only need a projection get
+    None instead of the exception resolve_mode would raise in the stop happy
+    path. Callers that need the record itself fail closed on the None.
+    """
+    matches = [record for record in _mode_records() if record.name == mode]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _mode_starts_client(mode: str) -> bool:
+    """Whether this call started a client, per the record of its mode.
+
+    A name outside the authority starts no client.
+    """
+    record = _mode_record(mode)
+    return record is not None and record.starts_client
 
 
 def _semantic_policies(
@@ -133,8 +201,8 @@ def build_run_request(
     kill: bool = False,
 ) -> tuple[bytes, dayz_test_request.RequestProjectPolicy]:
     selected = _selected_policy(sealed_policies, project)
-    if mode not in _ACCEPTED_MODES:
-        _fail("bad_dayz_test_request:mode expected server|all|client")
+    if mode not in _accepted_modes():
+        _fail(_mode_expected_error())
     public_extra = _public_mod_list(extra_mods, selected.mod_roots)
     public_base = _public_mod_list(base_mods, selected.mod_roots)
     public_server = _public_mod_list(server_mods, selected.mod_roots)
@@ -368,13 +436,20 @@ async def _require_idle_session(runtime: _Runtime, *, tool: str) -> None:
 def _artifact_paths(
     policy: dayz_test_request.RequestProjectPolicy, mode: str
 ) -> list[str]:
-    if mode == "server":
-        roots = ("_server",)
-    elif mode == "all":
-        roots = ("_server", "_client")
-    else:
-        roots = ("_client",)
-    return [ntpath.join(policy.dev_root, root, "profiles") for root in roots]
+    """The profile roots of an exact mode record, in the order it declares.
+
+    This was a literal table whose else branch answered _client for every
+    name it did not know: a mode whose roots the authority moved kept
+    reporting the old ones, and an unknown mode reported a root it never
+    wrote. An exact lookup that fails closed says so instead.
+    """
+    record = _mode_record(mode)
+    if record is None:
+        _fail(_mode_expected_error())
+    return [
+        ntpath.join(policy.dev_root, root, "profiles")
+        for root in record.artifact_roots
+    ]
 
 
 def list_project_names() -> dict[str, object]:
@@ -646,7 +721,7 @@ async def _execute_request(
         except Exception:
             status = None
         server_alive, client_alive = _liveness_from_status(status, terminal.run_id)
-        if public_mode in {"client", "all"}:
+        if _mode_starts_client(public_mode):
             try:
                 snapshot = await runtime.bridge_status_payload()
             except Exception:
@@ -654,7 +729,13 @@ async def _execute_request(
                 # ready; it is no answer, and it says so.
                 snapshot = None
             readiness = _project_launch_readiness(client_alive, snapshot)
-        if public_mode in {"all", "offline"} and client_alive is False:
+        # Same projection as the readiness branch above: a call that started
+        # a client and lost it failed, whatever the mode is called. The
+        # literal set it replaces omitted client -- the one mode whose whole
+        # job is the client -- and named offline, a role that never reaches
+        # this function. preflight returns before this block; a stop does
+        # reach it and starts no client, so it is never accused of one.
+        if _mode_starts_client(public_mode) and client_alive is False:
             terminal = replace(
                 terminal,
                 ok=False,
@@ -699,8 +780,8 @@ async def execute_dayz_test_run(
     started_at = time.monotonic()
     if progress_cb is not None:
         await progress_cb("validating", None)
-    if mode not in _PUBLIC_MODES:
-        _fail("bad_dayz_test_request:mode expected server|all|client")
+    if mode not in _public_modes():
+        _fail(_mode_expected_error())
     await _require_idle_session(runtime, tool="dayz_test_run")
     with open_approved_launcher("dayz-test-v1") as opened:
         opened.validate_native_pe()
@@ -726,7 +807,7 @@ async def execute_dayz_test_run(
                 player_name=player_name,
                 server_wait_s=server_wait_s,
             )
-            if not preflight and mode in {"client", "all"}:
+            if not preflight and _mode_starts_client(mode):
                 try:
                     steam = evaluate_steam_session()
                 except Exception:
