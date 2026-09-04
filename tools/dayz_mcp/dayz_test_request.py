@@ -42,21 +42,66 @@ _INVALID_RUN_ID = "invalid_run_id"
 _CLIENT_REQUIRES_RUN_ID = "client_requires_run_id"
 _SERVER_ALL_FORBID_RUN_ID = "server_all_forbid_run_id"
 
+# fb-20260829-023649-8f8c point 3. Every rejection below used to collapse into a
+# single token, so the caller learned that the request was bad and nothing else.
+# The vocabulary is CLOSED and the reason is validated against it before it is
+# published: a typo degrades to the bare legacy token instead of inventing a
+# code, and dayz_test_tool refuses to translate a suffix that is not in here.
+# The reason never crosses the bundle cable -- it is raised and caught inside
+# dayz_test_tool.build_run_request, in the MCP server process (0 hits for
+# invalid_dayz_test_request in daemon_contract.py and native_broker_protocol.py).
+REQUEST_REJECTION_REASONS = frozenset(
+    {
+        "duplicate_key",
+        "flag_not_boolean",
+        "json_constant_rejected",
+        "json_undecodable",
+        "kill_conflicts_with_other_work",
+        "kill_requires_offline_mode",
+        "mission_not_allowed",
+        "mod_list_invalid",
+        "mode_authority_unreadable",
+        "mode_unknown",
+        "no_base_mods_conflict",
+        "pack_only_requires_build",
+        "payload_not_encodable",
+        "payload_too_large",
+        "player_name_invalid",
+        "port_out_of_range",
+        "project_policy_not_found",
+        "raw_envelope_invalid",
+        "server_wait_out_of_range",
+        "source_outside_default",
+        "source_requires_build",
+        "unicode_not_normalized",
+        "unknown_key",
+        "version_unsupported",
+        "window_size_out_of_range",
+    }
+)
+
 
 def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError("invalid_dayz_test_request")
+            _invalid("duplicate_key")
         result[key] = value
     return result
 
 
 def _reject_json_constant(_value: str) -> object:
-    raise ValueError("invalid_dayz_test_request")
+    _invalid("json_constant_rejected")
 
 
-def _invalid() -> None:
+def _invalid(reason: str) -> None:
+    """Reject, naming the condition when the name is a declared one.
+
+    Fail-safe, not fail-open: an undeclared reason keeps EXACTLY the legacy
+    token, so a typo cannot publish a code no consumer has ever seen.
+    """
+    if reason in REQUEST_REJECTION_REASONS:
+        raise ValueError("invalid_dayz_test_request:" + reason)
     raise ValueError("invalid_dayz_test_request")
 
 
@@ -70,7 +115,7 @@ def _request_mode_view() -> tuple[str, tuple[str, ...]]:
         default = dayz_test_modes.resolve_default_mode(records)
         names = dayz_test_modes.request_mode_names(records)
     except dayz_test_modes.ModeAuthorityError:
-        _invalid()
+        _invalid("mode_authority_unreadable")
     return default.name, names
 
 
@@ -244,7 +289,7 @@ def parse_dayz_test_request(
     if type(raw) is not bytes or not 1 <= len(raw) <= 65_536 or raw.startswith(
         b"\xef\xbb\xbf"
     ):
-        _invalid()
+        _invalid("raw_envelope_invalid")
     try:
         text = raw.decode("utf-8")
         value = json.loads(
@@ -253,11 +298,11 @@ def parse_dayz_test_request(
             parse_constant=_reject_json_constant,
         )
     except (UnicodeDecodeError, json.JSONDecodeError):
-        _invalid()
+        _invalid("json_undecodable")
     if not isinstance(value, dict) or not set(value).issubset(_REQUEST_KEYS):
-        raise ValueError("invalid_dayz_test_request")
+        _invalid("unknown_key")
     if not _valid_unicode_tree(value):
-        _invalid()
+        _invalid("unicode_not_normalized")
     mod = value.get("mod")
     dev_root = value.get("dev_root")
     policy = next(
@@ -269,9 +314,9 @@ def parse_dayz_test_request(
         None,
     )
     if type(value.get("version")) is not int or value.get("version") != 1:
-        _invalid()
+        _invalid("version_unsupported")
     if policy is None:
-        _invalid()
+        _invalid("project_policy_not_found")
 
     default_mode, request_mode_names = _request_mode_view()
     mode = value.get("mode", default_mode)
@@ -295,21 +340,21 @@ def parse_dayz_test_request(
     run_id = value.get("run_id")
 
     if mode not in request_mode_names:
-        _invalid()
+        _invalid("mode_unknown")
     if not _bounded_text(mission, 1, 520) or (
         mission not in _MISSION_ALIASES
         and not _path_is_within(mission, policy.mission_roots)
     ):
-        _invalid()
+        _invalid("mission_not_allowed")
     if source is not None and (
         not _path_is_within(source, (policy.default_source,))
     ):
-        _invalid()
+        _invalid("source_outside_default")
     if not all(
         _valid_mod_list(candidate, policy.mod_roots)
         for candidate in (extra_mods, base_mods, server_mods)
     ):
-        _invalid()
+        _invalid("mod_list_invalid")
     if any(
         type(candidate) is not bool
         for candidate in (
@@ -322,40 +367,40 @@ def parse_dayz_test_request(
             kill,
         )
     ):
-        _invalid()
+        _invalid("flag_not_boolean")
     if not _bounded_int(port, 1024, 65530):
-        _invalid()
+        _invalid("port_out_of_range")
     if not _bounded_int(width, 320, 16384) or not _bounded_int(
         height, 320, 16384
     ):
-        _invalid()
+        _invalid("window_size_out_of_range")
     if not _bounded_text(player_name, 1, 64) or any(
         ord(char) <= 31 or 127 <= ord(char) <= 159 for char in player_name
     ):
-        _invalid()
+        _invalid("player_name_invalid")
     if not _bounded_int(server_wait_s, 1, 3600):
-        _invalid()
+        _invalid("server_wait_out_of_range")
     if run_id is not None and not _valid_uuid4(run_id):
         raise ValueError(_INVALID_RUN_ID)
     if no_base_mods and "base_mods" in value and bool(base_mods):
-        _invalid()
+        _invalid("no_base_mods_conflict")
 
     effective_build = build or clean
     if pack_only and not effective_build:
-        _invalid()
+        _invalid("pack_only_requires_build")
     canonical_default_source = (
         set(value) == _REQUEST_KEYS
         and source == policy.default_source
         and not effective_build
     )
     if source is not None and not effective_build and not canonical_default_source:
-        _invalid()
+        _invalid("source_requires_build")
     if kill and (
         run_id is None or effective_build or pack_only or preflight
     ):
-        _invalid()
+        _invalid("kill_conflicts_with_other_work")
     if kill and mode != "offline":
-        _invalid()
+        _invalid("kill_requires_offline_mode")
     if not kill and mode in {"server", "all"} and run_id is not None:
         raise ValueError(_SERVER_ALL_FORBID_RUN_ID)
     if not kill and mode == "client" and run_id is None:
@@ -393,9 +438,9 @@ def parse_dayz_test_request(
             sort_keys=True,
         ).encode("utf-8")
     except UnicodeEncodeError:
-        _invalid()
+        _invalid("payload_not_encodable")
     if len(canonical_bytes) > 65_536:
-        _invalid()
+        _invalid("payload_too_large")
     return ParsedDayzTestRequest(
         payload=payload,
         canonical_bytes=canonical_bytes,

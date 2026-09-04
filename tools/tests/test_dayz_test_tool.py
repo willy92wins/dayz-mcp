@@ -264,6 +264,75 @@ class DayzTestToolRequestTest(unittest.TestCase):
             dayz_test_request._SERVER_ALL_FORBID_RUN_ID, caught.exception.code
         )
 
+    def test_a_declared_request_rejection_reaches_the_caller_with_its_reason(
+        self,
+    ) -> None:
+        """8f8c point 3. The 25 parser conditions stop arriving as one token."""
+        cases = (
+            ({"port": 80}, "port_out_of_range"),
+            ({"width": 10}, "window_size_out_of_range"),
+            ({"server_wait_s": 0}, "server_wait_out_of_range"),
+            ({"player_name": "Dev"}, "player_name_invalid"),
+            ({"mission": "moon"}, "mission_not_allowed"),
+            ({"pack_only": True}, "pack_only_requires_build"),
+        )
+        for overrides, reason in cases:
+            with self.subTest(reason=reason):
+                with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                    dayz_test_tool.build_run_request(
+                        _sealed(_policy()),
+                        project="ExampleMod",
+                        mode="server",
+                        extra_mods=["@DayZ_MCP"],
+                        **overrides,
+                    )
+                self.assertEqual(
+                    caught.exception.code, f"bad_dayz_test_request:{reason}"
+                )
+                self.assertIn(reason, dayz_test_request.REQUEST_REJECTION_REASONS)
+
+    def test_an_undeclared_suffix_keeps_the_bare_legacy_code(self) -> None:
+        """Negative control that kills the mutant "translate any suffix".
+
+        Green before the change too: it is the guard, not the feature.
+        """
+        original = dayz_test_request.parse_dayz_test_request
+
+        def refuse(*_args: object, **_kwargs: object) -> object:
+            raise ValueError("invalid_dayz_test_request:a_reason_nobody_declared")
+
+        dayz_test_request.parse_dayz_test_request = refuse
+        try:
+            with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                dayz_test_tool.build_run_request(
+                    _sealed(_policy()),
+                    project="ExampleMod",
+                    mode="server",
+                    extra_mods=["@DayZ_MCP"],
+                )
+        finally:
+            dayz_test_request.parse_dayz_test_request = original
+        self.assertEqual(caught.exception.code, "bad_dayz_test_request")
+
+    def test_a_type_error_from_the_parser_keeps_the_bare_legacy_code(self) -> None:
+        original = dayz_test_request.parse_dayz_test_request
+
+        def refuse(*_args: object, **_kwargs: object) -> object:
+            raise TypeError("something else entirely")
+
+        dayz_test_request.parse_dayz_test_request = refuse
+        try:
+            with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                dayz_test_tool.build_run_request(
+                    _sealed(_policy()),
+                    project="ExampleMod",
+                    mode="server",
+                    extra_mods=["@DayZ_MCP"],
+                )
+        finally:
+            dayz_test_request.parse_dayz_test_request = original
+        self.assertEqual(caught.exception.code, "bad_dayz_test_request")
+
     def test_build_run_request_names_invalid_mode_and_expected_values(self) -> None:
         with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
             dayz_test_tool.build_run_request(

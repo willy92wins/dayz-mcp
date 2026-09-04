@@ -253,6 +253,17 @@ def build_run_request(
             dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
         }:
             _fail(f"bad_dayz_test_request:{token}")
+        # 8f8c point 3. The 25 conditions of the parser used to arrive here as
+        # one token. A declared reason is republished with the same shape the
+        # three named causes above already use, so every consumer that matches
+        # on the bad_dayz_test_request prefix keeps working; anything else --
+        # an undeclared suffix, a TypeError, a ValueError from elsewhere --
+        # keeps EXACTLY the bare legacy code.
+        prefix = "invalid_dayz_test_request:"
+        if token.startswith(prefix):
+            reason = token[len(prefix) :]
+            if reason in dayz_test_request.REQUEST_REJECTION_REASONS:
+                _fail(f"bad_dayz_test_request:{reason}")
         _fail("bad_dayz_test_request")
     effective_mods = [selected.mod, *(public_extra or [])]
     if not kill and not any(

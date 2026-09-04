@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import inspect
 import importlib.util
 import json
 import unittest
@@ -154,10 +155,16 @@ class DayzTestRequestTests(unittest.TestCase):
                 "run_id": valid_uuid,
             },
         }
+        stop_reasons = {
+            "kill_preflight": "invalid_dayz_test_request:kill_conflicts_with_other_work",
+            "kill_client": "invalid_dayz_test_request:kill_requires_offline_mode",
+            "kill_server": "invalid_dayz_test_request:kill_requires_offline_mode",
+            "kill_all": "invalid_dayz_test_request:kill_requires_offline_mode",
+        }
         for label, overrides in invalid_stops.items():
             with self.subTest(invalid_stop=label):
                 with self.assertRaisesRegex(
-                    ValueError, "^invalid_dayz_test_request$"
+                    ValueError, f"^{stop_reasons[label]}$"
                 ):
                     request_module.parse_dayz_test_request(
                         json.dumps({**base, **overrides}).encode("utf-8"),
@@ -184,7 +191,9 @@ class DayzTestRequestTests(unittest.TestCase):
                 )
                 self.assertEqual(parsed.payload["mission"], mission)
 
-        with self.assertRaisesRegex(ValueError, "^invalid_dayz_test_request$"):
+        with self.assertRaisesRegex(
+            ValueError, "^invalid_dayz_test_request:mission_not_allowed$"
+        ):
             request_module.parse_dayz_test_request(
                 json.dumps({**base, "mission": "namalsk"}).encode("utf-8"),
                 policies=(policy,),
@@ -391,11 +400,26 @@ class DayzTestRequestTests(unittest.TestCase):
         for label, overrides in invalid_overrides.items():
             document = dict(base)
             document.update(overrides)
+            # 8f8c point 3 (T6). Every row names its own condition; the three
+            # run_id tokens keep the shape they already had.
             expected_error = {
+                "bool_version": "invalid_dayz_test_request:version_unsupported",
+                "bool_port": "invalid_dayz_test_request:port_out_of_range",
+                "low_port": "invalid_dayz_test_request:port_out_of_range",
+                "low_width": "invalid_dayz_test_request:window_size_out_of_range",
+                "retail_mode": "invalid_dayz_test_request:mode_unknown",
+                "relative_unknown_mission": "invalid_dayz_test_request:mission_not_allowed",
+                "control_player_name": "invalid_dayz_test_request:player_name_invalid",
+                "zero_wait": "invalid_dayz_test_request:server_wait_out_of_range",
+                "mods_as_delimited_string": "invalid_dayz_test_request:mod_list_invalid",
+                "pack_only_without_build": "invalid_dayz_test_request:pack_only_requires_build",
+                "source_without_build": "invalid_dayz_test_request:source_requires_build",
+                "base_conflicts_with_no_base": "invalid_dayz_test_request:no_base_mods_conflict",
+                "kill_without_run": "invalid_dayz_test_request:kill_conflicts_with_other_work",
                 "client_without_run": "client_requires_run_id",
                 "server_with_run": "server_all_forbid_run_id",
                 "non_uuid_run": "invalid_run_id",
-            }.get(label, "invalid_dayz_test_request")
+            }[label]
             with self.subTest(label=label):
                 with self.assertRaisesRegex(ValueError, f"^{expected_error}$"):
                     request_module.parse_dayz_test_request(
@@ -685,6 +709,83 @@ class DayzTestRequestTests(unittest.TestCase):
         self.assertEqual(parsed.payload["source"], valid["source"])
         self.assertEqual(parsed.payload["extra_mods"], ["@Extra"])
         self.assertEqual(parsed.payload["server_mods"], [r"P:\Mods\@Server"])
+
+
+class RequestRejectionReasonsTests(unittest.TestCase):
+    """8f8c point 3. The 25 conditions of the parser stop being one token.
+
+    T6 is the positive half and T7 the negative control that kills the mutant
+    "translate any suffix": an undeclared reason must degrade to the exact
+    legacy token, not invent a code.
+    """
+
+    POLICY_KWARGS = {
+        "mod": "ExampleMod",
+        "dev_root": r"P:\ExampleMod_Suite",
+        "default_source": r"P:\ExampleMod",
+        "default_base_mods": ("@CF",),
+        "mission_roots": (r"P:\ExampleMod_Suite\_server\mpmissions",),
+        "mod_roots": (r"P:\Mods",),
+    }
+
+    def setUp(self) -> None:
+        self.request_module = importlib.import_module("dayz_mcp.dayz_test_request")
+        self.policy = self.request_module.RequestProjectPolicy(**self.POLICY_KWARGS)
+        self.base = {
+            "version": 1,
+            "dev_root": r"P:\ExampleMod_Suite",
+            "mod": "ExampleMod",
+        }
+
+    def _reason(self, **overrides: object) -> str:
+        with self.assertRaises(ValueError) as caught:
+            self.request_module.parse_dayz_test_request(
+                json.dumps({**self.base, **overrides}).encode("utf-8"),
+                policies=(self.policy,),
+            )
+        token = str(caught.exception)
+        prefix = "invalid_dayz_test_request:"
+        self.assertTrue(token.startswith(prefix), token)
+        return token[len(prefix) :]
+
+    def test_t6_distinct_conditions_produce_distinct_declared_reasons(self) -> None:
+        rows = (
+            {"port": 1023},
+            {"width": 319},
+            {"mode": "retail"},
+            {"mission": "moon"},
+            {"player_name": "Dev\u0001"},
+            {"server_wait_s": 0},
+            {"extra_mods": "@CF;@Other"},
+            {"pack_only": True},
+            {"kill": True, "mode": "client", "run_id": "12345678-1234-4234-8234-1234567890ab"},
+        )
+        reasons = [self._reason(**row) for row in rows]
+        for reason in reasons:
+            self.assertIn(reason, self.request_module.REQUEST_REJECTION_REASONS)
+        # Positive control against the defect coming back: nine different
+        # conditions must not collapse into one answer again.
+        self.assertGreaterEqual(len(set(reasons)), 8)
+
+    def test_the_vocabulary_is_closed_and_every_declared_reason_is_used(self) -> None:
+        source = inspect.getsource(self.request_module)
+        for reason in self.request_module.REQUEST_REJECTION_REASONS:
+            self.assertIn(f'_invalid("{reason}")', source, reason)
+
+    def test_t7_an_undeclared_reason_keeps_exactly_the_legacy_token(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self.request_module._invalid("a_reason_nobody_declared")
+        self.assertEqual(str(caught.exception), "invalid_dayz_test_request")
+
+    def test_no_rejection_path_still_raises_the_bare_literal(self) -> None:
+        """Grep as an assertion: the raw string may only live inside _invalid."""
+        lines = inspect.getsource(self.request_module).split("\n")
+        offenders = [
+            line.strip()
+            for line in lines
+            if 'ValueError("invalid_dayz_test_request")' in line
+        ]
+        self.assertEqual(len(offenders), 1, offenders)
 
 
 if __name__ == "__main__":
