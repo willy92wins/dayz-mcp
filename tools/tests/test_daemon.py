@@ -766,6 +766,49 @@ class DaemonEndpointTest(unittest.TestCase):
             {"ok": False, "run_id": None, "error": "run_state_unavailable"},
         )
 
+    def _acquire_with_rows(self, rows: list) -> dict:
+        srv = self._daemon(adopt_fixture=False)
+        manifest = srv.state.lifecycle.manifest
+        real = manifest.list_runs
+        manifest.list_runs = lambda: list(rows)  # type: ignore[method-assign]
+        try:
+            status, acquired = _http(
+                srv.base,
+                "POST",
+                "/session/acquire",
+                srv.key,
+                {"identity": IDENTITY, "purpose": "drive"},
+            )
+        finally:
+            manifest.list_runs = real  # type: ignore[method-assign]
+        self.assertEqual(status, 200, acquired)
+        self.assertEqual(acquired.get("status"), "active")
+        return acquired
+
+    def test_acquire_list_runs_row_with_non_string_owner_declares_run_state_unavailable(
+        self,
+    ) -> None:
+        # RunRecord bounds owner_session_id to str | None: a foreign owner
+        # object on a RUNNING_IDLE row is outside the contract, not "owned".
+        row = SimpleNamespace(
+            state="RUNNING_IDLE", owner_session_id=object(), run_id="run-a"
+        )
+        self.assertEqual(
+            self._acquire_with_rows([row]).get("adopted_run"),
+            {"ok": False, "run_id": None, "error": "run_state_unavailable"},
+        )
+
+    def test_acquire_list_runs_row_with_unknown_state_declares_run_state_unavailable(
+        self,
+    ) -> None:
+        # RunRecord bounds state to RUN_STATES: an unknown state is unreadable
+        # durable state, not merely "not idle".
+        row = SimpleNamespace(state="LIMBO", owner_session_id=None, run_id="run-b")
+        self.assertEqual(
+            self._acquire_with_rows([row]).get("adopted_run"),
+            {"ok": False, "run_id": None, "error": "run_state_unavailable"},
+        )
+
 
 class ProbeStatusHealthyTest(unittest.TestCase):
     EXECUTABLE = r"C:\Python\python.exe"

@@ -3155,14 +3155,24 @@ class Handler(BaseHTTPRequestHandler):
             unreadable = False
             idle: list[object] = []
             try:
+                from dayz_mcp.process_lifecycle import RUN_STATES
+
                 rows = list(manifest.list_runs())
                 for run in rows:
+                    # The RunRecord contract bounds state to RUN_STATES and
+                    # owner_session_id to str | None; a row outside it is
+                    # unreadable durable state, never a silent null.
                     if not (
                         hasattr(run, "state")
                         and hasattr(run, "owner_session_id")
                         and hasattr(run, "run_id")
                         and isinstance(run.state, str)
                         and isinstance(run.run_id, str)
+                        and run.state in RUN_STATES
+                        and (
+                            run.owner_session_id is None
+                            or isinstance(run.owner_session_id, str)
+                        )
                     ):
                         unreadable = True
                         break
