@@ -3234,7 +3234,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "reads the tail of the current launch -- each file is capped at "
             "its last 256 KiB -- never a historic dump. No lease. "
             "Pass back the marker this tool returns unchanged: encoded JSON "
-            "string or the decoded object {path:[offset,size,identity]}."
+            "string or the decoded object {path:[offset,size,identity]}. The "
+            "marker advances only to the end of the lines RETURNED, never to "
+            "EOF: without a marker, max_lines=1 marks one line INTO the launch "
+            "tail and a later read from it replays the whole boot. To mark "
+            "'now', read with a large max_lines until a call returns 0 new "
+            "lines and keep that marker, or use wait_for(log_matches), whose "
+            "window is measured from EOF. The mod probe writes to "
+            "script_<date>.log, not to the .RPT: a positive control searched "
+            "only in the RPT reads as zero."
         )
     )
     async def logs_since(
@@ -3817,7 +3825,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "answers 0-or-cap with no error signal, so the result carries "
             "nearest_player_m and reliability (player_in_bubble | "
             "remote_unverified). When the players probe succeeds with an empty "
-            "list, reason is no_player_connected."
+            "list, reason is no_player_connected. pos.y is used as given: "
+            "nothing snaps it to the surface (player_teleport y==0 does, this "
+            "tool does not), so pass pos=[x, surface_query.y, z]. A query "
+            "centred underground returns count_total 0 with reliability "
+            "player_in_bubble and no error: the only tell is nearest_player_m "
+            "reading as the vertical distance to the player standing on the "
+            "spot."
         )
     )
     async def entities_query(
@@ -4083,7 +4097,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "crop_space='client' (default) normalizes crop over the rendered viewport (the space ui_tree rects use) and fails closed with frame_client_rect_unverified; 'window' is the legacy whole-window bitmap. save_fullres=True also writes the "
         "native-resolution frame to disk and reports its path as fullres_path — read that file for "
         "fine detail, bypassing the inline token budget. Without window focus, the frame can be frozen: compare frame_sha256 between captures to detect it. "
-        "With two DayZ clients, capture targets the live run's client through cmdline_match/client_pid."
+        "With two DayZ clients, capture targets the live run's client through cmdline_match/client_pid. "
+        "window_surface and client_surface rects are PHYSICAL pixels (DPI-aware): a host helper that never calls "
+        "SetProcessDpiAwareness sees virtualized coordinates instead (at 150%: 1920 -> 1280), so a 'client_rect == "
+        "requested' gate can pass in the wrong space without the window having moved; check it against this surface map."
     ))
     async def capture_screenshot(
         scale: str = "small",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import sys
 import tempfile
@@ -506,6 +507,60 @@ class WaitForBug086EvidenceTest(unittest.IsolatedAsyncioTestCase):
         entries = [item for item in scanned["files"] if item["lines"] >= 1]
         self.assertTrue(entries, scanned)
         self.assertTrue(all(item["readable"] for item in entries), scanned)
+
+    async def test_same_bytes_default_sees_and_zero_misses(self) -> None:
+        """Both arms of the contract on ONE file, byte-identical between calls.
+
+        The default (200) must see a response that was durable before the
+        marker; lookback_lines=0 on the very same bytes must not. Pinning the two
+        verdicts on identical input attributes the flip to the parameter alone
+        (fb-20260829-025502-251d: a default of 0 turns action_use -> wait_for
+        into a false timeout, and a test per arm on different files cannot say
+        which of the two inputs changed the verdict).
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            profiles = self._profiles(directory)
+            log = profiles / "script.log"
+            log.write_text("".join(f"boot-{i}\n" for i in range(5)), encoding="utf-8")
+            needle = f"BUG086-arms-{uuid.uuid4().hex}"
+            _append_durably(log, needle + "\n")
+            digest_before = hashlib.sha256(log.read_bytes()).hexdigest()
+
+            async def lifecycle_status() -> dict:
+                return {"runs": [_live_run(profiles)]}
+
+            def runtime() -> _FakeRuntime:
+                fake = _FakeRuntime()
+                fake.lifecycle_status = lifecycle_status
+                return fake
+
+            by_default = await server.execute_wait_for(
+                runtime(),
+                "log_matches",
+                pattern=needle,
+                timeout_s=1.1,
+                poll_interval_s=0.5,
+            )
+            by_zero = await server.execute_wait_for(
+                runtime(),
+                "log_matches",
+                pattern=needle,
+                timeout_s=1.1,
+                poll_interval_s=0.5,
+                lookback_from="lines",
+                lookback_lines=0,
+            )
+            digest_after = hashlib.sha256(log.read_bytes()).hexdigest()
+
+        # Same bytes for both calls: the only thing that moved is lookback_lines.
+        self.assertEqual(digest_before, digest_after)
+        self.assertTrue(by_default["ok"])
+        self.assertTrue(by_default["satisfied"])
+        self.assertIn(needle, str(by_default["observed"]))
+        self.assertTrue(by_zero["ok"])
+        self.assertFalse(by_zero["satisfied"])
+        self.assertTrue(by_zero["timed_out"])
+        self.assertGreaterEqual(by_zero["probes"], 1)
 
     async def test_window_edge_is_inclusive_at_two_hundred(self) -> None:
         for label, fillers, satisfied, lines_total in _WINDOW_CASES:
