@@ -9,6 +9,7 @@ import os
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from PIL import Image, ImageChops, ImageStat
@@ -455,13 +456,18 @@ def compare_captures(subject_path: str, control_path: str, liveness_path: str | 
     return out
 
 
-def choose_stable_frame(frames: list[Image.Image]) -> Image.Image:
-    if not frames:
-        raise ValueError("no frames captured")
-    if len(frames) == 1:
-        return frames[0]
+def _adjacent_pair_deltas(frames: list[Image.Image]) -> list[float]:
+    """mean_abs_pixel_delta of every adjacent pair, in order; empty for a single frame. Split out so
+    the caller can publish the numbers the stability choice was already made on instead of paying
+    for the same downscale-and-diff twice."""
+    return [mean_abs_pixel_delta(frames[i - 1], frames[i]) for i in range(1, len(frames))]
 
-    pair_deltas = [mean_abs_pixel_delta(frames[i - 1], frames[i]) for i in range(1, len(frames))]
+
+def _stable_frame_index(frames: list[Image.Image], pair_deltas: list[float]) -> int:
+    """Index of the frame whose closest neighbour moved least. Same arithmetic as before, taking
+    the deltas as an argument."""
+    if len(frames) == 1:
+        return 0
     scores: list[float] = []
     for index in range(len(frames)):
         adjacent: list[float] = []
@@ -470,8 +476,377 @@ def choose_stable_frame(frames: list[Image.Image]) -> Image.Image:
         if index < len(pair_deltas):
             adjacent.append(pair_deltas[index])
         scores.append(min(adjacent))
-    best_index = min(range(len(scores)), key=lambda idx: scores[idx])
-    return frames[best_index]
+    return min(range(len(scores)), key=lambda idx: scores[idx])
+
+
+def choose_stable_frame(frames: list[Image.Image]) -> Image.Image:
+    if not frames:
+        raise ValueError("no frames captured")
+    if len(frames) == 1:
+        return frames[0]
+    return frames[_stable_frame_index(frames, _adjacent_pair_deltas(frames))]
+
+
+# --- Frozen frame: the same picture twice, declared as a fact ------------------------------------
+# A capture can hand back byte-identical pixels for reasons that look alike from outside: a client
+# that stopped drawing (the failure this answers), a paused sim (SetTimeMultiplier(0) freezes
+# animations too), an open menu, a still scene. So the repeat is published as a FLAG with its
+# evidence and never as an error -- the image is always delivered and the diagnosis stays with the
+# caller, who knows whether it asked for the pause. Two independent signals travel together:
+#   intra-call   distinct_frames / max_adjacent_delta over the N frames this call already grabs.
+#                No stored state, so it works on the FIRST capture; it only sees ~0.36 s.
+#   cross-call   the sidecar below: "has the render advanced since the last capture of this window,
+#                by anyone?" -- the question two captures with a camera_set between them ask.
+# The cross-call store is a file rather than a module global because in --client mode every MCP
+# session is its own process and the capture stays local (CLAUDE.md, Modos de ejecucion), so process
+# memory could only ever compare a session against itself, and would lose its baseline on restart.
+#
+# THE ONE THING THIS MUST NEVER DO IS INVENT A FREEZE. A true has to mean that the pixels measured
+# now equal pixels some earlier capture really stored, for a window and a surface that are still the
+# same one. Three things defend that and each was a defect first:
+#   - the whole read-compare-prune-write cycle runs under an inter-process lock. Without it a writer
+#     holding an old snapshot replaces a newer file and RESURRECTS a hash a later capture then
+#     reports as a freeze that never happened.
+#   - the comparison identity carries geometry, not just the label "client"/"window": _pixel_sha256
+#     hashes the byte stream alone, so a 10x20 and a 20x10 block of one colour hash the same and a
+#     resize would read as a frozen frame.
+#   - a capture whose window cannot be identified at all does not fall into a shared bucket: it
+#     publishes null. Two different windows in one "unknown" record compare as one window.
+FRAME_STATE_ENV = "DAYZ_MCP_FRAME_STATE_PATH"
+FRAME_STATE_FILENAME = "capture-frame-state.json"
+FRAME_STATE_VERSION = 2
+# Bound on the store: keys accumulate (a fresh pid every run), and a cache file that only grows is a
+# slow leak. Evicting the oldest record can only ever cost a comparison -- the next capture of that
+# window reports frame_stale null, never a wrong true.
+FRAME_STATE_MAX_WINDOWS = 32
+FRAME_STATE_TMP_PREFIX = ".capture-frame-state-"
+FRAME_STATE_TMP_SUFFIX = ".tmp"
+# Waiting for the lock is bounded and short: the critical section is a few milliseconds, and a
+# capture is worth more than the flag, so a lock that does not come free degrades to "unavailable"
+# instead of holding the capture. A lock older than STALE belonged to a process that died holding
+# it; breaking it costs, at worst, one capture's worth of the round-1 race.
+FRAME_STATE_LOCK_SUFFIX = ".lock"
+FRAME_STATE_LOCK_TIMEOUT_S = 0.5
+FRAME_STATE_LOCK_POLL_S = 0.005
+FRAME_STATE_LOCK_STALE_S = 30.0
+FRAME_STATE_TMP_STALE_S = 60.0
+SURFACE_CLIENT = "client"
+SURFACE_WINDOW = "window"
+KEY_KIND_CMDLINE = "cmdline"
+KEY_KIND_PID = "pid"
+KEY_KIND_UNACCREDITED = "unaccredited"
+STATE_BACKEND_SIDECAR = "sidecar"
+STATE_BACKEND_UNAVAILABLE = "unavailable"
+
+
+def frame_state_path() -> str:
+    r"""Where the cross-call frame identity lives: $DAYZ_MCP_FRAME_STATE_PATH >
+    %LOCALAPPDATA%\DayZ_MCP\capture-frame-state.json -- the same "env var wins" shape as
+    resolve_capture_dir. The LOCALAPPDATA root is replicated here, not imported from
+    dayz_mcp.runtime_state, because this module is published on its own (publish/boundary.py) and
+    must not depend on the package. A host without LOCALAPPDATA falls back to the temp dir instead
+    of failing: the flag is never worth a lost capture."""
+    chosen = os.environ.get(FRAME_STATE_ENV, "").strip()
+    if chosen:
+        return os.path.abspath(chosen)
+    base = os.environ.get("LOCALAPPDATA", "").strip() or tempfile.gettempdir()
+    return os.path.abspath(os.path.join(base, "DayZ_MCP", FRAME_STATE_FILENAME))
+
+
+class _FrameStateLock:
+    """Inter-process mutex over the sidecar, so read-compare-prune-write is one transaction.
+
+    Exclusive creation of a sibling file is the mechanism: atomic on NTFS and on POSIX, no
+    dependency, and visible to every process that shares the store. Acquisition is bounded by
+    FRAME_STATE_LOCK_TIMEOUT_S and raises TimeoutError when it expires, which the report turns into
+    state_backend "unavailable" -- the capture never waits on the flag."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path + FRAME_STATE_LOCK_SUFFIX
+        self._fd: int | None = None
+
+    def __enter__(self) -> "_FrameStateLock":
+        deadline = time.time() + FRAME_STATE_LOCK_TIMEOUT_S
+        while True:
+            try:
+                os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+                self._fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                return self
+            except FileExistsError:
+                self._break_if_stale()
+                if time.time() >= deadline:
+                    raise TimeoutError("frame_state_locked") from None
+                time.sleep(FRAME_STATE_LOCK_POLL_S)
+
+    def _break_if_stale(self) -> None:
+        """A holder killed mid-write would block every later capture for good, so a lock older than
+        FRAME_STATE_LOCK_STALE_S is removed. The critical section is milliseconds, so a live holder
+        can never reach that age."""
+        try:
+            age = time.time() - os.stat(self.path).st_mtime
+        except OSError:
+            return
+        if age > FRAME_STATE_LOCK_STALE_S:
+            try:
+                os.unlink(self.path)
+            except OSError:
+                pass
+
+    def __exit__(self, *_exc: object) -> None:
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+
+def _sweep_stale_temporaries(directory: str, now: float) -> None:
+    """Drop sidecar temporaries left by a process killed between the write and the replace. Called
+    only with the lock held and only for files past FRAME_STATE_TMP_STALE_S, so the temporary a live
+    writer is using is never touched. Every failure is ignored: leftover litter is not a reason to
+    lose a capture."""
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.name.startswith(FRAME_STATE_TMP_PREFIX) or not entry.name.endswith(FRAME_STATE_TMP_SUFFIX):
+            continue
+        try:
+            if now - entry.stat().st_mtime > FRAME_STATE_TMP_STALE_S:
+                os.unlink(entry.path)
+        except OSError:
+            pass
+
+
+def _read_frame_state(path: str) -> tuple[dict[str, Any], str | None]:
+    """(state, reset_reason). A missing file is the first capture, not an error. A file that does
+    not parse, or does not carry the expected shape or version, resets the state and says so: a
+    sidecar truncated by a host kill must not cost every later capture its flag. An OSError
+    propagates on purpose -- the caller degrades the report to state_backend "unavailable" rather
+    than overwriting records it could not read."""
+    fresh: dict[str, Any] = {"version": FRAME_STATE_VERSION, "windows": {}}
+    if not os.path.exists(path):
+        return (fresh, None)
+    with open(path, "r", encoding="utf-8") as handle:
+        raw = handle.read()
+    try:
+        state = json.loads(raw)
+    except ValueError as exc:
+        return (fresh, f"state_reset_unreadable: {type(exc).__name__}")
+    if not isinstance(state, dict) or not isinstance(state.get("windows"), dict):
+        return (fresh, "state_reset_bad_shape")
+    if state.get("version") != FRAME_STATE_VERSION:
+        return (fresh, f"state_reset_version: {state.get('version')!r}")
+    return (state, None)
+
+
+def _write_frame_state(path: str, state: dict[str, Any]) -> None:
+    """Replace the sidecar atomically -- sibling temp file plus os.replace -- so a capture killed
+    mid-write leaves either the old file or the new one and never a half-written one. Written as
+    bytes, like every other state file under this root, so the newlines do not depend on the
+    platform. Raises on any store failure; the caller turns that into state_backend "unavailable"
+    and still returns the image."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    payload = (json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    handle_fd, tmp_path = tempfile.mkstemp(prefix=FRAME_STATE_TMP_PREFIX, suffix=FRAME_STATE_TMP_SUFFIX, dir=directory)
+    try:
+        with os.fdopen(handle_fd, "wb") as handle:
+            handle.write(payload)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _frame_state_key(cmdline_match: str, window: object) -> tuple[str, str]:
+    """(key, kind) of the window whose frames are compared.
+
+    cmdline_match identifies the live run's client (the server derives it from that run's _client
+    profiles dir) and is the only identity that survives a process restart, so it wins. A bare pid
+    is second best and is published as such: the OS reuses pids, so "pid:77" is not proof that two
+    captures saw the same window -- the geometric identity below has to agree as well. With neither,
+    the capture is UNACCREDITED and gets no comparison at all: a shared "unknown" bucket would
+    compare two different windows as if they were one, which is exactly the false freeze this
+    contract forbids."""
+    text = str(cmdline_match or "").strip()
+    if text:
+        return (text, KEY_KIND_CMDLINE)
+    if isinstance(window, dict):
+        pid = window.get("pid")
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+            return (f"pid:{pid}", KEY_KIND_PID)
+    return ("unknown", KEY_KIND_UNACCREDITED)
+
+
+def _utc_stamp(epoch_s: float) -> str:
+    """ISO-8601 UTC to the millisecond, the shape both the sidecar and the meta publish."""
+    return datetime.fromtimestamp(epoch_s, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _parse_stamp(stamp: object) -> float | None:
+    """Epoch seconds of a stamp written by _utc_stamp, or None when it cannot be read. The trailing
+    Z is rewritten by hand so the published module keeps working on runtimes whose fromisoformat
+    does not accept it."""
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    text = stamp[:-1] + "+00:00" if stamp.endswith("Z") else stamp
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+def _comparison_surface(window_rgb: Image.Image, client_rect: object, window: object) -> tuple[str, str, str]:
+    """(surface, identity, sha256) of the surface staleness is decided on.
+
+    The surface is the client viewport when the backend rect accredits it and the whole window
+    bitmap otherwise; the viewport is preferred because the title bar repaints when the window gains
+    or loses focus, and that repaint would report "the frame moved" in exactly the focus scenario
+    this is meant to catch.
+
+    identity is what must MATCH for two captures to be comparable at all: the surface kind, its
+    exact rectangle and the window's own class and bitmap size. The label alone is not enough --
+    _pixel_sha256 hashes the byte stream and nothing else, so a 10x20 and a 20x10 block of one
+    colour produce the same hash and a resize would read as a frozen frame."""
+    rect = _verified_client_rect(client_rect, window_rgb.size)
+    if rect is None:
+        surface, rgb = SURFACE_WINDOW, window_rgb
+        box = (0, 0, window_rgb.width, window_rgb.height)
+    else:
+        left, top, width, height = rect
+        surface, rgb = SURFACE_CLIENT, window_rgb.crop((left, top, left + width, top + height))
+        box = rect
+    window_class = window.get("class") if isinstance(window, dict) else None
+    identity = "{}:{},{},{},{}:{}:{}x{}".format(
+        surface, box[0], box[1], box[2], box[3],
+        str(window_class) if isinstance(window_class, str) else "",
+        window_rgb.width, window_rgb.height,
+    )
+    return (surface, identity, _pixel_sha256(rgb))
+
+
+def _frame_evidence(frames: list[Image.Image], pair_deltas: list[float]) -> dict[str, Any]:
+    """What this single call saw, with no stored state: how many frames were grabbed, how many of
+    them differ pixel-wise, and how far the largest adjacent step moved. distinct_frames == 1 over
+    DEFAULT_FRAME_COUNT frames means nothing changed in DEFAULT_FRAME_INTERVAL_S * (N-1) seconds."""
+    digests = [_pixel_sha256(frame) for frame in frames]
+    return {
+        "frames": len(frames),
+        "distinct_frames": len(set(digests)),
+        "max_adjacent_delta": max(pair_deltas) if pair_deltas else 0.0,
+    }
+
+
+def _frame_stale_report(
+    key: str,
+    surface: str,
+    current_sha256: str,
+    evidence: dict[str, Any],
+    key_kind: str = KEY_KIND_CMDLINE,
+    identity: str = "",
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Compare this frame against the last one recorded for the same window, record the new one, and
+    return {stale, detail} for the meta.
+
+    stale is None -- never False -- whenever no comparison was possible: the first capture of a
+    window, a window that cannot be identified, a record taken over a different surface or geometry,
+    or a store that could not be read or written. stale is True only when the sha measured now
+    equals a sha an earlier capture really stored under the same key AND the same identity. The
+    stored timestamp is the FIRST capture of a run of identical frames, so age_s answers "frozen
+    since when" and not "how long ago was the previous call".
+
+    The whole cycle runs inside _FrameStateLock: read, compare, prune and write are one transaction
+    across processes. Serialising it is not tidiness -- without it a writer carrying an older
+    snapshot replaces a newer file, resurrects a hash that a later capture then matches, and
+    publishes a freeze that never happened.
+
+    Never raises: every store failure, lock timeout included, degrades to state_backend
+    "unavailable" with the reason in state_error, because a capture without the flag beats no
+    capture at all."""
+    moment = time.time() if now is None else now
+    detail: dict[str, Any] = {
+        "key": key,
+        "key_kind": key_kind,
+        "surface": surface,
+        "current_sha256": current_sha256,
+        "previous_sha256": None,
+        "same_as_capture_ts": None,
+        "age_s": None,
+        "repeat_count": 1,
+        **evidence,
+        "state_backend": STATE_BACKEND_SIDECAR,
+        "state_error": None,
+    }
+    if key_kind == KEY_KIND_UNACCREDITED:
+        # No window identity, no comparison and no record: one shared bucket would compare two
+        # different windows as if they were the same one.
+        detail["state_error"] = "key_unaccredited"
+        return {"stale": None, "detail": detail}
+    stale: bool | None = None
+    try:
+        path = frame_state_path()
+        with _FrameStateLock(path):
+            _sweep_stale_temporaries(os.path.dirname(path) or ".", moment)
+            state, reset_reason = _read_frame_state(path)
+            detail["state_error"] = reset_reason
+            record = state["windows"].get(key)
+            first_seen = moment
+            if isinstance(record, dict):
+                previous_sha256 = record.get("sha256")
+                if isinstance(previous_sha256, str) and previous_sha256:
+                    detail["previous_sha256"] = previous_sha256
+                    # Both halves, and not just the identity string: the label is what a caller
+                    # passing no identity still gets checked on, and the identity is what catches a
+                    # resize that keeps the label.
+                    if record.get("surface") != surface or record.get("identity") != identity:
+                        detail["state_error"] = "surface_changed"
+                    elif previous_sha256 == current_sha256:
+                        stale = True
+                        stored_ts = record.get("ts")
+                        if isinstance(stored_ts, str) and stored_ts:
+                            detail["same_as_capture_ts"] = stored_ts
+                        seen_at = _parse_stamp(stored_ts)
+                        if seen_at is not None:
+                            first_seen = seen_at
+                            detail["age_s"] = float(max(0.0, moment - seen_at))
+                        count = record.get("repeat_count")
+                        valid = isinstance(count, int) and not isinstance(count, bool) and count > 0
+                        detail["repeat_count"] = count + 1 if valid else 2
+                    else:
+                        stale = False
+            windows = state["windows"]
+            windows[key] = {
+                "surface": surface,
+                "identity": identity,
+                "sha256": current_sha256,
+                "ts": _utc_stamp(first_seen),
+                "repeat_count": detail["repeat_count"],
+            }
+            if len(windows) > FRAME_STATE_MAX_WINDOWS:
+                def _record_ts(name: str) -> str:
+                    entry = windows.get(name)
+                    return str(entry.get("ts") or "") if isinstance(entry, dict) else ""
+
+                newest = sorted(windows, key=_record_ts, reverse=True)[:FRAME_STATE_MAX_WINDOWS]
+                keep = set(newest) | {key}
+                state["windows"] = {name: record for name, record in windows.items() if name in keep}
+            _write_frame_state(path, state)
+    except Exception as exc:
+        stale = None
+        detail["state_backend"] = STATE_BACKEND_UNAVAILABLE
+        detail["state_error"] = f"{type(exc).__name__}: {exc}"[:200]
+    return {"stale": stale, "detail": detail}
 
 
 def _run_window_capture(output_path: str, process_name: str, timeout_s: float, method: str = "auto", client_pid: int = 0, cmdline_match: str = "") -> dict[str, Any]:
@@ -546,11 +921,17 @@ def grab_stable_frame(
     """Grab N frames, return the most stable full-resolution RGB frame (native window size, no
     downscale), or an error dict ({isError, error}) on capture failure / unverifiable or all-black
     client-area. Split out from
-    capture_screenshot so the dual channel (full-res to disk + inline thumbnail) shares one grab."""
+    capture_screenshot so the dual channel (full-res to disk + inline thumbnail) shares one grab.
+
+    Every frame that reaches this function is recorded in the frozen-frame sidecar BEFORE the
+    client-area gates, so a rejected capture still counts: "black since T, N captures in a row" is
+    only countable if the rejected frames are recorded too, and the error payload returned below
+    carries no meta of its own. The report rides on the returned frame as
+    info["frame_stale_report"], which capture_dual publishes."""
     frame_count = max(1, min(int(frames), 5))
     with tempfile.TemporaryDirectory(prefix="mcp_capture_") as tmp_dir:
         captured: list[Image.Image] = []
-        capture_results: list[tuple[Image.Image, dict[str, Any]]] = []
+        capture_results: list[dict[str, Any]] = []
         for index in range(frame_count):
             output_path = os.path.join(tmp_dir, f"frame_{index}.png")
             result = _run_window_capture(output_path, process_name=process_name, timeout_s=8.0, method=method, client_pid=client_pid, cmdline_match=cmdline_match)
@@ -559,12 +940,27 @@ def grab_stable_frame(
             with Image.open(output_path) as img:
                 frame = img.convert("RGB").copy()
                 captured.append(frame)
-                capture_results.append((frame, result))
+                capture_results.append(result)
             if index + 1 < frame_count:
                 time.sleep(DEFAULT_FRAME_INTERVAL_S)
 
-        chosen = choose_stable_frame(captured)
-        chosen_result = next(result for frame, result in capture_results if frame is chosen)
+        pair_deltas = _adjacent_pair_deltas(captured)
+        chosen_index = _stable_frame_index(captured, pair_deltas)
+        chosen = captured[chosen_index]
+        chosen_result = capture_results[chosen_index]
+        chosen_window = chosen_result.get("window")
+        state_key, key_kind = _frame_state_key(cmdline_match, chosen_window)
+        surface, surface_identity, surface_sha256 = _comparison_surface(
+            chosen, chosen_result.get("client"), chosen_window
+        )
+        frame_stale_report = _frame_stale_report(
+            key=state_key,
+            surface=surface,
+            current_sha256=surface_sha256,
+            evidence=_frame_evidence(captured, pair_deltas),
+            key_kind=key_kind,
+            identity=surface_identity,
+        )
         client_stats = chosen_result.get("clientStats")
         if not isinstance(client_stats, dict):
             return _error("frame_client_area_unverified")
@@ -585,6 +981,7 @@ def grab_stable_frame(
         chosen.info["sha256"] = chosen_result.get("sha256")
         # Client viewport of the SAME chosen frame, verified later by the consumer that needs it.
         chosen.info["client"] = chosen_result.get("client")
+        chosen.info["frame_stale_report"] = frame_stale_report
         return chosen
 
 
@@ -667,6 +1064,16 @@ def capture_dual(
     fullres file, when requested, is the native effective surface (after crops, before downscale),
     with its file hash in meta.fullres_file_sha256.
 
+    meta.frame_stale (bool | None) and meta.frame_stale_detail declare whether this frame repeats
+    the previous capture of the same window: True = identical pixels, False = the render advanced,
+    None = no comparison was possible (first capture, an unidentifiable window, a record over a
+    different surface or geometry, or an unusable state store). It is a fact about pixels, not a
+    diagnosis -- a paused sim, an open menu and a still scene all produce it legitimately -- so it
+    never turns a capture into an error. The detail also carries the intra-call evidence (frames,
+    distinct_frames, max_adjacent_delta), which needs no stored state and is therefore available on
+    the very first capture, and key_kind, which says how strong the window identity behind the
+    comparison is.
+
     Returns {inline, fullres_path, meta} on success or {isError, error} on failure."""
     if not isinstance(crop_space, str) or crop_space not in CROP_SPACES:
         return _error(ERROR_BAD_CROP_SPACE)
@@ -677,6 +1084,9 @@ def capture_dual(
     window_rgb = chosen
     window_box = (0, 0, window_rgb.width, window_rgb.height)
     window_hash = _pixel_sha256(window_rgb)
+    # Written by grab_stable_frame on the frame it selected; an empty dict only if a caller hands in
+    # a frame from somewhere else, in which case both keys publish as null rather than failing.
+    frame_stale_report: dict[str, Any] = chosen.info.get("frame_stale_report") or {}
 
     client_rect = _verified_client_rect(chosen.info.get("client"), window_rgb.size)
     client_rgb: Image.Image | None = None
@@ -731,6 +1141,8 @@ def capture_dual(
             "delivered_pixel_sha256": _pixel_sha256(delivered),
             "delivered_stats": image_stats_from_image(delivered),
         },
+        "frame_stale": frame_stale_report.get("stale"),
+        "frame_stale_detail": frame_stale_report.get("detail"),
         "fullres_file_sha256": None,
     }
     out: dict[str, Any] = {"inline": inline, "fullres_path": None, "meta": meta}
