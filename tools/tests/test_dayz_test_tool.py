@@ -741,6 +741,13 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "steam_registered_pid",
                 "steam_live_pids",
                 "remediation",
+                # Fase 1b + ronda 2: the extension gate publishes the branch it
+                # took, and what actually happened to the client role.
+                "client_terminated",
+                "client_relaunched",
+                "client_replace_reason",
+                "client_last_poll_age_s",
+                "client_record_age_s",
             },
         )
         self.assertEqual(result["status"], "succeeded")
@@ -878,6 +885,13 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "steam_registered_pid",
                 "steam_live_pids",
                 "remediation",
+                # Fase 1b + ronda 2: the extension gate publishes the branch it
+                # took, and what actually happened to the client role.
+                "client_terminated",
+                "client_relaunched",
+                "client_replace_reason",
+                "client_last_poll_age_s",
+                "client_record_age_s",
             },
         )
         self.assertEqual(result["status"], "failed")
@@ -945,6 +959,13 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "steam_registered_pid",
                 "steam_live_pids",
                 "remediation",
+                # Fase 1b + ronda 2: the extension gate publishes the branch it
+                # took, and what actually happened to the client role.
+                "client_terminated",
+                "client_relaunched",
+                "client_replace_reason",
+                "client_last_poll_age_s",
+                "client_record_age_s",
             },
         )
 
@@ -1006,6 +1027,13 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "steam_registered_pid",
                 "steam_live_pids",
                 "remediation",
+                # Fase 1b + ronda 2: the extension gate publishes the branch it
+                # took, and what actually happened to the client role.
+                "client_terminated",
+                "client_relaunched",
+                "client_replace_reason",
+                "client_last_poll_age_s",
+                "client_record_age_s",
             },
         )
 

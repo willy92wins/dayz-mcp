@@ -317,6 +317,31 @@ _ADOPT_NOT_DISPATCHABLE_HINT = (
     "Instance bindings do not survive a daemon restart. This run admits "
     "stop_run and relaunch; mutations cannot dispatch until then."
 )
+# fb-20260904-025733-d60f: states an ownerless run may be adopted from. A stop
+# that degraded leaves the run UNRECONCILED with no owner and, when the guard
+# could not end it, with a live process of its own: stop_run demands RUNNING
+# with an owner, reap_dead_run answers process_alive while the process lives,
+# and admin_reconcile is a TTY-confirmed admin path, so the box stayed occupied
+# with no verb a session could use. Adopting it re-enters the machine that
+# already exists: UNRECONCILED -> adopt -> RUNNING -> stop -> EXITED. The
+# safety discriminator does not move: still a lease, still no record the guard
+# cannot vouch for, still at least one owned process.
+_ADOPTABLE_STATES = frozenset({"RUNNING_IDLE", "UNRECONCILED"})
+# fb-20260904-025027-8f76 (part c): a process that has already exited can
+# outlive its own row in the host UDP table. start_run reads that table again
+# right before the launcher, and a pid that is no longer a registered process
+# reads there as a foreign holder, so retiring the record while the socket
+# lives would leave the role dead AND unlaunched - worse than the state it
+# started from. The wait for the release is bounded by contract, never by an
+# open sleep: at most _ROLE_RELEASE_TRIES probes spaced
+# _ROLE_RELEASE_INTERVAL_S apart, then port_still_held and nothing is retired.
+_ROLE_RELEASE_TRIES = 10
+_ROLE_RELEASE_INTERVAL_S = 0.25
+_PORT_STILL_HELD_HINT = (
+    "port_still_held: the superseded process ended but the host UDP socket "
+    "table still lists its pid. Nothing was retired and nothing was launched; "
+    "repeat the same call once the socket is released."
+)
 _STATUS_SNAPSHOT_TRIES = 3
 _RECOVERY_REPAIR_STATES = frozenset(
     {"STARTING", "RUNNING", "RUNNING_IDLE", "STOPPING", "UNRECONCILED"}
@@ -1021,6 +1046,10 @@ class ProcessLifecycle:
         # Retired-run diagnostics live in daemon memory and start empty after a
         # restart; the audit file is never read to reconstruct them.
         self._retired_diagnostics: deque[RetiredRunDiagnostic] = deque(maxlen=32)
+        # Bound of the socket-release confirmation (P-L2.c). Instance state so a
+        # test can shorten it without patching the module.
+        self._role_release_tries = _ROLE_RELEASE_TRIES
+        self._role_release_interval_s = _ROLE_RELEASE_INTERVAL_S
 
     def _prepare_instance(
         self,
@@ -2021,6 +2050,50 @@ class ProcessLifecycle:
                         confirmed_error="retail_quarantine",
                         attempt_started_at=attempt_started_at,
                     )
+                if (
+                    existing is not None
+                    and previous is not None
+                    # A1-F1/A1-F2: only the role the extension gate of
+                    # dayz_test_tool covers. That gate reads the client record
+                    # and nothing else, so running the replacement for another
+                    # role would end a live process no gate ever looked at, and
+                    # publish no_client_to_replace while doing it. Measured on
+                    # role=offline; restores the HEAD behaviour for it.
+                    and launch_role == "client"
+                ):
+                    # P-L2 / P-L2.c: the role this launch claims is freed
+                    # before the instance is prepared, so a refusal here never
+                    # leaves the superseded process alive with its binding
+                    # already retired.
+                    replaced_pids, replace_error = self._replace_role_processes(
+                        provisional, launch_role, client=client
+                    )
+                    if replace_error is None and replaced_pids:
+                        # Durable before the launch: a crash between here and
+                        # the launcher leaves STARTING without the superseded
+                        # record, which recover_after_restart turns into
+                        # UNRECONCILED and the adopt + stop pair closes.
+                        try:
+                            self.manifest.replace(provisional)
+                        except Exception:
+                            replace_error = "manifest_failed"
+                        else:
+                            self._invalidate_box_cache()
+                            previous.processes = list(provisional.processes)
+                    if replace_error is not None:
+                        settled = self._settle_failed_launch(
+                            client=client,
+                            previous=previous,
+                            provisional=provisional,
+                            launched=None,
+                            record=None,
+                            confirmed_error=replace_error,
+                            manifest_failure=replace_error == "manifest_failed",
+                            attempt_started_at=attempt_started_at,
+                        )
+                        if replace_error == "port_still_held":
+                            settled["hint"] = _PORT_STILL_HELD_HINT
+                        return settled
                 minted, prepare_error = self._prepare_instance(
                     run_id, launch_role, str(parsed["profiles"]), existing is not None
                 )
@@ -2300,6 +2373,137 @@ class ProcessLifecycle:
             if kind == "unknown" and unknown_reason is None:
                 unknown_reason = reason
         return buckets, unknown_reason
+
+    def _ports_released(self, pids: set[int]) -> str | None:
+        """None when no UDP holder carries one of these pids (P-L2.c).
+
+        Fail-closed twice over: a table this daemon cannot read is never
+        "released", and a pid still listed answers port_still_held instead of
+        letting the caller retire a record that the pre-launch probe of
+        start_run would then read as a foreign holder. A lifecycle wired
+        without a port probe has no table to contradict, and _port_holders
+        answers an empty known scan for it.
+
+        A3-F4: a bare pid is not an identity, and this runs right after the
+        guard confirmed the exit, which is the instant that pid stopped being
+        one. The OS is free to hand it to anything, so only a holder that could
+        plausibly be the game counts: a DayZ image on any port, or any image on
+        a port of the band this project launches in. A recycled pid holding an
+        unrelated socket no longer blocks the relaunch of a client it never was.
+        """
+        if not pids:
+            return None
+        tries = max(1, int(self._role_release_tries))
+        reason = "port_scan_unknown"
+        for attempt in range(tries):
+            scan_reason, holders = self._port_holders()
+            if scan_reason is None and holders is not None:
+                held = any(
+                    isinstance(holder.get("pid"), int)
+                    and holder["pid"] in pids
+                    and (
+                        _is_dayz_image(holder.get("name"))
+                        or holder["port"] in _DAYZ_PORT_RANGE
+                    )
+                    for holder in holders
+                )
+                if not held:
+                    return None
+                reason = "port_still_held"
+            else:
+                reason = scan_reason or "port_scan_unknown"
+            if attempt + 1 < tries:
+                time.sleep(self._role_release_interval_s)
+        return reason
+
+    def _replace_role_processes(
+        self, run: RunRecord, role: str, *, client: ClientIdentity
+    ) -> tuple[list[int], str | None]:
+        """Free a role on a run being extended, before a new process takes it.
+
+        fb-20260904-025027-8f76 (part c): start_run appended the relaunched
+        client next to the hung one, and RunRecord.validate does not bound a
+        run to one process per role, so the row carried two client records and
+        the liveness projection reported the last of them. The role's instance
+        binding is already retired on this same path (_prepare_instance with
+        replacing_role), so the superseded process is cut off from the bridge
+        either way: what was missing was ending it and dropping its record.
+
+        Order: terminate -> confirm -> retire. The process is confirmed by the
+        guard, which waits for the exit before answering terminated
+        (native_process_guard.py: process.wait after kill); the socket is
+        confirmed by _ports_released. The owned/foreign/unknown split is
+        stop_run's and is not relaxed: only a process this lifecycle can vouch
+        for is terminated, and a record it cannot classify is left exactly
+        where it is - a duplicate record is preferable to ending a process that
+        may not be ours.
+
+        Answers (retired_pids, error). On an error the run keeps every record;
+        the terminations already confirmed are reported so the caller can
+        settle the launch on the truth.
+        """
+        role_records = [record for record in run.processes if record.role == role]
+        if not role_records:
+            return [], None
+        owned: list[ProcessRecord] = []
+        gone: list[ProcessRecord] = []
+        for record in role_records:
+            kind, _reason = self._classify_registered_process(record)
+            if kind == "owned":
+                owned.append(record)
+            elif kind == "gone":
+                gone.append(record)
+        retiring = owned + gone
+        if not retiring:
+            return [], None
+        if len(retiring) >= len(run.processes):
+            # RunRecord.validate demands processes on a RUNNING run, so an
+            # emptied row would make the rollback target of
+            # _settle_failed_launch unpersistable. Refuse before terminating.
+            return [], "run_would_be_empty"
+        if not self._audit(
+            "lifecycle_role_replaced",
+            client,
+            "role_superseded",
+            "allowed",
+            run_id=run.run_id,
+            role=role,
+            owned_pids=[record.pid for record in owned],
+            gone_pids=[record.pid for record in gone],
+        ):
+            return [], "audit_failed"
+        terminated: list[int] = []
+        for record in owned:
+            try:
+                guard_result = self.guard.terminate(record)
+            except Exception:
+                guard_result = {
+                    "error": "guard_unavailable",
+                    "exit_code": 3,
+                    "terminated": False,
+                }
+            if (
+                not isinstance(guard_result, dict)
+                or guard_result.get("terminated") is not True
+            ):
+                return terminated, (
+                    str(guard_result.get("error", "termination_failed"))
+                    if isinstance(guard_result, dict)
+                    else "termination_failed"
+                )
+            terminated.append(record.pid)
+        release_reason = self._ports_released(
+            {record.pid for record in retiring}
+        )
+        if release_reason is not None:
+            return terminated, release_reason
+        retired = {(record.pid, record.role) for record in retiring}
+        run.processes = [
+            record
+            for record in run.processes
+            if (record.pid, record.role) not in retired
+        ]
+        return [record.pid for record in retiring], None
 
     def stop_run(self, client: ClientIdentity, token: str | None, run_id: object) -> dict[str, object]:
         legacy_error = self._legacy_identity_error()
@@ -2618,7 +2822,10 @@ class ProcessLifecycle:
                     if not dispatchable:
                         payload["hint"] = _ADOPT_NOT_DISPATCHABLE_HINT
                     return payload
-                if run.state != "RUNNING_IDLE" or run.owner_session_id is not None:
+                if (
+                    run.state not in _ADOPTABLE_STATES
+                    or run.owner_session_id is not None
+                ):
                     return self._reject_reserved(authority, command, "run_not_adoptable")
                 if any(
                     other.state in _ACTIVE_STATES and other.run_id != run_id
@@ -2642,7 +2849,12 @@ class ProcessLifecycle:
                     return result
                 if self._quarantined():
                     return self._reject_reserved(authority, command, "retail_quarantine")
-                if not self._audit("lifecycle_adopt", client, "identity_match", "allowed", run_id=run_id):
+                adopt_reason = (
+                    "unreconciled_adopt"
+                    if run.state == "UNRECONCILED"
+                    else "identity_match"
+                )
+                if not self._audit("lifecycle_adopt", client, adopt_reason, "allowed", run_id=run_id):
                     self.coordinator.reject_reservation(
                         authority[0], authority[1], authority[2], "audit_failed"
                     )
