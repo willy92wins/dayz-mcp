@@ -939,5 +939,130 @@ class StorageGateTests(unittest.TestCase):
         self.assertIn("storage_prepare_failed", dayz_test_worker.WORKER_ERROR_CODES)
 
 
+class ReplacementWitnessTests(unittest.TestCase):
+    """79e2. The witness reaches the sealed request, and the reason comes back.
+
+    Two halves of the same ficha: the gate verdict must travel INSIDE the
+    request the daemon revalidates, and the daemon's refusal must not be
+    flattened into worker_failed on the way out.
+    """
+
+    RUN_ID = "12345678-1234-4234-8234-1234567890ab"
+    WITNESS = 1_756_000_000_000
+
+    def _execute(self, broker: _Broker, **overrides: object) -> object:
+        raw = _raw(**overrides)
+        parsed = dayz_test_request.parse_dayz_test_request(raw, policies=(POLICY,))
+        ids = iter(
+            (
+                "12345678-1234-4234-8234-1234567890ab",
+                "87654321-4321-4321-8321-ba0987654321",
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            )
+        )
+
+        async def readiness(_run_id: str, _port: int, _timeout: int) -> object:
+            return dayz_test_readiness.ReadinessResult(ready=True, error_code=None)
+
+        return asyncio.run(
+            dayz_test_worker.execute_dayz_test_worker(
+                parsed.canonical_bytes,
+                request_sha256=parsed.sha256,
+                request_policies=(POLICY,),
+                runtime_policy=RUNTIME,
+                broker=broker,
+                id_fn=lambda: next(ids),
+                readiness_probe=readiness,
+                has_binarizable_assets=lambda _source: True,
+                now_fn=lambda: 1_756_000_000.0,
+            )
+        )
+
+    def test_the_witness_travels_in_the_sealed_client_start(self) -> None:
+        broker = _Broker()
+        broker.current_run_id = self.RUN_ID
+        self._execute(
+            broker,
+            mode="client",
+            run_id=self.RUN_ID,
+            replace_if_not_polling_since=self.WITNESS,
+        )
+        starts = [
+            json.loads(item.stdin)
+            for item in broker.requests
+            if item.payload.get("command") == "start"
+        ]
+        self.assertEqual(len(starts), 1, starts)
+        self.assertEqual(starts[0]["replace_if_not_polling_since"], self.WITNESS)
+        self.assertEqual(starts[0]["role"], "client")
+
+    def test_a_launch_that_creates_its_own_run_carries_no_witness(self) -> None:
+        """Negative control: nothing to supersede, nothing to witness.
+
+        It also keeps the bytes the launch hash covers as narrow as they were.
+        """
+        broker = _Broker()
+        self._execute(broker, mode="server")
+        starts = [
+            json.loads(item.stdin)
+            for item in broker.requests
+            if item.payload.get("command") == "start"
+        ]
+        for start in starts:
+            self.assertNotIn("replace_if_not_polling_since", start)
+
+    def test_a_declared_lifecycle_refusal_reaches_the_caller_verbatim(self) -> None:
+        for code in sorted(dayz_test_worker.LIFECYCLE_REJECTION_CODES):
+            with self.subTest(code=code):
+
+                class _RefusingBroker(_Broker):
+                    async def invoke(self, frame: bytes) -> dict[str, object]:
+                        request = native_broker_protocol.decode_request(frame)
+                        if request.payload.get("command") == "start":
+                            self.requests.append(request)
+                            return {"ok": False, "error": code}
+                        return await super().invoke(frame)
+
+                broker = _RefusingBroker()
+                broker.current_run_id = self.RUN_ID
+                with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as caught:
+                    self._execute(
+                        broker,
+                        mode="client",
+                        run_id=self.RUN_ID,
+                        replace_if_not_polling_since=self.WITNESS,
+                    )
+                self.assertEqual(caught.exception.code, code)
+
+    def test_an_undeclared_lifecycle_error_still_collapses_to_worker_failed(self) -> None:
+        """Negative control that kills the mutant "carry any error through"."""
+
+        class _RefusingBroker(_Broker):
+            async def invoke(self, frame: bytes) -> dict[str, object]:
+                request = native_broker_protocol.decode_request(frame)
+                if request.payload.get("command") == "start":
+                    self.requests.append(request)
+                    return {"ok": False, "error": "something_the_worker_never_heard_of"}
+                return await super().invoke(frame)
+
+        broker = _RefusingBroker()
+        broker.current_run_id = self.RUN_ID
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as caught:
+            self._execute(
+                broker,
+                mode="client",
+                run_id=self.RUN_ID,
+                replace_if_not_polling_since=self.WITNESS,
+            )
+        self.assertEqual(caught.exception.code, "worker_failed")
+
+    def test_the_carried_codes_are_part_of_the_worker_vocabulary(self) -> None:
+        self.assertTrue(
+            dayz_test_worker.LIFECYCLE_REJECTION_CODES
+            <= dayz_test_worker.WORKER_ERROR_CODES
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -30,6 +30,23 @@ _UUID4 = re.compile(
 PRE_ADMISSION_REJECTION_CODES = frozenset({"active_run_exists"})
 
 
+# fb-20260904-200816-79e2 / A3-F3. A lifecycle refusal used to reach the caller
+# as worker_failed, because a code outside WORKER_ERROR_CODES cannot be raised
+# here: the operator got "the worker failed" over a DayZ that had been killed,
+# or over a replacement the daemon refused for a reason it could name exactly.
+# This is a CLOSED list of the lifecycle codes the worker is allowed to carry
+# through verbatim; anything else still collapses to worker_failed.
+LIFECYCLE_REJECTION_CODES = frozenset(
+    {
+        "bridge_state_unreadable",
+        "client_polling_since_decision",
+        "port_still_held",
+        "replace_witness_missing",
+        "replace_witness_stale",
+    }
+)
+
+
 WORKER_ERROR_CODES = frozenset(
     {
         "build_failed",
@@ -46,7 +63,7 @@ WORKER_ERROR_CODES = frozenset(
         "worker_failed",
         "worker_identity_failed",
     }
-) | PRE_ADMISSION_REJECTION_CODES | dayz_test_readiness.READINESS_ERROR_CODES
+) | PRE_ADMISSION_REJECTION_CODES | LIFECYCLE_REJECTION_CODES | dayz_test_readiness.READINESS_ERROR_CODES
 
 
 class DayzTestWorkerError(RuntimeError):
@@ -286,6 +303,7 @@ def _start_core(
         profiles = client_profiles
     else:
         raise _failed("runtime_policy_invalid")
+    witness = payload.get("replace_if_not_polling_since")
     core: dict[str, object] = {
         "argv": argv,
         "cwd": runtime.game_directory,
@@ -298,6 +316,12 @@ def _start_core(
     }
     if run_id is not None:
         core["run_id"] = run_id
+        # 79e2. Only the client relaunch over a live run can supersede a
+        # process, so only it carries the witness of the gate that authorised
+        # it. A launch that creates its own run has nothing to supersede, and
+        # the key would only widen the bytes the launch hash covers.
+        if role == "client" and type(witness) is int:
+            core["replace_if_not_polling_since"] = witness
     return core
 
 _STORAGE_MODES = frozenset({"server", "all"})
@@ -404,6 +428,20 @@ def _successful_run(result: dict[str, object], run_id: str, state: str) -> bool:
         and result.get("run_id") == run_id
         and result.get("state") == state
     )
+
+
+def _lifecycle_rejection(result: object) -> str | None:
+    """The reason the daemon gave, when it is one the worker may republish.
+
+    Not the whole envelope: only a declared code. An undeclared one keeps the
+    legacy collapse, so the daemon cannot widen this vocabulary by itself.
+    """
+    if not isinstance(result, dict):
+        return None
+    code = result.get("error")
+    if not isinstance(code, str) or code not in LIFECYCLE_REJECTION_CODES:
+        return None
+    return code
 
 
 def _pre_admission_rejection(result: dict[str, object]) -> str | None:
@@ -516,7 +554,7 @@ async def _start(
                     "state": "RUNNING",
                 }
         if not _successful_run(result, target_run_id, "RUNNING"):
-            raise _failed()
+            raise _failed(_lifecycle_rejection(result) or "worker_failed")
         if operation_id is None:
             return target_run_id, True
         ack = await _lifecycle(

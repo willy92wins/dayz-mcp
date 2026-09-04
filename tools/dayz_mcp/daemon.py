@@ -540,6 +540,9 @@ def _activate_server_coordination(
         ),
         recovery_fault_arm=arm_lifecycle_recovery_fault,
         bindings=state,
+        # 79e2: the same ServerState, read-only, so start_run can revalidate a
+        # client replacement against the bridge at the instant of the kill.
+        bridge_probe=state.status_snapshot,
     )
     if recovered_lifecycle_fault is None:
         bounded_io(

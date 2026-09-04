@@ -342,6 +342,39 @@ _PORT_STILL_HELD_HINT = (
     "table still lists its pid. Nothing was retired and nothing was launched; "
     "repeat the same call once the socket is released."
 )
+# fb-20260904-200816-79e2 / H-A2-2. The extension gate decides in the MCP server
+# process and the kill happens here, after composing the sealed request, opening
+# the launcher, starting app.pyz and two broker round trips. A4 measured that
+# window on the durable audit: n=26, min 0,47 s, median 7,00 s, max 29,16 s --
+# the same order as PEER_STALE_S. The bound below is twice the measured maximum,
+# so a legitimate call never trips it while a request replayed minutes later does.
+_REPLACE_WITNESS_MAX_AGE_S = 60.0
+# One-sided tolerance for a witness stamped a hair in the future by clock skew
+# between the two processes. Anything beyond it is not skew.
+_REPLACE_WITNESS_SKEW_S = 2.0
+_REPLACE_WITNESS_HINTS = {
+    "replace_witness_missing": (
+        "replace_witness_missing: superseding a live client needs the witness "
+        "of the gate that authorised it, carried in the sealed request. Nothing "
+        "was terminated and nothing was launched. A launcher bundle older than "
+        "this daemon does not send it: rebuild and reinstall app.pyz."
+    ),
+    "replace_witness_stale": (
+        "replace_witness_stale: the gate read the bridge too long ago for its "
+        "verdict to still stand. Nothing was terminated and nothing was "
+        "launched; repeat the same call."
+    ),
+    "client_polling_since_decision": (
+        "client_polling_since_decision: the client polled the bridge again "
+        "after the gate decided it had stopped. Nothing was terminated and "
+        "nothing was launched: the client is alive and serving."
+    ),
+    "bridge_state_unreadable": (
+        "bridge_state_unreadable: the bridge state carries no usable evidence "
+        "about this client, and no evidence does not authorise ending a live "
+        "process. Nothing was terminated and nothing was launched."
+    ),
+}
 _STATUS_SNAPSHOT_TRIES = 3
 _RECOVERY_REPAIR_STATES = frozenset(
     {"STARTING", "RUNNING", "RUNNING_IDLE", "STOPPING", "UNRECONCILED"}
@@ -1015,6 +1048,10 @@ class ProcessLifecycle:
         recovery_fault_arm: RecoveryFaultArm | None = None,
         argv_of: Callable[[int], list[str] | None] | None = None,
         bindings: object | None = None,
+        # 79e2: reads the bridge peer rows to revalidate a client replacement at
+        # the instant of the kill. Read-only; None means "no answer", which is a
+        # refusal, never a licence.
+        bridge_probe: object | None = None,
         daemon_generation: str | None = None,
     ) -> None:
         self.coordinator = coordinator
@@ -1030,6 +1067,7 @@ class ProcessLifecycle:
         self.recovery_fault_arm = recovery_fault_arm
         self.argv_of = argv_of or _default_argv_of
         self.bindings = bindings
+        self.bridge_probe = bridge_probe
         self.daemon_generation = (
             daemon_generation if isinstance(daemon_generation, str) else ""
         )
@@ -1574,6 +1612,90 @@ class ProcessLifecycle:
             return "retail_manual_lifecycle_required"
         return "executable_not_allowed"
 
+    def _client_peer_row(self) -> dict[str, object] | None:
+        """The bridge row for the client peer, or None when there is no answer.
+
+        The probe is the loopback ServerState's own status_snapshot: the daemon
+        already owns that object (daemon.py passes it as ``bindings``), so the
+        state the MCP server reads over HTTP as /status is readable here with no
+        network hop. It travels as its OWN parameter and not through
+        ``bindings`` because this is a read of the bridge, not a binding
+        mutation, and an object that answers one must not have to answer both.
+
+        The lock order is the established one: _prepare_instance already calls
+        ``bindings.prepare`` under _operation_lock, and ServerState never takes
+        _operation_lock while holding its own lock (loopback.py:1250).
+
+        No probe, an unreadable one, or a snapshot without a client row are all
+        the same answer: None. The caller turns that into a refusal, never into
+        a licence to kill.
+        """
+        probe = self.bridge_probe
+        if not callable(probe):
+            return None
+        try:
+            snapshot = probe()
+        except Exception:
+            return None
+        if not isinstance(snapshot, dict):
+            return None
+        peers = snapshot.get("peers")
+        if not isinstance(peers, dict):
+            return None
+        row = peers.get("client")
+        return row if isinstance(row, dict) else None
+
+    def _replacement_witness_error(
+        self, parsed: dict[str, object], *, now: float
+    ) -> str | None:
+        """Revalidate here the verdict the extension gate reached back there.
+
+        H-A2-2 / ficha 79e2: the gate reads the bridge once, in another process,
+        and this is where a live DayZ dies. Nothing revalidated in between, so a
+        client that resumed polling inside the window was killed and the answer
+        said client_not_polling -- a fact already false at the moment of the kill.
+
+        The witness is the instant the gate READ the bridge, and it is compared
+        by ELAPSED TIME, never by absolute clocks: the bridge stamps its polls
+        with time.monotonic (loopback.py:939), so an epoch read here and a
+        monotonic reading there do not live on the same axis. "The client polled
+        after the decision" is therefore "its most recent poll is younger than
+        the age of the decision".
+
+        Deliberately stricter than server._peer_is_live: it takes the MOST
+        RECENT of the two ages the row carries instead of choosing one by
+        binding state. Any evidence of a poll after the decision blocks the
+        kill, and refusing costs one repeated call while being wrong the other
+        way costs a live session.
+        """
+        witness = parsed.get("replace_if_not_polling_since")
+        if type(witness) is not int or witness <= 0:
+            return "replace_witness_missing"
+        decision_age_s = now - witness / 1000.0
+        if (
+            decision_age_s < -_REPLACE_WITNESS_SKEW_S
+            or decision_age_s > _REPLACE_WITNESS_MAX_AGE_S
+        ):
+            return "replace_witness_stale"
+        peer = self._client_peer_row()
+        if peer is None:
+            return "bridge_state_unreadable"
+        ages = [
+            value
+            for value in (
+                peer.get("last_poll_age_s"),
+                peer.get("bound_last_poll_age_s"),
+            )
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        if not ages:
+            # A row with no usable age is not an answer, and no answer must not
+            # authorise a kill (the same reading as _peer_row_is_usable).
+            return "bridge_state_unreadable"
+        if min(ages) < max(0.0, decision_age_s):
+            return "client_polling_since_decision"
+        return None
+
     def _parse_start_request(self, request: object) -> tuple[dict[str, object] | None, str | None]:
         if not isinstance(request, dict):
             return None, "invalid_start_request"
@@ -2065,9 +2187,16 @@ class ProcessLifecycle:
                     # before the instance is prepared, so a refusal here never
                     # leaves the superseded process alive with its binding
                     # already retired.
-                    replaced_pids, replace_error = self._replace_role_processes(
-                        provisional, launch_role, client=client
+                    # 79e2: revalidated HERE, against the bridge state this
+                    # process owns, before a single process is touched.
+                    replaced_pids: tuple[int, ...] = ()
+                    replace_error = self._replacement_witness_error(
+                        parsed, now=time.time()
                     )
+                    if replace_error is None:
+                        replaced_pids, replace_error = self._replace_role_processes(
+                            provisional, launch_role, client=client
+                        )
                     if replace_error is None and replaced_pids:
                         # Durable before the launch: a crash between here and
                         # the launcher leaves STARTING without the superseded
@@ -2093,6 +2222,8 @@ class ProcessLifecycle:
                         )
                         if replace_error == "port_still_held":
                             settled["hint"] = _PORT_STILL_HELD_HINT
+                        elif replace_error in _REPLACE_WITNESS_HINTS:
+                            settled["hint"] = _REPLACE_WITNESS_HINTS[replace_error]
                         return settled
                 minted, prepare_error = self._prepare_instance(
                     run_id, launch_role, str(parsed["profiles"]), existing is not None

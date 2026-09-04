@@ -333,6 +333,43 @@ class DayzTestToolRequestTest(unittest.TestCase):
             dayz_test_request.parse_dayz_test_request = original
         self.assertEqual(caught.exception.code, "bad_dayz_test_request")
 
+    def test_the_replacement_witness_is_only_valid_on_a_client_relaunch(self) -> None:
+        """79e2. The field exists for one call: the one that supersedes a client."""
+        raw, _chosen = dayz_test_tool.build_run_request(
+            _sealed(_policy()),
+            project="ExampleMod",
+            mode="client",
+            run_id=RUN_ID,
+            extra_mods=["@DayZ_MCP"],
+            replace_if_not_polling_since=1_756_000_000_000,
+        )
+        self.assertEqual(
+            json.loads(raw)["replace_if_not_polling_since"], 1_756_000_000_000
+        )
+
+        with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+            dayz_test_tool.build_run_request(
+                _sealed(_policy()),
+                project="ExampleMod",
+                mode="server",
+                extra_mods=["@DayZ_MCP"],
+                replace_if_not_polling_since=1_756_000_000_000,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "bad_dayz_test_request:replace_witness_not_allowed",
+        )
+
+    def test_a_call_without_a_replacement_carries_no_witness(self) -> None:
+        raw, _chosen = dayz_test_tool.build_run_request(
+            _sealed(_policy()),
+            project="ExampleMod",
+            mode="client",
+            run_id=RUN_ID,
+            extra_mods=["@DayZ_MCP"],
+        )
+        self.assertIsNone(json.loads(raw)["replace_if_not_polling_since"])
+
     def test_build_run_request_names_invalid_mode_and_expected_values(self) -> None:
         with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
             dayz_test_tool.build_run_request(

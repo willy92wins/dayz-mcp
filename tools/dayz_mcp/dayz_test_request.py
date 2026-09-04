@@ -35,6 +35,7 @@ _REQUEST_KEYS = frozenset(
         "preflight",
         "kill",
         "run_id",
+        "replace_if_not_polling_since",
     }
 )
 _MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal", "lfheli"})
@@ -70,6 +71,8 @@ REQUEST_REJECTION_REASONS = frozenset(
         "port_out_of_range",
         "project_policy_not_found",
         "raw_envelope_invalid",
+        "replace_witness_invalid",
+        "replace_witness_not_allowed",
         "server_wait_out_of_range",
         "source_outside_default",
         "source_requires_build",
@@ -338,6 +341,7 @@ def parse_dayz_test_request(
     preflight = value.get("preflight", False)
     kill = value.get("kill", False)
     run_id = value.get("run_id")
+    replace_witness = value.get("replace_if_not_polling_since")
 
     if mode not in request_mode_names:
         _invalid("mode_unknown")
@@ -405,6 +409,16 @@ def parse_dayz_test_request(
         raise ValueError(_SERVER_ALL_FORBID_RUN_ID)
     if not kill and mode == "client" and run_id is None:
         raise ValueError(_CLIENT_REQUIRES_RUN_ID)
+    # fb-20260904-200816-79e2. The witness of the client-replacement gate: the
+    # instant, in epoch milliseconds, at which the gate READ the bridge and
+    # concluded that the client had stopped polling. It only makes sense on the
+    # one call that supersedes a live client, so any other shape is a rejection
+    # and not a field quietly dropped.
+    if replace_witness is not None:
+        if kill or mode != "client":
+            _invalid("replace_witness_not_allowed")
+        if not _bounded_int(replace_witness, 1, 4_102_444_800_000):
+            _invalid("replace_witness_invalid")
 
     payload: dict[str, object] = {
         "base_mods": [] if no_base_mods else list(base_mods),
@@ -423,6 +437,7 @@ def parse_dayz_test_request(
         "player_name": player_name,
         "port": port,
         "preflight": preflight,
+        "replace_if_not_polling_since": replace_witness,
         "run_id": run_id,
         "server_mods": list(server_mods),
         "server_wait_s": server_wait_s,

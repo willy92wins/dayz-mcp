@@ -65,6 +65,44 @@ def holders(*rows: tuple[int, int | None, str | None]) -> dict[str, object]:
     }
 
 
+class FakeBridgeBindings:
+    """The loopback ServerState the daemon always wires (daemon.py:541).
+
+    fb-20260904-200816-79e2: superseding a live client now needs the witness of
+    the gate that authorised it AND a bridge row that still agrees at T1. The
+    default row here is a client that has not polled for a long time -- the very
+    state the extension gate acts on -- so the tests written before the witness
+    keep measuring what they measured. The refusal branches have their own tests.
+    """
+
+    def __init__(
+        self,
+        last_poll_age_s: object = 999.0,
+        bound_last_poll_age_s: object = None,
+        binding_state: object = None,
+        raise_on_read: bool = False,
+    ) -> None:
+        self.last_poll_age_s = last_poll_age_s
+        self.bound_last_poll_age_s = bound_last_poll_age_s
+        self.binding_state = binding_state
+        self.raise_on_read = raise_on_read
+        self.reads = 0
+
+    def status_snapshot(self, now: object = None) -> dict[str, object]:
+        self.reads += 1
+        if self.raise_on_read:
+            raise RuntimeError("bridge unavailable")
+        return {
+            "peers": {
+                "client": {
+                    "last_poll_age_s": self.last_poll_age_s,
+                    "bound_last_poll_age_s": self.bound_last_poll_age_s,
+                    "binding_state": self.binding_state,
+                }
+            }
+        }
+
+
 class LifecycleReconcileTest(unittest.TestCase):
     """P-L1 (fb-20260904-025733-d60f) and P-L2/P-L2.c (fb-20260904-025027-8f76 c).
 
@@ -124,6 +162,8 @@ class LifecycleReconcileTest(unittest.TestCase):
         # one probe here so a red check costs no wall clock.
         self.lifecycle._role_release_tries = 1
         self.lifecycle._role_release_interval_s = 0.0
+        self.bridge = FakeBridgeBindings()
+        self.lifecycle.bridge_probe = self.bridge.status_snapshot
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -166,6 +206,9 @@ class LifecycleReconcileTest(unittest.TestCase):
             "profiles": "profiles",
             "mission": "test",
             "run_id": RUN_ID,
+            # 79e2: the witness of the gate, stamped now, so the revalidation
+            # inside start_run has something to compare against.
+            "replace_if_not_polling_since": int(time.time() * 1000),
         }
 
     def arm_launch(self, role: str = "client") -> ProcessRecord:
@@ -340,6 +383,115 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.assertEqual(replaced[0].get("role"), "client")
         self.assertEqual(replaced[0].get("owned_pids"), [721])
         self.assertEqual(replaced[0].get("gone_pids"), [])
+
+    # -- fb-20260904-200816-79e2 / H-A2-2 -----------------------------------
+    # The gate that authorises superseding a client decides in the MCP server
+    # process; the kill happens here, after composing the sealed request,
+    # opening the launcher, starting app.pyz and two broker round trips. A4
+    # measured that window over the durable audit: n=26, min 0,47 s, median
+    # 7,00 s, max 29,16 s -- the same order as PEER_STALE_S = 15 s.
+
+    def _replacement(self, **overrides: object) -> dict[str, object]:
+        server = self.owned(760, "server")
+        hung = self.owned(761, "client")
+        self.install_run([server, hung], state="RUNNING", owner="A")
+        self.arm_launch()
+        request = self.request()
+        request.update(overrides)
+        return self.lifecycle.start_run(IDENTITY_A, self.token_a, request)
+
+    def _assert_nothing_was_touched(self, result: dict[str, object], code: str) -> None:
+        self.assertEqual(result.get("error"), code, result)
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(self.pids(), [760, 761])
+        self.assertIn(code, str(result.get("hint")))
+
+    def test_a_replacement_without_the_gate_witness_is_refused(self) -> None:
+        """Fail-closed: no witness, no kill.
+
+        This is also what a launcher bundle older than this daemon sends, and
+        what lifecycle_cli start sends when it bypasses the gate (A2-G3).
+        """
+        result = self._replacement(replace_if_not_polling_since=None)
+        self._assert_nothing_was_touched(result, "replace_witness_missing")
+
+    def test_a_witness_that_is_not_an_integer_is_no_witness(self) -> None:
+        for value in ("1756000000000", 0, -1, 1.5, True):
+            with self.subTest(value=value):
+                self.setUp()
+                result = self._replacement(replace_if_not_polling_since=value)
+                self._assert_nothing_was_touched(result, "replace_witness_missing")
+
+    def test_a_decision_older_than_the_bound_no_longer_authorises_a_kill(self) -> None:
+        stale = int((time.time() - 120.0) * 1000)
+        result = self._replacement(replace_if_not_polling_since=stale)
+        self._assert_nothing_was_touched(result, "replace_witness_stale")
+
+    def test_a_witness_stamped_in_the_future_is_refused(self) -> None:
+        future = int((time.time() + 3600.0) * 1000)
+        result = self._replacement(replace_if_not_polling_since=future)
+        self._assert_nothing_was_touched(result, "replace_witness_stale")
+
+    def test_a_client_that_polled_after_the_decision_is_not_killed(self) -> None:
+        """A2-G2, closed here. The repro: the bridge says stale at T0, the
+        client polls again before start_run, and it used to die anyway with a
+        response that declared client_not_polling -- already false at the kill.
+        """
+        self.bridge.last_poll_age_s = 0.2
+        result = self._replacement(
+            replace_if_not_polling_since=int((time.time() - 10.0) * 1000)
+        )
+        self._assert_nothing_was_touched(result, "client_polling_since_decision")
+
+    def test_the_bound_age_counts_too_when_the_peer_is_bound(self) -> None:
+        # The most recent evidence of a poll wins, whichever key carries it:
+        # deliberately stricter than server._peer_is_live, which picks one by
+        # binding state.
+        self.bridge.last_poll_age_s = 999.0
+        self.bridge.bound_last_poll_age_s = 0.5
+        self.bridge.binding_state = "BOUND"
+        result = self._replacement(
+            replace_if_not_polling_since=int((time.time() - 10.0) * 1000)
+        )
+        self._assert_nothing_was_touched(result, "client_polling_since_decision")
+
+    def test_a_bridge_that_cannot_be_read_never_authorises_a_kill(self) -> None:
+        self.bridge.raise_on_read = True
+        result = self._replacement()
+        self._assert_nothing_was_touched(result, "bridge_state_unreadable")
+
+    def test_a_peer_row_without_a_usable_age_is_not_an_answer(self) -> None:
+        self.bridge.last_poll_age_s = None
+        self.bridge.bound_last_poll_age_s = None
+        result = self._replacement()
+        self._assert_nothing_was_touched(result, "bridge_state_unreadable")
+
+    def test_no_bridge_probe_at_all_is_the_same_refusal(self) -> None:
+        self.lifecycle.bridge_probe = None
+        result = self._replacement()
+        self._assert_nothing_was_touched(result, "bridge_state_unreadable")
+
+    def test_positive_control_a_client_that_stopped_polling_is_replaced(self) -> None:
+        """The other half: without it every assertion above would pass over a
+        gate that refuses everything.
+        """
+        self.bridge.last_poll_age_s = 999.0
+        result = self._replacement(
+            replace_if_not_polling_since=int((time.time() - 5.0) * 1000)
+        )
+        self.assertIs(result.get("ok"), True, result)
+        self.assertEqual([record.pid for record in self.guard.terminate_calls], [761])
+        self.assertGreaterEqual(self.bridge.reads, 1)
+
+    def test_the_witness_is_read_before_anything_is_terminated(self) -> None:
+        self.bridge.last_poll_age_s = 0.1
+        result = self._replacement(
+            replace_if_not_polling_since=int((time.time() - 10.0) * 1000)
+        )
+        self.assertEqual(result.get("error"), "client_polling_since_decision")
+        self.assertEqual(self.bridge.reads, 1)
+        self.assertEqual(self.guard.terminate_calls, [])
 
     def test_relaunching_a_role_the_run_does_not_hold_changes_nothing(self) -> None:
         """The mode=all client leg and any first launch of a role: no replacement."""

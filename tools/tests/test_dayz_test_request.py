@@ -241,6 +241,7 @@ class DayzTestRequestTests(unittest.TestCase):
             "player_name": "Dev",
             "port": 2302,
             "preflight": False,
+            "replace_if_not_polling_since": None,
             "run_id": None,
             "server_mods": [],
             "server_wait_s": 60,
