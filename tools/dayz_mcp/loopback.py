@@ -1151,6 +1151,11 @@ class ServerState:
             if binding.state != BINDING_RETIRED and self._peer_covers(binding, peer)
         ]
 
+    def _command_exempt_from_fence(self, command_id: object) -> bool:
+        """P-J1: the daemon's own fire-and-forget cleanup survives the owner fence."""
+
+        return isinstance(command_id, int) and command_id in self._fire_and_forget_ids
+
     def _drain_run_locked(
         self,
         run_id: str,
@@ -1163,10 +1168,20 @@ class ServerState:
             if _binding_run_id(binding) != run_id:
                 continue
             queue = self._bound_queues.get(instance)
-            if queue:
-                self._discard_queue(
-                    queue, "run_not_owned", discarded_exec, finished_operations
-                )
+            if not queue:
+                continue
+            kept: list[dict] = []
+            for command in queue:
+                if self._command_exempt_from_fence(command.get("id")):
+                    kept.append(command)
+                else:
+                    self._mark_discarded(
+                        command,
+                        "run_not_owned",
+                        discarded_exec,
+                        finished_operations,
+                    )
+            queue[:] = kept
 
     def _flush_queue_discards(
         self,
@@ -1272,9 +1287,22 @@ class ServerState:
     def _enqueue_run_rejection(
         self, run_id: str | None, *, mutation: bool, internal: bool
     ) -> str | None:
-        _ = (mutation, internal)
+        _ = mutation
         if not isinstance(run_id, str) or not run_id:
             return None
+        if internal:
+            # P-J1: a fenced RUNNING/STARTING run still accepts the daemon's own
+            # cleanup. RUNNING_IDLE stays run_not_owned at enqueue: production
+            # cleanup_owner runs before begin_release_owner, and the sealed
+            # occupancy test asserts the Python API keeps the idle fence.
+            state = self._durable_run_state(run_id)
+            if state == _DURABLE_UNREADABLE or state is None:
+                return "run_state_unavailable"
+            if state in {"RUNNING", "STARTING"}:
+                return None
+            if state == "RUNNING_IDLE":
+                return "run_not_owned"
+            return "binding_retired"
         if self._run_is_fenced(run_id):
             return "run_not_owned"
         state = self._durable_run_state(run_id)
@@ -2149,12 +2177,10 @@ class ServerState:
                                     discarded_exec,
                                     finished_operations,
                                 )
-                            queue = []
-                        else:
-                            queue = self._bound_queues.setdefault(token, [])
-                            self._expire_stale_commands(
-                                queue, now, discarded_exec, finished_operations
-                            )
+                        queue = self._bound_queues.setdefault(token, [])
+                        self._expire_stale_commands(
+                            queue, now, discarded_exec, finished_operations
+                        )
             else:
                 self._peer_last_class[peer] = BINDING_LEGACY
                 queue = self._legacy_queues[peer]
@@ -2196,7 +2222,11 @@ class ServerState:
                 if bound is not None and self._poll_should_hold_commands(
                     _binding_run_id(bound)
                 ):
-                    snapshot = []
+                    snapshot = [
+                        command
+                        for command in queue_ref
+                        if self._command_exempt_from_fence(command.get("id"))
+                    ]
                 else:
                     snapshot = list(queue_ref)
             has_mutation = any(
@@ -2221,8 +2251,12 @@ class ServerState:
                         self._drain_run_locked(
                             hold_run_id, discarded_exec, finished_operations
                         )
-                    commands = []
-                    break
+                    snapshot = [
+                        command
+                        for command in queue
+                        if self._command_exempt_from_fence(command.get("id"))
+                    ]
+                    queue_ref = queue
                 if (
                     queue is not queue_ref
                     or len(queue) < len(snapshot)
@@ -3076,6 +3110,130 @@ class Handler(BaseHTTPRequestHandler):
             response["cleanup_degraded"] = payload["cleanup_degraded"]
         self._json(200, response)
 
+    def _adopt_on_grant(self, client: ClientIdentity, payload: dict) -> dict:
+        """P-J2: a granted box lease adopts the unique ownerless RUNNING_IDLE run.
+
+        Fail-open for the lease: the caller already holds it. Declared on the
+        grant payload. Skipped when this daemon has no real ProcessLifecycle
+        (HTTP session fixtures that only wire a coordinator). Never raises:
+        the grant response must arrive whole.
+        """
+
+        if payload.get("status") != "active":
+            return payload
+        token = payload.get("lease_token")
+        if not isinstance(token, str) or not token:
+            return payload
+        lifecycle = self.state.lifecycle
+        if lifecycle is None or not hasattr(lifecycle, "adopt_run"):
+            return payload
+        if not hasattr(lifecycle, "manifest"):
+            return payload
+        manifest = lifecycle.manifest
+        if manifest is None or not hasattr(manifest, "list_runs"):
+            return payload
+        run_id: object = None
+        result: object = None
+
+        def _copy_cleanup(
+            adopted: dict[str, object], source: object
+        ) -> dict[str, object]:
+            if not isinstance(source, dict):
+                return adopted
+            raw = source.get("cleanup_degraded")
+            if isinstance(raw, (list, tuple)) and raw:
+                values = list(
+                    dict.fromkeys(
+                        item for item in raw if isinstance(item, str) and item
+                    )
+                )
+                if values:
+                    adopted["cleanup_degraded"] = values
+            return adopted
+
+        try:
+            unreadable = False
+            idle: list[object] = []
+            try:
+                rows = list(manifest.list_runs())
+                for run in rows:
+                    if not (
+                        hasattr(run, "state")
+                        and hasattr(run, "owner_session_id")
+                        and hasattr(run, "run_id")
+                        and isinstance(run.state, str)
+                        and isinstance(run.run_id, str)
+                    ):
+                        unreadable = True
+                        break
+                    if (
+                        run.state == "RUNNING_IDLE"
+                        and run.owner_session_id is None
+                    ):
+                        idle.append(run)
+            except Exception:
+                unreadable = True
+            if unreadable:
+                payload["adopted_run"] = {
+                    "ok": False,
+                    "run_id": None,
+                    "error": _DURABLE_UNREADABLE,
+                }
+                return payload
+            if not idle:
+                payload["adopted_run"] = None
+                return payload
+            if len(idle) > 1:
+                payload["adopted_run"] = {
+                    "ok": False,
+                    "run_id": None,
+                    "error": "multiple_idle_runs",
+                }
+                return payload
+            run_id = idle[0].run_id
+            result = lifecycle.adopt_run(client, token, run_id)
+            if not isinstance(result, dict):
+                payload["adopted_run"] = _copy_cleanup(
+                    {
+                        "ok": False,
+                        "run_id": run_id,
+                        "error": "adopt_failed",
+                    },
+                    result,
+                )
+                return payload
+            if result.get("ok") is True:
+                adopted: dict[str, object] = {
+                    "ok": True,
+                    "run_id": result.get("run_id", run_id),
+                    "state": result.get("state"),
+                    "dispatchable": result.get("dispatchable"),
+                }
+                if "hint" in result:
+                    adopted["hint"] = result["hint"]
+                payload["adopted_run"] = _copy_cleanup(adopted, result)
+                return payload
+            error = result.get("error")
+            adopted = {
+                "ok": False,
+                "run_id": result.get("run_id") if result.get("run_id") is not None else run_id,
+                "error": error if isinstance(error, str) and error else "adopt_failed",
+            }
+            if "hint" in result:
+                adopted["hint"] = result["hint"]
+            payload["adopted_run"] = _copy_cleanup(adopted, result)
+            return payload
+        except Exception:
+            payload["adopted_run"] = _copy_cleanup(
+                {
+                    "ok": False,
+                    "run_id": run_id,
+                    "error": "adopt_failed",
+                },
+                result,
+            )
+            return payload
+
     def _handle_session(self, action: str) -> None:
         body = self._read_json()
         if body is None:
@@ -3155,6 +3313,9 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 )
             payload["box"] = _box_payload(self.state)
+
+        if action in {"acquire", "wait"} and status == 200:
+            payload = self._adopt_on_grant(client, payload)
 
         payload = self._persist_coordination(payload)
         self._log(

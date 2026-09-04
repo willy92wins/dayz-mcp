@@ -1656,6 +1656,204 @@ class ProcessLifecycleTest(unittest.TestCase):
         )
         self.assertEqual(self.store.get("run-existing").owner_session_id, "A")
 
+    def test_adopt_is_idempotent_for_the_same_owner(self) -> None:
+        record = process(1072)
+        self.add_run(record, owner=None, state="RUNNING_IDLE")
+        self.guard.snapshots[record.pid] = snapshot(record)
+        first = self.lifecycle.adopt_run(IDENTITY_A, self.token_a, "run-existing")
+        stored_after_first = self.store.get("run-existing")
+        owner = stored_after_first.owner_session_id
+        lease = stored_after_first.owner_lease_id
+        state = stored_after_first.state
+        audit_before = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "lifecycle_adopt"
+        ]
+        second = self.lifecycle.adopt_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertEqual(second, first)
+        stored = self.store.get("run-existing")
+        self.assertEqual(
+            (stored.state, stored.owner_session_id, stored.owner_lease_id),
+            (state, owner, lease),
+        )
+        audit_after = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "lifecycle_adopt"
+        ]
+        self.assertEqual(len(audit_after), len(audit_before) + 1)
+        self.assertEqual(audit_after[-1].get("decision"), "allowed")
+        self.assertEqual(audit_after[-1].get("run_id"), "run-existing")
+
+    def test_adopt_from_another_session_stays_rejected(self) -> None:
+        record = process(1073)
+        self.add_run(record, owner=None, state="RUNNING_IDLE")
+        self.guard.snapshots[record.pid] = snapshot(record)
+        first = self.lifecycle.adopt_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertEqual(first.get("ok"), True, first)
+        missing = self.lifecycle.adopt_run(IDENTITY_B, None, "run-existing")
+        stolen = self.lifecycle.adopt_run(IDENTITY_B, self.token_a, "run-existing")
+        self.assertNotEqual(missing.get("ok"), True, missing)
+        self.assertNotEqual(stolen.get("ok"), True, stolen)
+        stored = self.store.get("run-existing")
+        self.assertEqual(stored.owner_session_id, "A")
+        self.assertEqual(stored.state, "RUNNING")
+
+    def test_adopt_run_dependency_failure_after_authorize_closes_reservation(
+        self,
+    ) -> None:
+        record = process(1099)
+        self.add_run(record, owner=None, state="RUNNING_IDLE")
+        original_get = self.store.get
+
+        def _boom(_run_id: str):
+            raise OSError("manifest read failed")
+
+        self.store.get = _boom  # type: ignore[method-assign]
+        try:
+            result = self.lifecycle.adopt_run(
+                IDENTITY_A, self.token_a, "run-existing"
+            )
+        except Exception as exc:  # noqa: BLE001 — propagation is the failure
+            self.fail(f"adopt_run propagated {type(exc).__name__}: {exc}")
+        finally:
+            self.store.get = original_get  # type: ignore[method-assign]
+        self.assertEqual(result.get("error"), "adopt_failed")
+        self.assertEqual(result.get("_http_status"), 503)
+        self.assertNotEqual(result.get("ok"), True)
+        active = self.coordinator._active
+        self.assertIsNotNone(active)
+        self.assertEqual(active.pending_authorizations, [])  # type: ignore[union-attr]
+        stored = self.store.get("run-existing")
+        self.assertEqual(stored.state, "RUNNING_IDLE")
+        self.assertIsNone(stored.owner_session_id)
+        self.assertIsNone(stored.owner_lease_id)
+
+    def test_adopt_run_abort_degradations_reach_cleanup_degraded(self) -> None:
+        record = process(1100)
+        self.add_run(record, owner=None, state="RUNNING_IDLE")
+        original_get = self.store.get
+        original_abort = self.coordinator.abort_reservation
+
+        def _boom(_run_id: str):
+            raise OSError("manifest read failed")
+
+        def _degraded_abort(*args, **kwargs):
+            base = original_abort(*args, **kwargs)
+            return tuple(dict.fromkeys([*base, "audit_failed"]))
+
+        self.store.get = _boom  # type: ignore[method-assign]
+        self.coordinator.abort_reservation = _degraded_abort  # type: ignore[method-assign]
+        try:
+            result = self.lifecycle.adopt_run(
+                IDENTITY_A, self.token_a, "run-existing"
+            )
+        except Exception as exc:  # noqa: BLE001 — propagation is the failure
+            self.fail(f"adopt_run propagated {type(exc).__name__}: {exc}")
+        finally:
+            self.store.get = original_get  # type: ignore[method-assign]
+            self.coordinator.abort_reservation = original_abort  # type: ignore[method-assign]
+        self.assertEqual(result.get("error"), "adopt_failed")
+        self.assertEqual(result.get("_http_status"), 503)
+        self.assertIn("audit_failed", result.get("cleanup_degraded") or [])
+        stored = self.store.get("run-existing")
+        self.assertEqual(stored.state, "RUNNING_IDLE")
+        self.assertIsNone(stored.owner_session_id)
+        self.assertIsNone(stored.owner_lease_id)
+
+    def test_adopt_run_abort_raise_closes_via_reject_reservation(self) -> None:
+        record = process(1101)
+        self.add_run(record, owner=None, state="RUNNING_IDLE")
+        original_get = self.store.get
+        original_abort = self.coordinator.abort_reservation
+
+        def _boom(_run_id: str):
+            raise OSError("manifest read failed")
+
+        def _abort_boom(*_a, **_k):
+            raise OSError("abort boom")
+
+        self.store.get = _boom  # type: ignore[method-assign]
+        self.coordinator.abort_reservation = _abort_boom  # type: ignore[method-assign]
+        try:
+            result = self.lifecycle.adopt_run(
+                IDENTITY_A, self.token_a, "run-existing"
+            )
+        except Exception as exc:  # noqa: BLE001 — propagation is the failure
+            self.fail(f"adopt_run propagated {type(exc).__name__}: {exc}")
+        finally:
+            self.store.get = original_get  # type: ignore[method-assign]
+            self.coordinator.abort_reservation = original_abort  # type: ignore[method-assign]
+        self.assertEqual(result.get("error"), "adopt_failed")
+        self.assertEqual(result.get("_http_status"), 503)
+        active = self.coordinator._active
+        self.assertIsNotNone(active)
+        self.assertEqual(active.pending_authorizations, [])  # type: ignore[union-attr]
+        stored = self.store.get("run-existing")
+        self.assertEqual(stored.state, "RUNNING_IDLE")
+        self.assertIsNone(stored.owner_session_id)
+        self.assertIsNone(stored.owner_lease_id)
+
+    def test_adopt_run_abort_and_reject_raise_declares_reservation_abort_failed(
+        self,
+    ) -> None:
+        record = process(1102)
+        self.add_run(record, owner=None, state="RUNNING_IDLE")
+        original_get = self.store.get
+        original_abort = self.coordinator.abort_reservation
+        original_reject = self.coordinator.reject_reservation
+
+        def _boom(_run_id: str):
+            raise OSError("manifest read failed")
+
+        def _abort_boom(*_a, **_k):
+            raise OSError("abort boom")
+
+        def _reject_boom(*_a, **_k):
+            raise OSError("reject boom")
+
+        self.store.get = _boom  # type: ignore[method-assign]
+        self.coordinator.abort_reservation = _abort_boom  # type: ignore[method-assign]
+        self.coordinator.reject_reservation = _reject_boom  # type: ignore[method-assign]
+        try:
+            result = self.lifecycle.adopt_run(
+                IDENTITY_A, self.token_a, "run-existing"
+            )
+        except Exception as exc:  # noqa: BLE001 — propagation is the failure
+            self.fail(f"adopt_run propagated {type(exc).__name__}: {exc}")
+        finally:
+            self.store.get = original_get  # type: ignore[method-assign]
+            self.coordinator.abort_reservation = original_abort  # type: ignore[method-assign]
+            self.coordinator.reject_reservation = original_reject  # type: ignore[method-assign]
+        self.assertEqual(result.get("error"), "adopt_failed")
+        self.assertEqual(result.get("_http_status"), 503)
+        self.assertIn(
+            "reservation_abort_failed", result.get("cleanup_degraded") or []
+        )
+        stored = self.store.get("run-existing")
+        self.assertEqual(stored.state, "RUNNING_IDLE")
+        self.assertIsNone(stored.owner_session_id)
+        self.assertIsNone(stored.owner_lease_id)
+
+    def test_exempt_delivery_does_not_credit_activity(self) -> None:
+        record = process(1074)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        cleanup = state.cleanup_owner("A", "lease-A", "owner_release", True)
+        self.assertEqual(cleanup["vehicle_release_enqueued"], 1)
+        released = self.lifecycle.release_owner("A", "lease-A")
+        self.assertEqual(released, ["run-existing"])
+        _, poll = accredited_poll(state, "client")
+        self.assertEqual(
+            [command.get("cmd") for command in poll.get("commands", [])],
+            ["vehicle_release"],
+        )
+        row = self.lifecycle.box_occupancy()["runs"][0]
+        self.assertEqual(row["state"], "RUNNING_IDLE")
+        self.assertNotEqual(row.get("activity_state"), "recent")
+
     def test_adopt_invalidates_occupancy_cache(self) -> None:
         record = process(1071)
         self.add_run(record, owner=None, state="RUNNING_IDLE")
@@ -2499,7 +2697,7 @@ class ProcessLifecycleTest(unittest.TestCase):
         status, payload = self._world_spawn(state)
         self.assertEqual(status, 200, payload)
 
-    def test_internal_cleanup_enqueued_before_release_is_gone_when_idle_published(
+    def test_internal_cleanup_enqueued_before_release_survives_when_idle_published(
         self,
     ) -> None:
         record = process(8088)
@@ -2510,6 +2708,7 @@ class ProcessLifecycleTest(unittest.TestCase):
             "vehicle_release", {}, peer="client", internal=True
         )
         self.assertEqual(queued, 200, payload)
+        state._fire_and_forget_ids.add(payload["id"])
         armado = threading.Event()
         dentro = threading.Event()
         puerta = threading.Event()
@@ -2541,10 +2740,14 @@ class ProcessLifecycleTest(unittest.TestCase):
         thread.join(timeout=5)
         self.store.release_owner = release_real  # type: ignore[method-assign]
         self.assertEqual(returned.get("changed"), ["run-existing"])
-        self.assertEqual(seen.get("queue"), [])
+        queued = seen.get("queue") or []
+        self.assertEqual([command.get("cmd") for command in queued], ["vehicle_release"])
         poll = seen.get("poll")
         self.assertIsInstance(poll, tuple)
-        self.assertEqual(poll[1].get("commands"), [])
+        self.assertEqual(
+            [command.get("cmd") for command in poll[1].get("commands", [])],
+            ["vehicle_release"],
+        )
 
     def test_poll_revalidates_after_lock_when_store_releases_without_fence(
         self,

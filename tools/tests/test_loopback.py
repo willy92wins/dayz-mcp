@@ -1096,6 +1096,63 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         self.assertEqual(state.pending_for_owner("released-owner"), 0)
 
 
+class FenceExemptionTest(unittest.TestCase):
+    """P-J1: daemon fire-and-forget cleanup survives the owner fence."""
+
+    def test_drain_keeps_fire_and_forget_and_discards_the_rest(self) -> None:
+        state = loopback.ServerState("k")
+        bind_both_peers(state)
+        status, camera = state.enqueue_command("camera_get", {}, peer="client")
+        self.assertEqual(status, 200, camera)
+        cleanup = state.cleanup_owner(
+            "released-owner", "released-lease", "owner_release", True
+        )
+        self.assertEqual(cleanup["vehicle_release_enqueued"], 1)
+        queued = list(state._bound_queues.get(INST_CLIENT) or [])
+        release_id = queued[-1]["id"]
+        self.assertIn(release_id, state._fire_and_forget_ids)
+        state.fence_runs(["test-run"])
+        remaining = [command["id"] for command in state._bound_queues.get(INST_CLIENT) or []]
+        self.assertEqual(remaining, [release_id])
+        discarded = state.take_result(camera["id"])
+        self.assertIsNotNone(discarded)
+        self.assertEqual(discarded["error"], "run_not_owned")
+
+    def test_held_poll_delivers_only_the_exempt_command(self) -> None:
+        state = loopback.ServerState("k")
+        bind_both_peers(state)
+        status, _camera = state.enqueue_command("camera_get", {}, peer="client")
+        self.assertEqual(status, 200)
+        cleanup = state.cleanup_owner(
+            "released-owner", "released-lease", "owner_release", True
+        )
+        self.assertEqual(cleanup["vehicle_release_enqueued"], 1)
+        state.fence_runs(["test-run"])
+        _, poll = accredited_poll(state, "client")
+        self.assertEqual(
+            [command["cmd"] for command in poll["commands"]],
+            ["vehicle_release"],
+        )
+
+    def test_internal_enqueue_on_fenced_run_is_not_run_not_owned(self) -> None:
+        state = loopback.ServerState("k")
+        bind_both_peers(state)
+        state.fence_runs(["test-run"])
+        status, payload = state.enqueue_command(
+            "vehicle_release", {}, peer="client", internal=True
+        )
+        self.assertEqual(status, 200, payload)
+        blocked, body = state.enqueue_command("camera_get", {}, peer="client")
+        self.assertEqual(blocked, 409, body)
+        self.assertEqual(body.get("error"), "run_not_owned")
+        state.lifecycle = None
+        unavailable, missing = state.enqueue_command(
+            "vehicle_release", {}, peer="client", internal=True
+        )
+        self.assertEqual(unavailable, 503, missing)
+        self.assertEqual(missing.get("error"), "run_state_unavailable")
+
+
 class StaleCommandHygieneTest(unittest.TestCase):
     """The daemon must not deliver a previous session's queued commands
     to a freshly (re)connected peer. record_poll expires by TTL and flushes on a

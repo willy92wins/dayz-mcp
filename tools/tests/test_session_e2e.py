@@ -400,9 +400,44 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
 
         released = await runtime_a.session_release(acquired_a["lease_token"])
         self.assertEqual(released["cleanup"]["vehicle_release_enqueued"], 1)
-        self.assertEqual(client_peer.command_names(), ["vehicle_control"])
-        await asyncio.sleep(0.1)
-        self.assertEqual(client_peer.command_names(), ["vehicle_control"])
+        await self.wait_until(
+            lambda: client_peer.command_names()
+            == ["vehicle_control", "vehicle_release"]
+        )
+
+    async def test_acquire_adopts_delivers_then_fifo_wait_adopts(self) -> None:
+        runtime_a = self.client("codex")
+        runtime_b = self.client("claude")
+        client_peer = self.peer("client")
+
+        acquired_a = await runtime_a.session_acquire("drive")
+        adopted = acquired_a.get("adopted_run") or {}
+        self.assertEqual(adopted.get("ok"), True, acquired_a)
+        self.assertEqual(adopted.get("run_id"), "test-run")
+        self.assertEqual(adopted.get("state"), "RUNNING")
+        self.assertIs(adopted.get("dispatchable"), True, acquired_a)
+
+        read = await runtime_a.call_bridge("camera_get", {}, "client", 2.0)
+        self.assertTrue(read["ok"], read)
+        mutation = await runtime_a.call_bridge(
+            "vehicle_control", {"throttle": 1.0}, "client", 2.0
+        )
+        self.assertTrue(mutation["ok"], mutation)
+        await self.wait_until(
+            lambda: client_peer.command_names() == ["camera_get", "vehicle_control"]
+        )
+
+        queued_b = await runtime_b.session_acquire("next")
+        self.assertEqual(queued_b["status"], "queued")
+        released = await runtime_a.session_release(acquired_a["lease_token"])
+        self.assertEqual(released["cleanup"]["runs_released"], ["test-run"])
+
+        granted = await runtime_b.session_wait(queued_b["ticket"], 10.0)
+        self.assertEqual(granted["status"], "active")
+        wait_adopted = granted.get("adopted_run") or {}
+        self.assertEqual(wait_adopted.get("ok"), True, granted)
+        self.assertEqual(wait_adopted.get("run_id"), "test-run")
+        await runtime_b.session_release(granted["lease_token"])
 
     async def test_pin_is_capped_at_300_and_result_clears_it(self) -> None:
         runtime_a = self.client("codex")

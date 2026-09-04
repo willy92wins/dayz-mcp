@@ -2495,71 +2495,137 @@ class ProcessLifecycle:
         authority = self._authority(decision)
         if authority is None:
             return self._error("lease_required", 403)
-        with self._operation_lock:
-            if not self._reservation_active(authority, command):
-                return self._error("lease_invalid", 409)
-            if self._quarantined():
-                return self._reject_reserved(authority, command, "retail_quarantine")
-            if not isinstance(run_id, str) or not run_id:
-                return self._reject_reserved(authority, command, "run_not_found", 404)
-            run = self.manifest.get(run_id)
-            if run is None:
-                return self._reject_reserved(authority, command, "run_not_found", 404)
-            if run.state != "RUNNING_IDLE" or run.owner_session_id is not None:
-                return self._reject_reserved(authority, command, "run_not_adoptable")
-            if any(
-                other.state in _ACTIVE_STATES and other.run_id != run_id
-                for other in self.manifest.list_runs()
-            ):
-                return self._reject_reserved(authority, command, "active_run_exists")
-            buckets, unknown_reason = self._partition_registered_processes(run.processes)
-            if buckets["unknown"]:
-                reason = unknown_reason or "process_identity_mismatch"
-                return self._reject_reserved(
-                    authority,
-                    command,
-                    reason,
-                    503 if reason == "guard_unavailable" else 409,
-                )
-            if not buckets["owned"]:
-                result = self._reject_reserved(
-                    authority, command, "run_processes_gone"
-                )
-                result["hint"] = _RUN_PROCESSES_GONE_HINT
-                return result
-            if self._quarantined():
-                return self._reject_reserved(authority, command, "retail_quarantine")
-            if not self._audit("lifecycle_adopt", client, "identity_match", "allowed", run_id=run_id):
-                self.coordinator.reject_reservation(
-                    authority[0], authority[1], authority[2], "audit_failed"
-                )
-                return self._error("audit_failed", 503)
-            if self._quarantined():
-                return self._reject_reserved(authority, command, "retail_quarantine")
-            command_id = self._commit_reserved(authority, command)
-            if command_id is None:
-                return self._error("lease_invalid", 409)
-            run.owner_session_id = client.session_id
-            run.owner_lease_id = authority[1]
-            run.state = "RUNNING"
-            try:
-                self.manifest.replace(run)
-            except Exception:
+        committed = False
+        try:
+            with self._operation_lock:
+                if not self._reservation_active(authority, command):
+                    return self._error("lease_invalid", 409)
+                if self._quarantined():
+                    return self._reject_reserved(authority, command, "retail_quarantine")
+                if not isinstance(run_id, str) or not run_id:
+                    return self._reject_reserved(authority, command, "run_not_found", 404)
+                run = self.manifest.get(run_id)
+                if run is None:
+                    return self._reject_reserved(authority, command, "run_not_found", 404)
+                if (
+                    run.state == "RUNNING"
+                    and run.owner_session_id == client.session_id
+                    and run.owner_lease_id == authority[1]
+                ):
+                    # P-J2: same owner + same lease is a no-op success. dayz_test_worker
+                    # adopts explicitly after the grant already adopted.
+                    if not self._audit(
+                        "lifecycle_adopt", client, "identity_match", "allowed", run_id=run_id
+                    ):
+                        self.coordinator.reject_reservation(
+                            authority[0], authority[1], authority[2], "audit_failed"
+                        )
+                        return self._error("audit_failed", 503)
+                    command_id = self._commit_reserved(authority, command)
+                    if command_id is None:
+                        return self._error("lease_invalid", 409)
+                    committed = True
+                    self._finish_committed(authority, command_id)
+                    dispatchable = self._adopt_dispatchable(run_id)
+                    payload: dict[str, object] = {
+                        "ok": True,
+                        "run_id": run_id,
+                        "state": "RUNNING",
+                        "dispatchable": dispatchable,
+                    }
+                    if not dispatchable:
+                        payload["hint"] = _ADOPT_NOT_DISPATCHABLE_HINT
+                    return payload
+                if run.state != "RUNNING_IDLE" or run.owner_session_id is not None:
+                    return self._reject_reserved(authority, command, "run_not_adoptable")
+                if any(
+                    other.state in _ACTIVE_STATES and other.run_id != run_id
+                    for other in self.manifest.list_runs()
+                ):
+                    return self._reject_reserved(authority, command, "active_run_exists")
+                buckets, unknown_reason = self._partition_registered_processes(run.processes)
+                if buckets["unknown"]:
+                    reason = unknown_reason or "process_identity_mismatch"
+                    return self._reject_reserved(
+                        authority,
+                        command,
+                        reason,
+                        503 if reason == "guard_unavailable" else 409,
+                    )
+                if not buckets["owned"]:
+                    result = self._reject_reserved(
+                        authority, command, "run_processes_gone"
+                    )
+                    result["hint"] = _RUN_PROCESSES_GONE_HINT
+                    return result
+                if self._quarantined():
+                    return self._reject_reserved(authority, command, "retail_quarantine")
+                if not self._audit("lifecycle_adopt", client, "identity_match", "allowed", run_id=run_id):
+                    self.coordinator.reject_reservation(
+                        authority[0], authority[1], authority[2], "audit_failed"
+                    )
+                    return self._error("audit_failed", 503)
+                if self._quarantined():
+                    return self._reject_reserved(authority, command, "retail_quarantine")
+                command_id = self._commit_reserved(authority, command)
+                if command_id is None:
+                    return self._error("lease_invalid", 409)
+                committed = True
+                run.owner_session_id = client.session_id
+                run.owner_lease_id = authority[1]
+                run.state = "RUNNING"
+                try:
+                    self.manifest.replace(run)
+                except Exception:
+                    self._finish_committed(authority, command_id)
+                    return self._error("manifest_failed", 503)
+                self._invalidate_box_cache()
+                self._unfence_runs([run_id])
                 self._finish_committed(authority, command_id)
-                return self._error("manifest_failed", 503)
-            self._invalidate_box_cache()
-            self._unfence_runs([run_id])
-            self._finish_committed(authority, command_id)
-            dispatchable = self._adopt_dispatchable(run_id)
-            payload: dict[str, object] = {
-                "ok": True,
-                "run_id": run_id,
-                "state": "RUNNING",
-                "dispatchable": dispatchable,
-            }
-            if not dispatchable:
-                payload["hint"] = _ADOPT_NOT_DISPATCHABLE_HINT
-            return payload
+                dispatchable = self._adopt_dispatchable(run_id)
+                payload = {
+                    "ok": True,
+                    "run_id": run_id,
+                    "state": "RUNNING",
+                    "dispatchable": dispatchable,
+                }
+                if not dispatchable:
+                    payload["hint"] = _ADOPT_NOT_DISPATCHABLE_HINT
+                return payload
+        except Exception:
+            # Unexpected exit after _authorize opened a reservation and before
+            # commit: abort (not reject). abort_reservation is the coordinator
+            # contract for an operation that could not complete; reject is the
+            # fallback close. Compensator degradations are not swallowed (F-04);
+            # same collection pattern as stop_run's manifest.replace failure.
+            result = self._error("adopt_failed", 503)
+            if not committed:
+                degraded: list[str] = []
+                try:
+                    degraded.extend(
+                        self.coordinator.abort_reservation(
+                            authority[0],
+                            authority[1],
+                            authority[2],
+                            "adopt_failed",
+                        )
+                    )
+                except Exception:
+                    try:
+                        rejected = self.coordinator.reject_reservation(
+                            authority[0],
+                            authority[1],
+                            authority[2],
+                            "adopt_failed",
+                        )
+                        extra = getattr(rejected, "cleanup_degraded", ())
+                        if extra:
+                            degraded.extend(extra)
+                    except Exception:
+                        degraded.append("reservation_abort_failed")
+                if degraded:
+                    result["cleanup_degraded"] = list(dict.fromkeys(degraded))
+            return result
 
     def release_owner(self, session_id: str, lease_id: str) -> list[str]:
         with self._operation_lock:
