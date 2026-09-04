@@ -119,11 +119,27 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         for srv in self.servers:
             srv.stop()
 
-    def _daemon(self, port: int = 0, **kw) -> DaemonHttpServer:
-        srv = DaemonHttpServer(_config(key="ckey", **kw), port=port)
+    def _daemon(self, port: int = 0, *, adopt_fixture: bool = True, **kw) -> DaemonHttpServer:
+        srv = DaemonHttpServer(
+            _config(key="ckey", **kw), port=port, adopt_fixture=adopt_fixture
+        )
         srv.start()
         self.servers.append(srv)
         return srv
+
+    def _adopt_run(
+        self,
+        srv: DaemonHttpServer,
+        runtime: server.ClientRuntime,
+        lease_token: str,
+        run_id: str = "test-run",
+    ) -> dict:
+        result = srv.state.lifecycle.adopt_run(
+            runtime.identity, lease_token, run_id
+        )
+        self.assertEqual(result.get("ok"), True, result)
+        self.assertIs(result.get("dispatchable"), True, result)
+        return result
 
     def _peer(self, srv: DaemonHttpServer, peer: str, version: str | None = None) -> GamePeer:
         game = GamePeer(srv.base, srv.key, peer, version=version)
@@ -191,7 +207,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["state"]["pos"], [1.0, 2.0, 3.0])
 
     async def test_client_acquire_stores_token_and_mutation_transports_it(self) -> None:
-        srv = self._daemon()
+        srv = self._daemon(adopt_fixture=False)
         self._peer(srv, "server")
         runtime = self._client(srv, client_platform="codex")
 
@@ -202,13 +218,14 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         own_identity = json.loads(acquired["client_identity_json"])
         self.assertEqual(own_identity["session_id"], runtime.identity.session_id)
         self.assertEqual(own_identity["pid"], runtime.identity.pid)
+        self._adopt_run(srv, runtime, acquired["lease_token"])
         result = await runtime.call_bridge(
             "world_spawn", {"type": "X", "pos": [1, 2, 3]}, "server", 2.0
         )
         self.assertTrue(result["ok"])
 
     async def test_wait_stores_granted_token_and_release_clears_local_state(self) -> None:
-        srv = self._daemon()
+        srv = self._daemon(adopt_fixture=False)
         owner = self._client(srv, client_platform="codex")
         waiter = self._client(srv, client_platform="claude")
         owner_acquired = await owner.session_acquire("owner")
@@ -766,7 +783,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["server_version"], core.EXPECTED_BRIDGE_VERSION)
 
     async def test_client_mode_session_tool_enables_existing_mutation(self) -> None:
-        srv = self._daemon()
+        srv = self._daemon(adopt_fixture=False)
         self._peer(srv, "server")
         config = ServerConfig(
             mode="client", key=srv.key, port=srv.port,
@@ -788,6 +805,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         acquired = _content_json(
             await app.call_tool("session_acquire", {"purpose": "spawn fixture"})
         )
+        self._adopt_run(srv, runtime, acquired["lease_token"])
         heartbeat = _content_json(
             await app.call_tool(
                 "session_heartbeat", {"lease_token": acquired["lease_token"]}
@@ -842,11 +860,12 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         # Second acceptance clause: with ANOTHER session holding
         # the lease, the pure read still completes. Negative control: the foreign
         # lease does not let this session mutate either.
-        srv = self._daemon()
+        srv = self._daemon(adopt_fixture=False)
         self._peer(srv, "server")
         holder = self._client(srv, client_platform="codex")
         acquired = await holder.session_acquire("hold the lease")
         self.assertEqual(acquired["status"], "active")
+        self._adopt_run(srv, holder, acquired["lease_token"])
 
         config = ServerConfig(
             mode="client", key=srv.key, port=srv.port,
@@ -973,7 +992,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         started: dict[str, DaemonHttpServer] = {}
 
         def spawn() -> int:
-            srv = DaemonHttpServer(_config(key="ckey"), port=port)
+            srv = DaemonHttpServer(_config(key="ckey"), port=port, adopt_fixture=True)
             srv.start()
             self.servers.append(srv)
             game = GamePeer(srv.base, srv.key, "server")

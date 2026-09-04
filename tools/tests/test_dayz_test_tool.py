@@ -1774,3 +1774,159 @@ class LaunchReadinessProjectionTest(unittest.TestCase):
                 )
                 self.assertIsNone(projection.bridge_ready)
                 self.assertIsNone(projection.reason)
+
+
+class DayzTestStopEnvelopeTest(unittest.IsolatedAsyncioTestCase):
+    async def _stop(self, lifecycle: dict[str, object]):
+        runtime = _Runtime(lifecycle)
+        policy = _policy(
+            mod="StorageMod",
+            dev_root=r"C:\Tools\LFV_D2_Executor",
+            default_source=r"C:\Tools\LFV_D2_Executor\staged-source\StorageMod",
+            default_base_mods=("@CF",),
+        )
+        async def launch(raw_request: bytes, **kwargs: object) -> int:
+            await kwargs["execution_started_cb"]()
+            kwargs["output_sink"](
+                "stdout",
+                _terminal(
+                    {
+                        "cleanup_degraded": False,
+                        "error_code": None,
+                        "exit_code": 0,
+                        "ok": True,
+                        "run_id": RUN_ID,
+                    }
+                ),
+            )
+            return 0
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch,
+        ):
+            return await dayz_test_tool.execute_dayz_test_stop(runtime, RUN_ID), runtime
+
+    async def test_present_inactive_run_returns_structured_envelope(self) -> None:
+        row = {
+            "run_id": RUN_ID,
+            "state": "EXITED",
+            "mod": "@StorageMod",
+            "profiles": r"C:\Tools\LFV_D2_Executor\_client\profiles",
+            "launch_acknowledged": True,
+            "daemon_generation_at_launch": "old-gen",
+            "daemon_generation_current": "new-gen",
+            "generation_changed": False,
+        }
+        result, runtime = await self._stop({"runs": [row]})
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["run_id"], RUN_ID)
+        self.assertEqual(result["error_code"], "run_not_active")
+        self.assertEqual(result["daemon_generation_at_launch"], "old-gen")
+        self.assertEqual(result["daemon_generation_current"], "new-gen")
+        self.assertIs(result["generation_changed"], False)
+        self.assertNotIn("retired_run_diagnostics", result)
+        self.assertEqual(runtime.lifecycle_calls, 1)
+
+    async def test_absent_run_with_one_diagnostic_returns_run_not_found_envelope(
+        self,
+    ) -> None:
+        diagnostic = {
+            "run_id": RUN_ID,
+            "event": "run_reaped",
+            "reason": "all_processes_gone_or_foreign",
+            "decision": "reaped",
+            "state": "EXITED",
+            "daemon_generation_at_launch": "old-gen",
+            "daemon_generation_current": "new-gen",
+            "generation_changed": False,
+        }
+        result, _runtime = await self._stop(
+            {"runs": [], "retired_run_diagnostics": [diagnostic]}
+        )
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "run_not_found")
+        self.assertEqual(result["daemon_generation_at_launch"], "old-gen")
+        self.assertIs(result["generation_changed"], False)
+        self.assertNotIn("retired_run_diagnostics", result)
+
+    async def test_unknown_uuid_still_raises_run_not_found(self) -> None:
+        with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+            await self._stop({"runs": [], "retired_run_diagnostics": []})
+        self.assertEqual(caught.exception.code, "run_not_found")
+
+    async def test_ambiguous_diagnostics_still_raise_run_not_found(self) -> None:
+        diagnostic = {
+            "run_id": RUN_ID,
+            "event": "run_reaped",
+            "reason": "all_processes_gone_or_foreign",
+            "decision": "reaped",
+            "state": "EXITED",
+            "daemon_generation_at_launch": "old-gen",
+            "daemon_generation_current": "new-gen",
+            "generation_changed": False,
+        }
+        other = dict(diagnostic, event="lifecycle_stop_outcome", decision="stopped")
+        with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+            await self._stop({"runs": [], "retired_run_diagnostics": [diagnostic, other]})
+        self.assertEqual(caught.exception.code, "run_not_found")
+
+    async def test_incomplete_diagnostic_raises_run_not_found_without_fabricating_nulls(
+        self,
+    ) -> None:
+        complete = {
+            "run_id": RUN_ID,
+            "event": "run_reaped",
+            "reason": "all_processes_gone_or_foreign",
+            "decision": "reaped",
+            "state": "EXITED",
+            "daemon_generation_at_launch": "old-gen",
+            "daemon_generation_current": "new-gen",
+            "generation_changed": False,
+        }
+        for field in list(complete):
+            mutilated = {key: value for key, value in complete.items() if key != field}
+            with self.subTest(missing=field):
+                with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                    await self._stop({"runs": [], "retired_run_diagnostics": [mutilated]})
+                self.assertEqual(caught.exception.code, "run_not_found")
+
+    async def test_diagnostic_with_non_exited_state_raises_run_not_found(self) -> None:
+        diagnostic = {
+            "run_id": RUN_ID,
+            "event": "run_reaped",
+            "reason": "all_processes_gone_or_foreign",
+            "decision": "reaped",
+            "state": "RUNNING_IDLE",
+            "daemon_generation_at_launch": "old-gen",
+            "daemon_generation_current": "new-gen",
+            "generation_changed": False,
+        }
+        with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+            await self._stop({"runs": [], "retired_run_diagnostics": [diagnostic]})
+        self.assertEqual(caught.exception.code, "run_not_found")
+
+    async def test_present_inactive_row_without_generation_raises_run_not_active(
+        self,
+    ) -> None:
+        row = {
+            "run_id": RUN_ID,
+            "state": "EXITED",
+            "mod": "@StorageMod",
+            "profiles": r"C:\Tools\LFV_D2_Executor\_client\profiles",
+            "launch_acknowledged": True,
+        }
+        with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+            await self._stop({"runs": [row]})
+        self.assertEqual(caught.exception.code, "run_not_active")
+
+
+if __name__ == "__main__":
+    unittest.main()

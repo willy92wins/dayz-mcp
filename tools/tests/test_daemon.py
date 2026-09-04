@@ -25,6 +25,7 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import core, daemon, loopback, orphan_guard
 from dayz_mcp.native_process_guard import identity_hashes
 from dayz_mcp.server import ServerConfig
+from dayz_mcp.session_coordination import ClientIdentity
 from tests.fence_helpers import bind_both_peers
 
 
@@ -36,6 +37,15 @@ IDENTITY = {
     "session_id": "daemon-test",
     "task_label": "daemon",
 }
+
+FIXTURE_IDENTITY = ClientIdentity(
+    "codex",
+    99,
+    1,
+    "2026-07-14T10:00:00Z",
+    "daemon-fixture-holder",
+    "fixture-owner",
+)
 
 
 def _http(
@@ -81,9 +91,18 @@ def _free_port() -> int:
 class DaemonHttpServer:
     """A daemon-style loopback (version validator + status_provider) on a port."""
 
-    def __init__(self, config: ServerConfig, port: int = 0) -> None:
+    def __init__(
+        self,
+        config: ServerConfig,
+        port: int = 0,
+        *,
+        adopt_fixture: bool = False,
+    ) -> None:
         self.key = config.key
         self.runtime_dir = TemporaryDirectory()
+        self.fixture_identity = FIXTURE_IDENTITY
+        self.fixture_lease_token: str | None = None
+        self.fixture_lease_id: str | None = None
         with patch.dict(os.environ, {"LOCALAPPDATA": self.runtime_dir.name}), patch.object(
             daemon.orphan_guard,
             "snapshot_retail_processes",
@@ -92,7 +111,15 @@ class DaemonHttpServer:
             self.state = daemon.build_server_state(
                 config, self.key, activate_coordination=True
             )
+        # P-I10: bind never writes an owner. Callers that need a dispatchable
+        # run pass adopt_fixture=True: a fixture identity acquires a real
+        # lifecycle lease and adopt_run. The constructor default is False so
+        # tests outside this write-set that construct DaemonHttpServer() and
+        # then acquire (colas / lease election) still see an empty titular.
+        # test_daemon._daemon and test_client_mode._daemon default True.
         bind_both_peers(self.state)
+        if adopt_fixture:
+            self._acquire_and_adopt_fixture()
         provider = daemon.make_status_provider(config, self.state)
         self.httpd = loopback.create_http_server(
             port, self.state, log_sink=lambda _m: None, reclaim_orphans=False, status_provider=provider
@@ -116,6 +143,38 @@ class DaemonHttpServer:
             self.httpd.serve_forever(poll_interval=0.01)
         except Exception:
             pass
+
+    def _acquire_and_adopt_fixture(self) -> None:
+        lifecycle = self.state.lifecycle
+        coordinator = lifecycle.coordinator
+        status, acquired = coordinator.acquire(self.fixture_identity, "lifecycle")
+        if status != 200:
+            raise AssertionError(
+                f"fixture acquire failed: {status} {acquired!r}"
+            )
+        self.fixture_lease_token = acquired["lease_token"]
+        self.fixture_lease_id = acquired["lease_id"]
+        adopted = lifecycle.adopt_run(
+            self.fixture_identity, self.fixture_lease_token, "test-run"
+        )
+        if not isinstance(adopted, dict) or adopted.get("ok") is not True:
+            raise AssertionError(f"fixture adopt_run failed: {adopted!r}")
+        if adopted.get("dispatchable") is not True:
+            raise AssertionError(f"fixture adopt_run not dispatchable: {adopted!r}")
+
+    def release_fixture_owner(self) -> None:
+        if self.fixture_lease_token is None:
+            return
+        status, payload = self.state.lifecycle.coordinator.release(
+            self.fixture_identity, self.fixture_lease_token
+        )
+        if status not in (200, 202):
+            raise AssertionError(
+                f"fixture release failed: {status} {payload!r}"
+            )
+        self.fixture_lease_token = None
+        self.fixture_lease_id = None
+        self._drain_coordination_workers()
 
     def start(self) -> None:
         self.thread.start()
@@ -172,8 +231,8 @@ class DaemonEndpointTest(unittest.TestCase):
         for srv in self.servers:
             srv.stop()
 
-    def _daemon(self, **kw) -> DaemonHttpServer:
-        srv = DaemonHttpServer(_config(**kw))
+    def _daemon(self, *, adopt_fixture: bool = True, **kw) -> DaemonHttpServer:
+        srv = DaemonHttpServer(_config(**kw), adopt_fixture=adopt_fixture)
         srv.start()
         self.servers.append(srv)
         return srv
@@ -254,7 +313,7 @@ class DaemonEndpointTest(unittest.TestCase):
     def test_credential_retry_does_not_change_active_lease_or_run_owner(
         self,
     ) -> None:
-        srv = self._daemon()
+        srv = self._daemon(adopt_fixture=False)
         acquire_status, acquired = _http(
             srv.base,
             "POST",

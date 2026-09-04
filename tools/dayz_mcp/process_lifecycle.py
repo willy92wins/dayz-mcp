@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# Every transition into RUNNING_IDLE goes through the fence; the poll
+# re-validates after re-acquiring the lock.
+
 import dataclasses
 import hashlib
 import json
@@ -8,10 +11,13 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from collections import deque
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from types import MappingProxyType
+from typing import Callable, Mapping, TypeVar
 
 from dayz_mcp.instance_fence import BindingPrepareError
 from dayz_mcp.runtime_state import RuntimePaths, atomic_write_bytes
@@ -35,6 +41,7 @@ _HEX = frozenset("0123456789abcdef")
 _IDENTITY_SCHEMES = frozenset({"legacy-wmi-v1", "psutil-argv-v2"})
 _BOX_MOD_CAP = 12
 _BOX_OCCUPANCY_CACHE_S = 1.5
+_ACTIVITY_STALE_S = 900.0
 _ACTIVE_RUN_STOP_HINT = "stop it with dayz_test_stop(run_id={run_id})"
 _ACTIVE_RUN_WAIT_HINT = "retry with wait_for_box_s=<n>"
 
@@ -206,6 +213,118 @@ def _copy_box(payload: dict[str, object]) -> dict[str, object]:
     }
 
 
+@dataclass(frozen=True)
+class _BoxSnapshot:
+    clock: float
+    runs: tuple[RunRecord, ...]
+    activity: Mapping[str, float]
+    unknown: frozenset[str]
+    revision: int
+    daemon_generation: str = ""
+    compensating: frozenset[str] = field(default_factory=frozenset)
+
+
+@dataclass(frozen=True)
+class _BoxProbes:
+    foreign: tuple[dict[str, object], ...]
+    ports_in_use: tuple[int, ...]
+    scan_known: bool
+
+
+def _activity_from_snapshot(
+    snapshot: _BoxSnapshot, run_id: str
+) -> tuple[str, float | None]:
+    if run_id in snapshot.unknown or run_id in snapshot.compensating:
+        return "unknown", None
+    stamp = snapshot.activity.get(run_id)
+    if stamp is None:
+        return "unknown", None
+    if stamp > snapshot.clock:
+        return "unknown", None
+    age = snapshot.clock - stamp
+    if age <= _ACTIVITY_STALE_S:
+        return "recent", round(age, 3)
+    return "stale", round(age, 3)
+
+
+def _generation_projection(run: RunRecord, current: str) -> dict[str, object]:
+    launch = getattr(run, "daemon_generation_at_launch", None)
+    if not isinstance(launch, str) or not launch:
+        launch = None
+    current_value = current if isinstance(current, str) else ""
+    changed = None if launch is None else launch != current_value
+    return {
+        "daemon_generation_at_launch": launch,
+        "daemon_generation_current": current_value,
+        "generation_changed": changed,
+    }
+
+
+_DIAGNOSTIC_PUBLIC_KEYS = (
+    "run_id",
+    "daemon_generation_at_launch",
+    "daemon_generation_current",
+    "generation_changed",
+    "event",
+    "reason",
+    "decision",
+    "state",
+)
+_BINDING_REASON_BY_EVENT = {
+    "lifecycle_stop_outcome": "stopped",
+    "lifecycle_owner_released": "released",
+    "lifecycle_recovery_repair": "recovery_repaired",
+    "lifecycle_manifest_recovery": "manifest_repaired",
+    "run_reaped": "reaped",
+    "admin_reconcile": "admin_reconciled",
+}
+_RUN_PROCESSES_GONE_HINT = (
+    "This run has no live owned process. Reap or recover the run "
+    "(reap_dead_run / reap_dead_runs / admin reconcile) so the durable "
+    "EXITED state converges; adopt_run does not restore a dead run."
+)
+_ADOPT_NOT_DISPATCHABLE_HINT = (
+    "Instance bindings do not survive a daemon restart. This run admits "
+    "stop_run and relaunch; mutations cannot dispatch until then."
+)
+_STATUS_SNAPSHOT_TRIES = 3
+_RECOVERY_REPAIR_STATES = frozenset(
+    {"STARTING", "RUNNING", "RUNNING_IDLE", "STOPPING", "UNRECONCILED"}
+)
+
+
+def _derive_box(snapshot: _BoxSnapshot, probes: _BoxProbes) -> dict[str, object]:
+    runs: list[dict[str, object]] = []
+    for run in snapshot.runs:
+        if run.state not in _ACTIVE_STATES:
+            continue
+        owner = run.owner_session_id
+        activity_state, last_activity_age_s = _activity_from_snapshot(
+            snapshot, run.run_id
+        )
+        row: dict[str, object] = {
+            "run_id": run.run_id,
+            "mod": run.mod,
+            "label": run.label,
+            "age_s": round(_run_age_s(run, snapshot.clock), 3),
+            "owner_session": owner[:12] if isinstance(owner, str) and owner else None,
+            "state": run.state,
+            "activity_state": activity_state,
+            "last_activity_age_s": last_activity_age_s,
+        }
+        row.update(_generation_projection(run, snapshot.daemon_generation))
+        runs.append(row)
+    occupied = True if not probes.scan_known else bool(runs or probes.foreign)
+    return {
+        "occupied": occupied,
+        "runs": runs,
+        "foreign": [dict(item) for item in probes.foreign],
+        "ports_in_use": list(probes.ports_in_use),
+        "queue": [],
+        "scan_known": probes.scan_known,
+    }
+
+
 def _wait_hint(box: object) -> str:
     if not isinstance(box, dict):
         return _ACTIVE_RUN_WAIT_HINT
@@ -265,12 +384,23 @@ def occupancy_error_fields(
                 if isinstance(age, (int, float)) and not isinstance(age, bool)
                 else 0.0
             )
+            payload["activity_state"] = item.get("activity_state")
+            payload["last_activity_age_s"] = item.get("last_activity_age_s")
             payload["foreign"] = False
-            payload["hint"] = (
-                _ACTIVE_RUN_STOP_HINT.format(run_id=run_id)
-                if _caller_owns_run(item, caller_session)
-                else _wait_hint(box)
-            )
+            state = item.get("state")
+            if state in {"STARTING", "STOPPING"}:
+                payload["hint"] = _wait_hint(box)
+            elif state == "UNRECONCILED":
+                payload["hint"] = (
+                    "this run is unreconciled; waiting will not free the box"
+                )
+            elif _caller_owns_run(item, caller_session) and state in {
+                "RUNNING",
+                "RUNNING_IDLE",
+            }:
+                payload["hint"] = _ACTIVE_RUN_STOP_HINT.format(run_id=run_id)
+            else:
+                payload["hint"] = _wait_hint(box)
             return payload
     foreign = box.get("foreign")
     if isinstance(foreign, list):
@@ -358,6 +488,7 @@ class RunRecord:
     launch_operation_id: str | None = None
     launch_request_sha256: str | None = None
     launch_acknowledged: bool = True
+    daemon_generation_at_launch: str | None = None
 
     @classmethod
     def from_payload(cls, value: object) -> "RunRecord":
@@ -379,6 +510,7 @@ class RunRecord:
             value.get("launch_operation_id"),
             value.get("launch_request_sha256"),
             value.get("launch_acknowledged", True),
+            value.get("daemon_generation_at_launch"),
         )
         run.validate()
         return run
@@ -427,6 +559,23 @@ class RunRecord:
             or not isinstance(self.launch_acknowledged, bool)
         ):
             raise ValueError("invalid_run_record")
+        if self.daemon_generation_at_launch is not None and not isinstance(
+            self.daemon_generation_at_launch, str
+        ):
+            raise ValueError("invalid_run_record")
+
+
+@dataclass(frozen=True)
+class RetiredRunDiagnostic:
+    run_id: str
+    daemon_generation_at_launch: str | None
+    daemon_generation_current: str
+    generation_changed: bool | None
+    event: str
+    reason: str
+    decision: str
+    state: str
+    launch_operation_id: str | None = None
 
 
 class RunManifestStore:
@@ -781,9 +930,12 @@ AuditCallback = Callable[[dict[str, object]], object]
 RetailProbe = Callable[[], dict[str, object]]
 Launcher = Callable[[list[str], str, str], object]
 RecoveryFaultArm = Callable[[RunRecord, str], object]
+_T = TypeVar("_T")
 
 
 class ProcessLifecycle:
+    """Every transition into RUNNING_IDLE goes through the fence; the poll re-validates after re-acquiring the lock."""
+
     def __init__(
         self,
         *,
@@ -799,6 +951,7 @@ class ProcessLifecycle:
         recovery_fault_arm: RecoveryFaultArm | None = None,
         argv_of: Callable[[int], list[str] | None] | None = None,
         bindings: object | None = None,
+        daemon_generation: str | None = None,
     ) -> None:
         self.coordinator = coordinator
         self.manifest = manifest
@@ -812,10 +965,22 @@ class ProcessLifecycle:
         self.recovery_fault_arm = recovery_fault_arm
         self.argv_of = argv_of or _default_argv_of
         self.bindings = bindings
-        self._box_cache: tuple[float, dict[str, object]] | None = None
+        self.daemon_generation = (
+            daemon_generation if isinstance(daemon_generation, str) else ""
+        )
+        self._box_cache: tuple[float, int, _BoxProbes] | None = None
+        self._box_revision = 0
         self._operation_lock = threading.RLock()
         self._command_id = -1
         self._last_start_error: str | None = None
+        self._activity_lock = threading.Lock()
+        self._last_activity: dict[tuple[str, str], float] = {}
+        self._activity_unknown: set[tuple[str, str]] = set()
+        self._activity_tombstone: dict[tuple[str, str], float] = {}
+        self._compensating_runs: set[tuple[str, str]] = set()
+        # Retired-run diagnostics live in daemon memory and start empty after a
+        # restart; the audit file is never read to reconstruct them.
+        self._retired_diagnostics: deque[RetiredRunDiagnostic] = deque(maxlen=32)
 
     def _prepare_instance(
         self,
@@ -859,6 +1024,135 @@ class ProcessLifecycle:
             return
         bindings.retire_run(run_id, reason)
 
+    def _adopt_dispatchable(self, run_id: str) -> bool:
+        # Caller holds _operation_lock. ServerState.run_has_bound_binding
+        # takes ServerState._lock; never the inverse.
+        bindings = self.bindings
+        if bindings is None:
+            return False
+        checker = getattr(bindings, "run_has_bound_binding", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(run_id))
+        except Exception:
+            return False
+
+    def _current_generation(self) -> str:
+        return self.daemon_generation if isinstance(self.daemon_generation, str) else ""
+
+    def _retire_run_diagnostic(
+        self,
+        run: RunRecord,
+        event: str,
+        reason: str,
+        decision: str,
+        state: str = "EXITED",
+    ) -> None:
+        key = (run.run_id, run.launch_operation_id)
+        fields = _generation_projection(run, self._current_generation())
+        entry = RetiredRunDiagnostic(
+            run_id=run.run_id,
+            daemon_generation_at_launch=fields["daemon_generation_at_launch"],
+            daemon_generation_current=fields["daemon_generation_current"],
+            generation_changed=fields["generation_changed"],
+            event=event,
+            reason=reason,
+            decision=decision,
+            state=state,
+            launch_operation_id=run.launch_operation_id,
+        )
+        with self._activity_lock:
+            for existing in self._retired_diagnostics:
+                if (existing.run_id, existing.launch_operation_id) == key:
+                    return
+            self._retired_diagnostics.appendleft(entry)
+
+    def _commit_retirement(
+        self, run: RunRecord, event: str, reason: str, decision: str
+    ) -> bool:
+        # Binding retirement precedes the durable transition; the diagnostic
+        # follows a successful persist. stop_run may already have retired.
+        binding_reason = _BINDING_REASON_BY_EVENT.get(event, reason)
+        self._retire_run_bindings(run.run_id, binding_reason)
+        try:
+            self.manifest.replace(run)
+        except Exception:
+            return False
+        self._best_effort_post_persist_retirement(run, event, reason, decision)
+        return True
+
+    def _best_effort_post_persist_retirement(
+        self, run: RunRecord, event: str, reason: str, decision: str
+    ) -> None:
+        try:
+            self._invalidate_box_cache()
+        except Exception:
+            self._note_post_persist_fault(run.run_id, "invalidate_box_cache")
+        try:
+            self._retire_run_diagnostic(run, event, reason, decision, "EXITED")
+        except Exception:
+            self._note_post_persist_fault(run.run_id, "diagnostic")
+        try:
+            self._seal_terminal(run.run_id, time.time())
+        except Exception:
+            self._note_post_persist_fault(run.run_id, "seal_terminal")
+            try:
+                self._unfence_runs([run.run_id])
+            except Exception:
+                pass
+
+    def _note_post_persist_fault(self, run_id: str, reason: str) -> None:
+        try:
+            self._audit(
+                "lifecycle_terminal_post_persist",
+                None,
+                reason,
+                "degraded",
+                run_id=run_id,
+            )
+        except Exception:
+            pass
+
+    def _projected_run(self, run: RunRecord) -> dict[str, object]:
+        row = dataclasses.asdict(run)
+        row.update(_generation_projection(run, self._current_generation()))
+        return row
+
+    def _publish_retired_diagnostics(self) -> list[dict[str, object]]:
+        with self._activity_lock:
+            entries = list(self._retired_diagnostics)
+        published: list[dict[str, object]] = []
+        for item in entries:
+            raw = dataclasses.asdict(item)
+            published.append({key: raw[key] for key in _DIAGNOSTIC_PUBLIC_KEYS})
+        return published
+
+    def _status_snapshot(
+        self,
+    ) -> tuple[list[RunRecord], list[dict[str, object]]]:
+        # Never takes _operation_lock: /status is the health discriminator and
+        # must not wait out a stop. Revision stamp + bounded retry, then drop
+        # a diagnostic whose run still has a non-terminal row in this payload.
+        runs: list[RunRecord] = []
+        diagnostics: list[dict[str, object]] = []
+        for _ in range(_STATUS_SNAPSHOT_TRIES):
+            with self._activity_lock:
+                before = self._box_revision
+            runs = list(self.manifest.list_runs())
+            diagnostics = self._publish_retired_diagnostics()
+            with self._activity_lock:
+                after = self._box_revision
+            if before == after:
+                break
+        live = {run.run_id for run in runs if run.state != "EXITED"}
+        diagnostics = [
+            item
+            for item in diagnostics
+            if item.get("run_id") not in live
+        ]
+        return runs, diagnostics
+
     def _launch(self, argv: list[str], cwd: str, window_style: str) -> object:
         kwargs: dict[str, object] = {"cwd": cwd, "close_fds": True}
         if os.name == "nt" and window_style == "hidden":
@@ -883,6 +1177,227 @@ class ProcessLifecycle:
             return self.audit(payload) is not False
         except Exception:
             return False
+
+    def _activity_key(self, run_id: str) -> tuple[str, str]:
+        generation = self.daemon_generation if isinstance(self.daemon_generation, str) else ""
+        return (generation, run_id)
+
+    def _bump_box_revision_locked(self) -> None:
+        # Caller holds _activity_lock. start/stop/reap take _operation_lock
+        # then _activity_lock; reverse order would deadlock.
+        self._box_revision += 1
+        self._box_cache = None
+
+    def _invalidate_box_cache(self) -> None:
+        with self._activity_lock:
+            self._bump_box_revision_locked()
+
+    def _capture_start_activity(
+        self, run: RunRecord, *, launched: ProcessRecord | None = None
+    ) -> None:
+        records = [launched] if launched is not None else list(run.processes)
+        stamps = [
+            stamp
+            for stamp in (
+                _utc_epoch(record.creation_time_utc) for record in records
+            )
+            if stamp is not None
+        ]
+        key = self._activity_key(run.run_id)
+        with self._activity_lock:
+            if stamps and key not in self._activity_unknown:
+                if launched is not None or key not in self._last_activity:
+                    # A process launched by this daemon is a stamp of its own:
+                    # max with any earlier seal (extension), never import a
+                    # pre-daemon basal when this daemon has not sealed yet.
+                    self._seal_activity_locked(key, max(stamps))
+            self._bump_box_revision_locked()
+
+    def record_command_activity(self, run_id: str, *, now: float | None = None) -> bool:
+        if not isinstance(run_id, str) or not run_id:
+            return False
+        epoch = time.time() if now is None else float(now)
+        return self._write_command_activity(run_id, epoch, reason="enqueue_accepted")
+
+    def record_box_command_activity(
+        self,
+        *,
+        now: float | None = None,
+        owner_session: str | None = None,
+        run_id: str | None = None,
+    ) -> None:
+        epoch = time.time() if now is None else float(now)
+        if isinstance(run_id, str) and run_id:
+            try:
+                self.record_command_activity(run_id, now=epoch)
+            except Exception:
+                pass
+            return
+        # No accredited binding. Do not credit by owner or by cardinality:
+        # either false-attributes freshness or leaves a false stale on a live
+        # session. Forget stamps so occupancy publishes unknown.
+        _ = owner_session
+        try:
+            runs = list(self.manifest.list_runs())
+        except Exception:
+            return
+        active = [run for run in runs if run.state in _ACTIVE_STATES]
+        with self._activity_lock:
+            for run in active:
+                key = self._activity_key(run.run_id)
+                current = self._last_activity.get(key)
+                if current is not None and current <= epoch:
+                    self._last_activity.pop(key, None)
+                self._raise_activity_tombstone_locked(key, epoch)
+            self._bump_box_revision_locked()
+
+    def tombstone_run_activity(self, run_id: str, *, now: float | None = None) -> None:
+        if not isinstance(run_id, str) or not run_id:
+            return
+        epoch = time.time() if now is None else float(now)
+        key = self._activity_key(run_id)
+        with self._activity_lock:
+            self._raise_activity_tombstone_locked(key, epoch)
+            current = self._last_activity.get(key)
+            if current is not None and current <= epoch:
+                self._last_activity.pop(key, None)
+            self._bump_box_revision_locked()
+
+    def _forget_run_residues(self, run_id: str) -> None:
+        self._seal_terminal(run_id, time.time())
+
+    def _seal_terminal(self, run_id: str, at: float) -> None:
+        # Drop data, unknown, and compensation; keep (or recreate) a frontier
+        # later than any stamp that was acceptable at retirement so a writer
+        # that accepted before this seal cannot reappear after it.
+        epoch = float(at)
+        with self._activity_lock:
+            keys = [
+                key
+                for key in (
+                    set(self._last_activity)
+                    | set(self._activity_tombstone)
+                    | set(self._activity_unknown)
+                    | set(self._compensating_runs)
+                )
+                if key[1] == run_id
+            ]
+            current = self._activity_key(run_id)
+            if current not in keys:
+                keys.append(current)
+            frontier = epoch
+            for key in keys:
+                stamp = self._last_activity.get(key)
+                if stamp is not None and stamp > frontier:
+                    frontier = stamp
+                tomb = self._activity_tombstone.get(key)
+                if tomb is not None and tomb > frontier:
+                    frontier = tomb
+            for key in keys:
+                self._last_activity.pop(key, None)
+                self._activity_unknown.discard(key)
+                self._compensating_runs.discard(key)
+                self._raise_activity_tombstone_locked(key, frontier)
+            self._bump_box_revision_locked()
+        bindings = self.bindings
+        unfence = getattr(bindings, "unfence_runs", None)
+        if callable(unfence):
+            try:
+                unfence([run_id])
+            except Exception:
+                pass
+
+    def _raise_activity_tombstone_locked(
+        self, key: tuple[str, str], epoch: float
+    ) -> None:
+        current = self._activity_tombstone.get(key)
+        if current is None or epoch > current:
+            self._activity_tombstone[key] = epoch
+
+    def _seal_activity_locked(self, key: tuple[str, str], epoch: float) -> None:
+        # Unique stamp writer. Sticky unknown still wins over everything.
+        # A compensating run discards credit and basal until the rollback
+        # tombstone is the frontier.
+        if key in self._compensating_runs:
+            return
+        tombstone = self._activity_tombstone.get(key)
+        if tombstone is not None and epoch <= tombstone:
+            return
+        current = self._last_activity.get(key)
+        if current is None or epoch >= current:
+            self._last_activity[key] = epoch
+
+    def _write_command_activity(self, run_id: str, epoch: float, *, reason: str) -> bool:
+        key = self._activity_key(run_id)
+        ok = self._audit(
+            "run_command_activity",
+            None,
+            reason,
+            "recorded",
+            run_id=run_id,
+            activity_epoch=epoch,
+        )
+        with self._activity_lock:
+            if not ok:
+                tombstone = self._activity_tombstone.get(key)
+                if tombstone is None or epoch > tombstone:
+                    self._activity_unknown.add(key)
+            elif key not in self._activity_unknown:
+                self._seal_activity_locked(key, epoch)
+            self._bump_box_revision_locked()
+        return ok
+
+    def _activity_for_run_id(
+        self, run_id: str, clock: float
+    ) -> tuple[str, float | None]:
+        key = self._activity_key(run_id)
+        with self._activity_lock:
+            if key in self._activity_unknown or key in self._compensating_runs:
+                return "unknown", None
+            stamp = self._last_activity.get(key)
+            tombstone = self._activity_tombstone.get(key)
+        if stamp is None:
+            return "unknown", None
+        if tombstone is not None and stamp <= tombstone:
+            return "unknown", None
+        if stamp > clock:
+            return "unknown", None
+        age = clock - stamp
+        if age <= _ACTIVITY_STALE_S:
+            return "recent", round(age, 3)
+        return "stale", round(age, 3)
+
+    def _run_activity(self, run: RunRecord, clock: float) -> tuple[str, float | None]:
+        return self._activity_for_run_id(run.run_id, clock)
+
+    def _forget_attempt_activity(
+        self,
+        run_id: str,
+        attempt_started_at: float,
+        *,
+        rolled_back_at: float,
+    ) -> None:
+        key = self._activity_key(run_id)
+        with self._activity_lock:
+            current = self._last_activity.get(key)
+            if (
+                current is not None
+                and attempt_started_at <= current <= rolled_back_at
+            ):
+                self._last_activity.pop(key, None)
+            self._raise_activity_tombstone_locked(key, rolled_back_at)
+            self._bump_box_revision_locked()
+
+    @contextmanager
+    def _compensating(self, run_id: str):
+        key = self._activity_key(run_id)
+        with self._activity_lock:
+            self._compensating_runs.add(key)
+        try:
+            yield
+        finally:
+            with self._activity_lock:
+                self._compensating_runs.discard(key)
 
     def _legacy_identity_error(self) -> dict[str, object] | None:
         try:
@@ -1094,6 +1609,105 @@ class ProcessLifecycle:
             self._add_degradation(result, "audit_failed")
         return result
 
+    def _persist_failed_launch_target(
+        self,
+        target: RunRecord,
+        provisional: RunRecord,
+        attempt_started_at: float | None,
+    ) -> bool:
+        persistence_failed = False
+        try:
+            self.manifest.replace(target)
+        except Exception:
+            persistence_failed = True
+        else:
+            self._invalidate_box_cache()
+            if target.state == "EXITED":
+                self._seal_terminal(provisional.run_id, time.time())
+        if attempt_started_at is not None:
+            self._forget_attempt_activity(
+                provisional.run_id,
+                attempt_started_at,
+                rolled_back_at=time.time(),
+            )
+        return persistence_failed
+
+    def _drain_pending_for_runs(self, run_ids: list[str]) -> None:
+        bindings = self.bindings
+        drain = getattr(bindings, "drain_pending_for_run", None)
+        if not callable(drain):
+            return
+        for run_id in run_ids:
+            try:
+                drain(run_id)
+            except Exception:
+                pass
+
+    def _fence_runs(self, run_ids: list[str]) -> None:
+        if not run_ids:
+            return
+        bindings = self.bindings
+        fence = getattr(bindings, "fence_runs", None)
+        if callable(fence):
+            fence(run_ids)
+            return
+        self._drain_pending_for_runs(run_ids)
+
+    def _unfence_runs(self, run_ids: list[str]) -> None:
+        bindings = self.bindings
+        unfence = getattr(bindings, "unfence_runs", None)
+        if not callable(unfence):
+            return
+        try:
+            unfence(run_ids)
+        except Exception:
+            pass
+
+    def _transition_to_idle(self, runs: list[str], persist: Callable[[], _T]) -> _T:
+        """Fence + drain, persist, then confirm; unfence if persist fails.
+
+        Every transition into RUNNING_IDLE goes through this method.
+        """
+
+        if runs:
+            try:
+                self._fence_runs(runs)
+            except Exception:
+                self._unfence_runs(runs)
+                raise
+        try:
+            result = persist()
+        except Exception:
+            if runs:
+                self._unfence_runs(runs)
+            raise
+        leftover: list[str] = []
+        for run_id in runs:
+            current = self.manifest.get(run_id)
+            if current is None or current.state != "RUNNING_IDLE":
+                leftover.append(run_id)
+        if leftover:
+            self._unfence_runs(leftover)
+        return result
+
+    def _quiesce_then_release_owner(self, session_id: str, lease_id: str) -> list[str]:
+        """Quiesce runs → persist → confirm or revert.
+
+        Every transition into RUNNING_IDLE goes through the fence.
+        """
+
+        candidates = [
+            run.run_id
+            for run in self.manifest.list_runs()
+            if run.owner_session_id == session_id
+            and run.owner_lease_id == lease_id
+            and run.state == "RUNNING"
+        ]
+        return self._transition_to_idle(
+            candidates,
+            lambda: self.manifest.release_owner(session_id, lease_id),
+        )
+
     def _settle_failed_launch(
         self,
         *,
@@ -1104,46 +1718,46 @@ class ProcessLifecycle:
         record: ProcessRecord | None,
         confirmed_error: str,
         manifest_failure: bool = False,
+        attempt_started_at: float | None = None,
     ) -> dict[str, object]:
         """Leave every failed Popen attempt in a durable, reconcilable state."""
 
         self._last_start_error = confirmed_error
         confirmed_closed = launched is None or self._terminate_open_handle(launched)
         persistence_failed = False
-        if confirmed_closed:
-            if previous is not None:
-                target = RunRecord.from_payload(dataclasses.asdict(previous))
+        with self._compensating(provisional.run_id):
+            if confirmed_closed:
+                if previous is not None:
+                    target = RunRecord.from_payload(dataclasses.asdict(previous))
+                else:
+                    target = RunRecord.from_payload(dataclasses.asdict(provisional))
+                    target.state = "EXITED"
+                    target.owner_session_id = None
+                    target.owner_lease_id = None
+                    target.processes = []
+                persistence_failed = self._persist_failed_launch_target(
+                    target, provisional, attempt_started_at
+                )
+                durable = self.manifest.get(provisional.run_id)
+                state = durable.state if durable is not None else "STARTING"
+                if persistence_failed:
+                    result = self._error("manual_cleanup_required", 409)
+                else:
+                    result = self._error(
+                        confirmed_error,
+                        503 if confirmed_error == "lifecycle_start_failed" else 409,
+                    )
             else:
                 target = RunRecord.from_payload(dataclasses.asdict(provisional))
-                target.state = "EXITED"
-                target.owner_session_id = None
-                target.owner_lease_id = None
-                target.processes = []
-            try:
-                self.manifest.replace(target)
-            except Exception:
-                persistence_failed = True
-            durable = self.manifest.get(provisional.run_id)
-            state = durable.state if durable is not None else "STARTING"
-            if persistence_failed:
-                result = self._error("manual_cleanup_required", 409)
-            else:
-                result = self._error(
-                    confirmed_error,
-                    503 if confirmed_error == "lifecycle_start_failed" else 409,
+                target.state = "UNRECONCILED"
+                if record is not None and record not in target.processes:
+                    target.processes.append(record)
+                persistence_failed = self._persist_failed_launch_target(
+                    target, provisional, attempt_started_at
                 )
-        else:
-            target = RunRecord.from_payload(dataclasses.asdict(provisional))
-            target.state = "UNRECONCILED"
-            if record is not None and record not in target.processes:
-                target.processes.append(record)
-            try:
-                self.manifest.replace(target)
-            except Exception:
-                persistence_failed = True
-            durable = self.manifest.get(provisional.run_id)
-            state = durable.state if durable is not None else "STARTING"
-            result = self._error("manual_cleanup_required", 409)
+                durable = self.manifest.get(provisional.run_id)
+                state = durable.state if durable is not None else "STARTING"
+                result = self._error("manual_cleanup_required", 409)
 
         result["run_id"] = provisional.run_id
         result["state"] = state
@@ -1317,6 +1931,7 @@ class ProcessLifecycle:
                     if isinstance(launch_request_sha256, str)
                     else None,
                     False if isinstance(launch_operation_id, str) else True,
+                    self._current_generation() or None,
                 )
             )
             provisional.state = "STARTING"
@@ -1337,11 +1952,13 @@ class ProcessLifecycle:
                     run_id=run_id,
                     state=existing.state if existing is not None else "ABSENT",
                 )
+            self._invalidate_box_cache()
 
             launched: object | None = None
             record: ProcessRecord | None = None
             minted: str | None = None
             launch_role = str(parsed["role"])
+            attempt_started_at = time.time()
             try:
                 if self._quarantined():
                     return self._settle_failed_launch(
@@ -1351,6 +1968,7 @@ class ProcessLifecycle:
                         launched=None,
                         record=None,
                         confirmed_error="retail_quarantine",
+                        attempt_started_at=attempt_started_at,
                     )
                 minted, prepare_error = self._prepare_instance(
                     run_id, launch_role, str(parsed["profiles"]), existing is not None
@@ -1363,6 +1981,7 @@ class ProcessLifecycle:
                         launched=None,
                         record=None,
                         confirmed_error=prepare_error,
+                        attempt_started_at=attempt_started_at,
                     )
                 try:
                     launched = self.launcher(
@@ -1382,6 +2001,7 @@ class ProcessLifecycle:
                         launched=launched,
                         record=None,
                         confirmed_error="lifecycle_start_failed",
+                        attempt_started_at=attempt_started_at,
                     )
 
                 try:
@@ -1398,6 +2018,7 @@ class ProcessLifecycle:
                         launched=launched,
                         record=None,
                         confirmed_error="identity_unavailable",
+                        attempt_started_at=attempt_started_at,
                     )
                 self._confirm_instance(minted, record)
 
@@ -1416,7 +2037,9 @@ class ProcessLifecycle:
                         record=record,
                         confirmed_error="lifecycle_start_failed",
                         manifest_failure=True,
+                        attempt_started_at=attempt_started_at,
                     )
+                self._capture_start_activity(completed, launched=record)
 
                 result: dict[str, object] = {
                     "ok": True,
@@ -1647,6 +2270,7 @@ class ProcessLifecycle:
                 run.owner_session_id = None
                 run.owner_lease_id = None
                 run.state = "UNRECONCILED"
+                self._retire_run_bindings(run.run_id, "stopped")
                 try:
                     self.manifest.replace(run)
                 except Exception:
@@ -1673,6 +2297,7 @@ class ProcessLifecycle:
                         state="RUNNING",
                         terminated=0,
                     )
+                self._invalidate_box_cache()
                 result = self._reject_reserved(
                     authority,
                     command,
@@ -1713,6 +2338,7 @@ class ProcessLifecycle:
             if command_id is None:
                 return self._error("lease_invalid", 409)
             try:
+                self._retire_run_bindings(run_id, "stopped")
                 run.state = "STOPPING"
                 try:
                     self.manifest.replace(run)
@@ -1729,6 +2355,7 @@ class ProcessLifecycle:
                         state="RUNNING",
                         terminated=0,
                     )
+                self._invalidate_box_cache()
                 terminated = 0
                 survivors = list(owned)
                 for record in list(owned):
@@ -1742,6 +2369,8 @@ class ProcessLifecycle:
                             self.manifest.replace(run)
                         except Exception:
                             degraded.append("manifest_failed")
+                        else:
+                            self._invalidate_box_cache()
                         result: dict[str, object] = {
                             "error": "partial_cleanup",
                             "reason": "retail_quarantine",
@@ -1782,6 +2411,8 @@ class ProcessLifecycle:
                             self.manifest.replace(run)
                         except Exception:
                             degraded.append("manifest_failed")
+                        else:
+                            self._invalidate_box_cache()
                         response: dict[str, object] = {
                             "error": "partial_cleanup",
                             "terminated": terminated,
@@ -1810,9 +2441,12 @@ class ProcessLifecycle:
                 run.owner_session_id = None
                 run.owner_lease_id = None
                 run.processes = []
-                try:
-                    self.manifest.replace(run)
-                except Exception:
+                if not self._commit_retirement(
+                    run,
+                    "lifecycle_stop_outcome",
+                    "stopped",
+                    "stopped",
+                ):
                     result = {
                         "error": "partial_cleanup",
                         "reason": "manifest_failed",
@@ -1837,7 +2471,6 @@ class ProcessLifecycle:
                     "state": "EXITED",
                     "terminated": terminated,
                 }
-                self._retire_run_bindings(run_id, "stopped")
                 return self._terminal_outcome(
                     result,
                     "lifecycle_stop_outcome",
@@ -1879,15 +2512,21 @@ class ProcessLifecycle:
                 for other in self.manifest.list_runs()
             ):
                 return self._reject_reserved(authority, command, "active_run_exists")
-            for record in run.processes:
-                kind, reason = self._classify_registered_process(record)
-                if kind == "unknown":
-                    return self._reject_reserved(
-                        authority,
-                        command,
-                        reason,
-                        503 if reason == "guard_unavailable" else 409,
-                    )
+            buckets, unknown_reason = self._partition_registered_processes(run.processes)
+            if buckets["unknown"]:
+                reason = unknown_reason or "process_identity_mismatch"
+                return self._reject_reserved(
+                    authority,
+                    command,
+                    reason,
+                    503 if reason == "guard_unavailable" else 409,
+                )
+            if not buckets["owned"]:
+                result = self._reject_reserved(
+                    authority, command, "run_processes_gone"
+                )
+                result["hint"] = _RUN_PROCESSES_GONE_HINT
+                return result
             if self._quarantined():
                 return self._reject_reserved(authority, command, "retail_quarantine")
             if not self._audit("lifecycle_adopt", client, "identity_match", "allowed", run_id=run_id):
@@ -1908,13 +2547,42 @@ class ProcessLifecycle:
             except Exception:
                 self._finish_committed(authority, command_id)
                 return self._error("manifest_failed", 503)
+            self._invalidate_box_cache()
+            self._unfence_runs([run_id])
             self._finish_committed(authority, command_id)
-            return {"ok": True, "run_id": run_id, "state": "RUNNING"}
+            dispatchable = self._adopt_dispatchable(run_id)
+            payload: dict[str, object] = {
+                "ok": True,
+                "run_id": run_id,
+                "state": "RUNNING",
+                "dispatchable": dispatchable,
+            }
+            if not dispatchable:
+                payload["hint"] = _ADOPT_NOT_DISPATCHABLE_HINT
+            return payload
 
     def release_owner(self, session_id: str, lease_id: str) -> list[str]:
         with self._operation_lock:
             self._require_legacy_identity_safe()
-            return self.manifest.release_owner(session_id, lease_id)
+            changed = self._quiesce_then_release_owner(session_id, lease_id)
+            if changed:
+                self._invalidate_box_cache()
+            return changed
+
+    def release_all_running_owners(self) -> list[str]:
+        with self._operation_lock:
+            self._require_legacy_identity_safe()
+            candidates = [
+                run.run_id
+                for run in self.manifest.list_runs()
+                if run.state == "RUNNING" and run.owner_session_id is not None
+            ]
+            changed = self._transition_to_idle(
+                candidates, self.manifest.release_all_running_owners
+            )
+            if changed:
+                self._invalidate_box_cache()
+            return changed
 
     def begin_release_owner(
         self, session_id: str, lease_id: str
@@ -1933,12 +2601,13 @@ class ProcessLifecycle:
                 and run.state in _ACTIVE_STATES
             ]
             if not unacknowledged:
+                released = self._quiesce_then_release_owner(session_id, lease_id)
+                if released:
+                    self._invalidate_box_cache()
                 result.update(
                     {
                         "terminal_safe": True,
-                        "runs_released": self.manifest.release_owner(
-                            session_id, lease_id
-                        ),
+                        "runs_released": released,
                     }
                 )
                 terminal.set()
@@ -1976,14 +2645,7 @@ class ProcessLifecycle:
                             except Exception:
                                 actual = {"error": "guard_unavailable"}
                             if not self._identity_matches(record, actual):
-                                current.state = "UNRECONCILED"
-                                current.owner_session_id = None
-                                current.owner_lease_id = None
-                                try:
-                                    self.manifest.replace(current)
-                                except Exception:
-                                    pass
-                                self._arm_cleanup_fault(
+                                self._persist_unreconciled_and_arm(
                                     current, "identity_ambiguous"
                                 )
                                 result.update(
@@ -2001,14 +2663,9 @@ class ProcessLifecycle:
                                 not isinstance(terminated, dict)
                                 or terminated.get("terminated") is not True
                             ):
-                                current.state = "UNRECONCILED"
-                                current.owner_session_id = None
-                                current.owner_lease_id = None
-                                try:
-                                    self.manifest.replace(current)
-                                except Exception:
-                                    pass
-                                self._arm_cleanup_fault(current, "cleanup_failed")
+                                self._persist_unreconciled_and_arm(
+                                    current, "cleanup_failed"
+                                )
                                 result.update(
                                     {
                                         "terminal_safe": False,
@@ -2020,12 +2677,24 @@ class ProcessLifecycle:
                         current.owner_session_id = None
                         current.owner_lease_id = None
                         current.processes = []
-                        self.manifest.replace(current)
+                        if not self._commit_retirement(
+                            current,
+                            "lifecycle_owner_released",
+                            "released",
+                            "released",
+                        ):
+                            result.update(
+                                {
+                                    "terminal_safe": False,
+                                    "error": "cleanup_failed",
+                                }
+                            )
+                            return
                         released.append(current.run_id)
-                        self._retire_run_bindings(current.run_id, "released")
-                    released.extend(
-                        self.manifest.release_owner(session_id, lease_id)
-                    )
+                    extra = self._quiesce_then_release_owner(session_id, lease_id)
+                    if extra:
+                        self._invalidate_box_cache()
+                    released.extend(extra)
                     result.update(
                         {
                             "terminal_safe": True,
@@ -2045,6 +2714,20 @@ class ProcessLifecycle:
             daemon=True,
         ).start()
         return CleanupDisposition(True, terminal, result)
+
+    def _persist_unreconciled_and_arm(self, current: RunRecord, reason: str) -> None:
+        durable = RunRecord.from_payload(dataclasses.asdict(current))
+        current.state = "UNRECONCILED"
+        current.owner_session_id = None
+        current.owner_lease_id = None
+        self._retire_run_bindings(current.run_id, "released")
+        try:
+            self.manifest.replace(current)
+        except Exception:
+            self._arm_cleanup_fault(durable, reason)
+            return
+        self._invalidate_box_cache()
+        self._arm_cleanup_fault(current, reason)
 
     def _arm_cleanup_fault(self, run: RunRecord, reason: str) -> None:
         callback = self.recovery_fault_arm
@@ -2071,6 +2754,7 @@ class ProcessLifecycle:
                 run is None
                 or run.launch_operation_id != operation_id
                 or run.launch_acknowledged
+                or run.state not in _RECOVERY_REPAIR_STATES
             ):
                 return {"terminal_safe": False, "error": "identity_ambiguous"}
             observed_hash = hashlib.sha256(
@@ -2120,11 +2804,13 @@ class ProcessLifecycle:
             run.owner_session_id = None
             run.owner_lease_id = None
             run.processes = []
-            try:
-                self.manifest.replace(run)
-            except Exception:
+            if not self._commit_retirement(
+                run,
+                "lifecycle_recovery_repair",
+                "confirmed_repair",
+                "repaired",
+            ):
                 return {"terminal_safe": False, "error": "manifest_drift"}
-            self._retire_run_bindings(run_id, "recovery_repaired")
             return {
                 "terminal_safe": True,
                 "run_id": run_id,
@@ -2161,6 +2847,7 @@ class ProcessLifecycle:
             except Exception:
                 return {"terminal_safe": False, "error": "manifest_drift"}
             self.manifest = restored
+            self._invalidate_box_cache()
             for run in restored.list_runs():
                 if (
                     run.launch_operation_id is None
@@ -2206,13 +2893,22 @@ class ProcessLifecycle:
                 run.owner_session_id = None
                 run.owner_lease_id = None
                 run.processes = []
-                try:
-                    restored.replace(run)
-                except Exception:
+                if not self._commit_retirement(
+                    run,
+                    "lifecycle_manifest_recovery",
+                    "backup_restored",
+                    "repaired",
+                ):
                     return self._manifest_repair_failure("manifest_drift")
-                self._retire_run_bindings(run.run_id, "manifest_repaired")
             try:
-                restored.recover_after_restart()
+                candidates = [
+                    run.run_id
+                    for run in restored.list_runs()
+                    if run.state == "RUNNING" and run.owner_session_id is not None
+                ]
+                self._transition_to_idle(
+                    candidates, restored.recover_after_restart
+                )
             except Exception:
                 return self._manifest_repair_failure("manifest_drift")
             return {
@@ -2278,12 +2974,13 @@ class ProcessLifecycle:
         run.owner_lease_id = None
         run.processes = []
         run.state = "EXITED"
-        try:
-            self.manifest.replace(run)
-        except Exception:
+        if not self._commit_retirement(
+            run,
+            "run_reaped",
+            "all_processes_gone_or_foreign",
+            "reaped",
+        ):
             return "manifest_failed"
-        self._retire_run_bindings(run.run_id, "reaped")
-        self._box_cache = None
         self.coordinator.note_run_reaped(owner_session_id)
         return ""
 
@@ -2366,10 +3063,12 @@ class ProcessLifecycle:
         legacy_error = self._legacy_identity_error()
         if legacy_error is not None:
             return legacy_error
+        runs, diagnostics = self._status_snapshot()
         payload: dict[str, object] = {
-            "runs": [dataclasses.asdict(run) for run in self.manifest.list_runs()],
+            "runs": [self._projected_run(run) for run in runs],
             "retail_quarantine": self._quarantined(),
             "client": client.public_payload(),
+            "retired_run_diagnostics": diagnostics,
         }
         if self._last_start_error is not None:
             payload["last_start_error"] = self._last_start_error
@@ -2379,13 +3078,14 @@ class ProcessLifecycle:
         legacy_error = self._legacy_identity_error()
         if legacy_error is not None:
             return legacy_error
-        runs = self.manifest.list_runs()
+        runs, diagnostics = self._status_snapshot()
         # Keep every non-terminal state: admin recovery needs STARTING and STOPPING.
         active_runs = [run for run in runs if run.state in _ACTIVE_STATES]
         return {
-            "runs": [dataclasses.asdict(run) for run in active_runs],
+            "runs": [self._projected_run(run) for run in active_runs],
             "runs_retired": len(runs) - len(active_runs),
             "retail_quarantine": self._quarantined(),
+            "retired_run_diagnostics": diagnostics,
         }
 
     def _diag_snapshot(
@@ -2413,34 +3113,65 @@ class ProcessLifecycle:
         return None, observed
 
     def box_occupancy(self, *, now: float | None = None) -> dict[str, object]:
-        """Observe managed runs plus live DayZDiag not owned by this lifecycle.
+        """The box is derived from one snapshot; live state is never re-read after it.
 
+        Observe managed runs plus live DayZDiag not owned by this lifecycle.
         Reuses ``diag_probe`` (the same scan ``start_run`` uses to reject a
         foreign diag). Argv decode is per-PID enrichment, not a second scan.
         An unknown snapshot is occupied: launching would be a guess.
         ``scan_known`` is False on that path (empty ``foreign`` is not proof
-        of an empty box).
+        of an empty box). Probe results (``foreign``, ``ports_in_use``,
+        ``scan_known``) may be reused for 1.5 s; rows are not.
         """
 
-        if now is None and self._box_cache is not None:
-            cached_at, cached = self._box_cache
-            if time.monotonic() - cached_at < _BOX_OCCUPANCY_CACHE_S:
-                return _copy_box(cached)
-        snapshot = self._box_occupancy_uncached(
-            time.time() if now is None else float(now)
-        )
-        if now is None:
-            self._box_cache = (time.monotonic(), snapshot)
-        return _copy_box(snapshot)
+        clock = time.time() if now is None else float(now)
+        snapshot = self._take_box_snapshot(clock)
+        probes = self._probes_for_snapshot(snapshot, use_cache=now is None)
+        return _derive_box(snapshot, probes)
 
-    def _box_occupancy_uncached(self, clock: float) -> dict[str, object]:
-        active = [
-            run for run in self.manifest.list_runs() if run.state in _ACTIVE_STATES
-        ]
+    def _take_box_snapshot(self, clock: float) -> _BoxSnapshot:
+        # The seal must be a lower bound of the data it certifies.
+        with self._activity_lock:
+            revision = self._box_revision
+        runs = tuple(self.manifest.list_runs())
+        with self._activity_lock:
+            generation = (
+                self.daemon_generation
+                if isinstance(self.daemon_generation, str)
+                else ""
+            )
+            activity = {
+                run_id: stamp
+                for (gen, run_id), stamp in self._last_activity.items()
+                if gen == generation
+                and stamp
+                > self._activity_tombstone.get((gen, run_id), stamp - 1.0)
+            }
+            unknown = frozenset(
+                run_id
+                for (gen, run_id) in self._activity_unknown
+                if gen == generation
+            )
+            compensating = frozenset(
+                run_id
+                for (gen, run_id) in self._compensating_runs
+                if gen == generation
+            )
+        return _BoxSnapshot(
+            clock=clock,
+            runs=runs,
+            activity=MappingProxyType(activity),
+            unknown=unknown,
+            revision=revision,
+            daemon_generation=generation,
+            compensating=compensating,
+        )
+
+    def _collect_probes(self, snapshot: _BoxSnapshot) -> _BoxProbes:
+        active = [run for run in snapshot.runs if run.state in _ACTIVE_STATES]
         registered_pids = {
             record.pid for run in active for record in run.processes
         }
-        runs: list[dict[str, object]] = []
         ports: list[int] = []
 
         def _remember_port(port: int) -> None:
@@ -2459,38 +3190,28 @@ class ProcessLifecycle:
             return parsed
 
         for run in active:
-            owner = run.owner_session_id
             for record in run.processes:
                 _absorb_argv(record.pid)
-            runs.append(
-                {
-                    "run_id": run.run_id,
-                    "mod": run.mod,
-                    "label": run.label,
-                    "age_s": round(_run_age_s(run, clock), 3),
-                    "owner_session": owner[:12] if isinstance(owner, str) and owner else None,
-                    "state": run.state,
-                }
-            )
 
         reason, observed = self._diag_snapshot()
-        foreign: list[dict[str, object]] = []
         if reason is not None or observed is None:
-            return {
-                "occupied": True,
-                "runs": runs,
-                "foreign": foreign,
-                "ports_in_use": ports,
-                "queue": [],
-                "scan_known": False,
-            }
+            return _BoxProbes(
+                foreign=(),
+                ports_in_use=tuple(ports),
+                scan_known=False,
+            )
+        foreign: list[dict[str, object]] = []
         for process in observed:
             pid = int(process["pid"])
             parsed = _absorb_argv(pid)
             if pid in registered_pids:
                 continue
             parsed_ports = parsed.get("ports")
-            port = parsed_ports[0] if isinstance(parsed_ports, list) and parsed_ports else None
+            port = (
+                parsed_ports[0]
+                if isinstance(parsed_ports, list) and parsed_ports
+                else None
+            )
             foreign.append(
                 {
                     "port": port if isinstance(port, int) else None,
@@ -2498,14 +3219,31 @@ class ProcessLifecycle:
                     "profiles": _public_profiles_label(parsed.get("profiles")),
                 }
             )
-        return {
-            "occupied": bool(runs or foreign),
-            "runs": runs,
-            "foreign": foreign,
-            "ports_in_use": ports,
-            "queue": [],
-            "scan_known": True,
-        }
+        return _BoxProbes(
+            foreign=tuple(foreign),
+            ports_in_use=tuple(ports),
+            scan_known=True,
+        )
+
+    def _probes_for_snapshot(
+        self, snapshot: _BoxSnapshot, *, use_cache: bool
+    ) -> _BoxProbes:
+        if use_cache:
+            with self._activity_lock:
+                cached = self._box_cache
+            if cached is not None:
+                cached_at, cached_revision, cached_probes = cached
+                if (
+                    cached_revision == snapshot.revision
+                    and time.monotonic() - cached_at < _BOX_OCCUPANCY_CACHE_S
+                ):
+                    return cached_probes
+        probes = self._collect_probes(snapshot)
+        if use_cache:
+            with self._activity_lock:
+                if self._box_revision == snapshot.revision:
+                    self._box_cache = (time.monotonic(), snapshot.revision, probes)
+        return probes
 
     def _reconcile_survivors(
         self, processes: list[ProcessRecord]
@@ -2681,13 +3419,30 @@ class ProcessLifecycle:
             run.owner_session_id = None
             run.owner_lease_id = None
             run.processes = survivors
+            if (
+                run.state in {"STARTING", "STOPPING"}
+                and survivors
+                and run.launch_operation_id is not None
+            ):
+                run.launch_acknowledged = True
             run.state = "RUNNING_IDLE" if survivors else "EXITED"
-            try:
-                self.manifest.replace(run)
-            except Exception:
-                return self._error("manifest_failed", 503)
             if run.state == "EXITED":
-                self._retire_run_bindings(run.run_id, "admin_reconciled")
+                if not self._commit_retirement(
+                    run,
+                    "admin_reconcile",
+                    "admin_reconciled",
+                    "confirmed",
+                ):
+                    return self._error("manifest_failed", 503)
+            else:
+                try:
+                    self._transition_to_idle(
+                        [run.run_id],
+                        lambda: self.manifest.replace(run),
+                    )
+                except Exception:
+                    return self._error("manifest_failed", 503)
+                self._invalidate_box_cache()
             result: dict[str, object] = {
                 "reconciled": True,
                 "run_id": run_id,

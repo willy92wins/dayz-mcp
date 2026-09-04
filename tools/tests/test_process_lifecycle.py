@@ -6,6 +6,7 @@ import dataclasses
 import sys
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -16,14 +17,18 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
+from dayz_mcp import loopback
+from dayz_mcp.instance_fence import BINDING_STARTING, Binding
 from dayz_mcp.process_lifecycle import (
     ProcessLifecycle,
     ProcessRecord,
     RunManifestStore,
     RunRecord,
+    _ADOPT_NOT_DISPATCHABLE_HINT,
 )
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
+from tests.fence_helpers import INST_CLIENT, INST_SERVER, accredited_poll, bind_both_peers
 
 
 IDENTITY_A = ClientIdentity("codex", 11, 1, "2026-07-15T00:00:00Z", "A", "owner")
@@ -519,6 +524,32 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.store.add(run)
         return run
 
+    def _bind_run(self, run_id: str = "run-existing") -> loopback.ServerState:
+        state = loopback.ServerState("k")
+        bind_both_peers(state, run_id=run_id)
+        state.lifecycle = self.lifecycle
+        self.lifecycle.bindings = state
+        return state
+
+    def _enqueue_after_durable(
+        self,
+        state: loopback.ServerState,
+        trigger_states: frozenset[str],
+    ):
+        seen: dict[str, object] = {}
+        real = RunManifestStore.replace
+
+        def _wrapped(store: RunManifestStore, run: RunRecord) -> None:
+            real(store, run)
+            name = getattr(run, "state", None)
+            if name in trigger_states and "st" not in seen:
+                seen["st"], seen["payload"] = state.enqueue_command(
+                    "camera_get", {}, peer="client"
+                )
+                seen["state"] = name
+
+        return seen, _wrapped
+
     def test_legacy_active_run_is_audited_and_durably_quarantined_once(self) -> None:
         self.add_run(legacy_process(77))
 
@@ -649,6 +680,168 @@ class ProcessLifecycleTest(unittest.TestCase):
             [record.pid for record in self.store.get("run-existing").processes],
             [registered.pid, launched.pid],
         )
+
+    def test_extending_inherited_run_does_not_import_pre_daemon_activity(self) -> None:
+        from dayz_mcp.process_lifecycle import _utc_epoch
+
+        viejo_utc = "2026-06-01T00:00:00.0000000Z"
+        nuevo_utc = "2026-09-04T12:00:00.0000000Z"
+        inherited = ProcessRecord(
+            701,
+            viejo_utc,
+            HASH_A,
+            HASH_B,
+            "client",
+            identity_scheme="psutil-argv-v2",
+        )
+        self.add_run(inherited)
+        self.lifecycle.daemon_generation = "gen-B"
+        launched = ProcessRecord(
+            self.launcher.pid,
+            nuevo_utc,
+            HASH_A,
+            HASH_B,
+            "server",
+            identity_scheme="psutil-argv-v2",
+        )
+        self.guard.snapshots[launched.pid] = snapshot(launched)
+        result = self.lifecycle.start_run(
+            IDENTITY_A,
+            self.token_a,
+            self.request() | {"run_id": "run-existing", "role": "server"},
+        )
+        self.assertTrue(result.get("ok"), result)
+        now = _utc_epoch(nuevo_utc) + 10.0
+        row = next(
+            item
+            for item in self.lifecycle.box_occupancy(now=now)["runs"]
+            if item["run_id"] == "run-existing"
+        )
+        edad = row.get("last_activity_age_s")
+        viejo = _utc_epoch(viejo_utc)
+        importado = (
+            edad is not None
+            and viejo is not None
+            and abs((now - float(edad)) - viejo) < 2.0
+        )
+        self.assertFalse(importado, row)
+        self.assertEqual(row["activity_state"], "recent")
+        self.assertAlmostEqual(row["last_activity_age_s"], 10.0, places=2)
+
+    def test_failed_extend_does_not_leave_freshness_on_inherited_run(self) -> None:
+        from dayz_mcp.process_lifecycle import _utc_epoch
+
+        inherited = process(701)
+        self.add_run(inherited)
+        self.lifecycle.daemon_generation = "gen-B"
+        self.guard.snapshots[inherited.pid] = snapshot(inherited)
+        launched = process(self.launcher.pid)
+        self.guard.snapshots[launched.pid] = snapshot(launched)
+        original_replace = self.store.replace
+
+        def _replace(run: RunRecord) -> None:
+            if run.state == "RUNNING" and len(run.processes) > 1:
+                raise OSError("disk")
+            original_replace(run)
+
+        self.store.replace = _replace  # type: ignore[method-assign]
+        before = self.lifecycle.box_occupancy(now=time.time())
+        self.assertEqual(
+            next(
+                item["activity_state"]
+                for item in before["runs"]
+                if item["run_id"] == "run-existing"
+            ),
+            "unknown",
+        )
+        result = self.lifecycle.start_run(
+            IDENTITY_A,
+            self.token_a,
+            self.request() | {"run_id": "run-existing", "role": "server"},
+        )
+        self.assertIn("error", result)
+        restored = self.store.get("run-existing")
+        self.assertEqual(restored.state, "RUNNING")
+        self.assertEqual(len(restored.processes), 1)
+        stamp = _utc_epoch(launched.creation_time_utc)
+        self.assertIsNotNone(stamp)
+        row = next(
+            item
+            for item in self.lifecycle.box_occupancy(now=float(stamp) + 10.0)["runs"]
+            if item["run_id"] == "run-existing"
+        )
+        self.assertEqual(row["activity_state"], "unknown")
+        self.assertIsNone(row["last_activity_age_s"])
+
+    def test_failed_extend_discards_activity_credited_in_the_confirm_window(self) -> None:
+        profiles = self.root / "client_profiles"
+        profiles.mkdir()
+        (profiles / "dayz_mcp.json").write_text(
+            '{"url":"http://127.0.0.1:1/","key":"k","pollHz":5}',
+            encoding="utf-8",
+        )
+        state = loopback.ServerState("k")
+        self.lifecycle.bindings = state
+        state.lifecycle = self.lifecycle
+        inherited = process(701)
+        self.add_run(inherited)
+        self.lifecycle.daemon_generation = "gen-B"
+        self.guard.snapshots[inherited.pid] = snapshot(inherited)
+        launched = process(self.launcher.pid)
+        self.guard.snapshots[launched.pid] = snapshot(launched)
+        before = self.lifecycle.box_occupancy(now=time.time())
+        self.assertEqual(
+            next(
+                item["activity_state"]
+                for item in before["runs"]
+                if item["run_id"] == "run-existing"
+            ),
+            "unknown",
+        )
+        window: dict[str, object] = {}
+        original_replace = self.store.replace
+
+        def _replace(run: RunRecord) -> None:
+            if run.state == "RUNNING" and len(run.processes) > 1:
+                window["st"], window["payload"] = state.enqueue_command(
+                    "query_all_players", {}, peer="server"
+                )
+                raise OSError("disk")
+            original_replace(run)
+
+        self.store.replace = _replace  # type: ignore[method-assign]
+        result = self.lifecycle.start_run(
+            IDENTITY_A,
+            self.token_a,
+            self.request()
+            | {
+                "run_id": "run-existing",
+                "role": "server",
+                "profiles": str(profiles),
+            },
+        )
+        self.assertIn("error", result)
+        self.assertEqual(window.get("st"), 200, window)
+        credited = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "run_command_activity"
+            and event.get("run_id") == "run-existing"
+        ]
+        self.assertTrue(
+            credited,
+            "the confirm-to-replace window did not credit the inherited run",
+        )
+        restored = self.store.get("run-existing")
+        self.assertEqual(restored.state, "RUNNING")
+        self.assertEqual(len(restored.processes), 1)
+        row = next(
+            item
+            for item in self.lifecycle.box_occupancy(now=time.time())["runs"]
+            if item["run_id"] == "run-existing"
+        )
+        self.assertEqual(row["activity_state"], "unknown")
+        self.assertIsNone(row["last_activity_age_s"])
 
     def test_foreign_diag_reason_allows_exact_registered_snapshot(self) -> None:
         registered = process(702)
@@ -955,6 +1148,75 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertTrue(result["terminal_safe"])
         self.assertEqual(self.store.get(run.run_id).state, "EXITED")
         self.assertEqual(self.guard.terminate_calls, [record])
+
+    def test_repair_recovery_fault_invalidates_occupancy_cache(self) -> None:
+        record = process(8101)
+        run = RunRecord(
+            "11111111-1111-4111-8111-111111111111",
+            None,
+            None,
+            "UNRECONCILED",
+            "recoverable",
+            "@mod",
+            "profiles",
+            "mission",
+            [record],
+            "22222222-2222-4222-8222-222222222222",
+            "a" * 64,
+            False,
+        )
+        self.store.add(run)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        run_hash = hashlib.sha256(
+            json.dumps(
+                dataclasses.asdict(run),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        before = self.lifecycle.box_occupancy()
+        self.assertTrue(before["occupied"])
+        result = self.lifecycle.repair_recovery_fault(
+            {
+                "scope": "run",
+                "run_id": run.run_id,
+                "launch_operation_id": run.launch_operation_id,
+                "run_record_sha256": run_hash,
+            }
+        )
+        self.assertTrue(result["terminal_safe"])
+        cached = self.lifecycle.box_occupancy()
+        self.assertFalse(cached["occupied"])
+        self.assertEqual(cached["runs"], [])
+
+    def test_begin_release_owner_invalidates_occupancy_cache(self) -> None:
+        record = process(8081)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        self.store.add(
+            RunRecord(
+                "11111111-1111-4111-8111-111111111111",
+                "A",
+                "lease-A",
+                "RUNNING",
+                "recoverable",
+                "@mod",
+                "profiles",
+                "mission",
+                [record],
+                "22222222-2222-4222-8222-222222222222",
+                "a" * 64,
+                False,
+            )
+        )
+        before = self.lifecycle.box_occupancy()
+        self.assertTrue(before["occupied"])
+        disposition = self.lifecycle.begin_release_owner("A", "lease-A")
+        self.assertTrue(disposition.terminal_event.wait(1.0))
+        self.assertTrue(disposition.terminal_result["terminal_safe"])
+        cached = self.lifecycle.box_occupancy()
+        self.assertFalse(cached["occupied"])
+        self.assertEqual(cached["runs"], [])
 
     def test_manifest_recovery_restores_valid_backup_then_reconciles_unacknowledged(self) -> None:
         record = process(811)
@@ -1382,8 +1644,49 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.add_run(record, owner=None, state="RUNNING_IDLE")
         self.guard.snapshots[record.pid] = snapshot(record)
         result = self.lifecycle.adopt_run(IDENTITY_A, self.token_a, "run-existing")
-        self.assertEqual(result, {"ok": True, "run_id": "run-existing", "state": "RUNNING"})
+        self.assertEqual(
+            result,
+            {
+                "ok": True,
+                "run_id": "run-existing",
+                "state": "RUNNING",
+                "dispatchable": False,
+                "hint": _ADOPT_NOT_DISPATCHABLE_HINT,
+            },
+        )
         self.assertEqual(self.store.get("run-existing").owner_session_id, "A")
+
+    def test_adopt_invalidates_occupancy_cache(self) -> None:
+        record = process(1071)
+        self.add_run(record, owner=None, state="RUNNING_IDLE")
+        self.guard.snapshots[record.pid] = snapshot(record)
+        before = self.lifecycle.box_occupancy()
+        self.assertEqual(before["runs"][0]["state"], "RUNNING_IDLE")
+        result = self.lifecycle.adopt_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertEqual(
+            result,
+            {
+                "ok": True,
+                "run_id": "run-existing",
+                "state": "RUNNING",
+                "dispatchable": False,
+                "hint": _ADOPT_NOT_DISPATCHABLE_HINT,
+            },
+        )
+        cached = self.lifecycle.box_occupancy()
+        self.assertEqual(cached["runs"][0]["state"], "RUNNING")
+        self.assertEqual(cached["runs"][0]["owner_session"], "A")
+
+    def test_release_owner_invalidates_occupancy_cache(self) -> None:
+        record = process(1061)
+        self.add_run(record)
+        before = self.lifecycle.box_occupancy()
+        self.assertEqual(before["runs"][0]["state"], "RUNNING")
+        changed = self.lifecycle.release_owner("A", "lease-A")
+        self.assertEqual(changed, ["run-existing"])
+        cached = self.lifecycle.box_occupancy()
+        self.assertEqual(cached["runs"][0]["state"], "RUNNING_IDLE")
+        self.assertIsNone(cached["runs"][0]["owner_session"])
 
     def test_stop_run_releases_when_one_registered_pid_is_already_dead(self) -> None:
         live, dead = process(48011, "server"), process(48012, "client")
@@ -1431,7 +1734,16 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.guard.snapshots[live.pid] = snapshot(live)
         self._dead(dead.pid)
         result = self.lifecycle.adopt_run(IDENTITY_A, self.token_a, "run-existing")
-        self.assertEqual(result, {"ok": True, "run_id": "run-existing", "state": "RUNNING"})
+        self.assertEqual(
+            result,
+            {
+                "ok": True,
+                "run_id": "run-existing",
+                "state": "RUNNING",
+                "dispatchable": False,
+                "hint": _ADOPT_NOT_DISPATCHABLE_HINT,
+            },
+        )
         stop = self.lifecycle.stop_run(IDENTITY_A, self.token_a, "run-existing")
         self.assertEqual(stop.get("state"), "EXITED")
         self.assertEqual([item.pid for item in self.guard.terminate_calls], [live.pid])
@@ -1527,6 +1839,21 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertEqual((current.state, current.owner_session_id), ("RUNNING_IDLE", None))
         self.assertEqual(self.guard.terminate_calls, [])
         self.assertIn("admin_reconcile", [event["event"] for event in self.audit.events])
+
+    def test_admin_reconcile_invalidates_occupancy_cache(self) -> None:
+        record = process(1131)
+        self.add_run(record, owner=None, state="UNRECONCILED")
+        self.guard.snapshots[record.pid] = snapshot(record)
+        self.lifecycle.diag_probe = lambda: {
+            "known": True,
+            "processes": [{"pid": record.pid, "name": "DayZDiag_x64.exe"}],
+        }
+        before = self.lifecycle.box_occupancy()
+        self.assertEqual(before["runs"][0]["state"], "UNRECONCILED")
+        result = self.lifecycle.admin_reconcile("run-existing", 1131, "incident")
+        self.assertEqual(result.get("state"), "RUNNING_IDLE")
+        cached = self.lifecycle.box_occupancy()
+        self.assertEqual(cached["runs"][0]["state"], "RUNNING_IDLE")
 
     def test_release_owner_serializes_with_lifecycle_operations(self) -> None:
         entered = threading.Event()
@@ -1684,6 +2011,2624 @@ class ProcessLifecycleTest(unittest.TestCase):
             IDENTITY_A, self.token_a, str(request["new_run_id"])
         )
         self.assertEqual(stop.get("ok"), True)
+
+    def test_stop_run_rejects_enqueue_once_stopping_is_durable(self) -> None:
+        record = process(808)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        seen, wrapped = self._enqueue_after_durable(state, frozenset({"STOPPING"}))
+        with patch.object(RunManifestStore, "replace", wrapped):
+            result = self.lifecycle.stop_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertTrue(result.get("ok"), result)
+        self.assertIn("st", seen)
+        self.assertNotEqual(seen["st"], 200, seen)
+
+    def test_stop_run_rejects_enqueue_once_exited_is_durable(self) -> None:
+        record = process(809)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        seen, wrapped = self._enqueue_after_durable(state, frozenset({"EXITED"}))
+        with patch.object(RunManifestStore, "replace", wrapped):
+            result = self.lifecycle.stop_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertTrue(result.get("ok"), result)
+        self.assertIn("st", seen)
+        self.assertNotEqual(seen["st"], 200, seen)
+
+    def test_begin_release_owner_rejects_enqueue_once_exited_is_durable(self) -> None:
+        record = process(8082)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        self.store.add(
+            RunRecord(
+                "11111111-1111-4111-8111-111111111111",
+                "A",
+                "lease-A",
+                "RUNNING",
+                "recoverable",
+                "@mod",
+                "profiles",
+                "mission",
+                [record],
+                "22222222-2222-4222-8222-222222222222",
+                "a" * 64,
+                False,
+            )
+        )
+        state = self._bind_run("11111111-1111-4111-8111-111111111111")
+        seen, wrapped = self._enqueue_after_durable(state, frozenset({"EXITED"}))
+        with patch.object(RunManifestStore, "replace", wrapped):
+            disposition = self.lifecycle.begin_release_owner("A", "lease-A")
+            self.assertTrue(disposition.terminal_event.wait(2.0))
+        self.assertTrue(disposition.terminal_result.get("terminal_safe"))
+        self.assertIn("st", seen)
+        self.assertNotEqual(seen["st"], 200, seen)
+
+    def test_repair_recovery_fault_rejects_enqueue_once_exited_is_durable(self) -> None:
+        record = process(8102)
+        run = RunRecord(
+            "11111111-1111-4111-8111-111111111111",
+            None,
+            None,
+            "UNRECONCILED",
+            "recoverable",
+            "@mod",
+            "profiles",
+            "mission",
+            [record],
+            "22222222-2222-4222-8222-222222222222",
+            "a" * 64,
+            False,
+        )
+        self.store.add(run)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        run_hash = hashlib.sha256(
+            json.dumps(
+                dataclasses.asdict(run),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        state = self._bind_run(run.run_id)
+        seen, wrapped = self._enqueue_after_durable(state, frozenset({"EXITED"}))
+        with patch.object(RunManifestStore, "replace", wrapped):
+            result = self.lifecycle.repair_recovery_fault(
+                {
+                    "scope": "run",
+                    "run_id": run.run_id,
+                    "launch_operation_id": run.launch_operation_id,
+                    "run_record_sha256": run_hash,
+                }
+            )
+        self.assertTrue(result.get("terminal_safe"), result)
+        self.assertIn("st", seen)
+        self.assertNotEqual(seen["st"], 200, seen)
+
+    def test_repair_manifest_recovery_rejects_enqueue_once_exited_is_durable(
+        self,
+    ) -> None:
+        record = process(8112)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        run = RunRecord(
+            "11111111-1111-4111-8111-111111111111",
+            "A",
+            "lease-A",
+            "RUNNING",
+            "recoverable",
+            "@mod",
+            "profiles",
+            "mission",
+            [record],
+            "22222222-2222-4222-8222-222222222222",
+            "a" * 64,
+            False,
+        )
+        raw = (
+            json.dumps(
+                {"version": 1, "runs": [dataclasses.asdict(run)]},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        state = self._bind_run(run.run_id)
+        seen, wrapped = self._enqueue_after_durable(state, frozenset({"EXITED"}))
+        with patch.object(RunManifestStore, "replace", wrapped):
+            result = self.lifecycle.repair_manifest_recovery(raw)
+        self.assertTrue(result.get("terminal_safe"), result)
+        self.assertIn("st", seen)
+        self.assertNotEqual(seen["st"], 200, seen)
+
+    def test_reap_run_rejects_enqueue_once_exited_is_durable(self) -> None:
+        rec = process(48977)
+        self.add_run(rec, owner=None, state="RUNNING_IDLE")
+        self.guard.snapshots[rec.pid] = {
+            "error": "process_not_found",
+            "exit_code": 4,
+        }
+        state = self._bind_run()
+        seen, wrapped = self._enqueue_after_durable(state, frozenset({"EXITED"}))
+        with patch.object(RunManifestStore, "replace", wrapped):
+            reaped = self.lifecycle.reap_dead_runs()
+        self.assertEqual(reaped, ["run-existing"])
+        self.assertIn("st", seen)
+        self.assertNotEqual(seen["st"], 200, seen)
+
+    def test_admin_reconcile_rejects_enqueue_once_exited_is_durable(self) -> None:
+        record = process(1132)
+        self.add_run(record, owner=None, state="RUNNING_IDLE")
+        self.guard.snapshots[record.pid] = {
+            "error": "process_not_found",
+            "exit_code": 4,
+        }
+        state = self._bind_run()
+        seen, wrapped = self._enqueue_after_durable(state, frozenset({"EXITED"}))
+        with patch.object(RunManifestStore, "replace", wrapped):
+            result = self.lifecycle.admin_reconcile(
+                "run-existing", record.pid, "incident", empty=False
+            )
+        self.assertEqual(result.get("state"), "EXITED", result)
+        self.assertIn("st", seen)
+        self.assertNotEqual(seen["st"], 200, seen)
+
+    def _world_spawn(self, state: loopback.ServerState):
+        return state.enqueue_command(
+            "world_spawn", {"classname": "SurvivorM_Mirek"}, peer="server"
+        )
+
+    def test_acknowledged_begin_release_owner_rejects_world_spawn(self) -> None:
+        record = process(8083)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        before, _ = self._world_spawn(state)
+        self.assertEqual(before, 200)
+        disposition = self.lifecycle.begin_release_owner("A", "lease-A")
+        self.assertFalse(disposition.fence_required)
+        self.assertTrue(disposition.terminal_result.get("terminal_safe"))
+        durable = self.store.get("run-existing")
+        self.assertEqual(durable.state, "RUNNING_IDLE")
+        self.assertIsNone(durable.owner_session_id)
+        status, payload = self._world_spawn(state)
+        self.assertNotEqual(status, 200, payload)
+        self.assertEqual(payload.get("error"), "run_not_owned")
+        hint = payload.get("hint")
+        self.assertIsInstance(hint, str)
+        self.assertIn("Adopt", hint)
+        self.assertNotIn("dayz_test_run mode=client", hint)
+        self.assertNotIn("mode=client run_id=", hint)
+        self.assertNotEqual(payload.get("error"), "binding_retired")
+
+    def test_admin_reconcile_with_survivors_rejects_world_spawn(self) -> None:
+        record = process(1133)
+        self.add_run(record, owner=None, state="UNRECONCILED")
+        self.guard.snapshots[record.pid] = snapshot(record)
+        self.lifecycle.diag_probe = lambda: {
+            "known": True,
+            "processes": [{"pid": record.pid, "name": "DayZDiag_x64.exe"}],
+        }
+        state = self._bind_run()
+        result = self.lifecycle.admin_reconcile(
+            "run-existing", record.pid, "incident"
+        )
+        self.assertEqual(result.get("state"), "RUNNING_IDLE", result)
+        status, payload = self._world_spawn(state)
+        self.assertNotEqual(status, 200, payload)
+        self.assertEqual(payload.get("error"), "run_not_owned")
+
+    def test_release_owner_drains_pending_queue_and_adopt_rehabilitates(self) -> None:
+        record = process(8084)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        queued, payload = self._world_spawn(state)
+        self.assertEqual(queued, 200, payload)
+        self.assertTrue(state._bound_queues.get(INST_SERVER))
+        changed = self.lifecycle.release_owner("A", "lease-A")
+        self.assertEqual(changed, ["run-existing"])
+        durable = self.store.get("run-existing")
+        self.assertEqual(durable.state, "RUNNING_IDLE")
+        self.assertIn(INST_SERVER, state._bindings)
+        self.assertEqual(state._bindings[INST_SERVER].state, "BOUND")
+        self.assertEqual(state._bound_queues.get(INST_SERVER), [])
+        poll_status, poll = accredited_poll(state, "server")
+        self.assertEqual(poll_status, 200, poll)
+        self.assertEqual(poll.get("commands"), [])
+        idle_status, idle_payload = self._world_spawn(state)
+        self.assertEqual(idle_payload.get("error"), "run_not_owned")
+        self.assertNotEqual(idle_status, 200)
+        adopted = self.lifecycle.adopt_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertTrue(adopted.get("ok"), adopted)
+        self.assertIs(adopted.get("dispatchable"), True, adopted)
+        after, after_payload = self._world_spawn(state)
+        self.assertEqual(after, 200, after_payload)
+        self.assertIn(INST_SERVER, state._bindings)
+
+    def test_starting_run_still_dispatches_mutations(self) -> None:
+        record = process(8085)
+        self.add_run(record, state="STARTING")
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        status, payload = self._world_spawn(state)
+        self.assertEqual(status, 200, payload)
+
+    def test_credit_during_failed_launch_wait_is_tombstoned_post_rollback_kept(
+        self,
+    ) -> None:
+        inherited = process(701)
+        self.add_run(inherited)
+        self.guard.snapshots[inherited.pid] = snapshot(inherited)
+        seeded_at = time.time()
+        self.lifecycle.record_command_activity("run-existing", now=seeded_at)
+        credited: dict[str, object] = {}
+        original_wait = self.launcher.wait
+
+        def _wait(timeout: float) -> None:
+            credited["ok"] = self.lifecycle.record_command_activity(
+                "run-existing", now=time.time()
+            )
+            return original_wait(timeout)
+
+        self.launcher.wait = _wait  # type: ignore[method-assign]
+        result = self.lifecycle.start_run(
+            IDENTITY_A,
+            self.token_a,
+            self.request() | {"run_id": "run-existing", "role": "server"},
+        )
+        self.assertIn("error", result, result)
+        self.assertTrue(credited.get("ok"), credited)
+        restored = self.store.get("run-existing")
+        self.assertEqual(restored.state, "RUNNING")
+        row = next(
+            item
+            for item in self.lifecycle.box_occupancy(now=time.time())["runs"]
+            if item["run_id"] == "run-existing"
+        )
+        self.assertEqual(row["activity_state"], "unknown")
+        self.assertIsNone(row["last_activity_age_s"])
+        after_at = time.time()
+        self.assertTrue(
+            self.lifecycle.record_command_activity("run-existing", now=after_at)
+        )
+        kept = next(
+            item
+            for item in self.lifecycle.box_occupancy(now=after_at + 1.0)["runs"]
+            if item["run_id"] == "run-existing"
+        )
+        self.assertEqual(kept["activity_state"], "recent")
+
+    def test_credit_during_rollback_replace_is_discarded_post_lift_lands(self) -> None:
+        inherited = process(701)
+        self.add_run(inherited)
+        self.guard.snapshots[inherited.pid] = snapshot(inherited)
+        launched = process(self.launcher.pid)
+        self.guard.snapshots[launched.pid] = snapshot(launched)
+        original_replace = self.store.replace
+        during: dict[str, object] = {}
+
+        def _replace(run: RunRecord) -> None:
+            if run.state == "RUNNING" and len(run.processes) > 1:
+                raise OSError("disk")
+            if run.state == "RUNNING" and len(run.processes) == 1:
+                original_replace(run)
+                during["ok"] = self.lifecycle.record_command_activity(
+                    "run-existing", now=time.time()
+                )
+                key = self.lifecycle._activity_key("run-existing")
+                with self.lifecycle._activity_lock:
+                    during["stamp"] = self.lifecycle._last_activity.get(key)
+                return
+            original_replace(run)
+
+        self.store.replace = _replace  # type: ignore[method-assign]
+        result = self.lifecycle.start_run(
+            IDENTITY_A,
+            self.token_a,
+            self.request() | {"run_id": "run-existing", "role": "server"},
+        )
+        self.assertIn("error", result, result)
+        self.assertTrue(during.get("ok"), during)
+        self.assertIsNone(during.get("stamp"), during)
+        restored = self.store.get("run-existing")
+        self.assertEqual(restored.state, "RUNNING")
+        row = next(
+            item
+            for item in self.lifecycle.box_occupancy(now=time.time())["runs"]
+            if item["run_id"] == "run-existing"
+        )
+        self.assertEqual(row["activity_state"], "unknown")
+        self.assertIsNone(row["last_activity_age_s"])
+        after_at = time.time()
+        self.assertTrue(
+            self.lifecycle.record_command_activity("run-existing", now=after_at)
+        )
+        kept = next(
+            item
+            for item in self.lifecycle.box_occupancy(now=after_at + 1.0)["runs"]
+            if item["run_id"] == "run-existing"
+        )
+        self.assertEqual(kept["activity_state"], "recent")
+
+    def test_failed_rollback_replace_lifts_compensating_fence(self) -> None:
+        inherited = process(702)
+        self.add_run(inherited)
+        self.guard.snapshots[inherited.pid] = snapshot(inherited)
+        launched = process(self.launcher.pid)
+        self.guard.snapshots[launched.pid] = snapshot(launched)
+        original_replace = self.store.replace
+
+        def _replace(run: RunRecord) -> None:
+            if run.state == "RUNNING":
+                raise OSError("disk")
+            original_replace(run)
+
+        self.store.replace = _replace  # type: ignore[method-assign]
+        result = self.lifecycle.start_run(
+            IDENTITY_A,
+            self.token_a,
+            self.request() | {"run_id": "run-existing", "role": "server"},
+        )
+        self.assertIn("error", result, result)
+        after_at = time.time()
+        self.assertTrue(
+            self.lifecycle.record_command_activity("run-existing", now=after_at)
+        )
+        kept = next(
+            item
+            for item in self.lifecycle.box_occupancy(now=after_at + 1.0)["runs"]
+            if item["run_id"] == "run-existing"
+        )
+        self.assertEqual(kept["activity_state"], "recent")
+
+    def test_acknowledged_begin_release_owner_poll_during_persist_is_empty(
+        self,
+    ) -> None:
+        record = process(8086)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        queued, payload = self._world_spawn(state)
+        self.assertEqual(queued, 200, payload)
+        armado = threading.Event()
+        dentro = threading.Event()
+        puerta = threading.Event()
+        quien: dict[str, object] = {}
+        release_real = self.store.release_owner
+
+        def _release_lento(session_id: str, lease_id: str):
+            salida = release_real(session_id, lease_id)
+            if armado.is_set() and not dentro.is_set():
+                quien["ident"] = threading.get_ident()
+                dentro.set()
+                puerta.wait(5.0)
+            return salida
+
+        self.store.release_owner = _release_lento  # type: ignore[method-assign]
+        returned: dict[str, object] = {}
+
+        def _liberador() -> None:
+            returned["d"] = self.lifecycle.begin_release_owner("A", "lease-A")
+
+        thread = threading.Thread(target=_liberador, daemon=True)
+        armado.set()
+        thread.start()
+        self.assertTrue(dentro.wait(5.0))
+        self.assertEqual(quien.get("ident"), thread.ident)
+        self.assertNotIn("d", returned)
+        durable = self.store.get("run-existing").state
+        self.assertEqual(durable, "RUNNING_IDLE")
+        poll_status, poll = accredited_poll(state, "server")
+        puerta.set()
+        thread.join(timeout=5)
+        self.store.release_owner = release_real  # type: ignore[method-assign]
+        self.assertEqual(poll_status, 200, poll)
+        self.assertEqual(poll.get("commands"), [])
+        disposition = returned.get("d")
+        self.assertIsNotNone(disposition)
+        self.assertFalse(disposition.fence_required)
+
+    def test_admin_reconcile_with_survivors_poll_during_persist_is_empty(self) -> None:
+        record = process(1134)
+        self.add_run(record, owner=None, state="UNRECONCILED")
+        self.guard.snapshots[record.pid] = snapshot(record)
+        self.lifecycle.diag_probe = lambda: {
+            "known": True,
+            "processes": [{"pid": record.pid, "name": "DayZDiag_x64.exe"}],
+        }
+        state = self._bind_run()
+        armado = threading.Event()
+        dentro = threading.Event()
+        puerta = threading.Event()
+        replace_real = self.store.replace
+
+        def _replace_lento(run: RunRecord) -> None:
+            replace_real(run)
+            if (
+                armado.is_set()
+                and not dentro.is_set()
+                and getattr(run, "state", None) == "RUNNING_IDLE"
+            ):
+                dentro.set()
+                puerta.wait(5.0)
+
+        self.store.replace = _replace_lento  # type: ignore[method-assign]
+        returned: dict[str, object] = {}
+
+        def _reconciler() -> None:
+            returned["r"] = self.lifecycle.admin_reconcile(
+                "run-existing", record.pid, "incident"
+            )
+
+        thread = threading.Thread(target=_reconciler, daemon=True)
+        armado.set()
+        thread.start()
+        self.assertTrue(dentro.wait(5.0))
+        self.assertNotIn("r", returned)
+        st_cmd, _ = state.enqueue_command("camera_get", {}, peer="client")
+        poll_status, poll = accredited_poll(state, "client")
+        puerta.set()
+        thread.join(timeout=5)
+        self.store.replace = replace_real  # type: ignore[method-assign]
+        self.assertNotEqual(st_cmd, 200)
+        self.assertEqual(poll_status, 200, poll)
+        self.assertEqual(poll.get("commands"), [])
+        self.assertEqual((returned.get("r") or {}).get("state"), "RUNNING_IDLE")
+
+    def test_release_owner_persist_failure_reverts_fence_and_still_dispatches(
+        self,
+    ) -> None:
+        record = process(8087)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        before, _ = self._world_spawn(state)
+        self.assertEqual(before, 200)
+
+        def _fail(_session_id: str, _lease_id: str):
+            raise OSError("disk")
+
+        original = self.store.release_owner
+        self.store.release_owner = _fail  # type: ignore[method-assign]
+        with self.assertRaises(OSError):
+            self.lifecycle.release_owner("A", "lease-A")
+        self.store.release_owner = original  # type: ignore[method-assign]
+        durable = self.store.get("run-existing")
+        self.assertEqual(durable.state, "RUNNING")
+        self.assertEqual(durable.owner_session_id, "A")
+        status, payload = self._world_spawn(state)
+        self.assertEqual(status, 200, payload)
+
+    def test_internal_cleanup_enqueued_before_release_is_gone_when_idle_published(
+        self,
+    ) -> None:
+        record = process(8088)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        queued, payload = state.enqueue_command(
+            "vehicle_release", {}, peer="client", internal=True
+        )
+        self.assertEqual(queued, 200, payload)
+        armado = threading.Event()
+        dentro = threading.Event()
+        puerta = threading.Event()
+        seen: dict[str, object] = {}
+        release_real = self.store.release_owner
+
+        def _release_lento(session_id: str, lease_id: str):
+            salida = release_real(session_id, lease_id)
+            if armado.is_set() and not dentro.is_set():
+                dentro.set()
+                seen["queue"] = list(state._bound_queues.get(INST_CLIENT) or [])
+                seen["poll"] = accredited_poll(state, "client")
+                puerta.wait(5.0)
+            return salida
+
+        self.store.release_owner = _release_lento  # type: ignore[method-assign]
+        returned: dict[str, object] = {}
+
+        def _liberador() -> None:
+            returned["changed"] = self.lifecycle.release_owner("A", "lease-A")
+
+        thread = threading.Thread(target=_liberador, daemon=True)
+        armado.set()
+        thread.start()
+        self.assertTrue(dentro.wait(5.0))
+        durable = self.store.get("run-existing").state
+        self.assertEqual(durable, "RUNNING_IDLE")
+        puerta.set()
+        thread.join(timeout=5)
+        self.store.release_owner = release_real  # type: ignore[method-assign]
+        self.assertEqual(returned.get("changed"), ["run-existing"])
+        self.assertEqual(seen.get("queue"), [])
+        poll = seen.get("poll")
+        self.assertIsInstance(poll, tuple)
+        self.assertEqual(poll[1].get("commands"), [])
+
+    def test_poll_revalidates_after_lock_when_store_releases_without_fence(
+        self,
+    ) -> None:
+        record = process(8090)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        queued, payload = self._world_spawn(state)
+        self.assertEqual(queued, 200, payload)
+        armado = threading.Event()
+        dentro = threading.Event()
+        puerta = threading.Event()
+        crl_real = loopback.command_requires_lease
+
+        def _crl_lento(cmd: str) -> bool:
+            if armado.is_set() and not dentro.is_set():
+                dentro.set()
+                puerta.wait(5.0)
+            return crl_real(cmd)
+
+        loopback.command_requires_lease = _crl_lento  # type: ignore[method-assign]
+        returned: dict[str, object] = {}
+
+        def _poll() -> None:
+            returned["p"] = accredited_poll(state, "server")
+
+        thread = threading.Thread(target=_poll, daemon=True)
+        armado.set()
+        thread.start()
+        self.assertTrue(dentro.wait(5.0))
+        self.assertNotIn("p", returned)
+        changed = self.store.release_owner("A", "lease-A")
+        durable = self.store.get("run-existing").state
+        puerta.set()
+        thread.join(timeout=5)
+        loopback.command_requires_lease = crl_real  # type: ignore[method-assign]
+        self.assertEqual(changed, ["run-existing"])
+        self.assertEqual(durable, "RUNNING_IDLE")
+        st_poll, poll = returned.get("p", (None, None))
+        self.assertEqual(st_poll, 200, poll)
+        self.assertEqual(poll.get("commands"), [])
+
+    def test_poll_in_repair_window_does_not_deliver(self) -> None:
+        record = process(8091)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        queued, payload = self._world_spawn(state)
+        self.assertEqual(queued, 200, payload)
+        raw = self.store.paths.runs_path.read_bytes()
+        armado = threading.Event()
+        dentro = threading.Event()
+        puerta = threading.Event()
+        crl_real = loopback.command_requires_lease
+
+        def _crl_lento(cmd: str) -> bool:
+            if armado.is_set() and not dentro.is_set():
+                dentro.set()
+                puerta.wait(5.0)
+            return crl_real(cmd)
+
+        loopback.command_requires_lease = _crl_lento  # type: ignore[method-assign]
+        returned: dict[str, object] = {}
+
+        def _poll() -> None:
+            returned["p"] = accredited_poll(state, "server")
+
+        thread = threading.Thread(target=_poll, daemon=True)
+        armado.set()
+        thread.start()
+        self.assertTrue(dentro.wait(5.0))
+        self.assertNotIn("p", returned)
+        repaired = self.lifecycle.repair_manifest_recovery(raw)
+        durable = self.lifecycle.manifest.get("run-existing").state
+        puerta.set()
+        thread.join(timeout=5)
+        loopback.command_requires_lease = crl_real  # type: ignore[method-assign]
+        self.assertTrue(repaired.get("terminal_safe"), repaired)
+        self.assertEqual(durable, "RUNNING_IDLE")
+        st_poll, poll = returned.get("p", (None, None))
+        self.assertEqual(st_poll, 200, poll)
+        self.assertEqual(poll.get("commands"), [])
+        self.assertIn("run-existing", state._fenced_runs)
+
+    def test_release_all_running_owners_poll_during_persist_is_empty(self) -> None:
+        record = process(8092)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        queued, payload = self._world_spawn(state)
+        self.assertEqual(queued, 200, payload)
+        armado = threading.Event()
+        dentro = threading.Event()
+        puerta = threading.Event()
+        release_real = self.store.release_all_running_owners
+
+        def _release_lento() -> list[str]:
+            salida = release_real()
+            if armado.is_set() and not dentro.is_set():
+                dentro.set()
+                puerta.wait(5.0)
+            return salida
+
+        self.store.release_all_running_owners = _release_lento  # type: ignore[method-assign]
+        returned: dict[str, object] = {}
+
+        def _liberador() -> None:
+            returned["changed"] = self.lifecycle.release_all_running_owners()
+
+        thread = threading.Thread(target=_liberador, daemon=True)
+        armado.set()
+        thread.start()
+        self.assertTrue(dentro.wait(5.0))
+        self.assertNotIn("changed", returned)
+        durable = self.store.get("run-existing").state
+        self.assertEqual(durable, "RUNNING_IDLE")
+        poll_status, poll = accredited_poll(state, "server")
+        puerta.set()
+        thread.join(timeout=5)
+        self.store.release_all_running_owners = release_real  # type: ignore[method-assign]
+        self.assertEqual(returned.get("changed"), ["run-existing"])
+        self.assertEqual(poll_status, 200, poll)
+        self.assertEqual(poll.get("commands"), [])
+        self.assertIn("run-existing", state._fenced_runs)
+
+    def test_reader_during_rollback_replace_publishes_unknown(self) -> None:
+        inherited = process(703)
+        self.add_run(inherited)
+        self.guard.snapshots[inherited.pid] = snapshot(inherited)
+        launched = process(self.launcher.pid)
+        self.guard.snapshots[launched.pid] = snapshot(launched)
+        original_wait = self.launcher.wait
+        original_replace = self.store.replace
+        armado = threading.Event()
+        dentro = threading.Event()
+        puerta = threading.Event()
+
+        def _wait(timeout: float) -> None:
+            self.lifecycle.record_command_activity("run-existing", now=time.time())
+            return original_wait(timeout)
+
+        def _replace(run: RunRecord) -> None:
+            if run.state == "RUNNING" and len(run.processes) > 1:
+                raise OSError("disk")
+            if run.state == "RUNNING" and len(run.processes) == 1:
+                original_replace(run)
+                if armado.is_set() and not dentro.is_set():
+                    dentro.set()
+                    puerta.wait(5.0)
+                return
+            original_replace(run)
+
+        self.launcher.wait = _wait  # type: ignore[method-assign]
+        self.store.replace = _replace  # type: ignore[method-assign]
+        returned: dict[str, object] = {}
+
+        def _starter() -> None:
+            returned["start"] = self.lifecycle.start_run(
+                IDENTITY_A,
+                self.token_a,
+                self.request() | {"run_id": "run-existing", "role": "server"},
+            )
+
+        def _reader() -> None:
+            returned["box"] = self.lifecycle.box_occupancy(now=time.time())
+
+        starter = threading.Thread(target=_starter, daemon=True)
+        armado.set()
+        starter.start()
+        self.assertTrue(dentro.wait(5.0))
+        self.assertNotIn("start", returned)
+        reader = threading.Thread(target=_reader, daemon=True)
+        reader.start()
+        reader.join(timeout=5)
+        puerta.set()
+        starter.join(timeout=5)
+        self.launcher.wait = original_wait  # type: ignore[method-assign]
+        self.store.replace = original_replace  # type: ignore[method-assign]
+        self.assertIn("error", returned.get("start") or {}, returned)
+        box = returned.get("box")
+        self.assertIsInstance(box, dict)
+        row = next(
+            item
+            for item in box["runs"]
+            if item["run_id"] == "run-existing"
+        )
+        self.assertEqual(row["activity_state"], "unknown")
+        self.assertIsNone(row["last_activity_age_s"])
+
+    def test_release_then_reap_drops_fence(self) -> None:
+        record = process(8093)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        changed = self.lifecycle.release_owner("A", "lease-A")
+        self.assertEqual(changed, ["run-existing"])
+        self.assertIn("run-existing", state._fenced_runs)
+        self.guard.snapshots[record.pid] = {
+            "error": "process_not_found",
+            "exit_code": 4,
+        }
+        reaped = self.lifecycle.reap_dead_runs()
+        self.assertEqual(reaped, ["run-existing"])
+        self.assertEqual(self.store.get("run-existing").state, "EXITED")
+        self.assertNotIn("run-existing", state._fenced_runs)
+
+    def test_failed_rollback_replace_forgets_attempt_credit(self) -> None:
+        inherited = process(701)
+        self.add_run(inherited)
+        self.guard.snapshots[inherited.pid] = snapshot(inherited)
+        launched = process(self.launcher.pid)
+        self.guard.snapshots[launched.pid] = snapshot(launched)
+        original_replace = self.store.replace
+        during: dict[str, object] = {}
+
+        def _replace(run: RunRecord) -> None:
+            if run.state == "RUNNING" and len(run.processes) > 1:
+                during["ok"] = self.lifecycle.record_command_activity(
+                    "run-existing", now=time.time()
+                )
+                raise OSError("disk")
+            if run.state == "RUNNING" and len(run.processes) == 1:
+                raise OSError("disk")
+            original_replace(run)
+
+        self.store.replace = _replace  # type: ignore[method-assign]
+        result = self.lifecycle.start_run(
+            IDENTITY_A,
+            self.token_a,
+            self.request() | {"run_id": "run-existing", "role": "server"},
+        )
+        self.assertIn("error", result, result)
+        self.assertTrue(during.get("ok"), during)
+        row = next(
+            item
+            for item in self.lifecycle.box_occupancy(now=time.time())["runs"]
+            if item["run_id"] == "run-existing"
+        )
+        self.assertEqual(row["activity_state"], "unknown")
+        self.assertIsNone(row["last_activity_age_s"])
+
+    def test_begin_release_owner_failed_replace_arms_durable_hash(self) -> None:
+        record = process(812)
+        run = RunRecord(
+            "11111111-1111-4111-8111-111111111111",
+            "A",
+            "lease-A",
+            "RUNNING",
+            "recoverable",
+            "@mod",
+            "profiles",
+            "mission",
+            [record],
+            "22222222-2222-4222-8222-222222222222",
+            "a" * 64,
+            False,
+        )
+        self.store.add(run)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        self.guard.terminate_results = [{"terminated": False}]
+        durable_hash = hashlib.sha256(
+            json.dumps(
+                dataclasses.asdict(self.store.get(run.run_id)),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        armed: list[tuple[str, str]] = []
+
+        def _arm(armed_run: RunRecord, reason: str) -> None:
+            armed.append(
+                (
+                    hashlib.sha256(
+                        json.dumps(
+                            dataclasses.asdict(armed_run),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                    reason,
+                )
+            )
+
+        self.lifecycle.recovery_fault_arm = _arm
+        original_replace = self.store.replace
+
+        def _replace(_run: RunRecord) -> None:
+            raise OSError("disk")
+
+        self.store.replace = _replace  # type: ignore[method-assign]
+        disposition = self.lifecycle.begin_release_owner("A", "lease-A")
+        self.assertTrue(disposition.terminal_event.wait(2.0))
+        self.assertFalse(disposition.terminal_result.get("terminal_safe"))
+        self.assertTrue(armed, armed)
+        self.assertEqual(armed[0][0], durable_hash)
+        self.store.replace = original_replace  # type: ignore[method-assign]
+        repaired = self.lifecycle.repair_recovery_fault(
+            {
+                "scope": "run",
+                "run_id": run.run_id,
+                "launch_operation_id": run.launch_operation_id,
+                "run_record_sha256": armed[0][0],
+            }
+        )
+        self.assertTrue(repaired.get("terminal_safe"), repaired)
+        self.assertEqual(self.store.get(run.run_id).state, "EXITED")
+
+    def test_admin_reconcile_starting_does_not_publish_unaccredited_idle(self) -> None:
+        record = process(1134)
+        run = RunRecord(
+            "run-existing",
+            "A",
+            "lease-A",
+            "STARTING",
+            "same",
+            "@SameMod",
+            "profiles",
+            "mission",
+            [record],
+            "22222222-2222-4222-8222-222222222222",
+            "a" * 64,
+            False,
+        )
+        self.store.add(run)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        self.lifecycle.diag_probe = lambda: {
+            "known": True,
+            "processes": [{"pid": record.pid, "name": "DayZDiag_x64.exe"}],
+        }
+        result = self.lifecycle.admin_reconcile(
+            "run-existing", record.pid, "incident"
+        )
+        current = self.store.get("run-existing")
+        idle_unaccredited = (
+            current.state == "RUNNING_IDLE"
+            and current.launch_acknowledged is False
+            and current.owner_session_id is None
+        )
+        self.assertFalse(idle_unaccredited, result)
+        recovered = self.store.recover_after_restart()
+        after = self.store.get("run-existing")
+        self.assertIsNotNone(after)
+        self.assertNotEqual(after.state, "STARTING")
+        _ = recovered
+
+    def test_run_not_owned_hint_does_not_order_client_launch(self) -> None:
+        record = process(8087)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        self.lifecycle.release_owner("A", "lease-A")
+        status, payload = self._world_spawn(state)
+        self.assertEqual(payload.get("error"), "run_not_owned")
+        self.assertNotEqual(status, 200)
+        hint = str(payload.get("hint") or "")
+        self.assertNotIn("dayz_test_run mode=client", hint)
+        self.assertNotIn("mode=client run_id=", hint)
+
+    def test_extension_refreshes_basal_as_max_with_prior_stamp(self) -> None:
+        inherited = process(701)
+        self.add_run(inherited)
+        self.guard.snapshots[inherited.pid] = snapshot(inherited)
+        old_stamp = time.time() - 5000.0
+        self.lifecycle.record_command_activity("run-existing", now=old_stamp)
+        stale = next(
+            item
+            for item in self.lifecycle.box_occupancy(now=time.time())["runs"]
+            if item["run_id"] == "run-existing"
+        )
+        self.assertEqual(stale["activity_state"], "stale")
+        launched_utc = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000Z"
+        launched = ProcessRecord(
+            self.launcher.pid,
+            launched_utc,
+            HASH_A,
+            HASH_B,
+            "server",
+            identity_scheme="psutil-argv-v2",
+        )
+        self.guard.snapshots[launched.pid] = snapshot(launched)
+        result = self.lifecycle.start_run(
+            IDENTITY_A,
+            self.token_a,
+            self.request() | {"run_id": "run-existing", "role": "server"},
+        )
+        self.assertTrue(result.get("ok"), result)
+        row = next(
+            item
+            for item in self.lifecycle.box_occupancy(now=time.time())["runs"]
+            if item["run_id"] == "run-existing"
+        )
+        self.assertEqual(row["activity_state"], "recent")
+
+    def test_exited_clears_residues_so_reused_run_id_is_unknown(self) -> None:
+        expected = process(self.launcher.pid)
+        self.guard.snapshots[self.launcher.pid] = snapshot(expected)
+        started =         self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request()
+        )
+        self.assertTrue(started.get("ok"), started)
+        run_id = str(started["run_id"])
+        old_stamp = time.time() - 100.0
+        self.lifecycle.record_command_activity(run_id, now=old_stamp)
+        recent = next(
+            item
+            for item in self.lifecycle.box_occupancy(now=time.time())["runs"]
+            if item["run_id"] == run_id
+        )
+        self.assertEqual(recent["activity_state"], "recent")
+        self.lifecycle.stop_run(IDENTITY_A, self.token_a, run_id)
+        self.assertEqual(self.store.get(run_id).state, "EXITED")
+        key = self.lifecycle._activity_key(run_id)
+        with self.lifecycle._activity_lock:
+            self.assertNotIn(key, self.lifecycle._last_activity)
+            self.assertIn(key, self.lifecycle._activity_tombstone)
+            self.assertNotIn(key, self.lifecycle._compensating_runs)
+        self.lifecycle.manifest = RunManifestStore(self.store.paths)
+        self.store = self.lifecycle.manifest
+        second = process(self.launcher.pid + 1)
+        self.launcher.pid = second.pid
+        self.guard.snapshots[second.pid] = snapshot(second)
+        restarted = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request()
+        )
+        self.assertTrue(restarted.get("ok"), restarted)
+        self.assertEqual(restarted.get("run_id"), run_id)
+        row = next(
+            item
+            for item in self.lifecycle.box_occupancy(now=time.time())["runs"]
+            if item["run_id"] == run_id
+        )
+        age = row.get("last_activity_age_s")
+        inherited_old_credit = (
+            row["activity_state"] == "recent"
+            and isinstance(age, (int, float))
+            and abs(float(age) - 100.0) < 20.0
+        )
+        self.assertFalse(inherited_old_credit, row)
+        with self.lifecycle._activity_lock:
+            stamp = self.lifecycle._last_activity.get(key)
+        if stamp is not None:
+            self.assertNotAlmostEqual(float(stamp), old_stamp, delta=1.0)
+        if row["activity_state"] == "recent":
+            self.assertLess(float(age), 30.0)
+        else:
+            self.assertIn(row["activity_state"], ("unknown", "stale"))
+
+    def test_in_flight_credit_does_not_land_after_fence(self) -> None:
+        record = process(8088)
+        run = self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        self.lifecycle._capture_start_activity(run)
+        state = self._bind_run()
+        armado = threading.Event()
+        dentro = threading.Event()
+        puerta = threading.Event()
+        credito_real = self.lifecycle.record_command_activity
+
+        def _credito_lento(run_id: str, *, now: float | None = None) -> bool:
+            if armado.is_set() and not dentro.is_set():
+                dentro.set()
+                puerta.wait(5.0)
+            return credito_real(run_id, now=now)
+
+        self.lifecycle.record_command_activity = _credito_lento  # type: ignore[method-assign]
+        returned: dict[str, object] = {}
+
+        def _encolador() -> None:
+            returned["r"] = state.enqueue_command(
+                "world_spawn", {"classname": "SurvivorM_Mirek"}, peer="server"
+            )
+
+        thread = threading.Thread(target=_encolador, daemon=True)
+        armado.set()
+        thread.start()
+        self.assertTrue(dentro.wait(5.0))
+        self.lifecycle.release_owner("A", "lease-A")
+        puerta.set()
+        thread.join(timeout=5)
+        self.lifecycle.record_command_activity = credito_real  # type: ignore[method-assign]
+        self.assertEqual((returned.get("r") or (None, None))[0], 200)
+        self.assertEqual(self.store.get("run-existing").state, "RUNNING_IDLE")
+        row = next(
+            item
+            for item in self.lifecycle.box_occupancy(now=time.time())["runs"]
+            if item["run_id"] == "run-existing"
+        )
+        self.assertEqual(row["activity_state"], "unknown")
+
+    def test_stop_discards_queued_exec_with_audit(self) -> None:
+        record = process(8089)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        registros: list[tuple[object, object]] = []
+
+        def _exec_audit(expr, decision, main_fn, command_id) -> None:
+            registros.append((decision, command_id))
+
+        state = loopback.ServerState(
+            "k",
+            enable_exec_enforce=True,
+            exec_allowlist={"probe()"},
+            exec_audit=_exec_audit,
+        )
+        bind_both_peers(state, run_id="run-existing")
+        state.lifecycle = self.lifecycle
+        self.lifecycle.bindings = state
+        st, payload = state.enqueue_command(
+            "exec_enforce", {"expr": "probe()", "main_fn": "Main"}, peer="server"
+        )
+        self.assertEqual(st, 200, payload)
+        cid = payload.get("id")
+        parado = self.lifecycle.stop_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertTrue(isinstance(parado, dict) and parado.get("ok") is True, parado)
+        self.assertIn(("discarded", cid), registros)
+
+    def test_unreadable_manifest_rejects_enqueue_without_credit(self) -> None:
+        record = process(8090)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        get_real = self.store.get
+        before = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "run_command_activity"
+        ]
+
+        def _get_roto(run_id: str):
+            raise RuntimeError("manifest_unreadable")
+
+        self.store.get = _get_roto  # type: ignore[method-assign]
+        try:
+            st, payload = state.enqueue_command("camera_get", {}, peer="client")
+        finally:
+            self.store.get = get_real  # type: ignore[method-assign]
+        after = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "run_command_activity"
+        ]
+        self.assertNotEqual(st, 200, payload)
+        self.assertEqual(payload.get("error"), "run_state_unavailable")
+        self.assertEqual(len(after), len(before))
+
+    def test_store_result_without_instance_after_retire_is_rejected(self) -> None:
+        record = process(8091)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        st_enq, payload = state.enqueue_command("camera_get", {}, peer="client")
+        self.assertEqual(st_enq, 200, payload)
+        cid = payload.get("id")
+        st_poll, entregado = accredited_poll(state, "client")
+        self.assertEqual(st_poll, 200, entregado)
+        ids = [
+            command.get("id")
+            for command in (entregado.get("commands") or [])
+        ]
+        self.assertIn(cid, ids)
+        parado = self.lifecycle.stop_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertTrue(isinstance(parado, dict) and parado.get("ok") is True, parado)
+        st_res, res = state.store_result(
+            {"id": cid, "ok": True, "result": {"late": True}}, instance=None
+        )
+        self.assertNotEqual(st_res, 200, res)
+
+    def _dispatch_client_command(self, state: loopback.ServerState) -> int:
+        st_enq, payload = state.enqueue_command("camera_get", {}, peer="client")
+        self.assertEqual(st_enq, 200, payload)
+        cid = payload.get("id")
+        self.assertIsInstance(cid, int)
+        st_poll, delivered = accredited_poll(state, "client")
+        self.assertEqual(st_poll, 200, delivered)
+        ids = [
+            command.get("id")
+            for command in (delivered.get("commands") or [])
+        ]
+        self.assertIn(cid, ids)
+        return int(cid)
+
+    def _assert_late_result_rejected_without_diagnostic(
+        self, state: loopback.ServerState, cid: int, run_id: str
+    ) -> None:
+        st_res, res = state.store_result(
+            {"id": cid, "ok": True, "result": {"late": True}}, instance=None
+        )
+        self.assertNotEqual(st_res, 200, res)
+        self.assertFalse(
+            any(item.run_id == run_id for item in self.lifecycle._retired_diagnostics)
+        )
+
+    def _replace_failing_exited(self):
+        real = self.lifecycle.manifest.replace
+
+        def _wrapped(run: RunRecord) -> None:
+            if getattr(run, "state", None) == "EXITED":
+                raise OSError("disco lleno")
+            return real(run)
+
+        return real, _wrapped
+
+    def test_persist_failure_on_reap_retires_binding_and_rejects_late_result(
+        self,
+    ) -> None:
+        record = process(9401)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        cid = self._dispatch_client_command(state)
+        self.guard.snapshots[record.pid] = {
+            "error": "process_not_found",
+            "exit_code": 4,
+        }
+        real, wrapped = self._replace_failing_exited()
+        self.lifecycle.manifest.replace = wrapped  # type: ignore[method-assign]
+        try:
+            reaped = self.lifecycle.reap_dead_runs()
+        finally:
+            self.lifecycle.manifest.replace = real  # type: ignore[method-assign]
+        self.assertEqual(reaped, [])
+        self.assertEqual(self.store.get("run-existing").state, "RUNNING")
+        self._assert_late_result_rejected_without_diagnostic(
+            state, cid, "run-existing"
+        )
+
+    def test_persist_failure_on_begin_release_retires_binding_and_rejects_late_result(
+        self,
+    ) -> None:
+        record = process(9402)
+        run = RunRecord(
+            "11111111-1111-4111-8111-111111111111",
+            "A",
+            "lease-A",
+            "RUNNING",
+            "recoverable",
+            "@mod",
+            "profiles",
+            "mission",
+            [record],
+            "22222222-2222-4222-8222-222222222222",
+            "a" * 64,
+            False,
+        )
+        self.store.add(run)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run(run.run_id)
+        cid = self._dispatch_client_command(state)
+        real, wrapped = self._replace_failing_exited()
+        self.lifecycle.manifest.replace = wrapped  # type: ignore[method-assign]
+        try:
+            disposition = self.lifecycle.begin_release_owner("A", "lease-A")
+            self.assertTrue(disposition.terminal_event.wait(1.0))
+        finally:
+            self.lifecycle.manifest.replace = real  # type: ignore[method-assign]
+        self.assertFalse(disposition.terminal_result.get("terminal_safe"))
+        self.assertEqual(self.store.get(run.run_id).state, "RUNNING")
+        self._assert_late_result_rejected_without_diagnostic(state, cid, run.run_id)
+
+    def test_persist_failure_on_repair_recovery_retires_binding_and_rejects_late_result(
+        self,
+    ) -> None:
+        record = process(9403)
+        run = RunRecord(
+            "11111111-1111-4111-8111-333333333333",
+            "A",
+            "lease-A",
+            "RUNNING",
+            "recoverable",
+            "@mod",
+            "profiles",
+            "mission",
+            [record],
+            "22222222-2222-4222-8222-444444444444",
+            "a" * 64,
+            False,
+        )
+        self.store.add(run)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run(run.run_id)
+        cid = self._dispatch_client_command(state)
+        run = self.store.get(run.run_id)
+        assert run is not None
+        run.state = "UNRECONCILED"
+        self.store.replace(run)
+        run_hash = hashlib.sha256(
+            json.dumps(
+                dataclasses.asdict(run),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        real, wrapped = self._replace_failing_exited()
+        self.lifecycle.manifest.replace = wrapped  # type: ignore[method-assign]
+        try:
+            result = self.lifecycle.repair_recovery_fault(
+                {
+                    "scope": "run",
+                    "run_id": run.run_id,
+                    "launch_operation_id": run.launch_operation_id,
+                    "run_record_sha256": run_hash,
+                }
+            )
+        finally:
+            self.lifecycle.manifest.replace = real  # type: ignore[method-assign]
+        self.assertFalse(result.get("terminal_safe"), result)
+        self.assertEqual(self.store.get(run.run_id).state, "UNRECONCILED")
+        self._assert_late_result_rejected_without_diagnostic(state, cid, run.run_id)
+
+    def test_persist_failure_on_admin_reconcile_retires_binding_and_rejects_late_result(
+        self,
+    ) -> None:
+        record = process(9404)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        cid = self._dispatch_client_command(state)
+        run = self.store.get("run-existing")
+        assert run is not None
+        run.state = "UNRECONCILED"
+        run.processes = []
+        self.store.replace(run)
+        real, wrapped = self._replace_failing_exited()
+        self.lifecycle.manifest.replace = wrapped  # type: ignore[method-assign]
+        try:
+            result = self.lifecycle.admin_reconcile(
+                "run-existing", None, "operator cleanup", empty=True
+            )
+        finally:
+            self.lifecycle.manifest.replace = real  # type: ignore[method-assign]
+        self.assertEqual(result.get("error"), "manifest_failed")
+        self.assertEqual(self.store.get("run-existing").state, "UNRECONCILED")
+        self._assert_late_result_rejected_without_diagnostic(
+            state, cid, "run-existing"
+        )
+
+    def test_persist_failure_on_manifest_recovery_retires_binding_and_rejects_late_result(
+        self,
+    ) -> None:
+        record = process(9405)
+        run = RunRecord(
+            "11111111-1111-4111-8111-555555555555",
+            "A",
+            "lease-A",
+            "RUNNING",
+            "recoverable",
+            "@mod",
+            "profiles",
+            "mission",
+            [record],
+            "22222222-2222-4222-8222-666666666666",
+            "a" * 64,
+            False,
+        )
+        self.store.add(run)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run(run.run_id)
+        cid = self._dispatch_client_command(state)
+        raw = (
+            json.dumps(
+                {"version": 1, "runs": [dataclasses.asdict(run)]},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        original = RunManifestStore.replace
+
+        def _wrapped(store, target):
+            if getattr(target, "state", None) == "EXITED":
+                raise OSError("disco lleno")
+            return original(store, target)
+
+        RunManifestStore.replace = _wrapped  # type: ignore[method-assign]
+        try:
+            result = self.lifecycle.repair_manifest_recovery(raw)
+        finally:
+            RunManifestStore.replace = original  # type: ignore[method-assign]
+        self.assertFalse(result.get("terminal_safe"), result)
+        self._assert_late_result_rejected_without_diagnostic(state, cid, run.run_id)
+
+    def test_persist_failure_on_stop_retires_binding_and_rejects_late_result(
+        self,
+    ) -> None:
+        record = process(9406)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        cid = self._dispatch_client_command(state)
+        real, wrapped = self._replace_failing_exited()
+        self.lifecycle.manifest.replace = wrapped  # type: ignore[method-assign]
+        try:
+            result = self.lifecycle.stop_run(IDENTITY_A, self.token_a, "run-existing")
+        finally:
+            self.lifecycle.manifest.replace = real  # type: ignore[method-assign]
+        self.assertIn("error", result)
+        self.assertNotEqual(self.store.get("run-existing").state, "EXITED")
+        self._assert_late_result_rejected_without_diagnostic(
+            state, cid, "run-existing"
+        )
+
+    def test_terminal_cleanup_keeps_frontier_so_late_credit_does_not_reappear(
+        self,
+    ) -> None:
+        record = process(9407)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        armado = threading.Event()
+        dentro = threading.Event()
+        puerta = threading.Event()
+        credito_real = self.lifecycle.record_command_activity
+
+        def _credito_lento(run_id: str, *, now: float | None = None) -> bool:
+            if armado.is_set() and not dentro.is_set():
+                dentro.set()
+                puerta.wait(5.0)
+            return credito_real(run_id, now=now)
+
+        self.lifecycle.record_command_activity = _credito_lento  # type: ignore[method-assign]
+        returned: dict[str, object] = {}
+
+        def _encolador() -> None:
+            returned["r"] = state.enqueue_command("camera_get", {}, peer="client")
+
+        thread = threading.Thread(target=_encolador, daemon=True)
+        armado.set()
+        thread.start()
+        self.assertTrue(dentro.wait(5.0))
+        self.guard.snapshots[record.pid] = {
+            "error": "process_not_found",
+            "exit_code": 4,
+        }
+        reaped = self.lifecycle.reap_dead_runs()
+        puerta.set()
+        thread.join(timeout=5)
+        self.lifecycle.record_command_activity = credito_real  # type: ignore[method-assign]
+        self.assertEqual(reaped, ["run-existing"])
+        self.assertEqual(self.store.get("run-existing").state, "EXITED")
+        key = self.lifecycle._activity_key("run-existing")
+        with self.lifecycle._activity_lock:
+            self.assertNotIn(key, self.lifecycle._last_activity)
+            self.assertIn(key, self.lifecycle._activity_tombstone)
+
+    def test_tombstone_raise_does_not_fail_open_idle_transition(self) -> None:
+        record = process(9408)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        real_tomb = self.lifecycle.tombstone_run_activity
+
+        def _boom(run_id: str, *, now: float | None = None) -> None:
+            raise RuntimeError("tombstone_failed")
+
+        self.lifecycle.tombstone_run_activity = _boom  # type: ignore[method-assign]
+        try:
+            with self.assertRaises(RuntimeError):
+                self.lifecycle.release_owner("A", "lease-A")
+        finally:
+            self.lifecycle.tombstone_run_activity = real_tomb  # type: ignore[method-assign]
+        self.assertEqual(self.store.get("run-existing").state, "RUNNING")
+        self.assertNotIn("run-existing", state._fenced_runs)
+
+    def test_malformed_durable_state_rejects_enqueue_without_credit(self) -> None:
+        record = process(9409)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        get_real = self.store.get
+        before = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "run_command_activity"
+        ]
+
+        def _get_malformado(run_id: str):
+            return types.SimpleNamespace(run_id=run_id, state=None)
+
+        self.store.get = _get_malformado  # type: ignore[method-assign]
+        try:
+            st, payload = state.enqueue_command("camera_get", {}, peer="client")
+        finally:
+            self.store.get = get_real  # type: ignore[method-assign]
+        after = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "run_command_activity"
+        ]
+        self.assertNotEqual(st, 200, payload)
+        self.assertEqual(payload.get("error"), "run_state_unavailable")
+        self.assertEqual(len(after), len(before))
+
+    def test_missing_manifest_getter_rejects_enqueue_without_credit(self) -> None:
+        record = process(9410)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        before = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "run_command_activity"
+        ]
+        original = self.lifecycle.manifest
+        self.lifecycle.manifest = object()  # type: ignore[assignment]
+        try:
+            st, payload = state.enqueue_command("camera_get", {}, peer="client")
+        finally:
+            self.lifecycle.manifest = original
+        after = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "run_command_activity"
+        ]
+        self.assertNotEqual(st, 200, payload)
+        self.assertEqual(payload.get("error"), "run_state_unavailable")
+        self.assertEqual(len(after), len(before))
+
+    def test_exec_enforce_without_lifecycle_is_run_state_unavailable(self) -> None:
+        record = process(9411)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = loopback.ServerState(
+            "k",
+            enable_exec_enforce=True,
+            exec_allowlist={"probe()"},
+            exec_audit=lambda *_args: None,
+        )
+        bind_both_peers(state, run_id="run-existing")
+        state.lifecycle = None
+        st, payload = state.enqueue_command(
+            "exec_enforce",
+            {"expr": "probe()", "main_fn": "Main"},
+            peer="server",
+        )
+        self.assertNotEqual(st, 200, payload)
+        self.assertEqual(st, 503, payload)
+        self.assertEqual(payload.get("error"), "run_state_unavailable")
+
+    def test_poll_without_lifecycle_holds_bound_commands(self) -> None:
+        record = process(9412)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        st, payload = state.enqueue_command("camera_get", {}, peer="client")
+        self.assertEqual(st, 200, payload)
+        state.lifecycle = None
+        st_poll, delivered = accredited_poll(state, "client")
+        self.assertEqual(st_poll, 200, delivered)
+        self.assertEqual(delivered.get("commands"), [])
+
+    def test_failed_audit_after_terminal_frontier_does_not_recreate_unknown(
+        self,
+    ) -> None:
+        record = process(9413)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        armado = threading.Event()
+        dentro = threading.Event()
+        puerta = threading.Event()
+        quien: dict[str, object] = {}
+        audit_real = self.lifecycle.audit
+
+        def _audit_lento_fallido(payload: dict[str, object]) -> bool:
+            if (
+                armado.is_set()
+                and not dentro.is_set()
+                and isinstance(payload, dict)
+                and payload.get("event") == "run_command_activity"
+            ):
+                quien["ident"] = threading.get_ident()
+                dentro.set()
+                puerta.wait(5.0)
+                return False
+            return audit_real(payload)
+
+        self.lifecycle.audit = _audit_lento_fallido  # type: ignore[method-assign]
+        returned: dict[str, object] = {}
+
+        def _encolador() -> None:
+            returned["r"] = state.enqueue_command("camera_get", {}, peer="client")
+
+        thread = threading.Thread(target=_encolador, daemon=True)
+        armado.set()
+        thread.start()
+        self.assertTrue(dentro.wait(5.0))
+        self.assertEqual(quien.get("ident"), thread.ident)
+        self.assertNotIn("r", returned)
+        self.guard.snapshots[record.pid] = {
+            "error": "process_not_found",
+            "exit_code": 4,
+        }
+        reaped = self.lifecycle.reap_dead_runs()
+        puerta.set()
+        thread.join(timeout=5)
+        self.lifecycle.audit = audit_real  # type: ignore[method-assign]
+        self.assertEqual(reaped, ["run-existing"])
+        self.assertEqual(self.store.get("run-existing").state, "EXITED")
+        key = self.lifecycle._activity_key("run-existing")
+        with self.lifecycle._activity_lock:
+            self.assertNotIn(key, self.lifecycle._activity_unknown)
+
+    def test_failed_audit_after_frontier_still_leaves_sticky(self) -> None:
+        record = process(9414)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        self.lifecycle.tombstone_run_activity("run-existing", now=100.0)
+        self.audit.fail_events.add("run_command_activity")
+        recorded = self.lifecycle.record_command_activity("run-existing", now=200.0)
+        self.assertFalse(recorded)
+        key = self.lifecycle._activity_key("run-existing")
+        with self.lifecycle._activity_lock:
+            self.assertIn(key, self.lifecycle._activity_unknown)
+
+    def test_adopt_after_failed_terminal_persist_directs_to_reap(self) -> None:
+        record = process(9415)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        released = self.lifecycle.release_owner("A", "lease-A")
+        self.assertEqual(released, ["run-existing"])
+        self.guard.snapshots[record.pid] = {
+            "error": "process_not_found",
+            "exit_code": 4,
+        }
+        real = self.lifecycle.manifest.replace
+        fallos = {"n": 0}
+
+        def _replace_roto(run: RunRecord) -> None:
+            if getattr(run, "state", None) == "EXITED" and fallos["n"] == 0:
+                fallos["n"] += 1
+                raise OSError("disco lleno")
+            return real(run)
+
+        self.lifecycle.manifest.replace = _replace_roto  # type: ignore[method-assign]
+        try:
+            reaped = self.lifecycle.reap_dead_runs()
+        finally:
+            self.lifecycle.manifest.replace = real  # type: ignore[method-assign]
+        self.assertEqual(reaped, [])
+        self.assertEqual(fallos["n"], 1)
+        self.assertEqual(self.store.get("run-existing").state, "RUNNING_IDLE")
+        adopted = self.lifecycle.adopt_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertNotEqual(adopted.get("ok"), True, adopted)
+        self.assertEqual(adopted.get("error"), "run_processes_gone")
+        hint = adopted.get("hint")
+        self.assertIsInstance(hint, str)
+        self.assertIn("reap", str(hint).lower())
+        st, payload = state.enqueue_command("camera_get", {}, peer="client")
+        self.assertNotEqual(st, 200, payload)
+        reaped_again = self.lifecycle.reap_dead_runs()
+        self.assertEqual(reaped_again, ["run-existing"])
+        self.assertEqual(self.store.get("run-existing").state, "EXITED")
+
+    def _fresh_lifecycle_after_restart(self, generation: str = "gen-B"):
+        manifest2 = RunManifestStore(self.store.paths)
+        manifest2.recover_after_restart()
+        state2 = loopback.ServerState("k")
+        life2 = ProcessLifecycle(
+            coordinator=self.coordinator,
+            manifest=manifest2,
+            audit=self.audit,
+            guard=self.guard,
+            retail_probe=lambda: self.probe_result,
+            diag_probe=lambda: {"known": True, "processes": []},
+            game_path=self.game,
+            launcher=self.launcher,
+            id_fn=lambda: "run-1",
+            bindings=state2,
+            daemon_generation=generation,
+        )
+        state2.lifecycle = life2
+        return life2, manifest2, state2
+
+    def test_adopt_rejects_when_all_registered_processes_are_foreign(self) -> None:
+        rec = process(9422)
+        self.add_run(rec, owner=None, state="RUNNING_IDLE")
+        self.guard.snapshots[rec.pid] = snapshot(rec) | {
+            "creation_time_utc": "9999-01-01T00:00:00.0000000Z"
+        }
+        adopted = self.lifecycle.adopt_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertNotEqual(adopted.get("ok"), True, adopted)
+        self.assertEqual(adopted.get("error"), "run_processes_gone")
+        self.assertEqual(adopted.get("_http_status"), 409)
+        hint = adopted.get("hint")
+        self.assertIsInstance(hint, str)
+        self.assertIn("reap", str(hint).lower())
+        self.assertEqual(self.store.get("run-existing").state, "RUNNING_IDLE")
+        self.assertEqual(self.guard.terminate_calls, [])
+
+    def test_adopt_declares_dispatchable_true_after_release(self) -> None:
+        record = process(9423)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = self._bind_run()
+        released = self.lifecycle.release_owner("A", "lease-A")
+        self.assertEqual(released, ["run-existing"])
+        adopted = self.lifecycle.adopt_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertTrue(adopted.get("ok"), adopted)
+        self.assertIs(adopted.get("dispatchable"), True, adopted)
+        self.assertNotIn("hint", adopted)
+        after, after_payload = self._world_spawn(state)
+        self.assertEqual(after, 200, after_payload)
+
+    def test_adopt_declares_dispatchable_false_without_bindings(self) -> None:
+        record = process(9424)
+        self.add_run(record, owner=None, state="RUNNING_IDLE")
+        self.guard.snapshots[record.pid] = snapshot(record)
+        self.assertIsNone(self.lifecycle.bindings)
+        adopted = self.lifecycle.adopt_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertTrue(adopted.get("ok"), adopted)
+        self.assertIs(adopted.get("dispatchable"), False, adopted)
+        hint = adopted.get("hint")
+        self.assertIsInstance(hint, str)
+        self.assertIn("restart", str(hint).lower())
+        self.assertIn("stop_run", str(hint))
+
+    def test_adopt_starting_binding_is_not_dispatchable(self) -> None:
+        record = process(9420)
+        self.add_run(record, owner=None, state="RUNNING_IDLE")
+        self.guard.snapshots[record.pid] = snapshot(record)
+        state = loopback.ServerState("k")
+        with state._lock:
+            state._bindings["starting"] = Binding(
+                instance="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                run_id="run-existing",
+                role="client",
+                epoch=1,
+                pid=None,
+                creation_time_utc=None,
+                state=BINDING_STARTING,
+            )
+        state.lifecycle = self.lifecycle
+        self.lifecycle.bindings = state
+        adopted = self.lifecycle.adopt_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertTrue(adopted.get("ok"), adopted)
+        self.assertIs(adopted.get("dispatchable"), False, adopted)
+        self.assertIsInstance(adopted.get("hint"), str)
+
+    def test_adopt_after_restart_rejects_gone_process(self) -> None:
+        record = process(9421)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        released = self.lifecycle.release_owner("A", "lease-A")
+        self.assertEqual(released, ["run-existing"])
+        self._dead(record.pid)
+        real = self.lifecycle.manifest.replace
+        fallos = {"n": 0}
+
+        def _replace_roto(run: RunRecord) -> None:
+            if getattr(run, "state", None) == "EXITED" and fallos["n"] == 0:
+                fallos["n"] += 1
+                raise OSError("disco lleno")
+            return real(run)
+
+        self.lifecycle.manifest.replace = _replace_roto  # type: ignore[method-assign]
+        try:
+            reaped = self.lifecycle.reap_dead_runs()
+        finally:
+            self.lifecycle.manifest.replace = real  # type: ignore[method-assign]
+        self.assertEqual(reaped, [])
+        self.assertEqual(fallos["n"], 1)
+        self.assertEqual(self.store.get("run-existing").state, "RUNNING_IDLE")
+        life2, manifest2, _state2 = self._fresh_lifecycle_after_restart()
+        adopted = life2.adopt_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertNotEqual(adopted.get("ok"), True, adopted)
+        self.assertEqual(adopted.get("error"), "run_processes_gone")
+        self.assertEqual(adopted.get("_http_status"), 409)
+        hint = adopted.get("hint")
+        self.assertIsInstance(hint, str)
+        self.assertIn("reap", str(hint).lower())
+        self.assertEqual(manifest2.get("run-existing").state, "RUNNING_IDLE")
+
+    def test_adopt_after_restart_live_process_declares_not_dispatchable(self) -> None:
+        record = process(9425)
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        self._bind_run()
+        released = self.lifecycle.release_owner("A", "lease-A")
+        self.assertEqual(released, ["run-existing"])
+        life2, _manifest2, state2 = self._fresh_lifecycle_after_restart()
+        adopted = life2.adopt_run(IDENTITY_A, self.token_a, "run-existing")
+        self.assertTrue(adopted.get("ok"), adopted)
+        self.assertIs(adopted.get("dispatchable"), False, adopted)
+        hint = adopted.get("hint")
+        self.assertIsInstance(hint, str)
+        self.assertIn("restart", str(hint).lower())
+        self.assertIn("stop_run", str(hint))
+        st, payload = state2.enqueue_command(
+            "world_spawn", {"classname": "SurvivorM_Mirek"}, peer="server"
+        )
+        self.assertNotEqual(st, 200, payload)
+
+
+GEN_LAUNCH = "daemon_generation_at_launch"
+GEN_CURRENT = "daemon_generation_current"
+GEN_CHANGED = "generation_changed"
+GEN_FIELDS = (GEN_LAUNCH, GEN_CURRENT, GEN_CHANGED)
+DIAG_KEY = "retired_run_diagnostics"
+DIAG_CAP = 32
+DIAG_KEYS = frozenset(
+    {
+        "run_id",
+        GEN_LAUNCH,
+        GEN_CURRENT,
+        GEN_CHANGED,
+        "event",
+        "reason",
+        "decision",
+        "state",
+    }
+)
+
+
+class RetiredRunDiagnosticsAndGenerationTest(unittest.TestCase):
+    """Lote H: generation projection, in-memory retired-run ring, six feed paths."""
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.game = self.root / "DayZ"
+        self.game.mkdir()
+        (self.game / "DayZDiag_x64.exe").write_bytes(b"")
+        self.paths = RuntimePaths(
+            self.root / "runtime",
+            self.root / "runtime" / "audit",
+            self.root / "runtime" / "coordination.json",
+            self.root / "runtime" / "runs.json",
+        )
+        self.audit = AuditSink()
+        self.coordinator = SessionCoordinator(
+            token_fn=lambda: "token-A",
+            id_fn=lambda: "lease-A",
+            audit=self.audit,
+        )
+        status, acquired = self.coordinator.acquire(IDENTITY_A, "lifecycle")
+        self.assertEqual(status, 200)
+        self.token_a = acquired["lease_token"]
+        self.store = RunManifestStore(self.paths)
+        self.guard = FakeGuard()
+        self.launcher = FakeLauncher()
+        self.generation = "gen-lote-h-test"
+        self.lifecycle = ProcessLifecycle(
+            coordinator=self.coordinator,
+            manifest=self.store,
+            audit=self.audit,
+            guard=self.guard,
+            retail_probe=lambda: {"known": True, "processes": []},
+            diag_probe=lambda: {"known": True, "processes": []},
+            game_path=self.game,
+            launcher=self.launcher,
+            id_fn=lambda: "run-1",
+            daemon_generation=self.generation,
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _request(self) -> dict[str, object]:
+        return {
+            "argv": [str(self.game / "DayZDiag_x64.exe"), "-mission=test"],
+            "cwd": str(self.game),
+            "role": "client",
+            "window_style": "normal",
+            "label": "gate",
+            "mod": "@SameMod",
+            "profiles": "profiles",
+            "mission": "test",
+        }
+
+    def _start(self) -> str:
+        launched = process(self.launcher.pid)
+        self.guard.snapshots[launched.pid] = snapshot(launched)
+        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self._request())
+        self.assertTrue(result.get("ok"), result)
+        return str(result["run_id"])
+
+    def _prune_exited(self) -> None:
+        self.lifecycle.manifest = RunManifestStore(self.paths)
+        self.lifecycle._invalidate_box_cache()
+
+    def _row(self, payload: dict[str, object], run_id: str) -> dict[str, object]:
+        for item in payload.get("runs") or []:
+            if isinstance(item, dict) and item.get("run_id") == run_id:
+                return item
+        self.fail(f"run {run_id} missing from {payload.get('runs')}")
+
+    def _diags(self, payload: dict[str, object], run_id: str) -> list[dict[str, object]]:
+        raw = payload.get(DIAG_KEY)
+        self.assertIsInstance(raw, list, f"{DIAG_KEY} missing or not a list: {raw!r}")
+        return [
+            item
+            for item in raw
+            if isinstance(item, dict) and item.get("run_id") == run_id
+        ]
+
+    def test_status_and_public_status_project_generation_on_present_run(self) -> None:
+        run_id = self._start()
+        status = self.lifecycle.status(IDENTITY_A)
+        public = self.lifecycle.public_status()
+        status_row = self._row(status, run_id)
+        public_row = self._row(public, run_id)
+        for row in (status_row, public_row):
+            self.assertEqual(row[GEN_LAUNCH], self.generation)
+            self.assertEqual(row[GEN_CURRENT], self.generation)
+            self.assertIs(row[GEN_CHANGED], False)
+        self.assertEqual(
+            {field: status_row[field] for field in GEN_FIELDS},
+            {field: public_row[field] for field in GEN_FIELDS},
+        )
+        self.assertIsInstance(status.get(DIAG_KEY), list)
+        self.assertIsInstance(public.get(DIAG_KEY), list)
+
+    def test_generation_changed_is_null_never_false_without_launch_generation(self) -> None:
+        record = process(9101)
+        self.store.add(
+            RunRecord(
+                "legacy-run",
+                "A",
+                "lease-A",
+                "RUNNING",
+                "gate",
+                "@SameMod",
+                "profiles",
+                "mission",
+                [record],
+            )
+        )
+        row = self._row(self.lifecycle.status(IDENTITY_A), "legacy-run")
+        self.assertIsNone(row[GEN_LAUNCH])
+        self.assertEqual(row[GEN_CURRENT], self.generation)
+        self.assertIsNone(row[GEN_CHANGED])
+
+    def test_from_payload_round_trip_keeps_launch_generation(self) -> None:
+        run_id = self._start()
+        stored = self.lifecycle.manifest.get(run_id)
+        self.assertEqual(getattr(stored, GEN_LAUNCH), self.generation)
+        reloaded = RunManifestStore(self.paths).get(run_id)
+        self.assertEqual(getattr(reloaded, GEN_LAUNCH), self.generation)
+
+    def test_legacy_runs_json_without_field_loads_and_survives_get_list_replace(
+        self,
+    ) -> None:
+        """§2(D): a real on-disk manifest written by the previous tree."""
+        record = process(9102)
+        payload = {
+            "version": 1,
+            "runs": [
+                {
+                    "run_id": "legacy-disk",
+                    "owner_session_id": "A",
+                    "owner_lease_id": "lease-A",
+                    "state": "RUNNING",
+                    "label": "gate",
+                    "mod": "@SameMod",
+                    "profiles": "profiles",
+                    "mission": "mission",
+                    "processes": [dataclasses.asdict(record)],
+                    "launch_operation_id": None,
+                    "launch_request_sha256": None,
+                    "launch_acknowledged": True,
+                }
+            ],
+        }
+        self.assertNotIn(GEN_LAUNCH, payload["runs"][0])
+        self.paths.runs_path.parent.mkdir(parents=True, exist_ok=True)
+        self.paths.runs_path.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        store = RunManifestStore(self.paths)
+        loaded = store.get("legacy-disk")
+        self.assertIsNotNone(loaded)
+        self.assertIsNone(getattr(loaded, GEN_LAUNCH, "missing"))
+        listed = store.list_runs()
+        self.assertEqual(len(listed), 1)
+        self.assertIsNone(getattr(listed[0], GEN_LAUNCH, "missing"))
+        loaded.label = "relabeled"
+        store.replace(loaded)
+        again = store.get("legacy-disk")
+        self.assertEqual(again.label, "relabeled")
+        self.assertIsNone(getattr(again, GEN_LAUNCH, "missing"))
+        on_disk = json.loads(self.paths.runs_path.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["runs"][0]["label"], "relabeled")
+
+    def test_stop_run_feeds_the_retired_diagnostic_ring(self) -> None:
+        run_id = self._start()
+        stopped = self.lifecycle.stop_run(IDENTITY_A, self.token_a, run_id)
+        self.assertTrue(stopped.get("ok"), stopped)
+        self._prune_exited()
+        hits = self._diags(self.lifecycle.status(IDENTITY_A), run_id)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["event"], "lifecycle_stop_outcome")
+        self.assertEqual(hits[0]["reason"], "stopped")
+        self.assertEqual(hits[0]["decision"], "stopped")
+        self.assertEqual(hits[0]["state"], "EXITED")
+        self.assertEqual(set(hits[0]), DIAG_KEYS)
+
+    def test_reap_run_feeds_the_retired_diagnostic_ring(self) -> None:
+        record = process(9201)
+        self.store.add(
+            RunRecord(
+                "reap-run",
+                None,
+                None,
+                "RUNNING_IDLE",
+                "gate",
+                "@SameMod",
+                "profiles",
+                "mission",
+                [record],
+            )
+        )
+        self.guard.snapshots[record.pid] = {
+            "error": "process_not_found",
+            "exit_code": 4,
+        }
+        self.assertEqual(self.lifecycle.reap_dead_runs(), ["reap-run"])
+        self._prune_exited()
+        hits = self._diags(self.lifecycle.status(IDENTITY_A), "reap-run")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["event"], "run_reaped")
+        self.assertEqual(hits[0]["decision"], "reaped")
+        self.assertEqual(hits[0]["state"], "EXITED")
+        self.assertEqual(set(hits[0]), DIAG_KEYS)
+
+    def test_begin_release_owner_feeds_the_retired_diagnostic_ring(self) -> None:
+        record = process(9202)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        run_id = "11111111-1111-4111-8111-111111111111"
+        self.store.add(
+            RunRecord(
+                run_id,
+                "A",
+                "lease-A",
+                "RUNNING",
+                "recoverable",
+                "@mod",
+                "profiles",
+                "mission",
+                [record],
+                "22222222-2222-4222-8222-222222222222",
+                "a" * 64,
+                False,
+            )
+        )
+        disposition = self.lifecycle.begin_release_owner("A", "lease-A")
+        self.assertTrue(disposition.terminal_event.wait(1.0))
+        self.assertTrue(disposition.terminal_result.get("terminal_safe"))
+        self._prune_exited()
+        hits = self._diags(self.lifecycle.status(IDENTITY_A), run_id)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["decision"], "released")
+        self.assertEqual(hits[0]["state"], "EXITED")
+        self.assertEqual(set(hits[0]), DIAG_KEYS)
+
+    def test_repair_recovery_fault_feeds_the_retired_diagnostic_ring(self) -> None:
+        record = process(9203)
+        run = RunRecord(
+            "11111111-1111-4111-8111-111111111111",
+            None,
+            None,
+            "UNRECONCILED",
+            "recoverable",
+            "@mod",
+            "profiles",
+            "mission",
+            [record],
+            "22222222-2222-4222-8222-222222222222",
+            "a" * 64,
+            False,
+        )
+        self.store.add(run)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        run_hash = hashlib.sha256(
+            json.dumps(
+                dataclasses.asdict(run),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        result = self.lifecycle.repair_recovery_fault(
+            {
+                "scope": "run",
+                "run_id": run.run_id,
+                "launch_operation_id": run.launch_operation_id,
+                "run_record_sha256": run_hash,
+            }
+        )
+        self.assertTrue(result.get("terminal_safe"), result)
+        self._prune_exited()
+        hits = self._diags(self.lifecycle.status(IDENTITY_A), run.run_id)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["event"], "lifecycle_recovery_repair")
+        self.assertEqual(hits[0]["state"], "EXITED")
+        self.assertEqual(set(hits[0]), DIAG_KEYS)
+
+    def test_repair_manifest_recovery_feeds_the_retired_diagnostic_ring(self) -> None:
+        record = process(9204)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        run = RunRecord(
+            "11111111-1111-4111-8111-111111111111",
+            "A",
+            "lease-A",
+            "RUNNING",
+            "recoverable",
+            "@mod",
+            "profiles",
+            "mission",
+            [record],
+            "22222222-2222-4222-8222-222222222222",
+            "a" * 64,
+            False,
+        )
+        raw = (
+            json.dumps(
+                {"version": 1, "runs": [dataclasses.asdict(run)]},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        result = self.lifecycle.repair_manifest_recovery(raw)
+        self.assertTrue(result.get("terminal_safe"), result)
+        hits = self._diags(self.lifecycle.status(IDENTITY_A), run.run_id)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["event"], "lifecycle_manifest_recovery")
+        self.assertEqual(hits[0]["state"], "EXITED")
+        self.assertEqual(set(hits[0]), DIAG_KEYS)
+
+    def test_admin_reconcile_feeds_the_retired_diagnostic_ring(self) -> None:
+        record = process(9205)
+        self.store.add(
+            RunRecord(
+                "reconcile-run",
+                None,
+                None,
+                "RUNNING_IDLE",
+                "gate",
+                "@SameMod",
+                "profiles",
+                "mission",
+                [record],
+            )
+        )
+        self.guard.snapshots[record.pid] = {
+            "error": "process_not_found",
+            "exit_code": 4,
+        }
+        result = self.lifecycle.admin_reconcile("reconcile-run", 9205, "incident")
+        self.assertEqual(result.get("state"), "EXITED", result)
+        self._prune_exited()
+        hits = self._diags(self.lifecycle.status(IDENTITY_A), "reconcile-run")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["event"], "admin_reconcile")
+        self.assertEqual(hits[0]["state"], "EXITED")
+        self.assertEqual(set(hits[0]), DIAG_KEYS)
+
+    def test_ring_caps_at_32_keeping_the_most_recent(self) -> None:
+        total = 40
+        ids = [f"seed-{index:02d}" for index in range(total)]
+        for index, run_id in enumerate(ids):
+            pid = 30000 + index
+            record = process(pid)
+            self.store.add(
+                RunRecord(
+                    run_id,
+                    None,
+                    None,
+                    "RUNNING_IDLE",
+                    "gate",
+                    "@SameMod",
+                    "profiles",
+                    "mission",
+                    [record],
+                )
+            )
+            self.guard.snapshots[pid] = {
+                "error": "process_not_found",
+                "exit_code": 4,
+            }
+        reaped = self.lifecycle.reap_dead_runs()
+        self.assertEqual(len(reaped), total)
+        raw = self.lifecycle.status(IDENTITY_A).get(DIAG_KEY)
+        self.assertIsInstance(raw, list)
+        published = [item.get("run_id") for item in raw if isinstance(item, dict)]
+        self.assertLessEqual(len(raw), DIAG_CAP)
+        self.assertEqual(set(published), set(ids[-DIAG_CAP:]))
+        self.assertFalse(set(published) & set(ids[:-DIAG_CAP]))
+
+    def test_diagnostic_has_no_timestamp_or_path_keys(self) -> None:
+        run_id = self._start()
+        self.lifecycle.stop_run(IDENTITY_A, self.token_a, run_id)
+        hits = self._diags(self.lifecycle.status(IDENTITY_A), run_id)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(set(hits[0]), DIAG_KEYS)
+        forbidden = ("time", "stamp", "path", "dir", "file", "utc", "epoch")
+        for key, value in hits[0].items():
+            lowered = key.casefold()
+            if lowered in {GEN_LAUNCH, GEN_CURRENT}:
+                continue
+            for token in forbidden:
+                self.assertNotIn(token, lowered, key)
+            if isinstance(value, str):
+                self.assertNotIn("\\", value)
+                self.assertFalse(value.startswith("/"))
+
+    def test_failed_stop_does_not_enter_the_ring(self) -> None:
+        run_id = self._start()
+        self.guard.snapshots[self.launcher.pid] = {
+            "error": "guard_unavailable",
+            "exit_code": 3,
+        }
+        result = self.lifecycle.stop_run(IDENTITY_A, self.token_a, run_id)
+        row = self._row(self.lifecycle.status(IDENTITY_A), run_id)
+        self.assertEqual(row["state"], "UNRECONCILED")
+        self.assertEqual(self._diags(self.lifecycle.status(IDENTITY_A), run_id), [])
+        self.assertIn("error", result)
+
+    def test_new_lifecycle_publishes_an_empty_ring(self) -> None:
+        status = self.lifecycle.status(IDENTITY_A)
+        public = self.lifecycle.public_status()
+        self.assertEqual(status.get(DIAG_KEY), [])
+        self.assertEqual(public.get(DIAG_KEY), [])
+
+class RetiredRunRingCommitAndSnapshotTest(RetiredRunDiagnosticsAndGenerationTest):
+    """Lote H ronda 2: persistir then publicar, dedup, coherent read, closed reason."""
+
+    def _ring_raw(self) -> list:
+        return list(self.lifecycle._retired_diagnostics)
+
+    def _wrap_replace_fail(self):
+        real = self.lifecycle.manifest.replace
+        calls = {"n": 0}
+
+        def _wrapped(run):
+            calls["n"] += 1
+            ring_ids = [item.run_id for item in self._ring_raw()]
+            calls.setdefault("ring_at_replace", []).append(list(ring_ids))
+            raise OSError("disco lleno")
+
+        return real, _wrapped, calls
+
+    def test_a_persist_failure_on_reap_publishes_nothing_and_keeps_the_run(self) -> None:
+        record = process(9301)
+        self.store.add(
+            RunRecord(
+                "reap-fail",
+                None,
+                None,
+                "RUNNING_IDLE",
+                "gate",
+                "@SameMod",
+                "profiles",
+                "mission",
+                [record],
+            )
+        )
+        self.guard.snapshots[record.pid] = {"error": "process_not_found", "exit_code": 4}
+        real, wrapped, calls = self._wrap_replace_fail()
+        self.lifecycle.manifest.replace = wrapped
+        try:
+            reaped = self.lifecycle.reap_dead_runs()
+        finally:
+            self.lifecycle.manifest.replace = real
+        self.assertEqual(reaped, [])
+        self.assertGreaterEqual(calls["n"], 1)
+        self.assertEqual(self.lifecycle.manifest.get("reap-fail").state, "RUNNING_IDLE")
+        self.assertEqual(self._diags(self.lifecycle.status(IDENTITY_A), "reap-fail"), [])
+        self.assertEqual(self._ring_raw(), [])
+
+    def test_a_persist_failure_on_stop_publishes_nothing_and_keeps_the_run(self) -> None:
+        run_id = self._start()
+        real, wrapped, calls = self._wrap_replace_fail()
+        self.lifecycle.manifest.replace = wrapped
+        try:
+            result = self.lifecycle.stop_run(IDENTITY_A, self.token_a, run_id)
+        finally:
+            self.lifecycle.manifest.replace = real
+        self.assertGreaterEqual(calls["n"], 1)
+        self.assertIn("error", result)
+        row = self._row(self.lifecycle.status(IDENTITY_A), run_id)
+        self.assertNotEqual(row["state"], "EXITED")
+        self.assertEqual(self._diags(self.lifecycle.status(IDENTITY_A), run_id), [])
+        self.assertFalse(any(item.run_id == run_id for item in self._ring_raw()))
+
+    def test_a_persist_failure_on_repair_recovery_publishes_nothing(self) -> None:
+        record = process(9302)
+        run = RunRecord(
+            "11111111-1111-4111-8111-111111111111",
+            None,
+            None,
+            "UNRECONCILED",
+            "recoverable",
+            "@mod",
+            "profiles",
+            "mission",
+            [record],
+            "22222222-2222-4222-8222-222222222222",
+            "a" * 64,
+            False,
+        )
+        self.store.add(run)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        run_hash = hashlib.sha256(
+            json.dumps(
+                dataclasses.asdict(run),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        real, wrapped, calls = self._wrap_replace_fail()
+        self.lifecycle.manifest.replace = wrapped
+        try:
+            result = self.lifecycle.repair_recovery_fault(
+                {
+                    "scope": "run",
+                    "run_id": run.run_id,
+                    "launch_operation_id": run.launch_operation_id,
+                    "run_record_sha256": run_hash,
+                }
+            )
+        finally:
+            self.lifecycle.manifest.replace = real
+        self.assertGreaterEqual(calls["n"], 1)
+        self.assertFalse(result.get("terminal_safe"))
+        self.assertEqual(self.lifecycle.manifest.get(run.run_id).state, "UNRECONCILED")
+        self.assertEqual(self._diags(self.lifecycle.status(IDENTITY_A), run.run_id), [])
+        self.assertEqual(self._ring_raw(), [])
+
+    def test_a_persist_failure_on_admin_reconcile_publishes_nothing(self) -> None:
+        self.store.add(
+            RunRecord(
+                "reconcile-fail",
+                None,
+                None,
+                "UNRECONCILED",
+                "gate",
+                "@SameMod",
+                "profiles",
+                "mission",
+                [],
+            )
+        )
+        real, wrapped, calls = self._wrap_replace_fail()
+        self.lifecycle.manifest.replace = wrapped
+        try:
+            result = self.lifecycle.admin_reconcile(
+                "reconcile-fail", None, "operator cleanup", empty=True
+            )
+        finally:
+            self.lifecycle.manifest.replace = real
+        self.assertGreaterEqual(calls["n"], 1)
+        self.assertEqual(result.get("error"), "manifest_failed")
+        self.assertEqual(self.lifecycle.manifest.get("reconcile-fail").state, "UNRECONCILED")
+        self.assertEqual(self._diags(self.lifecycle.status(IDENTITY_A), "reconcile-fail"), [])
+        self.assertEqual(self._ring_raw(), [])
+
+    def test_a_persist_failure_on_begin_release_owner_publishes_nothing(self) -> None:
+        record = process(9303)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        run_id = "11111111-1111-4111-8111-aaaaaaaaaaaa"
+        self.store.add(
+            RunRecord(
+                run_id,
+                "A",
+                "lease-A",
+                "RUNNING",
+                "recoverable",
+                "@mod",
+                "profiles",
+                "mission",
+                [record],
+                "22222222-2222-4222-8222-bbbbbbbbbbbb",
+                "a" * 64,
+                False,
+            )
+        )
+        real, wrapped, calls = self._wrap_replace_fail()
+        self.lifecycle.manifest.replace = wrapped
+        try:
+            disposition = self.lifecycle.begin_release_owner("A", "lease-A")
+            self.assertTrue(disposition.terminal_event.wait(1.0))
+        finally:
+            self.lifecycle.manifest.replace = real
+        self.assertGreaterEqual(calls["n"], 1)
+        self.assertFalse(disposition.terminal_result.get("terminal_safe"))
+        self.assertEqual(self.lifecycle.manifest.get(run_id).state, "RUNNING")
+        self.assertEqual(self._diags(self.lifecycle.status(IDENTITY_A), run_id), [])
+        self.assertEqual(self._ring_raw(), [])
+
+    def test_a_persist_failure_on_repair_manifest_recovery_publishes_nothing(self) -> None:
+        record = process(9304)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        run = RunRecord(
+            "11111111-1111-4111-8111-cccccccccccc",
+            "A",
+            "lease-A",
+            "RUNNING",
+            "recoverable",
+            "@mod",
+            "profiles",
+            "mission",
+            [record],
+            "22222222-2222-4222-8222-dddddddddddd",
+            "a" * 64,
+            False,
+        )
+        raw = (
+            json.dumps(
+                {"version": 1, "runs": [dataclasses.asdict(run)]},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        original = RunManifestStore.replace
+        calls = {"n": 0}
+
+        def _wrapped(store, target):
+            calls["n"] += 1
+            if target.state == "EXITED":
+                raise OSError("disco lleno")
+            return original(store, target)
+
+        RunManifestStore.replace = _wrapped
+        try:
+            result = self.lifecycle.repair_manifest_recovery(raw)
+        finally:
+            RunManifestStore.replace = original
+        self.assertGreaterEqual(calls["n"], 1)
+        self.assertFalse(result.get("terminal_safe"))
+        self.assertEqual(self._diags(self.lifecycle.status(IDENTITY_A), run.run_id), [])
+        self.assertFalse(any(item.run_id == run.run_id for item in self._ring_raw()))
+
+    def test_a_order_ring_still_empty_at_the_replace_of_a_healthy_reap(self) -> None:
+        record = process(9305)
+        self.store.add(
+            RunRecord(
+                "reap-order",
+                None,
+                None,
+                "RUNNING_IDLE",
+                "gate",
+                "@SameMod",
+                "profiles",
+                "mission",
+                [record],
+            )
+        )
+        self.guard.snapshots[record.pid] = {"error": "process_not_found", "exit_code": 4}
+        seen: list[list[str]] = []
+        real = self.lifecycle.manifest.replace
+
+        def _wrapped(run):
+            seen.append([item.run_id for item in self._ring_raw()])
+            return real(run)
+
+        self.lifecycle.manifest.replace = _wrapped
+        try:
+            self.assertEqual(self.lifecycle.reap_dead_runs(), ["reap-order"])
+        finally:
+            self.lifecycle.manifest.replace = real
+        self.assertTrue(seen)
+        self.assertFalse(any("reap-order" in frame for frame in seen))
+        self.assertEqual(len(self._diags(self.lifecycle.status(IDENTITY_A), "reap-order")), 1)
+
+    def test_b_failed_reaps_do_not_evict_a_prior_legitimate_diagnostic(self) -> None:
+        prior = process(9310)
+        self.store.add(
+            RunRecord(
+                "real-prior",
+                None,
+                None,
+                "RUNNING_IDLE",
+                "gate",
+                "@SameMod",
+                "profiles",
+                "mission",
+                [prior],
+            )
+        )
+        self.guard.snapshots[prior.pid] = {"error": "process_not_found", "exit_code": 4}
+        self.assertEqual(self.lifecycle.reap_dead_runs(), ["real-prior"])
+        self.assertEqual(len(self._diags(self.lifecycle.status(IDENTITY_A), "real-prior")), 1)
+        stuck = process(9311)
+        self.store.add(
+            RunRecord(
+                "stuck-run",
+                None,
+                None,
+                "RUNNING_IDLE",
+                "gate",
+                "@SameMod",
+                "profiles",
+                "mission",
+                [stuck],
+            )
+        )
+        self.guard.snapshots[stuck.pid] = {"error": "process_not_found", "exit_code": 4}
+        real = self.lifecycle.manifest.replace
+
+        def _broken(run):
+            raise OSError("disco lleno")
+
+        self.lifecycle.manifest.replace = _broken
+        try:
+            for _ in range(33):
+                self.assertEqual(self.lifecycle.reap_dead_runs(), [])
+        finally:
+            self.lifecycle.manifest.replace = real
+        status = self.lifecycle.status(IDENTITY_A)
+        self.assertEqual(len(self._diags(status, "real-prior")), 1)
+        self.assertEqual(self._diags(status, "stuck-run"), [])
+        self.assertEqual(self._row(status, "stuck-run")["state"], "RUNNING_IDLE")
+        self.assertEqual(len(status.get(DIAG_KEY) or []), 1)
+
+    def test_c_repeated_repair_recovery_fault_is_rejected_with_one_diagnostic(self) -> None:
+        record = process(9320)
+        run = RunRecord(
+            "11111111-1111-4111-8111-eeeeeeeeeeee",
+            None,
+            None,
+            "UNRECONCILED",
+            "recoverable",
+            "@mod",
+            "profiles",
+            "mission",
+            [record],
+            "22222222-2222-4222-8222-eeeeeeeeeeee",
+            "a" * 64,
+            False,
+        )
+        self.store.add(run)
+        self.guard.snapshots[record.pid] = {"error": "process_not_found", "exit_code": 4}
+        fault = {
+            "scope": "run",
+            "run_id": run.run_id,
+            "launch_operation_id": run.launch_operation_id,
+            "run_record_sha256": hashlib.sha256(
+                json.dumps(
+                    dataclasses.asdict(run),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+        first = self.lifecycle.repair_recovery_fault(fault)
+        self.assertTrue(first.get("terminal_safe"), first)
+        self.assertEqual(len(self._diags(self.lifecycle.status(IDENTITY_A), run.run_id)), 1)
+        current = self.lifecycle.manifest.get(run.run_id)
+        second_fault = {
+            "scope": "run",
+            "run_id": current.run_id,
+            "launch_operation_id": current.launch_operation_id,
+            "run_record_sha256": hashlib.sha256(
+                json.dumps(
+                    dataclasses.asdict(current),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+        second = self.lifecycle.repair_recovery_fault(second_fault)
+        self.assertIsNot(second.get("terminal_safe"), True)
+        self.assertEqual(len(self._diags(self.lifecycle.status(IDENTITY_A), run.run_id)), 1)
+
+    def test_d_torn_status_never_pairs_a_live_row_with_its_diagnostic(self) -> None:
+        self._start()
+        self.guard.snapshots[self.launcher.pid] = {
+            "error": "process_not_found",
+            "exit_code": 4,
+        }
+        real = self.lifecycle.manifest.list_runs
+        armed = {"on": True}
+
+        def _wrapped():
+            rows = real()
+            if armed["on"]:
+                armed["on"] = False
+                self.lifecycle.reap_dead_runs()
+            return rows
+
+        self.lifecycle.manifest.list_runs = _wrapped
+        try:
+            payload = self.lifecycle.status(IDENTITY_A)
+        finally:
+            self.lifecycle.manifest.list_runs = real
+        self.assertFalse(armed["on"])
+        live = {
+            row.get("run_id")
+            for row in payload.get("runs") or []
+            if isinstance(row, dict) and row.get("state") != "EXITED"
+        }
+        ring = {
+            item.get("run_id")
+            for item in payload.get(DIAG_KEY) or []
+            if isinstance(item, dict)
+        }
+        self.assertFalse(live & ring)
+
+    def test_d_torn_public_status_never_pairs_a_live_row_with_its_diagnostic(self) -> None:
+        self._start()
+        self.guard.snapshots[self.launcher.pid] = {
+            "error": "process_not_found",
+            "exit_code": 4,
+        }
+        real = self.lifecycle.manifest.list_runs
+        armed = {"on": True}
+
+        def _wrapped():
+            rows = real()
+            if armed["on"]:
+                armed["on"] = False
+                self.lifecycle.reap_dead_runs()
+            return rows
+
+        self.lifecycle.manifest.list_runs = _wrapped
+        try:
+            payload = self.lifecycle.public_status()
+        finally:
+            self.lifecycle.manifest.list_runs = real
+        self.assertFalse(armed["on"])
+        live = {
+            row.get("run_id")
+            for row in payload.get("runs") or []
+            if isinstance(row, dict) and row.get("state") != "EXITED"
+        }
+        ring = {
+            item.get("run_id")
+            for item in payload.get(DIAG_KEY) or []
+            if isinstance(item, dict)
+        }
+        self.assertFalse(live & ring)
+
+    def test_d_stop_then_status_without_reload_keeps_exited_row_and_diagnostic(self) -> None:
+        run_id = self._start()
+        stopped = self.lifecycle.stop_run(IDENTITY_A, self.token_a, run_id)
+        self.assertTrue(stopped.get("ok"), stopped)
+        payload = self.lifecycle.status(IDENTITY_A)
+        self.assertEqual(self._row(payload, run_id)["state"], "EXITED")
+        self.assertEqual(len(self._diags(payload, run_id)), 1)
+
+    def test_e_admin_reconcile_publishes_closed_reason_and_keeps_operator_text_in_audit(
+        self,
+    ) -> None:
+        dirty = "C:\\Users\\alice\\secret\\x.mdmp @ 2026-09-04T05:00:00Z"
+        self.store.add(
+            RunRecord(
+                "reconcile-dirty",
+                None,
+                None,
+                "UNRECONCILED",
+                "gate",
+                "@SameMod",
+                "profiles",
+                "mission",
+                [],
+            )
+        )
+        result = self.lifecycle.admin_reconcile(
+            "reconcile-dirty", None, dirty, empty=True
+        )
+        self.assertTrue(result.get("reconciled"), result)
+        hits = self._diags(self.lifecycle.status(IDENTITY_A), "reconcile-dirty")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["reason"], "admin_reconciled")
+        self.assertEqual(hits[0]["event"], "admin_reconcile")
+        self.assertNotIn("\\", hits[0]["reason"])
+        self.assertNotIn("2026", hits[0]["reason"])
+        audit_reasons = [
+            event.get("reason")
+            for event in self.audit.events
+            if event.get("event") == "admin_reconcile"
+        ]
+        self.assertIn(dirty, audit_reasons)
 
 
 if __name__ == "__main__":

@@ -771,6 +771,101 @@ async def execute_dayz_test_run(
             )
 
 
+def _run_row(status: object, run_id: str) -> dict[str, object] | None:
+    if not isinstance(status, dict) or not isinstance(status.get("runs"), list):
+        return None
+    matches = [
+        item
+        for item in status["runs"]
+        if isinstance(item, dict) and item.get("run_id") == run_id
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _retired_for(status: object, run_id: str) -> list[dict[str, object]]:
+    if not isinstance(status, dict):
+        return []
+    raw = status.get("retired_run_diagnostics")
+    if not isinstance(raw, list):
+        return []
+    return [
+        item
+        for item in raw
+        if isinstance(item, dict) and item.get("run_id") == run_id
+    ]
+
+
+_GENERATION_FIELDS = (
+    "daemon_generation_at_launch",
+    "daemon_generation_current",
+    "generation_changed",
+)
+_DIAGNOSTIC_FIELDS = (
+    "run_id",
+    *_GENERATION_FIELDS,
+    "event",
+    "reason",
+    "decision",
+    "state",
+)
+
+
+def _validated_generation(source: object) -> dict[str, object] | None:
+    if not isinstance(source, dict):
+        return None
+    if any(field not in source for field in _GENERATION_FIELDS):
+        return None
+    launch = source["daemon_generation_at_launch"]
+    current = source["daemon_generation_current"]
+    changed = source["generation_changed"]
+    if launch is not None and not isinstance(launch, str):
+        return None
+    if not isinstance(current, str):
+        return None
+    if changed is not None and not isinstance(changed, bool):
+        return None
+    return {
+        "daemon_generation_at_launch": launch,
+        "daemon_generation_current": current,
+        "generation_changed": changed,
+    }
+
+
+def _validated_diagnostic(item: object, run_id: str) -> dict[str, object] | None:
+    if not isinstance(item, dict) or set(item) != set(_DIAGNOSTIC_FIELDS):
+        return None
+    if item.get("run_id") != run_id or not isinstance(item.get("run_id"), str):
+        return None
+    if item.get("state") != "EXITED":
+        return None
+    for key in ("event", "reason", "decision"):
+        value = item.get(key)
+        if not isinstance(value, str) or not value:
+            return None
+    generations = _validated_generation(item)
+    if generations is None:
+        return None
+    return {field: item[field] for field in _DIAGNOSTIC_FIELDS}
+
+
+def _copy_generation(source: dict[str, object]) -> dict[str, object]:
+    copied = _validated_generation(source)
+    if copied is None:
+        raise KeyError("generation")
+    return copied
+
+
+def _failed_stop_envelope(
+    run_id: str, error_code: str, source: dict[str, object]
+) -> dict[str, object]:
+    return {
+        "status": "failed",
+        "run_id": run_id,
+        "error_code": error_code,
+        **_copy_generation(source),
+    }
+
+
 async def execute_dayz_test_stop(
     runtime: _Runtime,
     run_id: str,
@@ -784,9 +879,26 @@ async def execute_dayz_test_stop(
     with open_approved_launcher("dayz-test-v1") as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
-            policy, run = resolve_stop_run(
-                await runtime.lifecycle_status(), bundle.sealed_policies, run_id
-            )
+            status_snapshot = await runtime.lifecycle_status()
+            try:
+                policy, run = resolve_stop_run(
+                    status_snapshot, bundle.sealed_policies, run_id
+                )
+            except DayzTestToolError as exc:
+                if exc.code == "run_not_active":
+                    row = _run_row(status_snapshot, run_id)
+                    if _validated_generation(row) is None:
+                        raise
+                    return _failed_stop_envelope(run_id, "run_not_active", row)
+                if exc.code == "run_not_found":
+                    hits = _retired_for(status_snapshot, run_id)
+                    if len(hits) != 1:
+                        raise
+                    diagnostic = _validated_diagnostic(hits[0], run_id)
+                    if diagnostic is None:
+                        raise
+                    return _failed_stop_envelope(run_id, "run_not_found", diagnostic)
+                raise
             raw_request, _selected = build_run_request(
                 bundle.sealed_policies,
                 project=policy.mod,

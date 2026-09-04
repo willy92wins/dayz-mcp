@@ -12,6 +12,7 @@ import urllib.request
 
 from dayz_mcp import loopback
 from dayz_mcp import server
+from dayz_mcp.instance_fence import BINDING_STARTING, Binding
 from dayz_mcp.session_coordination import (
     ClientIdentity,
     MAX_SESSION_QUEUE,
@@ -266,6 +267,26 @@ class LoopbackTest(unittest.TestCase):
         self.assertIsNotNone(client["last_poll_at"])
         self.assertIsNotNone(client["last_poll_age_s"])
         self.assertEqual(client["version"], "4~1.29.0")
+
+    def test_retire_run_discards_fence_even_without_bindings(self) -> None:
+        with self.state._lock:
+            self.state._fenced_runs.add("orphan-run")
+        self.state.retire_run("orphan-run", "reaped")
+        self.assertNotIn("orphan-run", self.state._fenced_runs)
+
+    def test_retire_run_discards_fence_of_bound_run(self) -> None:
+        with self.state._lock:
+            self.state._fenced_runs.add("test-run")
+        self.state.retire_run("test-run", "reaped")
+        self.assertNotIn("test-run", self.state._fenced_runs)
+
+    def test_read_after_retire_run_is_binding_retired(self) -> None:
+        status, payload = self.state.enqueue_command("camera_get", {}, peer="client")
+        self.assertEqual(status, 200, payload)
+        self.state.retire_run("test-run", "stopped")
+        status, payload = self.state.enqueue_command("camera_get", {}, peer="client")
+        self.assertNotEqual(status, 200, payload)
+        self.assertEqual(payload.get("error"), "binding_retired")
 
     def test_server_state_api(self) -> None:
         status, payload = self.state.enqueue_command("camera_get", {}, peer="client")
@@ -1742,6 +1763,81 @@ class UiIngressSchemaTest(unittest.TestCase):
                     loopback.validate_command_args(command, args),
                     (False, "bad_args"),
                 )
+
+
+class BoundWithoutLifecycleTest(unittest.TestCase):
+    """P22': a BOUND peer with lifecycle=None does not dispatch; legacy still does."""
+
+    def test_bound_without_lifecycle_rejects_enqueue_and_holds_poll(self) -> None:
+        state = loopback.ServerState("clave-gate")
+        state.install_bound_peer(
+            instance=INST_CLIENT, role="client", pid=41002, run_id="run-1"
+        )
+        state.lifecycle = None
+        st, payload = state.enqueue_command("camera_get", {}, peer="client")
+        self.assertNotEqual(st, 200, payload)
+        self.assertEqual(st, 503, payload)
+        self.assertEqual(payload.get("error"), "run_state_unavailable")
+        st_poll, delivered = state.record_poll(
+            "client", None, instance=INST_CLIENT, source_pid=41002
+        )
+        self.assertEqual(st_poll, 200, delivered)
+        self.assertEqual(delivered.get("commands"), [])
+
+    def test_bound_without_lifecycle_rejects_exec_enforce(self) -> None:
+        state = loopback.ServerState(
+            "k",
+            enable_exec_enforce=True,
+            exec_allowlist={"probe()"},
+            exec_audit=lambda *_args: None,
+        )
+        bind_both_peers(state, run_id="run-1")
+        state.lifecycle = None
+        st, payload = state.enqueue_command(
+            "exec_enforce",
+            {"expr": "probe()", "main_fn": "Main"},
+            peer="server",
+        )
+        self.assertNotEqual(st, 200, payload)
+        self.assertEqual(st, 503, payload)
+        self.assertEqual(payload.get("error"), "run_state_unavailable")
+
+    def test_legacy_queue_without_binding_still_dispatches(self) -> None:
+        state = loopback.ServerState("k")
+        state.lifecycle = None
+        st, payload = state.enqueue_command("camera_get", {}, peer="client")
+        self.assertEqual(st, 200, payload)
+        st_poll, delivered = state.record_poll("client", None)
+        self.assertEqual(st_poll, 200, delivered)
+        ids = [command.get("id") for command in (delivered.get("commands") or [])]
+        self.assertIn(payload.get("id"), ids)
+
+
+class AdoptDispatchableBindingTest(unittest.TestCase):
+    """P19''-c: dispatchable is a BOUND binding on the present ServerState."""
+
+    def test_run_has_bound_binding_requires_bound_state(self) -> None:
+        state = loopback.ServerState("k")
+        checker = getattr(state, "run_has_bound_binding", None)
+        self.assertTrue(callable(checker), "run_has_bound_binding missing")
+        self.assertFalse(checker("run-1"))
+        bind_both_peers(state, run_id="run-1")
+        self.assertTrue(checker("run-1"))
+        self.assertFalse(checker("run-other"))
+        starting = loopback.ServerState("k2")
+        start_checker = getattr(starting, "run_has_bound_binding", None)
+        self.assertTrue(callable(start_checker))
+        with starting._lock:
+            starting._bindings[INST_CLIENT] = Binding(
+                instance=INST_CLIENT,
+                run_id="run-1",
+                role="client",
+                epoch=1,
+                pid=None,
+                creation_time_utc=None,
+                state=BINDING_STARTING,
+            )
+        self.assertFalse(start_checker("run-1"))
 
 
 class OneOfIsTotalOverJsonTest(unittest.TestCase):

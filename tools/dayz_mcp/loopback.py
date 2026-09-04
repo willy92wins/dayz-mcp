@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+# Every transition into RUNNING_IDLE goes through the fence; the poll
+# re-validates after re-acquiring the lock.
+
 import errno
 import hmac
 import json
@@ -93,6 +96,11 @@ CREDENTIAL_RECOVERY_TTL_S = 300.0
 CREDENTIAL_RECOVERY_COUNT_MAX = 2_147_483_647
 EXEC_COMMANDS = {"exec_enforce"}
 WHITELISTED_COMMANDS = SERVER_COMMANDS | CLIENT_COMMANDS
+_RUN_NOT_OWNED_HINT = (
+    "This run has no owner (RUNNING_IDLE). Adopt the existing run "
+    "before dispatching."
+)
+_DURABLE_UNREADABLE = "run_state_unavailable"
 # Whitelisted verbs that validate_command_args does NOT schema-check. Each is
 # either read-only / single-arg or validated by its server.py tool. Keep in sync
 # with SERVER_COMMANDS | CLIENT_COMMANDS: any whitelisted verb not in this set
@@ -218,6 +226,13 @@ def peer_for_command(cmd: str) -> str:
     if cmd in CLIENT_COMMANDS:
         return "client"
     return "server"
+
+
+def _binding_run_id(binding: object | None) -> str | None:
+    run_id = getattr(binding, "run_id", None)
+    if isinstance(run_id, str) and run_id:
+        return run_id
+    return None
 
 
 def _default_log_sink(message: str) -> None:
@@ -809,7 +824,35 @@ class TestIdentityOverride:
             self._ctime_by_pid.pop(pid, None)
 
 
+class _BoundPeerDispatchable:
+    """Durable RUNNING for run_ids minted by the test helper ``install_bound_peer``.
+
+    Production never calls that helper; the daemon attaches a real
+    ProcessLifecycle before minting. Tests that want the P22' ``lifecycle is
+    None`` branch set ``state.lifecycle = None`` after install.
+    """
+
+    def __init__(self, run_id: str) -> None:
+        self._run_ids = {run_id}
+        self.manifest = self
+
+    def remember(self, run_id: str) -> None:
+        if isinstance(run_id, str) and run_id:
+            self._run_ids.add(run_id)
+
+    def get(self, run_id: str) -> object | None:
+        if run_id in self._run_ids:
+            return _BoundPeerRunning()
+        return None
+
+
+class _BoundPeerRunning:
+    state = "RUNNING"
+
+
 class ServerState:
+    """A run without an owner dispatches nothing; the fence precedes the durable transition and so does binding retirement; the diagnostic follows a successful persist."""
+
     def __init__(
         self,
         key: str,
@@ -838,6 +881,7 @@ class ServerState:
         self.retail_probe: Callable[[], dict[str, object]] | None = None
         self.daemon_generation: str | None = None
         self._lock = threading.RLock()
+        self._fenced_runs: set[str] = set()
         self._next_id = 1
         self._legacy_queues: dict[str, list[dict]] = {"server": [], "client": []}
         self._queues = self._legacy_queues
@@ -990,19 +1034,33 @@ class ServerState:
                 self._retired_roles.discard("client")
 
     def retire_role(self, run_id: str, role: str, reason: str) -> None:
+        discarded_exec: list[tuple[str, str, int]] = []
+        finished_operations: list[tuple[ClientIdentity, str, int, str, str]] = []
         with self._lock:
             instance = self._role_index.pop((run_id, role), None)
             if instance is None:
                 return
-            self._retire_instance_locked(instance, reason)
+            self._retire_instance_locked(
+                instance, reason, discarded_exec, finished_operations
+            )
+            self._tombstone_run_activity(run_id)
+        self._flush_queue_discards(discarded_exec, finished_operations)
 
     def retire_run(self, run_id: str, reason: str) -> None:
+        discarded_exec: list[tuple[str, str, int]] = []
+        finished_operations: list[tuple[ClientIdentity, str, int, str, str]] = []
         with self._lock:
             keys = [key for key in self._role_index if key[0] == run_id]
             for key in keys:
                 instance = self._role_index.pop(key, None)
                 if instance is not None:
-                    self._retire_instance_locked(instance, reason)
+                    self._retire_instance_locked(
+                        instance, reason, discarded_exec, finished_operations
+                    )
+            if isinstance(run_id, str) and run_id:
+                self._fenced_runs.discard(run_id)
+                self._tombstone_run_activity(run_id)
+        self._flush_queue_discards(discarded_exec, finished_operations)
 
     def install_bound_peer(
         self,
@@ -1034,16 +1092,39 @@ class ServerState:
                 self._test_identity_override = TestIdentityOverride()
             self._test_identity_override.bind(instance, pid, creation_time_utc)
             self._ever_bound = True
+        if self.lifecycle is None:
+            self.lifecycle = _BoundPeerDispatchable(run_id)
+        else:
+            remember = getattr(self.lifecycle, "remember", None)
+            if callable(remember):
+                remember(run_id)
 
-    def _retire_instance_locked(self, instance: str, reason: str) -> None:
+    def run_has_bound_binding(self, run_id: str) -> bool:
+        """True iff a present binding for this run is BOUND. STARTING does not dispatch."""
+
+        if not isinstance(run_id, str) or not run_id:
+            return False
+        with self._lock:
+            return any(
+                _binding_run_id(binding) == run_id and binding.state == BINDING_BOUND
+                for binding in self._bindings.values()
+            )
+
+    def _retire_instance_locked(
+        self,
+        instance: str,
+        reason: str,
+        discarded_exec: list[tuple[str, str, int]],
+        finished_operations: list[tuple[ClientIdentity, str, int, str, str]],
+    ) -> None:
         binding = self._bindings.get(instance)
         if binding is None:
             return
         self._station_epoch += 1
         queue = self._bound_queues.get(instance, [])
-        discarded_exec: list[tuple[str, str, int]] = []
-        finished_operations: list[tuple[ClientIdentity, str, int, str, str]] = []
-        self._discard_queue(queue, "binding_retired", discarded_exec, finished_operations)
+        self._discard_queue(
+            queue, "binding_retired", discarded_exec, finished_operations
+        )
         self._retired_instances[instance] = None
         self._retired_instances.move_to_end(instance)
         while len(self._retired_instances) > RETIRED_INSTANCE_LIMIT:
@@ -1057,9 +1138,8 @@ class ServerState:
         override = self._test_identity_override
         if override is not None:
             override.drop_instance(instance, retired_pid)
-        for command_id, fence in list(self._command_fence.items()):
-            if fence[0] == instance:
-                self._command_fence.pop(command_id, None)
+        # Result fences of already-dispatched ids survive retirement (P12).
+        # Queued commands drop their fence in _mark_discarded.
 
     def _peer_covers(self, binding: Binding, peer: str) -> bool:
         return binding.role == peer or binding.role == "offline"
@@ -1071,8 +1151,151 @@ class ServerState:
             if binding.state != BINDING_RETIRED and self._peer_covers(binding, peer)
         ]
 
+    def _drain_run_locked(
+        self,
+        run_id: str,
+        discarded_exec: list[tuple[str, str, int]],
+        finished_operations: list[tuple[ClientIdentity, str, int, str, str]],
+    ) -> None:
+        for instance, binding in list(self._bindings.items()):
+            if binding.state == BINDING_RETIRED:
+                continue
+            if _binding_run_id(binding) != run_id:
+                continue
+            queue = self._bound_queues.get(instance)
+            if queue:
+                self._discard_queue(
+                    queue, "run_not_owned", discarded_exec, finished_operations
+                )
+
+    def _flush_queue_discards(
+        self,
+        discarded_exec: list[tuple[str, str, int]],
+        finished_operations: list[tuple[ClientIdentity, str, int, str, str]],
+    ) -> None:
+        for expr, main_fn, command_id in discarded_exec:
+            try:
+                if self.exec_audit is not None:
+                    self.exec_audit(expr, "discarded", main_fn, command_id)
+            except Exception:
+                pass
+        self._finish_operations(finished_operations)
+
+    def drain_pending_for_run(self, run_id: str) -> None:
+        """Empty bound queues for this run without retiring the binding."""
+
+        if not isinstance(run_id, str) or not run_id:
+            return
+        discarded_exec: list[tuple[str, str, int]] = []
+        finished_operations: list[tuple[ClientIdentity, str, int, str, str]] = []
+        with self._lock:
+            self._drain_run_locked(run_id, discarded_exec, finished_operations)
+        self._flush_queue_discards(discarded_exec, finished_operations)
+
+    def fence_runs(self, run_ids: list[str]) -> None:
+        """Raise the logical owner-fence and empty queues under the poll/enqueue lock."""
+
+        discarded_exec: list[tuple[str, str, int]] = []
+        finished_operations: list[tuple[ClientIdentity, str, int, str, str]] = []
+        try:
+            with self._lock:
+                for run_id in run_ids:
+                    if not isinstance(run_id, str) or not run_id:
+                        continue
+                    self._fenced_runs.add(run_id)
+                    # Tombstone before drain: if raising the frontier fails,
+                    # queues stay so the idle transition can revert closed.
+                    self._tombstone_run_activity(run_id, fail_closed=True)
+                    self._drain_run_locked(run_id, discarded_exec, finished_operations)
+        finally:
+            self._flush_queue_discards(discarded_exec, finished_operations)
+
+    def _tombstone_run_activity(
+        self, run_id: str | None, *, fail_closed: bool = False
+    ) -> None:
+        # Caller may hold self._lock. Must not take _operation_lock.
+        if not isinstance(run_id, str) or not run_id:
+            return
+        lifecycle = self.lifecycle
+        tombstone = getattr(lifecycle, "tombstone_run_activity", None)
+        if not callable(tombstone):
+            return
+        try:
+            tombstone(run_id, now=time.time())
+        except Exception:
+            if fail_closed:
+                raise
+            return
+
+    def unfence_runs(self, run_ids: list[str]) -> None:
+        with self._lock:
+            for run_id in run_ids:
+                if isinstance(run_id, str) and run_id:
+                    self._fenced_runs.discard(run_id)
+
+    def _durable_run_state(self, run_id: str | None) -> str | None:
+        if not isinstance(run_id, str) or not run_id:
+            return None
+        lifecycle = self.lifecycle
+        if lifecycle is None:
+            return None
+        manifest = getattr(lifecycle, "manifest", None)
+        getter = getattr(manifest, "get", None)
+        if not callable(getter):
+            return None
+        try:
+            run = getter(run_id)
+        except Exception:
+            return _DURABLE_UNREADABLE
+        if run is None:
+            return "EXITED"
+        state = getattr(run, "state", None)
+        return state if isinstance(state, str) else None
+
+    def _run_is_fenced(self, run_id: str | None) -> bool:
+        return isinstance(run_id, str) and run_id in self._fenced_runs
+
+    def _poll_should_hold_commands(self, run_id: str | None) -> bool:
+        if self._run_is_fenced(run_id):
+            return True
+        if not isinstance(run_id, str) or not run_id:
+            return False
+        return not self._run_is_dispatchable(run_id)
+
+    def _run_is_dispatchable(self, run_id: str | None) -> bool:
+        """RUNNING or STARTING dispatch; a fenced or idle run dispatches nothing."""
+
+        if self._run_is_fenced(run_id):
+            return False
+        return self._durable_run_state(run_id) in {"RUNNING", "STARTING"}
+
+    def _enqueue_run_rejection(
+        self, run_id: str | None, *, mutation: bool, internal: bool
+    ) -> str | None:
+        _ = (mutation, internal)
+        if not isinstance(run_id, str) or not run_id:
+            return None
+        if self._run_is_fenced(run_id):
+            return "run_not_owned"
+        state = self._durable_run_state(run_id)
+        if state in {"RUNNING", "STARTING"}:
+            return None
+        if state == "RUNNING_IDLE":
+            return "run_not_owned"
+        if state == _DURABLE_UNREADABLE or state is None:
+            return "run_state_unavailable"
+        return "binding_retired"
+
+    def _fence_reject_response(self, code: str) -> tuple[int, dict]:
+        if code == "run_state_unavailable":
+            return 503, {"error": "run_state_unavailable"}
+        status, payload = fence_error(code)
+        if code == "run_not_owned":
+            payload["hint"] = _RUN_NOT_OWNED_HINT
+        return status, payload
+
     def _enqueue_fence_target(
-        self, peer: str, cmd: str
+        self, peer: str, cmd: str, *, internal: bool = False
     ) -> tuple[str | None, list[dict] | None, str | None]:
         mutation = command_requires_lease(cmd)
         candidates = self._active_bindings_for_peer(peer)
@@ -1090,6 +1313,11 @@ class ServerState:
             return "instance_peer_collision", None, None
         if mutation:
             if len(bound) == 1:
+                rejection = self._enqueue_run_rejection(
+                    _binding_run_id(bound[0]), mutation=True, internal=internal
+                )
+                if rejection is not None:
+                    return rejection, None, None
                 instance = bound[0].instance
                 return None, self._bound_queues.setdefault(instance, []), instance
             if ambiguous:
@@ -1106,6 +1334,11 @@ class ServerState:
                 return "unbound_after_restart", None, None
             return "legacy_unbound", None, None
         if len(bound) == 1:
+            rejection = self._enqueue_run_rejection(
+                _binding_run_id(bound[0]), mutation=False, internal=internal
+            )
+            if rejection is not None:
+                return rejection, None, None
             instance = bound[0].instance
             return None, self._bound_queues.setdefault(instance, []), instance
         if ambiguous:
@@ -1114,6 +1347,10 @@ class ServerState:
             return "creation_time_unreadable", None, None
         if starting:
             return "binding_not_ready", None, None
+        if not candidates and (
+            peer in self._retired_roles or "offline" in self._retired_roles
+        ):
+            return "binding_retired", None, None
         return None, self._legacy_queues[peer], None
 
     def _peer_queue_len(self, peer: str) -> int:
@@ -1301,6 +1538,7 @@ class ServerState:
                 owner_client=None,
                 owner_lease_id=None,
                 operation_timeout_s=safe_operation_timeout_s,
+                internal=internal,
             )
 
         try:
@@ -1482,6 +1720,7 @@ class ServerState:
         owner_lease_id: str | None,
         operation_timeout_s: float = 0.0,
         commit: Callable[[int], bool] | None = None,
+        internal: bool = False,
     ) -> tuple[int, dict]:
         if cmd not in self.whitelisted_commands():
             return 400, {"error": "not_whitelisted"}
@@ -1520,20 +1759,23 @@ class ServerState:
                 owner_lease_id,
                 operation_timeout_s,
                 commit,
+                internal=internal,
             )
 
+        commanded_run_id: str | None = None
+        activity_epoch: float | None = None
         with self._lock:
             if self._stopping:
                 return 409, {"error": "enqueue_cancelled"}
             fence_error_code, queue, fence_instance = self._enqueue_fence_target(
-                peer, cmd
+                peer, cmd, internal=internal
             )
             if fence_error_code is not None or queue is None:
                 code = fence_error_code or "legacy_unbound"
                 self._fence_reject_counts[code] = (
                     self._fence_reject_counts.get(code, 0) + 1
                 )
-                return fence_error(code)
+                return self._fence_reject_response(code)
             if self._peer_queue_len(peer) >= MAX_QUEUE:
                 return 429, {"error": "queue_full"}
 
@@ -1555,13 +1797,23 @@ class ServerState:
                 self._bindings.get(fence_instance) if fence_instance else None
             )
             self._seal_command(command_id, fence_instance, binding)
+            commanded_run_id = _binding_run_id(binding)
             if command_requires_lease(cmd) and (
                 fence_instance is None
                 or binding is None
                 or binding.state != BINDING_BOUND
             ):
                 self._unaccredited_mutation_enqueues += 1
+            if not internal and isinstance(commanded_run_id, str) and commanded_run_id:
+                activity_epoch = time.time()
 
+        try:
+            if not internal:
+                self._note_run_command_activity(
+                    owner_client, run_id=commanded_run_id, now=activity_epoch
+                )
+        except Exception:
+            pass
         return 200, {"id": command_id, "peer": peer, "cmd": cmd}
 
     def _enqueue_exec_enforce(
@@ -1572,6 +1824,7 @@ class ServerState:
         owner_lease_id: str | None,
         operation_timeout_s: float,
         commit: Callable[[int], bool] | None = None,
+        internal: bool = False,
     ) -> tuple[int, dict]:
         expr = args.get("expr", "")
         main_fn = args.get("main_fn", "")
@@ -1594,13 +1847,13 @@ class ServerState:
             if self._stopping:
                 return 409, {"error": "enqueue_cancelled"}
             fence_error_code, _queue, _fence_instance = self._enqueue_fence_target(
-                peer, "exec_enforce"
+                peer, "exec_enforce", internal=internal
             )
             if fence_error_code is not None:
                 self._fence_reject_counts[fence_error_code] = (
                     self._fence_reject_counts.get(fence_error_code, 0) + 1
                 )
-                return fence_error(fence_error_code)
+                return self._fence_reject_response(fence_error_code)
             if self._peer_queue_len(peer) >= MAX_QUEUE:
                 return 429, {"error": "queue_full"}
             command_id = self._next_id
@@ -1622,9 +1875,12 @@ class ServerState:
         commit_failed = False
         capacity_lost = False
         fence_lost = False
+        fence_error_code: str | None = None
+        commanded_run_id: str | None = None
+        activity_epoch: float | None = None
         with self._lock:
             fence_error_code, queue, fence_instance = self._enqueue_fence_target(
-                peer, "exec_enforce"
+                peer, "exec_enforce", internal=internal
             )
             self._exec_capacity_reserved[peer] -= 1
             if fence_error_code is not None or queue is None:
@@ -1653,12 +1909,15 @@ class ServerState:
                     self._bindings.get(fence_instance) if fence_instance else None
                 )
                 self._seal_command(command_id, fence_instance, binding)
+                commanded_run_id = _binding_run_id(binding)
                 if (
                     fence_instance is None
                     or binding is None
                     or binding.state != BINDING_BOUND
                 ):
                     self._unaccredited_mutation_enqueues += 1
+                if not internal and isinstance(commanded_run_id, str) and commanded_run_id:
+                    activity_epoch = time.time()
 
         if commit_failed or capacity_lost or fence_lost:
             try:
@@ -1668,11 +1927,47 @@ class ServerState:
         if capacity_lost:
             return 429, {"error": "queue_full"}
         if fence_lost:
+            if fence_error_code is not None:
+                return self._fence_reject_response(fence_error_code)
             return 409, {"error": "enqueue_cancelled"}
         if commit_failed:
             return 409, {"error": "lease_invalid"}
 
+        try:
+            if not internal:
+                self._note_run_command_activity(
+                    owner_client, run_id=commanded_run_id, now=activity_epoch
+                )
+        except Exception:
+            pass
         return 200, {"id": command_id, "peer": peer, "cmd": "exec_enforce"}
+
+    def _note_run_command_activity(
+        self,
+        owner_client: ClientIdentity | None,
+        run_id: str | None = None,
+        now: float | None = None,
+    ) -> None:
+        epoch = time.time() if now is None else float(now)
+        lifecycle = self.lifecycle
+        if isinstance(run_id, str) and run_id:
+            exact = getattr(lifecycle, "record_command_activity", None)
+            if callable(exact):
+                exact(run_id, now=epoch)
+                return
+        # Legacy queue and any enqueue without a bound run_id: no accredited
+        # destination. Lifecycle publishes unknown rather than crediting by
+        # cardinality or leaving a false stale.
+        recorder = getattr(lifecycle, "record_box_command_activity", None)
+        if not callable(recorder):
+            return
+        owner_session = (
+            owner_client.session_id
+            if owner_client is not None
+            and isinstance(getattr(owner_client, "session_id", None), str)
+            else None
+        )
+        recorder(now=epoch, owner_session=owner_session)
 
     def _rollback_enqueued(self, command_id: int) -> None:
         for key, queue in self._iter_mutable_queues():
@@ -1846,10 +2141,20 @@ class ServerState:
                     if bind_label == BINDING_BOUND:
                         accredited = True
                         self._bound_last_poll_at[peer] = now
-                        queue = self._bound_queues.setdefault(token, [])
-                        self._expire_stale_commands(
-                            queue, now, discarded_exec, finished_operations
-                        )
+                        run_id = _binding_run_id(binding)
+                        if self._poll_should_hold_commands(run_id):
+                            if isinstance(run_id, str) and run_id:
+                                self._drain_run_locked(
+                                    run_id,
+                                    discarded_exec,
+                                    finished_operations,
+                                )
+                            queue = []
+                        else:
+                            queue = self._bound_queues.setdefault(token, [])
+                            self._expire_stale_commands(
+                                queue, now, discarded_exec, finished_operations
+                            )
             else:
                 self._peer_last_class[peer] = BINDING_LEGACY
                 queue = self._legacy_queues[peer]
@@ -1887,7 +2192,13 @@ class ServerState:
         while True:
             with self._lock:
                 queue_ref = deliver_queue
-                snapshot = list(queue_ref)
+                bound = self._bindings.get(token) if token is not None else None
+                if bound is not None and self._poll_should_hold_commands(
+                    _binding_run_id(bound)
+                ):
+                    snapshot = []
+                else:
+                    snapshot = list(queue_ref)
             has_mutation = any(
                 isinstance(command.get("cmd"), str)
                 and command_requires_lease(command["cmd"])
@@ -1903,6 +2214,15 @@ class ServerState:
 
             with self._lock:
                 queue = deliver_queue
+                bound = self._bindings.get(token) if token is not None else None
+                hold_run_id = _binding_run_id(bound) if bound is not None else None
+                if bound is not None and self._poll_should_hold_commands(hold_run_id):
+                    if isinstance(hold_run_id, str) and hold_run_id:
+                        self._drain_run_locked(
+                            hold_run_id, discarded_exec, finished_operations
+                        )
+                    commands = []
+                    break
                 if (
                     queue is not queue_ref
                     or len(queue) < len(snapshot)
@@ -2175,6 +2495,8 @@ class ServerState:
             fence = self._command_fence.get(command_id)
             if fence is not None:
                 target_instance, target_epoch, _target_pid = fence
+                if target_instance in self._retired_instances:
+                    return 409, {"error": "binding_retired"}
                 presented = instance or ""
                 if target_instance and presented != target_instance:
                     self._audit_fence(
