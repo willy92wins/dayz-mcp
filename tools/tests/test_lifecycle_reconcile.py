@@ -461,9 +461,34 @@ class LifecycleReconcileTest(unittest.TestCase):
         result = self._replacement()
         self._assert_nothing_was_touched(result, "bridge_state_unreadable")
 
-    def test_a_peer_row_without_a_usable_age_is_not_an_answer(self) -> None:
+    def test_a_client_that_never_polled_is_still_replaceable(self) -> None:
+        """Both ages null is the row of a peer that never polled this generation.
+
+        That is evidence that it did not poll after the decision either, and it
+        is the hung client the replacement exists for (ficha 8f76c). Reading it
+        as silence would refuse exactly the case the feature was built to fix.
+        """
         self.bridge.last_poll_age_s = None
         self.bridge.bound_last_poll_age_s = None
+        result = self._replacement(
+            replace_if_not_polling_since=int((time.time() - 5.0) * 1000)
+        )
+        self.assertIs(result.get("ok"), True, result)
+        self.assertEqual([record.pid for record in self.guard.terminate_calls], [761])
+
+    def test_a_row_that_is_not_the_shape_the_bridge_publishes_is_no_answer(self) -> None:
+        class _MalformedBridge:
+            reads = 0
+
+            def status_snapshot(self, now: object = None) -> dict[str, object]:
+                return {"peers": {"client": {"binding_state": "BOUND"}}}
+
+        self.lifecycle.bridge_probe = _MalformedBridge().status_snapshot
+        result = self._replacement()
+        self._assert_nothing_was_touched(result, "bridge_state_unreadable")
+
+    def test_a_non_numeric_age_is_no_answer(self) -> None:
+        self.bridge.last_poll_age_s = "0.2"
         result = self._replacement()
         self._assert_nothing_was_touched(result, "bridge_state_unreadable")
 

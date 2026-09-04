@@ -1680,18 +1680,27 @@ class ProcessLifecycle:
         peer = self._client_peer_row()
         if peer is None:
             return "bridge_state_unreadable"
-        ages = [
-            value
-            for value in (
-                peer.get("last_poll_age_s"),
-                peer.get("bound_last_poll_age_s"),
-            )
-            if isinstance(value, (int, float)) and not isinstance(value, bool)
-        ]
-        if not ages:
-            # A row with no usable age is not an answer, and no answer must not
-            # authorise a kill (the same reading as _peer_row_is_usable).
+        keys = ("last_poll_age_s", "bound_last_poll_age_s")
+        if any(key not in peer for key in keys):
+            # Not the shape status_snapshot publishes, so not an answer about
+            # this client, and no answer must not authorise a kill.
             return "bridge_state_unreadable"
+        values = [peer[key] for key in keys]
+        if any(
+            value is not None
+            and not (isinstance(value, (int, float)) and not isinstance(value, bool))
+            for value in values
+        ):
+            return "bridge_state_unreadable"
+        ages = [value for value in values if value is not None]
+        if not ages:
+            # Both ages null is the row of a peer that has NEVER polled in this
+            # generation (loopback.py: last_poll_at stays None until the first
+            # poll). That is positive evidence that it did not poll after the
+            # decision either -- and it is the hung client of ficha 8f76c, the
+            # very case the replacement exists for. Reading it as silence would
+            # make the feature refuse exactly the case it was built to fix.
+            return None
         if min(ages) < max(0.0, decision_age_s):
             return "client_polling_since_decision"
         return None
