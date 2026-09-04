@@ -26,6 +26,7 @@ from dayz_mcp import (
     core,
     daemon,
     daemon_credential,
+    dayz_test_modes,
     dayz_test_tool,
     host_config,
     inbox,
@@ -50,6 +51,19 @@ from dayz_mcp.server_cli import CLIENT_PLATFORM_ALIASES, build_server_parser
 from dayz_mcp.process_lifecycle import empty_box, occupancy_error_fields
 from dayz_mcp.session_coordination import ClientIdentity
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
+
+UiClickMode = Literal["direct", "complete"]
+UiReloadLayoutMode = Literal["reload", "close"]
+
+_CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
+    "pipeline_resolve",
+    "capture_screenshot",
+    "ui_click",
+    "ui_reload_layout",
+    "dayz_knowledge_status",
+    "dayz_knowledge_prepare",
+    "dayz_test_run",
+)
 
 
 DEFAULT_TOOL_TIMEOUT_S = 15.0
@@ -1736,6 +1750,53 @@ def _patch_public_argument_alias(app: FastMCP, tool_name: str, internal: str, pu
     object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
 
 
+def _patch_closed_tool_schema(app: FastMCP, tool_name: str) -> None:
+    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
+    if tool is None:
+        raise RuntimeError(f"missing tool {tool_name}")
+    tool.parameters["additionalProperties"] = False
+    # A zero-argument tool publishes `required: []` explicitly: a consumer that generates
+    # calls from the schema must see a closed, empty contract, not an absent key.
+    tool.parameters.setdefault("required", [])
+    allowed = set(tool.parameters.get("properties", {}))
+    original = tool.fn_metadata.call_fn_with_arg_validation
+
+    async def patched(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly):
+        unknown = set(arguments_to_validate) - allowed
+        if unknown:
+            raise ToolError("bad_args: unexpected arguments")
+        return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
+
+    object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
+
+
+def _patch_mode_enum_from_authority(app: FastMCP, tool_name: str, field: str = "mode") -> None:
+    """Publish and enforce a mode enum read from the M12 authority at build time and per call.
+
+    ``dayz_test_modes.public_mode_names()`` is read when the app is BUILT (never when this module
+    is imported) for the published schema, and again on EVERY call before validation, so a
+    substituted record set is honoured both by a new ``build_app()`` and by the next call
+    (Codex B-01, 2026-09-04). Schema and validation close together: the annotation stays ``str``
+    and this wrapper is the gate.
+    """
+    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
+    if tool is None:
+        raise RuntimeError(f"missing tool {tool_name}")
+    prop = tool.parameters.get("properties", {}).get(field)
+    if not isinstance(prop, dict):
+        raise RuntimeError(f"missing property {field} on {tool_name}")
+    prop["enum"] = list(dayz_test_modes.public_mode_names())
+    original = tool.fn_metadata.call_fn_with_arg_validation
+
+    async def patched(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly):
+        allowed = dayz_test_modes.public_mode_names()
+        if arguments_to_validate.get(field) not in allowed:
+            raise ToolError(f"bad_args: {field} must be one of " + "|".join(allowed))
+        return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
+
+    object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
+
+
 def _player_count(result: dict[str, Any]) -> int:
     players = result.get("players")
     if not isinstance(players, list):
@@ -2882,10 +2943,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             "Queue and run an approved DayZ test project; lease ownership and "
             "heartbeat remain internal to the tool. Release any held session "
-            "lease before calling. mode is server|all|client. "
+            "lease before calling. "
             "Reattach sequence: server -> run_id -> client(run_id). "
             "client requires run_id; server|all forbid run_id. "
             "preflight does not relax that matrix. "
+            "extra_mods accepts any folder under the project's mod_roots "
+            "(a disposable probe need not be registered as a project). "
             "wait_for_box_s>0 waits "
             "until session_status.box is free (FIFO, no tool_lock while "
             f"sleeping). 0 is the immediate reject. wait_for_box_s must be <= "
@@ -3930,9 +3993,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(description=(
         "Capture a screenshot from the DayZDiag window. Returns inline JPEG ImageContent fit to the "
         "client's MAX_MCP_OUTPUT_TOKENS budget (default 25000 -> ~600px wide; raise that client env var for bigger inline frames: 50000 -> ~860px/2x px, 75000 -> ~1070px/3x, 100000 -> ~native; max_tokens spends LESS than the cap, above-cap is clamped). Use scale='full' to spend a raised inline budget on resolution (the default scale='small' is a hard 512px cap). crop ('center', 'center:0.4', or normalized 'l,t,r,b') zooms on the subject; "
-        "for optical zoom set a narrow fov in radians via camera_set first. fmt='webp' is ~15% smaller (opt-in; Claude Code has known webp MIME bugs, JPEG stays default). save_fullres=True also writes the "
-        "native-resolution frame to disk and returns its path in a JSON text block — read that file for "
-        "fine detail, bypassing the inline token budget. Without window focus, the frame can be frozen. "
+        "for optical zoom set a narrow fov in radians via camera_set first. fmt='webp' is ~15% smaller (opt-in; Claude Code has known webp MIME bugs, JPEG stays default). "
+        "The result is ALWAYS two blocks: the image, then a JSON text block with the surface map (crop_space, window_surface, client_surface, effective_surface, frame_sha256, fullres_path). "
+        "crop_space='client' (default) normalizes crop over the rendered viewport (the space ui_tree rects use) and fails closed with frame_client_rect_unverified; 'window' is the legacy whole-window bitmap. save_fullres=True also writes the "
+        "native-resolution frame to disk and reports its path as fullres_path — read that file for "
+        "fine detail, bypassing the inline token budget. Without window focus, the frame can be frozen: compare frame_sha256 between captures to detect it. "
         "With two DayZ clients, capture targets the live run's client through cmdline_match/client_pid."
     ))
     async def capture_screenshot(
@@ -3943,6 +4008,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         fmt: str = mcp_capture.DEFAULT_FORMAT,
         quality: int = mcp_capture.DEFAULT_QUALITY,
         crop: str = "",
+        crop_space: str = mcp_capture.DEFAULT_CROP_SPACE,
         save_fullres: bool = False,
         save_dir: str = "",
     ):
@@ -4005,6 +4071,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 fmt=fmt,
                 quality=quality,
                 crop=crop,
+                crop_space=crop_space,
                 save_fullres=save_fullres,
                 save_dir=save_dir,
             )
@@ -4024,9 +4091,6 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad image data") from exc
         image_format = _image_format_from_mime(inline.get("mimeType"))
         image = Image(data=raw, format=image_format)
-        if not save_fullres:
-            # Backward-compatible single-Image return (now JPEG instead of PNG).
-            return image
         meta = {"fullres_path": result.get("fullres_path"), **result.get("meta", {})}
         return [image, json.dumps(meta)]
 
@@ -4236,16 +4300,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Click a client widget by name. button is "
-        "0=left, 1=right, 2=middle."
+        "0=left, 1=right, 2=middle. mode='direct' is the default; the bridge "
+        "rejects mode='complete' with mode_not_implemented."
     ))
     async def ui_click(
         path: str,
-        button: int = 0,
+        button: StrictInt = 0,
         # Not `str | None`: FastMCP would publish anyOf[string,null] and collapse
         # explicit root=null into omit (global scope). `str = None` publishes
         # type:string so Pydantic rejects the null before enqueue.
         root: str = None,
-        mode: str = "direct",
+        mode: UiClickMode = "direct",
         bubble: StrictBool = False,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
@@ -4280,7 +4345,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     ))
     async def ui_reload_layout(
         path: str = "",
-        mode: str = "reload",
+        mode: UiReloadLayoutMode = "reload",
         limit: int = 256,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
@@ -4516,6 +4581,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def pipeline_resolve(
         feedback_id: str,
         resolution: str,
+        evidence_ref: Annotated[str | None, Field(max_length=240)] = None,
     ) -> dict[str, Any]:
         """Triage a feedback item by appending a resolution; deletes nothing, history is append-only."""
         # The lock here only preserves the one-tool-at-a-time client invariant;
@@ -4523,7 +4589,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             try:
                 return inbox.append_resolution(
-                    feedback_id, resolution, platform=_pipeline_platform()
+                    feedback_id,
+                    resolution,
+                    platform=_pipeline_platform(),
+                    evidence_ref=evidence_ref,
                 )
             except ValueError as exc:
                 message = str(exc)
@@ -4554,6 +4623,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         """
         return await playbook_tool_mod.execute_playbook_run(app, name, params)
 
+    _patch_mode_enum_from_authority(app, "dayz_test_run")
+    for _closed_tool in _CLOSED_SCHEMA_TOOLS:
+        _patch_closed_tool_schema(app, _closed_tool)
     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
     _tool_registry_overlay.update(_frozen_tool_registry_overlay(app, config))
     return app, runtime

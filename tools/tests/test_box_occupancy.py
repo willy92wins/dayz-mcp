@@ -673,7 +673,7 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
             return {
                 "status": "succeeded",
                 "project": "ExampleMod",
-                "mode": "offline",
+                "mode": "server",
                 "run_id": "12345678-1234-4234-8234-1234567890ab",
                 "phase": "completed",
                 "elapsed_s": 0.1,
@@ -697,7 +697,7 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
                     "dayz_test_run",
                     {
                         "project": "ExampleMod",
-                        "mode": "offline",
+                        "mode": "server",
                         "wait_for_box_s": 30.0,
                     },
                 )
@@ -723,7 +723,7 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
                 "dayz_test_run",
                 {
                     "project": "ExampleMod",
-                    "mode": "offline",
+                    "mode": "server",
                     "wait_for_box_s": BOX_WAIT_MAX_S + 1,
                 },
             )
@@ -796,7 +796,7 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
                     "dayz_test_run",
                     {
                         "project": "ExampleMod",
-                        "mode": "offline",
+                        "mode": "server",
                         "wait_for_box_s": 5.0,
                     },
                 )
@@ -826,7 +826,7 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
             return {
                 "status": "failed",
                 "project": "ExampleMod",
-                "mode": "offline",
+                "mode": "server",
                 "run_id": None,
                 "phase": "executing",
                 "elapsed_s": 0.2,
@@ -866,7 +866,7 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
             payload = _content_json(
                 await app.call_tool(
                     "dayz_test_run",
-                    {"project": "ExampleMod", "mode": "offline"},
+                    {"project": "ExampleMod", "mode": "server"},
                 )
             )
         self.assertEqual(payload.get("error_code"), "active_run_exists")

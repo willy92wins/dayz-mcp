@@ -305,7 +305,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             running = asyncio.create_task(
                 app.call_tool(
                     "dayz_test_run",
-                    {"project": "ExampleMod", "mode": "offline"},
+                    {"project": "ExampleMod", "mode": "server"},
                 )
             )
             await started.wait()
@@ -342,7 +342,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         for tool, args, target in (
             (
                 "dayz_test_run",
-                {"project": "ExampleMod", "mode": "offline"},
+                {"project": "ExampleMod", "mode": "server"},
                 "execute_dayz_test_run",
             ),
             (
@@ -372,7 +372,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaises(Exception) as typed_err:
                 await app.call_tool(
-                    "dayz_test_run", {"project": "ExampleMod", "mode": "offline"}
+                    "dayz_test_run", {"project": "ExampleMod", "mode": "server"}
                 )
         typed_message = str(typed_err.exception)
         self.assertIn("bad_project", typed_message)
@@ -659,7 +659,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         for tool, args, target in (
             (
                 "dayz_test_run",
-                {"project": "ExampleMod", "mode": "offline"},
+                {"project": "ExampleMod", "mode": "server"},
                 "execute_dayz_test_run",
             ),
             (

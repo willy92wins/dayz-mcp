@@ -277,8 +277,12 @@ class PipelineToolsTest(unittest.IsolatedAsyncioTestCase):
         rs_params = inspect.signature(resolve.fn).parameters
         self.assertIn("feedback_id", rs_params)
         self.assertIn("resolution", rs_params)
+        self.assertIn("evidence_ref", rs_params)
         rs_required = resolve.parameters.get("required") or []
         self.assertEqual(set(rs_required), {"feedback_id", "resolution"})
+        rs_props = resolve.parameters.get("properties", {})
+        self.assertIn("evidence_ref", rs_props)
+        self.assertNotIn("evidence_ref", rs_required)
 
     async def test_feedback_tool_rejects_bad_kind(self) -> None:
         app, _runtime = server.build_app(server.ServerConfig())
