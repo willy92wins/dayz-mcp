@@ -51,6 +51,19 @@ _SERVER_ALL_FORBID_RUN_ID = "server_all_forbid_run_id"
 # The reason never crosses the bundle cable -- it is raised and caught inside
 # dayz_test_tool.build_run_request, in the MCP server process (0 hits for
 # invalid_dayz_test_request in daemon_contract.py and native_broker_protocol.py).
+# Codex F-07. A canonical payload emitted before replace_if_not_polling_since
+# existed carries every other key and not that one. Recognising only the new
+# keyset would make a stored or replayed v1 document stop being canonical and
+# die as source_requires_build, with no version bump and no legacy route -- the
+# exact failure a rollback of this window would hit. Both keysets are canonical.
+_CANONICAL_KEYSETS = frozenset(
+    {
+        _REQUEST_KEYS,
+        _REQUEST_KEYS - {"replace_if_not_polling_since"},
+    }
+)
+
+
 REQUEST_REJECTION_REASONS = frozenset(
     {
         "duplicate_key",
@@ -393,7 +406,7 @@ def parse_dayz_test_request(
     if pack_only and not effective_build:
         _invalid("pack_only_requires_build")
     canonical_default_source = (
-        set(value) == _REQUEST_KEYS
+        set(value) in _CANONICAL_KEYSETS
         and source == policy.default_source
         and not effective_build
     )

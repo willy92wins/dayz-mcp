@@ -384,6 +384,89 @@ class PrepareStorageTest(unittest.TestCase):
         )
         self.assertFalse(again.storage_rotated)
 
+    def test_f03_marker_published_is_a_claim_and_needs_its_backup(self) -> None:
+        """Codex F-03. The phase alone used to authorise the launch.
+
+        Journal says marker_published, the marker carries the new seal, and yet
+        storage_1 is still the OLD tree and no backup exists: the rotation never
+        happened. Completing it would hand the engine the old world labelled
+        with the new mod set -- exactly the poisoning M15 exists to stop.
+        """
+        _make_storage(self.mission)
+        (self.mission / storage.MARKER_NAME).write_text(
+            json.dumps(_valid_marker(SEAL_A)), encoding="utf-8"
+        )
+        backup = f"{storage.STORAGE_NAME}.modset-19700101-000000-legacy"
+        (self.mission / f"{storage.JOURNAL_PREFIX}{'1' * 32}{storage.JOURNAL_SUFFIX}").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "txid": "1" * 32,
+                    "phase": storage.PHASE_MARKER_PUBLISHED,
+                    "new_seal": SEAL_A,
+                    "old_seal": None,
+                    "project": "DayZ_MCP",
+                    "storage_backup": backup,
+                    "marker_backup": f"{backup}.marker.json",
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        result = self._prepare()
+        self.assertFalse(result.launch_allowed)
+        self.assertEqual(result.reason, "journal_state_impossible")
+
+    def test_f03_positive_control_a_real_marker_published_completes(self) -> None:
+        # Without it the assertion above would pass over a branch that blocks
+        # every marker_published journal, real ones included.
+        backup = f"{storage.STORAGE_NAME}.modset-19700101-000000-legacy"
+        (self.mission / backup).mkdir()
+        (self.mission / backup / "data.bin").write_bytes(b"world-and-characters")
+        (self.mission / storage.MARKER_NAME).write_text(
+            json.dumps(_valid_marker(SEAL_A)), encoding="utf-8"
+        )
+        (self.mission / f"{storage.JOURNAL_PREFIX}{'1' * 32}{storage.JOURNAL_SUFFIX}").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "txid": "1" * 32,
+                    "phase": storage.PHASE_MARKER_PUBLISHED,
+                    "new_seal": SEAL_A,
+                    "old_seal": None,
+                    "project": "DayZ_MCP",
+                    "storage_backup": backup,
+                    "marker_backup": f"{backup}.marker.json",
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        result = self._prepare()
+        self.assertTrue(result.launch_allowed, result)
+        self.assertTrue(
+            (self.mission / f"{storage.JOURNAL_PREFIX}{'1' * 32}{storage.JOURNAL_COMPLETED_SUFFIX}").is_file()
+        )
+
+    def test_f06_a_directory_that_cannot_be_listed_is_not_an_empty_one(self) -> None:
+        """Codex F-06. An observation that failed is not an absence."""
+        _make_storage(self.mission, marker_payload=_valid_marker(SEAL_A))
+        real_listdir = os.listdir
+
+        def refusing(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if str(path) == str(self.mission):
+                raise PermissionError("cannot enumerate")
+            return real_listdir(path, *args, **kwargs)
+
+        os.listdir = refusing
+        try:
+            result = self._prepare()
+        finally:
+            os.listdir = real_listdir
+        self.assertFalse(result.launch_allowed)
+        self.assertTrue(result.storage_recovery_required)
+        self.assertEqual(result.reason, "mission_not_enumerable")
+
     def test_a_journal_whose_physical_state_is_impossible_blocks(self) -> None:
         _make_storage(self.mission)
         backup = f"{storage.STORAGE_NAME}.modset-19700101-000000-legacy"

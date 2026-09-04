@@ -6,6 +6,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import math
 import os
 import subprocess
 import threading
@@ -349,9 +350,6 @@ _PORT_STILL_HELD_HINT = (
 # the same order as PEER_STALE_S. The bound below is twice the measured maximum,
 # so a legitimate call never trips it while a request replayed minutes later does.
 _REPLACE_WITNESS_MAX_AGE_S = 60.0
-# One-sided tolerance for a witness stamped a hair in the future by clock skew
-# between the two processes. Anything beyond it is not skew.
-_REPLACE_WITNESS_SKEW_S = 2.0
 _REPLACE_WITNESS_HINTS = {
     "replace_witness_missing": (
         "replace_witness_missing: superseding a live client needs the witness "
@@ -1612,6 +1610,15 @@ class ProcessLifecycle:
             return "retail_manual_lifecycle_required"
         return "executable_not_allowed"
 
+    @staticmethod
+    def _usable_peer_age(value: object) -> bool:
+        """None, or a finite non-negative number. Nothing else is an age."""
+        if value is None:
+            return True
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        return math.isfinite(value) and value >= 0.0
+
     def _client_peer_row(self) -> dict[str, object] | None:
         """The bridge row for the client peer, or None when there is no answer.
 
@@ -1672,10 +1679,13 @@ class ProcessLifecycle:
         if type(witness) is not int or witness <= 0:
             return "replace_witness_missing"
         decision_age_s = now - witness / 1000.0
-        if (
-            decision_age_s < -_REPLACE_WITNESS_SKEW_S
-            or decision_age_s > _REPLACE_WITNESS_MAX_AGE_S
-        ):
+        # Codex F-05. A witness in the future used to be tolerated up to a
+        # couple of seconds and then clamped to zero, which turned a poll made
+        # AFTER the real decision into one made before it and authorised the
+        # kill. There is no benign reason for a decision stamped in the future
+        # by a process on this host, so any negative age is a refusal and the
+        # comparison below no longer needs a clamp.
+        if decision_age_s < 0.0 or decision_age_s > _REPLACE_WITNESS_MAX_AGE_S:
             return "replace_witness_stale"
         peer = self._client_peer_row()
         if peer is None:
@@ -1686,11 +1696,12 @@ class ProcessLifecycle:
             # this client, and no answer must not authorise a kill.
             return "bridge_state_unreadable"
         values = [peer[key] for key in keys]
-        if any(
-            value is not None
-            and not (isinstance(value, (int, float)) and not isinstance(value, bool))
-            for value in values
-        ):
+        if any(not self._usable_peer_age(value) for value in values):
+            # Codex F-04: a field that is a string, a bool, NaN, an infinity or
+            # a negative duration is an unknown dimension, and the kill may not
+            # be decided on the subset that happened to parse. NaN matters on
+            # its own: every comparison against it is False, so a filtered NaN
+            # would have read as "did not poll".
             return "bridge_state_unreadable"
         ages = [value for value in values if value is not None]
         if not ages:
@@ -1701,7 +1712,7 @@ class ProcessLifecycle:
             # very case the replacement exists for. Reading it as silence would
             # make the feature refuse exactly the case it was built to fix.
             return None
-        if min(ages) < max(0.0, decision_age_s):
+        if min(ages) < decision_age_s:
             return "client_polling_since_decision"
         return None
 

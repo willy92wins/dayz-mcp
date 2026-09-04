@@ -887,7 +887,31 @@ class StorageGateTests(unittest.TestCase):
                 self._execute(broker, **overrides)
                 self.assertEqual(bool(STORAGE_GATE.calls), expected)
 
-    def test_s13b_the_gate_runs_before_the_first_broker_frame(self) -> None:
+    def test_f08_with_build_the_addon_builder_frame_precedes_the_gate(self) -> None:
+        """Codex F-08. The honest order, asserted instead of claimed.
+
+        server+build=True rotates, and by then the AddonBuilder frame has been
+        sent and checked. That is deliberate -- a build that fails must not have
+        rotated -- but "before the first broker frame" was false for this shape.
+        """
+        trace: list[str] = []
+        STORAGE_GATE.reset(trace)
+
+        class _TracingBroker(_Broker):
+            async def invoke(self, frame: bytes) -> dict[str, object]:
+                request = native_broker_protocol.decode_request(frame)
+                if request.kind is native_broker_protocol.BrokerKind.ADDON_BUILDER:
+                    trace.append("build")
+                else:
+                    trace.append("lifecycle")
+                return await super().invoke(frame)
+
+        self._execute(_TracingBroker(), mode="server", build=True)
+        STORAGE_GATE.reset()
+        self.assertEqual(trace[:2], ["build", "storage"])
+        self.assertNotIn("lifecycle", trace[: trace.index("storage")])
+
+    def test_s13b_the_gate_runs_before_any_process_is_created(self) -> None:
         trace: list[str] = []
         STORAGE_GATE.reset(trace)
 
@@ -900,6 +924,8 @@ class StorageGateTests(unittest.TestCase):
         STORAGE_GATE.reset()
         self.assertEqual(trace[0], "storage")
         self.assertEqual(trace.count("storage"), 1)
+        # Named for what it measures: without build there is no earlier frame,
+        # so "before the first frame" and "before any process" coincide here.
 
     def test_the_seal_separates_extra_mods_from_server_mods(self) -> None:
         STORAGE_GATE.reset()
@@ -911,7 +937,7 @@ class StorageGateTests(unittest.TestCase):
         STORAGE_GATE.reset()
         self.assertNotEqual(first, second)
 
-    def test_a_blocked_storage_refuses_the_launch_without_a_broker_frame(self) -> None:
+    def test_a_blocked_storage_refuses_the_launch_without_creating_a_process(self) -> None:
         blocked = dayz_test_storage.RotationResult(
             launch_allowed=False,
             storage_rotated=False,

@@ -487,6 +487,41 @@ class LifecycleReconcileTest(unittest.TestCase):
         result = self._replacement()
         self._assert_nothing_was_touched(result, "bridge_state_unreadable")
 
+    def test_f05_a_witness_a_second_in_the_future_does_not_authorise_a_kill(self) -> None:
+        """Codex F-05. The dangerous window was inside the old skew tolerance.
+
+        A witness stamped 1 s ahead made a poll 0.1 s old look older than the
+        decision once the negative age was clamped to zero, and the live client
+        died. +3600 s was already refused; this is the case that was not.
+        """
+        self.bridge.last_poll_age_s = 0.1
+        result = self._replacement(
+            replace_if_not_polling_since=int((time.time() + 1.0) * 1000)
+        )
+        self._assert_nothing_was_touched(result, "replace_witness_stale")
+
+    def test_f04_a_partially_unreadable_row_is_no_answer(self) -> None:
+        """Codex F-04. One field that parses does not make the row readable.
+
+        NaN matters on its own: every comparison against it is False, so a NaN
+        that survived the filter would have read as "did not poll".
+        """
+        for label, first, second in (
+            ("string", 999.0, "0.2"),
+            ("nan", 999.0, float("nan")),
+            ("inf", 999.0, float("inf")),
+            ("negative", 999.0, -1.0),
+            ("bool", 999.0, True),
+        ):
+            with self.subTest(label=label):
+                self.setUp()
+                self.bridge.last_poll_age_s = first
+                self.bridge.bound_last_poll_age_s = second
+                result = self._replacement(
+                    replace_if_not_polling_since=int((time.time() - 5.0) * 1000)
+                )
+                self._assert_nothing_was_touched(result, "bridge_state_unreadable")
+
     def test_a_non_numeric_age_is_no_answer(self) -> None:
         self.bridge.last_poll_age_s = "0.2"
         result = self._replacement()

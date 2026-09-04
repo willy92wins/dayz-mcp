@@ -476,6 +476,14 @@ def _reconcile_journal(mission: str, txid: str, seal: str) -> RotationResult | N
     backup_path = ntpath.join(mission, str(document["storage_backup"]))
     backup_present = os.path.exists(backup_path)
     if document["phase"] == PHASE_MARKER_PUBLISHED:
+        # Codex F-03. The phase is a CLAIM, not evidence. A journal that says
+        # marker_published over a mission whose backup does not exist, or whose
+        # marker is not the one this transaction published, describes a rotation
+        # that did not happen -- and completing it would hand the engine the old
+        # world under the new seal. The backup is the tell: this phase is only
+        # reachable after the tree was renamed.
+        if not backup_present or read_marker(mission).seal != str(document["new_seal"]):
+            return _blocked("journal_state_impossible", seal)
         _complete_journal(mission, txid)
         return None
     if storage_present and not backup_present:
@@ -501,11 +509,18 @@ def _reconcile_journal(mission: str, txid: str, seal: str) -> RotationResult | N
     return _blocked("journal_state_impossible", seal)
 
 
-def _active_journals(mission: str) -> tuple[list[str], bool]:
+def _active_journals(mission: str) -> tuple[list[str], bool] | None:
+    """The active journals, or None when the directory could not be enumerated.
+
+    Codex F-06. Returning an empty list for an OSError made "I could not look"
+    indistinguishable from "there is nothing there", and the caller turned that
+    into permission to launch over a mission with a transaction possibly in
+    flight. An observation that failed is not an absence.
+    """
     try:
         entries = os.listdir(mission)
     except OSError:
-        return [], False
+        return None
     active: list[str] = []
     malformed = False
     for name in entries:
@@ -612,7 +627,10 @@ def prepare_storage(
     _validate_transaction(seal, project, now, txid)
     if not os.path.isdir(mission):
         return _blocked("mission_not_a_directory", seal)
-    active, malformed = _active_journals(mission)
+    scan = _active_journals(mission)
+    if scan is None:
+        return _blocked("mission_not_enumerable", seal)
+    active, malformed = scan
     if malformed:
         return _blocked("journal_name_invalid", seal)
     if len(active) > 1:

@@ -695,9 +695,17 @@ async def execute_dayz_test_worker(
 
     mode = str(payload["mode"])
     # M15 (fichas 4407 + 01ae). The mod set decides whether the mission storage
-    # is reusable, and the check belongs here: this is the last point at which
-    # nothing has been asked of the broker yet, and the only layer that holds
-    # both the resolved mission and the runtime policy.
+    # is reusable, and the check belongs here: the last point before any PROCESS
+    # is created, and the only layer that holds both the resolved mission and the
+    # runtime policy. Not "before the first broker frame": a request with
+    # build=True has already sent the AddonBuilder frame by now (Codex F-08).
+    # Building first is deliberate -- a build that fails must not have rotated.
+    # OPEN (Codex F-01): a launch the daemon will refuse with active_run_exists
+    # has already rotated by now. v1 renames and never deletes, and a tree with
+    # open handles refuses to move on Windows, but the ordering is real and it
+    # is NEW: nothing rotated anything before M15-min. Closing it atomically is
+    # step 9 of the frozen plan (pending_run_id + CAS), which M15-min does not
+    # materialise. Declared in lote-etapa-B/CIERRE.md as a decision.
     if _storage_applies(mode, supplied_run_id):
         _prepare_storage(
             payload, runtime, request_sha256=request_sha256, now_fn=now_fn

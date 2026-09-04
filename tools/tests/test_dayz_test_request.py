@@ -773,6 +773,33 @@ class RequestRejectionReasonsTests(unittest.TestCase):
         for reason in self.request_module.REQUEST_REJECTION_REASONS:
             self.assertIn(f'_invalid("{reason}")', source, reason)
 
+    def test_f07_a_canonical_payload_from_before_the_witness_still_parses(self) -> None:
+        """Codex F-07. A v1 document emitted before the key existed is still v1.
+
+        Recognising only the new keyset made a stored or replayed payload stop
+        being canonical and die as source_requires_build, with no version bump
+        and no legacy route: the failure a rollback of this window would hit.
+        """
+        module = self.request_module
+        policy = module.RequestProjectPolicy(**self.POLICY_KWARGS)
+        current = module.parse_dayz_test_request(
+            json.dumps(self.base).encode("utf-8"), policies=(policy,)
+        )
+        legacy = dict(current.payload)
+        del legacy["replace_if_not_polling_since"]
+        reparsed = module.parse_dayz_test_request(
+            json.dumps(legacy).encode("utf-8"), policies=(policy,)
+        )
+        self.assertEqual(reparsed.payload["source"], policy.default_source)
+        self.assertIsNone(reparsed.payload["replace_if_not_polling_since"])
+        # Positive control: a keyset that is neither of the two IS rejected.
+        stray = dict(legacy)
+        del stray["player_name"]
+        with self.assertRaises(ValueError):
+            module.parse_dayz_test_request(
+                json.dumps(stray).encode("utf-8"), policies=(policy,)
+            )
+
     def test_t7_an_undeclared_reason_keeps_exactly_the_legacy_token(self) -> None:
         with self.assertRaises(ValueError) as caught:
             self.request_module._invalid("a_reason_nobody_declared")
