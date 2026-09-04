@@ -45,13 +45,18 @@ class _FakeRuntime:
         self._counts = list(player_counts or [])
         self._fallback = fallback
         self.lifecycle_status = None
+        self.lock_acquisitions = 0
+        self.bridge_calls = 0
 
     async def call_bridge(
         self, cmd: str, args: dict, peer: str, timeout_s: float
     ) -> dict:
+        self.bridge_calls += 1
         if cmd != "query_all_players":
             raise server.ToolError(f"unexpected:{cmd}")
         count = self._counts.pop(0) if self._counts else self._fallback
+        if isinstance(count, str):
+            raise server.ToolError(count)
         return {"ok": 1, "players": [{} for _ in range(count)]}
 
 
@@ -111,6 +116,55 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
                 poll_interval_s=2.0,
             )
         self.assertIn("version_blocked", str(ctx.exception))
+
+    async def test_rejects_timeout_above_600_before_lock(self) -> None:
+        runtime = _FakeRuntime(player_counts=[1])
+        with self.assertRaises(server.ToolError) as ctx:
+            await server.execute_wait_for(
+                runtime, "players_at_least", value=1, timeout_s=601.0, poll_interval_s=0.5
+            )
+        self.assertIn("bad_args: timeout_s must be <= 600", str(ctx.exception))
+        self.assertEqual(runtime.bridge_calls, 0)
+
+    async def test_accepts_exactly_600(self) -> None:
+        runtime = _FakeRuntime(player_counts=[1])
+        result = await server.execute_wait_for(
+            runtime, "players_at_least", value=1, timeout_s=600.0, poll_interval_s=0.5
+        )
+        self.assertTrue(result["satisfied"])
+        self.assertEqual(runtime.bridge_calls, 1)
+
+    async def test_waits_through_server_poll_stale(self) -> None:
+        stale = "game_not_ready:reason=server_poll_stale"
+        runtime = _FakeRuntime(player_counts=[stale, stale, 1])
+        result = await server.execute_wait_for(
+            runtime, "players_at_least", value=1, timeout_s=10.0, poll_interval_s=0.2
+        )
+        self.assertTrue(result["satisfied"])
+        self.assertEqual(result["probes"], 3)
+        self.assertEqual(result["not_ready_probes"], 2)
+        self.assertEqual(runtime.bridge_calls, 3)
+
+    async def test_server_poll_stale_timeout_reports_last_error(self) -> None:
+        stale = "game_not_ready:reason=server_poll_stale"
+        runtime = _FakeRuntime(fallback=stale)
+        result = await server.execute_wait_for(
+            runtime, "players_at_least", value=1, timeout_s=1.2, poll_interval_s=0.3
+        )
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["satisfied"])
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["last_error"], stale)
+        self.assertGreaterEqual(result["not_ready_probes"], 2)
+
+    async def test_other_game_not_ready_aborts_first_probe(self) -> None:
+        runtime = _FakeRuntime(player_counts=["game_not_ready:reason=no_run", 1])
+        with self.assertRaises(server.ToolError) as ctx:
+            await server.execute_wait_for(
+                runtime, "players_at_least", value=1, timeout_s=5.0, poll_interval_s=0.2
+            )
+        self.assertIn("game_not_ready:reason=no_run", str(ctx.exception))
+        self.assertEqual(runtime.bridge_calls, 1)
 
     async def test_sleep_does_not_hold_tool_lock(self) -> None:
         # Fails if wait_for wraps its whole body in `async with runtime.tool_lock`.

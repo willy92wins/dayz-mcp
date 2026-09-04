@@ -56,6 +56,7 @@ class AnnotateEntitiesReliabilityTest(unittest.TestCase):
         out = _annotate_entities_reliability(result, {"ok": 1, "players": []}, [0.0, 0.0, 0.0])
         self.assertIsNone(out["nearest_player_m"])
         self.assertEqual(out["reliability"], "remote_unverified")
+        self.assertEqual(out["reason"], "no_player_connected")
 
     def test_failed_players_probe_is_remote_not_a_crash(self) -> None:
         result = {"ok": 1}

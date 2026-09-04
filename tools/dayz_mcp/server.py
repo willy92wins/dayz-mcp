@@ -1916,6 +1916,8 @@ def _annotate_entities_reliability(
         result["reliability"] = "player_in_bubble"
     else:
         result["reliability"] = "remote_unverified"
+    if isinstance(players_result, dict) and players_result.get("ok") and not players:
+        result["reason"] = "no_player_connected"
     return result
 
 
@@ -2269,6 +2271,8 @@ def _wait_for_response(
     observed: Any,
     satisfied: bool,
     scanned: dict[str, Any] | None = None,
+    not_ready_probes: int = 0,
+    last_error: str | None = None,
 ) -> dict[str, Any]:
     response = {
         # Timeout is a normal result, not a tool error. Gate on satisfied.
@@ -2280,7 +2284,10 @@ def _wait_for_response(
         "observed": observed,
         "timed_out": not satisfied,
         "tool": "wait_for",
+        "not_ready_probes": not_ready_probes,
     }
+    if last_error is not None:
+        response["last_error"] = last_error
     if scanned is not None:
         response["scanned"] = scanned
     return response
@@ -2327,7 +2334,11 @@ async def execute_wait_for(
     timeout_value = _finite_float(timeout_s, "bad_args: timeout_s must be > 0")
     if timeout_value <= 0.0:
         raise ToolError("bad_args: timeout_s must be > 0")
-    timeout_s = min(timeout_value, WAIT_FOR_MAX_TIMEOUT_S)
+    if timeout_value > WAIT_FOR_MAX_TIMEOUT_S:
+        raise ToolError(
+            f"bad_args: timeout_s must be <= {int(WAIT_FOR_MAX_TIMEOUT_S)}"
+        )
+    timeout_s = timeout_value
     poll_value = _finite_float(poll_interval_s, "bad_args: poll_interval_s must be > 0")
     if poll_value <= 0.0:
         raise ToolError("bad_args: poll_interval_s must be > 0")
@@ -2352,6 +2363,8 @@ async def execute_wait_for(
     started = time.monotonic()
     deadline = started + timeout_s
     probes = 0
+    not_ready_probes = 0
+    last_error: str | None = None
     observed: Any = None
     log_markers: dict[str, log_tail.TailMarker] = {}
     seen_paths: list[str] = []
@@ -2417,31 +2430,37 @@ async def execute_wait_for(
                     )
                 except ToolError as exc:
                     message = str(exc)
-                    if message.startswith("timeout waiting for"):
+                    if message == "game_not_ready:reason=server_poll_stale":
+                        not_ready_probes += 1
+                        last_error = message
+                        satisfied = False
+                    elif message.startswith("timeout waiting for"):
                         suffix = ""
                         if "; " in message:
                             suffix = "; " + message.split("; ", 1)[1]
                         raise ToolError(
                             f"wait_for timed out waiting for {condition}{suffix}"
                         ) from None
-                    if message.startswith("version_blocked") or message.startswith(
+                    elif message.startswith("version_blocked") or message.startswith(
                         "game_not_ready"
                     ) or message in {
                         "daemon_unavailable",
                         "version_blocked",
                     }:
                         raise
-                    if "query_all_players" in message:
+                    elif "query_all_players" in message:
                         raise ToolError(
                             message.replace("query_all_players", "wait_for")
                         ) from None
-                    raise
-                observed = _player_count(result)
-                satisfied = (
-                    observed >= value
-                    if condition == "players_at_least"
-                    else observed <= value
-                )
+                    else:
+                        raise
+                else:
+                    observed = _player_count(result)
+                    satisfied = (
+                        observed >= value
+                        if condition == "players_at_least"
+                        else observed <= value
+                    )
             else:
                 probe_paths = await _wait_for_script_log_paths(runtime)
                 lines, log_markers, counts = _new_log_lines(probe_paths, log_markers)
@@ -2462,6 +2481,8 @@ async def execute_wait_for(
                 observed=observed,
                 satisfied=True,
                 scanned=scan_summary(),
+                not_ready_probes=not_ready_probes,
+                last_error=last_error,
             )
         # Sleep outside the lock. Do not wrap this loop in tool_lock.
         await asyncio.sleep(poll_interval_s)
@@ -2473,6 +2494,8 @@ async def execute_wait_for(
         observed=observed,
         satisfied=False,
         scanned=scan_summary(),
+        not_ready_probes=not_ready_probes,
+        last_error=last_error,
     )
 
 
@@ -2744,6 +2767,18 @@ def _session_status_blocked_on(status: dict[str, Any]) -> str | None:
             "to join the box FIFO"
         )
     return None
+
+
+def _bridge_status_description() -> str:
+    """Publish the open ready.reason set from module authority at build time."""
+    reasons = sorted(READY_REASONS | set(_FENCE_BLOCK_READY.values()))
+    reason_list = "|".join(reasons)
+    return (
+        "Inspect peer liveness, version_state, and ready "
+        f"{{ready, reason is an OPEN set (today: {reason_list}): validate by shape "
+        "(ready: bool, reason: non-empty string), never against a whitelist}}. "
+        "daemon_modules.stale = source newer than daemon, not a crash."
+    )
 
 
 def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
@@ -3732,7 +3767,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "player streaming the area: far from every player the engine "
             "answers 0-or-cap with no error signal, so the result carries "
             "nearest_player_m and reliability (player_in_bubble | "
-            "remote_unverified)."
+            "remote_unverified). When the players probe succeeds with an empty "
+            "list, reason is no_player_connected."
         )
     )
     async def entities_query(
@@ -4102,14 +4138,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             async with runtime.tool_lock:
                 return await runtime.call_exec_enforce(args, _timeout(timeout_s))
 
-    @app.tool(
-        description=(
-            "Inspect peer liveness, version_state, and ready "
-            "{ready, reason=ready|no_run|server_poll_stale|client_not_polling|"
-            "client_legacy_blocked|version_mismatch}. "
-            "daemon_modules.stale = source newer than daemon, not a crash."
-        )
-    )
+    @app.tool(description=_bridge_status_description())
     async def bridge_status() -> dict[str, Any]:
         runtime.touch()
         payload = await runtime.bridge_status_payload()
@@ -4425,7 +4454,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Start a DayZ user action on the local player "
-        "without keyboard. Confirm with wait_for(condition=log_matches)."
+        "without keyboard. Confirm with wait_for(condition=log_matches). "
+        "action = the Enforce class name of the user action "
+        "(candidate.Type().ToString(), e.g. ActionOpenDoors), NOT the "
+        "visible/localized prompt text; classname = the target's GetType()."
     ))
     async def action_use(
         action: str,
@@ -4466,6 +4498,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "a line written before the caller's action and cause a false positive. "
             "On timeout still returns "
             "ok: true with satisfied: false -- gate on satisfied, not ok. "
+            "timeout_s <= 600 (bad_args above; never clamped). "
+            "players_* waits through server startup: a probe answered "
+            "game_not_ready:reason=server_poll_stale is retried until "
+            "timeout_s (not_ready_probes, last_error in the response); any "
+            "other not-ready reason aborts on the first probe. "
             "scanned reports which log files were read and how many "
             "lines each gave, so a no-match is visible as a no-match."
         )
