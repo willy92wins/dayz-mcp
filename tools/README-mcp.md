@@ -104,6 +104,19 @@ The builder reads a host-only intent file. It never loads the published example.
 8. Seed and install the registry:
    `python -m dayz_mcp.launcher_registry_update bootstrap`, then
    `python -m dayz_mcp.launcher_registry_update install-dayz-test-v1 --expected-sha256 <sha printed by bootstrap>`.
+9. Renew the registry after ANY rebuild. The registry pins the file identity of the bundle
+   directory and `build_native_launcher.py` renews that directory with `os.replace`, so after
+   `python build_native_launcher.py --offline --verify-reproducible` every `dayz_test_run` fails
+   with `launcher_root_identity_drift` until the registry is renewed:
+   `python -m dayz_mcp.launcher_registry_update rollback-last`, then
+   `python -m dayz_mcp.launcher_registry_update install-dayz-test-v1 --expected-sha256 <sha256 of the CURRENT tools/approved-launchers.json>`.
+   The CAS value is the hash of the registry file after the rollback, never the PE's hash
+   (`launcher_registry_cas_mismatch` otherwise), and `install` without the rollback fails with
+   `launcher_registry_version_already_installed`. `bootstrap` is create-only: it never resets an
+   existing registry. A Steam client update invalidates the sealed bundle the same way (the
+   closure manifest pins four Steam DLLs by size and sha256): rebuild, then run this cycle.
+   Live MCP client sessions keep the tool code and the bundle layout they started with: after a
+   tools deploy, a daemon restart or a bundle layout change, reopen the client session.
 
 Locate the file with `--policy PATH`, then `DAYZ_MCP_LAUNCHER_POLICY`, then `%LOCALAPPDATA%\DayZ_MCP\launcher-policy.json`. An empty env value is an error, not a fallback. The published example is never selected.
 

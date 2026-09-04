@@ -632,7 +632,7 @@ class ProjectMapSizesDocsTest(unittest.TestCase):
         self.assertEqual(
             offenders, [],
             f"PROJECT-MAP size claims drifted: {offenders}. "
-            f"Regenerate the map")
+            f"Update PROJECT-MAP.md by hand")
 
 
 class ProjectMapEntryPointsDocsTest(unittest.TestCase):
@@ -652,7 +652,7 @@ class ProjectMapEntryPointsDocsTest(unittest.TestCase):
         self.assertEqual(
             ghosts, [],
             f"PROJECT-MAP lists entry points that do not exist: {ghosts}. "
-            f"Regenerate the map or delete the stale lines")
+            f"Update PROJECT-MAP.md by hand or delete the stale lines")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import locale
 import math
@@ -102,6 +103,10 @@ class DoctorSources:
     expected_command: str
     knowledge_pack_dir: Path | None = None
     knowledge_pack_manifest_path: Path | None = None
+    # Approved native launcher whose closure-manifest externals are checked against the
+    # disk. None (the default for injected sources) skips the check entirely, so a
+    # synthetic diagnosis never opens the host's real registry.
+    native_launcher_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -255,6 +260,7 @@ def default_sources(policy: AccreditedDaemonPolicy) -> DoctorSources:
         expected_command=sys.executable,
         knowledge_pack_dir=knowledge_pack_dir,
         knowledge_pack_manifest_path=default_manifest_path(knowledge_pack_dir),
+        native_launcher_id="dayz-test-v1",
     )
 
 
@@ -430,6 +436,90 @@ def _parse_registration(
 
 def _finding(code: str, *, severity: str = "FAIL", **details: object) -> dict[str, object]:
     return {"code": code, "severity": severity, **details}
+
+
+def check_native_bundle_externals(
+    entries: list[dict],
+    *,
+    stat: Callable[[str], tuple[int, str] | None],
+    approved_sha256: str | None = None,
+) -> list[dict[str, object]]:
+    externals = [item for item in entries if item.get("kind") == "external"]
+    drifted: list[str] = []
+    for entry in externals:
+        path = str(entry["path"])
+        observed = stat(path)
+        if observed is None:
+            drifted.append(path)
+            continue
+        size, sha256_hex = observed
+        if size != entry["size"] or sha256_hex.lower() != str(entry["sha256"]).lower():
+            drifted.append(path)
+    if not drifted:
+        return [
+            _finding(
+                "NATIVE_BUNDLE_EXTERNALS_OK",
+                severity="INFO",
+                checked=len(externals),
+            )
+        ]
+    # The CAS of `install-dayz-test-v1` is the sha256 of tools/approved-launchers.json AFTER
+    # `rollback-last`, which cannot be known before the rollback runs; the PE hash is never it.
+    sha_token = approved_sha256 or "<sha256 of tools/approved-launchers.json after rollback-last>"
+    remediation = (
+        "Renew the native bundle: "
+        "python tools/build_native_launcher.py --offline --verify-reproducible, then "
+        "python -m dayz_mcp.launcher_registry_update rollback-last, then "
+        f"install-dayz-test-v1 --expected-sha256 {sha_token}."
+    )
+    return [
+        _finding(
+            "NATIVE_BUNDLE_EXTERNAL_DRIFT",
+            severity="FAIL",
+            drifted=drifted,
+            remediation=remediation,
+        )
+    ]
+
+
+def _stat_external_file(path: str) -> tuple[int, str] | None:
+    target = Path(path)
+    try:
+        if not target.is_file():
+            return None
+        data = target.read_bytes()
+    except OSError:
+        return None
+    return len(data), hashlib.sha256(data).hexdigest()
+
+
+def _check_native_bundle_closure(
+    sources: DoctorSources, findings: list[dict[str, object]]
+) -> None:
+    launcher_id = getattr(sources, "native_launcher_id", None)
+    if launcher_id is None:
+        return
+    try:
+        from dayz_mcp.launcher_registry import open_approved_launcher
+
+        with open_approved_launcher(launcher_id) as opened:
+            manifest_path = opened.root / "closure-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            entries = manifest.get("entries")
+            if type(entries) is not list:
+                raise ValueError("invalid_closure_manifest_entries")
+            findings.extend(
+                check_native_bundle_externals(
+                    entries,
+                    stat=_stat_external_file,
+                )
+            )
+    except Exception:
+        findings.append(
+            # A launcher that cannot be opened or a manifest that cannot be read is not
+            # "unknown": with a launcher id configured it is a failed check.
+            _finding("NATIVE_BUNDLE_MANIFEST_UNREADABLE", severity="FAIL")
+        )
 
 
 def _check_knowledge_pack(
@@ -1101,6 +1191,7 @@ def _diagnose(sources: DoctorSources, *, require_clean: bool) -> dict[str, objec
         )
     _check_runs(sources, managed, findings)
     _check_launchers(sources.scan_roots, findings)
+    _check_native_bundle_closure(sources, findings)
     _check_knowledge_pack(sources, registrations, findings)
 
     findings.sort(
