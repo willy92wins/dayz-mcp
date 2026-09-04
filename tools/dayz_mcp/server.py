@@ -1969,6 +1969,45 @@ CLEARANCE_LANDING_BAND_M = 0.5
 ENTITIES_QUERY_BUBBLE_M = 300.0
 
 
+# entities_query rows carry has_cargo: MCPEntityHit declares the field
+# (addon/scripts/5_Mission/MCPMessages.c:360) and DispatchEntitiesQuery fills it with
+# HasCargoCapacity (MCPBridge.c:1422, defined :1441-1456 as EntityAI.Cast ->
+# GetInventory() -> GetCargo() != null). Two wire facts keep a normalisation on this
+# side:
+#   - the bridge serialises an Enforce bool as int 0/1, the same way `ok` arrives
+#     (wait_for_result above), so a consumer testing `row["has_cargo"] is True` would
+#     read every container as false;
+#   - a bridge that predates the field omits the key entirely, and absent means "the
+#     bridge did not say" (null), never "no cargo" (false).
+# A value in any other form is published as null rather than guessed: a truthiness test
+# on an unknown shape would fabricate a verdict the bridge never gave.
+def _cargo_flag(value: object) -> bool | None:
+    """Read one has_cargo cell off the wire as a bool, or None when unstated."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    return None
+
+
+def _normalize_entities_cargo(result: dict[str, Any]) -> dict[str, Any]:
+    """Publish has_cargo on every entities_query row as bool | None.
+
+    Additive and total: no row is dropped, reordered or otherwise rewritten, and no
+    shape raises. A result without rows, or rows that are not dicts, comes back as it
+    arrived -- a missing field must never cost the caller the answer it did get.
+    """
+    if not isinstance(result, dict):
+        return result
+    rows = result.get("entities")
+    if not isinstance(rows, list):
+        return result
+    for row in rows:
+        if isinstance(row, dict):
+            row["has_cargo"] = _cargo_flag(row.get("has_cargo"))
+    return result
+
+
 def _annotate_entities_reliability(
     result: dict[str, Any], players_result: object, pos: list[float]
 ) -> dict[str, Any]:
@@ -3948,8 +3987,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             "Query world entities around pos within radius (0 < r <= 200). "
             "Returns the nearest entries up to limit (default 32, max 128) as "
-            "{type, classname, pos, distance} sorted by distance ascending, plus "
-            "count_total before the cut. No classname filter; raw nearby objects. "
+            "{type, classname, has_cargo, pos, distance} sorted by distance "
+            "ascending, plus count_total before the cut. No classname filter; raw "
+            "nearby objects. has_cargo is cargo CAPACITY, not occupancy: the bridge "
+            "reads GetInventory().GetCargo() != null on the row's own object, so an "
+            "EMPTY container reads true, and an object that is not an EntityAI, or "
+            "an EntityAI with no cargo grid, reads false. It answers 'could this "
+            "hold items', which is the predicate a container check needs; it never "
+            "says whether anything is inside. A row whose only cargo lives in a "
+            "proxy reports false. has_cargo is null, never false, when the bridge "
+            "did not state it: a client older than the has_cargo build omits the "
+            "field, and null means the bridge did not say. "
             "Absent entities travel as []. Rows are trustworthy only with a "
             "player streaming the area: far from every player the engine "
             "answers 0-or-cap with no error signal, so the result carries "
@@ -3990,7 +4038,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             players = await runtime.call_bridge(
                 "query_all_players", {}, "server", _timeout(timeout_s)
             )
-        return _annotate_entities_reliability(result, players, args["pos"])
+        return _annotate_entities_reliability(
+            _normalize_entities_cargo(result), players, args["pos"]
+        )
 
     @app.tool(
         description=(
@@ -4223,10 +4273,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "Capture a screenshot from the DayZDiag window. Returns inline JPEG ImageContent fit to the "
         "client's MAX_MCP_OUTPUT_TOKENS budget (default 25000 -> ~600px wide; raise that client env var for bigger inline frames: 50000 -> ~860px/2x px, 75000 -> ~1070px/3x, 100000 -> ~native; max_tokens spends LESS than the cap, above-cap is clamped). Use scale='full' to spend a raised inline budget on resolution (the default scale='small' is a hard 512px cap). crop ('center', 'center:0.4', or normalized 'l,t,r,b') zooms on the subject; "
         "for optical zoom set a narrow fov in radians via camera_set first. fmt='webp' is ~15% smaller (opt-in; Claude Code has known webp MIME bugs, JPEG stays default). "
-        "The result is ALWAYS two blocks: the image, then a JSON text block with the surface map (crop_space, window_surface, client_surface, effective_surface, frame_sha256, fullres_path). "
+        "The result is ALWAYS two blocks: the image, then a JSON text block with the surface map (crop_space, window_surface, client_surface, effective_surface, frame_sha256, frame_stale, frame_stale_detail, fullres_path). "
         "crop_space='client' (default) normalizes crop over the rendered viewport (the space ui_tree rects use) and fails closed with frame_client_rect_unverified; 'window' is the legacy whole-window bitmap. save_fullres=True also writes the "
         "native-resolution frame to disk and reports its path as fullres_path — read that file for "
-        "fine detail, bypassing the inline token budget. Without window focus, the frame can be frozen: compare frame_sha256 between captures to detect it. "
+        "fine detail, bypassing the inline token budget. Without window focus, the frame can be frozen: frame_stale (bool | null) declares it. true means these "
+        "pixels repeat the previous capture of the same window, false that the render advanced, and null that no comparison was possible (first capture, an "
+        "unidentifiable window, a record over a different surface or geometry, or an unusable state store). frame_stale_detail carries the evidence: "
+        "previous_sha256, age_s, repeat_count, key_kind and state_backend, plus the intra-call frames, distinct_frames and max_adjacent_delta, which need no "
+        "stored state and are therefore there on the very first capture. A repeated frame is a fact about pixels, not an error: a paused sim, an open menu "
+        "and a still scene all produce it legitimately. "
         "With two DayZ clients, capture targets the live run's client through cmdline_match/client_pid. "
         "window_surface and client_surface rects are PHYSICAL pixels (DPI-aware): a host helper that never calls "
         "SetProcessDpiAwareness sees virtualized coordinates instead (at 150%: 1920 -> 1280), so a 'client_rect == "
