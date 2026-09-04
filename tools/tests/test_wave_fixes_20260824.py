@@ -58,6 +58,15 @@ class AnnotateEntitiesReliabilityTest(unittest.TestCase):
         self.assertEqual(out["reliability"], "remote_unverified")
         self.assertEqual(out["reason"], "no_player_connected")
 
+    def test_ok_probe_without_players_list_claims_nothing(self) -> None:
+        # An ok reply that carries no list (or a non-list) is not evidence that
+        # nobody is connected: remote_unverified, and no reason (Codex B-01).
+        for probe in ({"ok": 1}, {"ok": 1, "players": None}, {"ok": 1, "players": "x"}):
+            out = _annotate_entities_reliability({"ok": 1}, probe, [0.0, 0.0, 0.0])
+            self.assertIsNone(out["nearest_player_m"], probe)
+            self.assertEqual(out["reliability"], "remote_unverified", probe)
+            self.assertNotIn("reason", out, probe)
+
     def test_failed_players_probe_is_remote_not_a_crash(self) -> None:
         result = {"ok": 1}
         out = _annotate_entities_reliability(result, {"ok": 0, "error": "x"}, [0.0, 0.0, 0.0])

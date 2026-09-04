@@ -116,5 +116,24 @@ class ActionUseDescriptionTest(unittest.TestCase):
         self.assertIn("not the visible", low)
 
 
+class RunIdMatrixDescriptionTest(unittest.TestCase):
+    """fb-20260829-104625-7c88: the client-requires-run_id / server|all-forbid-run_id matrix
+    is published on the tool prose AND on the two properties, not only enforced by
+    dayz_test_request.py with a bare bad_dayz_test_request."""
+
+    def test_tool_and_property_descriptions_publish_the_matrix(self) -> None:
+        app, _ = build_app(ServerConfig(key="k", port=0, log_sink=lambda _m: None))
+        desc = _tool_desc(app, "dayz_test_run")
+        self.assertIn("mode=client requires run_id", desc)
+        self.assertIn("preserving the server", desc)
+        self.assertIn("must NOT pass run_id", desc)
+        props = app._tool_manager.get_tool("dayz_test_run").parameters["properties"]
+        self.assertEqual(props["mode"]["description"], server.RUN_ID_MATRIX_MODE_DESCRIPTION)
+        self.assertEqual(props["run_id"]["description"], server.RUN_ID_MATRIX_RUN_ID_DESCRIPTION)
+        # The enum published from the authority survives the description patch.
+        self.assertIn("server", props["mode"]["enum"])
+        self.assertNotIn("offline", props["mode"]["enum"])
+
+
 if __name__ == "__main__":
     unittest.main()

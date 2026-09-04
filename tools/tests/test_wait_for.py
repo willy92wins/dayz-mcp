@@ -166,6 +166,22 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("game_not_ready:reason=no_run", str(ctx.exception))
         self.assertEqual(runtime.bridge_calls, 1)
 
+    async def test_deadline_bounds_the_sleep(self) -> None:
+        # A poll interval longer than the remaining budget must not extend the
+        # call past timeout_s: the single deadline governs the sleep too (Codex B-02).
+        import time
+
+        runtime = _FakeRuntime(fallback="game_not_ready:reason=server_poll_stale")
+        t0 = time.monotonic()
+        result = await server.execute_wait_for(
+            runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
+        )
+        wall = time.monotonic() - t0
+        self.assertFalse(result["satisfied"])
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(runtime.bridge_calls, 1)
+        self.assertLess(wall, 0.3, f"deadline exceeded: {wall:.3f}s for timeout_s=0.1")
+
     async def test_sleep_does_not_hold_tool_lock(self) -> None:
         # Fails if wait_for wraps its whole body in `async with runtime.tool_lock`.
         # Holding the lock across the inter-probe sleep would starve every other

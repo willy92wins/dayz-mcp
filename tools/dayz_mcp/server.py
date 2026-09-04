@@ -110,8 +110,11 @@ DAEMON_AUTOSPAWN_ALREADY = (
 )
 # A peer with last_poll_age_s >= this value is not live (game polls ~0.2s).
 PEER_STALE_S = 15.0
-# Closed ready.reason set. *_legacy_blocked / version_mismatch only after
-# that peer has polled at least once (last_poll_age_s is not None).
+# Published ready.reason set. The bridge_status description derives its list
+# from this set plus _FENCE_BLOCK_READY.values() at build time and declares it
+# OPEN: consumers validate by shape, never against a copied whitelist.
+# *_legacy_blocked / version_mismatch only after that peer has polled at least
+# once (last_poll_age_s is not None).
 READY_REASONS = frozenset({
     "ready",
     "no_run",
@@ -1797,6 +1800,39 @@ def _patch_mode_enum_from_authority(app: FastMCP, tool_name: str, field: str = "
     object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
 
 
+RUN_ID_MATRIX_MODE_DESCRIPTION = (
+    "Launch mode. client reattaches only the client to a live run and REQUIRES "
+    "run_id (server and world state preserved); server and all launch fresh and "
+    "must NOT pass run_id."
+)
+RUN_ID_MATRIX_RUN_ID_DESCRIPTION = (
+    "Live run to reattach to. Required with mode=client; forbidden with "
+    "mode=server|all (bad_dayz_test_request otherwise)."
+)
+
+
+def _describe_run_id_matrix(app: FastMCP, tool_name: str) -> None:
+    """Publish the mode/run_id matrix on the two properties, not only in the tool prose.
+
+    ``dayz_test_request.py`` enforces client-requires-run_id and server|all-forbid-run_id
+    with one bare ``bad_dayz_test_request``; the published schema said only "Mode" and
+    "Run Id" (fb-20260829-104625-7c88). The property descriptions are the place a client
+    reads before calling.
+    """
+    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
+    if tool is None:
+        raise RuntimeError(f"missing tool {tool_name}")
+    props = tool.parameters.get("properties", {})
+    for field, text in (
+        ("mode", RUN_ID_MATRIX_MODE_DESCRIPTION),
+        ("run_id", RUN_ID_MATRIX_RUN_ID_DESCRIPTION),
+    ):
+        prop = props.get(field)
+        if not isinstance(prop, dict):
+            raise RuntimeError(f"missing property {field} on {tool_name}")
+        prop["description"] = text
+
+
 def _player_count(result: dict[str, Any]) -> int:
     players = result.get("players")
     if not isinstance(players, list):
@@ -1895,8 +1931,12 @@ def _annotate_entities_reliability(
         return result
     nearest: float | None = None
     players = []
+    # The probe's raw list, kept apart from the iteration default: an ok reply
+    # WITHOUT a players list is not evidence that nobody is connected.
+    players_raw: object = None
     if isinstance(players_result, dict) and players_result.get("ok"):
-        players = players_result.get("players") or []
+        players_raw = players_result.get("players")
+        players = players_raw if isinstance(players_raw, list) else []
     for player in players:
         ppos = player.get("pos") if isinstance(player, dict) else None
         if not (isinstance(ppos, list) and len(ppos) == 3):
@@ -1916,7 +1956,9 @@ def _annotate_entities_reliability(
         result["reliability"] = "player_in_bubble"
     else:
         result["reliability"] = "remote_unverified"
-    if isinstance(players_result, dict) and players_result.get("ok") and not players:
+    # Positive evidence only: the probe answered ok AND carried an empty list.
+    # A missing or non-list field is reported as remote_unverified without a reason.
+    if isinstance(players_raw, list) and not players_raw:
         result["reason"] = "no_player_connected"
     return result
 
@@ -2484,8 +2526,13 @@ async def execute_wait_for(
                 not_ready_probes=not_ready_probes,
                 last_error=last_error,
             )
-        # Sleep outside the lock. Do not wrap this loop in tool_lock.
-        await asyncio.sleep(poll_interval_s)
+        # Sleep outside the lock. Do not wrap this loop in tool_lock. The sleep
+        # is bounded by the single deadline: a poll interval longer than the
+        # remaining budget must not extend the call past timeout_s.
+        remaining_sleep = deadline - time.monotonic()
+        if remaining_sleep <= 0.0:
+            break
+        await asyncio.sleep(min(poll_interval_s, remaining_sleep))
 
     return _wait_for_response(
         condition=condition,
@@ -2980,7 +3027,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "heartbeat remain internal to the tool. Release any held session "
             "lease before calling. "
             "Reattach sequence: server -> run_id -> client(run_id). "
-            "client requires run_id; server|all forbid run_id. "
+            "mode=client requires run_id: it reattaches only the client to a "
+            "live run, preserving the server and the world state (no server "
+            "reboot); mode=server|all must NOT pass run_id. "
             "preflight does not relax that matrix. "
             "extra_mods accepts any folder under the project's mod_roots "
             "(a disposable probe need not be registered as a project). "
@@ -4661,6 +4710,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         return await playbook_tool_mod.execute_playbook_run(app, name, params)
 
     _patch_mode_enum_from_authority(app, "dayz_test_run")
+    _describe_run_id_matrix(app, "dayz_test_run")
     for _closed_tool in _CLOSED_SCHEMA_TOOLS:
         _patch_closed_tool_schema(app, _closed_tool)
     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
