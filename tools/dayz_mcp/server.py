@@ -644,12 +644,58 @@ def _target_peer_down(
     )
 
 
-def _bridge_error(result: dict[str, Any]) -> ToolError:
-    # The message stays a fixed code; the bridge's object_id (sent on a
+_UI_ECHO_VERBS = frozenset({"ui_click", "ui_focus", "ui_set_text", "ui_tree"})
+_UI_CLICK_DIAGNOSTIC_KEYS = ("handler", "user_id", "clicked")
+_UI_ECHO_KEYS = ("requested_path", "requested_root", "matched_path")
+
+
+def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
+    """Diagnostics the bridge filled BEFORE deciding the error, as message text.
+
+    ui_click sets user_id, handler and clicked before it settles on not_handled
+    (MCPClientBridge.c:1465-1480), and the four core UI verbs echo their request
+    (ui_request, MCPClientBridge.c:2199-2218). Only the message of a ToolError
+    crosses the MCP wire, so a bare code threw away the two fields that
+    discriminate the cause (fb-20260829-221423-b2c4).
+
+    The decision is by VERB, never by key presence: MCPResult is one flat class
+    (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
+    clicked=false, and a world_spawn timeout has to stay "timeout". The click
+    scalars are reported for ui_click only, an empty handler included -- no
+    handler ran, which is a different diagnosis from one that ran and declined.
+    The echo is whitelisted and empty values are omitted; requested_text stays
+    out on purpose, it would replay caller input (possibly sensitive, unbounded)
+    into an error message.
+    """
+    if cmd not in _UI_ECHO_VERBS:
+        return ""
+    parts: list[str] = []
+    if cmd == "ui_click":
+        fields = [
+            f"{key}={result[key]!r}" for key in _UI_CLICK_DIAGNOSTIC_KEYS if key in result
+        ]
+        if fields:
+            parts.append(" ".join(fields))
+    echo = result.get("ui_request")
+    if isinstance(echo, dict):
+        pairs = [
+            f"{key}={echo[key]!r}" for key in _UI_ECHO_KEYS if echo.get(key) not in (None, "")
+        ]
+        if pairs:
+            parts.append(" ".join(pairs))
+    return "; ".join(parts)
+
+
+def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
+    # The message head stays the fixed code; the bridge's object_id (sent on a
     # spawn timeout, MCPBridge.c:3272) rides in a structured attribute so the
     # caller can clean up instead of duplicating, without the message carrying
-    # host content across the MCP wire.
-    error = ToolError(str(result.get("error") or "bridge_error"))
+    # host content across the MCP wire. For the core UI verbs the diagnostics
+    # the bridge filled before the error follow the code after "; " -- see
+    # _bridge_error_detail; every other verb keeps the bare code.
+    code = str(result.get("error") or "bridge_error")
+    detail = _bridge_error_detail(result, cmd)
+    error = ToolError(f"{code}; {detail}" if detail else code)
     object_id = result.get("object_id")
     if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
         error.object_id = object_id
@@ -884,7 +930,7 @@ class Runtime:
                 # matched a business error (`0 is False` is False) and surfaced
                 # bridge failures as success. Treat any falsy ok as a ToolError.
                 if not result.get("ok"):
-                    raise _bridge_error(result)
+                    raise _bridge_error(result, cmd)
                 return result_prune.prune_unfilled_fields(cmd, result)
             await asyncio.sleep(POLL_INTERVAL_S)
 
@@ -914,7 +960,7 @@ class Runtime:
         if result is None:
             return None
         if not result.get("ok"):
-            raise _bridge_error(result)
+            raise _bridge_error(result, cmd)
         return result_prune.prune_unfilled_fields(cmd, result)
 
     async def abandon_bridge(self, command_id: int, reason: str) -> None:
@@ -1515,7 +1561,7 @@ class ClientRuntime:
                 result = payload.get("result") or {}
                 # Bridge serializes ok as int 0/1; treat any falsy ok as an error.
                 if not result.get("ok"):
-                    raise _bridge_error(result)
+                    raise _bridge_error(result, cmd)
                 return result_prune.prune_unfilled_fields(cmd, result)
             remaining = deadline - self._time_fn()
             if remaining <= 0.0:
@@ -1587,7 +1633,7 @@ class ClientRuntime:
         if payload.get("status") == "done":
             result = payload.get("result") or {}
             if not result.get("ok"):
-                raise _bridge_error(result)
+                raise _bridge_error(result, cmd)
             return result_prune.prune_unfilled_fields(cmd, result)
         return None
 
@@ -4396,7 +4442,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Click a client widget by name. button is "
         "0=left, 1=right, 2=middle. mode='direct' is the default; the bridge "
-        "rejects mode='complete' with mode_not_implemented."
+        "rejects mode='complete' with mode_not_implemented. On failure the "
+        "error text keeps the bridge diagnostics after the code, e.g. "
+        "not_handled; handler='X' user_id=506 clicked=False; "
+        "requested_path='BtnCloseX' matched_path='...': an empty handler means "
+        "no handler ran, a named one ran and declined."
     ))
     async def ui_click(
         path: str,
