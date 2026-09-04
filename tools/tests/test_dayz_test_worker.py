@@ -10,6 +10,7 @@ import unittest
 from dayz_mcp import (
     dayz_test_readiness,
     dayz_test_request,
+    dayz_test_storage,
     dayz_test_worker,
     native_broker_protocol,
 )
@@ -37,6 +38,61 @@ RUNTIME = dayz_test_worker.WorkerRuntimePolicy(
     build_temp_root=r"P:\temp",
     build_source_basename=None,
 )
+
+
+# M15. Every launch that hands a fresh mission storage to the engine now passes
+# through dayz_test_storage.prepare_storage, which touches the real file system.
+# These tests are about the worker, not about rotation, so the module attribute
+# is replaced for the whole file by a recording stub that always allows the
+# launch. StorageGateTests below is the one that asserts WHO calls it and WHEN.
+_REAL_PREPARE_STORAGE = dayz_test_storage.prepare_storage
+
+
+class _StorageGateSpy:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.trace: list[str] | None = None
+
+    def reset(self, trace: list[str] | None = None) -> None:
+        self.calls = []
+        self.trace = trace
+
+    def __call__(
+        self,
+        mission: str,
+        *,
+        seal: str,
+        project: str,
+        now: float,
+        txid: str,
+    ) -> dayz_test_storage.RotationResult:
+        self.calls.append(
+            {"mission": mission, "seal": seal, "project": project, "txid": txid}
+        )
+        if self.trace is not None:
+            self.trace.append("storage")
+        return dayz_test_storage.RotationResult(
+            launch_allowed=True,
+            storage_rotated=False,
+            storage_backup=None,
+            storage_marker_backup=None,
+            storage_seal=seal[:8],
+            storage_recovery_required=False,
+            storage_reset_notice=None,
+            decision=dayz_test_storage.DECISION_REUSE,
+            reason="seal_matches",
+        )
+
+
+STORAGE_GATE = _StorageGateSpy()
+
+
+def setUpModule() -> None:
+    dayz_test_storage.prepare_storage = STORAGE_GATE
+
+
+def tearDownModule() -> None:
+    dayz_test_storage.prepare_storage = _REAL_PREPARE_STORAGE
 
 
 class _Broker:
@@ -771,6 +827,116 @@ class DayzTestWorkerTests(unittest.TestCase):
         source = inspect.getsource(dayz_test_worker)
         for forbidden in ("subprocess", "multiprocessing", "ctypes", "os.system", "os.spawn"):
             self.assertNotIn(forbidden, source)
+
+
+class StorageGateTests(unittest.TestCase):
+    """S13. Who rotates the mission storage, and before what.
+
+    The negative half is the point: a mode that attaches to a tree the engine
+    already chose must not rotate it, and a call that never launches must not
+    touch it at all.
+    """
+
+    RUN_ID = "12345678-1234-4234-8234-1234567890ab"
+
+    def _execute(self, broker: _Broker, **overrides: object) -> object:
+        raw = _raw(**overrides)
+        parsed = dayz_test_request.parse_dayz_test_request(raw, policies=(POLICY,))
+        ids = iter(
+            (
+                "12345678-1234-4234-8234-1234567890ab",
+                "87654321-4321-4321-8321-ba0987654321",
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            )
+        )
+
+        async def readiness(_run_id: str, _port: int, _timeout: int) -> object:
+            return dayz_test_readiness.ReadinessResult(ready=True, error_code=None)
+
+        return asyncio.run(
+            dayz_test_worker.execute_dayz_test_worker(
+                parsed.canonical_bytes,
+                request_sha256=parsed.sha256,
+                request_policies=(POLICY,),
+                runtime_policy=RUNTIME,
+                broker=broker,
+                id_fn=lambda: next(ids),
+                readiness_probe=readiness,
+                has_binarizable_assets=lambda _source: True,
+                now_fn=lambda: 1_756_000_000.0,
+            )
+        )
+
+    def test_s13_only_the_modes_that_hand_over_a_fresh_storage_rotate(self) -> None:
+        cases = (
+            ({"mode": "server"}, True),
+            ({"mode": "all"}, True),
+            ({"mode": "offline"}, True),
+            ({"mode": "offline", "run_id": self.RUN_ID}, False),
+            ({"mode": "client", "run_id": self.RUN_ID}, False),
+            ({"mode": "offline", "run_id": self.RUN_ID, "kill": True}, False),
+            ({"mode": "server", "preflight": True}, False),
+        )
+        for overrides, expected in cases:
+            with self.subTest(**overrides):
+                STORAGE_GATE.reset()
+                broker = _Broker()
+                if overrides.get("run_id") and not overrides.get("kill"):
+                    broker.current_run_id = str(overrides["run_id"])
+                self._execute(broker, **overrides)
+                self.assertEqual(bool(STORAGE_GATE.calls), expected)
+
+    def test_s13b_the_gate_runs_before_the_first_broker_frame(self) -> None:
+        trace: list[str] = []
+        STORAGE_GATE.reset(trace)
+
+        class _TracingBroker(_Broker):
+            async def invoke(self, frame: bytes) -> dict[str, object]:
+                trace.append("broker")
+                return await super().invoke(frame)
+
+        self._execute(_TracingBroker(), mode="server")
+        STORAGE_GATE.reset()
+        self.assertEqual(trace[0], "storage")
+        self.assertEqual(trace.count("storage"), 1)
+
+    def test_the_seal_separates_extra_mods_from_server_mods(self) -> None:
+        STORAGE_GATE.reset()
+        self._execute(_Broker(), mode="server", extra_mods=["@LFQuad2"])
+        first = STORAGE_GATE.calls[0]["seal"]
+        STORAGE_GATE.reset()
+        self._execute(_Broker(), mode="server", server_mods=["@LFQuad2"])
+        second = STORAGE_GATE.calls[0]["seal"]
+        STORAGE_GATE.reset()
+        self.assertNotEqual(first, second)
+
+    def test_a_blocked_storage_refuses_the_launch_without_a_broker_frame(self) -> None:
+        blocked = dayz_test_storage.RotationResult(
+            launch_allowed=False,
+            storage_rotated=False,
+            storage_backup=None,
+            storage_marker_backup=None,
+            storage_seal="00000000",
+            storage_recovery_required=True,
+            storage_reset_notice=None,
+            decision="blocked",
+            reason="journal_ambiguous",
+        )
+        dayz_test_storage.prepare_storage = lambda *a, **k: blocked
+        broker = _Broker()
+        try:
+            with self.assertRaisesRegex(
+                dayz_test_worker.DayzTestWorkerError, "storage_recovery_required"
+            ):
+                self._execute(broker, mode="server")
+        finally:
+            dayz_test_storage.prepare_storage = STORAGE_GATE
+        self.assertEqual(broker.requests, [])
+
+    def test_storage_error_codes_are_declared_in_the_worker_vocabulary(self) -> None:
+        self.assertIn("storage_recovery_required", dayz_test_worker.WORKER_ERROR_CODES)
+        self.assertIn("storage_prepare_failed", dayz_test_worker.WORKER_ERROR_CODES)
 
 
 if __name__ == "__main__":
