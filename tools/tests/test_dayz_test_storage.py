@@ -314,6 +314,32 @@ class PrepareStorageTest(unittest.TestCase):
         self.assertFalse(result.launch_allowed)
         self.assertEqual(result.reason, "journal_unreadable")
 
+    def test_a_leftover_temporary_does_not_block_the_mission_forever(self) -> None:
+        """A hard kill between the write and the rename leaves the temporary.
+
+        v1 deletes nothing, so it stays. Named after its destination it would
+        match the journal prefix without matching the journal grammar, and every
+        future launch of this mission would answer journal_name_invalid.
+        """
+        _make_storage(self.mission, marker_payload=_valid_marker(SEAL_A))
+        leftover = self.mission / f"{storage.STORAGE_NAME}.modset.tmp-4242-0"
+        leftover.write_text("half a journal", encoding="utf-8")
+        result = self._prepare()
+        self.assertTrue(result.launch_allowed, result)
+        self.assertEqual(result.decision, storage.DECISION_REUSE)
+        self.assertTrue(leftover.is_file())
+
+    def test_positive_control_a_journal_shaped_leftover_does_block(self) -> None:
+        # Without this the test above would pass over a scan that ignores
+        # everything, including a real ambiguous journal.
+        _make_storage(self.mission, marker_payload=_valid_marker(SEAL_A))
+        (self.mission / f"{storage.JOURNAL_PREFIX}zz{storage.JOURNAL_SUFFIX}").write_text(
+            "half a journal", encoding="utf-8"
+        )
+        result = self._prepare()
+        self.assertFalse(result.launch_allowed)
+        self.assertEqual(result.reason, "journal_name_invalid")
+
     def test_s9_a_crash_between_the_rename_and_the_seal_recovers_from_the_journal(self) -> None:
         """The case the design names: storage moved, marker not published yet.
 

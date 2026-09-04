@@ -31,6 +31,7 @@ signature would not have seen the incident that motivated the annex.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import ntpath
 import os
@@ -75,6 +76,9 @@ STORAGE_POISON_RPT_SIGNATURES = (
 )
 
 MODSET_ROLES = ("base_mods", "project_mod", "extra_mods", "server_mods")
+
+
+_TEMPORARY_SEQUENCE = itertools.count()
 
 
 class StorageError(ValueError):
@@ -263,7 +267,15 @@ def _write_json_atomic(path: str, document: object, *, replace: bool) -> None:
     derived data and never the source of truth of anything a player owns.
     """
     payload = _canonical(document)
-    temporary = f"{path}.tmp-{os.getpid()}-{int(time.time() * 1000)}"
+    # The temporary is NOT named after its destination. A hard kill between the
+    # write and the rename leaves it on disk forever (v1 deletes nothing), and a
+    # leftover called `storage_1.modset.rotation.<txid>.json.tmp-...` matches the
+    # journal prefix without matching the journal grammar, which would block
+    # every future launch of the mission. Its own prefix keeps it out of the scan.
+    temporary = ntpath.join(
+        ntpath.dirname(path),
+        f"{STORAGE_NAME}.modset.tmp-{os.getpid()}-{next(_TEMPORARY_SEQUENCE)}",
+    )
     with open(temporary, "wb") as handle:
         handle.write(payload)
         handle.flush()
