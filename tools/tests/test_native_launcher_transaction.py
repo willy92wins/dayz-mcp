@@ -66,6 +66,15 @@ class NativeLauncherTransactionTests(unittest.IsolatedAsyncioTestCase):
         # now refuses to start a server.
         for path in (source, missions, mods / "@CF", mods / "@VPPAdminTools"):
             path.mkdir(parents=True, exist_ok=True)
+        # ficha df93 ronda 3: the gate proves the mod's identity from its own
+        # meta.cpp, so the fixture carries the lines every install has.
+        (mods / "@VPPAdminTools" / "meta.cpp").write_text(
+            "protocol = 1;\n"
+            "publishedid = 1828439124;\n"
+            'name = "VPPAdminTools";\n'
+            "timestamp = 5250883055442304087;\n",
+            encoding="ascii",
+        )
         (project / "_server" / "serverDZ.cfg").write_text(
             "vppDisablePassword = 1;\n", encoding="ascii"
         )

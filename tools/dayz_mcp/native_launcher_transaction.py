@@ -118,18 +118,24 @@ async def _cleanup_transaction(
 VPP_MOD_FOLDER = "@VPPAdminTools"
 # Six of the ten sealed policies do not name the folder at all: they carry the
 # Workshop install by its absolute path, whose basename is the published id.
-# Measured on this host: <workshop>\221100\1828439124\meta.cpp says name =
-# "VPPAdminTools". Matching only the folder name refused those six live
-# configurations, which is the failure this gate exists to avoid.
+# Both forms only SELECT a candidate here. A basename is a name, not an
+# identity: a directory an unrelated mod occupies would pass a name check. The
+# identity is the published id inside the candidate's own meta.cpp, which every
+# live form carries -- measured on this host for P:\Mods\@VPPAdminTools,
+# <DayZ>\!Workshop\@VPPAdminTools and <workshop>\content\221100\1828439124:
+# all three say publishedid = 1828439124.
 VPP_WORKSHOP_ID = "1828439124"
 VPP_MOD_IDENTITIES = frozenset(
     {VPP_MOD_FOLDER.casefold(), VPP_WORKSHOP_ID.casefold()}
 )
+_MOD_META_NAME = "meta.cpp"
+_MOD_PUBLISHED_ID = re.compile(r"publishedid\s*=\s*(\d{1,20})")
 VPP_PREFLIGHT_FAILED = "vpp_preflight_failed"
 VPP_PREFLIGHT_HINT = (
-    "this mode starts a server and the admin tools are not usable: add "
-    "@VPPAdminTools to extra_mods, and make sure the mod folder, the server "
-    "serverDZ.cfg and its vppDisablePassword = 1 are in place"
+    "this mode starts a server and the admin tools are not usable: put the "
+    "installed mod in extra_mods as @VPPAdminTools, or as its absolute "
+    "Workshop path (the form this gate can always verify), and make sure the "
+    "server serverDZ.cfg carries a live vppDisablePassword = 1"
 )
 SERVER_CONFIG_NAME = "serverDZ.cfg"
 _PROFILES_DIR = "profiles"
@@ -142,29 +148,36 @@ _MAX_PREFLIGHT_READ_CHARS = 262_144
 # The generated cfg writes "vppDisablePassword = 1;" (dayz-test.ps1:343). The
 # ps1's self-heal only checks the key is PRESENT (:468); a key set to 0 leaves
 # the superadmin at the password prompt, which is the reported symptom, so the
-# VALUE is what is checked, and only outside comments -- the same // and /* */
-# the generated cfg itself uses. A key the engine never reads is not a key.
-_VPP_ASSIGNMENT = re.compile(r"vppDisablePassword\s*=\s*([^;\s]+)")
-_LINE_COMMENT = re.compile(r"//[^\n]*")
-_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+# VALUE is what is checked -- and only where the engine would read it. A regex
+# over the raw text accepted the key inside a string, inside an unterminated
+# /* block, and as the tail of another identifier, so the cfg is scanned with a
+# state machine instead: // to end of line, /* until */ or end of file, and
+# "..." are all dead ground, and the key needs a left boundary.
+_VPP_KEY = "vppDisablePassword"
+_VPP_VALUE = re.compile(r"\s*=\s*([^;\s]+)")
 # One clean SteamID64 per line, the same token dayz-test.ps1:398 keeps.
 _STEAM_ID64 = re.compile(r"\d{17}")
 _UNREADABLE = object()
 
 
 class HostVppFiles:
-    """The only host access this preflight has: two read-only probes.
+    """The only host access this preflight has: one read-only probe.
 
     No write surface exists on purpose. A preflight that repaired the workspace
-    would be the ps1 again; the refusal is what the ficha asked for.
+    would be the ps1 again; the refusal is what the ficha asked for. is_dir went
+    with the folder probe: existence is now proven by reading the mod's own
+    meta.cpp, and a directory that exists proves nothing about what is in it.
     """
 
-    def is_dir(self, path: str) -> bool:
-        return os.path.isdir(path)
-
     def read_text(self, path: str) -> str:
+        """Up to the cap PLUS ONE character, so the caller can see the overflow.
+
+        Returning exactly the cap made a truncated prefix indistinguishable
+        from a whole file, and a cfg whose later assignment contradicted the
+        first one passed. The extra character is the overflow sentinel.
+        """
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            return handle.read(_MAX_PREFLIGHT_READ_CHARS)
+            return handle.read(_MAX_PREFLIGHT_READ_CHARS + 1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,18 +269,58 @@ def vpp_preflight_paths(
     )
 
 
-def _vpp_password_is_disabled(config: str) -> bool:
-    """True only when every UNCOMMENTED assignment of the key says 1.
+def _live_assignments(config: str, key: str) -> list[str]:
+    """Values assigned to `key` in the ground the engine actually reads.
 
-    Stripping comments can only remove assignments, never invent one, so a
-    value hidden inside a quoted // is dropped and the run is refused: the
-    error always lands on the refusing side. Two live assignments with
-    different values are refused too -- this layer cannot rank them against
-    the engine's own parser, and guessing is how a gate goes green on a cfg
-    that will still ask the superadmin for a password.
+    One left-to-right pass. // runs to the end of the line, /* runs to */ or,
+    unterminated, to the end of the file, and a double-quoted string is dead
+    ground too -- all three swallowed a key that a raw regex then counted as
+    live. The key also needs a left boundary, so `notvppDisablePassword` stops
+    matching. Escapes are not honoured inside strings: serverDZ.cfg has none,
+    and treating a backslash-quote as a closing quote can only end a string
+    early, which puts more text under scrutiny, never less.
     """
-    body = _LINE_COMMENT.sub("", _BLOCK_COMMENT.sub("", config))
-    values = _VPP_ASSIGNMENT.findall(body)
+    values: list[str] = []
+    index = 0
+    length = len(config)
+    quote = chr(34)
+    newline = chr(10)
+    while index < length:
+        if config[index] == quote:
+            index += 1
+            while index < length and config[index] != quote:
+                index += 1
+            index += 1
+            continue
+        if config.startswith("//", index):
+            end = config.find(newline, index)
+            index = length if end == -1 else end + 1
+            continue
+        if config.startswith("/*", index):
+            end = config.find("*/", index + 2)
+            index = length if end == -1 else end + 2
+            continue
+        if config.startswith(key, index) and (
+            index == 0
+            or not (config[index - 1].isalnum() or config[index - 1] == "_")
+        ):
+            match = _VPP_VALUE.match(config, index + len(key))
+            if match is not None:
+                values.append(match.group(1))
+                index = match.end()
+                continue
+        index += 1
+    return values
+
+
+def _vpp_password_is_disabled(config: str) -> bool:
+    """True only when every LIVE assignment of the key says 1.
+
+    Two live assignments that disagree are refused: this layer cannot rank them
+    against the engine's own parser, and guessing is how a gate goes green on a
+    cfg that will still ask the superadmin for a password.
+    """
+    values = _live_assignments(config, _VPP_KEY)
     return bool(values) and all(value.strip() == "1" for value in values)
 
 
@@ -281,39 +334,49 @@ def _read_or_absent(files: object, path: str) -> object:
         return _UNREADABLE
 
 
-def _is_vpp_entry(entry: str) -> bool:
-    """Whether this -mod= entry is the admin tools, by folder name or id.
+def _is_vpp_candidate(entry: str) -> bool:
+    """Whether this -mod= entry is worth checking. A NAME, not an identity.
 
     A relative entry is the folder name the ps1 used; an absolute entry is the
-    Workshop install, whose last segment is the published id. Both identities
-    appear in the live sealed policies.
+    Workshop install, whose last segment is the published id. Both forms only
+    select a candidate: the identity is proven from the mod's own meta.cpp.
     """
     return ntpath.basename(entry).casefold() in VPP_MOD_IDENTITIES
 
 
-def _mod_folder_probe(
-    entry: str,
-    policy: dayz_test_request.RequestProjectPolicy,
-    files: object,
-) -> bool | None:
-    """True/False if the exact folder the worker will pass can be checked here.
+def _resolved_mod_path(
+    entry: str, policy: dayz_test_request.RequestProjectPolicy
+) -> str | None:
+    """The exact path the worker will hand to the engine, or None if unknowable.
 
-    None means the check is NOT AVAILABLE at this layer, and the caller must
-    say so instead of claiming a pass. An absolute entry is exact: it is the
-    path the worker normalises and hands to the engine
+    An absolute entry is exact: the worker only normalises it
     (dayz_test_worker.py:197-202). A relative entry is resolved by the worker
     against worker-runtime.json's single mods_root, which this route cannot
-    read; build_native_launcher.py:503 only guarantees that mods_root is ONE
-    of the policy's mod_roots. With exactly one declared root the two are
-    therefore the same path and the probe is exact; with several, which one
-    the worker uses is unknown, and probing them all would report a folder
-    found under a root the launch never touches.
+    read; build_native_launcher.py:503 only guarantees mods_root is ONE of the
+    policy's mod_roots. With exactly one declared root the two are the same
+    path; with several, which one the launch uses is unknown here.
     """
     if ntpath.isabs(entry):
-        return bool(files.is_dir(ntpath.normpath(entry)))
+        return ntpath.normpath(entry)
     if len(policy.mod_roots) != 1:
         return None
-    return bool(files.is_dir(ntpath.join(policy.mod_roots[0], entry)))
+    return ntpath.join(policy.mod_roots[0], entry)
+
+
+def _proves_vpp_identity(path: str, files: object) -> bool | None:
+    """True/False from the mod's own meta.cpp; None when it cannot be read.
+
+    `publishedid` is the identity Steam assigns; the folder name is not. Every
+    live form of this mod carries it. A directory an unrelated mod occupies, or
+    a hand-made one with the right name, has no meta.cpp with this id.
+    """
+    meta = _read_or_absent(files, ntpath.join(path, _MOD_META_NAME))
+    if not isinstance(meta, str):
+        return None
+    found = _MOD_PUBLISHED_ID.search(meta)
+    if found is None:
+        return False
+    return found.group(1) == VPP_WORKSHOP_ID
 
 
 def evaluate_vpp_preflight(
@@ -337,21 +400,29 @@ def evaluate_vpp_preflight(
     warnings: list[str] = []
 
     requested = [
-        entry for entry in effective_mod_entries(payload) if _is_vpp_entry(entry)
+        entry for entry in effective_mod_entries(payload) if _is_vpp_candidate(entry)
     ]
     if not requested:
         missing.append("vpp_mod_not_requested")
     else:
-        probes = [_mod_folder_probe(entry, policy, host) for entry in requested]
-        if any(probe is True for probe in probes):
-            pass
-        elif all(probe is False for probe in probes):
-            missing.append("vpp_mod_folder")
+        resolved = [_resolved_mod_path(entry, policy) for entry in requested]
+        paths = [path for path in resolved if path is not None]
+        if not paths:
+            # Every candidate is a relative name under a multi-root policy.
+            # Nothing can be proven about a path the launch may not even use,
+            # and "unknown" is not "authorised": the hint names the form that
+            # always verifies, the absolute Workshop path the six live
+            # multi-root policies already use.
+            missing.append("vpp_mod_root_ambiguous")
         else:
-            # Not a pass and not a failure: the folder could not be located
-            # from here. Refusing would block the live multi-root projects;
-            # claiming a pass would be the green this gate exists to deny.
-            warnings.append("vpp_mod_folder_unverifiable")
+            proofs = [_proves_vpp_identity(path, host) for path in paths]
+            if any(proof is True for proof in proofs):
+                pass
+            elif any(proof is False for proof in proofs):
+                # Read, and it is some other mod. The name was never identity.
+                missing.append("vpp_mod_identity")
+            else:
+                missing.append("vpp_mod_folder")
 
     paths = vpp_preflight_paths(payload, policy)
     config = _read_or_absent(host, paths.server_config)
@@ -359,6 +430,11 @@ def evaluate_vpp_preflight(
         missing.append("server_config_unreadable")
     elif config is None:
         missing.append("server_config")
+    elif len(str(config)) > _MAX_PREFLIGHT_READ_CHARS:
+        # The read is capped, so a bigger file arrives truncated and a later
+        # assignment contradicting the first one would be invisible. A prefix
+        # is not the file: say so rather than validate the part we saw.
+        missing.append("server_config_unverifiable")
     elif not _vpp_password_is_disabled(str(config)):
         missing.append("vpp_disable_password")
 

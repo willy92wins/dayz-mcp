@@ -35,6 +35,17 @@ from dayz_mcp import (
 
 
 RUN_ID = "12345678-1234-4234-8234-1234567890ab"
+# The four lines every install of this mod carries, measured on this host for
+# the three live forms of the folder.
+META_VPP = (
+    "protocol = 1;\n"
+    "publishedid = 1828439124;\n"
+    'name = "VPPAdminTools";\n'
+    "timestamp = 5250883055442304087;\n"
+)
+META_OTHER = META_VPP.replace("1828439124", "1559212036").replace(
+    "VPPAdminTools", "CF"
+)
 PACKAGE = Path(dayz_test_tool.__file__).resolve().parent
 TOOLS = PACKAGE.parent
 
@@ -79,19 +90,14 @@ class FakeFiles:
     def __init__(
         self,
         *,
-        dirs: tuple[str, ...] = (),
         files: dict[str, str] | None = None,
         unreadable: tuple[str, ...] = (),
     ) -> None:
-        self.dirs = {ntpath.normcase(item) for item in dirs}
         self.files = {
             ntpath.normcase(key): value for key, value in (files or {}).items()
         }
         self.unreadable = {ntpath.normcase(item) for item in unreadable}
         self.reads: list[str] = []
-
-    def is_dir(self, path: str) -> bool:
-        return ntpath.normcase(path) in self.dirs
 
     def read_text(self, path: str) -> str:
         self.reads.append(path)
@@ -112,8 +118,10 @@ def _healthy(
     server = ntpath.join(selected.dev_root, "_server")
     vpp = ntpath.join(server, "profiles", "VPPAdminTools", "Permissions")
     return FakeFiles(
-        dirs=(ntpath.join(selected.mod_roots[0], "@VPPAdminTools"),),
         files={
+            ntpath.join(
+                selected.mod_roots[0], "@VPPAdminTools", "meta.cpp"
+            ): META_VPP,
             ntpath.join(server, "serverDZ.cfg"): (
                 "allowFilePatching = 1;\nvppDisablePassword = 1;\n"
             ),
@@ -211,7 +219,7 @@ class VppPreflightDecisionTest(unittest.TestCase):
         workshop = ntpath.join(r"P:\Mods", "1828439124")
         policy = _policy()
         files = _healthy(policy)
-        files.dirs.add(ntpath.normcase(workshop))
+        files.files[ntpath.normcase(ntpath.join(workshop, "meta.cpp"))] = META_VPP
         result = self._result(
             policy=policy,
             files=files,
@@ -226,8 +234,10 @@ class VppPreflightDecisionTest(unittest.TestCase):
         workshop = ntpath.join(r"P:\Mods", "1828439124")
         policy = _policy()
         files = _healthy(policy)
-        files.dirs.clear()
-        files.dirs.add(ntpath.normcase(ntpath.join(r"P:\Elsewhere", "1828439124")))
+        files.files.clear()
+        files.files[
+            ntpath.normcase(ntpath.join(r"P:\Elsewhere", "1828439124", "meta.cpp"))
+        ] = META_VPP
         result = self._result(
             policy=policy,
             files=files,
@@ -237,10 +247,72 @@ class VppPreflightDecisionTest(unittest.TestCase):
 
         self.assertIn("vpp_mod_folder", result.missing)
 
+    def test_a_foreign_directory_with_the_right_name_is_refused(self) -> None:
+        # The delta review built exactly this: a directory named after the
+        # Workshop id holding some other mod. A name is not an identity.
+        for entry, meta in (
+            (ntpath.join(r"P:\Mods", "1828439124"), META_OTHER),
+            (ntpath.join(r"P:\Mods", "@VPPAdminTools"), META_OTHER),
+        ):
+            with self.subTest(entry=entry):
+                policy = _policy()
+                files = _healthy(policy)
+                files.files[ntpath.normcase(ntpath.join(entry, "meta.cpp"))] = meta
+                result = self._result(
+                    policy=policy,
+                    files=files,
+                    mode="all",
+                    extra_mods=["@DayZ_MCP", entry],
+                )
+
+                self.assertEqual(
+                    result.error_code, transaction.VPP_PREFLIGHT_FAILED
+                )
+                self.assertIn("vpp_mod_identity", result.missing)
+
+    def test_a_directory_with_no_meta_cpp_is_refused(self) -> None:
+        workshop = ntpath.join(r"P:\Mods", "1828439124")
+        policy = _policy()
+        files = _healthy(policy)
+        files.files.pop(
+            ntpath.normcase(
+                ntpath.join(policy.mod_roots[0], "@VPPAdminTools", "meta.cpp")
+            )
+        )
+        result = self._result(
+            policy=policy,
+            files=files,
+            mode="all",
+            extra_mods=["@DayZ_MCP", workshop],
+        )
+
+        self.assertIn("vpp_mod_folder", result.missing)
+
+    def test_an_unreadable_meta_cpp_is_refused(self) -> None:
+        policy = _policy()
+        files = _healthy(policy)
+        files.unreadable = {
+            ntpath.normcase(
+                ntpath.join(policy.mod_roots[0], "@VPPAdminTools", "meta.cpp")
+            )
+        }
+        result = self._result(
+            policy=policy,
+            files=files,
+            mode="all",
+            extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+        )
+
+        self.assertIn("vpp_mod_folder", result.missing)
+
     def test_requested_admin_tools_with_no_folder_on_disk_are_refused(self) -> None:
         policy = _policy()
         files = _healthy(policy)
-        files.dirs.clear()
+        files.files.pop(
+            ntpath.normcase(
+                ntpath.join(policy.mod_roots[0], "@VPPAdminTools", "meta.cpp")
+            )
+        )
         result = self._result(
             policy=policy,
             files=files,
@@ -252,15 +324,18 @@ class VppPreflightDecisionTest(unittest.TestCase):
         self.assertIn("vpp_mod_folder", result.missing)
         self.assertNotIn("vpp_mod_not_requested", result.missing)
 
-    def test_a_relative_entry_with_several_roots_is_declared_unverifiable(self) -> None:
-        # The worker resolves a relative entry against ONE mods_root that this
-        # layer cannot read (build_native_launcher.py:503 only guarantees it is
-        # one of these). Probing them all reported a folder found under a root
-        # the launch never touches; refusing would block the live multi-root
-        # projects. The gate says it could not check, and launches.
+    def test_a_relative_entry_with_several_roots_is_refused(self) -> None:
+        # The worker resolves a relative entry against ONE mods_root this layer
+        # cannot read (build_native_launcher.py:503 only guarantees it is one
+        # of these). Round 2 turned that into a warning and launched: the delta
+        # review called it fail-open against P-D1 and it was right. Unknown is
+        # not authorised; the hint names the absolute form, which is what the
+        # six live multi-root policies already use.
         policy = _policy(mod_roots=(r"P:\ModsRuntime", r"P:\ModsSecondary"))
         files = _healthy(policy)
-        files.dirs = {ntpath.normcase(r"P:\ModsSecondary\@VPPAdminTools")}
+        files.files[
+            ntpath.normcase(r"P:\ModsSecondary\@VPPAdminTools\meta.cpp")
+        ] = META_VPP
         result = self._result(
             policy=policy,
             files=files,
@@ -268,13 +343,34 @@ class VppPreflightDecisionTest(unittest.TestCase):
             extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
         )
 
-        self.assertIsNone(result.error_code)
-        self.assertIn("vpp_mod_folder_unverifiable", result.warnings)
+        self.assertEqual(result.error_code, transaction.VPP_PREFLIGHT_FAILED)
+        self.assertIn("vpp_mod_root_ambiguous", result.missing)
 
-    def test_a_single_root_keeps_the_folder_check_blocking(self) -> None:
+    def test_an_absolute_entry_passes_under_a_multi_root_policy(self) -> None:
+        # The escape the refusal above points at, and the shape the six live
+        # multi-root policies carry.
+        policy = _policy(mod_roots=(r"P:\ModsRuntime", r"P:\ModsSecondary"))
+        workshop = ntpath.join(r"P:\ModsSecondary", "1828439124")
+        files = _healthy(policy)
+        files.files[ntpath.normcase(ntpath.join(workshop, "meta.cpp"))] = META_VPP
+        result = self._result(
+            policy=policy,
+            files=files,
+            mode="all",
+            extra_mods=["@DayZ_MCP", workshop],
+        )
+
+        self.assertIsNone(result.error_code)
+
+    def test_a_single_root_resolves_a_relative_entry_exactly(self) -> None:
         policy = _policy(mod_roots=(r"P:\ModsRuntime",))
         files = _healthy(policy)
-        files.dirs = {ntpath.normcase(r"P:\ModsSecondary\@VPPAdminTools")}
+        files.files.pop(
+            ntpath.normcase(r"P:\ModsRuntime\@VPPAdminTools\meta.cpp")
+        )
+        files.files[
+            ntpath.normcase(r"P:\ModsSecondary\@VPPAdminTools\meta.cpp")
+        ] = META_VPP
         result = self._result(
             policy=policy,
             files=files,
@@ -283,7 +379,7 @@ class VppPreflightDecisionTest(unittest.TestCase):
         )
 
         self.assertIn("vpp_mod_folder", result.missing)
-        self.assertNotIn("vpp_mod_folder_unverifiable", result.warnings)
+        self.assertNotIn("vpp_mod_root_ambiguous", result.missing)
 
     def test_client_mode_does_not_require_the_admin_tools(self) -> None:
         result = self._result(
@@ -420,6 +516,91 @@ class VppPreflightDecisionTest(unittest.TestCase):
         )
 
         self.assertIsNone(result.error_code)
+
+    def test_dead_ground_never_counts_as_a_live_key(self) -> None:
+        # The three shapes the delta review executed against the regex: a key
+        # inside an unterminated /* block, a key that is only the tail of
+        # another identifier, and a key inside a quoted string.
+        for label, body in (
+            ("unterminated_block", "/* vppDisablePassword=1;"),
+            ("prefixed_identifier", "notvppDisablePassword=1;\n"),
+            ("inside_string", 'motd[]={"vppDisablePassword=1;"};\n'),
+            (
+                "unterminated_block_hides_a_live_zero",
+                "vppDisablePassword=0;\n/* vppDisablePassword=1;",
+            ),
+        ):
+            with self.subTest(label=label):
+                policy = _policy()
+                files = _healthy(policy)
+                files.files[
+                    ntpath.normcase(
+                        ntpath.join(policy.dev_root, "_server", "serverDZ.cfg")
+                    )
+                ] = body
+                result = self._result(
+                    policy=policy,
+                    files=files,
+                    mode="all",
+                    extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+                )
+
+                self.assertIn("vpp_disable_password", result.missing)
+
+    def test_a_live_key_after_dead_ground_still_passes(self) -> None:
+        # Positive control for the scanner: it must not eat the real assignment
+        # that follows a comment, a string, or a lookalike identifier.
+        policy = _policy()
+        files = _healthy(policy)
+        files.files[
+            ntpath.normcase(ntpath.join(policy.dev_root, "_server", "serverDZ.cfg"))
+        ] = (
+            "// vppDisablePassword = 0;\n"
+            'hostname = "http://example/x";\n'
+            "notvppDisablePassword=0;\n"
+            "/* vppDisablePassword = 0; */\n"
+            "vppDisablePassword=1;\n"
+        )
+        result = self._result(
+            policy=policy,
+            files=files,
+            mode="all",
+            extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+        )
+
+        self.assertIsNone(result.error_code)
+
+    def test_a_config_bigger_than_the_read_cap_is_refused(self) -> None:
+        # The cap made a prefix indistinguishable from the file, so a later
+        # contradicting assignment was invisible. A prefix is not the file.
+        policy = _policy()
+        files = _healthy(policy)
+        body = (
+            "vppDisablePassword=1;\n"
+            + "x=1;\n" * 60000
+            + "vppDisablePassword=0;\n"
+        )
+        self.assertGreater(len(body), transaction._MAX_PREFLIGHT_READ_CHARS)
+        files.files[
+            ntpath.normcase(ntpath.join(policy.dev_root, "_server", "serverDZ.cfg"))
+        ] = body
+        result = self._result(
+            policy=policy,
+            files=files,
+            mode="all",
+            extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+        )
+
+        self.assertEqual(result.error_code, transaction.VPP_PREFLIGHT_FAILED)
+        self.assertIn("server_config_unverifiable", result.missing)
+
+    def test_the_host_seam_reports_the_overflow_instead_of_hiding_it(self) -> None:
+        with TemporaryDirectory() as raw_root:
+            path = Path(raw_root) / "big.cfg"
+            path.write_text("y" * (transaction._MAX_PREFLIGHT_READ_CHARS + 500))
+            text = transaction.HostVppFiles().read_text(str(path))
+
+        self.assertEqual(len(text), transaction._MAX_PREFLIGHT_READ_CHARS + 1)
 
     def test_unreadable_server_config_fails_closed(self) -> None:
         policy = _policy()
@@ -579,7 +760,7 @@ class VppPreflightEnforcementTest(unittest.TestCase):
         seam = transaction.HostVppFiles()
         public = {name for name in dir(seam) if not name.startswith("_")}
 
-        self.assertEqual(public, {"is_dir", "read_text"})
+        self.assertEqual(public, {"read_text"})
 
 
 class _CountingControlClient:
@@ -759,9 +940,13 @@ class VppPreflightCallSiteTest(unittest.TestCase):
         return callers
 
     def test_the_launcher_is_reached_through_one_transaction_only(self) -> None:
+        # h9_native_probe.py is host-local and untracked (tests/test_lote_w_h9.py
+        # :18-21 says so and skips without it), so a clean checkout has one
+        # caller and this host has two. Subtracting the declared exception keeps
+        # the assertion exact in both trees while a NEW caller still fails it.
         self.assertEqual(
-            self._callers("launch_registered_native"),
-            {"secure_launcher.py", "h9_native_probe.py"},
+            self._callers("launch_registered_native") - {"h9_native_probe.py"},
+            {"secure_launcher.py"},
         )
         self.assertEqual(
             self._callers("execute_native_launcher_transaction"),
@@ -775,11 +960,16 @@ class VppPreflightCallSiteTest(unittest.TestCase):
     def test_every_caller_of_the_backend_runs_the_gate_first(self) -> None:
         """h9_native_probe drives the backend directly, so it enforces itself.
 
-        The census above allows exactly one such caller. This asserts that the
-        one allowed exception is not an exception at all: it calls the same
-        enforce_vpp_preflight, and calls it before the backend.
+        The census allows exactly one such caller. This asserts the one allowed
+        exception is not an exception at all: it calls the same
+        enforce_vpp_preflight, and calls it before the backend. The probe is
+        host-local and untracked, so a tree without it skips, exactly as
+        tests/test_lote_w_h9.py:18-21 does.
         """
-        source = (TOOLS / "h9_native_probe.py").read_text(encoding="utf-8")
+        probe = TOOLS / "h9_native_probe.py"
+        if not probe.is_file():
+            self.skipTest("h9_native_probe.py is not present in this tree")
+        source = probe.read_text(encoding="utf-8")
         enforce = source.index("enforce_vpp_preflight(parsed.payload")
         launch = source.index("await launch_registered_native(")
 
