@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from dayz_mcp import dayz_test_modes, dayz_test_request, dayz_test_worker
+from dayz_mcp import native_launcher_transaction
 from dayz_mcp import dayz_test_tool
 from dayz_mcp import server
 from dayz_mcp import steam_preflight
@@ -633,6 +634,22 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        # ficha df93: the VPP preflight refuses a server start whose effective
+        # -mod= list carries no @VPPAdminTools. These fixtures are policies and
+        # stubs, not a server workspace, so the gate is neutralised here exactly
+        # as the Steam one above is; its own oracle is tests/test_vpp_preflight.py.
+        vpp_patcher = patch.object(
+            dayz_test_tool,
+            "preflight_vpp_request",
+            return_value=native_launcher_transaction.VppPreflightResult(
+                error_code=None,
+                missing=(),
+                warnings=(),
+                hint=native_launcher_transaction.VPP_PREFLIGHT_HINT,
+            ),
+        )
+        vpp_patcher.start()
+        self.addCleanup(vpp_patcher.stop)
 
     async def test_run_rejects_missing_bridge_before_secure_launch(self) -> None:
         policy = _policy()
@@ -748,6 +765,8 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "client_replace_reason",
                 "client_last_poll_age_s",
                 "client_record_age_s",
+                "vpp_missing",
+                "vpp_warnings",
             },
         )
         self.assertEqual(result["status"], "succeeded")
@@ -892,6 +911,8 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "client_replace_reason",
                 "client_last_poll_age_s",
                 "client_record_age_s",
+                "vpp_missing",
+                "vpp_warnings",
             },
         )
         self.assertEqual(result["status"], "failed")
@@ -966,6 +987,8 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "client_replace_reason",
                 "client_last_poll_age_s",
                 "client_record_age_s",
+                "vpp_missing",
+                "vpp_warnings",
             },
         )
 
@@ -1034,6 +1057,8 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "client_replace_reason",
                 "client_last_poll_age_s",
                 "client_record_age_s",
+                "vpp_missing",
+                "vpp_warnings",
             },
         )
 

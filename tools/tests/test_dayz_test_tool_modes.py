@@ -18,6 +18,7 @@ from dataclasses import replace
 from unittest.mock import patch
 
 from dayz_mcp import dayz_test_modes, dayz_test_request, dayz_test_tool
+from dayz_mcp import native_launcher_transaction
 from dayz_mcp import steam_preflight
 
 from tests.test_dayz_test_tool import (
@@ -171,6 +172,22 @@ class ModeAuthorityExecutionTest(unittest.IsolatedAsyncioTestCase):
         patcher = patch.object(dayz_test_tool, "evaluate_steam_session", side_effect=steam)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # ficha df93: the VPP preflight refuses a server start whose effective
+        # -mod= list carries no @VPPAdminTools. These fixtures are policies and
+        # stubs, not a server workspace, so the gate is neutralised here exactly
+        # as the Steam one above is; its own oracle is tests/test_vpp_preflight.py.
+        vpp_patcher = patch.object(
+            dayz_test_tool,
+            "preflight_vpp_request",
+            return_value=native_launcher_transaction.VppPreflightResult(
+                error_code=None,
+                missing=(),
+                warnings=(),
+                hint=native_launcher_transaction.VPP_PREFLIGHT_HINT,
+            ),
+        )
+        vpp_patcher.start()
+        self.addCleanup(vpp_patcher.stop)
 
     async def _run(
         self, runtime: _Runtime, policy: dayz_test_request.RequestProjectPolicy, mode: str
@@ -392,6 +409,22 @@ class ModeContractM19Test(unittest.IsolatedAsyncioTestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        # ficha df93: the VPP preflight refuses a server start whose effective
+        # -mod= list carries no @VPPAdminTools. These fixtures are policies and
+        # stubs, not a server workspace, so the gate is neutralised here exactly
+        # as the Steam one above is; its own oracle is tests/test_vpp_preflight.py.
+        vpp_patcher = patch.object(
+            dayz_test_tool,
+            "preflight_vpp_request",
+            return_value=native_launcher_transaction.VppPreflightResult(
+                error_code=None,
+                missing=(),
+                warnings=(),
+                hint=native_launcher_transaction.VPP_PREFLIGHT_HINT,
+            ),
+        )
+        vpp_patcher.start()
+        self.addCleanup(vpp_patcher.stop)
 
     @staticmethod
     def _runtime_with_dead_client(*, extensible: bool = False) -> _Runtime:
