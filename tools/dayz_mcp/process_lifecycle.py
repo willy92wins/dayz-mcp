@@ -20,6 +20,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, TypeVar
 
+from dayz_mcp import dayz_test_storage
 from dayz_mcp.instance_fence import BindingPrepareError
 from dayz_mcp.runtime_state import RuntimePaths, atomic_write_bytes
 from dayz_mcp.session_coordination import (
@@ -371,6 +372,20 @@ _REPLACE_WITNESS_HINTS = {
         "bridge_state_unreadable: the bridge state carries no usable evidence "
         "about this client, and no evidence does not authorise ending a live "
         "process. Nothing was terminated and nothing was launched."
+    ),
+}
+_STORAGE_ROTATE_HINTS = {
+    "storage_rotate_failed": (
+        "storage_rotate_failed: the mission storage could not be sealed or set "
+        "aside for this mod set. Nothing was launched and no process was "
+        "created; the storage is left exactly as it was found."
+    ),
+    "storage_recovery_required": (
+        "storage_recovery_required: the mission carries a rotation that cannot "
+        "be reconciled (an ambiguous or unreadable journal, or a physical state "
+        "no sequence produces). Nothing was launched. Inspect the "
+        "storage_1.modset.rotation.* files next to storage_1 before retrying; "
+        "no data was deleted -- v1 renames and never removes."
     ),
 }
 _STATUS_SNAPSHOT_TRIES = 3
@@ -1652,6 +1667,91 @@ class ProcessLifecycle:
         row = peers.get("client")
         return row if isinstance(row, dict) else None
 
+    @staticmethod
+    def _rotation_applies(existing: object, launch_role: str) -> bool:
+        """Only a launch that CREATES its run hands the engine a fresh storage.
+
+        A client, or an offline that extends an existing run, attaches to a tree
+        the engine already chose; rotating under it would pull the world from a
+        live session. Mirrors dayz_test_worker._start_core, which puts the seal
+        in the request for exactly these two roles and only when it creates the
+        run -- so launch_request_sha256 covers it.
+        """
+        return existing is None and launch_role in {"server", "offline"}
+
+    def _rotate_storage_for_launch(
+        self, parsed: dict[str, object], run_id: str
+    ) -> str | None:
+        """Seal the mod set and set aside an incompatible storage. Pre-spawn.
+
+        Codex F-01 put this here. It used to run inside the worker, before the
+        first lifecycle call, so a launch this method was going to refuse with
+        active_run_exists had ALREADY renamed the storage of the run that was
+        alive: the bytes survived (v1 renames, never deletes) but they left the
+        canonical path under a live owner. Now every admission -- active run,
+        quarantine, lease, audit, fence, and the last look at the socket table
+        -- has already passed, the operation lock is held, and no process has
+        been created yet. A refusal here has rotated nothing.
+
+        Returns a declared error code, or None when the launch may proceed.
+        """
+        seal = parsed.get("storage_seal")
+        mission = parsed.get("mission")
+        project = str(parsed.get("mod") or "").lstrip("@")
+        if (
+            not isinstance(seal, str)
+            or not isinstance(mission, str)
+            or not mission
+            or not project
+        ):
+            # Fail-closed: a launch that must rotate and does not carry its seal
+            # comes from a launcher bundle older than this daemon. Refusing
+            # costs a rebuild; guessing costs the mission.
+            return "storage_rotate_failed"
+        try:
+            result = dayz_test_storage.prepare_storage(
+                mission,
+                seal=seal,
+                project=project[:64],
+                now=time.time(),
+                # Derived, never minted: a retry of the same launch names the
+                # same journal, and no clock or randomness enters the id.
+                txid=hashlib.sha256(
+                    (run_id + ":" + seal).encode("utf-8")
+                ).hexdigest()[:32],
+            )
+        except (dayz_test_storage.StorageError, OSError):
+            return "storage_rotate_failed"
+        if not result.launch_allowed:
+            return "storage_recovery_required"
+        if result.storage_rotated:
+            self._audit_storage_rotation(run_id, result)
+        return None
+
+    def _audit_storage_rotation(self, run_id: str, result: object) -> None:
+        """A rotation resets the world and the characters: it leaves a row."""
+        writer = self.audit
+        if not callable(writer):
+            return
+        try:
+            writer(
+                {
+                    "event": "lifecycle_storage_rotated",
+                    "run_id": run_id,
+                    "storage_backup": getattr(result, "storage_backup", None),
+                    "storage_marker_backup": getattr(
+                        result, "storage_marker_backup", None
+                    ),
+                    "storage_seal": getattr(result, "storage_seal", None),
+                    "reason": getattr(result, "reason", None),
+                    "notice": getattr(result, "storage_reset_notice", None),
+                }
+            )
+        except Exception:
+            # Observability only: a row that cannot be written never blocks a
+            # launch the admissions already allowed.
+            return
+
     def _replacement_witness_error(
         self, parsed: dict[str, object], *, now: float
     ) -> str | None:
@@ -2289,6 +2389,27 @@ class ProcessLifecycle:
                         # the way _start_rejection publishes it, not swallowed.
                         self._add_degradation(settled, "audit_failed")
                     return settled
+                # M15 (fichas 4407 + 01ae) / Codex F-01. Last step before the
+                # spawn and after EVERY admission: a refusal above this line has
+                # rotated nothing, and this is the only point at which the run
+                # is certain to be created.
+                if self._rotation_applies(existing, launch_role):
+                    storage_error = self._rotate_storage_for_launch(parsed, run_id)
+                    if storage_error is not None:
+                        self._retire_minted(
+                            run_id, launch_role, minted, "launch_failed"
+                        )
+                        settled = self._settle_failed_launch(
+                            client=client,
+                            previous=previous,
+                            provisional=provisional,
+                            launched=None,
+                            record=None,
+                            confirmed_error=storage_error,
+                            attempt_started_at=attempt_started_at,
+                        )
+                        settled["hint"] = _STORAGE_ROTATE_HINTS[storage_error]
+                        return settled
                 try:
                     launched = self.launcher(
                         list(parsed["argv"]),

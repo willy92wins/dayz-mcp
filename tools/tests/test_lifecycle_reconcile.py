@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import sys
 import time
+import hashlib
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -552,6 +554,168 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.assertEqual(result.get("error"), "client_polling_since_decision")
         self.assertEqual(self.bridge.reads, 1)
         self.assertEqual(self.guard.terminate_calls, [])
+
+    # -- M15 / Codex F-01: the rotation is a pre-spawn step of start_run ----
+    """The rotation used to live in the worker, before the first lifecycle
+
+    It used to live in the worker, before the first lifecycle call, so a launch
+    the daemon was about to refuse with active_run_exists had already renamed
+    the storage of the run that WAS alive. These tests fix the order: nothing
+    the daemon refuses may have touched the mission, and nothing it admits may
+    reach the launcher without the storage being right.
+    """
+
+    STORAGE_SEAL_A = "a" * 64
+    STORAGE_SEAL_B = "b" * 64
+
+    def mission(self) -> Path:
+        directory = Path(self.temporary.name) / "mpmissions" / "dayzOffline"
+        tree = directory / "storage_1"
+        if not tree.exists():
+            (tree / "players").mkdir(parents=True)
+            (tree / "data.bin").write_bytes(b"world-and-characters")
+            (tree / "players" / "p1.bin").write_bytes(b"survivor")
+        return directory
+
+    def digest(self) -> str:
+        entries = []
+        for current, dirnames, filenames in os.walk(self.mission()):
+            dirnames.sort()
+            entries.append("D " + str(Path(current).relative_to(self.mission())))
+            for name in sorted(filenames):
+                payload = (Path(current) / name).read_bytes()
+                entries.append(
+                    "F " + name + " " + hashlib.sha256(payload).hexdigest()
+                )
+        return hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()
+
+    def siblings(self) -> list[str]:
+        return sorted(
+            entry.name
+            for entry in self.mission().iterdir()
+            if entry.name.startswith("storage_1")
+        )
+
+    def server_request(self, seal: str | None = STORAGE_SEAL_A) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "argv": [str(self.game / "DayZDiag_x64.exe"), "-mission=test"],
+            "cwd": str(self.game),
+            "role": "server",
+            "window_style": "normal",
+            "label": "gate",
+            "mod": "@SameMod",
+            "profiles": "profiles",
+            "mission": str(self.mission()),
+        }
+        if seal is not None:
+            payload["storage_seal"] = seal
+        return payload
+
+    def test_a_launch_the_daemon_refuses_has_not_rotated_anything(self) -> None:
+        """(a) The ordering itself, asserted on the file system.
+
+        A run is already active, so this new launch dies with active_run_exists.
+        The mission must be byte-identical: same tree, same siblings, no marker.
+        """
+        self.install_run([self.owned(730, "server")], state="RUNNING", owner="A")
+        self.mission()
+        before_digest = self.digest()
+        before_siblings = self.siblings()
+
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.server_request()
+        )
+
+        self.assertEqual(result.get("error"), "active_run_exists", result)
+        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(self.digest(), before_digest)
+        self.assertEqual(self.siblings(), before_siblings)
+        self.assertFalse((self.mission() / "storage_1.modset.json").exists())
+
+    def test_b_an_admitted_launch_rotates_and_then_spawns(self) -> None:
+        """(b) The positive control. Without it (a) would pass over a gate that
+        never rotates at all, which is the mutation that matters most here."""
+        self.arm_launch("server")
+        self.mission()
+
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.server_request()
+        )
+
+        self.assertIs(result.get("ok"), True, result)
+        self.assertEqual(len(self.launcher.calls), 1)
+        marker = self.mission() / "storage_1.modset.json"
+        self.assertTrue(marker.is_file())
+        self.assertEqual(
+            json.loads(marker.read_text(encoding="utf-8"))["seal"], self.STORAGE_SEAL_A
+        )
+        # Legacy tree with no marker: fail-closed, so it was set aside.
+        moved = [name for name in self.siblings() if name.startswith("storage_1.modset-")]
+        self.assertEqual(len(moved), 1, self.siblings())
+        rows = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "lifecycle_storage_rotated"
+        ]
+        self.assertEqual(len(rows), 1, rows)
+
+    def test_the_same_seal_twice_does_not_rotate_again(self) -> None:
+        self.arm_launch("server")
+        self.mission()
+        self.lifecycle.start_run(IDENTITY_A, self.token_a, self.server_request())
+        after_first = self.siblings()
+        self.setUp()
+        self.arm_launch("server")
+        self.lifecycle.start_run(IDENTITY_A, self.token_a, self.server_request())
+        self.assertEqual(self.siblings(), after_first)
+
+    def test_c_a_journal_that_cannot_be_reconciled_refuses_the_launch(self) -> None:
+        """(c) Recovery: an ambiguous transaction blocks and spawns nothing."""
+        self.arm_launch("server")
+        mission = self.mission()
+        for txid in ("1" * 32, "2" * 32):
+            (mission / ("storage_1.modset.rotation." + txid + ".json")).write_text(
+                "{}", encoding="utf-8"
+            )
+        before = self.digest()
+
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.server_request()
+        )
+
+        self.assertEqual(result.get("error"), "storage_recovery_required", result)
+        self.assertIn("storage_1.modset.rotation", str(result.get("hint")))
+        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(self.digest(), before)
+
+    def test_a_launch_that_must_rotate_without_its_seal_is_refused(self) -> None:
+        """Fail-closed against a launcher bundle older than this daemon."""
+        self.arm_launch("server")
+        self.mission()
+        before = self.digest()
+
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.server_request(seal=None)
+        )
+
+        self.assertEqual(result.get("error"), "storage_rotate_failed", result)
+        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(self.digest(), before)
+
+    def test_a_client_relaunch_never_rotates(self) -> None:
+        """Negative control: attaching to a run the engine already serves."""
+        server = self.owned(740, "server")
+        hung = self.owned(741, "client")
+        self.install_run([server, hung], state="RUNNING", owner="A")
+        self.arm_launch()
+        self.mission()
+        before = self.digest()
+
+        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+
+        self.assertIs(result.get("ok"), True, result)
+        self.assertEqual(self.digest(), before)
+        self.assertFalse((self.mission() / "storage_1.modset.json").exists())
 
     def test_relaunching_a_role_the_run_does_not_hold_changes_nothing(self) -> None:
         """The mode=all client leg and any first launch of a role: no replacement."""

@@ -449,8 +449,12 @@ class LifecycleFenceTest(unittest.TestCase):
             "label": "fence",
             "mod": "@Mod",
             "profiles": str(profiles),
-            "mission": "test",
+            "mission": str(self._mission_dir()),
         }
+        if run_id is None and role in {"server", "offline"}:
+            # M15: a launch that creates its run carries the seal of its mod
+            # set, and start_run rotates the mission storage before spawning.
+            payload["storage_seal"] = "a" * 64
         if run_id is not None:
             payload["run_id"] = run_id
             # 79e2: the witness of the gate that authorised superseding a live
@@ -458,6 +462,11 @@ class LifecycleFenceTest(unittest.TestCase):
             # ages: never polled, which is evidence and not silence.
             payload["replace_if_not_polling_since"] = int(time.time() * 1000)
         return payload
+
+    def _mission_dir(self) -> Path:
+        mission = self.root / "mission"
+        mission.mkdir(parents=True, exist_ok=True)
+        return mission
 
     def _seed_next_pid(self, role: str) -> ProcessRecord:
         record = _record(self.launcher.next_pid, role)

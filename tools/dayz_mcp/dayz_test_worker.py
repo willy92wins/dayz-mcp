@@ -7,7 +7,6 @@ import hashlib
 import json
 import ntpath
 import re
-import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -43,6 +42,8 @@ LIFECYCLE_REJECTION_CODES = frozenset(
         "port_still_held",
         "replace_witness_missing",
         "replace_witness_stale",
+        "storage_recovery_required",
+        "storage_rotate_failed",
     }
 )
 
@@ -58,8 +59,6 @@ WORKER_ERROR_CODES = frozenset(
         "run_not_adoptable",
         "run_stop_failed",
         "runtime_policy_invalid",
-        "storage_prepare_failed",
-        "storage_recovery_required",
         "worker_failed",
         "worker_identity_failed",
     }
@@ -322,38 +321,28 @@ def _start_core(
         # the key would only widen the bytes the launch hash covers.
         if role == "client" and type(witness) is int:
             core["replace_if_not_polling_since"] = witness
+    elif role in {"server", "offline"}:
+        # M15. Only a launch that CREATES its run hands the engine a fresh
+        # mission storage; a client, or an offline that extends a run, attaches
+        # to a tree the engine already chose. The seal is added before _start
+        # hashes the core, so launch_request_sha256 covers it.
+        core["storage_seal"] = _modset_seal(payload, runtime)
     return core
 
-_STORAGE_MODES = frozenset({"server", "all"})
+def _modset_seal(
+    payload: dict[str, object], runtime: WorkerRuntimePolicy
+) -> str:
+    """The fingerprint of the mod set this launch is about to hand the engine.
 
-
-def _storage_applies(mode: str, supplied_run_id: object) -> bool:
-    """Only the launches that hand a fresh mission storage to the engine.
-
-    kill (:526), preflight and build return before this point, and client never
-    reaches it: a client attaches to a server that already chose its tree. An
-    offline run that extends an existing run_id is an attach too, so it is out.
+    Computed here because this is the only layer that holds both the request
+    payload and the runtime policy, and it travels INSIDE the sealed launch
+    request. It is not applied here: rotating before the daemon has admitted the
+    launch could rename the storage of a run that was alive and that the daemon
+    was about to protect with active_run_exists (Codex F-01). The daemon rotates,
+    after every admission and before it spawns anything.
     """
-    return mode in _STORAGE_MODES or (mode == "offline" and supplied_run_id is None)
-
-
-def _prepare_storage(
-    payload: dict[str, object],
-    runtime: WorkerRuntimePolicy,
-    *,
-    request_sha256: str,
-    now_fn: Callable[[], float],
-) -> dayz_test_storage.RotationResult:
-    """Seal the mod set and rotate storage_1 when it changed. M15-min.
-
-    Runs before the first broker frame of the launch, so a refusal here has
-    never created a process and never taken the box. server_mods is sealed for
-    every mode even though only role=server puts it on the argv (:240-245): a
-    seal that ignored it would call two different games the same one.
-    """
-    mission = _mission(payload, runtime)
     try:
-        seal = dayz_test_storage.modset_seal(
+        return dayz_test_storage.modset_seal(
             dayz_test_storage.modset_roles(
                 base_mods=list(payload.get("base_mods", [])),
                 project_mod="@" + runtime.mod,
@@ -364,22 +353,6 @@ def _prepare_storage(
         )
     except dayz_test_storage.StorageError:
         raise _failed("runtime_policy_invalid") from None
-    now = float(now_fn())
-    # The transaction id is DERIVED, not minted: it must not consume an entry of
-    # id_fn (the launch ids are recoverable by position) and a retry of the very
-    # same request at the same instant must name the same journal.
-    txid = hashlib.sha256(
-        f"{request_sha256}:{seal}:{now!r}".encode("utf-8")
-    ).hexdigest()[:32]
-    try:
-        result = dayz_test_storage.prepare_storage(
-            mission, seal=seal, project=runtime.mod, now=now, txid=txid
-        )
-    except (dayz_test_storage.StorageError, OSError):
-        raise _failed("storage_prepare_failed") from None
-    if not result.launch_allowed:
-        raise _failed("storage_recovery_required")
-    return result
 
 
 async def _invoke(
@@ -604,7 +577,6 @@ async def execute_dayz_test_worker(
     ] | None = None,
     has_binarizable_assets: Callable[[str], bool] = _default_has_assets,
     cancel_event: asyncio.Event | None = None,
-    now_fn: Callable[[], float] = time.time,
 ) -> WorkerResult:
     if (
         type(canonical_request) is not bytes
@@ -694,22 +666,6 @@ async def execute_dayz_test_worker(
         raise _failed("operation_cancelled")
 
     mode = str(payload["mode"])
-    # M15 (fichas 4407 + 01ae). The mod set decides whether the mission storage
-    # is reusable, and the check belongs here: the last point before any PROCESS
-    # is created, and the only layer that holds both the resolved mission and the
-    # runtime policy. Not "before the first broker frame": a request with
-    # build=True has already sent the AddonBuilder frame by now (Codex F-08).
-    # Building first is deliberate -- a build that fails must not have rotated.
-    # OPEN (Codex F-01): a launch the daemon will refuse with active_run_exists
-    # has already rotated by now. v1 renames and never deletes, and a tree with
-    # open handles refuses to move on Windows, but the ordering is real and it
-    # is NEW: nothing rotated anything before M15-min. Closing it atomically is
-    # step 9 of the frozen plan (pending_run_id + CAS), which M15-min does not
-    # materialise. Declared in lote-etapa-B/CIERRE.md as a decision.
-    if _storage_applies(mode, supplied_run_id):
-        _prepare_storage(
-            payload, runtime, request_sha256=request_sha256, now_fn=now_fn
-        )
     created_run_id: str | None = None
     try:
         if mode in {"client", "offline"} and run_id is not None:
