@@ -569,13 +569,27 @@ class LifecycleReconcileTest(unittest.TestCase):
     STORAGE_SEAL_B = "b" * 64
 
     def mission(self) -> Path:
+        """The mission directory, seeded ONCE.
+
+        It used to re-create storage_1 whenever it was missing, so merely
+        reading the sibling list after a rotation put the tree back and every
+        later assertion measured a mission that had healed itself.
+        """
         directory = Path(self.temporary.name) / "mpmissions" / "dayzOffline"
-        tree = directory / "storage_1"
-        if not tree.exists():
+        if not directory.exists():
+            tree = directory / "storage_1"
             (tree / "players").mkdir(parents=True)
             (tree / "data.bin").write_bytes(b"world-and-characters")
             (tree / "players" / "p1.bin").write_bytes(b"survivor")
         return directory
+
+    def backup_trees(self) -> list[str]:
+        """Only the trees set aside: not their markers, not the journals."""
+        return sorted(
+            entry.name
+            for entry in self.mission().iterdir()
+            if entry.is_dir() and entry.name.startswith("storage_1.modset-")
+        )
 
     def digest(self) -> str:
         entries = []
@@ -660,14 +674,57 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.assertEqual(len(rows), 1, rows)
 
     def test_the_same_seal_twice_does_not_rotate_again(self) -> None:
-        self.arm_launch("server")
-        self.mission()
-        self.lifecycle.start_run(IDENTITY_A, self.token_a, self.server_request())
+        """Idempotence, measured where it lives.
+
+        The first version of this test called setUp() between the two launches,
+        which moved to a FRESH mission and then compared sibling names: it
+        passed just as happily over a gate that rotates every single time. The
+        delta review named it. Two calls of the rotation step against the SAME
+        mission is the property, and the assertion that kills that mutant is
+        that the second adds no sibling and leaves the marker byte-identical.
+        """
+        mission = self.mission()
+        request = self.server_request()
+
+        first = self.lifecycle._rotate_storage_for_launch(request, "run-one")
+        self.assertIsNone(first)
         after_first = self.siblings()
-        self.setUp()
-        self.arm_launch("server")
-        self.lifecycle.start_run(IDENTITY_A, self.token_a, self.server_request())
+        marker = mission / "storage_1.modset.json"
+        sealed = marker.read_bytes()
+        self.assertEqual(
+            len([name for name in after_first if name.startswith("storage_1.modset-")]),
+            1,
+            after_first,
+        )
+
+        second = self.lifecycle._rotate_storage_for_launch(request, "run-two")
+
+        self.assertIsNone(second)
         self.assertEqual(self.siblings(), after_first)
+        self.assertEqual(marker.read_bytes(), sealed)
+        rotations = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "lifecycle_storage_rotated"
+        ]
+        self.assertEqual(len(rotations), 1, rotations)
+
+    def test_a_different_seal_rotates_a_second_time(self) -> None:
+        """Positive control for the one above: the gate is not simply inert."""
+        request = self.server_request()
+        self.assertIsNone(self.lifecycle._rotate_storage_for_launch(request, "run-one"))
+        after_first = self.backup_trees()
+        # The engine would create the new tree on start; nothing did here, and
+        # a second seal over an ABSENT storage only re-seals. Recreate it so the
+        # control measures a real second rotation.
+        (self.mission() / "storage_1").mkdir()
+        (self.mission() / "storage_1" / "data.bin").write_bytes(b"second-world")
+
+        other = dict(request)
+        other["storage_seal"] = self.STORAGE_SEAL_B
+        self.assertIsNone(self.lifecycle._rotate_storage_for_launch(other, "run-two"))
+
+        self.assertEqual(len(self.backup_trees()), len(after_first) + 1, self.backup_trees())
 
     def test_c_a_journal_that_cannot_be_reconciled_refuses_the_launch(self) -> None:
         """(c) Recovery: an ambiguous transaction blocks and spawns nothing."""

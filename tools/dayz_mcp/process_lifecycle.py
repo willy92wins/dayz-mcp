@@ -378,7 +378,10 @@ _STORAGE_ROTATE_HINTS = {
     "storage_rotate_failed": (
         "storage_rotate_failed: the mission storage could not be sealed or set "
         "aside for this mod set. Nothing was launched and no process was "
-        "created; the storage is left exactly as it was found."
+        "created. The mission is NOT guaranteed untouched: a transaction that "
+        "failed after its first rename leaves the old tree under its backup "
+        "name and an active journal beside storage_1, which the next call "
+        "reconciles. Nothing is ever deleted -- v1 renames only."
     ),
     "storage_recovery_required": (
         "storage_recovery_required: the mission carries a rotation that cannot "
