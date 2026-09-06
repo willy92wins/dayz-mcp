@@ -17,7 +17,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from unittest.mock import AsyncMock, patch
 
-from dayz_mcp import server
+from dayz_mcp import loopback, server
 from dayz_mcp.server import ServerConfig, build_app
 from tests.test_client_mode import _fixture_client_runtime
 from tests.test_mcp_tools import _content_json
@@ -165,6 +165,16 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
                 runtime, "players_at_least", value=1, timeout_s=5.0, poll_interval_s=0.2
             )
         self.assertIn("game_not_ready:reason=no_run", str(ctx.exception))
+        self.assertEqual(runtime.bridge_calls, 1)
+
+    async def test_an_ownership_refusal_aborts_the_first_probe_with_its_hint(self) -> None:
+        message = "run_not_owned: " + loopback._RUN_NOT_OWNED_HINT
+        runtime = _FakeRuntime(player_counts=[message, 1])
+        with self.assertRaises(server.ToolError) as ctx:
+            await server.execute_wait_for(
+                runtime, "players_at_least", value=1, timeout_s=5.0, poll_interval_s=0.2
+            )
+        self.assertEqual(str(ctx.exception), message)
         self.assertEqual(runtime.bridge_calls, 1)
 
     async def test_deadline_bounds_the_sleep(self) -> None:

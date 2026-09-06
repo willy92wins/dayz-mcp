@@ -194,9 +194,35 @@ _REMOTE_ERROR_CODES = frozenset({
     "instance_config_missing",
     "instance_config_mismatch",
     "creation_time_unreadable",
+    # run-fence refusals emitted by loopback._enqueue_run_rejection and loopback._enqueue_command.
+    "run_not_owned",
+    "run_state_unavailable",
+    "enqueue_cancelled",
+    # lease-grant race surfaced by session_coordination._validate_token_locked on /enqueue.
+    "session_granting",
 })
 _STALE_TICKET_ERRORS = frozenset({"ticket_expired", "ticket_invalid"})
 _STALE_LEASE_ERRORS = frozenset({"lease_expired", "lease_invalid"})
+_ENQUEUE_HINT_MAX_CHARS = 240
+
+
+def _carriable_hint(payload: object) -> str | None:
+    """Accredited-daemon prose travels only beside a whitelist code, bounded; it
+    never replaces the code."""
+    if not isinstance(payload, dict):
+        return None
+    hint = payload.get("hint")
+    if type(hint) is not str:
+        return None
+    if not 0 < len(hint) <= _ENQUEUE_HINT_MAX_CHARS:
+        return None
+    if hint != hint.strip():
+        return None
+    if not hint.isprintable():
+        return None
+    return hint
+
+
 # Constant ValueError tokens raised along the dayz_test request path, mapped to
 # caller-facing codes. The tokens are fixed strings that carry no host paths, so
 # translating them keeps host paths off the wire while replacing a bare
@@ -731,7 +757,12 @@ def _public_enqueue_error(
     status_snapshot: dict[str, Any] | None = None,
     peer: str | None = None,
 ) -> str:
-    """Map a remote enqueue payload to the caller-facing ToolError string."""
+    """Map a remote enqueue payload to the caller-facing ToolError string.
+
+    A known code with a valid hint travels as "<code>: <hint>"; a known code
+    without a hint stays bare; an unknown code stays the bare token remote_error
+    even when a hint is present.
+    """
     code = _remote_error_code(payload)
     if code == "retail_quarantine":
         return _retail_quarantine_recipe(payload.get("reason"))
@@ -757,6 +788,9 @@ def _public_enqueue_error(
         if isinstance(expected, str):
             return f"version_blocked:bridge {got!r} != {expected!r}"
         return "version_blocked"
+    hint = _carriable_hint(payload)
+    if code != "remote_error" and hint is not None:
+        return f"{code}: {hint}"
     return code
 
 
@@ -1524,7 +1558,7 @@ class ClientRuntime:
         )
         if status != 200:
             error = self._enqueue_error(payload)
-            if error in _STALE_LEASE_ERRORS and lease_token is not None:
+            if _remote_error_code(payload) in _STALE_LEASE_ERRORS and lease_token is not None:
                 self._control._clear_matching_lease(lease_token)
             if _remote_error_code(payload) in {"version_blocked", "lease_required"}:
                 try:
@@ -1615,7 +1649,7 @@ class ClientRuntime:
         )
         if status != 200:
             error = self._enqueue_error(payload)
-            if error in _STALE_LEASE_ERRORS and lease_token is not None:
+            if _remote_error_code(payload) in _STALE_LEASE_ERRORS and lease_token is not None:
                 self._control._clear_matching_lease(lease_token)
             if _remote_error_code(payload) in {"version_blocked", "lease_required"}:
                 try:
@@ -4854,6 +4888,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "game_not_ready:reason=server_poll_stale is retried until "
             "timeout_s (not_ready_probes, last_error in the response); any "
             "other not-ready reason aborts on the first probe. "
+            "A probe refused with run_not_owned (the run has no owner) aborts on "
+            "the first probe with the daemon's hint: adopt the run first with "
+            "session_acquire_wait, whose grant adopts the single ownerless "
+            "RUNNING_IDLE run and reports it in adopted_run (with several idle "
+            "runs it reports multiple_idle_runs and adopts none). "
             "scanned reports which log files were read and how many "
             "lines each gave, so a no-match is visible as a no-match."
         )
