@@ -56,11 +56,33 @@ class SnapshotUdpPortHoldersTest(unittest.TestCase):
         )
 
     def test_netstat_is_the_fallback_when_psutil_is_absent(self) -> None:
+        # fb-20260904-220107-b8b0: the per-PID retry consults the live host, so
+        # the fixture pid must never reach it (45428 was a real conhost.exe once).
         with patch.object(orphan_guard, "psutil", None), patch.object(
             orphan_guard, "_udp_holders_via_netstat", return_value=[(2302, 45428)]
-        ), patch.object(orphan_guard, "_snapshot_all_process_entries", return_value=None):
+        ), patch.object(orphan_guard, "_snapshot_all_process_entries", return_value=None), patch.object(
+            orphan_guard, "_toolhelp_lookup", return_value=None
+        ):
             result = orphan_guard.snapshot_udp_port_holders()
         self.assertEqual(result, {"known": True, "holders": [{"port": 2302, "pid": 45428, "name": None}]})
+
+    def test_a_pid_missing_from_the_bulk_snapshot_gets_one_toolhelp_retry(self) -> None:
+        # The retry is the only path that names a process started between the
+        # two reads; injected here so the test never depends on host pids.
+        with patch.object(orphan_guard, "psutil", None), patch.object(
+            orphan_guard, "_udp_holders_via_netstat", return_value=[(2302, 45428), (2304, 45428)]
+        ), patch.object(orphan_guard, "_snapshot_all_process_entries", return_value=[]), patch.object(
+            orphan_guard, "_toolhelp_lookup", return_value=(45428, "DayZServer_x64.exe")
+        ) as lookup:
+            result = orphan_guard.snapshot_udp_port_holders()
+        self.assertEqual(
+            result["holders"],
+            [
+                {"port": 2302, "pid": 45428, "name": "DayZServer_x64.exe"},
+                {"port": 2304, "pid": 45428, "name": "DayZServer_x64.exe"},
+            ],
+        )
+        lookup.assert_called_once_with(45428)
 
     def test_no_source_is_unknown_never_empty(self) -> None:
         with patch.object(orphan_guard, "psutil", None), patch.object(
