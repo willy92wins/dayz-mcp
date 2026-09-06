@@ -295,6 +295,23 @@ def _is_safe_error_token(value: str) -> bool:
     )
 
 
+def _opaque_dayz_test_failure(exc: BaseException) -> str:
+    """`dayz_test_failed:<Type>`, plus `:<code>` when the launcher backend named one.
+
+    NativeLauncherBackendError (native_launcher_backend.py) keeps a source
+    constant in ``code`` -- invalid_native_launcher_environment,
+    native_launcher_create_failed, ... -- and any host detail in ``detail``,
+    which never travels. Only an identifier-shaped code crosses the wire.
+    Ficha ae65 (2026-09-04): build=true died in that backend and the caller saw
+    the class name alone, with the code one frame away in the local log.
+    """
+    name = type(exc).__name__
+    code = getattr(exc, "code", None) if name == "NativeLauncherBackendError" else None
+    if isinstance(code, str) and _is_safe_error_token(code):
+        return f"dayz_test_failed:{name}:{code}"
+    return f"dayz_test_failed:{name}"
+
+
 @contextmanager
 def _typed_dayz_test_value_errors() -> Iterator[None]:
     """Type the constant ValueError tokens of the dayz_test request path.
@@ -3303,12 +3320,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 except ToolError:
                     raise
                 except Exception as exc:
-                    # The ToolError carries the exception TYPE only. The message
+                    # The ToolError carries the exception TYPE, plus the launcher
+                    # backend's bare code when it has one (ficha ae65). The message
                     # can hold host paths, so it must not cross the MCP wire; FastMCP
                     # serializes str(exc) alone. `from exc` keeps the cause in
                     # __cause__ for LOCAL diagnosis (needed to see why build:true failed), not for the wire.
                     _log_opaque_failure(client, "dayz_test_run", exc)
-                    raise ToolError(f"dayz_test_failed:{type(exc).__name__}") from exc
+                    raise ToolError(_opaque_dayz_test_failure(exc)) from exc
             if execute_error is not None:
                 if execute_error.code == "active_run_exists":
                     return _failed_active_run_result(
@@ -3372,12 +3390,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             except ToolError:
                 raise
             except Exception as exc:
-                # The ToolError carries the exception TYPE only. The message
+                # The ToolError carries the exception TYPE, plus the launcher
+                # backend's bare code when it has one (ficha ae65). The message
                 # can hold host paths, so it must not cross the MCP wire; FastMCP
                 # serializes str(exc) alone. `from exc` keeps the cause in
                 # __cause__ for LOCAL diagnosis (needed to see why build:true failed), not for the wire.
                 _log_opaque_failure(client, "dayz_test_stop", exc)
-                raise ToolError(f"dayz_test_failed:{type(exc).__name__}") from exc
+                raise ToolError(_opaque_dayz_test_failure(exc)) from exc
 
     @app.tool(description="Read the authoritative server-side player state.")
     async def query_player_state(timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:

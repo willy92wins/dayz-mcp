@@ -318,6 +318,58 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
 
         session_status.assert_awaited_once()
 
+    async def test_dayz_test_launcher_backend_code_travels_without_its_detail(self) -> None:
+        # Ficha ae65: build=true died as dayz_test_failed:NativeLauncherBackendError
+        # and the code, one frame away, never reached the caller. The backend
+        # names its cause with a source constant: that token crosses, the local
+        # detail (host paths) does not, and a code that is not a bare token
+        # stays mute exactly as before.
+        from dayz_mcp.native_launcher_backend import NativeLauncherBackendError
+        from tests.test_client_mode import _fixture_client_runtime
+
+        config = ServerConfig(
+            mode="client",
+            key=self.key,
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _message: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        with patch.object(server_module, "ClientRuntime", return_value=runtime):
+            app, _built = build_app(config)
+
+        cases = (
+            (
+                NativeLauncherBackendError(
+                    "invalid_native_launcher_environment", r"secret C:\Users\host"
+                ),
+                "NativeLauncherBackendError:invalid_native_launcher_environment",
+            ),
+            (
+                NativeLauncherBackendError(r"C:\Users\host\secret"),
+                "NativeLauncherBackendError",
+            ),
+        )
+        for error, expected in cases:
+
+            async def boom(*_args: object, **_kwargs: object) -> dict[str, Any]:
+                raise error
+
+            with patch.object(
+                server_module.dayz_test_tool, "execute_dayz_test_run", side_effect=boom
+            ):
+                with self.assertRaises(Exception) as err:
+                    await app.call_tool(
+                        "dayz_test_run", {"project": "ExampleMod", "mode": "server"}
+                    )
+            message = str(err.exception)
+            _assert_tool_error(self, err.exception)
+            self.assertIn("dayz_test_failed:", message, expected)
+            tail = message.split("dayz_test_failed:", 1)[1].split()[0].rstrip(".,;)")
+            self.assertEqual(tail, expected)
+            self.assertNotIn("secret", message, expected)
+            self.assertNotIn("host", message, expected)
+
     async def test_dayz_test_untyped_failure_carries_the_exception_type(self) -> None:
         # The bare `except Exception` swallowed the cause, which is exactly
         # what makes build:true undiagnosable. A non-existent `project` would NOT

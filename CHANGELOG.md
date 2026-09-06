@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `dayz_test_run` / `dayz_test_stop`: a failure inside the native launcher backend now names its bare code after the class, `dayz_test_failed:NativeLauncherBackendError:<code>`; host detail still stays in the local log (ficha ae65, step 1).
 - `entities_query` keeps `entities: []` on an empty result: result pruning no longer drops the key its description promises (ficha 59d9).
 
 ### Security
