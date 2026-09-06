@@ -155,9 +155,10 @@ _MAX_PREFLIGHT_READ_CHARS = 262_144
 # over the raw text accepted the key inside a string, inside an unterminated
 # /* block, and as the tail of another identifier, so the cfg is scanned with a
 # state machine instead: // to end of line, /* until */ or end of file, and
-# "..." are all dead ground, and the key needs a left boundary.
+# "..." are all dead ground, and the key needs a left boundary. Comments and
+# whitespace between the key, `=` and the value are the same dead ground; a
+# comment opener also ends the value, so `1/*x*/` is the token `1`.
 _VPP_KEY = "vppDisablePassword"
-_VPP_VALUE = re.compile(r"\s*=\s*([^;\s]+)")
 # The config language quotes with ' as well as " (Bohemia's Config Parser reads
 # both; ronda 4, R3-F-02): either delimits dead ground.
 _STRING_DELIMITERS = (chr(34), chr(39))
@@ -275,6 +276,26 @@ def vpp_preflight_paths(
     )
 
 
+def _skip_non_string_dead_ground(config: str, index: int) -> int:
+    """Whitespace and comments only. A quote is not skipped: it is not `=`."""
+    length = len(config)
+    newline = chr(10)
+    while index < length:
+        if config[index].isspace():
+            index += 1
+            continue
+        if config.startswith("//", index):
+            end = config.find(newline, index)
+            index = length if end == -1 else end + 1
+            continue
+        if config.startswith("/*", index):
+            end = config.find("*/", index + 2)
+            index = length if end == -1 else end + 2
+            continue
+        break
+    return index
+
+
 def _live_assignments(config: str, key: str) -> list[str]:
     """Values assigned to `key` in the ground the engine actually reads.
 
@@ -283,13 +304,16 @@ def _live_assignments(config: str, key: str) -> list[str]:
     unterminated, to the end of the file, and a quoted string -- 'single' or
     "double", the language has both -- is dead ground too: all of them
     swallowed a key that a raw regex then counted as live. The key also needs
-    a left boundary, so `notvppDisablePassword` stops matching; the `=` that
-    _VPP_VALUE demands right after it is the right boundary. Escapes are not
-    honoured inside strings: neither file has any, and treating a
+    a left boundary, so `notvppDisablePassword` stops matching. After a key,
+    only whitespace and comments (not strings) may sit before `=`, and again
+    before the value; anything else is not an assignment. The value is the
+    longest run that stops at the first semicolon, whitespace, comment opener
+    (`/*` or `//`) or end of file; an empty run is not an assignment. Escapes
+    are not honoured inside strings: neither file has any, and treating a
     backslash-quote as a closing quote can only end a string early, which puts
-    more text under scrutiny, never less. An unterminated string runs to the
-    end of the file, so nothing after it is live: the gate then refuses
-    rather than guesses where the engine would have stopped.
+    more text under scrutiny, never less. An unterminated string hides
+    everything after it; the gate refuses only if no live assignment was
+    captured before that point.
     """
     values: list[str] = []
     index = 0
@@ -315,11 +339,23 @@ def _live_assignments(config: str, key: str) -> list[str]:
             index == 0
             or not (config[index - 1].isalnum() or config[index - 1] == "_")
         ):
-            match = _VPP_VALUE.match(config, index + len(key))
-            if match is not None:
-                values.append(match.group(1))
-                index = match.end()
-                continue
+            cursor = _skip_non_string_dead_ground(config, index + len(key))
+            if cursor < length and config[cursor] == "=":
+                cursor = _skip_non_string_dead_ground(config, cursor + 1)
+                start = cursor
+                while cursor < length:
+                    if config[cursor] == ";" or config[cursor].isspace():
+                        break
+                    if config.startswith("/*", cursor) or config.startswith(
+                        "//", cursor
+                    ):
+                        break
+                    cursor += 1
+                value = config[start:cursor]
+                if value:
+                    values.append(value)
+                    index = cursor
+                    continue
         index += 1
     return values
 

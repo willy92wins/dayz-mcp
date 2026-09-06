@@ -1244,3 +1244,153 @@ class VppPreflightRound4Test(unittest.TestCase):
             with self.subTest(label):
                 result = self._with_config(body)
                 self.assertIsNone(result.error_code, label)
+
+
+class VppPreflightRound5Test(unittest.TestCase):
+    """Ronda 5 (delta-3 R4-F-01): comments between assignment tokens are live
+    separators, not a reason to drop the assignment from the census."""
+
+    def _result(
+        self,
+        *,
+        policy: dayz_test_request.RequestProjectPolicy | None = None,
+        files: FakeFiles | None = None,
+        **overrides: object,
+    ) -> object:
+        selected = policy or _policy()
+        return transaction.preflight_vpp_request(
+            _raw(selected, **overrides),
+            sealed_policies=_sealed(selected),
+            files=files if files is not None else _healthy(selected),
+        )
+
+    def _with_meta(self, meta: str) -> object:
+        policy = _policy()
+        files = _healthy(policy)
+        files.files[
+            ntpath.normcase(
+                ntpath.join(policy.mod_roots[0], "@VPPAdminTools", "meta.cpp")
+            )
+        ] = meta
+        return self._result(
+            policy=policy,
+            files=files,
+            mode="all",
+            extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+        )
+
+    def _with_config(self, body: str) -> object:
+        policy = _policy()
+        files = _healthy(policy)
+        files.files[
+            ntpath.normcase(ntpath.join(policy.dev_root, "_server", "serverDZ.cfg"))
+        ] = body
+        return self._result(
+            policy=policy,
+            files=files,
+            mode="all",
+            extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+        )
+
+    def test_meta_cpp_comments_between_tokens_do_not_hide_a_second_assignment(
+        self,
+    ) -> None:
+        for label, meta in (
+            (
+                "duplicate_foreign_block_comment",
+                "publishedid=1828439124; publishedid/*x*/=1559212036;",
+            ),
+            (
+                "duplicate_foreign_line_comment",
+                "publishedid=1828439124; publishedid//x\n=1559212036;",
+            ),
+            (
+                "duplicate_identical_block_comment",
+                "publishedid=1828439124; publishedid/*x*/=1828439124;",
+            ),
+            (
+                "single_foreign_comments_around_equal",
+                "publishedid/*x*/=/*y*/1559212036;",
+            ),
+            (
+                "canonical_id_only_inside_the_comment_after_equal",
+                "publishedid = /* 1828439124 */ 1559212036;",
+            ),
+        ):
+            with self.subTest(label):
+                result = self._with_meta(meta)
+                self.assertEqual(
+                    result.error_code, transaction.VPP_PREFLIGHT_FAILED, label
+                )
+                self.assertIn("vpp_mod_identity", result.missing, label)
+
+    def test_meta_cpp_comments_next_to_a_single_canonical_value_still_prove_identity(
+        self,
+    ) -> None:
+        for label, meta in (
+            ("value_then_adjacent_block_comment", "publishedid=1828439124/*x*/;"),
+            ("value_then_spaced_block_comment", "publishedid=1828439124 /*x*/;"),
+            ("block_comment_between_key_and_equal", "publishedid/*x*/=1828439124;"),
+            (
+                "line_comment_between_key_and_equal",
+                "publishedid // x\n = 1828439124;",
+            ),
+            ("semicolon_then_line_comment", "publishedid=1828439124;//tail"),
+        ):
+            with self.subTest(label):
+                result = self._with_meta(meta)
+                self.assertIsNone(result.error_code, label)
+
+    def test_cfg_comments_between_tokens_do_not_hide_a_conflicting_assignment(
+        self,
+    ) -> None:
+        for label, body in (
+            (
+                "conflict_block_comment",
+                "vppDisablePassword=1; vppDisablePassword/*x*/=0;",
+            ),
+            (
+                "conflict_line_comment_then_one",
+                "vppDisablePassword//x\n=0;\nvppDisablePassword=1;",
+            ),
+        ):
+            with self.subTest(label):
+                result = self._with_config(body)
+                self.assertEqual(
+                    result.error_code, transaction.VPP_PREFLIGHT_FAILED, label
+                )
+                self.assertIn("vpp_disable_password", result.missing, label)
+
+    def test_cfg_comments_next_to_a_live_one_still_disable_the_password(self) -> None:
+        for label, body in (
+            ("block_comment_between_key_and_equal", "vppDisablePassword/*x*/=1;"),
+            ("value_then_adjacent_block_comment", "vppDisablePassword=1/*x*/;"),
+        ):
+            with self.subTest(label):
+                result = self._with_config(body)
+                self.assertIsNone(result.error_code, label)
+
+    def test_contract_rules_pinned_after_the_cross_family_review(self) -> None:
+        # Four rules of the ronda-5 contract that the product honoured but no
+        # test pinned (review R5-A-02, 2026-09-06): a string is not dead ground
+        # between the key and the `=`; a value stops at `//` as it does at `/*`;
+        # an unterminated `/*` between tokens runs to the end of the file; an
+        # empty value is not an assignment. Plus the delta-2 repro literally,
+        # with the `;` INSIDE the single-quoted string.
+        for label, meta, expected in (
+            ("string_between_key_and_equal", "publishedid/*x*/'='=1828439124;", "vpp_mod_identity"),
+            ("value_cut_at_line_comment_without_newline", "publishedid=1828439124//x", None),
+            ("second_assignment_with_empty_value", "publishedid=1828439124;publishedid=;", None),
+        ):
+            with self.subTest(label):
+                result = self._with_meta(meta)
+                if expected is None:
+                    self.assertIsNone(result.error_code, label)
+                else:
+                    self.assertIn(expected, result.missing, label)
+        for label, body in (
+            ("unterminated_block_between_equal_and_value", "vppDisablePassword=/*1;"),
+            ("delta2_repro_semicolon_inside_the_string", "motd='vppDisablePassword=1;';\n"),
+        ):
+            with self.subTest(label):
+                self.assertIn("vpp_disable_password", self._with_config(body).missing, label)
