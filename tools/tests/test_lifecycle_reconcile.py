@@ -15,6 +15,7 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 from dayz_mcp import dayz_test_tool, process_lifecycle
+from dayz_mcp import native_launcher_transaction
 from dayz_mcp.process_lifecycle import (
     ProcessLifecycle,
     ProcessRecord,
@@ -1275,6 +1276,22 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
         )
         steam.start()
         self.addCleanup(steam.stop)
+        # ficha df93: the admin-tools preflight verifies the tools a request
+        # asks for and warns when it asks for none. These fixtures are policies
+        # and stubs, not a server workspace, so the gate is neutralised here
+        # exactly as the Steam one above is; its oracle is tests/test_vpp_preflight.py.
+        vpp_patcher = patch.object(
+            dayz_test_tool,
+            "preflight_vpp_request",
+            return_value=native_launcher_transaction.VppPreflightResult(
+                error_code=None,
+                missing=(),
+                warnings=(),
+                hint=native_launcher_transaction.VPP_PREFLIGHT_HINT,
+            ),
+        )
+        vpp_patcher.start()
+        self.addCleanup(vpp_patcher.stop)
         # The fake pids of the fixture must not be looked up on this host: a pid
         # that happens to exist would flip client_dead_after_ack and make the
         # outcome depend on the machine. A test that needs another answer sets

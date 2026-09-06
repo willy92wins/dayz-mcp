@@ -16,6 +16,7 @@ from dayz_mcp import (
     secure_launcher,
 )
 from dayz_mcp.launcher_registry import open_approved_launcher
+from dayz_mcp.native_launcher_transaction import preflight_vpp_request
 from dayz_mcp.steam_preflight import (
     REMEDIATION,
     STEAM_SESSION_STALE,
@@ -989,6 +990,8 @@ def _compact_result(
     client_replace_reason: str | None = None,
     client_last_poll_age_s: float | None = None,
     client_record_age_s: float | None = None,
+    vpp_missing: list[str] | None = None,
+    vpp_warnings: list[str] | None = None,
 ) -> dict[str, object]:
     projection = readiness or _NULL_READINESS
     return {
@@ -1020,6 +1023,15 @@ def _compact_result(
         "client_replace_reason": client_replace_reason,
         "client_last_poll_age_s": client_last_poll_age_s,
         "client_record_age_s": client_record_age_s,
+        # The admin-tools gate (ficha df93). An empty list is a MEASUREMENT:
+        # the gate ran here and found nothing. null means this layer never
+        # consulted it -- a stop, whose request is offline and therefore starts
+        # no server, and every envelope built before the gate. A request that
+        # asks for no admin tools is not refused: vpp_mod_not_requested travels
+        # in vpp_warnings. The gate itself is not optional: it runs inside
+        # native_launcher_transaction for every launch, named or not.
+        "vpp_missing": vpp_missing,
+        "vpp_warnings": vpp_warnings,
     }
 
 
@@ -1074,6 +1086,7 @@ async def _execute_request(
     progress_cb: _ProgressCallback | None,
     replacement: ClientReplacementDecision | None = None,
     client_pids_before: tuple[int, ...] | None = None,
+    vpp: object | None = None,
 ) -> dict[str, object]:
     stdout = bytearray()
     stderr = bytearray()
@@ -1193,6 +1206,8 @@ async def _execute_request(
         client_record_age_s=(
             None if replacement is None else replacement.record_age_s
         ),
+        vpp_missing=None if vpp is None else list(vpp.missing),
+        vpp_warnings=None if vpp is None else list(vpp.warnings),
     )
 
 
@@ -1251,6 +1266,35 @@ async def execute_dayz_test_run(
             raw_request, policy = build_run_request(
                 bundle.sealed_policies, **request_arguments
             )
+            # The admin-tools gate runs before the host gate below: it is a
+            # property of the request just composed, and a refusal here has
+            # consulted neither Steam nor the lifecycle. A request that asks
+            # for no admin tools passes it with a warning. It applies to
+            # preflight:true too -- dayz_test_worker.py:547-550 states the rule
+            # this route must keep: a preflight fails exactly where a real
+            # launch would. native_launcher_transaction enforces the same
+            # decision below; this call only names it for the caller.
+            vpp = preflight_vpp_request(
+                raw_request, sealed_policies=bundle.sealed_policies
+            )
+            if vpp.error_code is not None:
+                return _compact_result(
+                    terminal=WorkerTerminal(
+                        cleanup_degraded=False,
+                        error_code=vpp.error_code,
+                        exit_code=1,
+                        ok=False,
+                        run_id=None,
+                    ),
+                    project=policy.mod,
+                    mode=mode,
+                    started_at=started_at,
+                    artifacts_paths=[],
+                    phase="validating",
+                    remediation=vpp.hint,
+                    vpp_missing=list(vpp.missing),
+                    vpp_warnings=list(vpp.warnings),
+                )
             if not preflight and _mode_starts_client(mode):
                 try:
                     steam = evaluate_steam_session()
@@ -1278,6 +1322,8 @@ async def execute_dayz_test_run(
                         steam_registered_pid=steam.steam_registered_pid,
                         steam_live_pids=list(steam.steam_live_pids[:8]),
                         remediation=steam.remediation,
+                        vpp_missing=list(vpp.missing),
+                        vpp_warnings=list(vpp.warnings),
                     )
             replacement: ClientReplacementDecision | None = None
             client_pids_before: tuple[int, ...] | None = None
@@ -1345,6 +1391,8 @@ async def execute_dayz_test_run(
                             client_replace_reason=replacement.reason,
                             client_last_poll_age_s=replacement.last_poll_age_s,
                             client_record_age_s=replacement.record_age_s,
+                            vpp_missing=list(vpp.missing),
+                            vpp_warnings=list(vpp.warnings),
                         )
             if replacement is not None and replacement.replace:
                 # H-A2-2 / 79e2: the verdict reached here is two broker hops and
@@ -1371,6 +1419,7 @@ async def execute_dayz_test_run(
                 progress_cb=progress_cb,
                 replacement=replacement,
                 client_pids_before=client_pids_before,
+                vpp=vpp,
             )
 
 
