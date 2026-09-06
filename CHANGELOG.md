@@ -17,6 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Camera capture, UI inspection and interaction, and live `.layout` reload tools.
 - `dayz_mcp.effective_schema`: resolves the tool contract FastMCP publishes after `build_app`, aliases applied, and audits it against the prose each description promises.
 
+### Changed
+
+- `entities_query` keeps `entities: []` on an empty result: result pruning no longer drops the key its description promises (ficha 59d9).
+
 ### Security
 
 - Loopback-only access with API-key authentication, process accreditation, FIFO leases, and a JSONL audit trail.

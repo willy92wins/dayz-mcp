@@ -33,6 +33,7 @@ def _wire_result(**filled: object) -> dict[str, object]:
         "trace": {},
         "pos_real": [],
         "dialog": {},
+        "entities": [],
     }
     empty.update(filled)
     return {"ok": 1, "cmd": "fixture", **empty}
@@ -109,7 +110,29 @@ class ResultPruneTest(unittest.TestCase):
         self.assertNotIn("players", pruned)
         self.assertEqual(
             SEMANTIC_EMPTY_FIELDS,
-            frozenset({("query_all_players", "players"), ("ui_dialog", "dialog")}),
+            frozenset(
+                {
+                    ("query_all_players", "players"),
+                    ("ui_dialog", "dialog"),
+                    ("entities_query", "entities"),
+                }
+            ),
+        )
+
+    def test_entities_query_keeps_its_empty_list(self) -> None:
+        # Ficha 59d9: the published description says "Absent entities travel
+        # as []", and pruning the key made result["entities"] a KeyError on
+        # every empty query. count_total survives either way; the list is the
+        # contract the description names, and only for this verb.
+        pruned = prune_unfilled_fields(
+            "entities_query", _wire_result(count_total=0)
+        )
+
+        self.assertEqual(pruned["entities"], [])
+        self.assertEqual(pruned["count_total"], 0)
+        self.assertNotIn("players", pruned)
+        self.assertNotIn(
+            "entities", prune_unfilled_fields("object_inspect", _wire_result())
         )
 
     def test_scalars_are_never_pruned_even_when_falsy(self) -> None:

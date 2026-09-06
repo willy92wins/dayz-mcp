@@ -14,10 +14,11 @@ Two deliberate limits:
 2. An empty container is not always noise. `query_all_players` returning
    `players: []` is a verified success (in-game 2026-07-29) and must survive.
    Such pairs live in SEMANTIC_EMPTY_FIELDS and are never pruned.
-   The test is whether the container is the verb's ONLY answer.
-   `entities_query` reports `count_total` beside `entities`, and an int
-   survives pruning, so an empty result still says so. `query_all_players`
-   has no such scalar: prune its array and the answer is gone with it.
+   The test is whether the consumer reads the container as the answer.
+   `query_all_players` has no scalar beside `players`: prune its array and
+   the answer is gone with it. `entities_query` does report `count_total`,
+   but its description promises `entities: []` and an agent indexes by
+   that key (ficha 59d9), so the empty list stays too.
 
 This is an observable contract change for a published server: see the changelog.
 """
@@ -54,6 +55,11 @@ SEMANTIC_EMPTY_FIELDS = frozenset(
         # ui_dialog answers inside `dialog`; an empty object there is a bridge
         # defect the caller must see, not noise to hide.
         ("ui_dialog", "dialog"),
+        # entities_query publishes "Absent entities travel as []" (server.py)
+        # and its consumer indexes result["entities"]: the empty list is the
+        # answer, not noise. Ficha 59d9 (2026-09-04): the key vanished on
+        # every empty query and the description described what never came.
+        ("entities_query", "entities"),
     }
 )
 
