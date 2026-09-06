@@ -6,6 +6,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import math
 import os
 import subprocess
 import threading
@@ -19,6 +20,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, TypeVar
 
+from dayz_mcp import dayz_test_storage
 from dayz_mcp.instance_fence import BindingPrepareError
 from dayz_mcp.runtime_state import RuntimePaths, atomic_write_bytes
 from dayz_mcp.session_coordination import (
@@ -342,6 +344,53 @@ _PORT_STILL_HELD_HINT = (
     "table still lists its pid. Nothing was retired and nothing was launched; "
     "repeat the same call once the socket is released."
 )
+# fb-20260904-200816-79e2 / H-A2-2. The extension gate decides in the MCP server
+# process and the kill happens here, after composing the sealed request, opening
+# the launcher, starting app.pyz and two broker round trips. A4 measured that
+# window on the durable audit: n=26, min 0,47 s, median 7,00 s, max 29,16 s --
+# the same order as PEER_STALE_S. The bound below is twice the measured maximum,
+# so a legitimate call never trips it while a request replayed minutes later does.
+_REPLACE_WITNESS_MAX_AGE_S = 60.0
+_REPLACE_WITNESS_HINTS = {
+    "replace_witness_missing": (
+        "replace_witness_missing: superseding a live client needs the witness "
+        "of the gate that authorised it, carried in the sealed request. Nothing "
+        "was terminated and nothing was launched. A launcher bundle older than "
+        "this daemon does not send it: rebuild and reinstall app.pyz."
+    ),
+    "replace_witness_stale": (
+        "replace_witness_stale: the gate read the bridge too long ago for its "
+        "verdict to still stand. Nothing was terminated and nothing was "
+        "launched; repeat the same call."
+    ),
+    "client_polling_since_decision": (
+        "client_polling_since_decision: the client polled the bridge again "
+        "after the gate decided it had stopped. Nothing was terminated and "
+        "nothing was launched: the client is alive and serving."
+    ),
+    "bridge_state_unreadable": (
+        "bridge_state_unreadable: the bridge state carries no usable evidence "
+        "about this client, and no evidence does not authorise ending a live "
+        "process. Nothing was terminated and nothing was launched."
+    ),
+}
+_STORAGE_ROTATE_HINTS = {
+    "storage_rotate_failed": (
+        "storage_rotate_failed: the mission storage could not be sealed or set "
+        "aside for this mod set. Nothing was launched and no process was "
+        "created. The mission is NOT guaranteed untouched: a transaction that "
+        "failed after its first rename leaves the old tree under its backup "
+        "name and an active journal beside storage_1, which the next call "
+        "reconciles. Nothing is ever deleted -- v1 renames only."
+    ),
+    "storage_recovery_required": (
+        "storage_recovery_required: the mission carries a rotation that cannot "
+        "be reconciled (an ambiguous or unreadable journal, or a physical state "
+        "no sequence produces). Nothing was launched. Inspect the "
+        "storage_1.modset.rotation.* files next to storage_1 before retrying; "
+        "no data was deleted -- v1 renames and never removes."
+    ),
+}
 _STATUS_SNAPSHOT_TRIES = 3
 _RECOVERY_REPAIR_STATES = frozenset(
     {"STARTING", "RUNNING", "RUNNING_IDLE", "STOPPING", "UNRECONCILED"}
@@ -1015,6 +1064,10 @@ class ProcessLifecycle:
         recovery_fault_arm: RecoveryFaultArm | None = None,
         argv_of: Callable[[int], list[str] | None] | None = None,
         bindings: object | None = None,
+        # 79e2: reads the bridge peer rows to revalidate a client replacement at
+        # the instant of the kill. Read-only; None means "no answer", which is a
+        # refusal, never a licence.
+        bridge_probe: object | None = None,
         daemon_generation: str | None = None,
     ) -> None:
         self.coordinator = coordinator
@@ -1030,6 +1083,7 @@ class ProcessLifecycle:
         self.recovery_fault_arm = recovery_fault_arm
         self.argv_of = argv_of or _default_argv_of
         self.bindings = bindings
+        self.bridge_probe = bridge_probe
         self.daemon_generation = (
             daemon_generation if isinstance(daemon_generation, str) else ""
         )
@@ -1574,6 +1628,197 @@ class ProcessLifecycle:
             return "retail_manual_lifecycle_required"
         return "executable_not_allowed"
 
+    @staticmethod
+    def _usable_peer_age(value: object) -> bool:
+        """None, or a finite non-negative number. Nothing else is an age."""
+        if value is None:
+            return True
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        return math.isfinite(value) and value >= 0.0
+
+    def _client_peer_row(self) -> dict[str, object] | None:
+        """The bridge row for the client peer, or None when there is no answer.
+
+        The probe is the loopback ServerState's own status_snapshot: the daemon
+        already owns that object (daemon.py passes it as ``bindings``), so the
+        state the MCP server reads over HTTP as /status is readable here with no
+        network hop. It travels as its OWN parameter and not through
+        ``bindings`` because this is a read of the bridge, not a binding
+        mutation, and an object that answers one must not have to answer both.
+
+        The lock order is the established one: _prepare_instance already calls
+        ``bindings.prepare`` under _operation_lock, and ServerState never takes
+        _operation_lock while holding its own lock (loopback.py:1250).
+
+        No probe, an unreadable one, or a snapshot without a client row are all
+        the same answer: None. The caller turns that into a refusal, never into
+        a licence to kill.
+        """
+        probe = self.bridge_probe
+        if not callable(probe):
+            return None
+        try:
+            snapshot = probe()
+        except Exception:
+            return None
+        if not isinstance(snapshot, dict):
+            return None
+        peers = snapshot.get("peers")
+        if not isinstance(peers, dict):
+            return None
+        row = peers.get("client")
+        return row if isinstance(row, dict) else None
+
+    @staticmethod
+    def _rotation_applies(existing: object, launch_role: str) -> bool:
+        """Only a launch that CREATES its run hands the engine a fresh storage.
+
+        A client, or an offline that extends an existing run, attaches to a tree
+        the engine already chose; rotating under it would pull the world from a
+        live session. Mirrors dayz_test_worker._start_core, which puts the seal
+        in the request for exactly these two roles and only when it creates the
+        run -- so launch_request_sha256 covers it.
+        """
+        return existing is None and launch_role in {"server", "offline"}
+
+    def _rotate_storage_for_launch(
+        self, parsed: dict[str, object], run_id: str
+    ) -> str | None:
+        """Seal the mod set and set aside an incompatible storage. Pre-spawn.
+
+        Codex F-01 put this here. It used to run inside the worker, before the
+        first lifecycle call, so a launch this method was going to refuse with
+        active_run_exists had ALREADY renamed the storage of the run that was
+        alive: the bytes survived (v1 renames, never deletes) but they left the
+        canonical path under a live owner. Now every admission -- active run,
+        quarantine, lease, audit, fence, and the last look at the socket table
+        -- has already passed, the operation lock is held, and no process has
+        been created yet. A refusal here has rotated nothing.
+
+        Returns a declared error code, or None when the launch may proceed.
+        """
+        seal = parsed.get("storage_seal")
+        mission = parsed.get("mission")
+        project = str(parsed.get("mod") or "").lstrip("@")
+        if (
+            not isinstance(seal, str)
+            or not isinstance(mission, str)
+            or not mission
+            or not project
+        ):
+            # Fail-closed: a launch that must rotate and does not carry its seal
+            # comes from a launcher bundle older than this daemon. Refusing
+            # costs a rebuild; guessing costs the mission.
+            return "storage_rotate_failed"
+        try:
+            result = dayz_test_storage.prepare_storage(
+                mission,
+                seal=seal,
+                project=project[:64],
+                now=time.time(),
+                # Derived, never minted: a retry of the same launch names the
+                # same journal, and no clock or randomness enters the id.
+                txid=hashlib.sha256(
+                    (run_id + ":" + seal).encode("utf-8")
+                ).hexdigest()[:32],
+            )
+        except (dayz_test_storage.StorageError, OSError):
+            return "storage_rotate_failed"
+        if not result.launch_allowed:
+            return "storage_recovery_required"
+        if result.storage_rotated:
+            self._audit_storage_rotation(run_id, result)
+        return None
+
+    def _audit_storage_rotation(self, run_id: str, result: object) -> None:
+        """A rotation resets the world and the characters: it leaves a row."""
+        writer = self.audit
+        if not callable(writer):
+            return
+        try:
+            writer(
+                {
+                    "event": "lifecycle_storage_rotated",
+                    "run_id": run_id,
+                    "storage_backup": getattr(result, "storage_backup", None),
+                    "storage_marker_backup": getattr(
+                        result, "storage_marker_backup", None
+                    ),
+                    "storage_seal": getattr(result, "storage_seal", None),
+                    "reason": getattr(result, "reason", None),
+                    "notice": getattr(result, "storage_reset_notice", None),
+                }
+            )
+        except Exception:
+            # Observability only: a row that cannot be written never blocks a
+            # launch the admissions already allowed.
+            return
+
+    def _replacement_witness_error(
+        self, parsed: dict[str, object], *, now: float
+    ) -> str | None:
+        """Revalidate here the verdict the extension gate reached back there.
+
+        H-A2-2 / ficha 79e2: the gate reads the bridge once, in another process,
+        and this is where a live DayZ dies. Nothing revalidated in between, so a
+        client that resumed polling inside the window was killed and the answer
+        said client_not_polling -- a fact already false at the moment of the kill.
+
+        The witness is the instant the gate READ the bridge, and it is compared
+        by ELAPSED TIME, never by absolute clocks: the bridge stamps its polls
+        with time.monotonic (loopback.py:939), so an epoch read here and a
+        monotonic reading there do not live on the same axis. "The client polled
+        after the decision" is therefore "its most recent poll is younger than
+        the age of the decision".
+
+        Deliberately stricter than server._peer_is_live: it takes the MOST
+        RECENT of the two ages the row carries instead of choosing one by
+        binding state. Any evidence of a poll after the decision blocks the
+        kill, and refusing costs one repeated call while being wrong the other
+        way costs a live session.
+        """
+        witness = parsed.get("replace_if_not_polling_since")
+        if type(witness) is not int or witness <= 0:
+            return "replace_witness_missing"
+        decision_age_s = now - witness / 1000.0
+        # Codex F-05. A witness in the future used to be tolerated up to a
+        # couple of seconds and then clamped to zero, which turned a poll made
+        # AFTER the real decision into one made before it and authorised the
+        # kill. There is no benign reason for a decision stamped in the future
+        # by a process on this host, so any negative age is a refusal and the
+        # comparison below no longer needs a clamp.
+        if decision_age_s < 0.0 or decision_age_s > _REPLACE_WITNESS_MAX_AGE_S:
+            return "replace_witness_stale"
+        peer = self._client_peer_row()
+        if peer is None:
+            return "bridge_state_unreadable"
+        keys = ("last_poll_age_s", "bound_last_poll_age_s")
+        if any(key not in peer for key in keys):
+            # Not the shape status_snapshot publishes, so not an answer about
+            # this client, and no answer must not authorise a kill.
+            return "bridge_state_unreadable"
+        values = [peer[key] for key in keys]
+        if any(not self._usable_peer_age(value) for value in values):
+            # Codex F-04: a field that is a string, a bool, NaN, an infinity or
+            # a negative duration is an unknown dimension, and the kill may not
+            # be decided on the subset that happened to parse. NaN matters on
+            # its own: every comparison against it is False, so a filtered NaN
+            # would have read as "did not poll".
+            return "bridge_state_unreadable"
+        ages = [value for value in values if value is not None]
+        if not ages:
+            # Both ages null is the row of a peer that has NEVER polled in this
+            # generation (loopback.py: last_poll_at stays None until the first
+            # poll). That is positive evidence that it did not poll after the
+            # decision either -- and it is the hung client of ficha 8f76c, the
+            # very case the replacement exists for. Reading it as silence would
+            # make the feature refuse exactly the case it was built to fix.
+            return None
+        if min(ages) < decision_age_s:
+            return "client_polling_since_decision"
+        return None
+
     def _parse_start_request(self, request: object) -> tuple[dict[str, object] | None, str | None]:
         if not isinstance(request, dict):
             return None, "invalid_start_request"
@@ -2065,9 +2310,16 @@ class ProcessLifecycle:
                     # before the instance is prepared, so a refusal here never
                     # leaves the superseded process alive with its binding
                     # already retired.
-                    replaced_pids, replace_error = self._replace_role_processes(
-                        provisional, launch_role, client=client
+                    # 79e2: revalidated HERE, against the bridge state this
+                    # process owns, before a single process is touched.
+                    replaced_pids: tuple[int, ...] = ()
+                    replace_error = self._replacement_witness_error(
+                        parsed, now=time.time()
                     )
+                    if replace_error is None:
+                        replaced_pids, replace_error = self._replace_role_processes(
+                            provisional, launch_role, client=client
+                        )
                     if replace_error is None and replaced_pids:
                         # Durable before the launch: a crash between here and
                         # the launcher leaves STARTING without the superseded
@@ -2093,6 +2345,8 @@ class ProcessLifecycle:
                         )
                         if replace_error == "port_still_held":
                             settled["hint"] = _PORT_STILL_HELD_HINT
+                        elif replace_error in _REPLACE_WITNESS_HINTS:
+                            settled["hint"] = _REPLACE_WITNESS_HINTS[replace_error]
                         return settled
                 minted, prepare_error = self._prepare_instance(
                     run_id, launch_role, str(parsed["profiles"]), existing is not None
@@ -2138,6 +2392,27 @@ class ProcessLifecycle:
                         # the way _start_rejection publishes it, not swallowed.
                         self._add_degradation(settled, "audit_failed")
                     return settled
+                # M15 (fichas 4407 + 01ae) / Codex F-01. Last step before the
+                # spawn and after EVERY admission: a refusal above this line has
+                # rotated nothing, and this is the only point at which the run
+                # is certain to be created.
+                if self._rotation_applies(existing, launch_role):
+                    storage_error = self._rotate_storage_for_launch(parsed, run_id)
+                    if storage_error is not None:
+                        self._retire_minted(
+                            run_id, launch_role, minted, "launch_failed"
+                        )
+                        settled = self._settle_failed_launch(
+                            client=client,
+                            previous=previous,
+                            provisional=provisional,
+                            launched=None,
+                            record=None,
+                            confirmed_error=storage_error,
+                            attempt_started_at=attempt_started_at,
+                        )
+                        settled["hint"] = _STORAGE_ROTATE_HINTS[storage_error]
+                        return settled
                 try:
                     launched = self.launcher(
                         list(parsed["argv"]),

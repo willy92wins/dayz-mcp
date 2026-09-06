@@ -200,6 +200,7 @@ def build_run_request(
     player_name: str = "Dev",
     server_wait_s: int = 60,
     kill: bool = False,
+    replace_if_not_polling_since: int | None = None,
 ) -> tuple[bytes, dayz_test_request.RequestProjectPolicy]:
     selected = _selected_policy(sealed_policies, project)
     if mode not in _accepted_modes():
@@ -233,6 +234,11 @@ def build_run_request(
         document["base_mods"] = public_base
     if public_server is not None:
         document["server_mods"] = public_server
+    if replace_if_not_polling_since is not None:
+        # 79e2. Present only on the call that supersedes a live client, and only
+        # once the gate has actually read the bridge: the value is the instant
+        # of that reading, which start_run revalidates before killing anything.
+        document["replace_if_not_polling_since"] = replace_if_not_polling_since
     raw = json.dumps(
         document,
         ensure_ascii=False,
@@ -253,6 +259,17 @@ def build_run_request(
             dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
         }:
             _fail(f"bad_dayz_test_request:{token}")
+        # 8f8c point 3. The 25 conditions of the parser used to arrive here as
+        # one token. A declared reason is republished with the same shape the
+        # three named causes above already use, so every consumer that matches
+        # on the bad_dayz_test_request prefix keeps working; anything else --
+        # an undeclared suffix, a TypeError, a ValueError from elsewhere --
+        # keeps EXACTLY the bare legacy code.
+        prefix = "invalid_dayz_test_request:"
+        if token.startswith(prefix):
+            reason = token[len(prefix) :]
+            if reason in dayz_test_request.REQUEST_REJECTION_REASONS:
+                _fail(f"bad_dayz_test_request:{reason}")
         _fail("bad_dayz_test_request")
     effective_mods = [selected.mod, *(public_extra or [])]
     if not kill and not any(
@@ -1211,26 +1228,28 @@ async def execute_dayz_test_run(
     with open_approved_launcher("dayz-test-v1") as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
+            request_arguments: dict[str, object] = {
+                "project": project,
+                "mode": mode,
+                "mission": mission,
+                "build": build,
+                "clean": clean,
+                "pack_only": pack_only,
+                "preflight": preflight,
+                "run_id": run_id,
+                "extra_mods": extra_mods,
+                "base_mods": base_mods,
+                "server_mods": server_mods,
+                "no_base_mods": no_base_mods,
+                "no_file_patching": no_file_patching,
+                "port": port,
+                "width": width,
+                "height": height,
+                "player_name": player_name,
+                "server_wait_s": server_wait_s,
+            }
             raw_request, policy = build_run_request(
-                bundle.sealed_policies,
-                project=project,
-                mode=mode,
-                mission=mission,
-                build=build,
-                clean=clean,
-                pack_only=pack_only,
-                preflight=preflight,
-                run_id=run_id,
-                extra_mods=extra_mods,
-                base_mods=base_mods,
-                server_mods=server_mods,
-                no_base_mods=no_base_mods,
-                no_file_patching=no_file_patching,
-                port=port,
-                width=width,
-                height=height,
-                player_name=player_name,
-                server_wait_s=server_wait_s,
+                bundle.sealed_policies, **request_arguments
             )
             if not preflight and _mode_starts_client(mode):
                 try:
@@ -1278,6 +1297,11 @@ async def execute_dayz_test_run(
                     client_pids_before = _client_pids_from_status(
                         extension_status, run_id
                     )
+                    # The witness is stamped immediately BEFORE the read, so
+                    # it can only be earlier than the evidence, never later: an
+                    # error in this direction refuses a replacement, and the
+                    # opposite one would authorise a kill with a stale fact.
+                    decided_at_ms = int(time.time() * 1000)
                     try:
                         bridge = await runtime.bridge_status_payload()
                     except Exception:
@@ -1322,6 +1346,17 @@ async def execute_dayz_test_run(
                             client_last_poll_age_s=replacement.last_poll_age_s,
                             client_record_age_s=replacement.record_age_s,
                         )
+            if replacement is not None and replacement.replace:
+                # H-A2-2 / 79e2: the verdict reached here is two broker hops and
+                # one process start away from the kill, so it does not travel as
+                # a decision but as a WITNESS that start_run revalidates against
+                # the bridge state the daemon owns. Recomposed, not patched: the
+                # request is sealed and parsed as a whole.
+                raw_request, _witnessed = build_run_request(
+                    bundle.sealed_policies,
+                    **request_arguments,
+                    replace_if_not_polling_since=decided_at_ms,
+                )
             return await _execute_request(
                 runtime,
                 opened_launcher=opened,

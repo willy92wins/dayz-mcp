@@ -442,6 +442,44 @@ class ProcessLifecycleStatusPruneTest(unittest.TestCase):
             )
 
 
+class FakeBridgeBindings:
+    """The loopback ServerState status_snapshot the daemon wires as bridge_probe.
+
+    fb-20260904-200816-79e2: superseding a live client needs the witness of the
+    gate that authorised it AND a bridge row that still agrees at T1. The default
+    row is a client that has not polled for a long time -- the state the gate
+    acts on -- so the tests written before the witness keep measuring what they
+    measured. The refusal branches have their own tests.
+    """
+
+    def __init__(
+        self,
+        last_poll_age_s: object = 999.0,
+        bound_last_poll_age_s: object = None,
+        binding_state: object = None,
+        raise_on_read: bool = False,
+    ) -> None:
+        self.last_poll_age_s = last_poll_age_s
+        self.bound_last_poll_age_s = bound_last_poll_age_s
+        self.binding_state = binding_state
+        self.raise_on_read = raise_on_read
+        self.reads = 0
+
+    def status_snapshot(self, now: object = None) -> dict[str, object]:
+        self.reads += 1
+        if self.raise_on_read:
+            raise RuntimeError("bridge unavailable")
+        return {
+            "peers": {
+                "client": {
+                    "last_poll_age_s": self.last_poll_age_s,
+                    "bound_last_poll_age_s": self.bound_last_poll_age_s,
+                    "binding_state": self.binding_state,
+                }
+            }
+        }
+
+
 class ProcessLifecycleTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = TemporaryDirectory()
@@ -480,6 +518,8 @@ class ProcessLifecycleTest(unittest.TestCase):
             launcher=self.launcher,
             id_fn=lambda: "run-1",
         )
+        self.bridge = FakeBridgeBindings()
+        self.lifecycle.bridge_probe = self.bridge.status_snapshot
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -495,6 +535,9 @@ class ProcessLifecycleTest(unittest.TestCase):
             "mod": "@SameMod",
             "profiles": "profiles",
             "mission": "test",
+            # 79e2: the witness of the gate that authorised superseding a live
+            # client, stamped now so the revalidation in start_run can compare.
+            "replace_if_not_polling_since": int(time.time() * 1000),
         }
 
     def recoverable_request(self) -> dict[str, object]:
@@ -4006,6 +4049,8 @@ class RetiredRunDiagnosticsAndGenerationTest(unittest.TestCase):
             id_fn=lambda: "run-1",
             daemon_generation=self.generation,
         )
+        self.bridge = FakeBridgeBindings()
+        self.lifecycle.bridge_probe = self.bridge.status_snapshot
 
     def tearDown(self) -> None:
         self.temporary.cleanup()

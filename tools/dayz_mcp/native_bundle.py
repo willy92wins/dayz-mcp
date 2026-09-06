@@ -70,6 +70,7 @@ _APP_PACKAGED_MODULES = frozenset(
         "dayz_test_modes.py",
         "dayz_test_readiness.py",
         "dayz_test_request.py",
+        "dayz_test_storage.py",
         "dayz_test_worker.py",
         "host_config.py",
         "native_broker_protocol.py",

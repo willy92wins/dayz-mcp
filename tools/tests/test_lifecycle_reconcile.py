@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import sys
 import time
+import hashlib
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -65,6 +67,44 @@ def holders(*rows: tuple[int, int | None, str | None]) -> dict[str, object]:
     }
 
 
+class FakeBridgeBindings:
+    """The loopback ServerState the daemon always wires (daemon.py:541).
+
+    fb-20260904-200816-79e2: superseding a live client now needs the witness of
+    the gate that authorised it AND a bridge row that still agrees at T1. The
+    default row here is a client that has not polled for a long time -- the very
+    state the extension gate acts on -- so the tests written before the witness
+    keep measuring what they measured. The refusal branches have their own tests.
+    """
+
+    def __init__(
+        self,
+        last_poll_age_s: object = 999.0,
+        bound_last_poll_age_s: object = None,
+        binding_state: object = None,
+        raise_on_read: bool = False,
+    ) -> None:
+        self.last_poll_age_s = last_poll_age_s
+        self.bound_last_poll_age_s = bound_last_poll_age_s
+        self.binding_state = binding_state
+        self.raise_on_read = raise_on_read
+        self.reads = 0
+
+    def status_snapshot(self, now: object = None) -> dict[str, object]:
+        self.reads += 1
+        if self.raise_on_read:
+            raise RuntimeError("bridge unavailable")
+        return {
+            "peers": {
+                "client": {
+                    "last_poll_age_s": self.last_poll_age_s,
+                    "bound_last_poll_age_s": self.bound_last_poll_age_s,
+                    "binding_state": self.binding_state,
+                }
+            }
+        }
+
+
 class LifecycleReconcileTest(unittest.TestCase):
     """P-L1 (fb-20260904-025733-d60f) and P-L2/P-L2.c (fb-20260904-025027-8f76 c).
 
@@ -124,6 +164,8 @@ class LifecycleReconcileTest(unittest.TestCase):
         # one probe here so a red check costs no wall clock.
         self.lifecycle._role_release_tries = 1
         self.lifecycle._role_release_interval_s = 0.0
+        self.bridge = FakeBridgeBindings()
+        self.lifecycle.bridge_probe = self.bridge.status_snapshot
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -166,6 +208,9 @@ class LifecycleReconcileTest(unittest.TestCase):
             "profiles": "profiles",
             "mission": "test",
             "run_id": RUN_ID,
+            # 79e2: the witness of the gate, stamped now, so the revalidation
+            # inside start_run has something to compare against.
+            "replace_if_not_polling_since": int(time.time() * 1000),
         }
 
     def arm_launch(self, role: str = "client") -> ProcessRecord:
@@ -340,6 +385,394 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.assertEqual(replaced[0].get("role"), "client")
         self.assertEqual(replaced[0].get("owned_pids"), [721])
         self.assertEqual(replaced[0].get("gone_pids"), [])
+
+    # -- fb-20260904-200816-79e2 / H-A2-2 -----------------------------------
+    # The gate that authorises superseding a client decides in the MCP server
+    # process; the kill happens here, after composing the sealed request,
+    # opening the launcher, starting app.pyz and two broker round trips. A4
+    # measured that window over the durable audit: n=26, min 0,47 s, median
+    # 7,00 s, max 29,16 s -- the same order as PEER_STALE_S = 15 s.
+
+    def _replacement(self, **overrides: object) -> dict[str, object]:
+        server = self.owned(760, "server")
+        hung = self.owned(761, "client")
+        self.install_run([server, hung], state="RUNNING", owner="A")
+        self.arm_launch()
+        request = self.request()
+        request.update(overrides)
+        return self.lifecycle.start_run(IDENTITY_A, self.token_a, request)
+
+    def _assert_nothing_was_touched(self, result: dict[str, object], code: str) -> None:
+        self.assertEqual(result.get("error"), code, result)
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(self.pids(), [760, 761])
+        self.assertIn(code, str(result.get("hint")))
+
+    def test_a_replacement_without_the_gate_witness_is_refused(self) -> None:
+        """Fail-closed: no witness, no kill.
+
+        This is also what a launcher bundle older than this daemon sends, and
+        what lifecycle_cli start sends when it bypasses the gate (A2-G3).
+        """
+        result = self._replacement(replace_if_not_polling_since=None)
+        self._assert_nothing_was_touched(result, "replace_witness_missing")
+
+    def test_a_witness_that_is_not_an_integer_is_no_witness(self) -> None:
+        for value in ("1756000000000", 0, -1, 1.5, True):
+            with self.subTest(value=value):
+                self.setUp()
+                result = self._replacement(replace_if_not_polling_since=value)
+                self._assert_nothing_was_touched(result, "replace_witness_missing")
+
+    def test_a_decision_older_than_the_bound_no_longer_authorises_a_kill(self) -> None:
+        stale = int((time.time() - 120.0) * 1000)
+        result = self._replacement(replace_if_not_polling_since=stale)
+        self._assert_nothing_was_touched(result, "replace_witness_stale")
+
+    def test_a_witness_stamped_in_the_future_is_refused(self) -> None:
+        future = int((time.time() + 3600.0) * 1000)
+        result = self._replacement(replace_if_not_polling_since=future)
+        self._assert_nothing_was_touched(result, "replace_witness_stale")
+
+    def test_a_client_that_polled_after_the_decision_is_not_killed(self) -> None:
+        """A2-G2, closed here. The repro: the bridge says stale at T0, the
+        client polls again before start_run, and it used to die anyway with a
+        response that declared client_not_polling -- already false at the kill.
+        """
+        self.bridge.last_poll_age_s = 0.2
+        result = self._replacement(
+            replace_if_not_polling_since=int((time.time() - 10.0) * 1000)
+        )
+        self._assert_nothing_was_touched(result, "client_polling_since_decision")
+
+    def test_the_bound_age_counts_too_when_the_peer_is_bound(self) -> None:
+        # The most recent evidence of a poll wins, whichever key carries it:
+        # deliberately stricter than server._peer_is_live, which picks one by
+        # binding state.
+        self.bridge.last_poll_age_s = 999.0
+        self.bridge.bound_last_poll_age_s = 0.5
+        self.bridge.binding_state = "BOUND"
+        result = self._replacement(
+            replace_if_not_polling_since=int((time.time() - 10.0) * 1000)
+        )
+        self._assert_nothing_was_touched(result, "client_polling_since_decision")
+
+    def test_a_bridge_that_cannot_be_read_never_authorises_a_kill(self) -> None:
+        self.bridge.raise_on_read = True
+        result = self._replacement()
+        self._assert_nothing_was_touched(result, "bridge_state_unreadable")
+
+    def test_a_client_that_never_polled_is_still_replaceable(self) -> None:
+        """Both ages null is the row of a peer that never polled this generation.
+
+        That is evidence that it did not poll after the decision either, and it
+        is the hung client the replacement exists for (ficha 8f76c). Reading it
+        as silence would refuse exactly the case the feature was built to fix.
+        """
+        self.bridge.last_poll_age_s = None
+        self.bridge.bound_last_poll_age_s = None
+        result = self._replacement(
+            replace_if_not_polling_since=int((time.time() - 5.0) * 1000)
+        )
+        self.assertIs(result.get("ok"), True, result)
+        self.assertEqual([record.pid for record in self.guard.terminate_calls], [761])
+
+    def test_a_row_that_is_not_the_shape_the_bridge_publishes_is_no_answer(self) -> None:
+        class _MalformedBridge:
+            reads = 0
+
+            def status_snapshot(self, now: object = None) -> dict[str, object]:
+                return {"peers": {"client": {"binding_state": "BOUND"}}}
+
+        self.lifecycle.bridge_probe = _MalformedBridge().status_snapshot
+        result = self._replacement()
+        self._assert_nothing_was_touched(result, "bridge_state_unreadable")
+
+    def test_f05_a_witness_a_second_in_the_future_does_not_authorise_a_kill(self) -> None:
+        """Codex F-05. The dangerous window was inside the old skew tolerance.
+
+        A witness stamped 1 s ahead made a poll 0.1 s old look older than the
+        decision once the negative age was clamped to zero, and the live client
+        died. +3600 s was already refused; this is the case that was not.
+        """
+        self.bridge.last_poll_age_s = 0.1
+        result = self._replacement(
+            replace_if_not_polling_since=int((time.time() + 1.0) * 1000)
+        )
+        self._assert_nothing_was_touched(result, "replace_witness_stale")
+
+    def test_f04_a_partially_unreadable_row_is_no_answer(self) -> None:
+        """Codex F-04. One field that parses does not make the row readable.
+
+        NaN matters on its own: every comparison against it is False, so a NaN
+        that survived the filter would have read as "did not poll".
+        """
+        for label, first, second in (
+            ("string", 999.0, "0.2"),
+            ("nan", 999.0, float("nan")),
+            ("inf", 999.0, float("inf")),
+            ("negative", 999.0, -1.0),
+            ("bool", 999.0, True),
+        ):
+            with self.subTest(label=label):
+                self.setUp()
+                self.bridge.last_poll_age_s = first
+                self.bridge.bound_last_poll_age_s = second
+                result = self._replacement(
+                    replace_if_not_polling_since=int((time.time() - 5.0) * 1000)
+                )
+                self._assert_nothing_was_touched(result, "bridge_state_unreadable")
+
+    def test_a_non_numeric_age_is_no_answer(self) -> None:
+        self.bridge.last_poll_age_s = "0.2"
+        result = self._replacement()
+        self._assert_nothing_was_touched(result, "bridge_state_unreadable")
+
+    def test_no_bridge_probe_at_all_is_the_same_refusal(self) -> None:
+        self.lifecycle.bridge_probe = None
+        result = self._replacement()
+        self._assert_nothing_was_touched(result, "bridge_state_unreadable")
+
+    def test_positive_control_a_client_that_stopped_polling_is_replaced(self) -> None:
+        """The other half: without it every assertion above would pass over a
+        gate that refuses everything.
+        """
+        self.bridge.last_poll_age_s = 999.0
+        result = self._replacement(
+            replace_if_not_polling_since=int((time.time() - 5.0) * 1000)
+        )
+        self.assertIs(result.get("ok"), True, result)
+        self.assertEqual([record.pid for record in self.guard.terminate_calls], [761])
+        self.assertGreaterEqual(self.bridge.reads, 1)
+
+    def test_the_witness_is_read_before_anything_is_terminated(self) -> None:
+        self.bridge.last_poll_age_s = 0.1
+        result = self._replacement(
+            replace_if_not_polling_since=int((time.time() - 10.0) * 1000)
+        )
+        self.assertEqual(result.get("error"), "client_polling_since_decision")
+        self.assertEqual(self.bridge.reads, 1)
+        self.assertEqual(self.guard.terminate_calls, [])
+
+    # -- M15 / Codex F-01: the rotation is a pre-spawn step of start_run ----
+    """The rotation used to live in the worker, before the first lifecycle
+
+    It used to live in the worker, before the first lifecycle call, so a launch
+    the daemon was about to refuse with active_run_exists had already renamed
+    the storage of the run that WAS alive. These tests fix the order: nothing
+    the daemon refuses may have touched the mission, and nothing it admits may
+    reach the launcher without the storage being right.
+    """
+
+    STORAGE_SEAL_A = "a" * 64
+    STORAGE_SEAL_B = "b" * 64
+
+    def mission(self) -> Path:
+        """The mission directory, seeded ONCE.
+
+        It used to re-create storage_1 whenever it was missing, so merely
+        reading the sibling list after a rotation put the tree back and every
+        later assertion measured a mission that had healed itself.
+        """
+        directory = Path(self.temporary.name) / "mpmissions" / "dayzOffline"
+        if not directory.exists():
+            tree = directory / "storage_1"
+            (tree / "players").mkdir(parents=True)
+            (tree / "data.bin").write_bytes(b"world-and-characters")
+            (tree / "players" / "p1.bin").write_bytes(b"survivor")
+        return directory
+
+    def backup_trees(self) -> list[str]:
+        """Only the trees set aside: not their markers, not the journals."""
+        return sorted(
+            entry.name
+            for entry in self.mission().iterdir()
+            if entry.is_dir() and entry.name.startswith("storage_1.modset-")
+        )
+
+    def digest(self) -> str:
+        entries = []
+        for current, dirnames, filenames in os.walk(self.mission()):
+            dirnames.sort()
+            entries.append("D " + str(Path(current).relative_to(self.mission())))
+            for name in sorted(filenames):
+                payload = (Path(current) / name).read_bytes()
+                entries.append(
+                    "F " + name + " " + hashlib.sha256(payload).hexdigest()
+                )
+        return hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()
+
+    def siblings(self) -> list[str]:
+        return sorted(
+            entry.name
+            for entry in self.mission().iterdir()
+            if entry.name.startswith("storage_1")
+        )
+
+    def server_request(self, seal: str | None = STORAGE_SEAL_A) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "argv": [str(self.game / "DayZDiag_x64.exe"), "-mission=test"],
+            "cwd": str(self.game),
+            "role": "server",
+            "window_style": "normal",
+            "label": "gate",
+            "mod": "@SameMod",
+            "profiles": "profiles",
+            "mission": str(self.mission()),
+        }
+        if seal is not None:
+            payload["storage_seal"] = seal
+        return payload
+
+    def test_a_launch_the_daemon_refuses_has_not_rotated_anything(self) -> None:
+        """(a) The ordering itself, asserted on the file system.
+
+        A run is already active, so this new launch dies with active_run_exists.
+        The mission must be byte-identical: same tree, same siblings, no marker.
+        """
+        self.install_run([self.owned(730, "server")], state="RUNNING", owner="A")
+        self.mission()
+        before_digest = self.digest()
+        before_siblings = self.siblings()
+
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.server_request()
+        )
+
+        self.assertEqual(result.get("error"), "active_run_exists", result)
+        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(self.digest(), before_digest)
+        self.assertEqual(self.siblings(), before_siblings)
+        self.assertFalse((self.mission() / "storage_1.modset.json").exists())
+
+    def test_b_an_admitted_launch_rotates_and_then_spawns(self) -> None:
+        """(b) The positive control. Without it (a) would pass over a gate that
+        never rotates at all, which is the mutation that matters most here."""
+        self.arm_launch("server")
+        self.mission()
+
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.server_request()
+        )
+
+        self.assertIs(result.get("ok"), True, result)
+        self.assertEqual(len(self.launcher.calls), 1)
+        marker = self.mission() / "storage_1.modset.json"
+        self.assertTrue(marker.is_file())
+        self.assertEqual(
+            json.loads(marker.read_text(encoding="utf-8"))["seal"], self.STORAGE_SEAL_A
+        )
+        # Legacy tree with no marker: fail-closed, so it was set aside.
+        moved = [name for name in self.siblings() if name.startswith("storage_1.modset-")]
+        self.assertEqual(len(moved), 1, self.siblings())
+        rows = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "lifecycle_storage_rotated"
+        ]
+        self.assertEqual(len(rows), 1, rows)
+
+    def test_the_same_seal_twice_does_not_rotate_again(self) -> None:
+        """Idempotence, measured where it lives.
+
+        The first version of this test called setUp() between the two launches,
+        which moved to a FRESH mission and then compared sibling names: it
+        passed just as happily over a gate that rotates every single time. The
+        delta review named it. Two calls of the rotation step against the SAME
+        mission is the property, and the assertion that kills that mutant is
+        that the second adds no sibling and leaves the marker byte-identical.
+        """
+        mission = self.mission()
+        request = self.server_request()
+
+        first = self.lifecycle._rotate_storage_for_launch(request, "run-one")
+        self.assertIsNone(first)
+        after_first = self.siblings()
+        marker = mission / "storage_1.modset.json"
+        sealed = marker.read_bytes()
+        self.assertEqual(
+            len([name for name in after_first if name.startswith("storage_1.modset-")]),
+            1,
+            after_first,
+        )
+
+        second = self.lifecycle._rotate_storage_for_launch(request, "run-two")
+
+        self.assertIsNone(second)
+        self.assertEqual(self.siblings(), after_first)
+        self.assertEqual(marker.read_bytes(), sealed)
+        rotations = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "lifecycle_storage_rotated"
+        ]
+        self.assertEqual(len(rotations), 1, rotations)
+
+    def test_a_different_seal_rotates_a_second_time(self) -> None:
+        """Positive control for the one above: the gate is not simply inert."""
+        request = self.server_request()
+        self.assertIsNone(self.lifecycle._rotate_storage_for_launch(request, "run-one"))
+        after_first = self.backup_trees()
+        # The engine would create the new tree on start; nothing did here, and
+        # a second seal over an ABSENT storage only re-seals. Recreate it so the
+        # control measures a real second rotation.
+        (self.mission() / "storage_1").mkdir()
+        (self.mission() / "storage_1" / "data.bin").write_bytes(b"second-world")
+
+        other = dict(request)
+        other["storage_seal"] = self.STORAGE_SEAL_B
+        self.assertIsNone(self.lifecycle._rotate_storage_for_launch(other, "run-two"))
+
+        self.assertEqual(len(self.backup_trees()), len(after_first) + 1, self.backup_trees())
+
+    def test_c_a_journal_that_cannot_be_reconciled_refuses_the_launch(self) -> None:
+        """(c) Recovery: an ambiguous transaction blocks and spawns nothing."""
+        self.arm_launch("server")
+        mission = self.mission()
+        for txid in ("1" * 32, "2" * 32):
+            (mission / ("storage_1.modset.rotation." + txid + ".json")).write_text(
+                "{}", encoding="utf-8"
+            )
+        before = self.digest()
+
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.server_request()
+        )
+
+        self.assertEqual(result.get("error"), "storage_recovery_required", result)
+        self.assertIn("storage_1.modset.rotation", str(result.get("hint")))
+        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(self.digest(), before)
+
+    def test_a_launch_that_must_rotate_without_its_seal_is_refused(self) -> None:
+        """Fail-closed against a launcher bundle older than this daemon."""
+        self.arm_launch("server")
+        self.mission()
+        before = self.digest()
+
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.server_request(seal=None)
+        )
+
+        self.assertEqual(result.get("error"), "storage_rotate_failed", result)
+        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(self.digest(), before)
+
+    def test_a_client_relaunch_never_rotates(self) -> None:
+        """Negative control: attaching to a run the engine already serves."""
+        server = self.owned(740, "server")
+        hung = self.owned(741, "client")
+        self.install_run([server, hung], state="RUNNING", owner="A")
+        self.arm_launch()
+        self.mission()
+        before = self.digest()
+
+        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+
+        self.assertIs(result.get("ok"), True, result)
+        self.assertEqual(self.digest(), before)
+        self.assertFalse((self.mission() / "storage_1.modset.json").exists())
 
     def test_relaunching_a_role_the_run_does_not_hold_changes_nothing(self) -> None:
         """The mode=all client leg and any first launch of a role: no replacement."""

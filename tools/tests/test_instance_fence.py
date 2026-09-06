@@ -12,6 +12,7 @@ import inspect
 import json
 import os
 import re
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -418,6 +419,9 @@ class LifecycleFenceTest(unittest.TestCase):
             launcher=self.launcher,
             id_fn=lambda: "run-fence-1",
             bindings=self.state,
+            # 79e2: the same ServerState, read-only, so a client replacement is
+            # revalidated against the bridge at the instant of the kill.
+            bridge_probe=self.state.status_snapshot,
         )
         self.state.lifecycle = self.lifecycle
 
@@ -445,11 +449,24 @@ class LifecycleFenceTest(unittest.TestCase):
             "label": "fence",
             "mod": "@Mod",
             "profiles": str(profiles),
-            "mission": "test",
+            "mission": str(self._mission_dir()),
         }
+        if run_id is None and role in {"server", "offline"}:
+            # M15: a launch that creates its run carries the seal of its mod
+            # set, and start_run rotates the mission storage before spawning.
+            payload["storage_seal"] = "a" * 64
         if run_id is not None:
             payload["run_id"] = run_id
+            # 79e2: the witness of the gate that authorised superseding a live
+            # client. This fixture never polls, so the peer row carries null
+            # ages: never polled, which is evidence and not silence.
+            payload["replace_if_not_polling_since"] = int(time.time() * 1000)
         return payload
+
+    def _mission_dir(self) -> Path:
+        mission = self.root / "mission"
+        mission.mkdir(parents=True, exist_ok=True)
+        return mission
 
     def _seed_next_pid(self, role: str) -> ProcessRecord:
         record = _record(self.launcher.next_pid, role)
