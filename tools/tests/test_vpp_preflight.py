@@ -7,10 +7,11 @@ of it: the request policy of DayZ_MCP is the only one with an empty
 default_base_mods, so a server started here has admin tools only when the
 caller typed them into extra_mods.
 
-These checks pin the replacement: a read-only refusal in
+These checks pin the replacement: a read-only gate in
 native_launcher_transaction -- the one function both launch routes traverse --
-before a path is accredited, a lease is asked for or a process exists, plus
-warnings for the seeding the ps1 did and this route will not do.
+that verifies the admin tools a request asks for before a path is accredited,
+a lease is asked for or a process exists, warns when it asks for none, and
+warns for the seeding the ps1 did and this route will not do.
 """
 
 from __future__ import annotations
@@ -150,18 +151,23 @@ class VppPreflightDecisionTest(unittest.TestCase):
             files=files if files is not None else _healthy(selected),
         )
 
-    def test_server_mode_without_the_admin_tools_is_refused(self) -> None:
+    def test_server_mode_without_the_admin_tools_is_warned_not_refused(self) -> None:
         result = self._result(mode="all", extra_mods=["@DayZ_MCP"])
 
-        self.assertEqual(result.error_code, transaction.VPP_PREFLIGHT_FAILED)
-        self.assertIn("vpp_mod_not_requested", result.missing)
+        self.assertIsNone(result.error_code)
+        self.assertEqual(result.missing, ())
+        self.assertEqual(result.warnings, ("vpp_mod_not_requested",))
         self.assertIn("@VPPAdminTools", result.hint)
+        self.assertEqual(result.hint, transaction.VPP_ABSENT_HINT)
 
-    def test_server_only_mode_is_refused_the_same_way(self) -> None:
+    def test_server_only_mode_is_warned_the_same_way(self) -> None:
         result = self._result(mode="server", extra_mods=["@DayZ_MCP"])
 
-        self.assertEqual(result.error_code, transaction.VPP_PREFLIGHT_FAILED)
-        self.assertIn("vpp_mod_not_requested", result.missing)
+        self.assertIsNone(result.error_code)
+        self.assertEqual(result.missing, ())
+        self.assertEqual(result.warnings, ("vpp_mod_not_requested",))
+        self.assertIn("@VPPAdminTools", result.hint)
+        self.assertEqual(result.hint, transaction.VPP_ABSENT_HINT)
 
     def test_admin_tools_in_extra_mods_pass_a_healthy_workspace(self) -> None:
         result = self._result(
@@ -200,8 +206,8 @@ class VppPreflightDecisionTest(unittest.TestCase):
             extra_mods=["@DayZ_MCP"],
         )
 
-        self.assertEqual(result.error_code, transaction.VPP_PREFLIGHT_FAILED)
-        self.assertIn("vpp_mod_not_requested", result.missing)
+        self.assertIsNone(result.error_code)
+        self.assertEqual(result.warnings, ("vpp_mod_not_requested",))
 
     def test_absolute_admin_tools_path_counts_as_requested(self) -> None:
         result = self._result(
@@ -404,12 +410,41 @@ class VppPreflightDecisionTest(unittest.TestCase):
     def test_a_preflight_request_fails_exactly_where_a_launch_would(self) -> None:
         # dayz_test_worker.py:547-550 states the rule for the sealed worker:
         # a preflight must fail exactly where a real launch would.
+        policy = _policy()
+        files = _healthy(policy)
+        files.files[
+            ntpath.normcase(ntpath.join(policy.dev_root, "_server", "serverDZ.cfg"))
+        ] = "allowFilePatching = 1;\n"
+        result = self._result(
+            policy=policy,
+            files=files,
+            mode="all",
+            preflight=True,
+            extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+        )
+
+        self.assertEqual(result.error_code, transaction.VPP_PREFLIGHT_FAILED)
+        self.assertIn("vpp_disable_password", result.missing)
+
+    def test_a_preflight_request_without_admin_tools_is_warned_like_a_launch(
+        self,
+    ) -> None:
         result = self._result(
             mode="all", preflight=True, extra_mods=["@DayZ_MCP"]
         )
 
-        self.assertEqual(result.error_code, transaction.VPP_PREFLIGHT_FAILED)
-        self.assertIn("vpp_mod_not_requested", result.missing)
+        self.assertIsNone(result.error_code)
+        self.assertEqual(result.warnings, ("vpp_mod_not_requested",))
+
+    def test_a_run_that_requests_no_admin_tools_reads_nothing(self) -> None:
+        files = FakeFiles()
+        result = self._result(
+            files=files, mode="all", extra_mods=["@DayZ_MCP"]
+        )
+
+        self.assertIsNone(result.error_code)
+        self.assertEqual(result.warnings, ("vpp_mod_not_requested",))
+        self.assertEqual(files.reads, [])
 
     def test_missing_server_config_is_refused(self) -> None:
         policy = _policy()
@@ -718,12 +753,29 @@ class VppPreflightEnforcementTest(unittest.TestCase):
         policy = _policy()
         with self.assertRaises(ValueError) as caught:
             transaction.enforce_vpp_preflight(
-                self._parsed(policy, mode="all", extra_mods=["@DayZ_MCP"]),
+                self._parsed(
+                    policy,
+                    mode="all",
+                    extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+                ),
                 (policy,),
-                files=_healthy(policy),
+                files=FakeFiles(),
             )
 
         self.assertEqual(str(caught.exception), transaction.VPP_PREFLIGHT_FAILED)
+
+    def test_enforce_returns_a_warning_result_when_no_admin_tools_are_requested(
+        self,
+    ) -> None:
+        policy = _policy()
+        result = transaction.enforce_vpp_preflight(
+            self._parsed(policy, mode="all", extra_mods=["@DayZ_MCP"]),
+            (policy,),
+            files=_healthy(policy),
+        )
+
+        self.assertIsNone(result.error_code)
+        self.assertEqual(result.warnings, ("vpp_mod_not_requested",))
 
     def test_enforce_returns_the_result_when_the_workspace_is_usable(self) -> None:
         policy = _policy()
@@ -751,9 +803,31 @@ class VppPreflightEnforcementTest(unittest.TestCase):
             before = _tree_digest(Path(root))
             with self.assertRaises(ValueError):
                 transaction.enforce_vpp_preflight(
-                    self._parsed(policy, mode="all", extra_mods=["@DayZ_MCP"]),
+                    self._parsed(
+                        policy,
+                        mode="all",
+                        extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+                    ),
                     (policy,),
                 )
+            self.assertEqual(_tree_digest(Path(root)), before)
+
+    def test_the_warning_writes_nothing_to_the_workspace(self) -> None:
+        with TemporaryDirectory() as raw_root:
+            root = ntpath.normpath(raw_root)
+            policy = dayz_test_request.RequestProjectPolicy(
+                mod="ExampleMod",
+                dev_root=root,
+                default_source=root,
+                default_base_mods=(),
+                mission_roots=(root,),
+                mod_roots=(root,),
+            )
+            before = _tree_digest(Path(root))
+            transaction.enforce_vpp_preflight(
+                self._parsed(policy, mode="all", extra_mods=["@DayZ_MCP"]),
+                (policy,),
+            )
             self.assertEqual(_tree_digest(Path(root)), before)
 
     def test_the_host_seam_exposes_no_write_surface(self) -> None:
@@ -784,8 +858,13 @@ class _CountingControlClient:
 class VppPreflightChokepointTest(unittest.IsolatedAsyncioTestCase):
     """The transaction refuses before the lease and before the consumer runs."""
 
-    async def _transaction(self, **overrides: object):
-        policy = _policy()
+    async def _transaction(
+        self,
+        *,
+        policy: dayz_test_request.RequestProjectPolicy | None = None,
+        **overrides: object,
+    ):
+        policy = policy or _policy()
         client = _CountingControlClient()
         consumer_calls: list[object] = []
 
@@ -805,16 +884,42 @@ class VppPreflightChokepointTest(unittest.IsolatedAsyncioTestCase):
             raised = error
         return raised, client, consumer_calls
 
-    async def test_a_server_request_without_admin_tools_never_takes_a_lease(
+    async def test_a_server_request_with_unusable_admin_tools_never_takes_a_lease(
         self,
     ) -> None:
-        raised, client, consumer_calls = await self._transaction(
-            mode="all", extra_mods=["@DayZ_MCP"]
-        )
+        # The transaction reads the real host (there is no file seam here), so
+        # the policy is rooted in an empty temporary directory: the requested
+        # mod folder and serverDZ.cfg are absent by construction, not by
+        # whatever P: holds on the machine running the suite.
+        with TemporaryDirectory() as raw_root:
+            root = ntpath.normpath(raw_root)
+            policy = dayz_test_request.RequestProjectPolicy(
+                mod="ExampleMod",
+                dev_root=root,
+                default_source=root,
+                default_base_mods=(),
+                mission_roots=(root,),
+                mod_roots=(root,),
+            )
+            raised, client, consumer_calls = await self._transaction(
+                policy=policy,
+                mode="all",
+                extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+            )
 
         self.assertIsInstance(raised, ValueError)
         self.assertEqual(str(raised), transaction.VPP_PREFLIGHT_FAILED)
         self.assertEqual(client.acquire_calls, 0)
+        self.assertEqual(consumer_calls, [])
+
+    async def test_a_server_request_without_admin_tools_gets_past_the_gate(
+        self,
+    ) -> None:
+        raised, _client, consumer_calls = await self._transaction(
+            mode="all", extra_mods=["@DayZ_MCP"]
+        )
+
+        self.assertNotEqual(str(raised), transaction.VPP_PREFLIGHT_FAILED)
         self.assertEqual(consumer_calls, [])
 
     async def test_an_offline_request_gets_past_the_gate(self) -> None:
@@ -1032,7 +1137,7 @@ class _Runtime:
 
 
 class DayzTestRunVppGateTest(unittest.IsolatedAsyncioTestCase):
-    async def test_a_server_run_without_admin_tools_never_reaches_the_launcher(
+    async def test_a_server_run_with_unusable_admin_tools_never_reaches_the_launcher(
         self,
     ) -> None:
         policy = _policy()
@@ -1053,14 +1158,14 @@ class DayzTestRunVppGateTest(unittest.IsolatedAsyncioTestCase):
                 _Runtime(),
                 project="ExampleMod",
                 mode="all",
-                extra_mods=["@DayZ_MCP"],
+                extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
             )
 
         launch.assert_not_awaited()
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["phase"], "validating")
         self.assertEqual(result["error_code"], transaction.VPP_PREFLIGHT_FAILED)
-        self.assertEqual(result["vpp_missing"], ["vpp_mod_not_requested"])
+        self.assertEqual(result["vpp_missing"], ["vpp_disable_password"])
         self.assertIn("@VPPAdminTools", result["remediation"])
         self.assertIsNone(result["run_id"])
 
@@ -1118,11 +1223,67 @@ class DayzTestRunVppGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["vpp_warnings"], ["vpp_superadmins_absent"])
         self.assertEqual(result["vpp_missing"], [])
 
+    async def test_the_absent_admin_tools_warning_travels_with_a_successful_run(
+        self,
+    ) -> None:
+        policy = _policy()
+
+        async def launch(_raw_request: bytes, **kwargs: object) -> int:
+            kwargs["output_sink"](
+                "stdout",
+                json.dumps(
+                    {
+                        "cleanup_degraded": False,
+                        "error_code": None,
+                        "exit_code": 0,
+                        "ok": True,
+                        "run_id": RUN_ID,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
+            )
+            return 0
+
+        def warned(*_args: object, **_kwargs: object) -> object:
+            return transaction.VppPreflightResult(
+                error_code=None,
+                missing=(),
+                warnings=("vpp_mod_not_requested",),
+                hint=transaction.VPP_ABSENT_HINT,
+            )
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            dayz_test_tool, "preflight_vpp_request", new=warned
+        ), patch.object(
+            dayz_test_tool, "evaluate_steam_session", return_value=_steam_ok()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch,
+        ):
+            result = await dayz_test_tool.execute_dayz_test_run(
+                _Runtime(),
+                project="ExampleMod",
+                mode="all",
+                extra_mods=["@DayZ_MCP"],
+            )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["vpp_warnings"], ["vpp_mod_not_requested"])
+        self.assertEqual(result["vpp_missing"], [])
+
 
 def _refused(*_args: object, **_kwargs: object) -> object:
     return transaction.VppPreflightResult(
         error_code=transaction.VPP_PREFLIGHT_FAILED,
-        missing=("vpp_mod_not_requested",),
+        missing=("vpp_disable_password",),
         warnings=(),
         hint=transaction.VPP_PREFLIGHT_HINT,
     )

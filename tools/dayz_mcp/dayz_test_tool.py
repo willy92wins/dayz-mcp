@@ -1006,11 +1006,12 @@ def _compact_result(
         "client_replace_reason": client_replace_reason,
         "client_last_poll_age_s": client_last_poll_age_s,
         "client_record_age_s": client_record_age_s,
-        # The VPP admin-tools gate (ficha df93). An empty list is a
-        # MEASUREMENT: the gate ran here and found nothing. null means this
-        # layer never consulted it -- a stop, whose request is offline and
-        # therefore starts no server, and every envelope built before the
-        # gate. The enforcement itself is not optional: it runs inside
+        # The admin-tools gate (ficha df93). An empty list is a MEASUREMENT:
+        # the gate ran here and found nothing. null means this layer never
+        # consulted it -- a stop, whose request is offline and therefore starts
+        # no server, and every envelope built before the gate. A request that
+        # asks for no admin tools is not refused: vpp_mod_not_requested travels
+        # in vpp_warnings. The gate itself is not optional: it runs inside
         # native_launcher_transaction for every launch, named or not.
         "vpp_missing": vpp_missing,
         "vpp_warnings": vpp_warnings,
@@ -1248,7 +1249,8 @@ async def execute_dayz_test_run(
             )
             # The admin-tools gate runs before the host gate below: it is a
             # property of the request just composed, and a refusal here has
-            # consulted neither Steam nor the lifecycle. It applies to
+            # consulted neither Steam nor the lifecycle. A request that asks
+            # for no admin tools passes it with a warning. It applies to
             # preflight:true too -- dayz_test_worker.py:547-550 states the rule
             # this route must keep: a preflight fails exactly where a real
             # launch would. native_launcher_transaction enforces the same

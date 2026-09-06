@@ -843,10 +843,10 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
         )
         steam.start()
         self.addCleanup(steam.stop)
-        # ficha df93: the VPP preflight refuses a server start whose effective
-        # -mod= list carries no @VPPAdminTools. These fixtures are policies and
-        # stubs, not a server workspace, so the gate is neutralised here exactly
-        # as the Steam one above is; its own oracle is tests/test_vpp_preflight.py.
+        # ficha df93: the admin-tools preflight verifies the tools a request
+        # asks for and warns when it asks for none. These fixtures are policies
+        # and stubs, not a server workspace, so the gate is neutralised here
+        # exactly as the Steam one above is; its oracle is tests/test_vpp_preflight.py.
         vpp_patcher = patch.object(
             dayz_test_tool,
             "preflight_vpp_request",

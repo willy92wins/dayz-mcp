@@ -109,10 +109,11 @@ async def _cleanup_transaction(
 # could start with no admin tools at all and the symptom only showed up inside
 # the game.
 #
-# The replacement refuses instead of repairing: it reads, it never writes. It
-# lives HERE, and not in secure_launcher.py, because this is the single function
-# both launch routes traverse -- and because secure_launcher.py's bytes are
-# pinned by dependency-lock.json, which build-contract.json seals in turn
+# The replacement verifies what was requested, warns when nothing was asked
+# for, and still never writes. It lives HERE, and not in secure_launcher.py,
+# because this is the single function both launch routes traverse -- and
+# because secure_launcher.py's bytes are pinned by dependency-lock.json,
+# which build-contract.json seals in turn
 # (build_native_launcher.py:722, verify_bundle "build_contract_drift"), so
 # editing it costs a rebuild of the sealed bundle.
 VPP_MOD_FOLDER = "@VPPAdminTools"
@@ -135,10 +136,16 @@ _MOD_META_NAME = "meta.cpp"
 _MOD_PUBLISHED_ID_KEY = "publishedid"
 VPP_PREFLIGHT_FAILED = "vpp_preflight_failed"
 VPP_PREFLIGHT_HINT = (
-    "this mode starts a server and the admin tools are not usable: put the "
+    "the requested admin tools are not usable: put the "
     "installed mod in extra_mods as @VPPAdminTools, or as its absolute "
     "Workshop path (the form this gate can always verify), and make sure the "
     "server serverDZ.cfg carries a live vppDisablePassword = 1"
+)
+VPP_ABSENT_HINT = (
+    "no admin tools in the effective -mod= list: the server starts without "
+    "them. To use VPP, add @VPPAdminTools (or its absolute Workshop path) to "
+    "extra_mods or to the project policy default_base_mods; this gate never "
+    "requires a particular admin tool"
 )
 SERVER_CONFIG_NAME = "serverDZ.cfg"
 _PROFILES_DIR = "profiles"
@@ -211,8 +218,9 @@ class VppPreflightPaths:
 def mode_starts_server(mode: str) -> bool:
     """Whether this mode launches a server, per the M12 mode authority.
 
-    An unknown name fails closed as a server start: the gate refuses rather
-    than wave through a mode it cannot classify. In production the request
+    An unknown name fails closed as a server start: the gate examines it,
+    and warns or refuses on what it asked for, rather than wave through a
+    mode it cannot classify. In production the request
     layer already rejected unknown names (dayz_test_request.py:297), so this
     only covers an authority that moved underneath a parsed request.
     """
@@ -437,9 +445,11 @@ def evaluate_vpp_preflight(
 ) -> VppPreflightResult:
     """Decide, without writing anything, whether this run may start a server.
 
-    Deterministic and cheap findings block (missing); what the ps1 only seeded
-    best-effort warns (warnings), because this route cannot seed it and a
-    server with no superadmin still boots.
+    A run that names no admin tools may start: it is warned with
+    vpp_mod_not_requested and nothing is read. Deterministic and cheap
+    findings about the requested tool block (missing); what the ps1 only
+    seeded best-effort warns (warnings), because this route cannot seed it
+    and a server with no superadmin still boots.
     """
     if not mode_starts_server(str(payload["mode"])):
         return VppPreflightResult(
@@ -453,26 +463,30 @@ def evaluate_vpp_preflight(
         entry for entry in effective_mod_entries(payload) if _is_vpp_candidate(entry)
     ]
     if not requested:
-        missing.append("vpp_mod_not_requested")
+        return VppPreflightResult(
+            error_code=None,
+            missing=(),
+            warnings=("vpp_mod_not_requested",),
+            hint=VPP_ABSENT_HINT,
+        )
+    resolved = [_resolved_mod_path(entry, policy) for entry in requested]
+    paths = [path for path in resolved if path is not None]
+    if not paths:
+        # Every candidate is a relative name under a multi-root policy.
+        # Nothing can be proven about a path the launch may not even use,
+        # and "unknown" is not "authorised": the hint names the form that
+        # always verifies, the absolute Workshop path the six live
+        # multi-root policies already use.
+        missing.append("vpp_mod_root_ambiguous")
     else:
-        resolved = [_resolved_mod_path(entry, policy) for entry in requested]
-        paths = [path for path in resolved if path is not None]
-        if not paths:
-            # Every candidate is a relative name under a multi-root policy.
-            # Nothing can be proven about a path the launch may not even use,
-            # and "unknown" is not "authorised": the hint names the form that
-            # always verifies, the absolute Workshop path the six live
-            # multi-root policies already use.
-            missing.append("vpp_mod_root_ambiguous")
+        proofs = [_proves_vpp_identity(path, host) for path in paths]
+        if any(proof is True for proof in proofs):
+            pass
+        elif any(proof is False for proof in proofs):
+            # Read, and it is some other mod. The name was never identity.
+            missing.append("vpp_mod_identity")
         else:
-            proofs = [_proves_vpp_identity(path, host) for path in paths]
-            if any(proof is True for proof in proofs):
-                pass
-            elif any(proof is False for proof in proofs):
-                # Read, and it is some other mod. The name was never identity.
-                missing.append("vpp_mod_identity")
-            else:
-                missing.append("vpp_mod_folder")
+            missing.append("vpp_mod_folder")
 
     paths = vpp_preflight_paths(payload, policy)
     config = _read_or_absent(host, paths.server_config)
@@ -560,11 +574,12 @@ def enforce_vpp_preflight(
     *,
     files: object | None = None,
 ) -> VppPreflightResult:
-    """Refuse a server start without usable admin tools. Fail closed.
+    """Refuse a server start whose requested admin tools are not usable.
 
-    There is no bypass parameter on this route: wiring one would have to travel
-    through secure_launcher.py, whose bytes are pinned by the sealed build
-    contract. The refusal names what is missing so the caller can fix it.
+    Fail closed on what was asked. A request that names no admin tool is
+    warned and never refused: this launcher does not require a particular
+    one. There is no bypass parameter on this route, and none is needed:
+    not requesting the tool is the legitimate way to start without it.
     """
     result = preflight_vpp_payload(payload, policies, files=files)
     if result.error_code is not None:
@@ -595,8 +610,9 @@ async def execute_native_launcher_transaction(
     # ficha df93. Fail closed HERE: before any path is accredited, before the
     # lease is asked for and before a process exists. Both launch routes reach
     # this function -- the CLI through secure_launcher.run_secure_launcher and
-    # the MCP tool through dayz_test_tool._execute_request -- so a server that
-    # would start without admin tools is refused on either.
+    # the MCP tool through dayz_test_tool._execute_request -- so a server whose
+    # requested admin tools are unusable is refused on either; one that
+    # requests none is warned.
     enforce_vpp_preflight(parsed.payload, semantic_policies)
 
     with request_path_authority.accredit_request_paths(
