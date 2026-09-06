@@ -1141,3 +1141,106 @@ def _steam_ok() -> object:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VppPreflightRound4Test(unittest.TestCase):
+    """Ronda 4 (delta-2 R3-F-01 and R3-F-02): meta.cpp is scanned with the cfg
+    scanner instead of grepped, and a single-quoted string is dead ground."""
+
+    def _result(
+        self,
+        *,
+        policy: dayz_test_request.RequestProjectPolicy | None = None,
+        files: FakeFiles | None = None,
+        **overrides: object,
+    ) -> object:
+        selected = policy or _policy()
+        return transaction.preflight_vpp_request(
+            _raw(selected, **overrides),
+            sealed_policies=_sealed(selected),
+            files=files if files is not None else _healthy(selected),
+        )
+
+    def _with_meta(self, meta: str) -> object:
+        policy = _policy()
+        files = _healthy(policy)
+        files.files[
+            ntpath.normcase(
+                ntpath.join(policy.mod_roots[0], "@VPPAdminTools", "meta.cpp")
+            )
+        ] = meta
+        return self._result(
+            policy=policy,
+            files=files,
+            mode="all",
+            extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+        )
+
+    def _with_config(self, body: str) -> object:
+        policy = _policy()
+        files = _healthy(policy)
+        files.files[
+            ntpath.normcase(ntpath.join(policy.dev_root, "_server", "serverDZ.cfg"))
+        ] = body
+        return self._result(
+            policy=policy,
+            files=files,
+            mode="all",
+            extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+        )
+
+    def test_meta_cpp_forms_that_do_not_prove_the_identity(self) -> None:
+        # Every row of the delta-2 matrix that PASSED with the raw regex: the id
+        # in dead ground next to a live foreign one, two live ids, a suffix, and
+        # a file past the read cap (a prefix proves nothing).
+        cap = transaction._MAX_PREFLIGHT_READ_CHARS
+        for label, meta in (
+            ("id_only_in_a_line_comment", "// publishedid = 1828439124;\n" + META_OTHER),
+            ("id_only_in_a_block_comment", "/* publishedid = 1828439124; */\n" + META_OTHER),
+            ("id_inside_another_key", "xpublishedid = 1828439124;\n" + META_OTHER),
+            ("id_inside_a_double_quoted_string", 'name = "publishedid = 1828439124";\n' + META_OTHER),
+            ("id_inside_a_single_quoted_string", "name = 'publishedid = 1828439124';\n" + META_OTHER),
+            ("two_live_ids_correct_first", META_VPP + "publishedid = 1559212036;\n"),
+            ("id_with_a_suffix", META_VPP.replace("1828439124;", "1828439124evil;")),
+            ("past_the_read_cap", META_VPP + "// " + "x" * cap + "\n"),
+        ):
+            with self.subTest(label):
+                result = self._with_meta(meta)
+                self.assertEqual(result.error_code, transaction.VPP_PREFLIGHT_FAILED, label)
+                self.assertIn("vpp_mod_identity", result.missing, label)
+
+    def test_meta_cpp_forms_that_still_prove_the_identity(self) -> None:
+        # Positive controls: the scanner must not eat the real assignment.
+        for label, meta in (
+            ("canonical", META_VPP),
+            ("no_spaces", META_VPP.replace("publishedid = 1828439124;", "publishedid=1828439124;")),
+            ("foreign_id_only_in_a_comment", "// publishedid = 1559212036;\n" + META_VPP),
+            ("foreign_id_only_in_a_single_quoted_string", "name = 'publishedid = 1559212036';\n" + META_VPP),
+            ("crlf", META_VPP.replace("\n", "\r\n")),
+        ):
+            with self.subTest(label):
+                result = self._with_meta(meta)
+                self.assertIsNone(result.error_code, label)
+
+    def test_a_key_inside_a_single_quoted_string_is_dead_ground(self) -> None:
+        # R3-F-02: the config language quotes with ' as well as "; the key inside
+        # either is text the engine never reads as an assignment. An unterminated
+        # quote swallows the rest of the file, and the gate refuses rather than
+        # guesses where the engine would have stopped.
+        for label, body in (
+            ("only_in_single_quotes", "motd = 'vppDisablePassword = 1';\n"),
+            ("single_quoted_then_live_zero", "motd = 'vppDisablePassword = 1';\nvppDisablePassword = 0;\n"),
+            ("unterminated_single_quote", "motd = 'vppDisablePassword = 1;\nvppDisablePassword = 1;\n"),
+        ):
+            with self.subTest(label):
+                result = self._with_config(body)
+                self.assertIn("vpp_disable_password", result.missing, label)
+
+    def test_a_live_key_after_a_single_quoted_string_still_passes(self) -> None:
+        for label, body in (
+            ("after_a_closed_string", "motd = 'no password tonight';\nvppDisablePassword = 1;\n"),
+            ("apostrophe_inside_double_quotes", 'hostname = "Guillermo\'s box";\nvppDisablePassword = 1;\n'),
+        ):
+            with self.subTest(label):
+                result = self._with_config(body)
+                self.assertIsNone(result.error_code, label)

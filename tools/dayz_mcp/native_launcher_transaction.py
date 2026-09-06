@@ -129,7 +129,10 @@ VPP_MOD_IDENTITIES = frozenset(
     {VPP_MOD_FOLDER.casefold(), VPP_WORKSHOP_ID.casefold()}
 )
 _MOD_META_NAME = "meta.cpp"
-_MOD_PUBLISHED_ID = re.compile(r"publishedid\s*=\s*(\d{1,20})")
+# Read with the same scanner as serverDZ.cfg (ronda 4, R3-F-01): a raw regex
+# took the first "publishedid = <digits>" it saw, in a comment, inside another
+# key or as the prefix of 1828439124evil, and accredited a foreign directory.
+_MOD_PUBLISHED_ID_KEY = "publishedid"
 VPP_PREFLIGHT_FAILED = "vpp_preflight_failed"
 VPP_PREFLIGHT_HINT = (
     "this mode starts a server and the admin tools are not usable: put the "
@@ -155,6 +158,9 @@ _MAX_PREFLIGHT_READ_CHARS = 262_144
 # "..." are all dead ground, and the key needs a left boundary.
 _VPP_KEY = "vppDisablePassword"
 _VPP_VALUE = re.compile(r"\s*=\s*([^;\s]+)")
+# The config language quotes with ' as well as " (Bohemia's Config Parser reads
+# both; ronda 4, R3-F-02): either delimits dead ground.
+_STRING_DELIMITERS = (chr(34), chr(39))
 # One clean SteamID64 per line, the same token dayz-test.ps1:398 keeps.
 _STEAM_ID64 = re.compile(r"\d{17}")
 _UNREADABLE = object()
@@ -272,21 +278,26 @@ def vpp_preflight_paths(
 def _live_assignments(config: str, key: str) -> list[str]:
     """Values assigned to `key` in the ground the engine actually reads.
 
-    One left-to-right pass. // runs to the end of the line, /* runs to */ or,
-    unterminated, to the end of the file, and a double-quoted string is dead
-    ground too -- all three swallowed a key that a raw regex then counted as
-    live. The key also needs a left boundary, so `notvppDisablePassword` stops
-    matching. Escapes are not honoured inside strings: serverDZ.cfg has none,
-    and treating a backslash-quote as a closing quote can only end a string
-    early, which puts more text under scrutiny, never less.
+    One left-to-right pass over config-language text (serverDZ.cfg and
+    meta.cpp share it). // runs to the end of the line, /* runs to */ or,
+    unterminated, to the end of the file, and a quoted string -- 'single' or
+    "double", the language has both -- is dead ground too: all of them
+    swallowed a key that a raw regex then counted as live. The key also needs
+    a left boundary, so `notvppDisablePassword` stops matching; the `=` that
+    _VPP_VALUE demands right after it is the right boundary. Escapes are not
+    honoured inside strings: neither file has any, and treating a
+    backslash-quote as a closing quote can only end a string early, which puts
+    more text under scrutiny, never less. An unterminated string runs to the
+    end of the file, so nothing after it is live: the gate then refuses
+    rather than guesses where the engine would have stopped.
     """
     values: list[str] = []
     index = 0
     length = len(config)
-    quote = chr(34)
     newline = chr(10)
     while index < length:
-        if config[index] == quote:
+        quote = config[index]
+        if quote in _STRING_DELIMITERS:
             index += 1
             while index < length and config[index] != quote:
                 index += 1
@@ -367,16 +378,19 @@ def _proves_vpp_identity(path: str, files: object) -> bool | None:
     """True/False from the mod's own meta.cpp; None when it cannot be read.
 
     `publishedid` is the identity Steam assigns; the folder name is not. Every
-    live form of this mod carries it. A directory an unrelated mod occupies, or
-    a hand-made one with the right name, has no meta.cpp with this id.
+    live form of this mod carries it. The proof is exactly ONE live assignment
+    of that key whose value is the canonical decimal id. A second live
+    assignment, a value with a suffix (1828439124evil), the id in a comment or
+    inside another key, and a file past the read cap (a prefix proves nothing)
+    all read as some other mod, never as this one.
     """
     meta = _read_or_absent(files, ntpath.join(path, _MOD_META_NAME))
     if not isinstance(meta, str):
         return None
-    found = _MOD_PUBLISHED_ID.search(meta)
-    if found is None:
+    if len(meta) > _MAX_PREFLIGHT_READ_CHARS:
         return False
-    return found.group(1) == VPP_WORKSHOP_ID
+    values = _live_assignments(meta, _MOD_PUBLISHED_ID_KEY)
+    return len(values) == 1 and values[0] == VPP_WORKSHOP_ID
 
 
 def evaluate_vpp_preflight(
