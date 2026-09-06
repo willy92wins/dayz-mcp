@@ -387,6 +387,37 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.assertEqual(replaced[0].get("owned_pids"), [721])
         self.assertEqual(replaced[0].get("gone_pids"), [])
 
+    # -- fb-20260906-185909-df53 -------------------------------------------
+    def test_a_client_over_a_run_with_no_client_needs_no_witness(self) -> None:
+        """mode=all: the client stage extends the run its own server stage made.
+
+        `existing` is not None there, but the run carries no client process, so
+        _replace_role_processes would return ([], None) without touching a
+        thing (:2718) and the worker stamps no witness
+        (dayz_test_worker.py:317-323). Demanding it refused the launch of a
+        client that would never have superseded anything.
+        """
+        server = self.owned(770, "server")
+        self.install_run([server], state="RUNNING", owner="A")
+        self.arm_launch()
+        request = self.request()
+        request.pop("replace_if_not_polling_since")
+
+        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, request)
+
+        self.assertIs(result.get("ok"), True, result)
+        self.assertEqual(self.pids(), [770, LAUNCH_PID])
+        self.assertEqual(self.roles(), ["server", "client"])
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertEqual(
+            [
+                event
+                for event in self.audit.events
+                if event.get("event") == "lifecycle_role_replaced"
+            ],
+            [],
+        )
+
     # -- fb-20260904-200816-79e2 / H-A2-2 -----------------------------------
     # The gate that authorises superseding a client decides in the MCP server
     # process; the kill happens here, after composing the sealed request,

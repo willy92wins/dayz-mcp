@@ -2305,6 +2305,20 @@ class ProcessLifecycle:
                     # publish no_client_to_replace while doing it. Measured on
                     # role=offline; restores the HEAD behaviour for it.
                     and launch_role == "client"
+                    # fb-20260906-185909-df53: and only when there IS something
+                    # to supersede. _replace_role_processes returns ([], None)
+                    # for a run that carries no process of this role (:2718),
+                    # so demanding the witness in front of that no-op refused a
+                    # launch that would never have terminated anything -- which
+                    # is what mode=all does: its client stage extends the run
+                    # its own server stage created, and the worker stamps no
+                    # witness because no gate decided to supersede a client
+                    # (dayz_test_worker.py:317-323). Same set the callee
+                    # filters, read from the same object it is handed.
+                    and any(
+                        record.role == launch_role
+                        for record in provisional.processes
+                    )
                 ):
                     # P-L2 / P-L2.c: the role this launch claims is freed
                     # before the instance is prepared, so a refusal here never
