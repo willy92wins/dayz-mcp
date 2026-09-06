@@ -261,6 +261,19 @@ class ToolDescriptionTruthTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("cmdline_match/client_pid", description)
         self.assertIn("live run's client", description)
 
+    async def test_capture_screenshot_names_the_frame_stale_contract(self) -> None:
+        # mcp_capture publishes frame_stale/frame_stale_detail in the meta block
+        # (mcp_capture.py:1144-1145). The names are literal: a consumer greps the tool
+        # surface for the key it will read, so the description has to carry them
+        # verbatim rather than describe a hand-rolled frame_sha256 comparison.
+        description = self.tools["capture_screenshot"].description or ""
+        self.assertIn("frame_stale", description)
+        self.assertIn("frame_stale_detail", description)
+        # bool | null, and null is not false: a first capture has no baseline.
+        self.assertIn("null", description)
+        # A repeated frame is a fact about pixels, not a tool error.
+        self.assertIn("not an error", description)
+
     async def test_engine_set_documents_ownership_and_confirmation_fields(self) -> None:
         description = self.tools["engine_set"].description or ""
         self.assertIn("client-side ownership", description)

@@ -386,6 +386,142 @@ def listener_pid_for_port(port: int) -> int | None:
     return _listener_pid_from_netstat_output(result.stdout or b"", port)
 
 
+_DAYZ_IMAGE_NAMES = frozenset(
+    name.casefold()
+    for name in ("DayZDiag_x64.exe", "DayZServer_x64.exe", "DayZ_x64.exe", "DayZ_BE.exe")
+)
+
+
+def is_dayz_image_name(name: object) -> bool:
+    """True for the DayZ client/server images, case-insensitively."""
+    return isinstance(name, str) and name.casefold() in _DAYZ_IMAGE_NAMES
+
+
+def _udp_holders_from_netstat_output(
+    raw: bytes | str,
+) -> list[tuple[int, int | None]] | None:
+    """Parse a ``netstat -ano -p UDP`` dump into ``(port, pid)`` pairs.
+
+    UDP rows carry no State column: ``UDP  0.0.0.0:2302  *:*  45428`` (four
+    whitespace-separated fields; an IPv6 local looks like ``[::]:2302``). A row
+    whose PID column is not an int keeps the port with pid None: the socket is
+    real even when its holder cannot be attributed. A row that starts with
+    ``UDP`` but cannot be read (truncated, no port) makes the whole dump
+    untrusted and returns None: a holder this parser skipped would read as a
+    free port, which is the failure this snapshot exists to prevent.
+    """
+    text = _decode_console_bytes(raw) if isinstance(raw, bytes) else raw
+    holders: list[tuple[int, int | None]] = []
+    for line in text.splitlines():
+        parts = line.split()
+        if not parts or parts[0].upper() != "UDP":
+            continue
+        if len(parts) < 3:
+            return None
+        local = parts[1]
+        if ":" not in local:
+            return None
+        try:
+            port = int(local.rsplit(":", 1)[1])
+        except ValueError:
+            return None
+        if not 1 <= port <= 65535:
+            return None
+        pid: int | None = None
+        if len(parts) >= 4:
+            try:
+                pid = int(parts[-1])
+            except ValueError:
+                pid = None
+            if pid is not None and pid <= 0:
+                pid = None
+        holders.append((port, pid))
+    return holders
+
+
+def _udp_holders_via_psutil() -> list[tuple[int, int | None]] | None:
+    if psutil is None:
+        return None
+    try:
+        connections = psutil.net_connections(kind="udp")
+    except Exception:
+        return None
+    holders: list[tuple[int, int | None]] = []
+    for connection in connections:
+        local = getattr(connection, "laddr", None)
+        port = getattr(local, "port", None)
+        if port is None and isinstance(local, tuple) and len(local) >= 2:
+            port = local[1]
+        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+            continue
+        pid = getattr(connection, "pid", None)
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            pid = None
+        holders.append((port, pid))
+    return holders
+
+
+def _udp_holders_via_netstat() -> list[tuple[int, int | None]] | None:
+    if not _IS_WINDOWS:  # pragma: no cover - production target is Windows.
+        return None
+    try:
+        # Bounded at 3 s: the caller may hold the lifecycle operation lock, and a
+        # timeout answers "unknown" (occupied), never "empty".
+        result = subprocess.run(
+            ["netstat", "-ano", "-p", "UDP"],
+            capture_output=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return _udp_holders_from_netstat_output(result.stdout or b"")
+
+
+def snapshot_udp_port_holders() -> dict[str, object]:
+    """Every bound UDP port with its holder PID and image name, from the OS table.
+
+    fb-20260904-114520-6927: the box probe enumerated ``DayZDiag_x64.exe`` by
+    name and read ports from argv, so a server with another image, or one that
+    argv did not describe, held 2302 while the box read as free and a launch
+    went on top of it. This reads the socket table instead: psutil when it is
+    importable, ``netstat -ano -p UDP`` otherwise. Image names come from one
+    ToolHelp snapshot; a PID that snapshot does not list (exited between the
+    two reads) keeps ``name`` None. ``known`` is False when no source answered:
+    callers treat that as occupied, never as empty.
+    """
+    holders = _udp_holders_via_psutil()
+    if holders is None:
+        holders = _udp_holders_via_netstat()
+    if holders is None:
+        return {"known": False, "holders": []}
+    entries = _snapshot_all_process_entries()
+    names = {int(pid): name for pid, name in entries} if entries else {}
+    for _port, pid in holders:
+        if isinstance(pid, int) and pid not in names:
+            # The bulk snapshot and the socket table are two reads; a process
+            # that started between them gets one more chance to be named.
+            info = _toolhelp_lookup(pid)
+            if info is not None:
+                names[pid] = info[1]
+    rows: list[dict[str, object]] = [
+        {
+            "port": int(port),
+            "pid": pid,
+            "name": names.get(pid) if isinstance(pid, int) else None,
+        }
+        for port, pid in holders
+    ]
+    rows.sort(
+        key=lambda row: (
+            int(row["port"]),
+            row["pid"] if isinstance(row["pid"], int) else -1,
+        )
+    )
+    return {"known": True, "holders": rows}
+
+
 def _native_listener_pid_for_port(port: int) -> int | None:
     """Unique exact-loopback listener PID without starting a helper process."""
     if (

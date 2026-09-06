@@ -24,7 +24,9 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp import core, daemon, loopback, orphan_guard
 from dayz_mcp.native_process_guard import identity_hashes
+from dayz_mcp.process_lifecycle import ProcessRecord, RunRecord
 from dayz_mcp.server import ServerConfig
+from dayz_mcp.session_coordination import ClientIdentity
 from tests.fence_helpers import bind_both_peers
 
 
@@ -36,6 +38,24 @@ IDENTITY = {
     "session_id": "daemon-test",
     "task_label": "daemon",
 }
+
+IDENTITY_B = {
+    "platform": "claude",
+    "pid": 22,
+    "ppid": 2,
+    "started_at_utc": "2026-07-14T10:00:01Z",
+    "session_id": "daemon-test-b",
+    "task_label": "waiter",
+}
+
+FIXTURE_IDENTITY = ClientIdentity(
+    "codex",
+    99,
+    1,
+    "2026-07-14T10:00:00Z",
+    "daemon-fixture-holder",
+    "fixture-owner",
+)
 
 
 def _http(
@@ -81,9 +101,18 @@ def _free_port() -> int:
 class DaemonHttpServer:
     """A daemon-style loopback (version validator + status_provider) on a port."""
 
-    def __init__(self, config: ServerConfig, port: int = 0) -> None:
+    def __init__(
+        self,
+        config: ServerConfig,
+        port: int = 0,
+        *,
+        adopt_fixture: bool = False,
+    ) -> None:
         self.key = config.key
         self.runtime_dir = TemporaryDirectory()
+        self.fixture_identity = FIXTURE_IDENTITY
+        self.fixture_lease_token: str | None = None
+        self.fixture_lease_id: str | None = None
         with patch.dict(os.environ, {"LOCALAPPDATA": self.runtime_dir.name}), patch.object(
             daemon.orphan_guard,
             "snapshot_retail_processes",
@@ -92,7 +121,15 @@ class DaemonHttpServer:
             self.state = daemon.build_server_state(
                 config, self.key, activate_coordination=True
             )
+        # P-I10: bind never writes an owner. Callers that need a dispatchable
+        # run pass adopt_fixture=True: a fixture identity acquires a real
+        # lifecycle lease and adopt_run. The constructor default is False so
+        # tests outside this write-set that construct DaemonHttpServer() and
+        # then acquire (colas / lease election) still see an empty titular.
+        # test_daemon._daemon and test_client_mode._daemon default True.
         bind_both_peers(self.state)
+        if adopt_fixture:
+            self._acquire_and_adopt_fixture()
         provider = daemon.make_status_provider(config, self.state)
         self.httpd = loopback.create_http_server(
             port, self.state, log_sink=lambda _m: None, reclaim_orphans=False, status_provider=provider
@@ -116,6 +153,38 @@ class DaemonHttpServer:
             self.httpd.serve_forever(poll_interval=0.01)
         except Exception:
             pass
+
+    def _acquire_and_adopt_fixture(self) -> None:
+        lifecycle = self.state.lifecycle
+        coordinator = lifecycle.coordinator
+        status, acquired = coordinator.acquire(self.fixture_identity, "lifecycle")
+        if status != 200:
+            raise AssertionError(
+                f"fixture acquire failed: {status} {acquired!r}"
+            )
+        self.fixture_lease_token = acquired["lease_token"]
+        self.fixture_lease_id = acquired["lease_id"]
+        adopted = lifecycle.adopt_run(
+            self.fixture_identity, self.fixture_lease_token, "test-run"
+        )
+        if not isinstance(adopted, dict) or adopted.get("ok") is not True:
+            raise AssertionError(f"fixture adopt_run failed: {adopted!r}")
+        if adopted.get("dispatchable") is not True:
+            raise AssertionError(f"fixture adopt_run not dispatchable: {adopted!r}")
+
+    def release_fixture_owner(self) -> None:
+        if self.fixture_lease_token is None:
+            return
+        status, payload = self.state.lifecycle.coordinator.release(
+            self.fixture_identity, self.fixture_lease_token
+        )
+        if status not in (200, 202):
+            raise AssertionError(
+                f"fixture release failed: {status} {payload!r}"
+            )
+        self.fixture_lease_token = None
+        self.fixture_lease_id = None
+        self._drain_coordination_workers()
 
     def start(self) -> None:
         self.thread.start()
@@ -172,8 +241,8 @@ class DaemonEndpointTest(unittest.TestCase):
         for srv in self.servers:
             srv.stop()
 
-    def _daemon(self, **kw) -> DaemonHttpServer:
-        srv = DaemonHttpServer(_config(**kw))
+    def _daemon(self, *, adopt_fixture: bool = True, **kw) -> DaemonHttpServer:
+        srv = DaemonHttpServer(_config(**kw), adopt_fixture=adopt_fixture)
         srv.start()
         self.servers.append(srv)
         return srv
@@ -192,8 +261,10 @@ class DaemonEndpointTest(unittest.TestCase):
         self.assertIsNotNone(srv.state.coordination)
         self.assertIsNotNone(srv.state.coordination_store)
         self.assertNotIn("lease_token", json.dumps(body, separators=(",", ":")))
-        # require_version False + no poll → "legacy" (not blocked).
-        self.assertEqual(body["server_peer"]["version_state"], "legacy")
+        # require_version False + no poll this generation is not a live "legacy" verdict.
+        self.assertEqual(
+            body["server_peer"]["version_state"], "never_polled_this_generation"
+        )
 
     def test_status_requires_key(self) -> None:
         srv = self._daemon()
@@ -252,7 +323,7 @@ class DaemonEndpointTest(unittest.TestCase):
     def test_credential_retry_does_not_change_active_lease_or_run_owner(
         self,
     ) -> None:
-        srv = self._daemon()
+        srv = self._daemon(adopt_fixture=False)
         acquire_status, acquired = _http(
             srv.base,
             "POST",
@@ -352,7 +423,9 @@ class DaemonEndpointTest(unittest.TestCase):
         )
         self.assertEqual(status, 409)
         self.assertEqual(body["error"], "version_blocked")
-        self.assertEqual(body["state"], "legacy_blocked")
+        self.assertEqual(body["state"], "never_polled_this_generation")
+        self.assertEqual(body["detail"], "never_polled_this_generation")
+        self.assertNotEqual(body.get("detail"), "poll did not include ver=")
 
     def test_enqueue_ok_when_version_matches(self) -> None:
         srv = self._daemon(require_version=True, expected_game_version="1.29.0")
@@ -385,6 +458,356 @@ class DaemonEndpointTest(unittest.TestCase):
         self.assertIsNone(srv.state.status_snapshot().get("last_client_request_at"))
         _http(srv.base, "GET", "/status", srv.key)
         self.assertIsNotNone(srv.state.status_snapshot().get("last_client_request_at"))
+
+    def test_acquire_adopts_the_ownerless_idle_run(self) -> None:
+        srv = self._daemon(adopt_fixture=False)
+        status, acquired = _http(
+            srv.base,
+            "POST",
+            "/session/acquire",
+            srv.key,
+            {"identity": IDENTITY, "purpose": "drive"},
+        )
+        self.assertEqual(status, 200, acquired)
+        self.assertEqual(acquired.get("status"), "active")
+        adopted = acquired.get("adopted_run")
+        self.assertIsInstance(adopted, dict, acquired)
+        self.assertEqual(
+            {k: adopted.get(k) for k in ("ok", "run_id", "state", "dispatchable")},
+            {"ok": True, "run_id": "test-run", "state": "RUNNING", "dispatchable": True},
+        )
+        run = srv.state.lifecycle.manifest.get("test-run")
+        self.assertEqual(run.state, "RUNNING")
+        self.assertEqual(run.owner_session_id, IDENTITY["session_id"])
+
+    def test_acquire_without_adoptable_run_declares_null(self) -> None:
+        srv = self._daemon(adopt_fixture=False)
+        run = srv.state.lifecycle.manifest.get("test-run")
+        run.state = "EXITED"
+        run.processes = []
+        run.owner_session_id = None
+        run.owner_lease_id = None
+        srv.state.lifecycle.manifest.replace(run)
+        status, acquired = _http(
+            srv.base,
+            "POST",
+            "/session/acquire",
+            srv.key,
+            {"identity": IDENTITY, "purpose": "launch"},
+        )
+        self.assertEqual(status, 200, acquired)
+        self.assertEqual(acquired.get("status"), "active")
+        self.assertIn("adopted_run", acquired)
+        self.assertIsNone(acquired["adopted_run"])
+
+    def test_acquire_declares_rejected_adopt_when_processes_are_gone(self) -> None:
+        srv = self._daemon(adopt_fixture=False)
+        run = srv.state.lifecycle.manifest.get("test-run")
+        run.processes = [
+            ProcessRecord(
+                4_000_000,
+                "2026-08-18T00:00:00.000000Z",
+                "a" * 64,
+                "b" * 64,
+                "server",
+                identity_scheme="psutil-argv-v2",
+            )
+        ]
+        srv.state.lifecycle.manifest.replace(run)
+        status, acquired = _http(
+            srv.base,
+            "POST",
+            "/session/acquire",
+            srv.key,
+            {"identity": IDENTITY, "purpose": "drive"},
+        )
+        self.assertEqual(status, 200, acquired)
+        self.assertEqual(acquired.get("status"), "active")
+        adopted = acquired.get("adopted_run")
+        self.assertIsInstance(adopted, dict)
+        self.assertIs(adopted.get("ok"), False)
+        self.assertTrue(adopted.get("error"))
+        self.assertEqual(adopted.get("run_id"), "test-run")
+        stored = srv.state.lifecycle.manifest.get("test-run")
+        self.assertEqual(stored.state, "RUNNING_IDLE")
+        self.assertIsNone(stored.owner_session_id)
+
+    def test_acquire_declares_multiple_idle_runs(self) -> None:
+        srv = self._daemon(adopt_fixture=False)
+        existing = srv.state.lifecycle.manifest.get("test-run")
+        extra = RunRecord(
+            "other-idle",
+            None,
+            None,
+            "RUNNING_IDLE",
+            existing.label,
+            existing.mod,
+            existing.profiles,
+            existing.mission,
+            list(existing.processes),
+        )
+        srv.state.lifecycle.manifest.add(extra)
+        status, acquired = _http(
+            srv.base,
+            "POST",
+            "/session/acquire",
+            srv.key,
+            {"identity": IDENTITY, "purpose": "drive"},
+        )
+        self.assertEqual(status, 200, acquired)
+        self.assertEqual(acquired.get("status"), "active")
+        adopted = acquired.get("adopted_run")
+        self.assertEqual(
+            adopted,
+            {"ok": False, "run_id": None, "error": "multiple_idle_runs"},
+        )
+        self.assertIsNone(srv.state.lifecycle.manifest.get("test-run").owner_session_id)
+        self.assertIsNone(srv.state.lifecycle.manifest.get("other-idle").owner_session_id)
+
+    def test_wait_on_grant_adopts_the_idle_run(self) -> None:
+        srv = self._daemon(adopt_fixture=False)
+        status_a, acquired_a = _http(
+            srv.base,
+            "POST",
+            "/session/acquire",
+            srv.key,
+            {"identity": IDENTITY, "purpose": "owner"},
+        )
+        self.assertEqual(status_a, 200, acquired_a)
+        status_b, queued = _http(
+            srv.base,
+            "POST",
+            "/session/acquire",
+            srv.key,
+            {"identity": IDENTITY_B, "purpose": "next"},
+        )
+        self.assertEqual(status_b, 202, queued)
+        _http(
+            srv.base,
+            "POST",
+            "/session/release",
+            srv.key,
+            {"identity": IDENTITY, "lease_token": acquired_a["lease_token"]},
+        )
+        status_wait, granted = _http(
+            srv.base,
+            "POST",
+            "/session/wait",
+            srv.key,
+            {
+                "identity": IDENTITY_B,
+                "ticket": queued["ticket"],
+                "timeout_s": 10.0,
+            },
+            timeout=15.0,
+        )
+        self.assertEqual(status_wait, 200, granted)
+        self.assertEqual(granted.get("status"), "active")
+        adopted = granted.get("adopted_run") or {}
+        self.assertEqual(adopted.get("ok"), True, granted)
+        self.assertEqual(adopted.get("run_id"), "test-run")
+        stored = srv.state.lifecycle.manifest.get("test-run")
+        self.assertEqual(stored.owner_session_id, IDENTITY_B["session_id"])
+        self.assertEqual(stored.state, "RUNNING")
+
+    def test_acquire_list_runs_failure_declares_run_state_unavailable(self) -> None:
+        srv = self._daemon(adopt_fixture=False)
+        manifest = srv.state.lifecycle.manifest
+        real = manifest.list_runs
+
+        def unreadable():
+            raise OSError("manifest unreadable")
+
+        manifest.list_runs = unreadable  # type: ignore[method-assign]
+        try:
+            status, acquired = _http(
+                srv.base,
+                "POST",
+                "/session/acquire",
+                srv.key,
+                {"identity": IDENTITY, "purpose": "drive"},
+            )
+        finally:
+            manifest.list_runs = real  # type: ignore[method-assign]
+        self.assertEqual(status, 200, acquired)
+        self.assertEqual(acquired.get("status"), "active")
+        self.assertEqual(
+            acquired.get("adopted_run"),
+            {"ok": False, "run_id": None, "error": "run_state_unavailable"},
+        )
+
+    def test_acquire_survives_adopt_run_manifest_get_failure(self) -> None:
+        srv = self._daemon(adopt_fixture=False)
+        manifest = srv.state.lifecycle.manifest
+        real_get = manifest.get
+
+        def broken_get(_run_id):
+            raise OSError("manifest read failed inside adopt_run")
+
+        manifest.get = broken_get  # type: ignore[method-assign]
+        try:
+            status, acquired = _http(
+                srv.base,
+                "POST",
+                "/session/acquire",
+                srv.key,
+                {"identity": IDENTITY, "purpose": "drive"},
+            )
+        finally:
+            manifest.get = real_get  # type: ignore[method-assign]
+        self.assertEqual(status, 200, acquired)
+        self.assertEqual(acquired.get("status"), "active")
+        adopted = acquired.get("adopted_run")
+        self.assertIsInstance(adopted, dict, acquired)
+        self.assertIs(adopted.get("ok"), False)
+        self.assertTrue(adopted.get("error"))
+        active = srv.state.coordination._active
+        self.assertIsNotNone(active)
+        self.assertEqual(active.pending_authorizations, [])  # type: ignore[union-attr]
+        stored = srv.state.lifecycle.manifest.get("test-run")
+        self.assertEqual(stored.state, "RUNNING_IDLE")
+        self.assertIsNone(stored.owner_session_id)
+        token = acquired.get("lease_token")
+        rel_status, rel = _http(
+            srv.base,
+            "POST",
+            "/session/release",
+            srv.key,
+            {"identity": IDENTITY, "lease_token": token},
+        )
+        self.assertEqual(rel_status, 200, rel)
+        status_b, acquired_b = _http(
+            srv.base,
+            "POST",
+            "/session/acquire",
+            srv.key,
+            {"identity": IDENTITY_B, "purpose": "drive"},
+        )
+        self.assertEqual(status_b, 200, acquired_b)
+        self.assertEqual(acquired_b.get("status"), "active")
+
+    def test_acquire_survives_adopt_run_when_abort_reservation_raises(self) -> None:
+        srv = self._daemon(adopt_fixture=False)
+        manifest = srv.state.lifecycle.manifest
+        coord = srv.state.coordination
+        real_get = manifest.get
+        real_abort = coord.abort_reservation
+
+        def broken_get(_run_id):
+            raise OSError("manifest read failed inside adopt_run")
+
+        def broken_abort(*_a, **_k):
+            raise OSError("abort boom")
+
+        manifest.get = broken_get  # type: ignore[method-assign]
+        coord.abort_reservation = broken_abort  # type: ignore[method-assign]
+        try:
+            status, acquired = _http(
+                srv.base,
+                "POST",
+                "/session/acquire",
+                srv.key,
+                {"identity": IDENTITY, "purpose": "drive"},
+            )
+        finally:
+            manifest.get = real_get  # type: ignore[method-assign]
+            coord.abort_reservation = real_abort  # type: ignore[method-assign]
+        self.assertEqual(status, 200, acquired)
+        self.assertEqual(acquired.get("status"), "active")
+        adopted = acquired.get("adopted_run")
+        self.assertIsInstance(adopted, dict, acquired)
+        self.assertIs(adopted.get("ok"), False)
+        active = coord._active
+        self.assertIsNotNone(active)
+        pending = list(active.pending_authorizations)  # type: ignore[union-attr]
+        degraded = list(adopted.get("cleanup_degraded") or [])
+        self.assertTrue(
+            pending == [] or "reservation_abort_failed" in degraded,
+            f"pending={pending!r} cleanup_degraded={degraded!r}",
+        )
+        stored = srv.state.lifecycle.manifest.get("test-run")
+        self.assertEqual(stored.state, "RUNNING_IDLE")
+        self.assertIsNone(stored.owner_session_id)
+        token = acquired.get("lease_token")
+        rel_status, rel = _http(
+            srv.base,
+            "POST",
+            "/session/release",
+            srv.key,
+            {"identity": IDENTITY, "lease_token": token},
+        )
+        self.assertEqual(rel_status, 200, rel)
+
+    def test_acquire_malformed_list_runs_row_declares_run_state_unavailable(
+        self,
+    ) -> None:
+        srv = self._daemon(adopt_fixture=False)
+        manifest = srv.state.lifecycle.manifest
+        real = manifest.list_runs
+
+        def malformed():
+            return [object()]
+
+        manifest.list_runs = malformed  # type: ignore[method-assign]
+        try:
+            status, acquired = _http(
+                srv.base,
+                "POST",
+                "/session/acquire",
+                srv.key,
+                {"identity": IDENTITY, "purpose": "drive"},
+            )
+        finally:
+            manifest.list_runs = real  # type: ignore[method-assign]
+        self.assertEqual(status, 200, acquired)
+        self.assertEqual(acquired.get("status"), "active")
+        self.assertEqual(
+            acquired.get("adopted_run"),
+            {"ok": False, "run_id": None, "error": "run_state_unavailable"},
+        )
+
+    def _acquire_with_rows(self, rows: list) -> dict:
+        srv = self._daemon(adopt_fixture=False)
+        manifest = srv.state.lifecycle.manifest
+        real = manifest.list_runs
+        manifest.list_runs = lambda: list(rows)  # type: ignore[method-assign]
+        try:
+            status, acquired = _http(
+                srv.base,
+                "POST",
+                "/session/acquire",
+                srv.key,
+                {"identity": IDENTITY, "purpose": "drive"},
+            )
+        finally:
+            manifest.list_runs = real  # type: ignore[method-assign]
+        self.assertEqual(status, 200, acquired)
+        self.assertEqual(acquired.get("status"), "active")
+        return acquired
+
+    def test_acquire_list_runs_row_with_non_string_owner_declares_run_state_unavailable(
+        self,
+    ) -> None:
+        # RunRecord bounds owner_session_id to str | None: a foreign owner
+        # object on a RUNNING_IDLE row is outside the contract, not "owned".
+        row = SimpleNamespace(
+            state="RUNNING_IDLE", owner_session_id=object(), run_id="run-a"
+        )
+        self.assertEqual(
+            self._acquire_with_rows([row]).get("adopted_run"),
+            {"ok": False, "run_id": None, "error": "run_state_unavailable"},
+        )
+
+    def test_acquire_list_runs_row_with_unknown_state_declares_run_state_unavailable(
+        self,
+    ) -> None:
+        # RunRecord bounds state to RUN_STATES: an unknown state is unreadable
+        # durable state, not merely "not idle".
+        row = SimpleNamespace(state="LIMBO", owner_session_id=None, run_id="run-b")
+        self.assertEqual(
+            self._acquire_with_rows([row]).get("adopted_run"),
+            {"ok": False, "run_id": None, "error": "run_state_unavailable"},
+        )
 
 
 class ProbeStatusHealthyTest(unittest.TestCase):

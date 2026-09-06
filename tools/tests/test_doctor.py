@@ -1426,5 +1426,153 @@ class DoctorTest(unittest.TestCase):
         self.assertNotIn("$effectiveClaude.Contains($KeyFile)", script)
         self.assertNotIn("[Array]::IndexOf", script)
 
+
+class NativeBundleExternalsTests(unittest.TestCase):
+    def test_all_matching_externals_emit_ok_finding(self) -> None:
+        if doctor is None:
+            self.skipTest("dayz_mcp.doctor unavailable")
+        entries = [
+            {
+                "kind": "external",
+                "path": r"C:\ext\one.dll",
+                "size": 10,
+                "sha256": "aa" * 32,
+            },
+            {
+                "kind": "external",
+                "path": r"C:\ext\two.dll",
+                "size": 20,
+                "sha256": "bb" * 32,
+            },
+            {
+                "kind": "bundle",
+                "path": "runtime/python.exe",
+                "size": 5,
+                "sha256": "cc" * 32,
+            },
+        ]
+        table = {
+            entries[0]["path"]: (10, "aa" * 32),
+            entries[1]["path"]: (20, "bb" * 32),
+        }
+
+        def stat_ok(path: str) -> tuple[int, str] | None:
+            return table.get(str(path))
+
+        findings = doctor.check_native_bundle_externals(entries, stat=stat_ok)
+        self.assertEqual([item["code"] for item in findings], ["NATIVE_BUNDLE_EXTERNALS_OK"])
+        self.assertEqual(findings[0]["severity"], "INFO")
+        self.assertEqual(findings[0]["checked"], 2)
+
+    def test_size_drift_emits_fail_with_remediation(self) -> None:
+        if doctor is None:
+            self.skipTest("dayz_mcp.doctor unavailable")
+        entries = [
+            {
+                "kind": "external",
+                "path": r"C:\ext\one.dll",
+                "size": 10,
+                "sha256": "aa" * 32,
+            },
+            {
+                "kind": "external",
+                "path": r"C:\ext\two.dll",
+                "size": 20,
+                "sha256": "bb" * 32,
+            },
+        ]
+        table = {
+            entries[0]["path"]: (10, "aa" * 32),
+            entries[1]["path"]: (20, "bb" * 32),
+        }
+
+        def stat_drift(path: str) -> tuple[int, str] | None:
+            if str(path) == entries[0]["path"]:
+                return (11, "aa" * 32)
+            return table.get(str(path))
+
+        findings = doctor.check_native_bundle_externals(entries, stat=stat_drift)
+        drift = next(
+            item for item in findings if item["code"] == "NATIVE_BUNDLE_EXTERNAL_DRIFT"
+        )
+        self.assertEqual(drift["severity"], "FAIL")
+        self.assertIn(entries[0]["path"], drift["drifted"])
+        remediation = str(drift["remediation"])
+        self.assertIn("rollback-last", remediation)
+        self.assertIn("install-dayz-test-v1", remediation)
+
+    def test_missing_external_is_reported_not_bundle_entries(self) -> None:
+        if doctor is None:
+            self.skipTest("dayz_mcp.doctor unavailable")
+        entries = [
+            {
+                "kind": "external",
+                "path": r"C:\ext\one.dll",
+                "size": 10,
+                "sha256": "aa" * 32,
+            },
+            {
+                "kind": "external",
+                "path": r"C:\ext\two.dll",
+                "size": 20,
+                "sha256": "bb" * 32,
+            },
+            {
+                "kind": "bundle",
+                "path": "runtime/python.exe",
+                "size": 5,
+                "sha256": "cc" * 32,
+            },
+        ]
+        table = {
+            entries[0]["path"]: (10, "aa" * 32),
+            entries[1]["path"]: (20, "bb" * 32),
+        }
+
+        def stat_missing(path: str) -> tuple[int, str] | None:
+            if str(path) == entries[1]["path"]:
+                return None
+            return table.get(str(path))
+
+        findings = doctor.check_native_bundle_externals(entries, stat=stat_missing)
+        drift = next(
+            item for item in findings if item["code"] == "NATIVE_BUNDLE_EXTERNAL_DRIFT"
+        )
+        self.assertIn(entries[1]["path"], drift["drifted"])
+        self.assertNotIn(entries[2]["path"], drift["drifted"])
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class NativeBundleClosureWiringTests(unittest.TestCase):
+    """The closure check runs only for sources that name a launcher (ronda 2, orquestador).
+
+    Injected sources default to ``native_launcher_id=None`` so a synthetic diagnosis never
+    opens the host's real registry; ``default_sources`` names ``dayz-test-v1``.
+    """
+
+    def test_sources_without_launcher_id_add_no_finding(self) -> None:
+        if doctor is None:
+            self.skipTest("dayz_mcp.doctor unavailable")
+        from types import SimpleNamespace
+
+        findings: list[dict[str, object]] = []
+        doctor._check_native_bundle_closure(SimpleNamespace(native_launcher_id=None), findings)
+        self.assertEqual([], findings)
+
+    def test_unreadable_launcher_is_a_single_warn_finding(self) -> None:
+        if doctor is None:
+            self.skipTest("dayz_mcp.doctor unavailable")
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import dayz_mcp.launcher_registry as registry
+
+        findings: list[dict[str, object]] = []
+        with mock.patch.object(registry, "open_approved_launcher", side_effect=OSError("boom")):
+            doctor._check_native_bundle_closure(SimpleNamespace(native_launcher_id="dayz-test-v1"), findings)
+        self.assertEqual(
+            [{"code": "NATIVE_BUNDLE_MANIFEST_UNREADABLE", "severity": "FAIL"}], findings
+        )

@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "authored_from": [
+    "addon/scripts/5_Mission/MCPBridge.c SERVER_CAPABILITIES",
+    "addon/scripts/5_Mission/MCPClientBridge.c CLIENT_POLL_CAPS"
+  ],
+  "note": "peer + command -> public tool, or null when the command is deliberately not exposed. Never derived from app.list_tools(), from loopback's command lists or from the PBO: the census exists so it can disagree with what the daemon registers.",
+  "peers": {
+    "server": {
+      "entities_query": "entities_query",
+      "exec_enforce": null,
+      "infected_drive": "infected_drive",
+      "inventory_give": "inventory_give",
+      "notify_players": "notify_players",
+      "object_anim": "object_anim",
+      "object_delete": "object_delete",
+      "object_inspect": "object_inspect",
+      "player_teleport": "player_teleport",
+      "query_all_players": "query_all_players",
+      "query_get_in_condition": "query_get_in_condition",
+      "query_player_state": "query_player_state",
+      "scene_raycast": "scene_raycast",
+      "surface_query": "surface_query",
+      "telemetry_read": "telemetry_read",
+      "vehicle_drive": null,
+      "vehicle_enter": "vehicle_enter",
+      "vehicle_prepare_fixture": "vehicle_prepare_fixture",
+      "world_spawn": "world_spawn",
+      "world_time_set": "world_time_set",
+      "world_weather_set": "world_weather_set"
+    },
+    "client": {
+      "action_use": "action_use",
+      "camera_get": "camera_get",
+      "camera_set": "camera_set",
+      "drive_probe_client": null,
+      "engine_set": "engine_set",
+      "key_press": "key_press",
+      "player_respawn": "player_respawn",
+      "restore_gameplay": "restore_gameplay",
+      "ui_click": "ui_click",
+      "ui_dialog": "ui_dialog",
+      "ui_focus": "ui_focus",
+      "ui_reload_layout": "ui_reload_layout",
+      "ui_set_text": "ui_set_text",
+      "ui_tree": "ui_tree",
+      "vehicle_control": "vehicle_control",
+      "vehicle_get_in_client": "vehicle_get_in_client",
+      "vehicle_release": "vehicle_release",
+      "vehicle_telemetry": "vehicle_telemetry",
+      "vehicle_trace": "vehicle_trace"
+    }
+  },
+  "discriminating": {
+    "server": [
+      "entities_query"
+    ],
+    "client": [
+      "ui_dialog",
+      "key_press",
+      "player_respawn"
+    ]
+  }
+}

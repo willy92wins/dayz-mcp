@@ -19,13 +19,14 @@ from typing import Annotated, Any, Awaitable, Callable, Iterator, Literal
 
 from mcp.server.fastmcp import Context, FastMCP, Image
 from mcp.server.fastmcp.exceptions import ToolError
-from pydantic import Field
+from pydantic import Field, StrictBool, StrictInt
 
 import mcp_capture
 from dayz_mcp import (
     core,
     daemon,
     daemon_credential,
+    dayz_test_modes,
     dayz_test_tool,
     host_config,
     inbox,
@@ -37,12 +38,32 @@ from dayz_mcp.control_client import ControlClient, ControlClientError, ControlId
 from dayz_mcp.accredited_daemon_transport import AccreditedTransportError
 from dayz_mcp.daemon_policy import load_normal_daemon_policy
 from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
+from dayz_mcp.effective_schema_core import project_server_config_identity
+from dayz_mcp.tool_registry_fingerprint import (
+    AuthorityBundleBytes,
+    capture_registry_snapshot,
+    compare_snapshot_to_authority,
+    read_authority_marker,
+)
 from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import LoopbackServer, read_key
 from dayz_mcp.server_cli import CLIENT_PLATFORM_ALIASES, build_server_parser
 from dayz_mcp.process_lifecycle import empty_box, occupancy_error_fields
 from dayz_mcp.session_coordination import ClientIdentity
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
+
+UiClickMode = Literal["direct", "complete"]
+UiReloadLayoutMode = Literal["reload", "close"]
+
+_CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
+    "pipeline_resolve",
+    "capture_screenshot",
+    "ui_click",
+    "ui_reload_layout",
+    "dayz_knowledge_status",
+    "dayz_knowledge_prepare",
+    "dayz_test_run",
+)
 
 
 DEFAULT_TOOL_TIMEOUT_S = 15.0
@@ -89,8 +110,11 @@ DAEMON_AUTOSPAWN_ALREADY = (
 )
 # A peer with last_poll_age_s >= this value is not live (game polls ~0.2s).
 PEER_STALE_S = 15.0
-# Closed ready.reason set. *_legacy_blocked / version_mismatch only after
-# that peer has polled at least once (last_poll_age_s is not None).
+# Published ready.reason set. The bridge_status description derives its list
+# from this set plus _FENCE_BLOCK_READY.values() at build time and declares it
+# OPEN: consumers validate by shape, never against a copied whitelist.
+# *_legacy_blocked / version_mismatch only after that peer has polled at least
+# once (last_poll_age_s is not None).
 READY_REASONS = frozenset({
     "ready",
     "no_run",
@@ -170,9 +194,35 @@ _REMOTE_ERROR_CODES = frozenset({
     "instance_config_missing",
     "instance_config_mismatch",
     "creation_time_unreadable",
+    # run-fence refusals emitted by loopback._enqueue_run_rejection and loopback._enqueue_command.
+    "run_not_owned",
+    "run_state_unavailable",
+    "enqueue_cancelled",
+    # lease-grant race surfaced by session_coordination._validate_token_locked on /enqueue.
+    "session_granting",
 })
 _STALE_TICKET_ERRORS = frozenset({"ticket_expired", "ticket_invalid"})
 _STALE_LEASE_ERRORS = frozenset({"lease_expired", "lease_invalid"})
+_ENQUEUE_HINT_MAX_CHARS = 240
+
+
+def _carriable_hint(payload: object) -> str | None:
+    """Accredited-daemon prose travels only beside a whitelist code, bounded; it
+    never replaces the code."""
+    if not isinstance(payload, dict):
+        return None
+    hint = payload.get("hint")
+    if type(hint) is not str:
+        return None
+    if not 0 < len(hint) <= _ENQUEUE_HINT_MAX_CHARS:
+        return None
+    if hint != hint.strip():
+        return None
+    if not hint.isprintable():
+        return None
+    return hint
+
+
 # Constant ValueError tokens raised along the dayz_test request path, mapped to
 # caller-facing codes. The tokens are fixed strings that carry no host paths, so
 # translating them keeps host paths off the wire while replacing a bare
@@ -183,6 +233,9 @@ _DAYZ_TEST_VALUE_ERROR_CODES = {
     "invalid_dayz_test_path_authority": "bad_mod_authority",
     "invalid_dayz_test_policy": "launcher_policy_invalid",
     "invalid_dayz_test_request": "bad_dayz_test_request",
+    "invalid_run_id": "bad_run_id",
+    "client_requires_run_id": "client_requires_run_id",
+    "server_all_forbid_run_id": "server_all_forbid_run_id",
     # The run-manifest side of the same path. None of these were mapped, so a
     # launch that got past the parse failed as a bare "dayz_test_failed:ValueError"
     # with nothing to search for. Reported 2026-08-21 by a session that spent the
@@ -266,6 +319,23 @@ def _is_safe_error_token(value: str) -> bool:
         and value[0].isalpha()
         and all(char.isascii() and (char.isalnum() or char == "_") for char in value)
     )
+
+
+def _opaque_dayz_test_failure(exc: BaseException) -> str:
+    """`dayz_test_failed:<Type>`, plus `:<code>` when the launcher backend named one.
+
+    NativeLauncherBackendError (native_launcher_backend.py) keeps a source
+    constant in ``code`` -- invalid_native_launcher_environment,
+    native_launcher_create_failed, ... -- and any host detail in ``detail``,
+    which never travels. Only an identifier-shaped code crosses the wire.
+    Ficha ae65 (2026-09-04): build=true died in that backend and the caller saw
+    the class name alone, with the code one frame away in the local log.
+    """
+    name = type(exc).__name__
+    code = getattr(exc, "code", None) if name == "NativeLauncherBackendError" else None
+    if isinstance(code, str) and _is_safe_error_token(code):
+        return f"dayz_test_failed:{name}:{code}"
+    return f"dayz_test_failed:{name}"
 
 
 @contextmanager
@@ -398,6 +468,188 @@ def compute_bridge_ready(status: dict[str, Any]) -> dict[str, Any]:
     return {"ready": False, "reason": "no_run"}
 
 
+# peer + command -> the public tool that fronts it, or None when the command is
+# deliberately not exposed. Hand written from the two Enforce dispatchers
+# (MCPBridge.c SERVER_CAPABILITIES, MCPClientBridge.c CLIENT_POLL_CAPS).
+#
+# Explicitly NOT derived from app.list_tools(), from loopback's command lists or
+# from the PBO. The census exists so it CAN disagree with what the daemon
+# registers; a table derived from either side would agree by construction and
+# detect nothing. A command the bridge announces and this table does not know is
+# reported as unmapped rather than silently accepted -- that is the case a new
+# command shipped in the PBO produces, and it should be visible on the first
+# poll instead of on the first failed call.
+_BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
+    "server": {
+        "entities_query": "entities_query",
+        "exec_enforce": None,  # not a public tool by decision
+        "infected_drive": "infected_drive",
+        "inventory_give": "inventory_give",
+        "notify_players": "notify_players",
+        "object_anim": "object_anim",
+        "object_delete": "object_delete",
+        "object_inspect": "object_inspect",
+        "player_teleport": "player_teleport",
+        "query_all_players": "query_all_players",
+        "query_get_in_condition": "query_get_in_condition",
+        "query_player_state": "query_player_state",
+        "scene_raycast": "scene_raycast",
+        "surface_query": "surface_query",
+        "telemetry_read": "telemetry_read",
+        "vehicle_drive": None,  # server-side verb with no public tool of its own
+        "vehicle_enter": "vehicle_enter",
+        "vehicle_prepare_fixture": "vehicle_prepare_fixture",
+        "world_spawn": "world_spawn",
+        "world_time_set": "world_time_set",
+        "world_weather_set": "world_weather_set",
+    },
+    "client": {
+        "action_use": "action_use",
+        "camera_get": "camera_get",
+        "camera_set": "camera_set",
+        "drive_probe_client": None,  # internal probe, never exposed
+        "engine_set": "engine_set",
+        "key_press": "key_press",
+        "player_respawn": "player_respawn",
+        "restore_gameplay": "restore_gameplay",
+        "ui_click": "ui_click",
+        "ui_dialog": "ui_dialog",
+        "ui_focus": "ui_focus",
+        "ui_reload_layout": "ui_reload_layout",
+        "ui_set_text": "ui_set_text",
+        "ui_tree": "ui_tree",
+        "vehicle_control": "vehicle_control",
+        "vehicle_get_in_client": "vehicle_get_in_client",
+        "vehicle_release": "vehicle_release",
+        "vehicle_telemetry": "vehicle_telemetry",
+        "vehicle_trace": "vehicle_trace",
+    },
+}
+
+
+def _compare_bridge_capabilities(
+    peer: str, capabilities: object, registered_tools: frozenset[str]
+) -> dict[str, Any]:
+    """Cross one peer's announced census against the registered tools.
+
+    Three verdicts and never a fourth: ``match`` when every mapped command has
+    its tool and every tool has its command, ``mismatch`` when they disagree --
+    naming exactly which commands -- and ``unknown`` when there is no census to
+    judge. ``unknown`` is not a mismatch: an absent, malformed or unaccredited
+    announcement means we did not look, and saying otherwise would put a red on
+    a bridge that may be perfectly fine.
+    """
+
+    block = capabilities if isinstance(capabilities, dict) else {}
+    mapping = _BRIDGE_COMMAND_TOOLS.get(peer, {})
+    expected_tools = {tool for tool in mapping.values() if tool}
+    registered_bridge_tools = sorted(expected_tools & registered_tools)
+    announced = block.get("announced_commands")
+    if block.get("state") != "announced" or not isinstance(announced, list):
+        return {
+            "state": "unknown",
+            "reason": str(block.get("reason") or "absent"),
+            "announced_commands": [],
+            "registered_bridge_tools": registered_bridge_tools,
+            "announced_without_registered_tool": [],
+            "registered_without_announced_command": [],
+            "unmapped_announced_commands": [],
+        }
+    announced_set = {item for item in announced if isinstance(item, str)}
+    unmapped = sorted(item for item in announced_set if item not in mapping)
+    missing_tool = sorted(
+        item
+        for item in announced_set
+        if mapping.get(item) and mapping[item] not in registered_tools
+    )
+    announced_tools = {mapping[item] for item in announced_set if mapping.get(item)}
+    not_announced = sorted(
+        tool for tool in registered_bridge_tools if tool not in announced_tools
+    )
+    agrees = not (unmapped or missing_tool or not_announced)
+    return {
+        "state": "match" if agrees else "mismatch",
+        "reason": "ok" if agrees else "census_disagrees_with_registered_tools",
+        "announced_commands": sorted(announced_set),
+        "registered_bridge_tools": registered_bridge_tools,
+        "announced_without_registered_tool": missing_tool,
+        "registered_without_announced_command": not_announced,
+        "unmapped_announced_commands": unmapped,
+    }
+
+
+def _with_capability_comparison(
+    payload: dict[str, Any], registered_tools: frozenset[str]
+) -> dict[str, Any]:
+    enriched = dict(payload)
+    for peer, key in (("server", "server_peer"), ("client", "client_peer")):
+        block = enriched.get(key)
+        if not isinstance(block, dict):
+            continue
+        block = dict(block)
+        block["capabilities"] = _compare_bridge_capabilities(
+            peer, block.get("capabilities"), registered_tools
+        )
+        enriched[key] = block
+    return enriched
+
+
+_TOOL_REGISTRY_REMEDIATION = "reopen_mcp_client"
+
+
+def _registry_tool_records(app: FastMCP) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for tool in app._tool_manager.list_tools():
+        schema = tool.parameters if isinstance(getattr(tool, "parameters", None), dict) else {}
+        records.append(
+            {
+                "name": tool.name,
+                "description": tool.description or "",
+                "input_schema": schema,
+                "public_constraints": [],
+                "effect_verification": "wire",
+            }
+        )
+    return records
+
+
+def _capture_process_registry(app: FastMCP, config: ServerConfig) -> Any:
+    profile, role = project_server_config_identity(
+        enable_exec_enforce=config.enable_exec_enforce,
+        client_platform=config.client_platform,
+    )
+    if profile == "unknown" or role == "unknown":
+        profile, role = "standard", "claude"
+    return capture_registry_snapshot(
+        session_id=str(uuid.uuid4()),
+        profile=profile,
+        role=role,
+        captured_at_utc=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        tools=_registry_tool_records(app),
+    )
+
+
+def _frozen_tool_registry_overlay(app: FastMCP, config: ServerConfig) -> dict[str, Any]:
+    snapshot = _capture_process_registry(app, config)
+    authority = read_authority_marker(
+        AuthorityBundleBytes(
+            marker=None,
+            fingerprint_sidecar=None,
+            verdict_sidecar=None,
+            producers_sidecar=None,
+            receipts=None,
+        ),
+        expected_profile=snapshot.profile,
+        expected_role=snapshot.role,
+    )
+    return {
+        "tool_registry_fingerprint": snapshot.fingerprint,
+        "tool_registry_captured_at": snapshot.captured_at_utc,
+        "tool_registry_source_stale": compare_snapshot_to_authority(snapshot, authority),
+        "tool_registry_remediation": _TOOL_REGISTRY_REMEDIATION,
+    }
+
+
 def _with_ready(status: dict[str, Any]) -> dict[str, Any]:
     payload = dict(status)
     payload["ready"] = compute_bridge_ready(payload)
@@ -435,12 +687,58 @@ def _target_peer_down(
     )
 
 
-def _bridge_error(result: dict[str, Any]) -> ToolError:
-    # The message stays a fixed code; the bridge's object_id (sent on a
+_UI_ECHO_VERBS = frozenset({"ui_click", "ui_focus", "ui_set_text", "ui_tree"})
+_UI_CLICK_DIAGNOSTIC_KEYS = ("handler", "user_id", "clicked")
+_UI_ECHO_KEYS = ("requested_path", "requested_root", "matched_path")
+
+
+def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
+    """Diagnostics the bridge filled BEFORE deciding the error, as message text.
+
+    ui_click sets user_id, handler and clicked before it settles on not_handled
+    (MCPClientBridge.c:1465-1480), and the four core UI verbs echo their request
+    (ui_request, MCPClientBridge.c:2199-2218). Only the message of a ToolError
+    crosses the MCP wire, so a bare code threw away the two fields that
+    discriminate the cause (fb-20260829-221423-b2c4).
+
+    The decision is by VERB, never by key presence: MCPResult is one flat class
+    (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
+    clicked=false, and a world_spawn timeout has to stay "timeout". The click
+    scalars are reported for ui_click only, an empty handler included -- no
+    handler ran, which is a different diagnosis from one that ran and declined.
+    The echo is whitelisted and empty values are omitted; requested_text stays
+    out on purpose, it would replay caller input (possibly sensitive, unbounded)
+    into an error message.
+    """
+    if cmd not in _UI_ECHO_VERBS:
+        return ""
+    parts: list[str] = []
+    if cmd == "ui_click":
+        fields = [
+            f"{key}={result[key]!r}" for key in _UI_CLICK_DIAGNOSTIC_KEYS if key in result
+        ]
+        if fields:
+            parts.append(" ".join(fields))
+    echo = result.get("ui_request")
+    if isinstance(echo, dict):
+        pairs = [
+            f"{key}={echo[key]!r}" for key in _UI_ECHO_KEYS if echo.get(key) not in (None, "")
+        ]
+        if pairs:
+            parts.append(" ".join(pairs))
+    return "; ".join(parts)
+
+
+def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
+    # The message head stays the fixed code; the bridge's object_id (sent on a
     # spawn timeout, MCPBridge.c:3272) rides in a structured attribute so the
     # caller can clean up instead of duplicating, without the message carrying
-    # host content across the MCP wire.
-    error = ToolError(str(result.get("error") or "bridge_error"))
+    # host content across the MCP wire. For the core UI verbs the diagnostics
+    # the bridge filled before the error follow the code after "; " -- see
+    # _bridge_error_detail; every other verb keeps the bare code.
+    code = str(result.get("error") or "bridge_error")
+    detail = _bridge_error_detail(result, cmd)
+    error = ToolError(f"{code}; {detail}" if detail else code)
     object_id = result.get("object_id")
     if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
         error.object_id = object_id
@@ -459,7 +757,12 @@ def _public_enqueue_error(
     status_snapshot: dict[str, Any] | None = None,
     peer: str | None = None,
 ) -> str:
-    """Map a remote enqueue payload to the caller-facing ToolError string."""
+    """Map a remote enqueue payload to the caller-facing ToolError string.
+
+    A known code with a valid hint travels as "<code>: <hint>"; a known code
+    without a hint stays bare; an unknown code stays the bare token remote_error
+    even when a hint is present.
+    """
     code = _remote_error_code(payload)
     if code == "retail_quarantine":
         return _retail_quarantine_recipe(payload.get("reason"))
@@ -485,6 +788,9 @@ def _public_enqueue_error(
         if isinstance(expected, str):
             return f"version_blocked:bridge {got!r} != {expected!r}"
         return "version_blocked"
+    hint = _carriable_hint(payload)
+    if code != "remote_error" and hint is not None:
+        return f"{code}: {hint}"
     return code
 
 
@@ -601,6 +907,12 @@ class Runtime:
         peer_key = "client_peer" if peer == "client" else "server_peer"
         peer_status = snapshot[peer_key]
         state = peer_status["version_state"]
+        if state == "never_polled_this_generation":
+            if snapshot.get("require_version"):
+                raise ToolError(
+                    f"game_not_ready:reason={_game_not_ready_reason(snapshot, peer)}"
+                )
+            return
         if state in {"legacy_blocked", "version_mismatch"}:
             if peer_status.get("last_poll_age_s") is None or not _peer_is_live(peer_status):
                 raise ToolError(
@@ -669,7 +981,7 @@ class Runtime:
                 # matched a business error (`0 is False` is False) and surfaced
                 # bridge failures as success. Treat any falsy ok as a ToolError.
                 if not result.get("ok"):
-                    raise _bridge_error(result)
+                    raise _bridge_error(result, cmd)
                 return result_prune.prune_unfilled_fields(cmd, result)
             await asyncio.sleep(POLL_INTERVAL_S)
 
@@ -699,7 +1011,7 @@ class Runtime:
         if result is None:
             return None
         if not result.get("ok"):
-            raise _bridge_error(result)
+            raise _bridge_error(result, cmd)
         return result_prune.prune_unfilled_fields(cmd, result)
 
     async def abandon_bridge(self, command_id: int, reason: str) -> None:
@@ -1246,7 +1558,7 @@ class ClientRuntime:
         )
         if status != 200:
             error = self._enqueue_error(payload)
-            if error in _STALE_LEASE_ERRORS and lease_token is not None:
+            if _remote_error_code(payload) in _STALE_LEASE_ERRORS and lease_token is not None:
                 self._control._clear_matching_lease(lease_token)
             if _remote_error_code(payload) in {"version_blocked", "lease_required"}:
                 try:
@@ -1300,7 +1612,7 @@ class ClientRuntime:
                 result = payload.get("result") or {}
                 # Bridge serializes ok as int 0/1; treat any falsy ok as an error.
                 if not result.get("ok"):
-                    raise _bridge_error(result)
+                    raise _bridge_error(result, cmd)
                 return result_prune.prune_unfilled_fields(cmd, result)
             remaining = deadline - self._time_fn()
             if remaining <= 0.0:
@@ -1337,7 +1649,7 @@ class ClientRuntime:
         )
         if status != 200:
             error = self._enqueue_error(payload)
-            if error in _STALE_LEASE_ERRORS and lease_token is not None:
+            if _remote_error_code(payload) in _STALE_LEASE_ERRORS and lease_token is not None:
                 self._control._clear_matching_lease(lease_token)
             if _remote_error_code(payload) in {"version_blocked", "lease_required"}:
                 try:
@@ -1372,7 +1684,7 @@ class ClientRuntime:
         if payload.get("status") == "done":
             result = payload.get("result") or {}
             if not result.get("ok"):
-                raise _bridge_error(result)
+                raise _bridge_error(result, cmd)
             return result_prune.prune_unfilled_fields(cmd, result)
         return None
 
@@ -1469,6 +1781,48 @@ def _timeout(timeout_s: float) -> float:
     return value
 
 
+# restore_gameplay closes its verdict blind in Enforce: RestoreGameplay() and
+# ReleaseCamera() return nothing and `result.ok = true` is unconditional
+# (addon/scripts/5_Mission/MCPClientBridge.c:706-711), while both have exits
+# that do nothing at all -- `if (!mission) return;` at :3919-3922 and the
+# m_ControlsSuppressed guard at :3924. Ficha fb-20260903-125244-4f83.
+#
+# Of the four things the verb promises -- simulation, input, HUD and the camera
+# -- only the camera is readable from this layer, through the camera_get verb
+# that already exists: BuildCameraResult (:3645-3684) answers
+# error="player_camera_active" exactly when no scripted camera is mounted, the
+# discriminator measured in-game on 2026-08-16 (BUG-075). So the tool confirms
+# that one postcondition and refuses to answer ok when it cannot read it (G6,
+# fail closed): a false green here leaves the client unusable with reconnecting
+# as the only documented way out, and the verb is idempotent, so a retry after a
+# red is cheap. Controls, HUD and simulation stay unverifiable until the bridge
+# exposes a reader for them, and the successful response says so out loud.
+RESTORE_CAMERA_PROBE_CMD = "camera_get"
+RESTORE_NOT_VERIFIED = ("controls", "hud", "simulation")
+
+
+def _restore_camera_verdict(probe: dict[str, Any]) -> tuple[str, str]:
+    """Classify a camera_get result as released | still_active | unverified.
+
+    Anything that is not a positive reading of the released camera is
+    ``unverified``; absence is never taken for success.
+    """
+    camera = probe.get("camera") if isinstance(probe, dict) else None
+    if not isinstance(camera, dict):
+        return "unverified", "camera_get returned no camera block"
+    if not camera.get("ok"):
+        reason = str(camera.get("error") or "camera_not_readable")
+        return "unverified", f"camera_get could not read the camera ({reason})"
+    if camera.get("viewport_moved"):
+        return "still_active", str(camera.get("error") or "")
+    if camera.get("error") == "player_camera_active" or "viewport_moved" in camera:
+        return "released", ""
+    return (
+        "unverified",
+        "camera_get reported neither viewport_moved nor player_camera_active",
+    )
+
+
 # Mirrors VEHICLE_CONTROL_MAX_TTL_S in addon/scripts/5_Mission/MCPClientBridge.c:114.
 # The bridge only honours hold_ttl_s <= this value; above it the control silently
 # falls back to VEHICLE_CONTROL_DEFAULT_TTL_S (3.0 s). Keep in sync with the bridge.
@@ -1536,6 +1890,86 @@ def _patch_public_argument_alias(app: FastMCP, tool_name: str, internal: str, pu
         return await original(fn, fn_is_async, arguments, arguments_to_pass_directly)
 
     object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
+
+
+def _patch_closed_tool_schema(app: FastMCP, tool_name: str) -> None:
+    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
+    if tool is None:
+        raise RuntimeError(f"missing tool {tool_name}")
+    tool.parameters["additionalProperties"] = False
+    # A zero-argument tool publishes `required: []` explicitly: a consumer that generates
+    # calls from the schema must see a closed, empty contract, not an absent key.
+    tool.parameters.setdefault("required", [])
+    allowed = set(tool.parameters.get("properties", {}))
+    original = tool.fn_metadata.call_fn_with_arg_validation
+
+    async def patched(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly):
+        unknown = set(arguments_to_validate) - allowed
+        if unknown:
+            raise ToolError("bad_args: unexpected arguments")
+        return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
+
+    object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
+
+
+def _patch_mode_enum_from_authority(app: FastMCP, tool_name: str, field: str = "mode") -> None:
+    """Publish and enforce a mode enum read from the M12 authority at build time and per call.
+
+    ``dayz_test_modes.public_mode_names()`` is read when the app is BUILT (never when this module
+    is imported) for the published schema, and again on EVERY call before validation, so a
+    substituted record set is honoured both by a new ``build_app()`` and by the next call
+    (Codex B-01, 2026-09-04). Schema and validation close together: the annotation stays ``str``
+    and this wrapper is the gate.
+    """
+    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
+    if tool is None:
+        raise RuntimeError(f"missing tool {tool_name}")
+    prop = tool.parameters.get("properties", {}).get(field)
+    if not isinstance(prop, dict):
+        raise RuntimeError(f"missing property {field} on {tool_name}")
+    prop["enum"] = list(dayz_test_modes.public_mode_names())
+    original = tool.fn_metadata.call_fn_with_arg_validation
+
+    async def patched(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly):
+        allowed = dayz_test_modes.public_mode_names()
+        if arguments_to_validate.get(field) not in allowed:
+            raise ToolError(f"bad_args: {field} must be one of " + "|".join(allowed))
+        return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
+
+    object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
+
+
+RUN_ID_MATRIX_MODE_DESCRIPTION = (
+    "Launch mode. client reattaches only the client to a live run and REQUIRES "
+    "run_id (server and world state preserved); server and all launch fresh and "
+    "must NOT pass run_id."
+)
+RUN_ID_MATRIX_RUN_ID_DESCRIPTION = (
+    "Live run to reattach to. Required with mode=client; forbidden with "
+    "mode=server|all (bad_dayz_test_request otherwise)."
+)
+
+
+def _describe_run_id_matrix(app: FastMCP, tool_name: str) -> None:
+    """Publish the mode/run_id matrix on the two properties, not only in the tool prose.
+
+    ``dayz_test_request.py`` enforces client-requires-run_id and server|all-forbid-run_id
+    with one bare ``bad_dayz_test_request``; the published schema said only "Mode" and
+    "Run Id" (fb-20260829-104625-7c88). The property descriptions are the place a client
+    reads before calling.
+    """
+    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
+    if tool is None:
+        raise RuntimeError(f"missing tool {tool_name}")
+    props = tool.parameters.get("properties", {})
+    for field, text in (
+        ("mode", RUN_ID_MATRIX_MODE_DESCRIPTION),
+        ("run_id", RUN_ID_MATRIX_RUN_ID_DESCRIPTION),
+    ):
+        prop = props.get(field)
+        if not isinstance(prop, dict):
+            raise RuntimeError(f"missing property {field} on {tool_name}")
+        prop["description"] = text
 
 
 def _player_count(result: dict[str, Any]) -> int:
@@ -1628,6 +2062,45 @@ CLEARANCE_LANDING_BAND_M = 0.5
 ENTITIES_QUERY_BUBBLE_M = 300.0
 
 
+# entities_query rows carry has_cargo: MCPEntityHit declares the field
+# (addon/scripts/5_Mission/MCPMessages.c:360) and DispatchEntitiesQuery fills it with
+# HasCargoCapacity (MCPBridge.c:1422, defined :1441-1456 as EntityAI.Cast ->
+# GetInventory() -> GetCargo() != null). Two wire facts keep a normalisation on this
+# side:
+#   - the bridge serialises an Enforce bool as int 0/1, the same way `ok` arrives
+#     (wait_for_result above), so a consumer testing `row["has_cargo"] is True` would
+#     read every container as false;
+#   - a bridge that predates the field omits the key entirely, and absent means "the
+#     bridge did not say" (null), never "no cargo" (false).
+# A value in any other form is published as null rather than guessed: a truthiness test
+# on an unknown shape would fabricate a verdict the bridge never gave.
+def _cargo_flag(value: object) -> bool | None:
+    """Read one has_cargo cell off the wire as a bool, or None when unstated."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    return None
+
+
+def _normalize_entities_cargo(result: dict[str, Any]) -> dict[str, Any]:
+    """Publish has_cargo on every entities_query row as bool | None.
+
+    Additive and total: no row is dropped, reordered or otherwise rewritten, and no
+    shape raises. A result without rows, or rows that are not dicts, comes back as it
+    arrived -- a missing field must never cost the caller the answer it did get.
+    """
+    if not isinstance(result, dict):
+        return result
+    rows = result.get("entities")
+    if not isinstance(rows, list):
+        return result
+    for row in rows:
+        if isinstance(row, dict):
+            row["has_cargo"] = _cargo_flag(row.get("has_cargo"))
+    return result
+
+
 def _annotate_entities_reliability(
     result: dict[str, Any], players_result: object, pos: list[float]
 ) -> dict[str, Any]:
@@ -1636,8 +2109,12 @@ def _annotate_entities_reliability(
         return result
     nearest: float | None = None
     players = []
+    # The probe's raw list, kept apart from the iteration default: an ok reply
+    # WITHOUT a players list is not evidence that nobody is connected.
+    players_raw: object = None
     if isinstance(players_result, dict) and players_result.get("ok"):
-        players = players_result.get("players") or []
+        players_raw = players_result.get("players")
+        players = players_raw if isinstance(players_raw, list) else []
     for player in players:
         ppos = player.get("pos") if isinstance(player, dict) else None
         if not (isinstance(ppos, list) and len(ppos) == 3):
@@ -1657,6 +2134,10 @@ def _annotate_entities_reliability(
         result["reliability"] = "player_in_bubble"
     else:
         result["reliability"] = "remote_unverified"
+    # Positive evidence only: the probe answered ok AND carried an empty list.
+    # A missing or non-list field is reported as remote_unverified without a reason.
+    if isinstance(players_raw, list) and not players_raw:
+        result["reason"] = "no_player_connected"
     return result
 
 
@@ -2010,6 +2491,8 @@ def _wait_for_response(
     observed: Any,
     satisfied: bool,
     scanned: dict[str, Any] | None = None,
+    not_ready_probes: int = 0,
+    last_error: str | None = None,
 ) -> dict[str, Any]:
     response = {
         # Timeout is a normal result, not a tool error. Gate on satisfied.
@@ -2021,7 +2504,10 @@ def _wait_for_response(
         "observed": observed,
         "timed_out": not satisfied,
         "tool": "wait_for",
+        "not_ready_probes": not_ready_probes,
     }
+    if last_error is not None:
+        response["last_error"] = last_error
     if scanned is not None:
         response["scanned"] = scanned
     return response
@@ -2068,7 +2554,11 @@ async def execute_wait_for(
     timeout_value = _finite_float(timeout_s, "bad_args: timeout_s must be > 0")
     if timeout_value <= 0.0:
         raise ToolError("bad_args: timeout_s must be > 0")
-    timeout_s = min(timeout_value, WAIT_FOR_MAX_TIMEOUT_S)
+    if timeout_value > WAIT_FOR_MAX_TIMEOUT_S:
+        raise ToolError(
+            f"bad_args: timeout_s must be <= {int(WAIT_FOR_MAX_TIMEOUT_S)}"
+        )
+    timeout_s = timeout_value
     poll_value = _finite_float(poll_interval_s, "bad_args: poll_interval_s must be > 0")
     if poll_value <= 0.0:
         raise ToolError("bad_args: poll_interval_s must be > 0")
@@ -2093,6 +2583,8 @@ async def execute_wait_for(
     started = time.monotonic()
     deadline = started + timeout_s
     probes = 0
+    not_ready_probes = 0
+    last_error: str | None = None
     observed: Any = None
     log_markers: dict[str, log_tail.TailMarker] = {}
     seen_paths: list[str] = []
@@ -2158,31 +2650,37 @@ async def execute_wait_for(
                     )
                 except ToolError as exc:
                     message = str(exc)
-                    if message.startswith("timeout waiting for"):
+                    if message == "game_not_ready:reason=server_poll_stale":
+                        not_ready_probes += 1
+                        last_error = message
+                        satisfied = False
+                    elif message.startswith("timeout waiting for"):
                         suffix = ""
                         if "; " in message:
                             suffix = "; " + message.split("; ", 1)[1]
                         raise ToolError(
                             f"wait_for timed out waiting for {condition}{suffix}"
                         ) from None
-                    if message.startswith("version_blocked") or message.startswith(
+                    elif message.startswith("version_blocked") or message.startswith(
                         "game_not_ready"
                     ) or message in {
                         "daemon_unavailable",
                         "version_blocked",
                     }:
                         raise
-                    if "query_all_players" in message:
+                    elif "query_all_players" in message:
                         raise ToolError(
                             message.replace("query_all_players", "wait_for")
                         ) from None
-                    raise
-                observed = _player_count(result)
-                satisfied = (
-                    observed >= value
-                    if condition == "players_at_least"
-                    else observed <= value
-                )
+                    else:
+                        raise
+                else:
+                    observed = _player_count(result)
+                    satisfied = (
+                        observed >= value
+                        if condition == "players_at_least"
+                        else observed <= value
+                    )
             else:
                 probe_paths = await _wait_for_script_log_paths(runtime)
                 lines, log_markers, counts = _new_log_lines(probe_paths, log_markers)
@@ -2203,9 +2701,16 @@ async def execute_wait_for(
                 observed=observed,
                 satisfied=True,
                 scanned=scan_summary(),
+                not_ready_probes=not_ready_probes,
+                last_error=last_error,
             )
-        # Sleep outside the lock. Do not wrap this loop in tool_lock.
-        await asyncio.sleep(poll_interval_s)
+        # Sleep outside the lock. Do not wrap this loop in tool_lock. The sleep
+        # is bounded by the single deadline: a poll interval longer than the
+        # remaining budget must not extend the call past timeout_s.
+        remaining_sleep = deadline - time.monotonic()
+        if remaining_sleep <= 0.0:
+            break
+        await asyncio.sleep(min(poll_interval_s, remaining_sleep))
 
     return _wait_for_response(
         condition=condition,
@@ -2214,6 +2719,8 @@ async def execute_wait_for(
         observed=observed,
         satisfied=False,
         scanned=scan_summary(),
+        not_ready_probes=not_ready_probes,
+        last_error=last_error,
     )
 
 
@@ -2337,15 +2844,62 @@ def _box_ready_for(box: dict[str, Any], session_id: str) -> bool:
     return _box_head_is(box, session_id)
 
 
+def _port_conflict_fields(box: object, port: int | None) -> dict[str, Any]:
+    """Diagnosis for an active_run_exists that the box alone cannot explain.
+
+    fb-20260904-114520-6927: a launch refused because the requested port is
+    held by a process that is not ours (any image) arrives with a box that
+    reads free -- only DayZ images occupy the box -- so the generic hint told
+    the caller to wait for a box that was never busy. The held port is in
+    foreign_ports; say that, and say when the socket table itself could not be
+    read (waiting does not repair that either).
+    """
+    if not isinstance(box, dict):
+        return {}
+    if box.get("port_scan_known") is False:
+        reason = box.get("port_scan_reason")
+        return {
+            "reason": reason if isinstance(reason, str) and reason else "port_scan_unknown",
+            "hint": (
+                "the daemon could not read the host UDP socket table "
+                "(psutil/netstat): waiting does not help, restore that first"
+            ),
+        }
+    foreign_ports = box.get("foreign_ports")
+    runs = box.get("runs")
+    if isinstance(port, int) and isinstance(foreign_ports, list) and port in foreign_ports:
+        # Any requested port, any image: foreign_ports is the socket table minus
+        # the managed runs. When a run also occupies the box, both blockers are
+        # named -- freeing the box does not free this port.
+        if isinstance(runs, list) and runs:
+            hint = (
+                f"the box is busy (see occupied_by_run_id) AND port {port} is held "
+                "by a process that is not a managed run: after the box frees, pass "
+                "another port= or wait for that holder to exit; waiting for the box "
+                "alone does not free the port"
+            )
+        else:
+            hint = (
+                f"port {port} is held by a process on this host that is not a "
+                "managed run (see session_status.box.foreign_ports): pass another "
+                "port= or wait for its holder to exit; wait_for_box_s does not "
+                "help while the box reads free"
+            )
+        return {"reason": "port_in_use_foreign", "port": port, "hint": hint}
+    return {}
+
+
 def _enrich_active_run_result(
     result: dict[str, Any],
     box: dict[str, Any],
     *,
     caller_session: str | None = None,
+    port: int | None = None,
 ) -> dict[str, Any]:
     extra = occupancy_error_fields(box, caller_session=caller_session)
     payload = dict(result)
     payload.update(extra)
+    payload.update(_port_conflict_fields(box, port))
     payload["run_id"] = None
     payload["status"] = "failed"
     payload["error_code"] = "active_run_exists"
@@ -2359,8 +2913,10 @@ def _failed_active_run_result(
     box: object,
     started: float,
     caller_session: str | None = None,
+    port: int | None = None,
 ) -> dict[str, Any]:
     extra = occupancy_error_fields(box, caller_session=caller_session)
+    extra.update(_port_conflict_fields(box, port))
     return {
         "status": "failed",
         "project": project,
@@ -2435,6 +2991,16 @@ async def execute_wait_for_box(
                     ticket = next_ticket
             else:
                 wait_error = "box_status_invalid"
+            if box.get("port_scan_known") is False:
+                # The box reads occupied because the daemon could not read the
+                # UDP socket table; the FIFO does not repair that, so waiting
+                # would only burn the timeout. Say so at once.
+                return {
+                    "ok": False,
+                    "ticket": ticket,
+                    "box": box,
+                    "error": "port_scan_unknown",
+                }
             if wait_error == "box_queue_saturated":
                 return {
                     "ok": False,
@@ -2479,12 +3045,34 @@ def _session_status_blocked_on(status: dict[str, Any]) -> str | None:
             "to join the lease FIFO"
         )
     box = status.get("box")
+    if isinstance(box, dict) and box.get("port_scan_known") is False:
+        # The box reads occupied because the daemon could not read or
+        # attribute the host UDP socket table; the FIFO does not repair that.
+        reason = box.get("port_scan_reason")
+        reason_text = reason if isinstance(reason, str) and reason else "port_scan_unknown"
+        return (
+            f"DayZ test box, {reason_text}; next: restore the daemon's view of the "
+            "host UDP socket table (psutil/netstat, process attribution) -- "
+            "wait_for_box_s does not help"
+        )
     if isinstance(box, dict) and box.get("occupied") is True:
         return (
             "DayZ test box; next: call dayz_test_run(..., wait_for_box_s=<n>) "
             "to join the box FIFO"
         )
     return None
+
+
+def _bridge_status_description() -> str:
+    """Publish the open ready.reason set from module authority at build time."""
+    reasons = sorted(READY_REASONS | set(_FENCE_BLOCK_READY.values()))
+    reason_list = "|".join(reasons)
+    return (
+        "Inspect peer liveness, version_state, and ready "
+        f"{{ready, reason is an OPEN set (today: {reason_list}): validate by shape "
+        "(ready: bool, reason: non-empty string), never against a whitelist}}. "
+        "daemon_modules.stale = source newer than daemon, not a crash."
+    )
 
 
 def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
@@ -2537,6 +3125,24 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if config.mode != "client" or not isinstance(runtime, ClientRuntime):
             raise ToolError("session_tools_require_client_mode")
         return runtime
+
+    # Observed after build_app has finished registering, which is the only
+    # moment the set is complete, and cached because it cannot change afterwards.
+    _registered_tool_names: set[str] = set()
+    # Filled at the close of build_app, after every tool is registered. The
+    # overlay is local to this FastMCP process; loopback /status does not
+    # publish it.
+    _tool_registry_overlay: dict[str, Any] = {}
+
+    def _with_tool_registry(payload: dict[str, Any]) -> dict[str, Any]:
+        overlay = dict(payload)
+        overlay.update(_tool_registry_overlay)
+        return overlay
+
+    async def _bridge_tool_names() -> frozenset[str]:
+        if not _registered_tool_names:
+            _registered_tool_names.update(tool.name for tool in await app.list_tools())
+        return frozenset(_registered_tool_names)
 
     @app.tool(
         description="LOW-LEVEL: prefer session_acquire_wait. Acquire or join the FIFO lease."
@@ -2633,7 +3239,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Read redacted daemon/queue/self coordination state, including "
-            "box occupancy (managed runs, foreign DayZDiag, ports_in_use, "
+            "box occupancy (managed runs; foreign DayZ processes seen by image "
+            "or by a held UDP port, even without a run record; ports_in_use "
+            "from the socket table; "
             "and the box wait FIFO). blocked_on names the resource and next "
             "queue, or is null when neither lease nor box is busy. Lease TTL "
             f"is {config.session_ttl_s:g} s; renewal is internal."
@@ -2665,11 +3273,33 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Queue and run an approved DayZ test project; lease ownership and "
-            "heartbeat remain internal to the tool. wait_for_box_s>0 waits "
+            "heartbeat remain internal to the tool. Release any held session "
+            "lease before calling. "
+            "Reattach sequence: server -> run_id -> client(run_id). "
+            "mode=client requires run_id: it reattaches only the client to a "
+            "live run, preserving the server and the world state (no server "
+            "reboot); mode=server|all must NOT pass run_id. "
+            "preflight does not relax that matrix. "
+            "extra_mods accepts any folder under the project's mod_roots "
+            "(a disposable probe need not be registered as a project). "
+            "wait_for_box_s>0 waits "
             "until session_status.box is free (FIFO, no tool_lock while "
-            f"sleeping). 0 is the immediate reject. wait_for_box_s must be <= "
+            "sleeping). A DayZ server holding a game port counts as an "
+            "occupied box even without a run record, and a launch onto a "
+            "port held by a process that is not ours is refused "
+            "(active_run_exists; reason port_in_use_foreign names the port) "
+            "by a socket-table read repeated right before the launch; the "
+            "only window left is between that read and DayZ's own bind. "
+            "port_scan_unknown means the daemon could not read the socket "
+            "table: fix the host, waiting does not help. "
+            f"0 is the immediate reject. wait_for_box_s must be <= "
             f"{BOX_WAIT_MAX_S:g}. Choose port= from "
-            "session_status.box.ports_in_use."
+            "session_status.box.ports_in_use. width/height are copied into "
+            "the request and the worker passes -x/-y to the client exe, but "
+            "DayZDiag does not honor them as the render viewport "
+            "(profile/DPI win; 1280x720 measured as 846x461). Workaround: "
+            "SetWindowPos host-side, then ui_reload_layout to re-measure "
+            "without reboot."
         )
     )
     async def dayz_test_run(
@@ -2721,7 +3351,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         box=waited.get("box"),
                         started=started,
                         caller_session=caller_session,
+                        port=port,
                     )
+                    if waited.get("error") == "port_scan_unknown":
+                        failed["error_code"] = "port_scan_unknown"
                     if waited.get("error") == "box_queue_saturated":
                         failed["error_code"] = "box_queue_saturated"
                         failed["hint"] = "retry with wait_for_box_s=<n>"
@@ -2763,12 +3396,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 except ToolError:
                     raise
                 except Exception as exc:
-                    # The ToolError carries the exception TYPE only. The message
+                    # The ToolError carries the exception TYPE, plus the launcher
+                    # backend's bare code when it has one (ficha ae65). The message
                     # can hold host paths, so it must not cross the MCP wire; FastMCP
                     # serializes str(exc) alone. `from exc` keeps the cause in
                     # __cause__ for LOCAL diagnosis (needed to see why build:true failed), not for the wire.
                     _log_opaque_failure(client, "dayz_test_run", exc)
-                    raise ToolError(f"dayz_test_failed:{type(exc).__name__}") from exc
+                    raise ToolError(_opaque_dayz_test_failure(exc)) from exc
             if execute_error is not None:
                 if execute_error.code == "active_run_exists":
                     return _failed_active_run_result(
@@ -2777,6 +3411,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         box=await peek_box(),
                         started=started,
                         caller_session=caller_session,
+                        port=port,
                     )
                 raise ToolError(execute_error.code) from None
             if (
@@ -2787,6 +3422,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     result,
                     await peek_box(),
                     caller_session=caller_session,
+                    port=port,
                 )
             if result is None:
                 raise ToolError("dayz_test_failed:RuntimeError")
@@ -2830,12 +3466,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             except ToolError:
                 raise
             except Exception as exc:
-                # The ToolError carries the exception TYPE only. The message
+                # The ToolError carries the exception TYPE, plus the launcher
+                # backend's bare code when it has one (ficha ae65). The message
                 # can hold host paths, so it must not cross the MCP wire; FastMCP
                 # serializes str(exc) alone. `from exc` keeps the cause in
                 # __cause__ for LOCAL diagnosis (needed to see why build:true failed), not for the wire.
                 _log_opaque_failure(client, "dayz_test_stop", exc)
-                raise ToolError(f"dayz_test_failed:{type(exc).__name__}") from exc
+                raise ToolError(_opaque_dayz_test_failure(exc)) from exc
 
     @app.tool(description="Read the authoritative server-side player state.")
     async def query_player_state(timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
@@ -2861,7 +3498,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "reads the tail of the current launch -- each file is capped at "
             "its last 256 KiB -- never a historic dump. No lease. "
             "Pass back the marker this tool returns unchanged: encoded JSON "
-            "string or the decoded object {path:[offset,size,identity]}."
+            "string or the decoded object {path:[offset,size,identity]}. The "
+            "marker advances only to the end of the lines RETURNED, never to "
+            "EOF: without a marker, max_lines=1 marks one line INTO the launch "
+            "tail and a later read from it replays the whole boot. To mark "
+            "'now', read with a large max_lines until a call returns 0 new "
+            "lines and keep that marker, or use wait_for(log_matches), whose "
+            "window is measured from EOF. The mod probe writes to "
+            "script_<date>.log, not to the .RPT: a positive control searched "
+            "only in the RPT reads as zero."
         )
     )
     async def logs_since(
@@ -3437,13 +4082,29 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             "Query world entities around pos within radius (0 < r <= 200). "
             "Returns the nearest entries up to limit (default 32, max 128) as "
-            "{type, classname, pos, distance} sorted by distance ascending, plus "
-            "count_total before the cut. No classname filter; raw nearby objects. "
+            "{type, classname, has_cargo, pos, distance} sorted by distance "
+            "ascending, plus count_total before the cut. No classname filter; raw "
+            "nearby objects. has_cargo is cargo CAPACITY, not occupancy: the bridge "
+            "reads GetInventory().GetCargo() != null on the row's own object, so an "
+            "EMPTY container reads true, and an object that is not an EntityAI, or "
+            "an EntityAI with no cargo grid, reads false. It answers 'could this "
+            "hold items', which is the predicate a container check needs; it never "
+            "says whether anything is inside. A row whose only cargo lives in a "
+            "proxy reports false. has_cargo is null, never false, when the bridge "
+            "did not state it: a client older than the has_cargo build omits the "
+            "field, and null means the bridge did not say. "
             "Absent entities travel as []. Rows are trustworthy only with a "
             "player streaming the area: far from every player the engine "
             "answers 0-or-cap with no error signal, so the result carries "
             "nearest_player_m and reliability (player_in_bubble | "
-            "remote_unverified)."
+            "remote_unverified). When the players probe succeeds with an empty "
+            "list, reason is no_player_connected. pos.y is used as given: "
+            "nothing snaps it to the surface (player_teleport y==0 does, this "
+            "tool does not), so pass pos=[x, surface_query.y, z]. A query "
+            "centred underground returns count_total 0 with reliability "
+            "player_in_bubble and no error: the only tell is nearest_player_m "
+            "reading as the vertical distance to the player standing on the "
+            "spot."
         )
     )
     async def entities_query(
@@ -3472,7 +4133,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             players = await runtime.call_bridge(
                 "query_all_players", {}, "server", _timeout(timeout_s)
             )
-        return _annotate_entities_reliability(result, players, args["pos"])
+        return _annotate_entities_reliability(
+            _normalize_entities_cargo(result), players, args["pos"]
+        )
 
     @app.tool(
         description=(
@@ -3665,19 +4328,94 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Restore local player simulation, input, HUD, and "
-        "release the camera. camera_set has no off mode."
+        "release the camera. camera_set has no off mode. The bridge closes this "
+        "verdict without checking anything, so the tool re-reads the camera with "
+        "camera_get and fails closed: ok only when the view is back on the "
+        "player (camera_released: true), otherwise camera_still_active or "
+        "restore_unverified. Controls, HUD and simulation are NOT verified -- no "
+        "reader for them exists on the wire -- and the ok names them in "
+        "not_verified. The verb is idempotent, so a red can simply be retried. "
+        "timeout_s bounds each of the two bridge calls."
     ))
     async def restore_gameplay(timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
-            return await runtime.call_bridge("restore_gameplay", {}, "client", _timeout(timeout_s))
+            timeout = _timeout(timeout_s)
+            result = await runtime.call_bridge("restore_gameplay", {}, "client", timeout)
+            try:
+                probe = await runtime.call_bridge(
+                    RESTORE_CAMERA_PROBE_CMD, {"cam_mode": "get"}, "client", timeout
+                )
+            except ToolError as exc:
+                raise ToolError(
+                    "restore_unverified: restore_gameplay ran, but the camera_get "
+                    f"probe that confirms it failed ({exc}); the view may still be "
+                    "on the debug camera. Retry restore_gameplay."
+                ) from None
+            verdict, detail = _restore_camera_verdict(probe)
+            if verdict == "still_active":
+                suffix = f" ({detail})" if detail else ""
+                raise ToolError(
+                    "camera_still_active: restore_gameplay ran, but camera_get "
+                    f"still reports a scripted camera mounted{suffix}; the view "
+                    "has not returned to the player. Retry restore_gameplay."
+                )
+            if verdict != "released":
+                raise ToolError(
+                    f"restore_unverified: restore_gameplay ran, but {detail}. "
+                    "Retry restore_gameplay."
+                )
+            confirmed = dict(result)
+            confirmed["camera_released"] = True
+            confirmed["not_verified"] = list(RESTORE_NOT_VERIFIED)
+            return confirmed
+
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Deliver one non-negative DIK code to "
+        "Mission.OnKeyPress on the client (ESC is dik=1). This is a mission "
+        "callback, not OS input, key-up, hold, or respawn."
+    ))
+    async def key_press(
+        dik: StrictInt,
+        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(dik, int) or isinstance(dik, bool) or dik < 0:
+            raise ToolError(_bad_args("dik", dik, "be a non-negative int"))
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "key_press", {"dik": dik}, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Request a random local-player respawn through the "
+        "same character-selection, death-screen, menu, and mission teardown sequence as "
+        "vanilla InGameMenu.GameRespawn. ok/requested means the request was "
+        "issued; observe player state separately for completion."
+    ))
+    async def player_respawn(
+        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "player_respawn", {}, "client", _timeout(timeout_s)
+            )
 
     @app.tool(description=(
         "Capture a screenshot from the DayZDiag window. Returns inline JPEG ImageContent fit to the "
         "client's MAX_MCP_OUTPUT_TOKENS budget (default 25000 -> ~600px wide; raise that client env var for bigger inline frames: 50000 -> ~860px/2x px, 75000 -> ~1070px/3x, 100000 -> ~native; max_tokens spends LESS than the cap, above-cap is clamped). Use scale='full' to spend a raised inline budget on resolution (the default scale='small' is a hard 512px cap). crop ('center', 'center:0.4', or normalized 'l,t,r,b') zooms on the subject; "
-        "for optical zoom set a narrow fov in radians via camera_set first. fmt='webp' is ~15% smaller (opt-in; Claude Code has known webp MIME bugs, JPEG stays default). save_fullres=True also writes the "
-        "native-resolution frame to disk and returns its path in a JSON text block — read that file for "
-        "fine detail, bypassing the inline token budget. Without window focus, the frame can be frozen. "
-        "With two DayZ clients, capture targets the live run's client through cmdline_match/client_pid."
+        "for optical zoom set a narrow fov in radians via camera_set first. fmt='webp' is ~15% smaller (opt-in; Claude Code has known webp MIME bugs, JPEG stays default). "
+        "The result is ALWAYS two blocks: the image, then a JSON text block with the surface map (crop_space, window_surface, client_surface, effective_surface, frame_sha256, frame_stale, frame_stale_detail, fullres_path). "
+        "crop_space='client' (default) normalizes crop over the rendered viewport (the space ui_tree rects use) and fails closed with frame_client_rect_unverified; 'window' is the legacy whole-window bitmap. save_fullres=True also writes the "
+        "native-resolution frame to disk and reports its path as fullres_path — read that file for "
+        "fine detail, bypassing the inline token budget. Without window focus, the frame can be frozen: frame_stale (bool | null) declares it. true means these "
+        "pixels repeat the previous capture of the same window, false that the render advanced, and null that no comparison was possible (first capture, an "
+        "unidentifiable window, a record over a different surface or geometry, or an unusable state store). frame_stale_detail carries the evidence: "
+        "previous_sha256, age_s, repeat_count, key_kind and state_backend, plus the intra-call frames, distinct_frames and max_adjacent_delta, which need no "
+        "stored state and are therefore there on the very first capture. A repeated frame is a fact about pixels, not an error: a paused sim, an open menu "
+        "and a still scene all produce it legitimately. "
+        "With two DayZ clients, capture targets the live run's client through cmdline_match/client_pid. "
+        "window_surface and client_surface rects are PHYSICAL pixels (DPI-aware): a host helper that never calls "
+        "SetProcessDpiAwareness sees virtualized coordinates instead (at 150%: 1920 -> 1280), so a 'client_rect == "
+        "requested' gate can pass in the wrong space without the window having moved; check it against this surface map."
     ))
     async def capture_screenshot(
         scale: str = "small",
@@ -3687,6 +4425,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         fmt: str = mcp_capture.DEFAULT_FORMAT,
         quality: int = mcp_capture.DEFAULT_QUALITY,
         crop: str = "",
+        crop_space: str = mcp_capture.DEFAULT_CROP_SPACE,
         save_fullres: bool = False,
         save_dir: str = "",
     ):
@@ -3749,6 +4488,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 fmt=fmt,
                 quality=quality,
                 crop=crop,
+                crop_space=crop_space,
                 save_fullres=save_fullres,
                 save_dir=save_dir,
             )
@@ -3768,9 +4508,6 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad image data") from exc
         image_format = _image_format_from_mime(inline.get("mimeType"))
         image = Image(data=raw, format=image_format)
-        if not save_fullres:
-            # Backward-compatible single-Image return (now JPEG instead of PNG).
-            return image
         meta = {"fullres_path": result.get("fullres_path"), **result.get("meta", {})}
         return [image, json.dumps(meta)]
 
@@ -3782,17 +4519,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             async with runtime.tool_lock:
                 return await runtime.call_exec_enforce(args, _timeout(timeout_s))
 
-    @app.tool(
-        description=(
-            "Inspect peer liveness, version_state, and ready "
-            "{ready, reason=ready|no_run|server_poll_stale|client_not_polling|"
-            "client_legacy_blocked|version_mismatch}. "
-            "daemon_modules.stale = source newer than daemon, not a crash."
-        )
-    )
+    @app.tool(description=_bridge_status_description())
     async def bridge_status() -> dict[str, Any]:
         runtime.touch()
-        return await runtime.bridge_status_payload()
+        payload = await runtime.bridge_status_payload()
+        return _with_tool_registry(
+            _with_capability_comparison(payload, await _bridge_tool_names())
+        )
 
     @app.tool(
         description=(
@@ -3930,15 +4663,23 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def ui_tree(
         path: str = "",
         limit: int = 256,
+        # Not `str | None`: FastMCP would publish anyOf[string,null] and collapse
+        # explicit root=null into omit (global scope). `str = None` publishes
+        # type:string so Pydantic rejects the null before enqueue.
+        root: str = None,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str):
             raise ToolError(_bad_args("path", path, "be a string"))
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 512:
             raise ToolError(_bad_args("limit", limit, "be an int from 1 to 512"))
+        if root is not None and (not isinstance(root, str) or root == ""):
+            raise ToolError(_bad_args("root", root, "be a non-empty string"))
         args: dict[str, Any] = {"limit": int(limit)}
         if path != "":
             args["path"] = path
+        if root is not None:
+            args["root"] = root
         async with runtime.tool_lock:
             return await runtime.call_bridge("ui_tree", args, "client", _timeout(timeout_s))
 
@@ -3949,30 +4690,62 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def ui_set_text(
         path: str,
         text: str,
+        # Not `str | None`: FastMCP would publish anyOf[string,null] and collapse
+        # explicit root=null into omit (global scope). `str = None` publishes
+        # type:string so Pydantic rejects the null before enqueue.
+        root: str = None,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str) or path == "":
             raise ToolError(_bad_args("path", path, "be a non-empty string"))
         if not isinstance(text, str):
             raise ToolError(_bad_args("text", text, "be a string"))
-        args = {"path": path, "text": text}
+        if root is not None and (not isinstance(root, str) or root == ""):
+            raise ToolError(_bad_args("root", root, "be a non-empty string"))
+        args: dict[str, Any] = {"path": path, "text": text}
+        if root is not None:
+            args["root"] = root
         async with runtime.tool_lock:
             return await runtime.call_bridge("ui_set_text", args, "client", _timeout(timeout_s))
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Click a client widget by name. button is "
-        "0=left, 1=right, 2=middle."
+        "0=left, 1=right, 2=middle. mode='direct' is the default; the bridge "
+        "rejects mode='complete' with mode_not_implemented. On failure the "
+        "error text keeps the bridge diagnostics after the code, e.g. "
+        "not_handled; handler='X' user_id=506 clicked=False; "
+        "requested_path='BtnCloseX' matched_path='...': an empty handler means "
+        "no handler ran, a named one ran and declined."
     ))
     async def ui_click(
         path: str,
-        button: int = 0,
+        button: StrictInt = 0,
+        # Not `str | None`: FastMCP would publish anyOf[string,null] and collapse
+        # explicit root=null into omit (global scope). `str = None` publishes
+        # type:string so Pydantic rejects the null before enqueue.
+        root: str = None,
+        mode: UiClickMode = "direct",
+        bubble: StrictBool = False,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str) or path == "":
             raise ToolError(_bad_args("path", path, "be a non-empty string"))
         if not isinstance(button, int) or isinstance(button, bool) or button < 0 or button > 2:
             raise ToolError(_bad_args("button", button, "be an int from 0 to 2"))
-        args = {"path": path, "button": int(button)}
+        if not isinstance(mode, str) or mode not in {"direct", "complete"}:
+            raise ToolError(_bad_args("mode", mode, "be one of 'direct' or 'complete'"))
+        if not isinstance(bubble, bool):
+            raise ToolError(_bad_args("bubble", bubble, "be a bool"))
+        if root is not None and (not isinstance(root, str) or root == ""):
+            raise ToolError(_bad_args("root", root, "be a non-empty string"))
+        args: dict[str, Any] = {
+            "path": path,
+            "button": int(button),
+            "mode": mode,
+            "bubble": bubble,
+        }
+        if root is not None:
+            args["root"] = root
         async with runtime.tool_lock:
             return await runtime.call_bridge("ui_click", args, "client", _timeout(timeout_s))
 
@@ -3986,7 +4759,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     ))
     async def ui_reload_layout(
         path: str = "",
-        mode: str = "reload",
+        mode: UiReloadLayoutMode = "reload",
         limit: int = 256,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
@@ -4019,17 +4792,25 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "Walks to the topmost ancestor, SetActiveWindow(..., false) so the "
         "engine does not steal focus onto the first focusable child, then "
         "SetFocus. ok is true only when GetFocus() equals the target; a "
-        "widget that cannot take focus (plain TextWidget, NoFocus, disabled) "
-        "returns found=true and error=focus_not_taken. ui_click does not "
-        "focus: it calls OnClick directly."
+        "widget that cannot take focus (NoFocus flag or disabled) returns "
+        "found=true and error=focus_not_taken. A plain TextWidget does take "
+        "focus (ok=1). ui_click does not focus: it calls OnClick directly."
     ))
     async def ui_focus(
         path: str,
+        # Not `str | None`: FastMCP would publish anyOf[string,null] and collapse
+        # explicit root=null into omit (global scope). `str = None` publishes
+        # type:string so Pydantic rejects the null before enqueue.
+        root: str = None,
         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str) or path == "":
             raise ToolError(_bad_args("path", path, "be a non-empty string"))
-        args = {"path": path}
+        if root is not None and (not isinstance(root, str) or root == ""):
+            raise ToolError(_bad_args("root", root, "be a non-empty string"))
+        args: dict[str, Any] = {"path": path}
+        if root is not None:
+            args["root"] = root
         async with runtime.tool_lock:
             return await runtime.call_bridge(
                 "ui_focus", args, "client", _timeout(timeout_s)
@@ -4058,7 +4839,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Start a DayZ user action on the local player "
-        "without keyboard. Confirm with wait_for(condition=log_matches)."
+        "without keyboard. Confirm with wait_for(condition=log_matches). "
+        "action = the Enforce class name of the user action "
+        "(candidate.Type().ToString(), e.g. ActionOpenDoors), NOT the "
+        "visible/localized prompt text; classname = the target's GetType()."
     ))
     async def action_use(
         action: str,
@@ -4099,6 +4883,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "a line written before the caller's action and cause a false positive. "
             "On timeout still returns "
             "ok: true with satisfied: false -- gate on satisfied, not ok. "
+            "timeout_s <= 600 (bad_args above; never clamped). "
+            "players_* waits through server startup: a probe answered "
+            "game_not_ready:reason=server_poll_stale is retried until "
+            "timeout_s (not_ready_probes, last_error in the response); any "
+            "other not-ready reason aborts on the first probe. "
+            "A probe refused with run_not_owned (the run has no owner) aborts on "
+            "the first probe with the daemon's hint: adopt the run first with "
+            "session_acquire_wait, whose grant adopts the single ownerless "
+            "RUNNING_IDLE run and reports it in adopted_run (with several idle "
+            "runs it reports multiple_idle_runs and adopts none). "
             "scanned reports which log files were read and how many "
             "lines each gave, so a no-match is visible as a no-match."
         )
@@ -4153,6 +4947,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "bug | request | finding | tool_contribution. Body template: "
             "tool, args, error, repro. For contributions, reference "
             "artifacts at DURABLE paths (never session scratchpads). "
+            "Enforced limits, in characters: title 1..120, body 1..8000, "
+            "project 0..64; an over-length value is rejected naming its real "
+            "count (title 125 > 120 chars), so trim without guessing. "
             "Appends to a local shared inbox; ids cannot collide. Works "
             "even when the game and daemon are down."
         )
@@ -4163,7 +4960,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         body: str,
         project: str = "",
     ) -> dict[str, Any]:
-        """File pipeline feedback from any agent session: a bug you hit, a request for a missing capability, a finding worth recording, or a tool/playbook you built (kind=tool_contribution). For contributions, reference artifacts at DURABLE paths (never session scratchpads). Appends to a local shared inbox; ids cannot collide. Works even when the game and daemon are down."""
+        """File pipeline feedback from any agent session: a bug you hit, a request for a missing capability, a finding worth recording, or a tool/playbook you built (kind=tool_contribution). For contributions, reference artifacts at DURABLE paths (never session scratchpads). Enforced limits, in characters: title 1..120, body 1..8000, project 0..64; an over-length value is rejected naming its real count (title 125 > 120 chars). Appends to a local shared inbox; ids cannot collide. Works even when the game and daemon are down."""
         # The lock here only preserves the one-tool-at-a-time client invariant;
         # these tools do not call the bridge.
         async with runtime.tool_lock:
@@ -4208,20 +5005,32 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Triage a feedback item by appending a resolution; deletes "
-            "nothing, history is append-only."
+            "nothing, history is append-only. Enforced limits, in characters: "
+            "resolution 1..2000, evidence_ref 1..240. evidence_ref is a path "
+            "only -- a path relative to DayZ_MCP_dev starting at one of "
+            "reviews | gates | reports | research, ASCII, segments of "
+            "[A-Za-z0-9._-]. No repo prefix (not DayZ_MCP_dev/reviews/...), and "
+            "nothing appended to it: a note, parentheses, a commit id or a #anchor "
+            "make it an invalid path segment. An over-length value is rejected "
+            "naming its real count (resolution 2087 > 2000 chars), so trim "
+            "without guessing."
         )
     )
     async def pipeline_resolve(
         feedback_id: str,
         resolution: str,
+        evidence_ref: Annotated[str | None, Field(max_length=240)] = None,
     ) -> dict[str, Any]:
-        """Triage a feedback item by appending a resolution; deletes nothing, history is append-only."""
+        """Triage a feedback item by appending a resolution; deletes nothing, history is append-only. Enforced limits, in characters: resolution 1..2000, evidence_ref 1..240. evidence_ref is a path only -- relative to DayZ_MCP_dev, starting at reviews | gates | reports | research, ASCII, segments of [A-Za-z0-9._-], no repo prefix and nothing appended (note, parentheses, commit id, #anchor). An over-length value is rejected naming its real count (resolution 2087 > 2000 chars)."""
         # The lock here only preserves the one-tool-at-a-time client invariant;
         # these tools do not call the bridge.
         async with runtime.tool_lock:
             try:
                 return inbox.append_resolution(
-                    feedback_id, resolution, platform=_pipeline_platform()
+                    feedback_id,
+                    resolution,
+                    platform=_pipeline_platform(),
+                    evidence_ref=evidence_ref,
                 )
             except ValueError as exc:
                 message = str(exc)
@@ -4252,7 +5061,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         """
         return await playbook_tool_mod.execute_playbook_run(app, name, params)
 
+    _patch_mode_enum_from_authority(app, "dayz_test_run")
+    _describe_run_id_matrix(app, "dayz_test_run")
+    for _closed_tool in _CLOSED_SCHEMA_TOOLS:
+        _patch_closed_tool_schema(app, _closed_tool)
     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
+    _tool_registry_overlay.update(_frozen_tool_registry_overlay(app, config))
     return app, runtime
 
 

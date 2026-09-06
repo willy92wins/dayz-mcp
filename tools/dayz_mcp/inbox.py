@@ -12,6 +12,8 @@ INBOX_DIR = Path(os.environ["LOCALAPPDATA"]) / "DayZ_MCP" / "inbox"
 FEEDBACK_PATH = INBOX_DIR / "feedback.jsonl"
 KINDS = frozenset({"bug", "request", "tool_contribution", "finding"})
 _FEEDBACK_ID_RE = re.compile(r"^fb-\d{8}-\d{6}-[0-9a-f]{4}$")
+_EVIDENCE_ROOTS = frozenset({"reviews", "gates", "reports", "research"})
+_EVIDENCE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _require_str(value: object, field: str = "value") -> str:
@@ -20,9 +22,62 @@ def _require_str(value: object, field: str = "value") -> str:
     return value
 
 
+def _check_length(value: str, field: str, limit: int) -> None:
+    """Reject an over-long value naming how long it actually is.
+
+    "resolution > 2000 chars" says the caller overshot but not by how much, so
+    trimming is guesswork and every guess costs another rejected call (ficha
+    fb-20260906-145656-d45f: six such rejections in one session). The count is
+    in characters, the same unit the limit is in.
+    """
+    if not value:
+        raise ValueError(f"bad_args: {field} empty")
+    if len(value) > limit:
+        raise ValueError(f"bad_args: {field} {len(value)} > {limit} chars")
+
+
 def _utc_now() -> tuple[str, str]:
     now = datetime.now(timezone.utc)
     return now.strftime("%Y%m%d-%H%M%S"), now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _validate_evidence_ref(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = _require_str(value, "evidence_ref")
+    _check_length(value, "evidence_ref", 240)
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("bad_args: evidence_ref must be ASCII") from exc
+    segments = value.split("/")
+    if len(segments) < 2 or segments[0] not in _EVIDENCE_ROOTS:
+        raise ValueError("bad_args: evidence_ref must be under reviews|gates|reports|research")
+    for segment in segments[1:]:
+        if segment in {".", ".."} or _EVIDENCE_SEGMENT_RE.fullmatch(segment) is None:
+            raise ValueError("bad_args: evidence_ref contains an invalid path segment")
+    return value
+
+
+def _age_fields(ts: object, now: datetime) -> dict[str, object]:
+    if type(ts) is not str:
+        return {"age_s": None, "age_label": None, "age_reason": "invalid_timestamp"}
+    try:
+        original = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return {"age_s": None, "age_label": None, "age_reason": "invalid_timestamp"}
+    if original > now:
+        return {"age_s": None, "age_label": None, "age_reason": "future_timestamp"}
+    age_s = int((now - original).total_seconds())
+    if age_s < 60:
+        age_label = f"{age_s}s"
+    elif age_s < 3600:
+        age_label = f"{age_s // 60}m"
+    elif age_s < 86400:
+        age_label = f"{age_s // 3600}h"
+    else:
+        age_label = f"{age_s // 86400}d"
+    return {"age_s": age_s, "age_label": age_label}
 
 
 def _append_jsonl(record: dict) -> None:
@@ -54,12 +109,10 @@ def append_feedback(
     platform = _require_str(platform, "platform")
     if kind not in KINDS:
         raise ValueError("bad_args: kind not in bug|request|tool_contribution|finding")
-    if not 1 <= len(title) <= 120:
-        raise ValueError("bad_args: title > 120 chars" if title else "bad_args: title empty")
-    if not 1 <= len(body) <= 8000:
-        raise ValueError("bad_args: body > 8000 chars" if body else "bad_args: body empty")
+    _check_length(title, "title", 120)
+    _check_length(body, "body", 8000)
     if len(project) > 64:
-        raise ValueError("bad_args: project > 64 chars")
+        raise ValueError(f"bad_args: project {len(project)} > 64 chars")
     stamp, ts = _utc_now()
     entry = {
         "id": f"fb-{stamp}-{secrets.token_hex(2)}",
@@ -80,16 +133,15 @@ def append_resolution(
     feedback_id: str,
     resolution: str,
     platform: str = "",
+    evidence_ref: str | None = None,
 ) -> dict:
     feedback_id = _require_str(feedback_id, "feedback_id")
     resolution = _require_str(resolution, "resolution")
     platform = _require_str(platform, "platform")
+    evidence_ref = _validate_evidence_ref(evidence_ref)
     if _FEEDBACK_ID_RE.fullmatch(feedback_id) is None:
         raise ValueError("bad_args: feedback_id must match fb-YYYYMMDD-HHMMSS-xxxx")
-    if not 1 <= len(resolution) <= 2000:
-        raise ValueError(
-            "bad_args: resolution > 2000 chars" if resolution else "bad_args: resolution empty"
-        )
+    _check_length(resolution, "resolution", 2000)
     _stamp, ts = _utc_now()
     record = {
         "resolves": feedback_id,
@@ -97,11 +149,18 @@ def append_resolution(
         "resolution": resolution,
         "platform": platform,
     }
+    if evidence_ref is not None:
+        record["evidence_ref"] = evidence_ref
     _append_jsonl(record)
     return record
 
 
-def read_inbox(limit: int = 20, kind: str = "", include_resolved: bool = False) -> dict:
+def _read_inbox(
+    limit: int = 20,
+    kind: str = "",
+    include_resolved: bool = False,
+    now: datetime | None = None,
+) -> dict:
     if type(kind) is not str or (kind != "" and kind not in KINDS):
         raise ValueError("bad_args: kind not in bug|request|tool_contribution|finding")
     if type(limit) is not int or not 1 <= limit <= 100:
@@ -131,6 +190,9 @@ def read_inbox(limit: int = 20, kind: str = "", include_resolved: bool = False) 
                 if target in by_id:
                     by_id[target]["resolution"] = obj.get("resolution")
                     by_id[target]["resolved_ts"] = obj.get("ts")
+                    by_id[target].pop("evidence_ref", None)
+                    if obj.get("evidence_ref") is not None:
+                        by_id[target]["evidence_ref"] = obj["evidence_ref"]
                 continue
             entry_id = obj.get("id")
             if type(entry_id) is not str:
@@ -143,7 +205,10 @@ def read_inbox(limit: int = 20, kind: str = "", include_resolved: bool = False) 
     count_total = len(entries)
     unresolved_total = sum(1 for item in entries if "resolution" not in item)
     ranked: list[tuple[str, int, dict]] = []
+    if now is None:
+        now = datetime.now(timezone.utc)
     for index, item in enumerate(entries):
+        item.update(_age_fields(item.get("ts"), now))
         if kind != "" and item.get("kind") != kind:
             continue
         if not include_resolved and "resolution" in item:
@@ -156,3 +221,7 @@ def read_inbox(limit: int = 20, kind: str = "", include_resolved: bool = False) 
         "unresolved_total": unresolved_total,
         "malformed": malformed,
     }
+
+
+def read_inbox(limit: int = 20, kind: str = "", include_resolved: bool = False) -> dict:
+    return _read_inbox(limit=limit, kind=kind, include_resolved=include_resolved)

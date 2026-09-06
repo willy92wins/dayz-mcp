@@ -74,6 +74,57 @@ class InboxTest(unittest.TestCase):
         self.assertIn("title", message)
         self.assertIn("120", message)
 
+    def test_over_length_errors_name_the_real_count(self) -> None:
+        # Ficha fb-20260906-145656-d45f: "title > 120 chars" tells the caller it
+        # overshot but not by how much, so trimming is guesswork and each retry
+        # costs a turn. The limits below were read off inbox.py, not the ficha.
+        cases = (
+            ("title 125 > 120", lambda: inbox.append_feedback("bug", "x" * 125, "body")),
+            ("body 8001 > 8000", lambda: inbox.append_feedback("bug", "t", "x" * 8001)),
+            (
+                "project 65 > 64",
+                lambda: inbox.append_feedback("bug", "t", "b", project="x" * 65),
+            ),
+            (
+                "resolution 2087 > 2000",
+                lambda: inbox.append_resolution(
+                    "fb-20260906-145656-d45f", "x" * 2087
+                ),
+            ),
+            (
+                "evidence_ref 241 > 240",
+                lambda: inbox.append_resolution(
+                    "fb-20260906-145656-d45f",
+                    "ok",
+                    evidence_ref="reviews/" + "x" * 233,
+                ),
+            ),
+        )
+        for expected, call in cases:
+            with self.subTest(expected):
+                with self.assertRaises(ValueError) as ctx:
+                    call()
+                message = str(ctx.exception)
+                self.assertTrue(message.startswith("bad_args"), message)
+                self.assertIn(expected, message)
+
+    def test_empty_values_still_say_empty_not_a_count(self) -> None:
+        # A zero-length value is not an over-length one; keeping the two apart is
+        # what makes the count in the other branch readable.
+        cases = (
+            ("title empty", lambda: inbox.append_feedback("bug", "   ", "body")),
+            ("body empty", lambda: inbox.append_feedback("bug", "t", "")),
+            (
+                "resolution empty",
+                lambda: inbox.append_resolution("fb-20260906-145656-d45f", ""),
+            ),
+        )
+        for expected, call in cases:
+            with self.subTest(expected):
+                with self.assertRaises(ValueError) as ctx:
+                    call()
+                self.assertIn(expected, str(ctx.exception))
+
     def test_append_rejects_empty_body(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             inbox.append_feedback("bug", "title", "")
@@ -134,6 +185,103 @@ class InboxTest(unittest.TestCase):
         shown = inbox.read_inbox(include_resolved=True)
         self.assertEqual(shown["entries"][0]["resolution"], "second-fix")
 
+    def test_resolution_evidence_ref_accepts_only_the_four_durable_roots(self) -> None:
+        valid = (
+            "reviews/r.json",
+            "gates/g.md",
+            "reports/a/b.json",
+            "research/x-1/y_2.md",
+        )
+        item = inbox.append_feedback("bug", "evidence", "body")
+        for evidence_ref in valid:
+            with self.subTest(evidence_ref=evidence_ref):
+                record = inbox.append_resolution(item["id"], "fix", evidence_ref=evidence_ref)
+                self.assertEqual(record["evidence_ref"], evidence_ref)
+        raw = inbox.FEEDBACK_PATH.read_text(encoding="utf-8")
+        self.assertIn('"evidence_ref":"research/x-1/y_2.md"', raw)
+
+        invalid = (
+            "",
+            ".",
+            "..",
+            "/reviews/r.json",
+            "C:/reviews/r.json",
+            "reviews\\r.json",
+            "reviews:r.json",
+            "https://example.test/r.json",
+            "other/r.json",
+            "reviews/r/../x.json",
+            "reviews/\x01.json",
+            "reviews/é.json",
+            "reviews/r file.json",
+            "reviews",
+        )
+        for evidence_ref in invalid:
+            with self.subTest(evidence_ref=repr(evidence_ref)):
+                with self.assertRaises(ValueError):
+                    inbox.append_resolution(item["id"], "fix", evidence_ref=evidence_ref)
+
+    def test_latest_resolution_without_evidence_ref_clears_the_previous_ref(self) -> None:
+        item = inbox.append_feedback("bug", "two", "b2")
+        before = inbox.FEEDBACK_PATH.read_bytes()
+        inbox.append_resolution(item["id"], "first-fix", evidence_ref="reviews/first.md")
+        inbox.append_resolution(item["id"], "second-fix", evidence_ref="gates/second.md")
+        shown = inbox.read_inbox(include_resolved=True)
+        resolved = shown["entries"][0]
+        self.assertEqual(resolved["resolution"], "second-fix")
+        self.assertEqual(resolved["evidence_ref"], "gates/second.md")
+        inbox.append_resolution(item["id"], "third-fix")
+        cleared = inbox.read_inbox(include_resolved=True)["entries"][0]
+        self.assertEqual(cleared["resolution"], "third-fix")
+        self.assertNotIn("evidence_ref", cleared)
+        after = inbox.FEEDBACK_PATH.read_bytes()
+        self.assertTrue(after.startswith(before))
+        self.assertEqual(len(after.splitlines()), 4)
+        self.assertNotIn(b"evidence_ref", after.splitlines()[-1])
+        self.assertNotIn(b"age_s", after)
+        self.assertNotIn(b"age_label", after)
+
+    def test_age_boundaries_are_derived_from_original_ts_without_persistence(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime(2026, 1, 2, 0, 0, 0, tzinfo=timezone.utc)
+        cases = ((59, "59s"), (60, "1m"), (3599, "59m"), (3600, "1h"), (86399, "23h"), (86400, "1d"))
+        entries = []
+        for index, (seconds, label) in enumerate(cases):
+            entry_id = f"fb-20260101-0000{index:02d}-abcd"
+            stamp = (now - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            entries.append({"id": entry_id, "ts": stamp, "kind": "bug", "title": "t", "body": "b"})
+        entries.append({
+            "resolves": "fb-20260101-000000-abcd",
+            "ts": "2026-01-02T00:00:00Z",
+            "resolution": "fix",
+            "evidence_ref": "reviews/r.json",
+        })
+        invalid_id = "fb-20260101-000006-abcd"
+        future_id = "fb-20260101-000007-abcd"
+        entries.append({"id": invalid_id, "ts": "not-a-timestamp", "kind": "bug", "title": "t", "body": "b"})
+        entries.append({"id": future_id, "ts": "2026-01-02T00:00:01Z", "kind": "bug", "title": "t", "body": "b"})
+        inbox.INBOX_DIR.mkdir(parents=True)
+        inbox.FEEDBACK_PATH.write_text(
+            "".join(json.dumps(entry, separators=(",", ":")) + "\n" for entry in entries),
+            encoding="utf-8",
+        )
+        result = inbox._read_inbox(now=now, limit=100, include_resolved=True)
+        by_id = {entry["id"]: entry for entry in result["entries"]}
+        for index, (seconds, label) in enumerate(cases):
+            item = by_id[f"fb-20260101-0000{index:02d}-abcd"]
+            self.assertEqual(item["age_s"], seconds)
+            self.assertEqual(item["age_label"], label)
+        self.assertEqual(by_id[invalid_id]["age_s"], None)
+        self.assertEqual(by_id[invalid_id]["age_label"], None)
+        self.assertEqual(by_id[invalid_id]["age_reason"], "invalid_timestamp")
+        self.assertEqual(by_id[future_id]["age_s"], None)
+        self.assertEqual(by_id[future_id]["age_label"], None)
+        self.assertEqual(by_id[future_id]["age_reason"], "future_timestamp")
+        raw = inbox.FEEDBACK_PATH.read_bytes()
+        self.assertNotIn(b"age_s", raw)
+        self.assertNotIn(b"age_label", raw)
+
     def test_malformed_line_is_counted(self) -> None:
         inbox.append_feedback("bug", "ok", "body")
         with inbox.FEEDBACK_PATH.open("a", encoding="utf-8") as handle:
@@ -180,8 +328,12 @@ class PipelineToolsTest(unittest.IsolatedAsyncioTestCase):
         rs_params = inspect.signature(resolve.fn).parameters
         self.assertIn("feedback_id", rs_params)
         self.assertIn("resolution", rs_params)
+        self.assertIn("evidence_ref", rs_params)
         rs_required = resolve.parameters.get("required") or []
         self.assertEqual(set(rs_required), {"feedback_id", "resolution"})
+        rs_props = resolve.parameters.get("properties", {})
+        self.assertIn("evidence_ref", rs_props)
+        self.assertNotIn("evidence_ref", rs_required)
 
     async def test_feedback_tool_rejects_bad_kind(self) -> None:
         app, _runtime = server.build_app(server.ServerConfig())
@@ -196,3 +348,50 @@ class PipelineToolsTest(unittest.IsolatedAsyncioTestCase):
             "bad_args" in message or "tool_contribution" in message,
             message,
         )
+
+
+class PipelineToolDescriptionsDeclareLimitsTest(unittest.IsolatedAsyncioTestCase):
+    """Ficha fb-20260906-145656-d45f.
+
+    Six calls were rejected in one session (2026-09-04/05) by rules that exist
+    in the validator and in no description: the evidence_ref root set, the
+    "path only" shape, and the title and resolution caps. A limit that is only
+    discoverable by tripping it costs a turn per discovery. Every number
+    asserted here was read off dayz_mcp/inbox.py, not off the ficha.
+    """
+
+    async def _tool_descriptions(self) -> dict[str, str]:
+        app, _runtime = server.build_app(server.ServerConfig())
+        return {tool.name: (tool.description or "") for tool in await app.list_tools()}
+
+    async def test_feedback_declares_its_length_caps(self) -> None:
+        text = (await self._tool_descriptions())["pipeline_feedback"]
+        # inbox.append_feedback: title 1..120, body 1..8000, project <= 64.
+        for fragment in ("title", "120", "body", "8000", "project", "64"):
+            self.assertIn(fragment, text)
+
+    async def test_resolve_declares_the_evidence_ref_shape_and_both_caps(self) -> None:
+        text = (await self._tool_descriptions())["pipeline_resolve"]
+        # inbox.append_resolution: resolution 1..2000.
+        # inbox._validate_evidence_ref: 1..240, ASCII, first segment in
+        # {reviews, gates, reports, research}, later segments [A-Za-z0-9._-].
+        for fragment in (
+            "resolution",
+            "2000",
+            "evidence_ref",
+            "240",
+            "reviews",
+            "gates",
+            "reports",
+            "research",
+        ):
+            self.assertIn(fragment, text)
+        lowered = text.lower()
+        # The two rejections that cost the most turns were a repo-prefixed path
+        # and a path with a note glued onto it, so both must be named.
+        self.assertIn("relative", lowered)
+        self.assertIn("path only", lowered)
+
+
+if __name__ == "__main__":
+    unittest.main()

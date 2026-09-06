@@ -60,8 +60,24 @@ class NativeLauncherTransactionTests(unittest.IsolatedAsyncioTestCase):
         source = project / "source"
         missions = project / "_server" / "mpmissions"
         mods = root / "Mods"
-        for path in (source, missions, mods / "@CF"):
+        # ficha df93: a server workspace the admin-tools preflight accepts.
+        # The mod folder and the serverDZ.cfg with vppDisablePassword = 1 are
+        # what dayz-test.ps1 used to guarantee; without them the transaction
+        # now refuses to start a server.
+        for path in (source, missions, mods / "@CF", mods / "@VPPAdminTools"):
             path.mkdir(parents=True, exist_ok=True)
+        # ficha df93 ronda 3: the gate proves the mod's identity from its own
+        # meta.cpp, so the fixture carries the lines every install has.
+        (mods / "@VPPAdminTools" / "meta.cpp").write_text(
+            "protocol = 1;\n"
+            "publishedid = 1828439124;\n"
+            'name = "VPPAdminTools";\n'
+            "timestamp = 5250883055442304087;\n",
+            encoding="ascii",
+        )
+        (project / "_server" / "serverDZ.cfg").write_text(
+            "vppDisablePassword = 1;\n", encoding="ascii"
+        )
         policy = request_module.RequestProjectPolicy(
             mod="ExampleMod",
             dev_root=str(project),
@@ -76,6 +92,7 @@ class NativeLauncherTransactionTests(unittest.IsolatedAsyncioTestCase):
                 "version": 1,
                 "mod": policy.mod,
                 "dev_root": policy.dev_root,
+                "extra_mods": ["@VPPAdminTools"],
                 "preflight": True,
             }
         ).encode("utf-8")

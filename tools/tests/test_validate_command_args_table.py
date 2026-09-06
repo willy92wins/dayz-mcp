@@ -20,6 +20,17 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("extra_mode", {"mode": "restore"}, (False, "bad_args")),
         ("extra_flag", {"force": False}, (False, "bad_args")),
     ),
+    "player_respawn": (
+        ("valid_empty", {}, (True, None)),
+        ("extra_random", {"random": True}, (False, "bad_args")),
+    ),
+    "key_press": (
+        ("valid_esc", {"dik": 1}, (True, None)),
+        ("missing_dik", {}, (False, "bad_args")),
+        ("negative_dik", {"dik": -1}, (False, "bad_args")),
+        ("bool_dik", {"dik": True}, (False, "bad_args")),
+        ("extra_key", {"dik": 1, "extra": None}, (False, "bad_args")),
+    ),
     "vehicle_trace": (
         (
             "valid",
@@ -341,12 +352,24 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
     "ui_tree": (
         ("valid_empty", {}, (True, None)),
         ("valid_with_optional", {"path": "Root", "limit": 512}, (True, None)),
+        ("valid_root", {"root": "MyMenu"}, (True, None)),
+        ("valid_root_and_path", {"root": "MyMenu", "path": "a/b"}, (True, None)),
         ("extra_key", {"extra": None}, (False, "bad_args")),
         ("path_wrong_type", {"path": 1}, (False, "bad_args")),
         ("limit_below_range", {"limit": 0}, (False, "bad_args")),
+        ("root_empty", {"root": ""}, (False, "bad_args")),
+        ("root_wrong_type", {"root": 5}, (False, "bad_args")),
+        ("mode_leaks", {"mode": "direct"}, (False, "bad_args")),
+        ("bubble_leaks", {"bubble": True}, (False, "bad_args")),
     ),
     "ui_set_text": (
         ("valid", {"path": "Root.Label", "text": "Ready"}, (True, None)),
+        ("valid_empty_text", {"path": "Root.Label", "text": ""}, (True, None)),
+        (
+            "valid_root",
+            {"path": "Root.Label", "text": "Ready", "root": "MyMenu"},
+            (True, None),
+        ),
         (
             "extra_key",
             {"path": "Root.Label", "text": "Ready", "extra": None},
@@ -354,12 +377,47 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ),
         ("missing_text", {"path": "Root.Label"}, (False, "bad_args")),
         ("empty_path", {"path": "", "text": "Ready"}, (False, "bad_args")),
+        (
+            "root_empty",
+            {"path": "Root.Label", "text": "Ready", "root": ""},
+            (False, "bad_args"),
+        ),
+        (
+            "mode_leaks",
+            {"path": "Root.Label", "text": "Ready", "mode": "direct"},
+            (False, "bad_args"),
+        ),
+        (
+            "bubble_leaks",
+            {"path": "Root.Label", "text": "Ready", "bubble": True},
+            (False, "bad_args"),
+        ),
     ),
     "ui_click": (
         ("valid_without_button", {"path": "Root.Button"}, (True, None)),
         (
             "valid_with_button",
             {"path": "Root.Button", "button": 2},
+            (True, None),
+        ),
+        ("valid_mode_direct", {"path": "Root.Button", "mode": "direct"}, (True, None)),
+        (
+            "valid_mode_complete",
+            {"path": "Root.Button", "mode": "complete"},
+            (True, None),
+        ),
+        ("valid_bubble_true", {"path": "Root.Button", "bubble": True}, (True, None)),
+        ("valid_bubble_false", {"path": "Root.Button", "bubble": False}, (True, None)),
+        ("valid_root", {"path": "Root.Button", "root": "MyMenu"}, (True, None)),
+        (
+            "valid_full",
+            {
+                "path": "Root.Button",
+                "root": "MyMenu",
+                "mode": "direct",
+                "bubble": True,
+                "button": 0,
+            },
             (True, None),
         ),
         (
@@ -373,6 +431,20 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             {"path": "Root.Button", "button": 3},
             (False, "bad_args"),
         ),
+        (
+            "mode_outside_enum",
+            {"path": "Root.Button", "mode": "sideways"},
+            (False, "bad_args"),
+        ),
+        ("mode_empty", {"path": "Root.Button", "mode": ""}, (False, "bad_args")),
+        (
+            "bubble_string",
+            {"path": "Root.Button", "bubble": "true"},
+            (False, "bad_args"),
+        ),
+        ("bubble_int", {"path": "Root.Button", "bubble": 1}, (False, "bad_args")),
+        ("root_empty", {"path": "Root.Button", "root": ""}, (False, "bad_args")),
+        ("root_wrong_type", {"path": "Root.Button", "root": 123}, (False, "bad_args")),
     ),
     "ui_reload_layout": (
         ("valid_implicit_reload", {"path": "layout.gui"}, (True, None)),
@@ -396,6 +468,7 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
     ),
     "ui_focus": (
         ("valid", {"path": "Root.EditBox"}, (True, None)),
+        ("valid_root", {"root": "MyMenu", "path": "Root.EditBox"}, (True, None)),
         (
             "extra_key",
             {"path": "Root.EditBox", "extra": None},
@@ -403,6 +476,10 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ),
         ("missing_path", {}, (False, "bad_args")),
         ("empty_path", {"path": ""}, (False, "bad_args")),
+        ("root_empty", {"path": "Root.EditBox", "root": ""}, (False, "bad_args")),
+        ("bubble_leaks", {"path": "Root.EditBox", "bubble": True}, (False, "bad_args")),
+        ("mode_leaks", {"path": "Root.EditBox", "mode": "direct"}, (False, "bad_args")),
+        ("button_leaks", {"path": "Root.EditBox", "button": 1}, (False, "bad_args")),
     ),
     "ui_dialog": (
         (

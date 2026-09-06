@@ -10,6 +10,7 @@ import unittest
 from dayz_mcp import (
     dayz_test_readiness,
     dayz_test_request,
+    dayz_test_storage,
     dayz_test_worker,
     native_broker_protocol,
 )
@@ -465,6 +466,49 @@ class DayzTestWorkerTests(unittest.TestCase):
                     )
                 self.assertEqual(raised.exception.code, "runtime_policy_invalid")
 
+    def test_preflight_rejects_alias_missing_from_project_runtime(self) -> None:
+        parsed = dayz_test_request.parse_dayz_test_request(
+            _raw(mission="lfheli", preflight=True), policies=(POLICY,)
+        )
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+            asyncio.run(
+                dayz_test_worker.execute_dayz_test_worker(
+                    parsed.canonical_bytes,
+                    request_sha256=parsed.sha256,
+                    request_policies=(POLICY,),
+                    runtime_policy=RUNTIME,
+                    broker=_Broker(),
+                )
+            )
+        self.assertEqual(raised.exception.code, "runtime_policy_invalid")
+
+    def test_preflight_accepts_alias_present_in_project_runtime(self) -> None:
+        runtime = dataclasses.replace(
+            RUNTIME,
+            mission_aliases=RUNTIME.mission_aliases
+            + (
+                (
+                    "lfheli",
+                    r"C:\Program Files (x86)\Steam\steamapps\common\DayZServer\mpmissions\LFHeli.chernarusplus",
+                ),
+            ),
+        )
+        parsed = dayz_test_request.parse_dayz_test_request(
+            _raw(mission="lfheli", preflight=True), policies=(POLICY,)
+        )
+        broker = _Broker()
+        result = asyncio.run(
+            dayz_test_worker.execute_dayz_test_worker(
+                parsed.canonical_bytes,
+                request_sha256=parsed.sha256,
+                request_policies=(POLICY,),
+                runtime_policy=runtime,
+                broker=broker,
+            )
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(broker.requests, [])
+
     def test_lost_existing_start_response_recovers_only_from_one_role_pid(self) -> None:
         recovered = _LostExistingStartBroker()
         result = self._run(_raw(mode="all"), recovered)
@@ -728,6 +772,250 @@ class DayzTestWorkerTests(unittest.TestCase):
         source = inspect.getsource(dayz_test_worker)
         for forbidden in ("subprocess", "multiprocessing", "ctypes", "os.system", "os.spawn"):
             self.assertNotIn(forbidden, source)
+
+
+class StorageSealTests(unittest.TestCase):
+    """S13. Which launches carry the mod-set seal, and which must not.
+
+    The worker no longer rotates: it seals. The rotation moved into
+    process_lifecycle.start_run, after every admission and before the spawn
+    (Codex F-01), so what is asserted here is the CONTRACT the daemon consumes
+    -- and, above all, its negative half: a launch that attaches to a tree the
+    engine already chose must not carry a seal, because carrying one would ask
+    the daemon to rotate under a live session.
+    """
+
+    RUN_ID = "12345678-1234-4234-8234-1234567890ab"
+
+    def _starts(self, broker: _Broker, **overrides: object) -> list[dict[str, object]]:
+        raw = _raw(**overrides)
+        parsed = dayz_test_request.parse_dayz_test_request(raw, policies=(POLICY,))
+        ids = iter(
+            (
+                "12345678-1234-4234-8234-1234567890ab",
+                "87654321-4321-4321-8321-ba0987654321",
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            )
+        )
+
+        async def readiness(_run_id: str, _port: int, _timeout: int) -> object:
+            return dayz_test_readiness.ReadinessResult(ready=True, error_code=None)
+
+        asyncio.run(
+            dayz_test_worker.execute_dayz_test_worker(
+                parsed.canonical_bytes,
+                request_sha256=parsed.sha256,
+                request_policies=(POLICY,),
+                runtime_policy=RUNTIME,
+                broker=broker,
+                id_fn=lambda: next(ids),
+                readiness_probe=readiness,
+                has_binarizable_assets=lambda _source: True,
+            )
+        )
+        return [
+            json.loads(item.stdin)
+            for item in broker.requests
+            if item.payload.get("command") == "start"
+        ]
+
+    def test_s13_only_the_launches_that_create_a_run_carry_the_seal(self) -> None:
+        cases = (
+            ({"mode": "server"}, True),
+            ({"mode": "offline"}, True),
+            ({"mode": "offline", "run_id": self.RUN_ID}, False),
+            ({"mode": "client", "run_id": self.RUN_ID}, False),
+            ({"mode": "offline", "run_id": self.RUN_ID, "kill": True}, False),
+            ({"mode": "server", "preflight": True}, False),
+        )
+        for overrides, expected in cases:
+            with self.subTest(**overrides):
+                broker = _Broker()
+                if overrides.get("run_id") and not overrides.get("kill"):
+                    broker.current_run_id = str(overrides["run_id"])
+                starts = self._starts(broker, **overrides)
+                sealed = [start for start in starts if "storage_seal" in start]
+                self.assertEqual(bool(sealed), expected, starts)
+
+    def test_s13b_mode_all_seals_the_server_leg_and_not_the_client_leg(self) -> None:
+        starts = self._starts(_Broker(), mode="all")
+        self.assertEqual(len(starts), 2, starts)
+        server, client = starts
+        self.assertEqual(server["role"], "server")
+        self.assertEqual(client["role"], "client")
+        self.assertIn("storage_seal", server)
+        self.assertNotIn("storage_seal", client)
+
+    def test_the_seal_is_covered_by_the_launch_hash(self) -> None:
+        """It travels sealed, not merely alongside.
+
+        The launch hash is computed over the core AFTER the seal is added, so a
+        request whose mod set was tampered with in flight fails the daemon's own
+        integrity check instead of rotating for the wrong game.
+        """
+        starts = self._starts(_Broker(), mode="server")
+        core = dict(starts[0])
+        supplied = core.pop("launch_request_sha256")
+        expected = hashlib.sha256(
+            json.dumps(
+                core,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(supplied, expected)
+        self.assertIn("storage_seal", core)
+
+    def test_the_seal_separates_extra_mods_from_server_mods(self) -> None:
+        first = self._starts(_Broker(), mode="server", extra_mods=["@LFQuad2"])
+        second = self._starts(_Broker(), mode="server", server_mods=["@LFQuad2"])
+        self.assertNotEqual(first[0]["storage_seal"], second[0]["storage_seal"])
+
+    def test_the_seal_is_the_one_the_storage_module_computes(self) -> None:
+        # No mirror: the value in the request is the module's own answer.
+        starts = self._starts(_Broker(), mode="server", extra_mods=["@LFQuad2"])
+        expected = dayz_test_storage.modset_seal(
+            dayz_test_storage.modset_roles(
+                base_mods=list(POLICY.default_base_mods),
+                project_mod="@" + RUNTIME.mod,
+                extra_mods=["@LFQuad2"],
+                server_mods=[],
+                mods_root=RUNTIME.mods_root,
+            )
+        )
+        self.assertEqual(starts[0]["storage_seal"], expected)
+
+    def test_the_storage_codes_are_carried_from_the_daemon_verbatim(self) -> None:
+        for code in ("storage_rotate_failed", "storage_recovery_required"):
+            self.assertIn(code, dayz_test_worker.LIFECYCLE_REJECTION_CODES)
+            self.assertIn(code, dayz_test_worker.WORKER_ERROR_CODES)
+
+
+class ReplacementWitnessTests(unittest.TestCase):
+    """79e2. The witness reaches the sealed request, and the reason comes back.
+
+    Two halves of the same ficha: the gate verdict must travel INSIDE the
+    request the daemon revalidates, and the daemon's refusal must not be
+    flattened into worker_failed on the way out.
+    """
+
+    RUN_ID = "12345678-1234-4234-8234-1234567890ab"
+    WITNESS = 1_756_000_000_000
+
+    def _execute(self, broker: _Broker, **overrides: object) -> object:
+        raw = _raw(**overrides)
+        parsed = dayz_test_request.parse_dayz_test_request(raw, policies=(POLICY,))
+        ids = iter(
+            (
+                "12345678-1234-4234-8234-1234567890ab",
+                "87654321-4321-4321-8321-ba0987654321",
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            )
+        )
+
+        async def readiness(_run_id: str, _port: int, _timeout: int) -> object:
+            return dayz_test_readiness.ReadinessResult(ready=True, error_code=None)
+
+        return asyncio.run(
+            dayz_test_worker.execute_dayz_test_worker(
+                parsed.canonical_bytes,
+                request_sha256=parsed.sha256,
+                request_policies=(POLICY,),
+                runtime_policy=RUNTIME,
+                broker=broker,
+                id_fn=lambda: next(ids),
+                readiness_probe=readiness,
+                has_binarizable_assets=lambda _source: True,
+            )
+        )
+
+    def test_the_witness_travels_in_the_sealed_client_start(self) -> None:
+        broker = _Broker()
+        broker.current_run_id = self.RUN_ID
+        self._execute(
+            broker,
+            mode="client",
+            run_id=self.RUN_ID,
+            replace_if_not_polling_since=self.WITNESS,
+        )
+        starts = [
+            json.loads(item.stdin)
+            for item in broker.requests
+            if item.payload.get("command") == "start"
+        ]
+        self.assertEqual(len(starts), 1, starts)
+        self.assertEqual(starts[0]["replace_if_not_polling_since"], self.WITNESS)
+        self.assertEqual(starts[0]["role"], "client")
+
+    def test_a_launch_that_creates_its_own_run_carries_no_witness(self) -> None:
+        """Negative control: nothing to supersede, nothing to witness.
+
+        It also keeps the bytes the launch hash covers as narrow as they were.
+        """
+        broker = _Broker()
+        self._execute(broker, mode="server")
+        starts = [
+            json.loads(item.stdin)
+            for item in broker.requests
+            if item.payload.get("command") == "start"
+        ]
+        for start in starts:
+            self.assertNotIn("replace_if_not_polling_since", start)
+
+    def test_a_declared_lifecycle_refusal_reaches_the_caller_verbatim(self) -> None:
+        for code in sorted(dayz_test_worker.LIFECYCLE_REJECTION_CODES):
+            with self.subTest(code=code):
+
+                class _RefusingBroker(_Broker):
+                    async def invoke(self, frame: bytes) -> dict[str, object]:
+                        request = native_broker_protocol.decode_request(frame)
+                        if request.payload.get("command") == "start":
+                            self.requests.append(request)
+                            return {"ok": False, "error": code}
+                        return await super().invoke(frame)
+
+                broker = _RefusingBroker()
+                broker.current_run_id = self.RUN_ID
+                with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as caught:
+                    self._execute(
+                        broker,
+                        mode="client",
+                        run_id=self.RUN_ID,
+                        replace_if_not_polling_since=self.WITNESS,
+                    )
+                self.assertEqual(caught.exception.code, code)
+
+    def test_an_undeclared_lifecycle_error_still_collapses_to_worker_failed(self) -> None:
+        """Negative control that kills the mutant "carry any error through"."""
+
+        class _RefusingBroker(_Broker):
+            async def invoke(self, frame: bytes) -> dict[str, object]:
+                request = native_broker_protocol.decode_request(frame)
+                if request.payload.get("command") == "start":
+                    self.requests.append(request)
+                    return {"ok": False, "error": "something_the_worker_never_heard_of"}
+                return await super().invoke(frame)
+
+        broker = _RefusingBroker()
+        broker.current_run_id = self.RUN_ID
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as caught:
+            self._execute(
+                broker,
+                mode="client",
+                run_id=self.RUN_ID,
+                replace_if_not_polling_since=self.WITNESS,
+            )
+        self.assertEqual(caught.exception.code, "worker_failed")
+
+    def test_the_carried_codes_are_part_of_the_worker_vocabulary(self) -> None:
+        self.assertTrue(
+            dayz_test_worker.LIFECYCLE_REJECTION_CODES
+            <= dayz_test_worker.WORKER_ERROR_CODES
+        )
 
 
 if __name__ == "__main__":

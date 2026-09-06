@@ -158,6 +158,14 @@ is verified at `scripts/1_core/proto/enphysics.c:123`.
                 with self.subTest(name=entry["name"], path=evidence["path"]):
                     self.assertTrue((self.pack / evidence["path"]).is_file())
 
+    def test_extract_pack_output_passes_the_strong_published_validator(self) -> None:
+        # The strengthened pre-publication contract (plan point 4) must accept
+        # exactly the schema extract_pack() itself produces, optional fields
+        # included, so a prepared index never disagrees with a generated one.
+        entries = knowledge.extract_pack(self.pack)
+        self.assertTrue(entries)
+        self.assertIs(knowledge.validate_index(entries), entries)
+
     def test_module_cli_writes_the_same_deterministic_json(self) -> None:
         output = Path(self._temporary.name) / "knowledge.json"
         completed = subprocess.run(

@@ -61,20 +61,30 @@ class BridgeStatusGenerationTest(unittest.TestCase):
         self.assertFalse(server["observed_this_generation"])
         self.assertEqual(client["version_detail"], "never_polled_this_generation")
         self.assertEqual(server["version_detail"], "never_polled_this_generation")
-        # Existing classification is preserved so old consumers keep working.
-        self.assertEqual(client["version_state"], "legacy_blocked")
-        self.assertEqual(server["version_state"], "legacy_blocked")
+        self.assertEqual(client["version_state"], "never_polled_this_generation")
+        self.assertEqual(server["version_state"], "never_polled_this_generation")
+        self.assertNotEqual(client["version_state"], "legacy_blocked")
+        self.assertNotEqual(server["version_state"], "legacy_blocked")
+        self.assertEqual(
+            payload["version_state"]["client"], "never_polled_this_generation"
+        )
+        self.assertEqual(
+            payload["version_state"]["server"], "never_polled_this_generation"
+        )
         self.assertIsNone(client["last_poll_age_s"])
         self.assertTrue(_EXISTING_KEYS.issubset(client))
         self.assertTrue(_EXISTING_KEYS.issubset(server))
 
-    def test_require_version_false_never_polled_keeps_legacy_state(self) -> None:
+    def test_require_version_false_never_polled_is_not_legacy_as_current(self) -> None:
         payload = core.build_status(
             _snapshot(server_age=None, client_age=None),
             require_version=False,
             expected_game_version=None,
         )
-        self.assertEqual(payload["server_peer"]["version_state"], "legacy")
+        self.assertEqual(
+            payload["server_peer"]["version_state"], "never_polled_this_generation"
+        )
+        self.assertNotEqual(payload["server_peer"]["version_state"], "legacy")
         self.assertEqual(
             payload["server_peer"]["version_detail"], "never_polled_this_generation"
         )
@@ -94,6 +104,8 @@ class BridgeStatusGenerationTest(unittest.TestCase):
         self.assertEqual(server["version_detail"], "poll did not include ver=")
         self.assertFalse(client["observed_this_generation"])
         self.assertEqual(client["version_detail"], "never_polled_this_generation")
+        self.assertEqual(client["version_state"], "never_polled_this_generation")
+        self.assertNotEqual(client["version_state"], "legacy_blocked")
 
     def test_observed_zero_age_counts_as_this_generation(self) -> None:
         version = f"{core.EXPECTED_BRIDGE_VERSION}~1.29.0"

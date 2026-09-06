@@ -31,7 +31,7 @@ _IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 _DRIVE_REMOTE = 4
 _FILE_ID_RE = re.compile(r"^[0-9A-F]{32}$")
-_MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal"})
+_MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal", "lfheli"})
 
 
 class _FILE_ATTRIBUTE_TAG_INFO(ctypes.Structure):

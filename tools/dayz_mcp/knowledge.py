@@ -14,12 +14,18 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import msvcrt
 import os
 import re
+import stat
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from mcp.server.fastmcp.exceptions import ToolError
+
+from . import knowledge_pack
 
 
 GENERATION_COMMAND = (
@@ -27,7 +33,24 @@ GENERATION_COMMAND = (
     r"%LOCALAPPDATA%\DayZ_MCP\knowledge-pack --out "
     r"%LOCALAPPDATA%\DayZ_MCP\knowledge.json"
 )
-KNOWLEDGE_NOT_INSTALLED = f"knowledge_not_installed: run {GENERATION_COMMAND}"
+KNOWLEDGE_REMEDY = "call dayz_knowledge_status, then dayz_knowledge_prepare"
+KNOWLEDGE_NOT_INSTALLED = f"knowledge_not_installed: {KNOWLEDGE_REMEDY}"
+KNOWLEDGE_INDEX_INVALID = f"knowledge_index_invalid: {KNOWLEDGE_REMEDY}"
+
+
+class KnowledgeIndexError(ValueError):
+    """Raised when an index does not satisfy the published entry contract."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"knowledge_index_invalid: {reason}")
+
+
+class KnowledgePrepareConflict(RuntimeError):
+    """Raised when another process owns the prepare publication gate."""
+
+
+_PREPARE_TEST_HOOK: Callable[[], None] | None = None
 
 _TARGET_BUILD_RE = re.compile(
     # Split so the "build:" token and the "\s" escape never share a source
@@ -332,12 +355,39 @@ def extract_pack(pack_dir: str | Path) -> list[dict[str, Any]]:
     )
 
 
+def validate_index(payload: object) -> list[dict[str, Any]]:
+    """Validate the complete persisted index shape before it is consumed."""
+    if not isinstance(payload, list) or not payload:
+        raise KnowledgeIndexError("root must be a non-empty list")
+    for entry in payload:
+        if not isinstance(entry, dict):
+            raise KnowledgeIndexError("entry must be an object")
+        for field in ("name", "source_file"):
+            value = entry.get(field)
+            if not isinstance(value, str) or not value:
+                raise KnowledgeIndexError(f"{field} must be a non-empty string")
+        evidence = entry.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            raise KnowledgeIndexError("evidence must be a non-empty list")
+        for item in evidence:
+            if not isinstance(item, dict):
+                raise KnowledgeIndexError("evidence item must be an object")
+            path = item.get("path")
+            line = item.get("line")
+            if not isinstance(path, str) or not path:
+                raise KnowledgeIndexError("evidence path must be a non-empty string")
+            if isinstance(line, bool) or not isinstance(line, int) or line <= 0:
+                raise KnowledgeIndexError("evidence line must be a positive integer")
+    return payload
+
+
 def load_index(path: str | Path) -> list[dict[str, Any]]:
     """Load a generated JSON list without modifying it."""
-    payload = json.loads(Path(path).read_text(encoding="utf-8-sig"))
-    if not isinstance(payload, list):
-        raise ValueError("knowledge_index_invalid: root must be a list")
-    return payload
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise KnowledgeIndexError("JSON is invalid") from error
+    return validate_index(payload)
 
 
 def find(index: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
@@ -391,6 +441,177 @@ def _default_knowledge_json() -> Path:
     return base / "DayZ_MCP" / "knowledge.json"
 
 
+def _regular_lock_identity(path: Path, descriptor: int) -> tuple[int, int]:
+    opened = os.fstat(descriptor)
+    named = os.lstat(path)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(named.st_mode)
+        or _is_reparse_stat(opened)
+        or _is_reparse_stat(named)
+        or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+    ):
+        raise KnowledgePrepareConflict("knowledge_prepare_conflict")
+    return opened.st_dev, opened.st_ino
+
+
+def _is_reparse_stat(value: os.stat_result) -> bool:
+    attributes = getattr(value, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & reparse_flag)
+
+
+def _assert_regular_path(path: Path) -> os.stat_result:
+    try:
+        value = path.lstat()
+    except OSError as error:
+        raise KnowledgePrepareConflict("knowledge_prepare_conflict") from error
+    if not stat.S_ISREG(value.st_mode) or _is_reparse_stat(value):
+        raise KnowledgePrepareConflict("knowledge_prepare_conflict")
+    return value
+
+
+def _assert_no_name_surrogates(path: Path) -> None:
+    absolute = Path(os.path.abspath(str(Path(path))))
+    parts = absolute.parts
+    if not parts:
+        raise KnowledgePrepareConflict("knowledge_prepare_conflict")
+    current = Path(parts[0])
+    for part in parts[1:]:
+        current /= part
+        try:
+            value = os.stat(current, follow_symlinks=False)
+        except OSError as error:
+            raise KnowledgePrepareConflict("knowledge_prepare_conflict") from error
+        if int(getattr(value, "st_reparse_tag", 0) or 0) & 0x20000000:
+            raise KnowledgePrepareConflict("knowledge_prepare_conflict")
+
+
+@contextmanager
+def _exclusive_prepare_lock(lock_path: Path) -> Iterator[None]:
+    """Hold a non-blocking OS lock on a regular sibling anchor."""
+    _assert_no_name_surrogates(lock_path.parent)
+    if os.path.lexists(lock_path):
+        _assert_regular_path(lock_path)
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    descriptor: int | None = None
+    acquired = False
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+        _regular_lock_identity(lock_path, descriptor)
+        if os.fstat(descriptor).st_size == 0:
+            if os.write(descriptor, b"\0") != 1:
+                raise OSError("short_lock_write")
+            os.fsync(descriptor)
+            if os.fstat(descriptor).st_size < 1:
+                raise OSError("short_lock_write")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        acquired = True
+        _regular_lock_identity(lock_path, descriptor)
+    except KnowledgePrepareConflict:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    except (OSError, ValueError) as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise KnowledgePrepareConflict("knowledge_prepare_conflict") from error
+    try:
+        yield
+    finally:
+        try:
+            if acquired:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        finally:
+            os.close(descriptor)
+
+
+def _index_state(path: Path) -> tuple[str, str]:
+    try:
+        load_index(path)
+    except FileNotFoundError:
+        return "missing", "index_missing"
+    except (OSError, KnowledgeIndexError, TypeError, ValueError):
+        return "invalid", "index_invalid"
+    return "valid", "valid"
+
+
+def _pack_state() -> tuple[str, str, Path | None]:
+    try:
+        pack_path = knowledge_pack.resolve_pack_dir()
+    except Exception:
+        return "invalid", "pack_invalid", None
+    if not pack_path.exists():
+        return "missing", "pack_missing", pack_path
+    if not pack_path.is_dir():
+        return "invalid", "pack_invalid", pack_path
+    try:
+        entries = extract_pack(pack_path)
+        validate_index(entries)
+    except Exception:
+        return "invalid", "pack_invalid", pack_path
+    return "valid", "valid", pack_path
+
+
+def _status(path: Path) -> dict[str, Any]:
+    index_state, index_reason = _index_state(path)
+    pack_state, pack_reason, pack_path = _pack_state()
+    return {
+        "index_state": index_state,
+        "pack_state": pack_state,
+        "can_query": index_state == "valid",
+        "can_prepare": pack_state == "valid",
+        "index_path": str(path.resolve()),
+        "pack_path": str(pack_path.resolve()) if pack_path is not None else None,
+        "index_reason": index_reason,
+        "pack_reason": pack_reason,
+    }
+
+
+def _publish_index(path: Path, entries: list[dict[str, Any]]) -> dict[str, Any]:
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = Path(f"{path}.prepare.lock")
+    candidate: Path | None = None
+    with _exclusive_prepare_lock(lock_path):
+        txid = uuid.uuid4().hex
+        candidate = Path(f"{path}.candidate.{txid}")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        try:
+            descriptor = os.open(candidate, flags, 0o600)
+        except FileExistsError as error:
+            raise KnowledgePrepareConflict("knowledge_prepare_conflict") from error
+        try:
+            serialized = (json.dumps(entries, ensure_ascii=False, indent=2) + "\n").encode(
+                "utf-8"
+            )
+            with os.fdopen(descriptor, "wb", closefd=True) as output:
+                descriptor = -1
+                output.write(serialized)
+                output.flush()
+                os.fsync(output.fileno())
+            validate_index(json.loads(candidate.read_text(encoding="utf-8")))
+            if _PREPARE_TEST_HOOK is not None:
+                _PREPARE_TEST_HOOK()
+            os.replace(candidate, path)
+            candidate = None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if candidate is not None:
+                try:
+                    candidate.unlink()
+                except FileNotFoundError:
+                    pass
+    return {"status": "published", "index_path": str(path), "txid": txid}
+
+
 def register_knowledge_tools(
     app: Any,
     index_path: str | Path | None = None,
@@ -403,12 +624,14 @@ def register_knowledge_tools(
             return load_index(path)
         except FileNotFoundError:
             raise ToolError(KNOWLEDGE_NOT_INSTALLED) from None
+        except (OSError, KnowledgeIndexError, TypeError, ValueError):
+            raise ToolError(KNOWLEDGE_INDEX_INVALID) from None
 
     @app.tool(
         description=(
             "Search the local DayZ Knowledge Pack index by case-insensitive substring. "
             "Returns up to 20 entries with source_file and evidence citations. "
-            f"If the index is missing, run {GENERATION_COMMAND}."
+            f"If the index is missing, {KNOWLEDGE_REMEDY}."
         )
     )
     def dayz_knowledge_find(query: str) -> list[dict[str, Any]]:
@@ -418,11 +641,57 @@ def register_knowledge_tools(
         description=(
             "Look up one exact API or symbol name in the local DayZ Knowledge Pack index. "
             "Returns its signature, module, source_file, evidence, gotchas, and verified version. "
-            f"If the index is missing, run {GENERATION_COMMAND}."
+            f"If the index is missing, {KNOWLEDGE_REMEDY}."
         )
     )
     def dayz_knowledge_show(name: str) -> dict[str, Any]:
         return show(read_installed_index(), name)
+
+    @app.tool(
+        description=(
+            "Report independent local Knowledge Pack index and installed-pack states. "
+            "This operation is read-only."
+        )
+    )
+    def dayz_knowledge_status() -> dict[str, Any]:
+        return _status(path)
+
+    @app.tool(
+        description=(
+            "Prepare the local Knowledge Pack index from the already installed pack. "
+            "This operation never downloads or updates the pack."
+        )
+    )
+    def dayz_knowledge_prepare() -> dict[str, Any]:
+        try:
+            pack_path = knowledge_pack.resolve_pack_dir()
+        except Exception:
+            raise ToolError("knowledge_pack_invalid") from None
+        if not pack_path.exists():
+            raise ToolError("knowledge_pack_missing")
+        if not pack_path.is_dir():
+            raise ToolError("knowledge_pack_invalid")
+        try:
+            entries = extract_pack(pack_path)
+            validate_index(entries)
+        except Exception:
+            raise ToolError("knowledge_pack_invalid") from None
+        try:
+            result = _publish_index(path, entries)
+        except KnowledgePrepareConflict:
+            raise ToolError("knowledge_prepare_conflict") from None
+        except Exception:
+            raise ToolError("knowledge_prepare_failed") from None
+        result.update(
+            {
+                "pack_path": str(pack_path.resolve()),
+                "index_state": "valid",
+                "pack_state": "valid",
+                "can_query": True,
+                "can_prepare": True,
+            }
+        )
+        return result
 
 
 def _parser() -> argparse.ArgumentParser:

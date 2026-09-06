@@ -23,6 +23,13 @@ class MCPBridge
 	protected const int DRIVE_PROBE_PHASE_DRIVE = 2;
 	protected const int DRIVE_PROBE_PHASE_SAMPLE = 3;
 	protected const int DRIVE_PROBE_PHASE_REPORT = 4;
+	// Capability census announced on every poll (caps=). Sorted ascending,
+	// comma separated; one entry per branch of Dispatch() before unknown_command.
+	// The daemon crosses this list against its registered tools; keep it in
+	// lockstep with the dispatcher and never derive it from the daemon side.
+	// Short literals joined by + (the vanilla form for a const string built from
+	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
+	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,infected_drive,inventory_give,notify_players," + "object_anim,object_delete,object_inspect,player_teleport,query_all_players," + "query_get_in_condition,query_player_state,scene_raycast,surface_query,telemetry_read," + "vehicle_drive,vehicle_enter,vehicle_prepare_fixture,world_spawn,world_time_set,world_weather_set";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -225,6 +232,7 @@ class MCPBridge
 		m_CallbackRefs.Insert(cb);
 		string request = "poll?key=" + m_Key;
 		request = request + "&ver=" + GetPollVersion();
+		request = request + "&caps=" + EncodeQueryValue(SERVER_CAPABILITIES);
 		if (m_PeerInstance != "")
 		{
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
@@ -1370,6 +1378,7 @@ class MCPBridge
 
 	// Raw nearby objects via GetObjectsAtPosition3D. No classname filter.
 	// result.entities is the nearest `limit` hits; result.count_total is the uncut size.
+	// has_cargo reports cargo capacity (HasCargoCapacity), never occupancy.
 	protected bool DispatchEntitiesQuery(MCPCommand command, MCPResult result)
 	{
 		MCPSpawnValidation validation = ValidatePositionArgs(command.args);
@@ -1410,6 +1419,7 @@ class MCPBridge
 				vector foundPos = found.GetPosition();
 				entry.type = found.GetType();
 				entry.classname = found.ClassName();
+				entry.has_cargo = HasCargoCapacity(found);
 				VectorToArray(foundPos, entry.pos);
 				entry.distance = vector.Distance(validation.pos, foundPos);
 				collected.Insert(entry);
@@ -1422,6 +1432,27 @@ class MCPBridge
 		result.entities = TakeNearestEntities(collected, limit);
 		result.ok = true;
 		return true;
+	}
+
+	// C3: cargo capacity, not occupancy. An entity that owns a cargo grid answers
+	// true even while that grid is empty; an Object that is not an EntityAI, or an
+	// EntityAI without cargo, answers false. Item counting and classname lists are
+	// deliberately not consulted.
+	protected bool HasCargoCapacity(Object found)
+	{
+		EntityAI entity = EntityAI.Cast(found);
+		if (!entity)
+		{
+			return false;
+		}
+
+		GameInventory inventory = entity.GetInventory();
+		if (!inventory)
+		{
+			return false;
+		}
+
+		return inventory.GetCargo() != null;
 	}
 
 	// F3.6: memory points and bounding center. Missing memory points are product FAIL

@@ -27,6 +27,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Callable
 
 from dayz_mcp import core, orphan_guard
@@ -523,9 +524,14 @@ def _activate_server_coordination(
         audit=audit_writer.write,
         guard=guard,
         retail_probe=orphan_guard.snapshot_retail_processes,
+        # fb-20260904-114520-6927: a dedicated server that has not bound its
+        # port yet is only visible by name, so the name probe lists it too.
         diag_probe=lambda: orphan_guard.snapshot_processes_by_name(
-            ["DayZDiag_x64.exe"]
+            ["DayZDiag_x64.exe", "DayZServer_x64.exe"]
         ),
+        # fb-20260904-114520-6927: the socket table is the second witness of
+        # the box; a DayZ image holding a UDP port occupies it without a run.
+        port_probe=orphan_guard.snapshot_udp_port_holders,
         game_path=Path(
             os.environ.get(
                 "DAYZ_GAME_PATH",
@@ -534,6 +540,9 @@ def _activate_server_coordination(
         ),
         recovery_fault_arm=arm_lifecycle_recovery_fault,
         bindings=state,
+        # 79e2: the same ServerState, read-only, so start_run can revalidate a
+        # client replacement against the bridge at the instant of the kill.
+        bridge_probe=getattr(state, "status_snapshot", None),
     )
     if recovered_lifecycle_fault is None:
         bounded_io(
@@ -806,8 +815,498 @@ def install_run_reaper(
     return thread
 
 
-def run_daemon(config: Any) -> int:
-    startup_deadline = time.monotonic() + validated_startup_budget_s()
+# ---------------------------------------------------------------------------
+# Startup observability (ficha fb-20260901-225325-76dd).
+#
+# Whether this daemon can outlive the session that spawned it is decided by two
+# facts that used to leave no trace anywhere: which branch of spawn_detached
+# launched it, and whether the job it belongs to carries KILL_ON_JOB_CLOSE. The
+# SPAWN: lines are written by the PARENT to its own stderr, and the child's own
+# stdout/stderr go to DEVNULL, so a daemon that died WITH its session was
+# indistinguishable from one that shut down after its game had already died --
+# which is exactly the discrimination the 76dd diagnosis could not make. These
+# records go to the durable audit log (JsonlAuditWriter, under the runtime root),
+# the same sink the restart and reap history already comes from.
+#
+# Observability only: nothing below changes a launch, a bind, an idle or a
+# shutdown DECISION, and a record that cannot be written is dropped, never
+# raised.
+
+DAEMON_SPAWN_MARKER_ENV = "DAYZ_MCP_DAEMON_SPAWN_MARKER"
+
+# How long a startup or shutdown will WAIT for its own audit row before moving
+# on. The audit writer serialises every producer of this process behind one
+# lock with no timeout and rewrites the whole file under it, so an append that
+# is merely slow -- or one stuck behind another producer -- would otherwise
+# delay installing the watchdog, or leave the port closed with the process
+# still parked in stop.wait(). The budget bounds the WAIT, not the write: the
+# worker keeps going and the row still lands if the lock frees.
+DAEMON_EVENT_WRITE_BUDGET_S = 2.0
+SPAWN_BRANCH_BREAKAWAY_OK = "create_breakaway_from_job_ok"
+SPAWN_BRANCH_JOB_BOUND = "breakaway_denied_job_bound"
+SPAWN_BRANCH_POSIX_NEW_SESSION = "posix_new_session"
+SPAWN_BRANCH_NO_MARKER = "unknown_no_marker"
+SPAWN_BRANCH_STALE_MARKER = "unknown_stale_marker"
+_KNOWN_SPAWN_BRANCHES = frozenset(
+    {
+        SPAWN_BRANCH_BREAKAWAY_OK,
+        SPAWN_BRANCH_JOB_BOUND,
+        SPAWN_BRANCH_POSIX_NEW_SESSION,
+    }
+)
+
+# LL-156: a process meant to OUTLIVE its session never ties itself to its
+# parent's exit. The daemon arms no such watchdog (server.py, the embedded mode,
+# is the one that does); the flag is PUBLISHED so a regression that armed it
+# would show up in the record instead of being invisible.
+DAEMON_PARENT_DEATH_ARMED = False
+
+# JOBOBJECT_BASIC_LIMIT_INFORMATION.LimitFlags bits, and the info class that
+# carries them (winnt.h). KILL_ON_JOB_CLOSE is the bit that decides whether
+# closing the session's job takes this process with it; IsProcessInJob alone
+# answers True for almost everything since Windows 8 nests jobs, so it does not
+# discriminate and the flags do.
+_JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
+_JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0x00001000
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+
+_JOB_VERDICT_API_UNAVAILABLE = "api_unavailable"
+_JOB_VERDICT_MEMBERSHIP_FAILED = "is_process_in_job_failed"
+_JOB_VERDICT_QUERY_FAILED = "query_failed"
+_JOB_VERDICT_NO_JOB = "no_job"
+_JOB_VERDICT_KILL_ON_CLOSE = "job_bound_kill_on_close"
+_JOB_VERDICT_ANCESTORS_UNKNOWN = "job_bound_ancestors_unknown"
+
+
+def _spawn_marker(branch: str) -> str:
+    """The marker a spawner plants for the child it is about to launch.
+
+    It carries the spawner's pid so the child can refuse a marker it merely
+    INHERITED from a grandparent: a marker that lies about the branch is worse
+    than no marker at all.
+    """
+    return f"{branch}:{os.getpid()}"
+
+
+def _child_environment(branch: str) -> dict[str, str]:
+    """This process's environment plus the spawn marker. Nothing else changes:
+    the child still inherits exactly what it inherited before."""
+    environment = dict(os.environ)
+    environment[DAEMON_SPAWN_MARKER_ENV] = _spawn_marker(branch)
+    return environment
+
+
+def read_spawn_branch(
+    *, env: Mapping[str, str] | None = None, ppid: int | None = None
+) -> str:
+    """Read the branch this process was spawned through. Fail-closed.
+
+    A marker is accepted only when it names a KNOWN branch and was planted by
+    this process's own parent. The environment is inherited, so a grandparent's
+    marker would otherwise misattribute the branch to a process it never
+    launched; that reads as ``unknown_stale_marker``, and an absent marker (a
+    daemon started by hand) as ``unknown_no_marker``.
+    """
+    values = os.environ if env is None else env
+    try:
+        marker = values.get(DAEMON_SPAWN_MARKER_ENV, "")
+    except Exception:
+        return SPAWN_BRANCH_NO_MARKER
+    if not isinstance(marker, str) or not marker:
+        return SPAWN_BRANCH_NO_MARKER
+    branch, separator, raw_pid = marker.rpartition(":")
+    if not separator or branch not in _KNOWN_SPAWN_BRANCHES:
+        return SPAWN_BRANCH_STALE_MARKER
+    try:
+        marker_pid = int(raw_pid)
+    except (TypeError, ValueError):
+        return SPAWN_BRANCH_STALE_MARKER
+    try:
+        parent = os.getppid() if ppid is None else int(ppid)
+    except (TypeError, ValueError):
+        return SPAWN_BRANCH_STALE_MARKER
+    if marker_pid <= 0 or marker_pid != parent:
+        return SPAWN_BRANCH_STALE_MARKER
+    return branch
+
+
+def _job_object_raw() -> dict[str, object]:
+    """Thin Win32 layer: is this process in a job, and with which LimitFlags?
+
+    Returns raw observations (booleans, the LimitFlags word, Win32 error codes)
+    and NEVER raises; the reading lives in describe_job_object so every branch is
+    testable without a kernel. QueryInformationJobObject with a NULL handle asks
+    about "the job of the calling process", which in a nested chain is ONE job of
+    several and this API gives no way to name which: measured here, three deep,
+    it answered about the OUTERMOST. See describe_job_object for why that makes
+    the reading asymmetric.
+    """
+    if sys.platform != "win32":
+        return {"platform": sys.platform, "api": "unavailable"}
+    raw: dict[str, object] = {"platform": "win32", "api": "available"}
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.IsProcessInJob.restype = wintypes.BOOL
+        kernel32.IsProcessInJob.argtypes = [
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.BOOL),
+        ]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+
+        class _IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", _IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        membership = wintypes.BOOL(0)
+        ctypes.set_last_error(0)
+        if not kernel32.IsProcessInJob(
+            kernel32.GetCurrentProcess(), None, ctypes.byref(membership)
+        ):
+            raw["is_process_in_job_error"] = int(ctypes.get_last_error())
+            return raw
+        raw["in_job"] = bool(membership.value)
+        if not membership.value:
+            return raw
+        information = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        returned = wintypes.DWORD(0)
+        ctypes.set_last_error(0)
+        if not kernel32.QueryInformationJobObject(
+            None,
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+            ctypes.byref(returned),
+        ):
+            raw["query_information_job_object_error"] = int(ctypes.get_last_error())
+            return raw
+        raw["limit_flags"] = int(information.BasicLimitInformation.LimitFlags)
+        return raw
+    except Exception as error:  # a diagnostic probe is never a gate.
+        raw["api"] = "unavailable"
+        raw["exception"] = type(error).__name__
+        return raw
+
+
+def describe_job_object(raw: Mapping[str, object] | None) -> dict[str, object]:
+    """Read a _job_object_raw() observation into the fields the record publishes.
+
+    Pure, and deliberately ASYMMETRIC, because the API is. Only two answers are
+    conclusive: OUTSIDE any job, nothing can kill this process by closing one;
+    and a job carrying KILL_ON_JOB_CLOSE proves it dies when THAT job closes.
+    The third case is NOT survival. QueryInformationJobObject with a NULL handle
+    describes ONE job of a nested chain, and the rest stay invisible: measured
+    here with a process nested three deep (ambient 0x3000, then a job with
+    KILL_ON_JOB_CLOSE, then a job with no limits), the call returned the
+    OUTERMOST job's flags -- so not even "the immediate one" is a safe reading of
+    which job answered. Hence the field name ``queried_job_kill_on_close`` and
+    the companion ``other_jobs_risk``: with the bit absent the verdict is
+    ``job_bound_ancestors_unknown``, never a survival claim. Anything the probe
+    could not establish stays None with its Win32 error code, never a guessed
+    False.
+    """
+    values: Mapping[str, object] = raw if isinstance(raw, Mapping) else {}
+
+    def _error(key: str) -> int | None:
+        value = values.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value
+
+    membership_error = _error("is_process_in_job_error")
+    query_error = _error("query_information_job_object_error")
+    reading: dict[str, object] = {
+        "in_job": None,
+        "limit_flags": None,
+        # Named for its SCOPE: a fact about the ONE job this call described, and
+        # about no other job in the chain.
+        "queried_job_kill_on_close": None,
+        "breakaway_ok": None,
+        "silent_breakaway_ok": None,
+        "other_jobs_risk": None,
+        "win32_error": {
+            "is_process_in_job": membership_error,
+            "query_information_job_object": query_error,
+        },
+        "verdict": _JOB_VERDICT_API_UNAVAILABLE,
+    }
+    if values.get("api") != "available":
+        return reading
+    if membership_error is not None:
+        reading["verdict"] = _JOB_VERDICT_MEMBERSHIP_FAILED
+        return reading
+    membership = values.get("in_job")
+    if not isinstance(membership, bool):
+        reading["verdict"] = _JOB_VERDICT_MEMBERSHIP_FAILED
+        return reading
+    reading["in_job"] = membership
+    if not membership:
+        # Conclusive: a process in no job cannot be killed by a job closing.
+        reading["queried_job_kill_on_close"] = False
+        reading["breakaway_ok"] = False
+        reading["silent_breakaway_ok"] = False
+        reading["other_jobs_risk"] = "none"
+        reading["verdict"] = _JOB_VERDICT_NO_JOB
+        return reading
+    reading["other_jobs_risk"] = "unknown"
+    if query_error is not None:
+        reading["verdict"] = _JOB_VERDICT_QUERY_FAILED
+        return reading
+    flags = values.get("limit_flags")
+    if isinstance(flags, bool) or not isinstance(flags, int) or flags < 0:
+        reading["verdict"] = _JOB_VERDICT_QUERY_FAILED
+        return reading
+    reading["limit_flags"] = f"0x{flags:08X}"
+    reading["queried_job_kill_on_close"] = bool(
+        flags & _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    )
+    reading["breakaway_ok"] = bool(flags & _JOB_OBJECT_LIMIT_BREAKAWAY_OK)
+    reading["silent_breakaway_ok"] = bool(
+        flags & _JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK
+    )
+    reading["verdict"] = (
+        _JOB_VERDICT_KILL_ON_CLOSE
+        if reading["queried_job_kill_on_close"]
+        else _JOB_VERDICT_ANCESTORS_UNKNOWN
+    )
+    return reading
+
+
+def _parent_image_name(ppid: int) -> str | None:
+    """Basename of the spawner's image, or None when it cannot be read.
+
+    Attribution only (it says whether a session host or a shell launched this
+    daemon). A ppid that already died and was reused would name the wrong image,
+    so the DISCRIMINATOR is the job's limit flags, never this field.
+    """
+    try:
+        path = orphan_guard.full_image_path_of(int(ppid))
+    except Exception:
+        return None
+    if not isinstance(path, str) or not path:
+        return None
+    return os.path.basename(path)
+
+
+def build_daemon_started_event(
+    *,
+    pid: int,
+    ppid: int,
+    parent_image: str | None,
+    spawn_branch: str,
+    job: dict[str, object],
+    parent_death_armed: bool,
+    idle_timeout_s: float,
+    listen_port: int,
+) -> dict[str, object]:
+    """The one row a daemon that reaches LISTEN writes about how it got there."""
+    return {
+        "event": "daemon_started",
+        "reason": "daemon_start",
+        "duration_s": 0.0,
+        "decision": "observed",
+        "pid": int(pid),
+        "ppid": int(ppid),
+        "parent_image": parent_image,
+        "spawn_branch": spawn_branch,
+        "job": job,
+        "parent_death_armed": bool(parent_death_armed),
+        "idle_timeout_s": float(idle_timeout_s),
+        "listen_port": int(listen_port),
+    }
+
+
+def build_daemon_stopping_event(
+    *, reason: str, pid: int, uptime_s: float
+) -> dict[str, object]:
+    """The counterpart row, carrying the motive the code actually knows.
+
+    A daemon_started with no daemon_stopping is COMPATIBLE WITH a termination
+    nobody observed -- killed with the job that owns it, host crash, power cut --
+    but it is not an attribution: the same gap appears if the audit sink never
+    landed the row within its budget, or if the process died between closing the
+    port and the append. It narrows the question; it does not answer it.
+    """
+    return {
+        "event": "daemon_stopping",
+        "reason": reason,
+        "duration_s": max(0.0, float(uptime_s)),
+        "decision": "release_port_and_exit",
+        "pid": int(pid),
+    }
+
+
+def record_daemon_event(
+    event: dict[str, object],
+    *,
+    writer: Any | None = None,
+    daemon_generation: str | None = None,
+    log: Callable[[str], None] = _noop,
+    budget_s: float | None = None,
+) -> bool:
+    """Append ``event`` to the durable audit log; True only when it landed.
+
+    Best-effort BY CONTRACT. Every failure -- no runtime root, an unwritable
+    audit directory, a payload the writer rejects -- is swallowed and reported
+    through the return value, because a daemon that refused to start when its log
+    is broken would trade a diagnosable outage for an undiagnosable one.
+
+    With ``budget_s`` the append also stops being able to BLOCK the caller: it
+    runs on a worker and the caller waits at most that long. Swallowing
+    exceptions is not enough for that, because the writer's lock has no timeout
+    and any other producer of this process can hold it.
+    """
+    name = event.get("event") if isinstance(event, dict) else None
+
+    def _write() -> bool:
+        try:
+            sink = writer
+            if sink is None:
+                if not daemon_generation:
+                    return False
+                sink = JsonlAuditWriter(RuntimePaths.from_env(), daemon_generation)
+            return sink.write(event) is True
+        except Exception as error:
+            log(f"DAEMON: audit event {name!r} not recorded: {type(error).__name__}")
+            return False
+
+    if budget_s is None:
+        return _write()
+    outcome: list[bool] = []
+    try:
+        worker = threading.Thread(
+            target=lambda: outcome.append(_write()),
+            name="daemon-audit-event",
+            daemon=True,
+        )
+        worker.start()
+        worker.join(timeout=max(0.0, float(budget_s)))
+    except Exception as error:
+        # Thread.start() re-raises the OS failure to create a thread, and the
+        # whole point of this function is that observability is never fatal: a
+        # daemon that has already bound its port must not die because it could
+        # not spawn a logger.
+        log(f"DAEMON: audit event {name!r} not recorded: {type(error).__name__}")
+        return False
+    if worker.is_alive():
+        log(
+            f"DAEMON: audit event {name!r} exceeded its "
+            f"{float(budget_s):.1f}s budget; continuing without it"
+        )
+        return False
+    return bool(outcome) and outcome[0] is True
+
+
+def _record_daemon_started(
+    *,
+    state: Any,
+    daemon_generation: str,
+    idle_timeout_s: float,
+    listen_port: int,
+    log: Callable[[str], None] = _noop,
+) -> bool:
+    """Compose and persist the startup row, with every step inside the guard.
+
+    The Win32 probe, the marker read, the parent lookup and the write itself are
+    all in here: a daemon that has already bound its port must never fail because
+    of a diagnostic, so the only outcome of a broken record is a False and a log
+    line.
+    """
+    try:
+        ppid = os.getppid()
+        event = build_daemon_started_event(
+            pid=os.getpid(),
+            ppid=ppid,
+            parent_image=_parent_image_name(ppid),
+            spawn_branch=read_spawn_branch(ppid=ppid),
+            job=describe_job_object(_job_object_raw()),
+            parent_death_armed=DAEMON_PARENT_DEATH_ARMED,
+            idle_timeout_s=idle_timeout_s,
+            listen_port=listen_port,
+        )
+    except Exception as error:
+        log(f"DAEMON: startup record not composed: {type(error).__name__}")
+        return False
+    return record_daemon_event(
+        event,
+        writer=getattr(state, "audit_writer", None),
+        daemon_generation=daemon_generation,
+        log=log,
+        budget_s=DAEMON_EVENT_WRITE_BUDGET_S,
+    )
+
+
+def _record_daemon_stopping(
+    *,
+    state: Any,
+    daemon_generation: str,
+    reason: str,
+    uptime_s: float,
+    log: Callable[[str], None] = _noop,
+) -> bool:
+    """Same guard for the shutdown row. It is written BEFORE the stop event is
+    set: the watchdog thread that calls this is a daemon thread, so releasing the
+    main thread first could kill the append half-way through."""
+    try:
+        event = build_daemon_stopping_event(
+            reason=reason, pid=os.getpid(), uptime_s=uptime_s
+        )
+    except Exception as error:
+        log(f"DAEMON: shutdown record not composed: {type(error).__name__}")
+        return False
+    return record_daemon_event(
+        event,
+        writer=getattr(state, "audit_writer", None),
+        daemon_generation=daemon_generation,
+        log=log,
+        budget_s=DAEMON_EVENT_WRITE_BUDGET_S,
+    )
+
+
+def run_daemon(config: Any, *, stop: threading.Event | None = None) -> int:
+    daemon_started_at = time.monotonic()
+    startup_deadline = daemon_started_at + validated_startup_budget_s()
     log = _log_sink(config)
     key = config.key if getattr(config, "key", None) is not None else read_key(_required_keyfile(config))
     port = int(getattr(config, "port", 8765))
@@ -935,15 +1434,58 @@ def run_daemon(config: Any) -> int:
     idle_timeout_s = float(getattr(config, "idle_timeout_s", 1800.0))
     log(f"DAEMON LISTEN host={host} port={bound_port} idle_timeout={idle_timeout_s:.0f}s")
 
-    stop = threading.Event()
+    # fb-20260901-225325-76dd: the single point EVERY daemon that reaches LISTEN
+    # passes through, so exactly one row per live daemon. It is written after the
+    # port is bound and the generation accredited, and it cannot fail the startup.
+    listening_started_at = time.monotonic()
+    _record_daemon_started(
+        state=state,
+        daemon_generation=daemon_generation,
+        idle_timeout_s=idle_timeout_s,
+        listen_port=int(bound_port),
+        log=log,
+    )
 
-    def on_idle() -> None:
-        log("DAEMON: idle (no game polls, no client requests); releasing port and exiting")
+    stop = threading.Event() if stop is None else stop
+    stop_declaration = threading.Lock()
+    stop_declared: list[bool] = [False]
+
+    def declare_stop(reason: str) -> None:
+        """At most ONE daemon_stopping row per daemon, whoever arrives first.
+
+        The idle watchdog, the SIGINT arm and a normal return from stop.wait()
+        all pass through here, so an orderly exit ATTEMPTS its row exactly once.
+        An attempt is not a guarantee, and deliberately so: the append runs on a
+        worker with a wait budget, and a process that exits while the audit lock
+        is held drops it (measured -- an orderly idle shutdown under a held lock
+        left zero rows). A missing row therefore means "no orderly shutdown was
+        RECORDED", which is weaker than "no orderly shutdown happened". The
+        budget is worth more than the row: a daemon that hangs on its own log is
+        the failure this record exists to explain.
+        """
+        with stop_declaration:
+            if stop_declared[0]:
+                return
+            stop_declared[0] = True
+        _record_daemon_stopping(
+            state=state,
+            daemon_generation=daemon_generation,
+            reason=reason,
+            uptime_s=time.monotonic() - listening_started_at,
+            log=log,
+        )
+
+    def on_idle(reason: str = "idle") -> None:
+        if reason == "idle":
+            log("DAEMON: idle (no game polls, no client requests); releasing port and exiting")
+        else:
+            log(f"DAEMON: stopping ({reason}); releasing port and exiting")
         try:
             httpd.shutdown()
             httpd.server_close()
         except Exception:
             pass
+        declare_stop(reason)
         stop.set()
 
     if idle_timeout_s and idle_timeout_s > 0:
@@ -965,8 +1507,9 @@ def run_daemon(config: Any) -> int:
     try:
         stop.wait()
     except KeyboardInterrupt:
-        on_idle()
+        on_idle("keyboard_interrupt")
         return 130
+    declare_stop("stop_signalled")
     return 0
 
 
@@ -980,6 +1523,11 @@ def spawn_detached(argv: list[str], *, log: Callable[[str], None] = _noop, cwd: 
     degrades to "one owner at a time" — the next session's client re-spawns the daemon
     into its own job. Whether breakaway succeeds under Cowork is the in-vivo gate; each
     branch is logged so that gate is diagnosable rather than a black box.
+
+    The branch is also planted in the child's environment (DAYZ_MCP_DAEMON_SPAWN_MARKER,
+    branch plus this pid) because only the parent knows which Popen succeeded, and its
+    log goes to a stderr nobody keeps: the child republishes it into the durable audit
+    log at startup. The marker feeds a record and nothing else.
     """
     base_kwargs: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,
@@ -990,15 +1538,28 @@ def spawn_detached(argv: list[str], *, log: Callable[[str], None] = _noop, cwd: 
     }
     if sys.platform != "win32":
         try:
-            return subprocess.Popen(argv, start_new_session=True, **base_kwargs).pid
+            return subprocess.Popen(
+                argv,
+                start_new_session=True,
+                env=_child_environment(SPAWN_BRANCH_POSIX_NEW_SESSION),
+                **base_kwargs,
+            ).pid
         except OSError as exc:
             log(f"SPAWN: failed to launch daemon: {exc}")
             return None
 
     detached = _DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP
     try:
-        pid = subprocess.Popen(argv, creationflags=detached | _CREATE_BREAKAWAY_FROM_JOB, **base_kwargs).pid
-        log(f"SPAWN: daemon pid={pid} broke away from the job (will outlive this session)")
+        pid = subprocess.Popen(
+            argv,
+            creationflags=detached | _CREATE_BREAKAWAY_FROM_JOB,
+            env=_child_environment(SPAWN_BRANCH_BREAKAWAY_OK),
+            **base_kwargs,
+        ).pid
+        log(
+            f"SPAWN: daemon pid={pid} created with CREATE_BREAKAWAY_FROM_JOB "
+            "(an ancestor job that forbids breakaway can still hold it)"
+        )
         return pid
     except OSError:
         # Breakaway denied (the job forbids it): the child stays IN this session's Job
@@ -1007,7 +1568,12 @@ def spawn_detached(argv: list[str], *, log: Callable[[str], None] = _noop, cwd: 
         # so the in-vivo gate can attribute a "daemon died with the session" outcome.
         log("SPAWN: CREATE_BREAKAWAY_FROM_JOB denied; daemon is job-bound and may die with this session")
     try:
-        pid = subprocess.Popen(argv, creationflags=detached, **base_kwargs).pid
+        pid = subprocess.Popen(
+            argv,
+            creationflags=detached,
+            env=_child_environment(SPAWN_BRANCH_JOB_BOUND),
+            **base_kwargs,
+        ).pid
         log(f"SPAWN: daemon pid={pid} launched job-bound (no breakaway)")
         return pid
     except OSError as exc:

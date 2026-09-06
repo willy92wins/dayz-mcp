@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+# Every transition into RUNNING_IDLE goes through the fence; the poll
+# re-validates after re-acquiring the lock.
+
 import errno
 import hmac
 import json
 import math
+import re
 import sys
 import threading
 import time
@@ -70,6 +74,8 @@ CLIENT_COMMANDS = {
     "camera_set",
     "camera_get",
     "restore_gameplay",
+    "key_press",
+    "player_respawn",
     "drive_probe_client",
     "vehicle_get_in_client",
     "engine_set",
@@ -90,6 +96,11 @@ CREDENTIAL_RECOVERY_TTL_S = 300.0
 CREDENTIAL_RECOVERY_COUNT_MAX = 2_147_483_647
 EXEC_COMMANDS = {"exec_enforce"}
 WHITELISTED_COMMANDS = SERVER_COMMANDS | CLIENT_COMMANDS
+_RUN_NOT_OWNED_HINT = (
+    "This run has no owner (RUNNING_IDLE). Adopt the existing run "
+    "before dispatching."
+)
+_DURABLE_UNREADABLE = "run_state_unavailable"
 # Whitelisted verbs that validate_command_args does NOT schema-check. Each is
 # either read-only / single-arg or validated by its server.py tool. Keep in sync
 # with SERVER_COMMANDS | CLIENT_COMMANDS: any whitelisted verb not in this set
@@ -163,12 +174,48 @@ MAX_HTTP_WORKERS = MAX_SESSION_QUEUE + 32
 # its last poll exceeds PEER_RECONNECT_GAP_S (the previous game/session is gone).
 COMMAND_TTL_S = 30.0
 PEER_RECONNECT_GAP_S = 10.0
+# Capability census announced on every poll as `caps=` by both Enforce
+# dispatchers (MCPBridge.c:235, MCPClientBridge.c:423): lowercase command
+# names, comma separated, URL encoded. The daemon STORES it and never
+# derives it -- a census that disagrees with the registered tools is the
+# signal, so repairing it here would delete the finding.
+POLL_CAPS_MAX_NAMES = 64
+POLL_CAPS_MAX_BYTES = 4096
+_POLL_CAPS_NAME = re.compile(r"\A[a-z][a-z0-9_]{0,63}\Z")
 RETIRED_INSTANCE_LIMIT = 64
 # Ceiling for Handler._read_json. Checked against exec_enforce (short
 # allowlisted expr), world_spawn (tiny), pipeline_feedback (not on this
 # socket; 8 KiB inbox cap), ui_tree /result (<=512 nodes) and
 # vehicle_trace /result (limit<=64 samples). None approach 1 MiB.
 MAX_BODY_BYTES = 1 * 1024 * 1024
+
+
+def parse_poll_caps(raw: str | None) -> tuple[tuple[str, ...] | None, str]:
+    """Decode a ``caps=`` census into names plus the reason it is or is not usable.
+
+    Returns ``(None, reason)`` for anything that cannot be trusted. A census is
+    diagnostic: it never blocks a command, because refusing a poll over a
+    cosmetic field would turn a mismatched list into an outage. What it does do
+    is leave the peer visibly ``unknown`` instead of silently believing a
+    truncated or forged list.
+    """
+
+    if not raw:
+        return None, "absent"
+    if len(raw.encode("utf-8", "surrogatepass")) > POLL_CAPS_MAX_BYTES:
+        return None, "oversized"
+    parts = raw.split(",")
+    if len(parts) > POLL_CAPS_MAX_NAMES:
+        return None, "too_many"
+    seen: set[str] = set()
+    for name in parts:
+        if not _POLL_CAPS_NAME.match(name):
+            return None, "malformed"
+        if name in seen:
+            return None, "duplicate"
+        seen.add(name)
+    return tuple(parts), "ok"
+
 
 LogSink = Callable[[str], None]
 VersionValidator = Callable[[str | None], str]
@@ -179,6 +226,13 @@ def peer_for_command(cmd: str) -> str:
     if cmd in CLIENT_COMMANDS:
         return "client"
     return "server"
+
+
+def _binding_run_id(binding: object | None) -> str | None:
+    run_id = getattr(binding, "run_id", None)
+    if isinstance(run_id, str) and run_id:
+        return run_id
+    return None
 
 
 def _default_log_sink(message: str) -> None:
@@ -206,6 +260,8 @@ def _box_payload(state: "ServerState") -> dict:
                 "runs": [],
                 "foreign": [],
                 "ports_in_use": [],
+                "scan_known": False,
+                "port_scan_known": False,
             }
         else:
             occupancy = {
@@ -213,6 +269,8 @@ def _box_payload(state: "ServerState") -> dict:
                 "runs": [],
                 "foreign": [],
                 "ports_in_use": [],
+                "scan_known": False,
+                "port_scan_known": False,
             }
     else:
         occupancy = {
@@ -220,6 +278,8 @@ def _box_payload(state: "ServerState") -> dict:
             "runs": [],
             "foreign": [],
             "ports_in_use": [],
+            "scan_known": False,
+            "port_scan_known": False,
         }
     coordination = getattr(state, "coordination", None)
     queue: list = []
@@ -325,7 +385,15 @@ def _one_of(*accepted: object) -> _FieldValidator:
     accepted_values = frozenset(accepted)
 
     def validate(value: object) -> bool:
-        return value in accepted_values
+        try:
+            return value in accepted_values
+        except TypeError:
+            # A decoded JSON array or object is unhashable, and membership in a
+            # frozenset raises instead of answering. An enum validator has to be
+            # total over everything json.loads can produce: an unhashable value
+            # is simply not one of the accepted ones. Letting the TypeError
+            # escape turns a bad_args into an unhandled exception.
+            return False
 
     return validate
 
@@ -424,6 +492,13 @@ _SAFE_RADIUS_200 = _reject_numeric_errors(
 # preserve alternate payload shapes without duplicating command dispatch logic.
 _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "restore_gameplay": _command_schema(_schema_variant()),
+    "player_respawn": _command_schema(_schema_variant()),
+    "key_press": _command_schema(
+        _schema_variant(
+            required=("dik",),
+            validators={"dik": _integer_in_range(minimum=0)},
+        )
+    ),
     "vehicle_trace": _command_schema(
         _schema_variant(
             required=(
@@ -589,29 +664,35 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     ),
     "ui_tree": _command_schema(
         _schema_variant(
-            optional=("path", "limit"),
+            optional=("path", "limit", "root"),
             validators={
                 "path": _is_string,
                 "limit": _integer_in_range(minimum=1, maximum=512),
+                "root": _is_non_empty_string,
             },
         )
     ),
     "ui_set_text": _command_schema(
         _schema_variant(
             required=("path", "text"),
+            optional=("root",),
             validators={
                 "path": _is_non_empty_string,
                 "text": _is_string,
+                "root": _is_non_empty_string,
             },
         )
     ),
     "ui_click": _command_schema(
         _schema_variant(
             required=("path",),
-            optional=("button",),
+            optional=("button", "mode", "bubble", "root"),
             validators={
                 "path": _is_non_empty_string,
                 "button": _integer_in_range(minimum=0, maximum=2),
+                "mode": _one_of("direct", "complete"),
+                "bubble": _is_strict_bool,
+                "root": _is_non_empty_string,
             },
         )
     ),
@@ -648,7 +729,11 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "ui_focus": _command_schema(
         _schema_variant(
             required=("path",),
-            validators={"path": _is_non_empty_string},
+            optional=("root",),
+            validators={
+                "path": _is_non_empty_string,
+                "root": _is_non_empty_string,
+            },
         )
     ),
     "ui_dialog": _command_schema(delegated=_validate_ui_dialog_args),
@@ -745,7 +830,35 @@ class TestIdentityOverride:
             self._ctime_by_pid.pop(pid, None)
 
 
+class _BoundPeerDispatchable:
+    """Durable RUNNING for run_ids minted by the test helper ``install_bound_peer``.
+
+    Production never calls that helper; the daemon attaches a real
+    ProcessLifecycle before minting. Tests that want the P22' ``lifecycle is
+    None`` branch set ``state.lifecycle = None`` after install.
+    """
+
+    def __init__(self, run_id: str) -> None:
+        self._run_ids = {run_id}
+        self.manifest = self
+
+    def remember(self, run_id: str) -> None:
+        if isinstance(run_id, str) and run_id:
+            self._run_ids.add(run_id)
+
+    def get(self, run_id: str) -> object | None:
+        if run_id in self._run_ids:
+            return _BoundPeerRunning()
+        return None
+
+
+class _BoundPeerRunning:
+    state = "RUNNING"
+
+
 class ServerState:
+    """A run without an owner dispatches nothing; the fence precedes the durable transition and so does binding retirement; the diagnostic follows a successful persist."""
+
     def __init__(
         self,
         key: str,
@@ -774,6 +887,7 @@ class ServerState:
         self.retail_probe: Callable[[], dict[str, object]] | None = None
         self.daemon_generation: str | None = None
         self._lock = threading.RLock()
+        self._fenced_runs: set[str] = set()
         self._next_id = 1
         self._legacy_queues: dict[str, list[dict]] = {"server": [], "client": []}
         self._queues = self._legacy_queues
@@ -784,6 +898,10 @@ class ServerState:
         self._ever_bound = False
         self._seen_valid_inst_poll = False
         self._peer_last_class: dict[str, str] = {}
+        # peer -> {generation, commands|None, reason}. Overwritten on every
+        # poll: only the LAST accredited announcement of the CURRENT
+        # generation counts, and nothing here is ever inherited across one.
+        self._peer_caps: dict[str, dict] = {}
         self._bound_last_poll_at: dict[str, float | None] = {
             "server": None,
             "client": None,
@@ -922,19 +1040,33 @@ class ServerState:
                 self._retired_roles.discard("client")
 
     def retire_role(self, run_id: str, role: str, reason: str) -> None:
+        discarded_exec: list[tuple[str, str, int]] = []
+        finished_operations: list[tuple[ClientIdentity, str, int, str, str]] = []
         with self._lock:
             instance = self._role_index.pop((run_id, role), None)
             if instance is None:
                 return
-            self._retire_instance_locked(instance, reason)
+            self._retire_instance_locked(
+                instance, reason, discarded_exec, finished_operations
+            )
+            self._tombstone_run_activity(run_id)
+        self._flush_queue_discards(discarded_exec, finished_operations)
 
     def retire_run(self, run_id: str, reason: str) -> None:
+        discarded_exec: list[tuple[str, str, int]] = []
+        finished_operations: list[tuple[ClientIdentity, str, int, str, str]] = []
         with self._lock:
             keys = [key for key in self._role_index if key[0] == run_id]
             for key in keys:
                 instance = self._role_index.pop(key, None)
                 if instance is not None:
-                    self._retire_instance_locked(instance, reason)
+                    self._retire_instance_locked(
+                        instance, reason, discarded_exec, finished_operations
+                    )
+            if isinstance(run_id, str) and run_id:
+                self._fenced_runs.discard(run_id)
+                self._tombstone_run_activity(run_id)
+        self._flush_queue_discards(discarded_exec, finished_operations)
 
     def install_bound_peer(
         self,
@@ -966,16 +1098,39 @@ class ServerState:
                 self._test_identity_override = TestIdentityOverride()
             self._test_identity_override.bind(instance, pid, creation_time_utc)
             self._ever_bound = True
+        if self.lifecycle is None:
+            self.lifecycle = _BoundPeerDispatchable(run_id)
+        else:
+            remember = getattr(self.lifecycle, "remember", None)
+            if callable(remember):
+                remember(run_id)
 
-    def _retire_instance_locked(self, instance: str, reason: str) -> None:
+    def run_has_bound_binding(self, run_id: str) -> bool:
+        """True iff a present binding for this run is BOUND. STARTING does not dispatch."""
+
+        if not isinstance(run_id, str) or not run_id:
+            return False
+        with self._lock:
+            return any(
+                _binding_run_id(binding) == run_id and binding.state == BINDING_BOUND
+                for binding in self._bindings.values()
+            )
+
+    def _retire_instance_locked(
+        self,
+        instance: str,
+        reason: str,
+        discarded_exec: list[tuple[str, str, int]],
+        finished_operations: list[tuple[ClientIdentity, str, int, str, str]],
+    ) -> None:
         binding = self._bindings.get(instance)
         if binding is None:
             return
         self._station_epoch += 1
         queue = self._bound_queues.get(instance, [])
-        discarded_exec: list[tuple[str, str, int]] = []
-        finished_operations: list[tuple[ClientIdentity, str, int, str, str]] = []
-        self._discard_queue(queue, "binding_retired", discarded_exec, finished_operations)
+        self._discard_queue(
+            queue, "binding_retired", discarded_exec, finished_operations
+        )
         self._retired_instances[instance] = None
         self._retired_instances.move_to_end(instance)
         while len(self._retired_instances) > RETIRED_INSTANCE_LIMIT:
@@ -989,9 +1144,8 @@ class ServerState:
         override = self._test_identity_override
         if override is not None:
             override.drop_instance(instance, retired_pid)
-        for command_id, fence in list(self._command_fence.items()):
-            if fence[0] == instance:
-                self._command_fence.pop(command_id, None)
+        # Result fences of already-dispatched ids survive retirement (P12).
+        # Queued commands drop their fence in _mark_discarded.
 
     def _peer_covers(self, binding: Binding, peer: str) -> bool:
         return binding.role == peer or binding.role == "offline"
@@ -1003,8 +1157,179 @@ class ServerState:
             if binding.state != BINDING_RETIRED and self._peer_covers(binding, peer)
         ]
 
+    def _command_exempt_from_fence(self, command_id: object) -> bool:
+        """P-J1: the daemon's own fire-and-forget cleanup survives the owner fence."""
+
+        return isinstance(command_id, int) and command_id in self._fire_and_forget_ids
+
+    def _drain_run_locked(
+        self,
+        run_id: str,
+        discarded_exec: list[tuple[str, str, int]],
+        finished_operations: list[tuple[ClientIdentity, str, int, str, str]],
+    ) -> None:
+        for instance, binding in list(self._bindings.items()):
+            if binding.state == BINDING_RETIRED:
+                continue
+            if _binding_run_id(binding) != run_id:
+                continue
+            queue = self._bound_queues.get(instance)
+            if not queue:
+                continue
+            kept: list[dict] = []
+            for command in queue:
+                if self._command_exempt_from_fence(command.get("id")):
+                    kept.append(command)
+                else:
+                    self._mark_discarded(
+                        command,
+                        "run_not_owned",
+                        discarded_exec,
+                        finished_operations,
+                    )
+            queue[:] = kept
+
+    def _flush_queue_discards(
+        self,
+        discarded_exec: list[tuple[str, str, int]],
+        finished_operations: list[tuple[ClientIdentity, str, int, str, str]],
+    ) -> None:
+        for expr, main_fn, command_id in discarded_exec:
+            try:
+                if self.exec_audit is not None:
+                    self.exec_audit(expr, "discarded", main_fn, command_id)
+            except Exception:
+                pass
+        self._finish_operations(finished_operations)
+
+    def drain_pending_for_run(self, run_id: str) -> None:
+        """Empty bound queues for this run without retiring the binding."""
+
+        if not isinstance(run_id, str) or not run_id:
+            return
+        discarded_exec: list[tuple[str, str, int]] = []
+        finished_operations: list[tuple[ClientIdentity, str, int, str, str]] = []
+        with self._lock:
+            self._drain_run_locked(run_id, discarded_exec, finished_operations)
+        self._flush_queue_discards(discarded_exec, finished_operations)
+
+    def fence_runs(self, run_ids: list[str]) -> None:
+        """Raise the logical owner-fence and empty queues under the poll/enqueue lock."""
+
+        discarded_exec: list[tuple[str, str, int]] = []
+        finished_operations: list[tuple[ClientIdentity, str, int, str, str]] = []
+        try:
+            with self._lock:
+                for run_id in run_ids:
+                    if not isinstance(run_id, str) or not run_id:
+                        continue
+                    self._fenced_runs.add(run_id)
+                    # Tombstone before drain: if raising the frontier fails,
+                    # queues stay so the idle transition can revert closed.
+                    self._tombstone_run_activity(run_id, fail_closed=True)
+                    self._drain_run_locked(run_id, discarded_exec, finished_operations)
+        finally:
+            self._flush_queue_discards(discarded_exec, finished_operations)
+
+    def _tombstone_run_activity(
+        self, run_id: str | None, *, fail_closed: bool = False
+    ) -> None:
+        # Caller may hold self._lock. Must not take _operation_lock.
+        if not isinstance(run_id, str) or not run_id:
+            return
+        lifecycle = self.lifecycle
+        tombstone = getattr(lifecycle, "tombstone_run_activity", None)
+        if not callable(tombstone):
+            return
+        try:
+            tombstone(run_id, now=time.time())
+        except Exception:
+            if fail_closed:
+                raise
+            return
+
+    def unfence_runs(self, run_ids: list[str]) -> None:
+        with self._lock:
+            for run_id in run_ids:
+                if isinstance(run_id, str) and run_id:
+                    self._fenced_runs.discard(run_id)
+
+    def _durable_run_state(self, run_id: str | None) -> str | None:
+        if not isinstance(run_id, str) or not run_id:
+            return None
+        lifecycle = self.lifecycle
+        if lifecycle is None:
+            return None
+        manifest = getattr(lifecycle, "manifest", None)
+        getter = getattr(manifest, "get", None)
+        if not callable(getter):
+            return None
+        try:
+            run = getter(run_id)
+        except Exception:
+            return _DURABLE_UNREADABLE
+        if run is None:
+            return "EXITED"
+        state = getattr(run, "state", None)
+        return state if isinstance(state, str) else None
+
+    def _run_is_fenced(self, run_id: str | None) -> bool:
+        return isinstance(run_id, str) and run_id in self._fenced_runs
+
+    def _poll_should_hold_commands(self, run_id: str | None) -> bool:
+        if self._run_is_fenced(run_id):
+            return True
+        if not isinstance(run_id, str) or not run_id:
+            return False
+        return not self._run_is_dispatchable(run_id)
+
+    def _run_is_dispatchable(self, run_id: str | None) -> bool:
+        """RUNNING or STARTING dispatch; a fenced or idle run dispatches nothing."""
+
+        if self._run_is_fenced(run_id):
+            return False
+        return self._durable_run_state(run_id) in {"RUNNING", "STARTING"}
+
+    def _enqueue_run_rejection(
+        self, run_id: str | None, *, mutation: bool, internal: bool
+    ) -> str | None:
+        _ = mutation
+        if not isinstance(run_id, str) or not run_id:
+            return None
+        if internal:
+            # P-J1: a fenced RUNNING/STARTING run still accepts the daemon's own
+            # cleanup. RUNNING_IDLE stays run_not_owned at enqueue: production
+            # cleanup_owner runs before begin_release_owner, and the sealed
+            # occupancy test asserts the Python API keeps the idle fence.
+            state = self._durable_run_state(run_id)
+            if state == _DURABLE_UNREADABLE or state is None:
+                return "run_state_unavailable"
+            if state in {"RUNNING", "STARTING"}:
+                return None
+            if state == "RUNNING_IDLE":
+                return "run_not_owned"
+            return "binding_retired"
+        if self._run_is_fenced(run_id):
+            return "run_not_owned"
+        state = self._durable_run_state(run_id)
+        if state in {"RUNNING", "STARTING"}:
+            return None
+        if state == "RUNNING_IDLE":
+            return "run_not_owned"
+        if state == _DURABLE_UNREADABLE or state is None:
+            return "run_state_unavailable"
+        return "binding_retired"
+
+    def _fence_reject_response(self, code: str) -> tuple[int, dict]:
+        if code == "run_state_unavailable":
+            return 503, {"error": "run_state_unavailable"}
+        status, payload = fence_error(code)
+        if code == "run_not_owned":
+            payload["hint"] = _RUN_NOT_OWNED_HINT
+        return status, payload
+
     def _enqueue_fence_target(
-        self, peer: str, cmd: str
+        self, peer: str, cmd: str, *, internal: bool = False
     ) -> tuple[str | None, list[dict] | None, str | None]:
         mutation = command_requires_lease(cmd)
         candidates = self._active_bindings_for_peer(peer)
@@ -1022,6 +1347,11 @@ class ServerState:
             return "instance_peer_collision", None, None
         if mutation:
             if len(bound) == 1:
+                rejection = self._enqueue_run_rejection(
+                    _binding_run_id(bound[0]), mutation=True, internal=internal
+                )
+                if rejection is not None:
+                    return rejection, None, None
                 instance = bound[0].instance
                 return None, self._bound_queues.setdefault(instance, []), instance
             if ambiguous:
@@ -1038,6 +1368,11 @@ class ServerState:
                 return "unbound_after_restart", None, None
             return "legacy_unbound", None, None
         if len(bound) == 1:
+            rejection = self._enqueue_run_rejection(
+                _binding_run_id(bound[0]), mutation=False, internal=internal
+            )
+            if rejection is not None:
+                return rejection, None, None
             instance = bound[0].instance
             return None, self._bound_queues.setdefault(instance, []), instance
         if ambiguous:
@@ -1046,6 +1381,10 @@ class ServerState:
             return "creation_time_unreadable", None, None
         if starting:
             return "binding_not_ready", None, None
+        if not candidates and (
+            peer in self._retired_roles or "offline" in self._retired_roles
+        ):
+            return "binding_retired", None, None
         return None, self._legacy_queues[peer], None
 
     def _peer_queue_len(self, peer: str) -> int:
@@ -1233,6 +1572,7 @@ class ServerState:
                 owner_client=None,
                 owner_lease_id=None,
                 operation_timeout_s=safe_operation_timeout_s,
+                internal=internal,
             )
 
         try:
@@ -1377,7 +1717,17 @@ class ServerState:
             return {}
         with self._lock:
             poll_version = self._poll_versions.get(peer)
+            last_poll_at = self._last_poll_at.get(peer)
         state = self.version_validator(poll_version)
+        if last_poll_at is None:
+            if state not in BLOCKED_VERSION_STATES:
+                return {}
+            return {
+                "state": "never_polled_this_generation",
+                "expected": EXPECTED_BRIDGE_VERSION,
+                "got": None,
+                "detail": "never_polled_this_generation",
+            }
         if state not in BLOCKED_VERSION_STATES:
             return {}
         got: object = None
@@ -1404,6 +1754,7 @@ class ServerState:
         owner_lease_id: str | None,
         operation_timeout_s: float = 0.0,
         commit: Callable[[int], bool] | None = None,
+        internal: bool = False,
     ) -> tuple[int, dict]:
         if cmd not in self.whitelisted_commands():
             return 400, {"error": "not_whitelisted"}
@@ -1442,20 +1793,23 @@ class ServerState:
                 owner_lease_id,
                 operation_timeout_s,
                 commit,
+                internal=internal,
             )
 
+        commanded_run_id: str | None = None
+        activity_epoch: float | None = None
         with self._lock:
             if self._stopping:
                 return 409, {"error": "enqueue_cancelled"}
             fence_error_code, queue, fence_instance = self._enqueue_fence_target(
-                peer, cmd
+                peer, cmd, internal=internal
             )
             if fence_error_code is not None or queue is None:
                 code = fence_error_code or "legacy_unbound"
                 self._fence_reject_counts[code] = (
                     self._fence_reject_counts.get(code, 0) + 1
                 )
-                return fence_error(code)
+                return self._fence_reject_response(code)
             if self._peer_queue_len(peer) >= MAX_QUEUE:
                 return 429, {"error": "queue_full"}
 
@@ -1477,13 +1831,23 @@ class ServerState:
                 self._bindings.get(fence_instance) if fence_instance else None
             )
             self._seal_command(command_id, fence_instance, binding)
+            commanded_run_id = _binding_run_id(binding)
             if command_requires_lease(cmd) and (
                 fence_instance is None
                 or binding is None
                 or binding.state != BINDING_BOUND
             ):
                 self._unaccredited_mutation_enqueues += 1
+            if not internal and isinstance(commanded_run_id, str) and commanded_run_id:
+                activity_epoch = time.time()
 
+        try:
+            if not internal:
+                self._note_run_command_activity(
+                    owner_client, run_id=commanded_run_id, now=activity_epoch
+                )
+        except Exception:
+            pass
         return 200, {"id": command_id, "peer": peer, "cmd": cmd}
 
     def _enqueue_exec_enforce(
@@ -1494,6 +1858,7 @@ class ServerState:
         owner_lease_id: str | None,
         operation_timeout_s: float,
         commit: Callable[[int], bool] | None = None,
+        internal: bool = False,
     ) -> tuple[int, dict]:
         expr = args.get("expr", "")
         main_fn = args.get("main_fn", "")
@@ -1516,13 +1881,13 @@ class ServerState:
             if self._stopping:
                 return 409, {"error": "enqueue_cancelled"}
             fence_error_code, _queue, _fence_instance = self._enqueue_fence_target(
-                peer, "exec_enforce"
+                peer, "exec_enforce", internal=internal
             )
             if fence_error_code is not None:
                 self._fence_reject_counts[fence_error_code] = (
                     self._fence_reject_counts.get(fence_error_code, 0) + 1
                 )
-                return fence_error(fence_error_code)
+                return self._fence_reject_response(fence_error_code)
             if self._peer_queue_len(peer) >= MAX_QUEUE:
                 return 429, {"error": "queue_full"}
             command_id = self._next_id
@@ -1544,9 +1909,12 @@ class ServerState:
         commit_failed = False
         capacity_lost = False
         fence_lost = False
+        fence_error_code: str | None = None
+        commanded_run_id: str | None = None
+        activity_epoch: float | None = None
         with self._lock:
             fence_error_code, queue, fence_instance = self._enqueue_fence_target(
-                peer, "exec_enforce"
+                peer, "exec_enforce", internal=internal
             )
             self._exec_capacity_reserved[peer] -= 1
             if fence_error_code is not None or queue is None:
@@ -1575,12 +1943,15 @@ class ServerState:
                     self._bindings.get(fence_instance) if fence_instance else None
                 )
                 self._seal_command(command_id, fence_instance, binding)
+                commanded_run_id = _binding_run_id(binding)
                 if (
                     fence_instance is None
                     or binding is None
                     or binding.state != BINDING_BOUND
                 ):
                     self._unaccredited_mutation_enqueues += 1
+                if not internal and isinstance(commanded_run_id, str) and commanded_run_id:
+                    activity_epoch = time.time()
 
         if commit_failed or capacity_lost or fence_lost:
             try:
@@ -1590,11 +1961,47 @@ class ServerState:
         if capacity_lost:
             return 429, {"error": "queue_full"}
         if fence_lost:
+            if fence_error_code is not None:
+                return self._fence_reject_response(fence_error_code)
             return 409, {"error": "enqueue_cancelled"}
         if commit_failed:
             return 409, {"error": "lease_invalid"}
 
+        try:
+            if not internal:
+                self._note_run_command_activity(
+                    owner_client, run_id=commanded_run_id, now=activity_epoch
+                )
+        except Exception:
+            pass
         return 200, {"id": command_id, "peer": peer, "cmd": "exec_enforce"}
+
+    def _note_run_command_activity(
+        self,
+        owner_client: ClientIdentity | None,
+        run_id: str | None = None,
+        now: float | None = None,
+    ) -> None:
+        epoch = time.time() if now is None else float(now)
+        lifecycle = self.lifecycle
+        if isinstance(run_id, str) and run_id:
+            exact = getattr(lifecycle, "record_command_activity", None)
+            if callable(exact):
+                exact(run_id, now=epoch)
+                return
+        # Legacy queue and any enqueue without a bound run_id: no accredited
+        # destination. Lifecycle publishes unknown rather than crediting by
+        # cardinality or leaving a false stale.
+        recorder = getattr(lifecycle, "record_box_command_activity", None)
+        if not callable(recorder):
+            return
+        owner_session = (
+            owner_client.session_id
+            if owner_client is not None
+            and isinstance(getattr(owner_client, "session_id", None), str)
+            else None
+        )
+        recorder(now=epoch, owner_session=owner_session)
 
     def _rollback_enqueued(self, command_id: int) -> None:
         for key, queue in self._iter_mutable_queues():
@@ -1697,6 +2104,7 @@ class ServerState:
         instance: str | None = None,
         source_pid: int | None = None,
         source_creation_time: str | None = None,
+        caps: str | None = None,
     ) -> tuple[int, dict]:
         if peer not in VALID_PEERS:
             return 400, {"error": "bad_peer"}
@@ -1767,6 +2175,14 @@ class ServerState:
                     if bind_label == BINDING_BOUND:
                         accredited = True
                         self._bound_last_poll_at[peer] = now
+                        run_id = _binding_run_id(binding)
+                        if self._poll_should_hold_commands(run_id):
+                            if isinstance(run_id, str) and run_id:
+                                self._drain_run_locked(
+                                    run_id,
+                                    discarded_exec,
+                                    finished_operations,
+                                )
                         queue = self._bound_queues.setdefault(token, [])
                         self._expire_stale_commands(
                             queue, now, discarded_exec, finished_operations
@@ -1784,6 +2200,10 @@ class ServerState:
                 self._expire_stale_commands(
                     queue, now, discarded_exec, finished_operations
                 )
+
+            # After the whole binding chain: the census belongs to THIS poll,
+            # so it needs this poll's accreditation, not the previous one's.
+            self._record_poll_caps_locked(peer, caps, accredited)
 
             if not accredited:
                 self._unaccredited_poll_counts[bind_label] = (
@@ -1804,7 +2224,17 @@ class ServerState:
         while True:
             with self._lock:
                 queue_ref = deliver_queue
-                snapshot = list(queue_ref)
+                bound = self._bindings.get(token) if token is not None else None
+                if bound is not None and self._poll_should_hold_commands(
+                    _binding_run_id(bound)
+                ):
+                    snapshot = [
+                        command
+                        for command in queue_ref
+                        if self._command_exempt_from_fence(command.get("id"))
+                    ]
+                else:
+                    snapshot = list(queue_ref)
             has_mutation = any(
                 isinstance(command.get("cmd"), str)
                 and command_requires_lease(command["cmd"])
@@ -1820,6 +2250,19 @@ class ServerState:
 
             with self._lock:
                 queue = deliver_queue
+                bound = self._bindings.get(token) if token is not None else None
+                hold_run_id = _binding_run_id(bound) if bound is not None else None
+                if bound is not None and self._poll_should_hold_commands(hold_run_id):
+                    if isinstance(hold_run_id, str) and hold_run_id:
+                        self._drain_run_locked(
+                            hold_run_id, discarded_exec, finished_operations
+                        )
+                    snapshot = [
+                        command
+                        for command in queue
+                        if self._command_exempt_from_fence(command.get("id"))
+                    ]
+                    queue_ref = queue
                 if (
                     queue is not queue_ref
                     or len(queue) < len(snapshot)
@@ -2092,6 +2535,8 @@ class ServerState:
             fence = self._command_fence.get(command_id)
             if fence is not None:
                 target_instance, target_epoch, _target_pid = fence
+                if target_instance in self._retired_instances:
+                    return 409, {"error": "binding_retired"}
                 presented = instance or ""
                 if target_instance and presented != target_instance:
                     self._audit_fence(
@@ -2367,6 +2812,7 @@ class ServerState:
                     "binding_state": bind_state,
                     "instance_prefix": prefix,
                     "bound_last_poll_age_s": bound_age,
+                    "capabilities": self._capabilities_view_locked(peer),
                 }
             rejects = {code: 0 for code in FENCE_MUTATION_REJECT_CODES}
             rejects.update(
@@ -2385,6 +2831,49 @@ class ServerState:
             "last_client_request_at": last_client_request_at,
             "audit_degraded_count": audit_degraded_count,
             "fence": fence,
+        }
+
+    def _record_poll_caps_locked(
+        self, peer: str, raw: str | None, accredited: bool
+    ) -> None:
+        """Keep only the last accredited announcement, tagged with its generation.
+
+        An unaccredited poll may come from anyone, so its census is not stored
+        AND it does not keep the previous one alive: the peer goes back to
+        unknown. That is affordable here precisely because the census gates
+        nothing.
+        """
+
+        if accredited:
+            names, reason = parse_poll_caps(raw)
+        else:
+            names, reason = None, "unaccredited"
+        self._peer_caps[peer] = {
+            "generation": self.daemon_generation,
+            "commands": names,
+            "reason": reason,
+        }
+
+    def _capabilities_view_locked(self, peer: str) -> dict:
+        entry = self._peer_caps.get(peer)
+        if entry is None:
+            return {"state": "unknown", "reason": "absent", "announced_commands": []}
+        if entry["commands"] is None:
+            return {
+                "state": "unknown",
+                "reason": entry["reason"],
+                "announced_commands": [],
+            }
+        if entry["generation"] != self.daemon_generation:
+            return {
+                "state": "unknown",
+                "reason": "stale_generation",
+                "announced_commands": [],
+            }
+        return {
+            "state": "announced",
+            "reason": entry["reason"],
+            "announced_commands": list(entry["commands"]),
         }
 
     def _peer_status_view(
@@ -2627,6 +3116,140 @@ class Handler(BaseHTTPRequestHandler):
             response["cleanup_degraded"] = payload["cleanup_degraded"]
         self._json(200, response)
 
+    def _adopt_on_grant(self, client: ClientIdentity, payload: dict) -> dict:
+        """P-J2: a granted box lease adopts the unique ownerless RUNNING_IDLE run.
+
+        Fail-open for the lease: the caller already holds it. Declared on the
+        grant payload. Skipped when this daemon has no real ProcessLifecycle
+        (HTTP session fixtures that only wire a coordinator). Never raises:
+        the grant response must arrive whole.
+        """
+
+        if payload.get("status") != "active":
+            return payload
+        token = payload.get("lease_token")
+        if not isinstance(token, str) or not token:
+            return payload
+        lifecycle = self.state.lifecycle
+        if lifecycle is None or not hasattr(lifecycle, "adopt_run"):
+            return payload
+        if not hasattr(lifecycle, "manifest"):
+            return payload
+        manifest = lifecycle.manifest
+        if manifest is None or not hasattr(manifest, "list_runs"):
+            return payload
+        run_id: object = None
+        result: object = None
+
+        def _copy_cleanup(
+            adopted: dict[str, object], source: object
+        ) -> dict[str, object]:
+            if not isinstance(source, dict):
+                return adopted
+            raw = source.get("cleanup_degraded")
+            if isinstance(raw, (list, tuple)) and raw:
+                values = list(
+                    dict.fromkeys(
+                        item for item in raw if isinstance(item, str) and item
+                    )
+                )
+                if values:
+                    adopted["cleanup_degraded"] = values
+            return adopted
+
+        try:
+            unreadable = False
+            idle: list[object] = []
+            try:
+                from dayz_mcp.process_lifecycle import RUN_STATES
+
+                rows = list(manifest.list_runs())
+                for run in rows:
+                    # The RunRecord contract bounds state to RUN_STATES and
+                    # owner_session_id to str | None; a row outside it is
+                    # unreadable durable state, never a silent null.
+                    if not (
+                        hasattr(run, "state")
+                        and hasattr(run, "owner_session_id")
+                        and hasattr(run, "run_id")
+                        and isinstance(run.state, str)
+                        and isinstance(run.run_id, str)
+                        and run.state in RUN_STATES
+                        and (
+                            run.owner_session_id is None
+                            or isinstance(run.owner_session_id, str)
+                        )
+                    ):
+                        unreadable = True
+                        break
+                    if (
+                        run.state == "RUNNING_IDLE"
+                        and run.owner_session_id is None
+                    ):
+                        idle.append(run)
+            except Exception:
+                unreadable = True
+            if unreadable:
+                payload["adopted_run"] = {
+                    "ok": False,
+                    "run_id": None,
+                    "error": _DURABLE_UNREADABLE,
+                }
+                return payload
+            if not idle:
+                payload["adopted_run"] = None
+                return payload
+            if len(idle) > 1:
+                payload["adopted_run"] = {
+                    "ok": False,
+                    "run_id": None,
+                    "error": "multiple_idle_runs",
+                }
+                return payload
+            run_id = idle[0].run_id
+            result = lifecycle.adopt_run(client, token, run_id)
+            if not isinstance(result, dict):
+                payload["adopted_run"] = _copy_cleanup(
+                    {
+                        "ok": False,
+                        "run_id": run_id,
+                        "error": "adopt_failed",
+                    },
+                    result,
+                )
+                return payload
+            if result.get("ok") is True:
+                adopted: dict[str, object] = {
+                    "ok": True,
+                    "run_id": result.get("run_id", run_id),
+                    "state": result.get("state"),
+                    "dispatchable": result.get("dispatchable"),
+                }
+                if "hint" in result:
+                    adopted["hint"] = result["hint"]
+                payload["adopted_run"] = _copy_cleanup(adopted, result)
+                return payload
+            error = result.get("error")
+            adopted = {
+                "ok": False,
+                "run_id": result.get("run_id") if result.get("run_id") is not None else run_id,
+                "error": error if isinstance(error, str) and error else "adopt_failed",
+            }
+            if "hint" in result:
+                adopted["hint"] = result["hint"]
+            payload["adopted_run"] = _copy_cleanup(adopted, result)
+            return payload
+        except Exception:
+            payload["adopted_run"] = _copy_cleanup(
+                {
+                    "ok": False,
+                    "run_id": run_id,
+                    "error": "adopt_failed",
+                },
+                result,
+            )
+            return payload
+
     def _handle_session(self, action: str) -> None:
         body = self._read_json()
         if body is None:
@@ -2706,6 +3329,9 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 )
             payload["box"] = _box_payload(self.state)
+
+        if action in {"acquire", "wait"} and status == 200:
+            payload = self._adopt_on_grant(client, payload)
 
         payload = self._persist_coordination(payload)
         self._log(
@@ -2907,6 +3533,7 @@ class Handler(BaseHTTPRequestHandler):
         version = qs["ver"][0] if "ver" in qs else None
         inst_raw = qs.get("inst", [""])[0]
         instance = inst_raw if inst_raw else None
+        caps_raw = qs.get("caps", [""])[0]
         source_pid = self.state.resolve_poll_pid(
             instance, getattr(self, "connection", None)
         )
@@ -2915,6 +3542,7 @@ class Handler(BaseHTTPRequestHandler):
             version,
             instance=instance,
             source_pid=source_pid,
+            caps=caps_raw,
         )
         if status != 200:
             self._json(status, payload)

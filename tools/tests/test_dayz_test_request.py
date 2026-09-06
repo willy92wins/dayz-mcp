@@ -2,12 +2,203 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import inspect
 import importlib.util
 import json
 import unittest
+from dataclasses import replace
 
 
 class DayzTestRequestTests(unittest.TestCase):
+    def test_request_uses_current_mode_authority_for_each_parse(self) -> None:
+        request_module = importlib.import_module("dayz_mcp.dayz_test_request")
+        modes_module = importlib.import_module("dayz_mcp.dayz_test_modes")
+        policy = request_module.RequestProjectPolicy(
+            mod="ExampleMod",
+            dev_root=r"P:\ExampleMod_Suite",
+            default_source=r"P:\ExampleMod",
+            default_base_mods=("@CF",),
+            mission_roots=(r"P:\ExampleMod_Suite\_server\mpmissions",),
+            mod_roots=(r"P:\Mods",),
+        )
+        raw = json.dumps(
+            {"version": 1, "dev_root": r"P:\ExampleMod_Suite", "mod": "ExampleMod"}
+        ).encode("utf-8")
+        original_records = modes_module.MODE_RECORDS
+        changed_records = tuple(
+            replace(
+                record,
+                default_when_omitted=(record.name == "server"),
+                request_visible=(False if record.name == "client" else record.request_visible),
+            )
+            for record in original_records
+        )
+        no_default_records = tuple(
+            replace(record, default_when_omitted=False) for record in original_records
+        )
+        multiple_default_records = tuple(
+            replace(
+                record,
+                default_when_omitted=(record.name in {"all", "server"}),
+            )
+            for record in original_records
+        )
+        client_request = json.dumps(
+            {
+                "version": 1,
+                "dev_root": r"P:\ExampleMod_Suite",
+                "mod": "ExampleMod",
+                "mode": "client",
+                "run_id": "12345678-1234-4234-8234-1234567890ab",
+            }
+        ).encode("utf-8")
+
+        self.assertEqual(
+            request_module.parse_dayz_test_request(raw, policies=(policy,)).payload["mode"],
+            "all",
+        )
+        modes_module.MODE_RECORDS = changed_records
+        try:
+            self.assertEqual(
+                request_module.parse_dayz_test_request(raw, policies=(policy,)).payload["mode"],
+                "server",
+            )
+            with self.assertRaisesRegex(ValueError, "invalid_dayz_test_request"):
+                request_module.parse_dayz_test_request(client_request, policies=(policy,))
+            modes_module.MODE_RECORDS = no_default_records
+            with self.assertRaisesRegex(ValueError, "invalid_dayz_test_request"):
+                request_module.parse_dayz_test_request(raw, policies=(policy,))
+            modes_module.MODE_RECORDS = multiple_default_records
+            with self.assertRaisesRegex(ValueError, "invalid_dayz_test_request"):
+                request_module.parse_dayz_test_request(raw, policies=(policy,))
+        finally:
+            modes_module.MODE_RECORDS = original_records
+
+    def test_request_emits_closed_run_id_tokens_before_generic_validation(self) -> None:
+        request_module = importlib.import_module("dayz_mcp.dayz_test_request")
+        policy = request_module.RequestProjectPolicy(
+            mod="ExampleMod",
+            dev_root=r"P:\ExampleMod_Suite",
+            default_source=r"P:\ExampleMod",
+            default_base_mods=("@CF",),
+            mission_roots=(r"P:\ExampleMod_Suite\_server\mpmissions",),
+            mod_roots=(r"P:\Mods",),
+        )
+        base = {"version": 1, "dev_root": r"P:\ExampleMod_Suite", "mod": "ExampleMod"}
+        valid_uuid = "12345678-1234-4234-8234-1234567890ab"
+        cases = {
+            "invalid_uuid_wins": ({"mode": "client", "run_id": "not-a-uuid"}, "invalid_run_id"),
+            "server_invalid_uuid_wins": (
+                {"mode": "server", "run_id": "not-a-uuid"},
+                "invalid_run_id",
+            ),
+            "all_invalid_uuid_wins": (
+                {"mode": "all", "run_id": "not-a-uuid"},
+                "invalid_run_id",
+            ),
+            "client_without_id": ({"mode": "client"}, "client_requires_run_id"),
+            "server_with_id": ({"mode": "server", "run_id": valid_uuid}, "server_all_forbid_run_id"),
+            "all_with_id": ({"mode": "all", "run_id": valid_uuid}, "server_all_forbid_run_id"),
+        }
+
+        for preflight in (False, True):
+            for label, (overrides, expected) in cases.items():
+                document = {**base, **overrides, "preflight": preflight}
+                with self.subTest(preflight=preflight, label=label):
+                    with self.assertRaisesRegex(ValueError, f"^{expected}$"):
+                        request_module.parse_dayz_test_request(
+                            json.dumps(document).encode("utf-8"), policies=(policy,)
+                        )
+
+        for mode, run_id in (("server", None), ("all", None), ("client", valid_uuid)):
+            document = {**base, "mode": mode, "run_id": run_id}
+            with self.subTest(control_mode=mode):
+                parsed = request_module.parse_dayz_test_request(
+                    json.dumps(document).encode("utf-8"), policies=(policy,)
+                )
+                self.assertEqual(parsed.payload["mode"], mode)
+                self.assertEqual(parsed.payload["run_id"], run_id)
+
+        stop_document = {
+            **base,
+            "kill": True,
+            "mode": "offline",
+            "run_id": valid_uuid,
+        }
+        stop = request_module.parse_dayz_test_request(
+            json.dumps(stop_document).encode("utf-8"), policies=(policy,)
+        )
+        self.assertIs(stop.payload["kill"], True)
+        self.assertEqual(stop.payload["mode"], "offline")
+        self.assertEqual(stop.payload["run_id"], valid_uuid)
+
+        invalid_stops = {
+            "kill_preflight": {
+                "kill": True,
+                "mode": "offline",
+                "preflight": True,
+                "run_id": valid_uuid,
+            },
+            "kill_client": {
+                "kill": True,
+                "mode": "client",
+                "run_id": valid_uuid,
+            },
+            "kill_server": {
+                "kill": True,
+                "mode": "server",
+                "run_id": valid_uuid,
+            },
+            "kill_all": {
+                "kill": True,
+                "mode": "all",
+                "run_id": valid_uuid,
+            },
+        }
+        stop_reasons = {
+            "kill_preflight": "invalid_dayz_test_request:kill_conflicts_with_other_work",
+            "kill_client": "invalid_dayz_test_request:kill_requires_offline_mode",
+            "kill_server": "invalid_dayz_test_request:kill_requires_offline_mode",
+            "kill_all": "invalid_dayz_test_request:kill_requires_offline_mode",
+        }
+        for label, overrides in invalid_stops.items():
+            with self.subTest(invalid_stop=label):
+                with self.assertRaisesRegex(
+                    ValueError, f"^{stop_reasons[label]}$"
+                ):
+                    request_module.parse_dayz_test_request(
+                        json.dumps({**base, **overrides}).encode("utf-8"),
+                        policies=(policy,),
+                    )
+
+    def test_request_accepts_only_the_four_frozen_mission_aliases(self) -> None:
+        request_module = importlib.import_module("dayz_mcp.dayz_test_request")
+        policy = request_module.RequestProjectPolicy(
+            mod="ExampleMod",
+            dev_root=r"P:\ExampleMod_Suite",
+            default_source=r"P:\ExampleMod",
+            default_base_mods=("@CF",),
+            mission_roots=(r"P:\ExampleMod_Suite\_server\mpmissions",),
+            mod_roots=(r"P:\Mods",),
+        )
+        base = {"version": 1, "dev_root": r"P:\ExampleMod_Suite", "mod": "ExampleMod"}
+
+        for mission in ("sakhal", "lfheli"):
+            with self.subTest(mission=mission):
+                parsed = request_module.parse_dayz_test_request(
+                    json.dumps({**base, "mission": mission}).encode("utf-8"),
+                    policies=(policy,),
+                )
+                self.assertEqual(parsed.payload["mission"], mission)
+
+        with self.assertRaisesRegex(
+            ValueError, "^invalid_dayz_test_request:mission_not_allowed$"
+        ):
+            request_module.parse_dayz_test_request(
+                json.dumps({**base, "mission": "namalsk"}).encode("utf-8"),
+                policies=(policy,),
+            )
+
     def test_minimal_request_applies_policy_defaults_and_emits_canonical_bytes(
         self,
     ) -> None:
@@ -50,6 +241,7 @@ class DayzTestRequestTests(unittest.TestCase):
             "player_name": "Dev",
             "port": 2302,
             "preflight": False,
+            "replace_if_not_polling_since": None,
             "run_id": None,
             "server_mods": [],
             "server_wait_s": 60,
@@ -209,8 +401,28 @@ class DayzTestRequestTests(unittest.TestCase):
         for label, overrides in invalid_overrides.items():
             document = dict(base)
             document.update(overrides)
+            # 8f8c point 3 (T6). Every row names its own condition; the three
+            # run_id tokens keep the shape they already had.
+            expected_error = {
+                "bool_version": "invalid_dayz_test_request:version_unsupported",
+                "bool_port": "invalid_dayz_test_request:port_out_of_range",
+                "low_port": "invalid_dayz_test_request:port_out_of_range",
+                "low_width": "invalid_dayz_test_request:window_size_out_of_range",
+                "retail_mode": "invalid_dayz_test_request:mode_unknown",
+                "relative_unknown_mission": "invalid_dayz_test_request:mission_not_allowed",
+                "control_player_name": "invalid_dayz_test_request:player_name_invalid",
+                "zero_wait": "invalid_dayz_test_request:server_wait_out_of_range",
+                "mods_as_delimited_string": "invalid_dayz_test_request:mod_list_invalid",
+                "pack_only_without_build": "invalid_dayz_test_request:pack_only_requires_build",
+                "source_without_build": "invalid_dayz_test_request:source_requires_build",
+                "base_conflicts_with_no_base": "invalid_dayz_test_request:no_base_mods_conflict",
+                "kill_without_run": "invalid_dayz_test_request:kill_conflicts_with_other_work",
+                "client_without_run": "client_requires_run_id",
+                "server_with_run": "server_all_forbid_run_id",
+                "non_uuid_run": "invalid_run_id",
+            }[label]
             with self.subTest(label=label):
-                with self.assertRaisesRegex(ValueError, "invalid_dayz_test_request"):
+                with self.assertRaisesRegex(ValueError, f"^{expected_error}$"):
                     request_module.parse_dayz_test_request(
                         json.dumps(document).encode("utf-8"), policies=(policy,)
                     )
@@ -396,10 +608,6 @@ class DayzTestRequestTests(unittest.TestCase):
             "omitted_uses_policy": ({}, ["@CF", "@Dabs Framework", "@VPPAdminTools"]),
             "explicit_empty_stays_empty": ({"base_mods": []}, []),
             "no_base_empties_defaults": ({"no_base_mods": True}, []),
-            "preflight_client_needs_no_run": (
-                {"mode": "client", "preflight": True},
-                ["@CF", "@Dabs Framework", "@VPPAdminTools"],
-            ),
         }
 
         for label, (overrides, expected_base_mods) in cases.items():
@@ -502,6 +710,110 @@ class DayzTestRequestTests(unittest.TestCase):
         self.assertEqual(parsed.payload["source"], valid["source"])
         self.assertEqual(parsed.payload["extra_mods"], ["@Extra"])
         self.assertEqual(parsed.payload["server_mods"], [r"P:\Mods\@Server"])
+
+
+class RequestRejectionReasonsTests(unittest.TestCase):
+    """8f8c point 3. The 25 conditions of the parser stop being one token.
+
+    T6 is the positive half and T7 the negative control that kills the mutant
+    "translate any suffix": an undeclared reason must degrade to the exact
+    legacy token, not invent a code.
+    """
+
+    POLICY_KWARGS = {
+        "mod": "ExampleMod",
+        "dev_root": r"P:\ExampleMod_Suite",
+        "default_source": r"P:\ExampleMod",
+        "default_base_mods": ("@CF",),
+        "mission_roots": (r"P:\ExampleMod_Suite\_server\mpmissions",),
+        "mod_roots": (r"P:\Mods",),
+    }
+
+    def setUp(self) -> None:
+        self.request_module = importlib.import_module("dayz_mcp.dayz_test_request")
+        self.policy = self.request_module.RequestProjectPolicy(**self.POLICY_KWARGS)
+        self.base = {
+            "version": 1,
+            "dev_root": r"P:\ExampleMod_Suite",
+            "mod": "ExampleMod",
+        }
+
+    def _reason(self, **overrides: object) -> str:
+        with self.assertRaises(ValueError) as caught:
+            self.request_module.parse_dayz_test_request(
+                json.dumps({**self.base, **overrides}).encode("utf-8"),
+                policies=(self.policy,),
+            )
+        token = str(caught.exception)
+        prefix = "invalid_dayz_test_request:"
+        self.assertTrue(token.startswith(prefix), token)
+        return token[len(prefix) :]
+
+    def test_t6_distinct_conditions_produce_distinct_declared_reasons(self) -> None:
+        rows = (
+            {"port": 1023},
+            {"width": 319},
+            {"mode": "retail"},
+            {"mission": "moon"},
+            {"player_name": "Dev\u0001"},
+            {"server_wait_s": 0},
+            {"extra_mods": "@CF;@Other"},
+            {"pack_only": True},
+            {"kill": True, "mode": "client", "run_id": "12345678-1234-4234-8234-1234567890ab"},
+        )
+        reasons = [self._reason(**row) for row in rows]
+        for reason in reasons:
+            self.assertIn(reason, self.request_module.REQUEST_REJECTION_REASONS)
+        # Positive control against the defect coming back: nine different
+        # conditions must not collapse into one answer again.
+        self.assertGreaterEqual(len(set(reasons)), 8)
+
+    def test_the_vocabulary_is_closed_and_every_declared_reason_is_used(self) -> None:
+        source = inspect.getsource(self.request_module)
+        for reason in self.request_module.REQUEST_REJECTION_REASONS:
+            self.assertIn(f'_invalid("{reason}")', source, reason)
+
+    def test_f07_a_canonical_payload_from_before_the_witness_still_parses(self) -> None:
+        """Codex F-07. A v1 document emitted before the key existed is still v1.
+
+        Recognising only the new keyset made a stored or replayed payload stop
+        being canonical and die as source_requires_build, with no version bump
+        and no legacy route: the failure a rollback of this window would hit.
+        """
+        module = self.request_module
+        policy = module.RequestProjectPolicy(**self.POLICY_KWARGS)
+        current = module.parse_dayz_test_request(
+            json.dumps(self.base).encode("utf-8"), policies=(policy,)
+        )
+        legacy = dict(current.payload)
+        del legacy["replace_if_not_polling_since"]
+        reparsed = module.parse_dayz_test_request(
+            json.dumps(legacy).encode("utf-8"), policies=(policy,)
+        )
+        self.assertEqual(reparsed.payload["source"], policy.default_source)
+        self.assertIsNone(reparsed.payload["replace_if_not_polling_since"])
+        # Positive control: a keyset that is neither of the two IS rejected.
+        stray = dict(legacy)
+        del stray["player_name"]
+        with self.assertRaises(ValueError):
+            module.parse_dayz_test_request(
+                json.dumps(stray).encode("utf-8"), policies=(policy,)
+            )
+
+    def test_t7_an_undeclared_reason_keeps_exactly_the_legacy_token(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self.request_module._invalid("a_reason_nobody_declared")
+        self.assertEqual(str(caught.exception), "invalid_dayz_test_request")
+
+    def test_no_rejection_path_still_raises_the_bare_literal(self) -> None:
+        """Grep as an assertion: the raw string may only live inside _invalid."""
+        lines = inspect.getsource(self.request_module).split("\n")
+        offenders = [
+            line.strip()
+            for line in lines
+            if 'ValueError("invalid_dayz_test_request")' in line
+        ]
+        self.assertEqual(len(offenders), 1, offenders)
 
 
 if __name__ == "__main__":

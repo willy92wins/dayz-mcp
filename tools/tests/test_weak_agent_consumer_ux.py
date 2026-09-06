@@ -470,9 +470,14 @@ class WeakAgentCaptureWebpTest(unittest.IsolatedAsyncioTestCase):
         }
         with patch.object(server.mcp_capture, "capture_dual", return_value=payload):
             result = await tool.fn(fmt="webp")
-        self.assertEqual(result._format, "webp")
-        self.assertEqual(result._mime_type, "image/webp")
-        content = result.to_image_content()
+        # The tool returns [Image, meta JSON] in both save_fullres arms (ficha 268a); the
+        # image is the first block and keeps the encoder's mime type.
+        self.assertIsInstance(result, list)
+        self.assertEqual(2, len(result))
+        image = result[0]
+        self.assertEqual(image._format, "webp")
+        self.assertEqual(image._mime_type, "image/webp")
+        content = image.to_image_content()
         self.assertEqual(content.mimeType, "image/webp")
 
 

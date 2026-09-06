@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-EXPECTED_BRIDGE_VERSION = "9"
+EXPECTED_BRIDGE_VERSION = "10"
 
 # Peer version_state values that must block command delivery / enqueue.
 BLOCKED_VERSION_STATES = {"legacy_blocked", "version_mismatch"}
@@ -66,13 +66,24 @@ def _peer_status(
         expected_bridge_version=expected_bridge_version,
     )
     if not observed_this_generation:
-        # version_state stays the computed value so old consumers do not
-        # break; the detail names the real situation (no poll this daemon
-        # generation) instead of a stale "poll omitted ver=".
+        # Do not serve the computed/persisted verdict (legacy_blocked,
+        # version_mismatch, "poll did not include ver=") as if this
+        # generation observed a poll. Label the payload instead.
+        state = "never_polled_this_generation"
         detail = "never_polled_this_generation"
+    # M22 carrier (addendum enmienda 2026-09-03). M06 publishes the capability
+    # census on the raw snapshot and M22 compares it against the registered
+    # tools; this dict is the only thing between them, and it is built from a
+    # fixed key set, so anything not named here dies here. The shape is kept
+    # constant -- an older loopback with no census still yields a block that
+    # says unknown, rather than a missing key each consumer has to guess about.
+    capabilities = peer_snapshot.get("capabilities")
+    if not isinstance(capabilities, dict):
+        capabilities = {"state": "unknown", "reason": "absent", "announced_commands": []}
     return {
         "last_poll_age_s": last_poll_age_s,
         "queue_depth": peer_snapshot.get("queue_depth", 0),
+        "capabilities": capabilities,
         "version": version,
         "version_state": state,
         "version_detail": detail,

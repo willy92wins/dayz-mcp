@@ -221,6 +221,29 @@ class LauncherPolicySourceTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "policy_source_schema"):
             self.builder.validate_launcher_policy_source(document)
 
+    def test_missing_required_alias_key_is_schema_error(self) -> None:
+        document = _intent_template()
+        del document["projects"][0]["mission_aliases"]["sakhal"]
+        with self.assertRaisesRegex(ValueError, "policy_source_schema"):
+            self.builder.validate_launcher_policy_source(document)
+
+    def test_project_specific_extra_alias_is_accepted(self) -> None:
+        document = _intent_template()
+        extra = r"C:\DayZ\ExampleMod\dev\_server\mpmissions\LFHeli.chernarusplus"
+        document["projects"][0]["mission_aliases"]["lfheli"] = extra
+        self.builder.validate_launcher_policy_source(document)
+        runtime = self.builder.derive_worker_runtime(document)
+        aliases = runtime["projects"][0]["mission_aliases"]
+        self.assertEqual(aliases["lfheli"], extra)
+        self.assertTrue({"chernarus", "livonia", "sakhal"}.issubset(aliases))
+        self.builder.validate_worker_runtime_document(runtime)
+
+    def test_extra_alias_outside_roots_is_schema_error(self) -> None:
+        document = _intent_template()
+        document["projects"][0]["mission_aliases"]["lfheli"] = r"C:\Windows"
+        with self.assertRaisesRegex(ValueError, "policy_source_schema"):
+            self.builder.validate_launcher_policy_source(document)
+
     def test_build_source_basename_accepts_null_and_a_plain_name(self) -> None:
         document = _intent_template()
         self.builder.validate_launcher_policy_source(document)

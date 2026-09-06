@@ -78,14 +78,13 @@ TOOLS_RELATIVE_FILES: tuple[tuple[str, ...], ...] = (
     ("Bin", "PboUtils", "LibCommon.dll"),
     ("Bin", "PboUtils", "exclude.lst"),
 )
-STEAM_RELATIVE_FILES: tuple[str, ...] = (
-    "steamclient.dll",
-    "Steam.dll",
-    "CSERHelper.dll",
-    "GameOverlayRenderer.dll",
-    "tier0_s.dll",
-    "vstdlib_s.dll",
-)
+# Steam's own client DLLs stay out of the launcher closure. Steam updates them on its own
+# schedule, so pinning them by hash makes the bundle verifier fail on a third party's release
+# calendar, and a red that cannot separate an update from tampering is a red nobody reads.
+# The closure keeps what this project builds or freezes: the bundle, DayZ Tools and the diag
+# executable. Recorded in plans/inbox-20260830/physical-ownership-addendum-v1.md, section
+# "Enmienda 2026-09-02".
+STEAM_RELATIVE_FILES: tuple[str, ...] = ()
 ADDON_HELPER_RELATIVE: tuple[tuple[str, ...], ...] = (
     ("Bin", "Binarize", "binarize.exe"),
     ("Bin", "CfgConvert", "CfgConvert.exe"),

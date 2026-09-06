@@ -8,6 +8,7 @@ import time
 import unittest
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any, Callable
 from unittest.mock import AsyncMock, patch
 
@@ -304,7 +305,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             running = asyncio.create_task(
                 app.call_tool(
                     "dayz_test_run",
-                    {"project": "ExampleMod", "mode": "offline"},
+                    {"project": "ExampleMod", "mode": "server"},
                 )
             )
             await started.wait()
@@ -316,6 +317,58 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             await status
 
         session_status.assert_awaited_once()
+
+    async def test_dayz_test_launcher_backend_code_travels_without_its_detail(self) -> None:
+        # Ficha ae65: build=true died as dayz_test_failed:NativeLauncherBackendError
+        # and the code, one frame away, never reached the caller. The backend
+        # names its cause with a source constant: that token crosses, the local
+        # detail (host paths) does not, and a code that is not a bare token
+        # stays mute exactly as before.
+        from dayz_mcp.native_launcher_backend import NativeLauncherBackendError
+        from tests.test_client_mode import _fixture_client_runtime
+
+        config = ServerConfig(
+            mode="client",
+            key=self.key,
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _message: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        with patch.object(server_module, "ClientRuntime", return_value=runtime):
+            app, _built = build_app(config)
+
+        cases = (
+            (
+                NativeLauncherBackendError(
+                    "invalid_native_launcher_environment", r"secret C:\Users\host"
+                ),
+                "NativeLauncherBackendError:invalid_native_launcher_environment",
+            ),
+            (
+                NativeLauncherBackendError(r"C:\Users\host\secret"),
+                "NativeLauncherBackendError",
+            ),
+        )
+        for error, expected in cases:
+
+            async def boom(*_args: object, **_kwargs: object) -> dict[str, Any]:
+                raise error
+
+            with patch.object(
+                server_module.dayz_test_tool, "execute_dayz_test_run", side_effect=boom
+            ):
+                with self.assertRaises(Exception) as err:
+                    await app.call_tool(
+                        "dayz_test_run", {"project": "ExampleMod", "mode": "server"}
+                    )
+            message = str(err.exception)
+            _assert_tool_error(self, err.exception)
+            self.assertIn("dayz_test_failed:", message, expected)
+            tail = message.split("dayz_test_failed:", 1)[1].split()[0].rstrip(".,;)")
+            self.assertEqual(tail, expected)
+            self.assertNotIn("secret", message, expected)
+            self.assertNotIn("host", message, expected)
 
     async def test_dayz_test_untyped_failure_carries_the_exception_type(self) -> None:
         # The bare `except Exception` swallowed the cause, which is exactly
@@ -341,7 +394,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         for tool, args, target in (
             (
                 "dayz_test_run",
-                {"project": "ExampleMod", "mode": "offline"},
+                {"project": "ExampleMod", "mode": "server"},
                 "execute_dayz_test_run",
             ),
             (
@@ -371,7 +424,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaises(Exception) as typed_err:
                 await app.call_tool(
-                    "dayz_test_run", {"project": "ExampleMod", "mode": "offline"}
+                    "dayz_test_run", {"project": "ExampleMod", "mode": "server"}
                 )
         typed_message = str(typed_err.exception)
         self.assertIn("bad_project", typed_message)
@@ -508,6 +561,32 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         status = _content_json(await blocked_app.call_tool("bridge_status", {}))
         self.assertEqual(status["version_state"]["server"], "legacy_blocked")
 
+    async def test_never_polled_is_game_not_ready_before_enqueue(self) -> None:
+        app, runtime = self.build_started(require_version=True)
+        enqueue_calls: list[object] = []
+        original = runtime.state.enqueue_command
+
+        def wrapped(*args: object, **kwargs: object) -> object:
+            enqueue_calls.append(1)
+            return original(*args, **kwargs)
+
+        runtime.state.enqueue_command = wrapped  # type: ignore[method-assign]
+        with self.assertRaises(Exception) as err:
+            await app.call_tool("query_player_state", {"timeout_s": 1.0})
+        _assert_tool_error(self, err.exception)
+        message = str(err.exception)
+        self.assertIn("game_not_ready", message)
+        self.assertNotIn("version_blocked:bridge", message)
+        self.assertNotIn("poll did not include ver=", message)
+        self.assertEqual(enqueue_calls, [])
+        status = _content_json(await app.call_tool("bridge_status", {}))
+        self.assertEqual(
+            status["server_peer"]["version_state"], "never_polled_this_generation"
+        )
+        self.assertEqual(
+            status["client_peer"]["version_state"], "never_polled_this_generation"
+        )
+
     async def test_version_state_mismatch_and_ok(self) -> None:
         app, runtime = self.build_started(expected_game_version="1.29.0")
         self.start_peer(runtime, "server", version="wrong~1.29.0")
@@ -559,6 +638,47 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(ready["ready"], False)
         self.assertIn(ready["reason"], server_module.READY_REASONS)
 
+    async def test_bridge_status_publishes_frozen_tool_registry_overlay(self) -> None:
+        app, _runtime = self.build_started()
+        status = _content_json(await app.call_tool("bridge_status", {}))
+        for key in (
+            "tool_registry_fingerprint",
+            "tool_registry_captured_at",
+            "tool_registry_source_stale",
+            "tool_registry_remediation",
+        ):
+            self.assertIn(key, status)
+        self.assertEqual(status["tool_registry_remediation"], "reopen_mcp_client")
+        stale = status["tool_registry_source_stale"]
+        self.assertIn(stale, (None, "unknown"))
+        self.assertIsNot(stale, False)
+        with patch.object(server_module, "capture_registry_snapshot") as capture:
+            again = _content_json(await app.call_tool("bridge_status", {}))
+        capture.assert_not_called()
+        self.assertEqual(
+            again["tool_registry_fingerprint"], status["tool_registry_fingerprint"]
+        )
+        self.assertEqual(
+            again["tool_registry_captured_at"], status["tool_registry_captured_at"]
+        )
+
+    async def test_loopback_status_omits_tool_registry_overlay(self) -> None:
+        _app, runtime = self.build_started()
+        assert runtime.loopback is not None and runtime.loopback.httpd is not None
+        host, port = runtime.loopback.httpd.server_address
+        url = f"http://{host}:{port}/status?key={self.key}"
+        with urllib.request.urlopen(url, timeout=2.0) as response:
+            raw = json.loads(response.read().decode("utf-8"))
+        encoded = json.dumps(raw)
+        for key in (
+            "tool_registry_fingerprint",
+            "tool_registry_captured_at",
+            "tool_registry_source_stale",
+            "tool_registry_remediation",
+        ):
+            self.assertNotIn(key, raw)
+            self.assertNotIn(key, encoded)
+
     async def test_shutdown_reuses_port(self) -> None:
         _app, runtime = self.build_started()
         self.assertIsNotNone(runtime.loopback)
@@ -591,7 +711,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         for tool, args, target in (
             (
                 "dayz_test_run",
-                {"project": "ExampleMod", "mode": "offline"},
+                {"project": "ExampleMod", "mode": "server"},
                 "execute_dayz_test_run",
             ),
             (
@@ -653,6 +773,417 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             # and never carry a host path.
             self.assertTrue(code.isidentifier(), token)
 
+    def test_dayz_test_run_id_matrix_tokens_are_mapped(self) -> None:
+        from dayz_mcp import dayz_test_request
+
+        mapping = server_module._DAYZ_TEST_VALUE_ERROR_CODES
+        self.assertEqual(mapping[dayz_test_request._INVALID_RUN_ID], "bad_run_id")
+        for token in (
+            dayz_test_request._INVALID_RUN_ID,
+            dayz_test_request._CLIENT_REQUIRES_RUN_ID,
+            dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, mapping)
+                self.assertTrue(mapping[token].isidentifier(), token)
+
+    async def test_dayz_test_run_names_run_id_matrix_causes_on_the_wire(self) -> None:
+        from dayz_mcp import dayz_test_request, dayz_test_tool
+        from tests.test_client_mode import _fixture_client_runtime
+        from tests.test_dayz_test_tool import _Bundle, _Opened, _policy, _sealed
+
+        config = ServerConfig(
+            mode="client",
+            key=self.key,
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _message: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        with patch.object(server_module, "ClientRuntime", return_value=runtime):
+            app, _built = build_app(config)
+
+        sealed = _sealed(_policy())
+        bad_uuid = "not-a-uuid"
+        rows = (
+            (
+                {"mode": "client", "run_id": bad_uuid},
+                "bad_run_id",
+            ),
+            (
+                {"mode": "client"},
+                dayz_test_request._CLIENT_REQUIRES_RUN_ID,
+            ),
+            (
+                {"mode": "server", "run_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+                dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
+            ),
+            (
+                {"mode": "all", "run_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+                dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
+            ),
+        )
+        for arguments, token in rows:
+            for preflight in (False, True):
+                args = {
+                    "project": "ExampleMod",
+                    "extra_mods": ["@DayZ_MCP"],
+                    "preflight": preflight,
+                    **arguments,
+                }
+                with self.subTest(args=args):
+                    with patch.object(
+                        dayz_test_tool, "_require_idle_session", new=AsyncMock()
+                    ), patch.object(
+                        dayz_test_tool,
+                        "open_approved_launcher",
+                        return_value=_Opened(),
+                    ), patch.object(
+                        dayz_test_tool.secure_launcher,
+                        "load_verified_bundle",
+                        return_value=_Bundle(sealed),
+                    ):
+                        with self.assertRaises(Exception) as err:
+                            await app.call_tool("dayz_test_run", args)
+                    _assert_tool_error(self, err.exception)
+                    message = str(err.exception)
+                    self.assertIn(token, message)
+                    self.assertNotIn("dayz_test_failed", message)
+
+    async def test_dayz_test_run_preflight_client_reattach_keeps_run_id(self) -> None:
+        from dayz_mcp import dayz_test_tool
+        from tests.test_client_mode import _fixture_client_runtime
+        from tests.test_dayz_test_tool import _Bundle, _Opened, _policy, _sealed
+
+        run_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        config = ServerConfig(
+            mode="client",
+            key=self.key,
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _message: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        with patch.object(server_module, "ClientRuntime", return_value=runtime):
+            app, _built = build_app(config)
+
+        sealed = _sealed(_policy())
+
+        async def launch(_raw: bytes, **kwargs: object) -> int:
+            await kwargs["execution_started_cb"]()
+            kwargs["output_sink"](
+                "stdout",
+                json.dumps(
+                    {
+                        "cleanup_degraded": False,
+                        "error_code": None,
+                        "exit_code": 0,
+                        "ok": True,
+                        "run_id": run_id,
+                    },
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
+            )
+            return 0
+
+        with patch.object(
+            dayz_test_tool, "_require_idle_session", new=AsyncMock()
+        ), patch.object(
+            runtime, "lifecycle_status", new=AsyncMock(return_value={"runs": []})
+        ), patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(sealed),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch,
+        ):
+            raw = await app.call_tool(
+                "dayz_test_run",
+                {
+                    "project": "ExampleMod",
+                    "mode": "client",
+                    "preflight": True,
+                    "run_id": run_id,
+                    "extra_mods": ["@DayZ_MCP"],
+                },
+            )
+        payload = _content_json(raw)
+        self.assertEqual(payload.get("status"), "succeeded")
+        self.assertEqual(payload.get("run_id"), run_id)
+        self.assertNotEqual(payload.get("error_code"), "terminal_invalid")
+
+    async def test_dayz_test_run_description_documents_reattach_matrix(self) -> None:
+        from tests.test_client_mode import _fixture_client_runtime
+
+        config = ServerConfig(
+            mode="client",
+            key=self.key,
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _message: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        with patch.object(server_module, "ClientRuntime", return_value=runtime):
+            app, _built = build_app(config)
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        desc = (tools["dayz_test_run"].description or "").lower()
+        self.assertIn("reattach", desc)
+        self.assertIn("preflight", desc)
+        self.assertIn("run_id", desc)
+        self.assertIn("client", desc)
+
+
+class UiPublicSurfaceTest(unittest.IsolatedAsyncioTestCase):
+    """Public UI tools accept root; ui_click also accepts mode and bubble."""
+
+    _UI_TOOLS = ("ui_tree", "ui_set_text", "ui_click", "ui_focus")
+
+    def _app(self):
+        return build_app(ServerConfig(key="k", port=0, log_sink=lambda _message: None))
+
+    async def _call(self, tool: str, arguments: dict[str, Any]):
+        app, runtime = self._app()
+        seen: list[dict[str, Any]] = []
+
+        async def recorder(cmd, bridge_args, role, timeout):
+            seen.append(dict(bridge_args))
+            return {"ok": 1}
+
+        with patch.object(runtime, "call_bridge", side_effect=recorder):
+            try:
+                await app.call_tool(tool, arguments)
+                return (seen[0] if seen else None), None
+            except Exception as exc:
+                return (seen[0] if seen else None), exc
+
+    def _base(self, tool: str) -> dict[str, Any]:
+        args: dict[str, Any] = {"path": "Btn"}
+        if tool == "ui_set_text":
+            args["text"] = "x"
+        return args
+
+    async def test_registered_schema_declares_root_on_all_four_ui_tools(self) -> None:
+        app, _runtime = self._app()
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        for name in self._UI_TOOLS:
+            with self.subTest(name):
+                props = (tools[name].inputSchema or {}).get("properties", {})
+                self.assertIn("root", props, props)
+
+    async def test_registered_schema_declares_mode_and_bubble_on_ui_click(self) -> None:
+        app, _runtime = self._app()
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        props = (tools["ui_click"].inputSchema or {}).get("properties", {})
+        self.assertIn("mode", props, props)
+        self.assertIn("bubble", props, props)
+
+    async def test_root_reaches_the_bridge_when_the_caller_sends_it(self) -> None:
+        for tool in self._UI_TOOLS:
+            with self.subTest(tool):
+                sent, err = await self._call(tool, {**self._base(tool), "root": "MiRoot"})
+                self.assertIsNone(err, err)
+                self.assertIsNotNone(sent)
+                self.assertEqual(sent.get("root"), "MiRoot")
+
+    async def test_root_does_not_travel_when_omitted(self) -> None:
+        for tool in self._UI_TOOLS:
+            with self.subTest(tool):
+                sent, err = await self._call(tool, self._base(tool))
+                self.assertIsNone(err, err)
+                self.assertIsNotNone(sent)
+                self.assertNotIn("root", sent)
+
+    async def test_ui_click_always_sends_default_mode_and_bubble(self) -> None:
+        sent, err = await self._call("ui_click", {"path": "Btn"})
+        self.assertIsNone(err, err)
+        self.assertIsNotNone(sent)
+        self.assertEqual(sent.get("mode"), "direct")
+        self.assertIs(sent.get("bubble"), False)
+
+    async def test_ui_click_forwards_complete_mode_and_true_bubble(self) -> None:
+        sent, err = await self._call(
+            "ui_click", {"path": "Btn", "mode": "complete", "bubble": True}
+        )
+        self.assertIsNone(err, err)
+        self.assertIsNotNone(sent)
+        self.assertEqual(sent.get("mode"), "complete")
+        self.assertIs(sent.get("bubble"), True)
+
+    async def test_fail_closed_rejects_before_enqueue(self) -> None:
+        cases = (
+            ("ui_click", {"path": "Btn", "mode": "otro"}),
+            ("ui_click", {"path": "Btn", "mode": 3}),
+            ("ui_click", {"path": "Btn", "bubble": "true"}),
+            ("ui_click", {"path": "Btn", "bubble": 1}),
+            ("ui_click", {"path": "Btn", "root": ""}),
+            ("ui_focus", {"path": "Btn", "root": 7}),
+            ("ui_tree", {"root": ""}),
+            ("ui_set_text", {"path": "Btn", "text": "x", "root": ""}),
+        )
+        for tool, arguments in cases:
+            with self.subTest(tool=tool, arguments=arguments):
+                sent, err = await self._call(tool, arguments)
+                self.assertIsNone(sent)
+                self.assertIsNotNone(err)
+                _assert_tool_error(self, err)
+
+    async def test_ui_tree_rejects_explicit_null_root_before_enqueue(self) -> None:
+        sent, err = await self._call("ui_tree", {**self._base("ui_tree"), "root": None})
+        self.assertIsNone(sent)
+        self.assertIsNotNone(err)
+        _assert_tool_error(self, err)
+
+    async def test_ui_set_text_rejects_explicit_null_root_before_enqueue(self) -> None:
+        sent, err = await self._call(
+            "ui_set_text", {**self._base("ui_set_text"), "root": None}
+        )
+        self.assertIsNone(sent)
+        self.assertIsNotNone(err)
+        _assert_tool_error(self, err)
+
+    async def test_ui_click_rejects_explicit_null_root_before_enqueue(self) -> None:
+        sent, err = await self._call("ui_click", {**self._base("ui_click"), "root": None})
+        self.assertIsNone(sent)
+        self.assertIsNotNone(err)
+        _assert_tool_error(self, err)
+
+    async def test_ui_focus_rejects_explicit_null_root_before_enqueue(self) -> None:
+        sent, err = await self._call("ui_focus", {**self._base("ui_focus"), "root": None})
+        self.assertIsNone(sent)
+        self.assertIsNotNone(err)
+        _assert_tool_error(self, err)
+
+    async def test_existing_path_and_button_guards_still_reject(self) -> None:
+        cases = (
+            ("ui_click", {"path": ""}),
+            ("ui_click", {"path": "Btn", "button": 9}),
+        )
+        for tool, arguments in cases:
+            with self.subTest(arguments=arguments):
+                sent, err = await self._call(tool, arguments)
+                self.assertIsNone(sent)
+                self.assertIsNotNone(err)
+                _assert_tool_error(self, err)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+# --- M22: the announced census against the tools the app registers ----------
+#
+# The expected side is the fixture, a second hand-written copy of the map. It is
+# never derived from app.list_tools(), from loopback's lists or from the PBO:
+# the census exists precisely so it CAN disagree with the daemon, and an expected
+# computed from either side would agree by construction and catch nothing.
+
+_CENSUS_FIXTURE = json.loads(
+    (Path(__file__).resolve().parent / "fixtures" / "bridge_capabilities_v1.json")
+    .read_text(encoding="utf-8")
+)
+
+
+def _announced(commands: list[str]) -> dict[str, object]:
+    return {"state": "announced", "reason": "ok", "announced_commands": commands}
+
+
+class BridgeCapabilityComparisonTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        app, _runtime = build_app(
+            ServerConfig(key="k", port=0, log_sink=lambda _message: None)
+        )
+        self.registered = frozenset(tool.name for tool in await app.list_tools())
+
+    def _census(self, peer: str) -> list[str]:
+        return sorted(_CENSUS_FIXTURE["peers"][peer])
+
+    def test_the_shipped_map_and_the_fixture_still_agree(self) -> None:
+        # Two copies on purpose. This is what turns "someone edited one side"
+        # into a red instead of into silent agreement.
+        for peer, expected in _CENSUS_FIXTURE["peers"].items():
+            with self.subTest(peer):
+                self.assertEqual(
+                    server_module._BRIDGE_COMMAND_TOOLS[peer], expected
+                )
+
+    def test_a_complete_census_matches(self) -> None:
+        for peer in ("server", "client"):
+            with self.subTest(peer):
+                result = server_module._compare_bridge_capabilities(
+                    peer, _announced(self._census(peer)), self.registered
+                )
+                self.assertEqual(result["state"], "match")
+                self.assertEqual(result["reason"], "ok")
+                self.assertEqual(result["announced_without_registered_tool"], [])
+                self.assertEqual(result["registered_without_announced_command"], [])
+                self.assertEqual(result["unmapped_announced_commands"], [])
+
+    def test_dropping_one_named_command_is_a_mismatch_that_says_which(self) -> None:
+        for peer, commands in _CENSUS_FIXTURE["discriminating"].items():
+            for dropped in commands:
+                with self.subTest(f"{peer}:{dropped}"):
+                    census = [c for c in self._census(peer) if c != dropped]
+                    result = server_module._compare_bridge_capabilities(
+                        peer, _announced(census), self.registered
+                    )
+                    self.assertEqual(result["state"], "mismatch")
+                    self.assertEqual(
+                        result["registered_without_announced_command"], [dropped]
+                    )
+
+    def test_a_census_announced_on_the_wrong_peer_is_a_mismatch(self) -> None:
+        result = server_module._compare_bridge_capabilities(
+            "client", _announced(self._census("server")), self.registered
+        )
+        self.assertEqual(result["state"], "mismatch")
+        self.assertTrue(result["unmapped_announced_commands"])
+        self.assertIn("entities_query", result["unmapped_announced_commands"])
+
+    def test_a_command_the_map_does_not_know_is_reported_unmapped(self) -> None:
+        # What a PBO that grew a verb looks like: visible on the first poll,
+        # not on the first failed call.
+        census = self._census("client") + ["brand_new_verb"]
+        result = server_module._compare_bridge_capabilities(
+            "client", _announced(census), self.registered
+        )
+        self.assertEqual(result["state"], "mismatch")
+        self.assertEqual(result["unmapped_announced_commands"], ["brand_new_verb"])
+
+    def test_no_usable_census_is_unknown_and_not_a_mismatch(self) -> None:
+        # unknown is not a red: it says we did not look. Calling it mismatch
+        # would put a fault on a bridge that may be perfectly fine.
+        for label, block in (
+            ("absent", {"state": "unknown", "reason": "absent", "announced_commands": []}),
+            (
+                "unaccredited",
+                {"state": "unknown", "reason": "unaccredited", "announced_commands": []},
+            ),
+            ("malformed", {"state": "unknown", "reason": "malformed", "announced_commands": []}),
+            ("not a mapping", "nope"),
+            ("missing list", {"state": "announced", "reason": "ok"}),
+        ):
+            with self.subTest(label):
+                result = server_module._compare_bridge_capabilities(
+                    "client", block, self.registered
+                )
+                self.assertEqual(result["state"], "unknown")
+                self.assertEqual(result["announced_commands"], [])
+
+    def test_every_mapped_tool_is_actually_registered_by_the_app(self) -> None:
+        # The seam in the other direction: the fixture claims a public tool for
+        # each exposed command, and the app has to have it. A typo here would
+        # otherwise show up as a permanent mismatch blamed on the bridge.
+        for peer, mapping in _CENSUS_FIXTURE["peers"].items():
+            for command, tool in mapping.items():
+                if tool is None:
+                    continue
+                with self.subTest(f"{peer}:{command}"):
+                    self.assertIn(tool, self.registered)

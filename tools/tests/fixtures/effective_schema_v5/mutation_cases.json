@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"id": "field_removed_from_app_schema", "expected": "reject"},
+    {"id": "catalog_constraint_removed", "expected": "reject"},
+    {"id": "fixture_constraint_removed", "expected": "reject"},
+    {"id": "runtime_adapter_extra", "expected": "reject"},
+    {"id": "runtime_adapter_dangling", "expected": "reject"},
+    {"id": "validator_logic_altered", "expected": "reject"},
+    {"id": "extra_wrapper_removed", "expected": "reject"},
+    {"id": "extra_arguments_accepted", "expected": "reject"},
+    {"id": "offline_public", "expected": "reject"},
+    {"id": "mission_external_accepted", "expected": "reject"},
+    {"id": "parameter_renamed", "expected": "reject"},
+    {"id": "bridge_marked_wire", "expected": "reject"},
+    {"id": "runtime_extra_after_alias", "expected": "reject"}
+  ]
+}

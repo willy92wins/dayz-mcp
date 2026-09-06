@@ -53,7 +53,7 @@ There is no embedded fallback for interactive agent sessions. If client/daemon d
 
 Mutating work uses the request-bound high-level queue by default:
 
-1. `session_status()` first: `owner`/`queue`/`claimable` describe the **lease**. `box` describes the **game box** (managed `runs`, unmanaged `foreign` DayZDiag, `ports_in_use`, and the box wait FIFO). A free lease does not mean a free box.
+1. `session_status()` first: `owner`/`queue`/`claimable` describe the **lease**. `box` describes the **game box** (managed `runs`, unmanaged `foreign` DayZ processes, seen by image or by a held UDP port even without a run record, `ports_in_use` from the socket table, and the box wait FIFO). A free lease does not mean a free box.
 2. `session_acquire_wait(purpose, max_wait_s)` remains queued until it returns an active lease or fails. It never returns `queued`.
 3. Run only the required mutating operations. The lease/ticket TTL is 120 seconds; heartbeat is for active exclusive work only.
 4. `session_release(lease_token)` as soon as exclusive work ends.
@@ -65,7 +65,7 @@ Mutating work uses the request-bound high-level queue by default:
 
 Read-only tools do not require a lease. Never use another session's token or terminate a process to advance the FIFO queue.
 
-Requires a lease (these mutate the game): `world_spawn`, `object_delete`, `player_teleport`, `inventory_give`, `notify_players`, `vehicle_enter`, `vehicle_control`, `vehicle_release`, `vehicle_prepare_fixture`, `vehicle_get_in_client`, `vehicle_trace`, `infected_drive`, `camera_set`, `world_time_set`, `world_weather_set`, `engine_set`, `object_anim` (write), `restore_gameplay`, `action_use`, `ui_set_text`, `ui_click`, `ui_focus`, `ui_reload_layout`, `ui_dialog`, `dayz_test_run`, `dayz_test_stop`. The last two acquire and release the lease internally. The partition is the code's own: bridge commands not in `READ_ONLY_COMMANDS` (`session_coordination.py`) are mutating.
+Requires a lease (these mutate the game): `world_spawn`, `object_delete`, `player_teleport`, `player_respawn`, `inventory_give`, `notify_players`, `vehicle_enter`, `vehicle_control`, `vehicle_release`, `vehicle_prepare_fixture`, `vehicle_get_in_client`, `vehicle_trace`, `infected_drive`, `camera_set`, `key_press`, `world_time_set`, `world_weather_set`, `engine_set`, `object_anim` (write), `restore_gameplay`, `action_use`, `ui_set_text`, `ui_click`, `ui_focus`, `ui_reload_layout`, `ui_dialog`, `dayz_test_run`, `dayz_test_stop`. The last two acquire and release the lease internally. The partition is the code's own: bridge commands not in `READ_ONLY_COMMANDS` (`session_coordination.py`) are mutating.
 
 No lease (read-only): `query_all_players`, `query_player_state`, `entities_query`, `surface_query`, `scene_raycast`, `object_inspect`, `telemetry_read`, `vehicle_telemetry`, `camera_get`, `logs_since`, `ui_tree`, `query_get_in_condition`, `bridge_status`, `session_status`, `capture_screenshot`, `pipeline_*`.
 
@@ -75,7 +75,7 @@ A mutation without a lease returns `lease_required`. Call `session_acquire_wait`
 
 Use `dayz_test_run(project, mode, ...)` for normal MCP launches. The call remains open while it waits in the FIFO and while the test runs; it acquires, heartbeats and releases the lease internally. Projects and paths come only from the sealed `dayz-test-v1` policy. Use `dayz_test_stop(run_id)` to queue adoption and shutdown of that exact managed run. Neither tool accepts or returns a lease token, executable, PID, argv or arbitrary path.
 
-The box is a second resource. `wait_for_box_s=0` (default) fails immediately with `active_run_exists` if the box is occupied. `wait_for_box_s=<n>` waits up to n seconds (max 600, same order as `wait_for`), FIFO among waiters, without holding `tool_lock` and without requiring a lease heartbeat. A claimed head uses a 600 s claim TTL, not the 120 s waiter TTL; `dayz_test_run` heartbeats that claim until the launch returns, so a build longer than 120 s does not hand the box to the next waiter. While a session holds that claim, `dayz_test_run` from any other session is rejected (`active_run_exists`) even if no run is registered yet. On timeout the same `active_run_exists` is returned, enriched in the MCP tool (not on the sealed lifecycle wire) with `occupied_by_run_id`/`mod`/`label`/`age_s` when the occupant is a managed run, or `foreign=true` plus `port`/mods when it is not. The failed result keeps `run_id` null; the occupant's id is `occupied_by_run_id`. The stop recipe is only emitted when the caller owns the run or it is `RUNNING_IDLE`; otherwise retry with `wait_for_box_s=<n>` (and never terminate a foreign process). `box_queue_saturated` means the box wait FIFO is full — retry with `wait_for_box_s=<n>` after a waiter leaves.
+The box is a second resource. `wait_for_box_s=0` (default) fails immediately with `active_run_exists` if the box is occupied. A DayZ server holding a game port occupies the box even without a run record, and a launch onto a port held by a process that is not ours is refused (`active_run_exists` with `reason: port_in_use_foreign` and the port; `port_scan_unknown` when the socket table could not be read, which no wait repairs) by a socket-table read repeated right before the launch. The window that remains is between that read and DayZ's own bind; there is no port reservation. `wait_for_box_s=<n>` waits up to n seconds (max 600, same order as `wait_for`), FIFO among waiters, without holding `tool_lock` and without requiring a lease heartbeat. A claimed head uses a 600 s claim TTL, not the 120 s waiter TTL; `dayz_test_run` heartbeats that claim until the launch returns, so a build longer than 120 s does not hand the box to the next waiter. While a session holds that claim, `dayz_test_run` from any other session is rejected (`active_run_exists`) even if no run is registered yet. On timeout the same `active_run_exists` is returned, enriched in the MCP tool (not on the sealed lifecycle wire) with `occupied_by_run_id`/`mod`/`label`/`age_s` when the occupant is a managed run, or `foreign=true` plus `port`/mods when it is not. The failed result keeps `run_id` null; the occupant's id is `occupied_by_run_id`. The stop recipe is only emitted when the caller owns the run or it is `RUNNING_IDLE`; otherwise retry with `wait_for_box_s=<n>` (and never terminate a foreign process). `box_queue_saturated` means the box wait FIFO is full — retry with `wait_for_box_s=<n>` after a waiter leaves.
 
 Pick a free game port from `session_status.box.ports_in_use` and pass a different `port=` to `dayz_test_run`. There is no reservation registry.
 
@@ -104,6 +104,19 @@ The builder reads a host-only intent file. It never loads the published example.
 8. Seed and install the registry:
    `python -m dayz_mcp.launcher_registry_update bootstrap`, then
    `python -m dayz_mcp.launcher_registry_update install-dayz-test-v1 --expected-sha256 <sha printed by bootstrap>`.
+9. Renew the registry after ANY rebuild. The registry pins the file identity of the bundle
+   directory and `build_native_launcher.py` renews that directory with `os.replace`, so after
+   `python build_native_launcher.py --offline --verify-reproducible` every `dayz_test_run` fails
+   with `launcher_root_identity_drift` until the registry is renewed:
+   `python -m dayz_mcp.launcher_registry_update rollback-last`, then
+   `python -m dayz_mcp.launcher_registry_update install-dayz-test-v1 --expected-sha256 <sha256 of the CURRENT tools/approved-launchers.json>`.
+   The CAS value is the hash of the registry file after the rollback, never the PE's hash
+   (`launcher_registry_cas_mismatch` otherwise), and `install` without the rollback fails with
+   `launcher_registry_version_already_installed`. `bootstrap` is create-only: it never resets an
+   existing registry. A Steam client update invalidates the sealed bundle the same way (the
+   closure manifest pins four Steam DLLs by size and sha256): rebuild, then run this cycle.
+   Live MCP client sessions keep the tool code and the bundle layout they started with: after a
+   tools deploy, a daemon restart or a bundle layout change, reopen the client session.
 
 Locate the file with `--policy PATH`, then `DAYZ_MCP_LAUNCHER_POLICY`, then `%LOCALAPPDATA%\DayZ_MCP\launcher-policy.json`. An empty env value is an error, not a fallback. The published example is never selected.
 
@@ -121,7 +134,7 @@ Short call sequences for a cold consumer. Use `playbook_run(name, params)` for a
 4. `wait_for(condition="players_at_least", value=1)` — at least one connected player.
 5. `query_all_players()` — `{ok: 1, players: [{uid, pos: [x, y, z], health (0..1), in_vehicle}]}`. An empty `players` list is success with zero players, not an error. `uid` is SteamID64 (`PlayerIdentity.GetPlainId()`).
 
-`wait_for` on timeout still returns `ok: true` with `satisfied: false` and `timed_out: true`. Gate on `satisfied`, not `ok`. `timeout_s` is capped at 600. With the game off, the first probe aborts with `game_not_ready` (the daemon is up but the target peer is down, so the `version_blocked`/`lease_required` enqueue error is remapped to `game_not_ready:reason=...`); with no daemon at all it aborts with `daemon_unavailable`.
+`wait_for` on timeout still returns `ok: true` with `satisfied: false` and `timed_out: true`. Gate on `satisfied`, not `ok`. `timeout_s` above 600 is rejected up front with `bad_args: timeout_s must be <= 600` (never clamped). With the game off, the first probe aborts with `game_not_ready` (the daemon is up but the target peer is down, so the `version_blocked`/`lease_required` enqueue error is remapped to `game_not_ready:reason=...`); with no daemon at all it aborts with `daemon_unavailable`.
 
 `pattern` is a plain **substring**, not a regex: pass `[DayZ-MCP]`, never `\[DayZ-MCP\]`. An escaped pattern matches nothing and reads exactly like a mod that printed nothing. `lookback_lines` (default 200, max 2000) rewinds the initial markers by N lines; `lookback_from="launch"` instead scans this launch's logs from byte 0, the only way to reach a line printed at mission start. Measured 2026-08-21: `config loaded` sat at line 20 of a 132,632-line `script_*.log`, and was absent from that launch's `.RPT` entirely (0 hits in 165,669 lines) because the RPT only starts mirroring `SCRIPT` output about 16 s in. Every result carries `scanned`: which files were read, how many lines each gave, `readable` per file, and `scan_truncated` when a launch scan hits its 64 MiB ceiling. `observed` is the last line seen, not proof of what was searched -- read `scanned` for that.
 

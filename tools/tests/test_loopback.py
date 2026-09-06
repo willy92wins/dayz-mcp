@@ -12,6 +12,7 @@ import urllib.request
 
 from dayz_mcp import loopback
 from dayz_mcp import server
+from dayz_mcp.instance_fence import BINDING_STARTING, Binding
 from dayz_mcp.session_coordination import (
     ClientIdentity,
     MAX_SESSION_QUEUE,
@@ -266,6 +267,26 @@ class LoopbackTest(unittest.TestCase):
         self.assertIsNotNone(client["last_poll_at"])
         self.assertIsNotNone(client["last_poll_age_s"])
         self.assertEqual(client["version"], "4~1.29.0")
+
+    def test_retire_run_discards_fence_even_without_bindings(self) -> None:
+        with self.state._lock:
+            self.state._fenced_runs.add("orphan-run")
+        self.state.retire_run("orphan-run", "reaped")
+        self.assertNotIn("orphan-run", self.state._fenced_runs)
+
+    def test_retire_run_discards_fence_of_bound_run(self) -> None:
+        with self.state._lock:
+            self.state._fenced_runs.add("test-run")
+        self.state.retire_run("test-run", "reaped")
+        self.assertNotIn("test-run", self.state._fenced_runs)
+
+    def test_read_after_retire_run_is_binding_retired(self) -> None:
+        status, payload = self.state.enqueue_command("camera_get", {}, peer="client")
+        self.assertEqual(status, 200, payload)
+        self.state.retire_run("test-run", "stopped")
+        status, payload = self.state.enqueue_command("camera_get", {}, peer="client")
+        self.assertNotEqual(status, 200, payload)
+        self.assertEqual(payload.get("error"), "binding_retired")
 
     def test_server_state_api(self) -> None:
         status, payload = self.state.enqueue_command("camera_get", {}, peer="client")
@@ -789,6 +810,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         state, coordinator, client, token, _clock = self._coordinated_state(
             version_validator=lambda _version: "legacy_blocked"
         )
+        state.record_poll("server")
         self._assert_post_authorize_rejection_aborts(
             state,
             coordinator,
@@ -812,10 +834,57 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         self.assertEqual(payload["expected"], loopback.EXPECTED_BRIDGE_VERSION)
         self.assertEqual(payload["state"], "legacy_blocked")
 
+    def test_never_polled_409_matches_bridge_status_label(self) -> None:
+        state, coordinator, client, token, _clock = self._coordinated_state(
+            version_validator=lambda version: (
+                "legacy_blocked" if version is None else "ok"
+            )
+        )
+        fields = state._version_block_fields("server")
+        self.assertEqual(fields["state"], "never_polled_this_generation")
+        self.assertEqual(fields["detail"], "never_polled_this_generation")
+        self.assertNotEqual(fields["detail"], "poll did not include ver=")
+        status, payload = state.enqueue_command(
+            "world_spawn",
+            {"type": "X", "pos": [1, 2, 3]},
+            peer="server",
+            identity_payload=COORDINATED_IDENTITY,
+            lease_token=token,
+            operation_timeout_s=15.0,
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error"], "version_blocked")
+        self.assertEqual(payload["state"], "never_polled_this_generation")
+        self.assertEqual(payload["detail"], "never_polled_this_generation")
+        self.assertNotIn("poll did not include ver=", str(payload.get("detail")))
+        _ = coordinator
+        _ = client
+
+    def test_lease_required_never_polled_does_not_invent_a_pbo(self) -> None:
+        state, _coordinator, _client, _token, _clock = self._coordinated_state(
+            version_validator=lambda version: (
+                "legacy_blocked" if version is None else "ok"
+            )
+        )
+        status, payload = state.enqueue_command(
+            "world_spawn",
+            {"type": "X", "pos": [1, 2, 3]},
+            peer="server",
+            identity_payload=COORDINATED_IDENTITY,
+            lease_token=None,
+            operation_timeout_s=15.0,
+        )
+        self.assertEqual(payload["error"], "lease_required")
+        self.assertEqual(payload["version_state"], "never_polled_this_generation")
+        self.assertEqual(payload["detail"], "never_polled_this_generation")
+        self.assertNotEqual(payload.get("detail"), "poll did not include ver=")
+        self.assertIn(status, {403, 423})
+
     def test_lease_required_includes_version_block_fields(self) -> None:
         state, coordinator, _client, _token, _clock = self._coordinated_state(
             version_validator=lambda _version: "version_mismatch"
         )
+        state.record_poll("server", version="wrong~1.29.0")
         status, payload = state.enqueue_command(
             "world_spawn",
             {"type": "X", "pos": [1, 2, 3]},
@@ -1025,6 +1094,63 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         self.assertNotIn(command_id, state._fire_and_forget_ids)
         self.assertEqual(state.status_snapshot()["results_pending"], 0)
         self.assertEqual(state.pending_for_owner("released-owner"), 0)
+
+
+class FenceExemptionTest(unittest.TestCase):
+    """P-J1: daemon fire-and-forget cleanup survives the owner fence."""
+
+    def test_drain_keeps_fire_and_forget_and_discards_the_rest(self) -> None:
+        state = loopback.ServerState("k")
+        bind_both_peers(state)
+        status, camera = state.enqueue_command("camera_get", {}, peer="client")
+        self.assertEqual(status, 200, camera)
+        cleanup = state.cleanup_owner(
+            "released-owner", "released-lease", "owner_release", True
+        )
+        self.assertEqual(cleanup["vehicle_release_enqueued"], 1)
+        queued = list(state._bound_queues.get(INST_CLIENT) or [])
+        release_id = queued[-1]["id"]
+        self.assertIn(release_id, state._fire_and_forget_ids)
+        state.fence_runs(["test-run"])
+        remaining = [command["id"] for command in state._bound_queues.get(INST_CLIENT) or []]
+        self.assertEqual(remaining, [release_id])
+        discarded = state.take_result(camera["id"])
+        self.assertIsNotNone(discarded)
+        self.assertEqual(discarded["error"], "run_not_owned")
+
+    def test_held_poll_delivers_only_the_exempt_command(self) -> None:
+        state = loopback.ServerState("k")
+        bind_both_peers(state)
+        status, _camera = state.enqueue_command("camera_get", {}, peer="client")
+        self.assertEqual(status, 200)
+        cleanup = state.cleanup_owner(
+            "released-owner", "released-lease", "owner_release", True
+        )
+        self.assertEqual(cleanup["vehicle_release_enqueued"], 1)
+        state.fence_runs(["test-run"])
+        _, poll = accredited_poll(state, "client")
+        self.assertEqual(
+            [command["cmd"] for command in poll["commands"]],
+            ["vehicle_release"],
+        )
+
+    def test_internal_enqueue_on_fenced_run_is_not_run_not_owned(self) -> None:
+        state = loopback.ServerState("k")
+        bind_both_peers(state)
+        state.fence_runs(["test-run"])
+        status, payload = state.enqueue_command(
+            "vehicle_release", {}, peer="client", internal=True
+        )
+        self.assertEqual(status, 200, payload)
+        blocked, body = state.enqueue_command("camera_get", {}, peer="client")
+        self.assertEqual(blocked, 409, body)
+        self.assertEqual(body.get("error"), "run_not_owned")
+        state.lifecycle = None
+        unavailable, missing = state.enqueue_command(
+            "vehicle_release", {}, peer="client", internal=True
+        )
+        self.assertEqual(unavailable, 503, missing)
+        self.assertEqual(missing.get("error"), "run_state_unavailable")
 
 
 class StaleCommandHygieneTest(unittest.TestCase):
@@ -1406,6 +1532,389 @@ class ResultCapTests(unittest.TestCase):
         self.assertIsNotNone(state.take_result(ids[overflow]))
 
 
+
+# --- M06: capability census ingress (ficha fb-20260829-023649-8f8c point 9) ---
+#
+# Both Enforce dispatchers announce their own command census on every poll as
+# `caps=`. M06 receives, validates and stores it; comparing it against the tools
+# the daemon registers is M22's job and is deliberately not done here -- the
+# whole value of the census is that it can DISAGREE with the daemon, so a side
+# that repaired it would delete the finding.
+#
+# The census gates nothing. A poll whose census is absent, malformed, oversized
+# or unaccredited still gets its commands; what it loses is the right to be
+# believed, and it says so as `unknown` with a reason.
+
+# label, raw census, expected names, expected reason. Written out rather than
+# generated, so a change in the decoder cannot quietly rewrite its own oracle.
+_CAPS_TABLE = (
+    ("nominal", "entities_query,world_spawn", ("entities_query", "world_spawn"), "ok"),
+    ("single", "ui_dialog", ("ui_dialog",), "ok"),
+    ("digits_and_underscore", "a0_b1", ("a0_b1",), "ok"),
+    ("absent_empty", "", None, "absent"),
+    ("absent_none", None, None, "absent"),
+    ("uppercase", "Entities_Query", None, "malformed"),
+    ("leading_digit", "1abc", None, "malformed"),
+    ("hyphen", "a-b", None, "malformed"),
+    ("empty_member", "a,,b", None, "malformed"),
+    ("space", "a b", None, "malformed"),
+    ("duplicate", "a,a", None, "duplicate"),
+)
+
+
+def _enforce_census(file_name: str, const_name: str) -> str:
+    """The literal a bridge announces, rebuilt from its own source.
+
+    The const is short literals joined with + because Enforce caps a single
+    string literal; the census is longer than that cap.
+    """
+
+    import re as _re
+    from pathlib import Path as _Path
+
+    source = (
+        _Path(__file__).resolve().parents[2]
+        / "addon"
+        / "scripts"
+        / "5_Mission"
+        / file_name
+    ).read_text(encoding="utf-8", errors="replace")
+    # F-04: taking the first line that merely MENTIONS the name would happily
+    # read a comment. The census that reaches the wire is the compiled const, so
+    # the declaration is what this must find: a non-comment line that declares a
+    # const string.
+    candidates = [
+        raw
+        for raw in source.splitlines()
+        if f"{const_name} =" in raw
+        and "const string" in raw
+        and not raw.lstrip().startswith(("//", "/*", "*", "!"))
+    ]
+    if len(candidates) != 1:
+        raise AssertionError(
+            f"{file_name}: expected exactly one const declaration of "
+            f"{const_name}, found {len(candidates)}"
+        )
+    return "".join(_re.findall(r'"([^"]*)"', candidates[0]))
+
+
+class PollCapabilityIngressTest(unittest.TestCase):
+    def test_decoder_table(self) -> None:
+        for label, raw, names, reason in _CAPS_TABLE:
+            with self.subTest(label):
+                self.assertEqual(loopback.parse_poll_caps(raw), (names, reason))
+
+    def test_limits_match_the_contract_and_reject_only_past_the_boundary(self) -> None:
+        # F-02: the numbers below are the ficha's, written out. Deriving them from
+        # the constants under test made this assert nothing -- drop the ceiling to
+        # five names and a derived test still passes, because it moves with the
+        # code it is supposed to pin.
+        self.assertEqual(loopback.POLL_CAPS_MAX_NAMES, 64)
+        self.assertEqual(loopback.POLL_CAPS_MAX_BYTES, 4096)
+        at_limit = ",".join(f"c{index}" for index in range(64))
+        over = ",".join(f"c{index}" for index in range(65))
+        self.assertEqual(loopback.parse_poll_caps(at_limit)[1], "ok")
+        self.assertEqual(loopback.parse_poll_caps(over)[1], "too_many")
+        # Name length has its own boundary and it was never exercised: 64 is the
+        # last legal one, because the pattern allows a head plus 63 more.
+        self.assertEqual(loopback.parse_poll_caps("a" * 64)[1], "ok")
+        self.assertEqual(loopback.parse_poll_caps("a" * 65)[1], "malformed")
+        # Bytes are checked before the names, so one long name blows the ceiling
+        # and reports oversized rather than malformed.
+        self.assertEqual(loopback.parse_poll_caps("a" * 4097)[1], "oversized")
+
+    def test_accredited_poll_publishes_its_census(self) -> None:
+        state = loopback.ServerState("k")
+        bind_both_peers(state)
+        status, _payload = state.record_poll(
+            "server",
+            instance=INST_SERVER,
+            source_pid=41001,
+            caps="entities_query,world_spawn",
+        )
+        self.assertEqual(status, 200)
+        view = state.status_snapshot()["peers"]["server"]["capabilities"]
+        self.assertEqual(view["state"], "announced")
+        self.assertEqual(view["reason"], "ok")
+        self.assertEqual(view["announced_commands"], ["entities_query", "world_spawn"])
+        # The other peer never announced anything and must not borrow this one.
+        client = state.status_snapshot()["peers"]["client"]["capabilities"]
+        self.assertEqual(client["state"], "unknown")
+        self.assertEqual(client["announced_commands"], [])
+
+    def test_last_accredited_announcement_replaces_the_previous(self) -> None:
+        state = loopback.ServerState("k")
+        bind_both_peers(state)
+        state.record_poll("server", instance=INST_SERVER, source_pid=41001, caps="a,b")
+        state.record_poll("server", instance=INST_SERVER, source_pid=41001, caps="c")
+        view = state.status_snapshot()["peers"]["server"]["capabilities"]
+        self.assertEqual(view["announced_commands"], ["c"])
+
+    def test_an_invalid_announcement_does_not_keep_the_last_good_one_alive(self) -> None:
+        state = loopback.ServerState("k")
+        bind_both_peers(state)
+        state.record_poll("server", instance=INST_SERVER, source_pid=41001, caps="a,b")
+        state.record_poll("server", instance=INST_SERVER, source_pid=41001, caps="A,B")
+        view = state.status_snapshot()["peers"]["server"]["capabilities"]
+        self.assertEqual(view["state"], "unknown")
+        self.assertEqual(view["reason"], "malformed")
+        self.assertEqual(view["announced_commands"], [])
+
+    @staticmethod
+    def _state_with_a_pending_command(bind: bool = False) -> "loopback.ServerState":
+        """F-03: a differential over two empty answers proves nothing.
+
+        Both sides need a command actually waiting, or a mutant that drops the
+        queue exactly when the census is bad returns the same empty list twice
+        and walks straight through the guard.
+
+        The binding has to exist BEFORE the command is queued: an accredited poll
+        drains the bound queue, so anything enqueued earlier stays in the legacy
+        one and the poll comes back empty for a reason that has nothing to do
+        with the census.
+        """
+
+        state = loopback.ServerState("k")
+        if bind:
+            bind_both_peers(state)
+        status, _body = state.enqueue_command("query_all_players", {}, peer="server")
+        assert status == 200, status
+        return state
+
+    def test_unaccredited_poll_stays_unknown_and_is_answered_the_same(self) -> None:
+        # A legacy poll carries no instance, so nothing accredits it. Its census
+        # is not believed -- and the poll itself is answered exactly as it would
+        # be with no census at all, which is what "does not block" means.
+        plain = self._state_with_a_pending_command()
+        with_caps = self._state_with_a_pending_command()
+        base_status, base_payload = plain.record_poll("server")
+        status, payload = with_caps.record_poll("server", caps="entities_query")
+        self.assertTrue(base_payload["commands"], base_payload)
+        self.assertEqual((status, payload), (base_status, base_payload))
+        view = with_caps.status_snapshot()["peers"]["server"]["capabilities"]
+        self.assertEqual(view["state"], "unknown")
+        self.assertEqual(view["reason"], "unaccredited")
+        self.assertEqual(view["announced_commands"], [])
+
+    def test_a_malformed_census_is_answered_the_same_as_none(self) -> None:
+        plain = self._state_with_a_pending_command(bind=True)
+        broken = self._state_with_a_pending_command(bind=True)
+        base = plain.record_poll("server", instance=INST_SERVER, source_pid=41001)
+        got = broken.record_poll(
+            "server", instance=INST_SERVER, source_pid=41001, caps="NOT VALID"
+        )
+        self.assertTrue(base[1]["commands"], base)
+        self.assertEqual(got, base)
+        view = broken.status_snapshot()["peers"]["server"]["capabilities"]
+        self.assertEqual((view["state"], view["reason"]), ("unknown", "malformed"))
+
+    def test_census_is_not_inherited_across_generations(self) -> None:
+        state = loopback.ServerState("k")
+        state.daemon_generation = "gen-one"
+        bind_both_peers(state)
+        state.record_poll(
+            "server", instance=INST_SERVER, source_pid=41001, caps="entities_query"
+        )
+        self.assertEqual(
+            state.status_snapshot()["peers"]["server"]["capabilities"]["state"],
+            "announced",
+        )
+        state.daemon_generation = "gen-two"
+        view = state.status_snapshot()["peers"]["server"]["capabilities"]
+        self.assertEqual(view["state"], "unknown")
+        self.assertEqual(view["reason"], "stale_generation")
+        self.assertEqual(view["announced_commands"], [])
+
+    def test_the_ingress_accepts_what_the_bridges_actually_announce(self) -> None:
+        # The seam: this decoder and the two dispatchers have to agree on the
+        # wire form. A census that the bridges send and the daemon rejects would
+        # leave both peers permanently unknown, in green, with nothing to see.
+        for file_name, const_name, required in (
+            ("MCPBridge.c", "SERVER_CAPABILITIES", "entities_query"),
+            ("MCPClientBridge.c", "CLIENT_POLL_CAPS", "ui_dialog"),
+        ):
+            with self.subTest(file_name):
+                census = _enforce_census(file_name, const_name)
+                names, reason = loopback.parse_poll_caps(census)
+                self.assertEqual(reason, "ok", census)
+                self.assertIsNotNone(names)
+                self.assertIn(required, names)
+                # F-04: a dispatcher census is not one name. If it were, we
+                # read a decoy -- a comment or a doc line -- instead of the
+                # declaration that actually compiles into the poll.
+                self.assertGreater(len(names), 5, census)
+                self.assertLessEqual(
+                    len(census.encode("utf-8")), loopback.POLL_CAPS_MAX_BYTES
+                )
+                self.assertLessEqual(len(names), loopback.POLL_CAPS_MAX_NAMES)
+
+
+class UiIngressSchemaTest(unittest.TestCase):
+    """Approved UI ingress contract. Cases are written out, not read from the table."""
+
+    def test_accepts_contracted_payloads(self) -> None:
+        cases = (
+            ("ui_tree", {}),
+            ("ui_tree", {"path": "a/b"}),
+            ("ui_tree", {"path": "a/b", "limit": 8}),
+            ("ui_tree", {"root": "MyMenu"}),
+            ("ui_tree", {"root": "MyMenu", "path": "a/b"}),
+            ("ui_set_text", {"path": "a/b", "text": "x"}),
+            ("ui_set_text", {"path": "a/b", "text": ""}),
+            ("ui_set_text", {"path": "a/b", "text": "x", "root": "MyMenu"}),
+            ("ui_click", {"path": "a/b"}),
+            ("ui_click", {"path": "a/b", "button": 1}),
+            ("ui_click", {"path": "a/b", "mode": "direct"}),
+            ("ui_click", {"path": "a/b", "mode": "complete"}),
+            ("ui_click", {"path": "a/b", "bubble": True}),
+            ("ui_click", {"path": "a/b", "bubble": False}),
+            ("ui_click", {"path": "a/b", "root": "MyMenu"}),
+            (
+                "ui_click",
+                {
+                    "path": "a/b",
+                    "root": "MyMenu",
+                    "mode": "direct",
+                    "bubble": True,
+                    "button": 0,
+                },
+            ),
+            ("ui_focus", {"path": "a/b"}),
+            ("ui_focus", {"root": "MyMenu", "path": "a/b"}),
+        )
+        for command, args in cases:
+            with self.subTest(command=command, args=args):
+                self.assertEqual(
+                    loopback.validate_command_args(command, args),
+                    (True, None),
+                )
+
+    def test_rejects_uncontracted_fields_and_values(self) -> None:
+        cases = (
+            ("ui_click", {"path": "a/b", "wiggle": 1}),
+            ("ui_click", {"path": "a/b", "mode": "sideways"}),
+            ("ui_click", {"path": "a/b", "mode": []}),
+            ("ui_click", {"path": "a/b", "mode": {}}),
+            ("ui_click", {"path": "a/b", "mode": ""}),
+            ("ui_click", {"path": "a/b", "bubble": "true"}),
+            ("ui_click", {"path": "a/b", "bubble": 1}),
+            ("ui_click", {}),
+            ("ui_click", {"path": "a/b", "root": ""}),
+            ("ui_click", {"path": "a/b", "root": 123}),
+            ("ui_set_text", {"path": "a/b", "text": "x", "mode": "direct"}),
+            ("ui_set_text", {"path": "a/b", "text": "x", "bubble": True}),
+            ("ui_tree", {"mode": "direct"}),
+            ("ui_focus", {"path": "a/b", "bubble": True}),
+            ("ui_focus", {"path": "a/b", "button": 1}),
+            ("ui_tree", {"root": 5}),
+            ("ui_set_text", {"path": "a/b"}),
+            ("ui_tree", {"root": ""}),
+            ("ui_tree", {"bubble": True}),
+            ("ui_set_text", {"path": "a/b", "text": "x", "root": ""}),
+            ("ui_focus", {"path": "a/b", "mode": "direct"}),
+            ("ui_focus", {"path": "a/b", "root": ""}),
+        )
+        for command, args in cases:
+            with self.subTest(command=command, args=args):
+                self.assertEqual(
+                    loopback.validate_command_args(command, args),
+                    (False, "bad_args"),
+                )
+
+
+class BoundWithoutLifecycleTest(unittest.TestCase):
+    """P22': a BOUND peer with lifecycle=None does not dispatch; legacy still does."""
+
+    def test_bound_without_lifecycle_rejects_enqueue_and_holds_poll(self) -> None:
+        state = loopback.ServerState("clave-gate")
+        state.install_bound_peer(
+            instance=INST_CLIENT, role="client", pid=41002, run_id="run-1"
+        )
+        state.lifecycle = None
+        st, payload = state.enqueue_command("camera_get", {}, peer="client")
+        self.assertNotEqual(st, 200, payload)
+        self.assertEqual(st, 503, payload)
+        self.assertEqual(payload.get("error"), "run_state_unavailable")
+        st_poll, delivered = state.record_poll(
+            "client", None, instance=INST_CLIENT, source_pid=41002
+        )
+        self.assertEqual(st_poll, 200, delivered)
+        self.assertEqual(delivered.get("commands"), [])
+
+    def test_bound_without_lifecycle_rejects_exec_enforce(self) -> None:
+        state = loopback.ServerState(
+            "k",
+            enable_exec_enforce=True,
+            exec_allowlist={"probe()"},
+            exec_audit=lambda *_args: None,
+        )
+        bind_both_peers(state, run_id="run-1")
+        state.lifecycle = None
+        st, payload = state.enqueue_command(
+            "exec_enforce",
+            {"expr": "probe()", "main_fn": "Main"},
+            peer="server",
+        )
+        self.assertNotEqual(st, 200, payload)
+        self.assertEqual(st, 503, payload)
+        self.assertEqual(payload.get("error"), "run_state_unavailable")
+
+    def test_legacy_queue_without_binding_still_dispatches(self) -> None:
+        state = loopback.ServerState("k")
+        state.lifecycle = None
+        st, payload = state.enqueue_command("camera_get", {}, peer="client")
+        self.assertEqual(st, 200, payload)
+        st_poll, delivered = state.record_poll("client", None)
+        self.assertEqual(st_poll, 200, delivered)
+        ids = [command.get("id") for command in (delivered.get("commands") or [])]
+        self.assertIn(payload.get("id"), ids)
+
+
+class AdoptDispatchableBindingTest(unittest.TestCase):
+    """P19''-c: dispatchable is a BOUND binding on the present ServerState."""
+
+    def test_run_has_bound_binding_requires_bound_state(self) -> None:
+        state = loopback.ServerState("k")
+        checker = getattr(state, "run_has_bound_binding", None)
+        self.assertTrue(callable(checker), "run_has_bound_binding missing")
+        self.assertFalse(checker("run-1"))
+        bind_both_peers(state, run_id="run-1")
+        self.assertTrue(checker("run-1"))
+        self.assertFalse(checker("run-other"))
+        starting = loopback.ServerState("k2")
+        start_checker = getattr(starting, "run_has_bound_binding", None)
+        self.assertTrue(callable(start_checker))
+        with starting._lock:
+            starting._bindings[INST_CLIENT] = Binding(
+                instance=INST_CLIENT,
+                run_id="run-1",
+                role="client",
+                epoch=1,
+                pid=None,
+                creation_time_utc=None,
+                state=BINDING_STARTING,
+            )
+        self.assertFalse(start_checker("run-1"))
+
+
+class OneOfIsTotalOverJsonTest(unittest.TestCase):
+    """_one_of feeds several commands. An unhashable value must answer, not raise."""
+
+    def test_unhashable_enum_values_are_bad_args_everywhere(self) -> None:
+        cases = (
+            ("ui_click", {"path": "a/b", "mode": []}),
+            ("ui_click", {"path": "a/b", "mode": {}}),
+            # Pre-existing before this lote: measured raising on the live tree.
+            ("ui_reload_layout", {"mode": []}),
+            ("ui_reload_layout", {"mode": {}}),
+        )
+        for command, args in cases:
+            with self.subTest(command=command, args=args):
+                self.assertEqual(
+                    loopback.validate_command_args(command, args),
+                    (False, "bad_args"),
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
-
