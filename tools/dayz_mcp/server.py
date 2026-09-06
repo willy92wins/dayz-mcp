@@ -1747,6 +1747,48 @@ def _timeout(timeout_s: float) -> float:
     return value
 
 
+# restore_gameplay closes its verdict blind in Enforce: RestoreGameplay() and
+# ReleaseCamera() return nothing and `result.ok = true` is unconditional
+# (addon/scripts/5_Mission/MCPClientBridge.c:706-711), while both have exits
+# that do nothing at all -- `if (!mission) return;` at :3919-3922 and the
+# m_ControlsSuppressed guard at :3924. Ficha fb-20260903-125244-4f83.
+#
+# Of the four things the verb promises -- simulation, input, HUD and the camera
+# -- only the camera is readable from this layer, through the camera_get verb
+# that already exists: BuildCameraResult (:3645-3684) answers
+# error="player_camera_active" exactly when no scripted camera is mounted, the
+# discriminator measured in-game on 2026-08-16 (BUG-075). So the tool confirms
+# that one postcondition and refuses to answer ok when it cannot read it (G6,
+# fail closed): a false green here leaves the client unusable with reconnecting
+# as the only documented way out, and the verb is idempotent, so a retry after a
+# red is cheap. Controls, HUD and simulation stay unverifiable until the bridge
+# exposes a reader for them, and the successful response says so out loud.
+RESTORE_CAMERA_PROBE_CMD = "camera_get"
+RESTORE_NOT_VERIFIED = ("controls", "hud", "simulation")
+
+
+def _restore_camera_verdict(probe: dict[str, Any]) -> tuple[str, str]:
+    """Classify a camera_get result as released | still_active | unverified.
+
+    Anything that is not a positive reading of the released camera is
+    ``unverified``; absence is never taken for success.
+    """
+    camera = probe.get("camera") if isinstance(probe, dict) else None
+    if not isinstance(camera, dict):
+        return "unverified", "camera_get returned no camera block"
+    if not camera.get("ok"):
+        reason = str(camera.get("error") or "camera_not_readable")
+        return "unverified", f"camera_get could not read the camera ({reason})"
+    if camera.get("viewport_moved"):
+        return "still_active", str(camera.get("error") or "")
+    if camera.get("error") == "player_camera_active" or "viewport_moved" in camera:
+        return "released", ""
+    return (
+        "unverified",
+        "camera_get reported neither viewport_moved nor player_camera_active",
+    )
+
+
 # Mirrors VEHICLE_CONTROL_MAX_TTL_S in addon/scripts/5_Mission/MCPClientBridge.c:114.
 # The bridge only honours hold_ttl_s <= this value; above it the control silently
 # falls back to VEHICLE_CONTROL_DEFAULT_TTL_S (3.0 s). Keep in sync with the bridge.
@@ -4252,11 +4294,46 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Restore local player simulation, input, HUD, and "
-        "release the camera. camera_set has no off mode."
+        "release the camera. camera_set has no off mode. The bridge closes this "
+        "verdict without checking anything, so the tool re-reads the camera with "
+        "camera_get and fails closed: ok only when the view is back on the "
+        "player (camera_released: true), otherwise camera_still_active or "
+        "restore_unverified. Controls, HUD and simulation are NOT verified -- no "
+        "reader for them exists on the wire -- and the ok names them in "
+        "not_verified. The verb is idempotent, so a red can simply be retried. "
+        "timeout_s bounds each of the two bridge calls."
     ))
     async def restore_gameplay(timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
-            return await runtime.call_bridge("restore_gameplay", {}, "client", _timeout(timeout_s))
+            timeout = _timeout(timeout_s)
+            result = await runtime.call_bridge("restore_gameplay", {}, "client", timeout)
+            try:
+                probe = await runtime.call_bridge(
+                    RESTORE_CAMERA_PROBE_CMD, {"cam_mode": "get"}, "client", timeout
+                )
+            except ToolError as exc:
+                raise ToolError(
+                    "restore_unverified: restore_gameplay ran, but the camera_get "
+                    f"probe that confirms it failed ({exc}); the view may still be "
+                    "on the debug camera. Retry restore_gameplay."
+                ) from None
+            verdict, detail = _restore_camera_verdict(probe)
+            if verdict == "still_active":
+                suffix = f" ({detail})" if detail else ""
+                raise ToolError(
+                    "camera_still_active: restore_gameplay ran, but camera_get "
+                    f"still reports a scripted camera mounted{suffix}; the view "
+                    "has not returned to the player. Retry restore_gameplay."
+                )
+            if verdict != "released":
+                raise ToolError(
+                    f"restore_unverified: restore_gameplay ran, but {detail}. "
+                    "Retry restore_gameplay."
+                )
+            confirmed = dict(result)
+            confirmed["camera_released"] = True
+            confirmed["not_verified"] = list(RESTORE_NOT_VERIFIED)
+            return confirmed
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Deliver one non-negative DIK code to "

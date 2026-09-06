@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from dayz_mcp import loopback, server
@@ -12,6 +14,38 @@ from tests._addon_paths import addon_root
 MOD_SCRIPTS = addon_root() / "scripts"
 
 CLIENT_BRIDGE = MOD_SCRIPTS / "5_Mission" / "MCPClientBridge.c"
+
+
+def _content_json(content: Any) -> dict[str, Any]:
+    if isinstance(content, tuple):
+        _blocks, structured = content
+        if isinstance(structured, dict):
+            return structured
+        content = _blocks
+    parsed = json.loads(content[0].text)
+    if not isinstance(parsed, dict):
+        raise AssertionError(f"expected dict content, got {parsed!r}")
+    return parsed
+
+
+def _camera_probe(**camera: object) -> dict[str, Any]:
+    """A camera_get result as it comes off the wire.
+
+    Enforce serializes bools as 0/1 (tests/test_mcp_tools.py:80) and
+    BuildCameraResult (MCPClientBridge.c:3645-3684) has exactly three exits:
+    not in game (camera.ok=false), no scripted camera (viewport_moved=false
+    plus error="player_camera_active") and a scripted camera mounted
+    (viewport_moved=true). The middle one is the discriminator measured
+    in-game on 2026-08-16 for BUG-075.
+    """
+    block: dict[str, Any] = {
+        "ok": 1,
+        "applied_mode": "get",
+        "viewport_moved": 0,
+        "error": "",
+    }
+    block.update(camera)
+    return {"id": 8, "ok": 1, "error": "", "camera": block}
 
 
 def _method_body(source: str, signature: str) -> str:
@@ -61,11 +95,20 @@ class RestoreGameplayFastMCPContractTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             runtime,
             "call_bridge",
-            new=AsyncMock(return_value={"ok": 1}),
+            new=AsyncMock(
+                side_effect=[
+                    {"id": 7, "ok": 1, "error": ""},
+                    _camera_probe(error="player_camera_active"),
+                ]
+            ),
         ) as call:
             await app.call_tool("restore_gameplay", {"timeout_s": 1.0})
 
-        call.assert_awaited_once_with("restore_gameplay", {}, "client", 1.0)
+        # The restore itself is still the exact empty client command. The second
+        # bridge call is the postcondition probe, contracted in the class below.
+        self.assertEqual(
+            call.await_args_list[0].args, ("restore_gameplay", {}, "client", 1.0)
+        )
 
 
 class RestoreGameplayEnforceSourceContractTest(unittest.TestCase):
@@ -129,6 +172,144 @@ class RestoreGameplayEnforceSourceContractTest(unittest.TestCase):
         self.assertIn("RestoreGameplay();", prep)
         self.assertIn("job.sim_restored = true;", prep)
         self.assertLess(prep.index(guard), prep.index("player.GetCommand_Vehicle()"))
+
+
+class RestoreGameplayPostconditionContractTest(unittest.IsolatedAsyncioTestCase):
+    """ok:1 must mean an observed postcondition, not a line of code reached.
+
+    The Enforce dispatch closes the verdict blind: RestoreGameplay() and
+    ReleaseCamera() return nothing and result.ok = true is unconditional
+    (MCPClientBridge.c:706-711), while both have exits that do nothing at all
+    (if (!mission) return; at :3919-3922; the m_ControlsSuppressed guard at
+    :3924). Ficha fb-20260903-125244-4f83. Python cannot read controls, HUD or
+    the simulation flag from here, but it can re-read the camera through the
+    camera_get verb that already exists, so that is the one postcondition this
+    layer may claim -- and the only ground on which it may answer ok.
+    """
+
+    def _app(self) -> tuple[Any, Any]:
+        return server.build_app(
+            server.ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
+        )
+
+    async def test_ok_is_given_only_after_the_probe_shows_the_player_camera(self) -> None:
+        app, runtime = self._app()
+        with patch.object(
+            runtime,
+            "call_bridge",
+            new=AsyncMock(
+                side_effect=[
+                    {"id": 7, "ok": 1, "error": ""},
+                    _camera_probe(error="player_camera_active"),
+                ]
+            ),
+        ) as call:
+            result = _content_json(
+                await app.call_tool("restore_gameplay", {"timeout_s": 1.0})
+            )
+
+        self.assertEqual(len(call.await_args_list), 2)
+        self.assertEqual(call.await_args_list[1].args[0], "camera_get")
+        self.assertEqual(call.await_args_list[1].args[2], "client")
+        self.assertTrue(result["ok"])
+        self.assertIs(result["camera_released"], True)
+        # A green that does not name what it never looked at reads as a full
+        # restore, which is the class of lie the ficha reported.
+        self.assertEqual(result["not_verified"], ["controls", "hud", "simulation"])
+
+    async def test_a_camera_still_mounted_is_not_answered_as_ok(self) -> None:
+        app, runtime = self._app()
+        with patch.object(
+            runtime,
+            "call_bridge",
+            new=AsyncMock(
+                side_effect=[
+                    {"id": 7, "ok": 1, "error": ""},
+                    _camera_probe(viewport_moved=1, error=""),
+                ]
+            ),
+        ):
+            with self.assertRaises(Exception) as raised:
+                await app.call_tool("restore_gameplay", {"timeout_s": 1.0})
+
+        self.assertEqual(type(raised.exception).__name__, "ToolError")
+        self.assertIn("camera_still_active", str(raised.exception))
+
+    async def test_an_unreadable_probe_fails_closed(self) -> None:
+        app, runtime = self._app()
+        with patch.object(
+            runtime,
+            "call_bridge",
+            new=AsyncMock(
+                side_effect=[
+                    {"id": 7, "ok": 1, "error": ""},
+                    server.ToolError("timeout waiting for camera_get id=8"),
+                ]
+            ),
+        ):
+            with self.assertRaises(Exception) as raised:
+                await app.call_tool("restore_gameplay", {"timeout_s": 1.0})
+
+        self.assertEqual(type(raised.exception).__name__, "ToolError")
+        self.assertIn("restore_unverified", str(raised.exception))
+        # The caller must be able to tell "the restore ran and I could not read
+        # it" from "the restore never ran".
+        self.assertIn("camera_get", str(raised.exception))
+
+    async def test_a_probe_without_a_camera_block_fails_closed(self) -> None:
+        app, runtime = self._app()
+        with patch.object(
+            runtime,
+            "call_bridge",
+            new=AsyncMock(
+                side_effect=[
+                    {"id": 7, "ok": 1, "error": ""},
+                    {"id": 8, "ok": 1, "error": ""},
+                ]
+            ),
+        ):
+            with self.assertRaises(Exception) as raised:
+                await app.call_tool("restore_gameplay", {"timeout_s": 1.0})
+
+        self.assertEqual(type(raised.exception).__name__, "ToolError")
+        self.assertIn("restore_unverified", str(raised.exception))
+
+    async def test_a_probe_that_could_not_look_fails_closed(self) -> None:
+        # camera.ok=false is BuildCameraResult's client_not_in_game exit
+        # (MCPClientBridge.c:3654-3660): the probe answered, and its answer is
+        # "I could not look", which is not a released camera.
+        app, runtime = self._app()
+        with patch.object(
+            runtime,
+            "call_bridge",
+            new=AsyncMock(
+                side_effect=[
+                    {"id": 7, "ok": 1, "error": ""},
+                    _camera_probe(ok=0, error="client_not_in_game"),
+                ]
+            ),
+        ):
+            with self.assertRaises(Exception) as raised:
+                await app.call_tool("restore_gameplay", {"timeout_s": 1.0})
+
+        self.assertEqual(type(raised.exception).__name__, "ToolError")
+        self.assertIn("restore_unverified", str(raised.exception))
+        self.assertIn("client_not_in_game", str(raised.exception))
+
+    async def test_a_failed_restore_is_never_masked_by_the_probe(self) -> None:
+        # wait_for_result already raises on a falsy bridge ok, so the probe must
+        # not run and must not rewrite that red into a verification verdict.
+        app, runtime = self._app()
+        with patch.object(
+            runtime,
+            "call_bridge",
+            new=AsyncMock(side_effect=server.ToolError("client_not_in_game")),
+        ) as call:
+            with self.assertRaises(Exception) as raised:
+                await app.call_tool("restore_gameplay", {"timeout_s": 1.0})
+
+        self.assertEqual(len(call.await_args_list), 1)
+        self.assertIn("client_not_in_game", str(raised.exception))
 
 
 if __name__ == "__main__":
