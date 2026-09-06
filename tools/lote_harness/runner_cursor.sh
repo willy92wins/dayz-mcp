@@ -31,7 +31,11 @@ cd "$WS" || exit 2
 SANDBOX_HOME="$LOTE/../cursor-home"
 mkdir -p "$SANDBOX_HOME"
 if [ ! -d "$SANDBOX_HOME/.cursor" ]; then
-  MSYS_NO_PATHCONV=1 cmd /c "mklink /J $(cygpath -w "$SANDBOX_HOME")\\.cursor $(cygpath -w "$USERPROFILE")\\.cursor" >/dev/null \
+  # 2026-09-06: the two paths go as SEPARATE cmd arguments, never inside one quoted string.
+  # Under a path with a space ("DayZ Projects") the single-string form fails twice over: bare
+  # quotes make mklink answer "La sintaxis del comando no es correcta", and escaped ones reach
+  # cmd as a literal \" (MSYS re-quotes the argument), which it then reads as part of the path.
+  MSYS_NO_PATHCONV=1 cmd /c mklink /J "$(cygpath -w "$SANDBOX_HOME")\\.cursor" "$(cygpath -w "$USERPROFILE")\\.cursor" >/dev/null \
     || { echo "could not create the .cursor junction under $SANDBOX_HOME" >&2; exit 2; }
 fi
 [ -f "$SANDBOX_HOME/.cursor/cli-config.json" ] || { echo "sandbox .cursor junction not usable" >&2; exit 2; }
