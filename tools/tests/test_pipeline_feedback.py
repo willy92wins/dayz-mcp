@@ -74,6 +74,57 @@ class InboxTest(unittest.TestCase):
         self.assertIn("title", message)
         self.assertIn("120", message)
 
+    def test_over_length_errors_name_the_real_count(self) -> None:
+        # Ficha fb-20260906-145656-d45f: "title > 120 chars" tells the caller it
+        # overshot but not by how much, so trimming is guesswork and each retry
+        # costs a turn. The limits below were read off inbox.py, not the ficha.
+        cases = (
+            ("title 125 > 120", lambda: inbox.append_feedback("bug", "x" * 125, "body")),
+            ("body 8001 > 8000", lambda: inbox.append_feedback("bug", "t", "x" * 8001)),
+            (
+                "project 65 > 64",
+                lambda: inbox.append_feedback("bug", "t", "b", project="x" * 65),
+            ),
+            (
+                "resolution 2087 > 2000",
+                lambda: inbox.append_resolution(
+                    "fb-20260906-145656-d45f", "x" * 2087
+                ),
+            ),
+            (
+                "evidence_ref 241 > 240",
+                lambda: inbox.append_resolution(
+                    "fb-20260906-145656-d45f",
+                    "ok",
+                    evidence_ref="reviews/" + "x" * 233,
+                ),
+            ),
+        )
+        for expected, call in cases:
+            with self.subTest(expected):
+                with self.assertRaises(ValueError) as ctx:
+                    call()
+                message = str(ctx.exception)
+                self.assertTrue(message.startswith("bad_args"), message)
+                self.assertIn(expected, message)
+
+    def test_empty_values_still_say_empty_not_a_count(self) -> None:
+        # A zero-length value is not an over-length one; keeping the two apart is
+        # what makes the count in the other branch readable.
+        cases = (
+            ("title empty", lambda: inbox.append_feedback("bug", "   ", "body")),
+            ("body empty", lambda: inbox.append_feedback("bug", "t", "")),
+            (
+                "resolution empty",
+                lambda: inbox.append_resolution("fb-20260906-145656-d45f", ""),
+            ),
+        )
+        for expected, call in cases:
+            with self.subTest(expected):
+                with self.assertRaises(ValueError) as ctx:
+                    call()
+                self.assertIn(expected, str(ctx.exception))
+
     def test_append_rejects_empty_body(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             inbox.append_feedback("bug", "title", "")
@@ -297,3 +348,50 @@ class PipelineToolsTest(unittest.IsolatedAsyncioTestCase):
             "bad_args" in message or "tool_contribution" in message,
             message,
         )
+
+
+class PipelineToolDescriptionsDeclareLimitsTest(unittest.IsolatedAsyncioTestCase):
+    """Ficha fb-20260906-145656-d45f.
+
+    Six calls were rejected in one session (2026-09-04/05) by rules that exist
+    in the validator and in no description: the evidence_ref root set, the
+    "path only" shape, and the title and resolution caps. A limit that is only
+    discoverable by tripping it costs a turn per discovery. Every number
+    asserted here was read off dayz_mcp/inbox.py, not off the ficha.
+    """
+
+    async def _tool_descriptions(self) -> dict[str, str]:
+        app, _runtime = server.build_app(server.ServerConfig())
+        return {tool.name: (tool.description or "") for tool in await app.list_tools()}
+
+    async def test_feedback_declares_its_length_caps(self) -> None:
+        text = (await self._tool_descriptions())["pipeline_feedback"]
+        # inbox.append_feedback: title 1..120, body 1..8000, project <= 64.
+        for fragment in ("title", "120", "body", "8000", "project", "64"):
+            self.assertIn(fragment, text)
+
+    async def test_resolve_declares_the_evidence_ref_shape_and_both_caps(self) -> None:
+        text = (await self._tool_descriptions())["pipeline_resolve"]
+        # inbox.append_resolution: resolution 1..2000.
+        # inbox._validate_evidence_ref: 1..240, ASCII, first segment in
+        # {reviews, gates, reports, research}, later segments [A-Za-z0-9._-].
+        for fragment in (
+            "resolution",
+            "2000",
+            "evidence_ref",
+            "240",
+            "reviews",
+            "gates",
+            "reports",
+            "research",
+        ):
+            self.assertIn(fragment, text)
+        lowered = text.lower()
+        # The two rejections that cost the most turns were a repo-prefixed path
+        # and a path with a note glued onto it, so both must be named.
+        self.assertIn("relative", lowered)
+        self.assertIn("path only", lowered)
+
+
+if __name__ == "__main__":
+    unittest.main()

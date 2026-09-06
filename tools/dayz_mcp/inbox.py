@@ -22,6 +22,20 @@ def _require_str(value: object, field: str = "value") -> str:
     return value
 
 
+def _check_length(value: str, field: str, limit: int) -> None:
+    """Reject an over-long value naming how long it actually is.
+
+    "resolution > 2000 chars" says the caller overshot but not by how much, so
+    trimming is guesswork and every guess costs another rejected call (ficha
+    fb-20260906-145656-d45f: six such rejections in one session). The count is
+    in characters, the same unit the limit is in.
+    """
+    if not value:
+        raise ValueError(f"bad_args: {field} empty")
+    if len(value) > limit:
+        raise ValueError(f"bad_args: {field} {len(value)} > {limit} chars")
+
+
 def _utc_now() -> tuple[str, str]:
     now = datetime.now(timezone.utc)
     return now.strftime("%Y%m%d-%H%M%S"), now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -31,8 +45,7 @@ def _validate_evidence_ref(value: str | None) -> str | None:
     if value is None:
         return None
     value = _require_str(value, "evidence_ref")
-    if not 1 <= len(value) <= 240:
-        raise ValueError("bad_args: evidence_ref must be 1..240 chars")
+    _check_length(value, "evidence_ref", 240)
     try:
         value.encode("ascii")
     except UnicodeEncodeError as exc:
@@ -96,12 +109,10 @@ def append_feedback(
     platform = _require_str(platform, "platform")
     if kind not in KINDS:
         raise ValueError("bad_args: kind not in bug|request|tool_contribution|finding")
-    if not 1 <= len(title) <= 120:
-        raise ValueError("bad_args: title > 120 chars" if title else "bad_args: title empty")
-    if not 1 <= len(body) <= 8000:
-        raise ValueError("bad_args: body > 8000 chars" if body else "bad_args: body empty")
+    _check_length(title, "title", 120)
+    _check_length(body, "body", 8000)
     if len(project) > 64:
-        raise ValueError("bad_args: project > 64 chars")
+        raise ValueError(f"bad_args: project {len(project)} > 64 chars")
     stamp, ts = _utc_now()
     entry = {
         "id": f"fb-{stamp}-{secrets.token_hex(2)}",
@@ -130,10 +141,7 @@ def append_resolution(
     evidence_ref = _validate_evidence_ref(evidence_ref)
     if _FEEDBACK_ID_RE.fullmatch(feedback_id) is None:
         raise ValueError("bad_args: feedback_id must match fb-YYYYMMDD-HHMMSS-xxxx")
-    if not 1 <= len(resolution) <= 2000:
-        raise ValueError(
-            "bad_args: resolution > 2000 chars" if resolution else "bad_args: resolution empty"
-        )
+    _check_length(resolution, "resolution", 2000)
     _stamp, ts = _utc_now()
     record = {
         "resolves": feedback_id,
