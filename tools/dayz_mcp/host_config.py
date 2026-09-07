@@ -179,6 +179,36 @@ def _scan_raw_options(args: list[str]) -> dict[str, int]:
     return counts
 
 
+def _is_pinned_budget(value: object, expected: int) -> bool:
+    """True when ``value`` is ``expected``, written as an int or as an integral float.
+
+    The host CLIs own these files and rewrite them. Codex's TOML round-trip turns
+    ``tool_timeout_sec = 604800`` into ``604800.0``: the same seven-day budget, spelled
+    differently. Refusing the float cost two measured outages in which every client died at
+    startup on ``daemon_provenance_conflict`` -- 2026-08-24 (fb-20260824-000930-7af8, patched
+    by hand in the TOML, which the next round-trip undid) and 2026-09-07. The durable fix was
+    named in the first one and is this: compare the budget by VALUE, not by the literal's
+    spelling.
+
+    Strictness is otherwise unchanged, and both halves are load-bearing. ``bool`` is refused
+    because it is an ``int`` subclass and ``True == 1`` would let a flag through as a budget.
+    A fractional float is refused because it is not the pinned budget however close it looks;
+    that also rejects NaN and the infinities, which are not integral.
+
+    This aligns the provenance gate with the two checks that already accepted the float --
+    install_mcp.py:608 and the post-write verifiers below. Three checks on one field, and only
+    the fail-closed one was strict: that asymmetry is why the doctor reported healthy while
+    the gate killed the client.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value == expected
+    if isinstance(value, float):
+        return value.is_integer() and value == expected
+    return False
+
+
 def _registration_from_entry(
     entry: object,
     *,
@@ -199,18 +229,12 @@ def _registration_from_entry(
         timeout = entry.get("timeout")
         if (
             entry.get("type") != "stdio"
-            or isinstance(timeout, bool)
-            or not isinstance(timeout, int)
-            or timeout != CLAUDE_TIMEOUT_MS
+            or not _is_pinned_budget(timeout, CLAUDE_TIMEOUT_MS)
         ):
             raise HostConfigError("daemon_provenance_conflict")
     else:
         timeout = entry.get("tool_timeout_sec")
-        if (
-            isinstance(timeout, bool)
-            or not isinstance(timeout, int)
-            or timeout != CODEX_TIMEOUT_SECONDS
-        ):
+        if not _is_pinned_budget(timeout, CODEX_TIMEOUT_SECONDS):
             raise HostConfigError("daemon_provenance_conflict")
     command = _canonical_existing_file(entry.get("command"))
     if os.path.normcase(os.path.normpath(command)) != os.path.normcase(
