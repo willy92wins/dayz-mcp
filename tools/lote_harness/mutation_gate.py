@@ -67,7 +67,12 @@ def main(argv: list[str] | None = None) -> int:
     target = tree / args.file
     python = args.python or str(tree / "tools" / ".venv-mcp" / "Scripts" / "python.exe")
     if not pathlib.Path(python).is_file():
+        # A faithful workspace built by montar_ws.sh excludes .venv-mcp, which is the main
+        # place this runs. No fallback: picking another interpreter silently is how spurious
+        # reds appear (test_bug046 and the interpreter guard both fire on the wrong one).
         print(f"!! interprete no encontrado: {python}", file=sys.stderr)
+        print("   una copia fiel no lleva .venv-mcp: pasa --python con el "
+              "del arbol vivo", file=sys.stderr)
         return 2
 
     original = target.read_bytes()
