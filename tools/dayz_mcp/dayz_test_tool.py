@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import ntpath
 import os
@@ -22,6 +23,7 @@ from dayz_mcp.steam_preflight import (
     STEAM_SESSION_STALE,
     SteamSessionResult,
     evaluate_steam_session,
+    remediate_stale_steam_session,
 )
 _BRIDGE_MOD_NAMES = frozenset({"dayz_mcp", "@dayz_mcp"})
 _HELD_LEASE_RUN = (
@@ -831,7 +833,10 @@ def _peer_age(value: object) -> float | None:
     """A poll age only counts when it is a finite, non-negative number."""
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
     if number != number or number in (float("inf"), float("-inf")) or number < 0.0:
         return None
     return number
@@ -1060,14 +1065,25 @@ def _stop_artifacts(
         return []
     if not isinstance(profiles, str) or not profiles:
         _fail("lifecycle_status_invalid")
+    candidates = _artifact_paths(policy, "all")
     normalized = ntpath.normcase(ntpath.normpath(profiles))
     matches = [
         candidate
-        for candidate in _artifact_paths(policy, "all")
+        for candidate in candidates
         if ntpath.normcase(ntpath.normpath(candidate)) == normalized
     ]
     if len(matches) != 1:
         _fail("lifecycle_status_invalid")
+    processes = run.get("processes")
+    roles: set[str] = set()
+    if isinstance(processes, list):
+        for item in processes:
+            if isinstance(item, dict):
+                role = item.get("role")
+                if isinstance(role, str) and role:
+                    roles.add(role)
+    if len(roles) > 1:
+        return list(candidates)
     return matches
 
 
@@ -1233,6 +1249,7 @@ async def execute_dayz_test_run(
     player_name: str = "Dev",
     server_wait_s: int = 60,
     progress_cb: _ProgressCallback | None = None,
+    auto_remediate_steam: bool = False,
 ) -> dict[str, object]:
     started_at = time.monotonic()
     if progress_cb is not None:
@@ -1295,6 +1312,7 @@ async def execute_dayz_test_run(
                     vpp_missing=list(vpp.missing),
                     vpp_warnings=list(vpp.warnings),
                 )
+            steam_remediation_report: dict[str, object] | None = None
             if not preflight and _mode_starts_client(mode):
                 try:
                     steam = evaluate_steam_session()
@@ -1305,8 +1323,33 @@ async def execute_dayz_test_run(
                         steam_live_pids=(),
                         remediation=REMEDIATION,
                     )
+                if steam.error_code is not None and auto_remediate_steam is True:
+                    remediated_at = time.monotonic()
+                    steam_remediation_error: str | None = None
+                    try:
+                        steam = await asyncio.to_thread(remediate_stale_steam_session)
+                    except Exception as exc:
+                        steam_remediation_error = type(exc).__name__
+                        steam = SteamSessionResult(
+                            error_code=STEAM_SESSION_STALE,
+                            steam_registered_pid=steam.steam_registered_pid,
+                            steam_live_pids=steam.steam_live_pids,
+                            remediation=REMEDIATION,
+                        )
+                    steam_remediation_report = {
+                        "steam_remediated": steam.error_code is None,
+                        "steam_remediation_s": round(
+                            time.monotonic() - remediated_at, 3
+                        ),
+                    }
+                    if steam_remediation_error is not None:
+                        steam_remediation_report["steam_remediation_error"] = (
+                            steam_remediation_error
+                        )
+                    if getattr(steam, "steam_left_down", False) is True:
+                        steam_remediation_report["steam_left_down"] = True
                 if steam.error_code is not None:
-                    return _compact_result(
+                    failed = _compact_result(
                         terminal=WorkerTerminal(
                             cleanup_degraded=False,
                             error_code=steam.error_code,
@@ -1325,6 +1368,9 @@ async def execute_dayz_test_run(
                         vpp_missing=list(vpp.missing),
                         vpp_warnings=list(vpp.warnings),
                     )
+                    if steam_remediation_report is not None:
+                        failed.update(steam_remediation_report)
+                    return failed
             replacement: ClientReplacementDecision | None = None
             client_pids_before: tuple[int, ...] | None = None
             if run_id is not None and not preflight:
@@ -1357,7 +1403,7 @@ async def execute_dayz_test_run(
                         bridge = None
                     replacement = _decide_client_replacement(record, bridge)
                     if not replacement.replace:
-                        return _compact_result(
+                        refused = _compact_result(
                             terminal=WorkerTerminal(
                                 cleanup_degraded=False,
                                 error_code=_REFUSAL_ERROR_CODE.get(
@@ -1394,6 +1440,9 @@ async def execute_dayz_test_run(
                             vpp_missing=list(vpp.missing),
                             vpp_warnings=list(vpp.warnings),
                         )
+                        if steam_remediation_report is not None:
+                            refused.update(steam_remediation_report)
+                        return refused
             if replacement is not None and replacement.replace:
                 # H-A2-2 / 79e2: the verdict reached here is two broker hops and
                 # one process start away from the kill, so it does not travel as
@@ -1405,7 +1454,7 @@ async def execute_dayz_test_run(
                     **request_arguments,
                     replace_if_not_polling_since=decided_at_ms,
                 )
-            return await _execute_request(
+            result = await _execute_request(
                 runtime,
                 opened_launcher=opened,
                 verified_bundle=bundle,
@@ -1421,6 +1470,9 @@ async def execute_dayz_test_run(
                 client_pids_before=client_pids_before,
                 vpp=vpp,
             )
+            if steam_remediation_report is not None:
+                result.update(steam_remediation_report)
+            return result
 
 
 def _run_row(status: object, run_id: str) -> dict[str, object] | None:

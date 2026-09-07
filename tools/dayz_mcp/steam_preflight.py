@@ -10,6 +10,9 @@ from __future__ import annotations
 import ctypes
 from dataclasses import dataclass
 import ntpath
+import subprocess
+import time
+from collections.abc import Callable
 from typing import Protocol
 from ctypes import wintypes
 
@@ -17,7 +20,14 @@ from ctypes import wintypes
 STEAM_SESSION_STALE = "steam_session_stale"
 REMEDIATION = "restart_steam_and_wait_for_active_process_match"
 _ACTIVE_PROCESS_KEY = r"Software\Valve\Steam\ActiveProcess"
+_STEAM_KEY = r"Software\Valve\Steam"
 _MAX_LIVE_PIDS = 8
+_SHUTDOWN_WAIT_S = 15.0
+_ACTIVE_WAIT_S = 20.0
+_POLL_INTERVAL_S = 0.2
+_STEAM_INVOKE_FLAGS = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+    subprocess, "CREATE_NO_WINDOW", 0
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +46,17 @@ class SteamSessionResult:
     steam_registered_pid: int | None
     steam_live_pids: tuple[int, ...]
     remediation: str
+
+
+@dataclass(frozen=True, slots=True)
+class SteamRemediationResult(SteamSessionResult):
+    """Session verdict after one shutdown/silent cycle.
+
+    ``steam_left_down`` is not part of the evaluate contract: it is only
+    published when this cycle shut Steam down and could not bring it back.
+    """
+
+    steam_left_down: bool = False
 
 
 class SteamPreflightProvider(Protocol):
@@ -224,12 +245,161 @@ def evaluate_steam_session(
     )
 
 
+class SteamRemediationHost(Protocol):
+    """Host commands for one Steam shutdown/silent cycle. Tests inject doubles."""
+
+    def steam_executable(self) -> str | None: ...
+
+    def invoke_steam(self, executable: str, extra_args: tuple[str, ...]) -> None: ...
+
+    def monotonic(self) -> float: ...
+
+    def sleep(self, seconds: float) -> None: ...
+
+
+class WindowsSteamRemediationHost:
+    """Launch steam.exe detached; never wait on the child itself."""
+
+    def steam_executable(self) -> str | None:
+        import winreg
+
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _STEAM_KEY) as key:
+                value, _ = winreg.QueryValueEx(key, "SteamExe")
+        except OSError:
+            return None
+        if isinstance(value, str) and value:
+            return value
+        return None
+
+    def invoke_steam(self, executable: str, extra_args: tuple[str, ...]) -> None:
+        subprocess.Popen(
+            [executable, *extra_args],
+            close_fds=True,
+            creationflags=_STEAM_INVOKE_FLAGS,
+        )
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+
+def _steam_executable(
+    provider: SteamPreflightProvider, host: SteamRemediationHost
+) -> str | None:
+    live_pids = _safe_live_pids(provider) or ()
+    for pid in live_pids:
+        try:
+            image_path = provider.process_image_path(pid)
+        except Exception:
+            continue
+        if (
+            isinstance(image_path, str)
+            and ntpath.basename(image_path).casefold() == "steam.exe"
+        ):
+            return image_path
+    return host.steam_executable()
+
+
+def _wait_until(
+    host: SteamRemediationHost,
+    timeout_s: float,
+    predicate: Callable[[], bool],
+) -> bool:
+    deadline = host.monotonic() + timeout_s
+    while True:
+        if predicate():
+            return True
+        if host.monotonic() >= deadline:
+            return False
+        host.sleep(_POLL_INTERVAL_S)
+
+
+def _wait_until_steam_down(
+    provider: SteamPreflightProvider,
+    host: SteamRemediationHost,
+) -> str:
+    """Distinguish down / still alive / unreadable. Never treat None as down."""
+
+    deadline = host.monotonic() + _SHUTDOWN_WAIT_S
+    while True:
+        live = _safe_live_pids(provider)
+        if live is None:
+            return "unknown"
+        if live == ():
+            return "down"
+        if host.monotonic() >= deadline:
+            return "alive"
+        host.sleep(_POLL_INTERVAL_S)
+
+
+def _remediation_result(
+    session: SteamSessionResult, *, steam_left_down: bool = False
+) -> SteamRemediationResult:
+    return SteamRemediationResult(
+        error_code=session.error_code,
+        steam_registered_pid=session.steam_registered_pid,
+        steam_live_pids=session.steam_live_pids,
+        remediation=session.remediation,
+        steam_left_down=steam_left_down,
+    )
+
+
+def remediate_stale_steam_session(
+    provider: SteamPreflightProvider | None = None,
+    host: SteamRemediationHost | None = None,
+) -> SteamSessionResult:
+    """One shutdown, one silent relaunch, then a single re-evaluation.
+
+    Callers must not invoke this twice for the same launch. A cycle that
+    cannot restore ActiveProcess still returns ``steam_session_stale``.
+    An unreadable process list aborts the cycle; a shutdown that never
+    finishes does not proceed to ``-silent``. If ``-silent`` raises after
+    a completed shutdown, one retry is attempted; both failures publish
+    ``steam_left_down``.
+    """
+
+    selected_provider = WindowsSteamPreflightProvider() if provider is None else provider
+    selected_host = WindowsSteamRemediationHost() if host is None else host
+    executable = _steam_executable(selected_provider, selected_host)
+    if executable is None:
+        return _remediation_result(evaluate_steam_session(selected_provider))
+    try:
+        selected_host.invoke_steam(executable, ("-shutdown",))
+    except Exception:
+        return _remediation_result(evaluate_steam_session(selected_provider))
+    down_state = _wait_until_steam_down(selected_provider, selected_host)
+    if down_state != "down":
+        return _remediation_result(evaluate_steam_session(selected_provider))
+    try:
+        selected_host.invoke_steam(executable, ("-silent",))
+    except Exception:
+        try:
+            selected_host.invoke_steam(executable, ("-silent",))
+        except Exception:
+            return _remediation_result(
+                evaluate_steam_session(selected_provider),
+                steam_left_down=True,
+            )
+    _wait_until(
+        selected_host,
+        _ACTIVE_WAIT_S,
+        lambda: evaluate_steam_session(selected_provider).error_code is None,
+    )
+    return _remediation_result(evaluate_steam_session(selected_provider))
+
+
 __all__ = [
     "REMEDIATION",
     "STEAM_SESSION_STALE",
     "SteamActiveProcessSnapshot",
     "SteamPreflightProvider",
+    "SteamRemediationHost",
     "SteamSessionResult",
     "WindowsSteamPreflightProvider",
+    "WindowsSteamRemediationHost",
     "evaluate_steam_session",
+    "remediate_stale_steam_session",
 ]

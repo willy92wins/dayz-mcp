@@ -636,15 +636,46 @@ class ArtifactRootsTest(unittest.TestCase):
         """_stop_artifacts asks for the roots of "all"; both must stay reachable."""
 
         policy = _policy()
+        expected = [
+            r"P:\ExampleMod_Suite\_server\profiles",
+            r"P:\ExampleMod_Suite\_client\profiles",
+        ]
         for profiles in (
             r"P:\ExampleMod_Suite\_server\profiles",
             r"P:\ExampleMod_Suite\_client\profiles",
         ):
             with self.subTest(profiles=profiles):
                 self.assertEqual(
-                    dayz_test_tool._stop_artifacts(policy, {"profiles": profiles}),
-                    [profiles],
+                    dayz_test_tool._stop_artifacts(
+                        policy,
+                        {
+                            "profiles": profiles,
+                            "processes": [
+                                {"role": "server"},
+                                {"role": "client"},
+                            ],
+                        },
+                    ),
+                    expected,
                 )
+
+
+class StopArtifactsTest(unittest.TestCase):
+    def test_stop_names_both_artifact_roots_of_a_full_run(self) -> None:
+        policy = _policy()
+        expected = dayz_test_tool._artifact_paths(policy, "all")
+        self.assertEqual(len(expected), 2)
+        run = {
+            "profiles": expected[-1],
+            "processes": [
+                {"role": "server"},
+                "not-a-row",
+                {"role": "client"},
+                {"alive": True},
+            ],
+        }
+        self.assertEqual(dayz_test_tool._stop_artifacts(policy, run), expected)
+
 
 if __name__ == "__main__":
     unittest.main()

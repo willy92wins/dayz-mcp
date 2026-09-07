@@ -5,11 +5,14 @@ from __future__ import annotations
 from dataclasses import fields
 import unittest
 
+from collections.abc import Callable
+
 from dayz_mcp.steam_preflight import (
     REMEDIATION,
     STEAM_SESSION_STALE,
     SteamActiveProcessSnapshot,
     evaluate_steam_session,
+    remediate_stale_steam_session,
 )
 
 
@@ -270,6 +273,147 @@ class SteamPreflightTests(unittest.TestCase):
         )
         self.assertIsNone(foreign.error_code)
         self.assertEqual(foreign.steam_live_pids, (99, 100))
+
+
+_STEAM_EXE = r"C:\Steam\steam.exe"
+_SHUTDOWN_BUDGET_S = 15.0
+
+
+class _MutableSteamProvider:
+    """In-memory Steam session whose live-pid list the host can mutate."""
+
+    def __init__(self, *, steam_pids: object = (41,)) -> None:
+        self.pid = 41
+        self.active_user = 7
+        self.existing: set[int] = {41}
+        self.images: dict[int, object] = {41: _STEAM_EXE}
+        self.steam_pids = steam_pids
+
+    def read_active_process(self) -> SteamActiveProcessSnapshot:
+        return SteamActiveProcessSnapshot(pid=self.pid, active_user=self.active_user)
+
+    def process_exists(self, pid: int) -> bool:
+        return pid in self.existing
+
+    def process_image_path(self, pid: int) -> object:
+        return self.images[pid]
+
+    def steam_process_pids(self) -> object:
+        value = self.steam_pids
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    def shut_down(self) -> None:
+        self.steam_pids = ()
+        self.existing.clear()
+
+    def come_back(self) -> None:
+        self.steam_pids = (self.pid,)
+        self.existing = {self.pid}
+
+
+class _FakeRemediationHost:
+    """Records steam.exe invocations; never touches a real process."""
+
+    def __init__(
+        self,
+        executable: str = _STEAM_EXE,
+        *,
+        silent_errors: int = 0,
+    ) -> None:
+        self._executable = executable
+        self.invocations: list[tuple[str, tuple[str, ...]]] = []
+        self._now = 0.0
+        self.monotonic_calls = 0
+        self._silent_errors = silent_errors
+        self.on_invoke: Callable[[tuple[str, ...]], None] | None = None
+
+    def steam_executable(self) -> str | None:
+        return self._executable
+
+    def invoke_steam(self, executable: str, extra_args: tuple[str, ...]) -> None:
+        self.invocations.append((executable, extra_args))
+        if extra_args == ("-silent",) and self._silent_errors:
+            self._silent_errors -= 1
+            raise OSError("silent launch failed")
+        if self.on_invoke is not None:
+            self.on_invoke(extra_args)
+
+    def monotonic(self) -> float:
+        self.monotonic_calls += 1
+        return self._now
+
+    def sleep(self, seconds: float) -> None:
+        self._now += float(seconds)
+
+    def extra_args(self) -> list[tuple[str, ...]]:
+        return [args for _executable, args in self.invocations]
+
+
+class SteamRemediationHostTest(unittest.TestCase):
+    def test_a_clean_shutdown_and_relaunch_reports_success(self) -> None:
+        provider = _MutableSteamProvider()
+        host = _FakeRemediationHost()
+
+        def _on_invoke(extra_args: tuple[str, ...]) -> None:
+            if extra_args == ("-shutdown",):
+                provider.shut_down()
+            elif extra_args == ("-silent",):
+                provider.come_back()
+
+        host.on_invoke = _on_invoke
+
+        result = remediate_stale_steam_session(provider, host)
+
+        self.assertIsNone(result.error_code)
+        self.assertEqual(result.steam_registered_pid, 41)
+        self.assertIs(result.steam_left_down, False)
+        self.assertEqual(host.extra_args(), [("-shutdown",), ("-silent",)])
+        self.assertGreater(host.monotonic_calls, 0)
+
+    def test_a_shutdown_that_never_finishes_does_not_relaunch(self) -> None:
+        provider = _MutableSteamProvider()
+        provider.existing = set()
+        provider.steam_pids = (99,)
+        provider.images[99] = _STEAM_EXE
+        host = _FakeRemediationHost()
+
+        result = remediate_stale_steam_session(provider, host)
+
+        self.assertEqual(result.error_code, STEAM_SESSION_STALE)
+        self.assertEqual(host.extra_args(), [("-shutdown",)])
+        self.assertGreaterEqual(host._now, _SHUTDOWN_BUDGET_S)
+        self.assertIs(getattr(result, "steam_left_down", False), False)
+
+    def test_a_relaunch_that_fails_reports_steam_left_down(self) -> None:
+        provider = _MutableSteamProvider()
+        host = _FakeRemediationHost(silent_errors=8)
+
+        def _on_invoke(extra_args: tuple[str, ...]) -> None:
+            if extra_args == ("-shutdown",):
+                provider.shut_down()
+
+        host.on_invoke = _on_invoke
+
+        result = remediate_stale_steam_session(provider, host)
+
+        self.assertEqual(result.error_code, STEAM_SESSION_STALE)
+        self.assertIs(result.steam_left_down, True)
+        self.assertEqual(host.extra_args()[0], ("-shutdown",))
+        self.assertIn(("-silent",), host.extra_args())
+        self.assertEqual(provider.steam_pids, ())
+
+    def test_an_unreadable_process_list_is_not_read_as_shut_down(self) -> None:
+        provider = _MutableSteamProvider(steam_pids=RuntimeError("snapshot failed"))
+        host = _FakeRemediationHost()
+
+        result = remediate_stale_steam_session(provider, host)
+
+        self.assertEqual(result.error_code, STEAM_SESSION_STALE)
+        self.assertNotIn(("-silent",), host.extra_args())
+        self.assertLess(host._now, _SHUTDOWN_BUDGET_S)
+        self.assertIs(getattr(result, "steam_left_down", False), False)
 
 
 if __name__ == "__main__":
