@@ -279,5 +279,195 @@ class LauncherRegistryUpdateTest(unittest.TestCase):
             self.assertFalse(list(receipts.glob("*/rolled-back.json")))
 
 
+def _has_dayz_test_v1(registry: Path) -> bool:
+    payload = json.loads(registry.read_text(encoding="utf-8"))
+    return any(item.get("id") == "dayz-test-v1" for item in payload.get("launchers", []))
+
+
+def _entry_with_sha(digest: str) -> dict[str, object]:
+    entry = _entry()
+    entry["sha256"] = digest
+    return entry
+
+
+@unittest.skipUnless(os.name == "nt", "ReplaceFileW and LockFileEx are Windows-only")
+class ReplaceTransitionTest(unittest.TestCase):
+    def _paths(self, root: Path) -> tuple[Path, Path, Path]:
+        registry = root / "approved-launchers.json"
+        registry.write_bytes(BASELINE)
+        lock = root / "approved-launchers.lock"
+        lock.write_bytes(b"lock\n")
+        return registry, lock, root / "receipts"
+
+    def test_replacing_an_installed_launcher_never_leaves_the_registry_without_one(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry, lock, receipts = self._paths(root)
+            with patch.object(updater, "_validated_entry", return_value=_entry()):
+                updater._install_transition(
+                    registry_path=registry,
+                    lock_path=lock,
+                    receipts_path=receipts,
+                    bundle=root,
+                    expected_sha256=updater._sha256(BASELINE),
+                )
+            self.assertTrue(_has_dayz_test_v1(registry))
+            with patch.object(updater, "_validated_entry", return_value=_entry()):
+                with self.assertRaisesRegex(
+                    RuntimeError, "launcher_registry_version_already_installed"
+                ):
+                    updater._install_transition(
+                        registry_path=registry,
+                        lock_path=lock,
+                        receipts_path=receipts,
+                        bundle=root,
+                        expected_sha256=updater._sha256(registry.read_bytes()),
+                    )
+            self.assertTrue(_has_dayz_test_v1(registry))
+
+            replacement = _entry_with_sha("B" * 64)
+            with patch.object(updater, "_validated_entry", return_value=replacement):
+                updater._replace_transition(
+                    registry_path=registry,
+                    lock_path=lock,
+                    receipts_path=receipts,
+                    bundle=root,
+                    expected_sha256=updater._sha256(registry.read_bytes()),
+                )
+            self.assertTrue(_has_dayz_test_v1(registry))
+            installed = json.loads(registry.read_text(encoding="utf-8"))
+            self.assertEqual(installed["launchers"][0]["sha256"], "B" * 64)
+            self.assertEqual(len(installed["launchers"]), 1)
+
+            with patch.object(
+                updater, "_validated_entry", return_value=_entry_with_sha("C" * 64)
+            ):
+                with self.assertRaisesRegex(RuntimeError, "injected_failure"):
+                    updater._replace_transition(
+                        registry_path=registry,
+                        lock_path=lock,
+                        receipts_path=receipts,
+                        bundle=root,
+                        expected_sha256=updater._sha256(registry.read_bytes()),
+                        fail_at="before_apply",
+                    )
+            self.assertTrue(_has_dayz_test_v1(registry))
+            self.assertEqual(
+                json.loads(registry.read_text(encoding="utf-8"))["launchers"][0]["sha256"],
+                "B" * 64,
+            )
+
+            with patch.object(
+                updater, "_validated_entry", return_value=_entry_with_sha("C" * 64)
+            ):
+                with self.assertRaisesRegex(RuntimeError, "injected_failure"):
+                    updater._replace_transition(
+                        registry_path=registry,
+                        lock_path=lock,
+                        receipts_path=receipts,
+                        bundle=root,
+                        expected_sha256=updater._sha256(registry.read_bytes()),
+                        fail_at="after_apply",
+                    )
+            self.assertTrue(_has_dayz_test_v1(registry))
+            self.assertEqual(
+                json.loads(registry.read_text(encoding="utf-8"))["launchers"][0]["sha256"],
+                "C" * 64,
+            )
+
+    def test_a_failure_after_the_swap_is_recovered(self) -> None:
+        """Recover the after_apply half of a replace. The before_apply half is
+        covered by fb-20260907-083722-1f0a, not by this test.
+        """
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry, lock, receipts = self._paths(root)
+            with patch.object(updater, "_validated_entry", return_value=_entry()):
+                updater._install_transition(
+                    registry_path=registry,
+                    lock_path=lock,
+                    receipts_path=receipts,
+                    bundle=root,
+                    expected_sha256=updater._sha256(BASELINE),
+                )
+            committed_after_install = list(receipts.glob("*/committed.json"))
+            self.assertEqual(len(committed_after_install), 1)
+
+            replacement = _entry_with_sha("B" * 64)
+            with patch.object(updater, "_validated_entry", return_value=replacement):
+                with self.assertRaisesRegex(RuntimeError, "injected_failure"):
+                    updater._replace_transition(
+                        registry_path=registry,
+                        lock_path=lock,
+                        receipts_path=receipts,
+                        bundle=root,
+                        expected_sha256=updater._sha256(registry.read_bytes()),
+                        fail_at="after_apply",
+                    )
+            self.assertTrue(_has_dayz_test_v1(registry))
+            self.assertEqual(len(list(receipts.glob("*/committed.json"))), 1)
+            self.assertTrue(list(receipts.glob("*/prepared.json")))
+
+            with patch.object(updater, "_validated_entry", return_value=replacement):
+                with self.assertRaisesRegex(RuntimeError, "cas_mismatch"):
+                    updater._replace_transition(
+                        registry_path=registry,
+                        lock_path=lock,
+                        receipts_path=receipts,
+                        bundle=root,
+                        expected_sha256="F" * 64,
+                    )
+            self.assertTrue(_has_dayz_test_v1(registry))
+            self.assertEqual(len(list(receipts.glob("*/committed.json"))), 2)
+            self.assertEqual(
+                json.loads(registry.read_text(encoding="utf-8"))["launchers"][0]["sha256"],
+                "B" * 64,
+            )
+
+    def test_an_aborted_transition_leaves_no_temporary_file(self) -> None:
+        def _temps(registry: Path) -> list[Path]:
+            return list(registry.parent.glob(f".{registry.name}.tmp.*"))
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry, lock, receipts = self._paths(root)
+            with patch.object(updater, "_validated_entry", return_value=_entry()):
+                with self.assertRaisesRegex(RuntimeError, "injected_failure"):
+                    updater._install_transition(
+                        registry_path=registry,
+                        lock_path=lock,
+                        receipts_path=receipts,
+                        bundle=root,
+                        expected_sha256=updater._sha256(BASELINE),
+                        fail_at="before_replace",
+                    )
+            self.assertEqual(_temps(registry), [])
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry, lock, receipts = self._paths(root)
+            with patch.object(updater, "_validated_entry", return_value=_entry()):
+                updater._install_transition(
+                    registry_path=registry,
+                    lock_path=lock,
+                    receipts_path=receipts,
+                    bundle=root,
+                    expected_sha256=updater._sha256(BASELINE),
+                )
+            self.assertEqual(_temps(registry), [])
+            replacement = _entry_with_sha("B" * 64)
+            with patch.object(updater, "_validated_entry", return_value=replacement):
+                with self.assertRaisesRegex(RuntimeError, "injected_failure"):
+                    updater._replace_transition(
+                        registry_path=registry,
+                        lock_path=lock,
+                        receipts_path=receipts,
+                        bundle=root,
+                        expected_sha256=updater._sha256(registry.read_bytes()),
+                        fail_at="before_apply",
+                    )
+            self.assertEqual(_temps(registry), [])
+
+
 if __name__ == "__main__":
     unittest.main()

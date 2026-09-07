@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
+import os
 import socket
 import threading
 import time
 import unittest
 import urllib.parse
 import urllib.request
+from ctypes import wintypes
 from pathlib import Path
 from typing import Any, Callable
 from unittest.mock import AsyncMock, patch
 
+from dayz_mcp import core
 from dayz_mcp import server as server_module
 from dayz_mcp.server import EXPECTED_BRIDGE_VERSION, ServerConfig, Runtime, build_app
 from tests.fence_helpers import INST_CLIENT, INST_SERVER, bind_both_peers
@@ -1187,3 +1191,134 @@ class BridgeCapabilityComparisonTest(unittest.IsolatedAsyncioTestCase):
                     continue
                 with self.subTest(f"{peer}:{command}"):
                     self.assertIn(tool, self.registered)
+
+
+class ClientRenderSignalTest(unittest.TestCase):
+    def _snapshot(self) -> dict[str, Any]:
+        return {
+            "peers": {
+                "server": {
+                    "last_poll_age_s": 0.1,
+                    "queue_depth": 0,
+                    "version": None,
+                    "binding_state": "BOUND",
+                    "instance_prefix": "ab",
+                    "bound_last_poll_age_s": 0.1,
+                },
+                "client": {
+                    "last_poll_age_s": 0.1,
+                    "queue_depth": 0,
+                    "version": None,
+                    "binding_state": "BOUND",
+                    "instance_prefix": "cd",
+                    "bound_last_poll_age_s": 0.1,
+                },
+            },
+            "results_pending": 0,
+        }
+
+    def test_the_client_process_publishes_a_cpu_signal(self) -> None:
+        lifecycle = {
+            "runs": [
+                {
+                    "processes": [
+                        {"pid": os.getpid(), "role": "client"},
+                    ]
+                }
+            ]
+        }
+        payload = core.build_status(
+            self._snapshot(),
+            require_version=False,
+            expected_game_version=None,
+        )
+        enriched = core.attach_lifecycle_cpu_signals(lifecycle)
+        payload["lifecycle"] = enriched
+        process = enriched["runs"][0]["processes"][0]
+        cpu = process.get("cpu")
+        self.assertIsInstance(cpu, dict)
+        self.assertIn("user_100ns", cpu)
+        self.assertIn("kernel_100ns", cpu)
+        self.assertIn("sampled_at_ns", cpu)
+        self.assertIsInstance(cpu["user_100ns"], int)
+        self.assertIsInstance(cpu["kernel_100ns"], int)
+        self.assertIsInstance(cpu["sampled_at_ns"], int)
+        self.assertGreaterEqual(int(cpu["user_100ns"]) + int(cpu["kernel_100ns"]), 0)
+        self.assertNotIn("percent", cpu)
+        self.assertNotIn("cpu_percent", cpu)
+        self.assertNotIn("cpu", payload["client_peer"])
+        self.assertNotIn("cpu_percent", payload["client_peer"])
+
+    def test_a_peer_with_no_process_record_publishes_no_false_cpu_signal(self) -> None:
+        payload = core.build_status(
+            self._snapshot(),
+            require_version=False,
+            expected_game_version=None,
+        )
+        enriched = core.attach_lifecycle_cpu_signals({"runs": []})
+        payload["lifecycle"] = enriched
+        self.assertNotIn("cpu", payload["client_peer"])
+        self.assertNotIn("cpu_percent", payload["client_peer"])
+        self.assertIsNone(payload["client_peer"].get("cpu"))
+        self.assertNotIn("cpu", enriched)
+        self.assertNotIn("cpu_percent", enriched)
+        self.assertEqual(enriched["runs"], [])
+
+    def test_a_process_that_has_exited_publishes_no_cpu_signal(self) -> None:
+        def _write_filetime(pointer: object, value_100ns: int) -> None:
+            stamp = ctypes.cast(pointer, ctypes.POINTER(wintypes.FILETIME)).contents
+            stamp.dwLowDateTime = value_100ns & 0xFFFFFFFF
+            stamp.dwHighDateTime = (value_100ns >> 32) & 0xFFFFFFFF
+
+        def fake_get_process_times(handle, created, exited, kernel, user):
+            _write_filetime(created, 133000000000000136)
+            _write_filetime(exited, 133000000000000185)
+            _write_filetime(kernel, 156250)
+            _write_filetime(user, 0)
+            return True
+
+        lifecycle = {
+            "runs": [
+                {
+                    "processes": [
+                        {"pid": os.getpid(), "role": "client"},
+                    ]
+                }
+            ]
+        }
+        with patch.object(core._kernel32, "GetProcessTimes", side_effect=fake_get_process_times):
+            enriched = core.attach_lifecycle_cpu_signals(lifecycle)
+        process = enriched["runs"][0]["processes"][0]
+        self.assertNotIn("cpu", process)
+
+    def test_the_cpu_signal_carries_the_process_creation_time(self) -> None:
+        lifecycle = {
+            "runs": [
+                {
+                    "processes": [
+                        {"pid": os.getpid(), "role": "client"},
+                    ]
+                }
+            ]
+        }
+        enriched = core.attach_lifecycle_cpu_signals(lifecycle)
+        cpu = enriched["runs"][0]["processes"][0].get("cpu")
+        self.assertIsInstance(cpu, dict)
+        self.assertIn("created_100ns", cpu)
+        self.assertIsInstance(cpu["created_100ns"], int)
+        self.assertGreater(int(cpu["created_100ns"]), 0)
+
+    def test_a_process_that_cannot_be_sampled_publishes_no_cpu_signal(self) -> None:
+        lifecycle = {
+            "runs": [
+                {
+                    "processes": [
+                        {"pid": -1, "role": "client"},
+                    ]
+                }
+            ]
+        }
+        enriched = core.attach_lifecycle_cpu_signals(lifecycle)
+        process = enriched["runs"][0]["processes"][0]
+        self.assertNotIn("cpu", process)
+        self.assertNotIn("cpu_percent", process)

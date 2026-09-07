@@ -9,9 +9,33 @@ both processes can import it, not buried in the embedded Runtime.
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.GetProcessTimes.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    )
+    _kernel32.GetProcessTimes.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+else:
+    _kernel32 = None
 
 
 EXPECTED_BRIDGE_VERSION = "10"
@@ -135,6 +159,94 @@ def build_status(
     if isinstance(fence, dict):
         payload["fence"] = fence
     return payload
+
+
+def _filetime_100ns(stamp: Any) -> int:
+    return (int(stamp.dwHighDateTime) << 32) + int(stamp.dwLowDateTime)
+
+
+def read_process_cpu_times(pid: object) -> dict[str, int] | None:
+    """Cumulative CPU times for one pid, or None when the pid cannot be sampled.
+
+    One GetProcessTimes reading is not a utilization rate: the consumer has to
+    subtract two samples. This function never invents a percentage.
+
+    A process that has already exited still answers OpenProcess and
+    GetProcessTimes while a handle remains open; its totals are frozen. A
+    fresh sampled_at_ns on those totals would look like a live idle process,
+    so a non-zero exit time is not a sample. created_100ns is the pid-recycle
+    discriminator: two samples with the same pid and a different creation
+    time are not the same process.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    if os.name != "nt" or _kernel32 is None:
+        return None
+    handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        created = wintypes.FILETIME()
+        exited = wintypes.FILETIME()
+        kernel = wintypes.FILETIME()
+        user = wintypes.FILETIME()
+        if not _kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            return None
+        if _filetime_100ns(exited) != 0:
+            return None
+        return {
+            "user_100ns": _filetime_100ns(user),
+            "kernel_100ns": _filetime_100ns(kernel),
+            "created_100ns": _filetime_100ns(created),
+            "sampled_at_ns": time.time_ns(),
+        }
+    finally:
+        _kernel32.CloseHandle(handle)
+
+
+def attach_lifecycle_cpu_signals(lifecycle: dict[str, Any]) -> dict[str, Any]:
+    """Copy lifecycle.public_status() and hang raw CPU times on each process.
+
+    The pid already lives on the ProcessRecord; this does not scan the process
+    table. A process that cannot be sampled is left without a ``cpu`` key
+    rather than given a zero that would look like idle rendering.
+    """
+    if not isinstance(lifecycle, dict):
+        return lifecycle
+    runs = lifecycle.get("runs")
+    if not isinstance(runs, list):
+        return lifecycle
+    attached_runs: list[Any] = []
+    for run in runs:
+        if not isinstance(run, dict):
+            attached_runs.append(run)
+            continue
+        processes = run.get("processes")
+        if not isinstance(processes, list):
+            attached_runs.append(run)
+            continue
+        attached_processes: list[Any] = []
+        for process in processes:
+            if not isinstance(process, dict):
+                attached_processes.append(process)
+                continue
+            row = dict(process)
+            sample = read_process_cpu_times(process.get("pid"))
+            if sample is not None:
+                row["cpu"] = sample
+            attached_processes.append(row)
+        attached_run = dict(run)
+        attached_run["processes"] = attached_processes
+        attached_runs.append(attached_run)
+    attached = dict(lifecycle)
+    attached["runs"] = attached_runs
+    return attached
 
 
 def load_exec_allowlist(path: str | None) -> set[str]:

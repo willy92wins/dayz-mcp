@@ -245,45 +245,148 @@ def _install_transition(
         temporary = registry_path.with_name(
             f".{registry_path.name}.tmp.{uuid.uuid4()}"
         )
-        to_identity = _write_create_only(temporary, target_raw)
-        prepared = {
-            "format_version": 1,
-            "from_identity": current_identity,
-            "from_sha256": current_sha,
-            "outcome": "prepared",
-            "to_identity": to_identity,
-            "to_sha256": target_sha,
-        }
-        _write_create_only(transaction / "prepared.json", _receipt_bytes(prepared))
-        before_replace_raw, before_replace_identity = _read_pinned(registry_path)
-        if (
-            before_replace_raw != current_raw
-            or before_replace_identity != current_identity
-        ):
-            _invalid("launcher_registry_cas_mismatch")
-        if fail_at == "before_replace":
-            _invalid("launcher_registry_injected_failure")
-        _replace(registry_path, temporary)
-        installed_raw, installed_identity = _read_pinned(registry_path)
-        if (
-            installed_raw != target_raw
-            or _sha256(installed_raw) != target_sha
-            or installed_identity != to_identity
-        ):
-            _invalid("launcher_registry_install_verification_failed")
-        if fail_at == "after_replace":
-            _invalid("launcher_registry_injected_failure")
-        committed = {
-            **prepared,
-            "outcome": "committed",
-            "prepared_sha256": _sha256(_receipt_bytes(prepared)),
-        }
-        _write_create_only(transaction / "committed.json", _receipt_bytes(committed))
-        return target_sha
+        try:
+            to_identity = _write_create_only(temporary, target_raw)
+            prepared = {
+                "format_version": 1,
+                "from_identity": current_identity,
+                "from_sha256": current_sha,
+                "outcome": "prepared",
+                "to_identity": to_identity,
+                "to_sha256": target_sha,
+            }
+            _write_create_only(transaction / "prepared.json", _receipt_bytes(prepared))
+            before_replace_raw, before_replace_identity = _read_pinned(registry_path)
+            if (
+                before_replace_raw != current_raw
+                or before_replace_identity != current_identity
+            ):
+                _invalid("launcher_registry_cas_mismatch")
+            if fail_at == "before_replace":
+                _invalid("launcher_registry_injected_failure")
+            _replace(registry_path, temporary)
+            installed_raw, installed_identity = _read_pinned(registry_path)
+            if (
+                installed_raw != target_raw
+                or _sha256(installed_raw) != target_sha
+                or installed_identity != to_identity
+            ):
+                _invalid("launcher_registry_install_verification_failed")
+            if fail_at == "after_replace":
+                _invalid("launcher_registry_injected_failure")
+            committed = {
+                **prepared,
+                "outcome": "committed",
+                "prepared_sha256": _sha256(_receipt_bytes(prepared)),
+            }
+            _write_create_only(transaction / "committed.json", _receipt_bytes(committed))
+            return target_sha
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def install_dayz_test_v1(*, expected_sha256: str) -> str:
     return _install_transition(
+        registry_path=_CANONICAL_REGISTRY,
+        lock_path=_CANONICAL_LOCK,
+        receipts_path=_CANONICAL_RECEIPTS,
+        bundle=_CANONICAL_BUNDLE,
+        expected_sha256=expected_sha256,
+    )
+
+
+def _replace_transition(
+    *,
+    registry_path: Path,
+    lock_path: Path,
+    receipts_path: Path,
+    bundle: Path,
+    expected_sha256: str,
+    fail_at: str | None = None,
+) -> str:
+    # In-place replacement of an already-installed dayz-test-v1 entry. Same CAS,
+    # exclusive lock, receipt, and _recover_prepared contract as install, but the
+    # target payload always keeps a launcher: the old row is swapped for the new
+    # one in a single ReplaceFileW, so the registry never passes through empty.
+    if not _valid_sha(expected_sha256) or fail_at not in {
+        None,
+        "before_apply",
+        "after_apply",
+    }:
+        _invalid("invalid_launcher_registry_update")
+    entry = _validated_entry(bundle)
+    with acquire_registry_lock(exclusive=True, path=lock_path):
+        current_raw, current_identity = _read_pinned(registry_path)
+        current_sha = _sha256(current_raw)
+        _recover_prepared(receipts_path, current_sha, current_identity)
+        if current_sha != expected_sha256:
+            _invalid("launcher_registry_cas_mismatch")
+        current_entries = launcher_registry._parse_launcher_registry(
+            current_raw.decode("utf-8")
+        )
+        retained = [item for item in current_entries if item["id"] != "dayz-test-v1"]
+        if len(retained) == len(current_entries):
+            _invalid("launcher_registry_version_not_installed")
+        target_payload = {"format_version": 1, "launchers": [*retained, entry]}
+        launcher_registry._validate_launcher_registry_payload(target_payload)
+        target_raw = _canonical(target_payload)
+        target_sha = _sha256(target_raw)
+        if target_sha == current_sha:
+            _invalid("launcher_registry_replace_unchanged")
+
+        receipts_path.mkdir(parents=True, exist_ok=True)
+        launcher_registry._reject_path_name_surrogates(
+            receipts_path, error_code="invalid_launcher_registry_receipts"
+        )
+        transaction = receipts_path / str(uuid.uuid4())
+        transaction.mkdir()
+        backup_path = transaction / "from-registry.json"
+        _write_create_only(backup_path, current_raw)
+        temporary = registry_path.with_name(
+            f".{registry_path.name}.tmp.{uuid.uuid4()}"
+        )
+        try:
+            to_identity = _write_create_only(temporary, target_raw)
+            prepared = {
+                "format_version": 1,
+                "from_identity": current_identity,
+                "from_sha256": current_sha,
+                "outcome": "prepared",
+                "to_identity": to_identity,
+                "to_sha256": target_sha,
+            }
+            _write_create_only(transaction / "prepared.json", _receipt_bytes(prepared))
+            before_replace_raw, before_replace_identity = _read_pinned(registry_path)
+            if (
+                before_replace_raw != current_raw
+                or before_replace_identity != current_identity
+            ):
+                _invalid("launcher_registry_cas_mismatch")
+            if fail_at == "before_apply":
+                _invalid("launcher_registry_injected_failure")
+            _replace(registry_path, temporary)
+            installed_raw, installed_identity = _read_pinned(registry_path)
+            if (
+                installed_raw != target_raw
+                or _sha256(installed_raw) != target_sha
+                or installed_identity != to_identity
+            ):
+                _invalid("launcher_registry_install_verification_failed")
+            if fail_at == "after_apply":
+                _invalid("launcher_registry_injected_failure")
+            committed = {
+                **prepared,
+                "outcome": "committed",
+                "prepared_sha256": _sha256(_receipt_bytes(prepared)),
+            }
+            _write_create_only(transaction / "committed.json", _receipt_bytes(committed))
+            return target_sha
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def replace_dayz_test_v1(*, expected_sha256: str) -> str:
+    return _replace_transition(
         registry_path=_CANONICAL_REGISTRY,
         lock_path=_CANONICAL_LOCK,
         receipts_path=_CANONICAL_RECEIPTS,
@@ -301,7 +404,8 @@ def describe_registry_provenance(
     """Report whether the live registry bytes came from a RECORDED transition.
 
     The supported flow only ever moves the registry through
-    _install_transition / _rollback_transition, and each leaves a receipt. Anything
+    _install_transition / _replace_transition / _rollback_transition, and each
+    leaves a receipt. Anything
     that rewrites the file in place -- an editor, an ad-hoc script, a second session
     -- leaves content that no receipt describes. The damage stays invisible until
     the next rollback-last dies with launcher_registry_rollback_predecessor_unknown,
@@ -535,6 +639,8 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     install = commands.add_parser("install-dayz-test-v1")
     install.add_argument("--expected-sha256", required=True)
+    replace = commands.add_parser("replace-dayz-test-v1")
+    replace.add_argument("--expected-sha256", required=True)
     commands.add_parser("rollback-last")
     commands.add_parser("bootstrap")
     return parser
@@ -545,6 +651,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "install-dayz-test-v1":
             result = install_dayz_test_v1(expected_sha256=args.expected_sha256)
+        elif args.command == "replace-dayz-test-v1":
+            result = replace_dayz_test_v1(expected_sha256=args.expected_sha256)
         elif args.command == "bootstrap":
             result = bootstrap_registry()
             print(
@@ -554,7 +662,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             result = rollback_last_registry_transition()
     except BaseException as error:
-        print(f"launcher registry update failed: {type(error).__name__}")
+        print(f"launcher registry update failed: {type(error).__name__}: {error}")
         return 1
     print(result)
     return 0
