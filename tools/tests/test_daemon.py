@@ -1919,5 +1919,151 @@ class BuildDaemonArgvTest(unittest.TestCase):
         self.assertIn("--exec-allowlist", argv)
 
 
+class StatusProviderCpuSignalTest(unittest.TestCase):
+    """ficha c56a: the CPU signal existed and reached nobody.
+
+    ``core.attach_lifecycle_cpu_signals`` was built, reviewed and left with
+    five callers, all of them tests. A signal that never enters the /status
+    payload cannot be read by any client, so the feature was done and absent
+    at the same time.
+
+    The positive control is THIS process: its own pid is sampleable with
+    certainty, so the branch that hangs ``cpu`` on a row actually runs. A run
+    with no processes would leave the test green without executing anything --
+    measured on the G3 review, where exactly that control proved nothing.
+    """
+
+    _SNAPSHOT = {
+        "peers": {
+            "server": {"last_poll_age_s": None, "queue_depth": 0, "version": None},
+            "client": {"last_poll_age_s": None, "queue_depth": 0, "version": None},
+        },
+        "results_pending": 0,
+    }
+
+    @staticmethod
+    def _own_creation_stamp() -> str:
+        """The registered stamp for THIS process, in the record's own format.
+
+        Derived from the same reading the product compares against, because the
+        fixture has to be the producer's shape: a row with no creation_time_utc
+        now goes out with no cpu at all, on purpose.
+        """
+        sample = core.read_process_cpu_times(os.getpid())
+        assert sample is not None, "este proceso tiene que ser muestreable"
+        epoch_s = sample["created_100ns"] / 1e7 - 11644473600.0
+        from datetime import datetime, timezone
+
+        return datetime.fromtimestamp(epoch_s, tz=timezone.utc).isoformat()
+
+    def _payload(self, lifecycle_status):
+        state = SimpleNamespace(
+            daemon_generation="generation-cpu",
+            coordination=SimpleNamespace(snapshot_payload=lambda: {"revision": 1}),
+            lifecycle=SimpleNamespace(public_status=lambda: lifecycle_status),
+            status_snapshot=lambda: dict(self._SNAPSHOT),
+        )
+        return daemon.make_status_provider(_config(), state)()
+
+    def test_status_publishes_the_cpu_sample_for_a_live_process(self) -> None:
+        payload = self._payload(
+            {
+                "runs": [
+                    {
+                        "run_id": "run-cpu",
+                        "processes": [
+                            {
+                                "role": "client",
+                                "pid": os.getpid(),
+                                "creation_time_utc": self._own_creation_stamp(),
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        process = payload["lifecycle"]["runs"][0]["processes"][0]
+        self.assertIn("cpu", process)
+        cpu = process["cpu"]
+        for field in ("user_100ns", "kernel_100ns", "created_100ns", "sampled_at_ns"):
+            self.assertIsInstance(cpu[field], int)
+        # Not just "the keys are there": a function fabricating zeros would pass
+        # a type check, and that is precisely how the G3 control proved nothing.
+        # This interpreter has burnt CPU and was created in the past, so both
+        # numbers are positive unless the sample is invented.
+        self.assertGreater(cpu["user_100ns"] + cpu["kernel_100ns"], 0)
+        self.assertGreater(cpu["created_100ns"], 0)
+        self.assertGreater(cpu["sampled_at_ns"], 0)
+
+    def test_a_process_that_cannot_be_sampled_gets_no_zeroed_cpu(self) -> None:
+        """A zero would read as "alive and rendering nothing", which is the
+        exact confusion ficha ae65 was about. Absent is the honest answer."""
+        payload = self._payload(
+            {"runs": [{"run_id": "run-dead", "processes": [{"role": "client", "pid": None}]}]}
+        )
+
+        self.assertNotIn("cpu", payload["lifecycle"]["runs"][0]["processes"][0])
+
+    def test_a_recycled_pid_does_not_borrow_a_strangers_cpu(self) -> None:
+        """P2 of the cross-family review.
+
+        read_process_cpu_times documents created_100ns as the pid-recycle
+        discriminator, but it can only compare one sample against another -- and
+        once the pid has been reused BOTH samples belong to the new process and
+        agree with each other. The registered stamp is the only thing still
+        pointing at the process the run launched. Here the pid is real and
+        sampleable; only the registered creation time disagrees.
+        """
+        payload = self._payload(
+            {
+                "runs": [
+                    {
+                        "run_id": "run-recycled",
+                        "processes": [
+                            {
+                                "role": "client",
+                                "pid": os.getpid(),
+                                "creation_time_utc": "2001-01-01T00:00:00+00:00",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        self.assertNotIn("cpu", payload["lifecycle"]["runs"][0]["processes"][0])
+
+    def test_an_unverifiable_stamp_is_not_treated_as_a_match(self) -> None:
+        """Absent or malformed is not the same as fine: without a stamp the
+        attribution cannot be checked, so no sample goes out."""
+        for stamp in (None, "", "not-a-date", 17):
+            with self.subTest(stamp=stamp):
+                payload = self._payload(
+                    {
+                        "runs": [
+                            {
+                                "run_id": "run-nostamp",
+                                "processes": [
+                                    {"role": "client", "pid": os.getpid(),
+                                     "creation_time_utc": stamp}
+                                ],
+                            }
+                        ]
+                    }
+                )
+                self.assertNotIn(
+                    "cpu", payload["lifecycle"]["runs"][0]["processes"][0]
+                )
+
+    def test_the_audit_drop_warning_still_reads_the_enriched_payload(self) -> None:
+        """daemon.py reads ``audit_rows_dropped`` off the same dict it just
+        published; enriching it must not drop the top-level keys."""
+        payload = self._payload({"runs": [], "audit_rows_dropped": 3})
+
+        self.assertEqual(payload["audit_rows_dropped"], 3)
+        self.assertIn("audit_row_dropped", payload["warnings"])
+
+
 if __name__ == "__main__":
     unittest.main()

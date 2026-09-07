@@ -671,7 +671,12 @@ def make_status_provider(config: Any, state: ServerState) -> Callable[[], dict]:
             "coordination_revision": coordination.get("revision"),
         }
         if state.lifecycle is not None:
-            payload["lifecycle"] = state.lifecycle.public_status()
+            # The CPU sample rides along here rather than in a tool of its own:
+            # /status is the one payload every client already reads, and a
+            # signal published nowhere is a signal nobody can act on.
+            payload["lifecycle"] = core.attach_lifecycle_cpu_signals(
+                state.lifecycle.public_status()
+            )
             dropped = payload["lifecycle"].get("audit_rows_dropped")
             if (
                 isinstance(dropped, int)

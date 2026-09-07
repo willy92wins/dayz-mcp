@@ -1457,6 +1457,49 @@ class ClientReplacementDecisionTest(unittest.TestCase):
                     dayz_test_tool._CLIENT_START_BUDGET_S,
                 )
 
+    def test_the_budget_travels_as_a_call_parameter(self) -> None:
+        """The only door to the budget was the environment of the process that
+        serves the tools, and whoever drives this MCP does not launch that
+        process. A gate that needs a human to relaunch the server is a gate an
+        agent cannot run -- which is the whole point of the product.
+        """
+        self.assertEqual(dayz_test_tool._client_start_budget_s(5.0), 5.0)
+        decision = dayz_test_tool._decide_client_replacement(
+            _record(age_s=30.0), {"client_peer": _STALE_PEER}, budget_s=5.0
+        )
+        self.assertEqual(
+            (decision.replace, decision.reason), (True, "client_not_polling")
+        )
+
+    def test_the_call_parameter_wins_over_the_environment(self) -> None:
+        with patch.dict(os.environ, {_BUDGET_ENV: "3000"}):
+            self.assertEqual(dayz_test_tool._client_start_budget_s(5.0), 5.0)
+            decision = dayz_test_tool._decide_client_replacement(
+                _record(age_s=30.0), {"client_peer": _STALE_PEER}, budget_s=5.0
+            )
+            self.assertTrue(decision.replace)
+
+    def test_no_parameter_falls_back_to_the_environment_then_the_default(self) -> None:
+        with patch.dict(os.environ, {_BUDGET_ENV: "7"}):
+            self.assertEqual(dayz_test_tool._client_start_budget_s(None), 7.0)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                dayz_test_tool._client_start_budget_s(None),
+                dayz_test_tool._CLIENT_START_BUDGET_S,
+            )
+
+    def test_a_bad_call_parameter_is_rejected_not_ignored(self) -> None:
+        """Deliberately asymmetric with the env var, which ignores garbage.
+
+        The operator who exports an env var never sees the response; the caller
+        who passes a parameter does. Silently ignoring their override would be
+        a mute failure, and it would answer client_still_starting for six
+        minutes while the caller believed it had asked for five seconds.
+        """
+        for bad in (-1.0, 3600.5, float("nan"), "5"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                dayz_test_tool._client_start_budget_s(bad)
+
     def test_the_record_projection_does_not_confuse_absent_with_unknown(self) -> None:
         """A4-H2: un _pid_alive que no sabe responder NO es «no hay cliente»."""
         status = _extension_status(with_client=True)
@@ -1527,6 +1570,7 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
         client_age_s: float = 3600.0,
         relaunch: bool = True,
         processes_override: object = _UNSET,
+        client_start_budget_s: float | None = None,
     ):
         policy = _policy()
         before = _extension_status(
@@ -1591,6 +1635,7 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
                 mode=mode,
                 run_id=run_id,
                 extra_mods=["@DayZ_MCP"],
+                client_start_budget_s=client_start_budget_s,
             )
         return result, sent
 
@@ -1609,6 +1654,30 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["client_last_poll_age_s"], 0.2)
         self.assertEqual(result["phase"], "validating")
         self.assertIn("dayz_test_stop", str(result["remediation"]))
+
+    async def test_the_budget_override_crosses_the_executor(self) -> None:
+        """The ONLY control that spans the executor-to-decision hop.
+
+        The cross-family review removed ``budget_s=budget_s`` from the internal
+        call by AST and every one of the new tests stayed green: they measured
+        either the bare helper or the wrapper with the executor spied out, so
+        nothing watched the hop between them. This is the same fixture as
+        ``test_a_starting_client_is_not_replaced`` -- a 30 s client that has not
+        polled -- with the override that makes 30 s old rather than starting.
+        """
+        default, sent_default = await self.run_extension(
+            bridge={"client_peer": _STALE_PEER}, client_age_s=30.0
+        )
+        self.assertEqual(default["error_code"], "client_still_starting")
+        self.assertEqual(sent_default, [], "sin override no debe salir la peticion")
+
+        overridden, sent_over = await self.run_extension(
+            bridge={"client_peer": _STALE_PEER},
+            client_age_s=30.0,
+            client_start_budget_s=5.0,
+        )
+        self.assertNotEqual(overridden["error_code"], "client_still_starting")
+        self.assertNotEqual(sent_over, [], "con override de 5 s la peticion SALE")
 
     async def test_a_starting_client_is_not_replaced(self) -> None:
         """A4-H1: el que aun no ha sondeado NUNCA ha sondeado, no es un colgado."""

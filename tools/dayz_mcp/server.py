@@ -19,7 +19,7 @@ from typing import Annotated, Any, Awaitable, Callable, Iterator, Literal
 
 from mcp.server.fastmcp import Context, FastMCP, Image
 from mcp.server.fastmcp.exceptions import ToolError
-from pydantic import Field, StrictBool, StrictInt
+from pydantic import Field, StrictBool, StrictFloat, StrictInt
 
 import mcp_capture
 from dayz_mcp import (
@@ -1948,15 +1948,40 @@ RUN_ID_MATRIX_RUN_ID_DESCRIPTION = (
     "Live run to reattach to. Required with mode=client; forbidden with "
     "mode=server|all (bad_dayz_test_request otherwise)."
 )
+AUTO_REMEDIATE_STEAM_DESCRIPTION = (
+    "Opt-in. When the Steam preflight refuses, close the stale Steam session "
+    "and retry the preflight once instead of failing the run. Off by default "
+    "because it ends a session the caller may be using; when on, the result "
+    "reports steam_remediated and how long it took."
+)
+CLIENT_START_BUDGET_MAX_S = 3600.0
+CLIENT_START_BUDGET_DESCRIPTION = (
+    "Seconds a freshly launched client may take to reach its first poll before "
+    "it counts as hung. Under it, relaunching is refused with "
+    "client_still_starting. Must be a number in [0, 3600]; anything else is "
+    "rejected, not ignored. It governs THIS call only, so a client reattach "
+    "(mode=client) must pass it again -- it does not configure the launched "
+    "client. Omit to fall back to "
+    f"{dayz_test_tool._CLIENT_START_BUDGET_ENV} and then to the "
+    f"default of {dayz_test_tool._CLIENT_START_BUDGET_S:g} seconds, which "
+    "covers the slowest startup MEASURED - itself a lower bound, since the "
+    "process starts before its log header and polls after the mission exists."
+)
 
 
-def _describe_run_id_matrix(app: FastMCP, tool_name: str) -> None:
-    """Publish the mode/run_id matrix on the two properties, not only in the tool prose.
+def _describe_run_parameters(app: FastMCP, tool_name: str) -> None:
+    """Publish on the properties what the tool prose alone would not carry.
 
     ``dayz_test_request.py`` enforces client-requires-run_id and server|all-forbid-run_id
     with one bare ``bad_dayz_test_request``; the published schema said only "Mode" and
     "Run Id" (fb-20260829-104625-7c88). The property descriptions are the place a client
     reads before calling.
+
+    The same argument is why the startup budget and the Steam opt-in are here:
+    both were reachable only from the environment of a process the caller does
+    not launch, so the capability existed with no path from the surface the
+    caller has. A missing property raises rather than passing quietly - a
+    description silently attached to nothing is the failure this guards.
     """
     tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
     if tool is None:
@@ -1965,6 +1990,8 @@ def _describe_run_id_matrix(app: FastMCP, tool_name: str) -> None:
     for field, text in (
         ("mode", RUN_ID_MATRIX_MODE_DESCRIPTION),
         ("run_id", RUN_ID_MATRIX_RUN_ID_DESCRIPTION),
+        ("auto_remediate_steam", AUTO_REMEDIATE_STEAM_DESCRIPTION),
+        ("client_start_budget_s", CLIENT_START_BUDGET_DESCRIPTION),
     ):
         prop = props.get(field)
         if not isinstance(prop, dict):
@@ -2807,6 +2834,35 @@ def _parse_wait_for_box_s(value: object) -> float:
     return converted
 
 
+def _parse_client_start_budget_s(value: object) -> float | None:
+    """Validate the startup budget at the WIRE, which is where the frontier is.
+
+    Rejecting it inside the executor was not enough, and the reason is worth
+    keeping: pydantic coerces before any of our code runs, so ``false`` arrives
+    as ``0.0`` and ``"5"`` as ``5.0``. A budget of zero passes every range check
+    and disables the guard completely -- fail-open, reached by the one input
+    that most looks like "no". The StrictFloat|StrictInt annotation on the tool
+    stops the coercion; this function owns the range, next to
+    ``_parse_wait_for_box_s`` and raising the same ``bad_args:`` token, because
+    a bare ValueError from the executor reaches the caller as
+    ``dayz_test_failed:ValueError`` and names neither the field nor the range.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ToolError(
+            "bad_args: client_start_budget_s must be a finite number in "
+            f"[0, {CLIENT_START_BUDGET_MAX_S:g}]"
+        )
+    converted = float(value)
+    if not math.isfinite(converted) or not 0.0 <= converted <= CLIENT_START_BUDGET_MAX_S:
+        raise ToolError(
+            "bad_args: client_start_budget_s must be a finite number in "
+            f"[0, {CLIENT_START_BUDGET_MAX_S:g}]"
+        )
+    return converted
+
+
 def _box_from_status(status: object) -> dict[str, Any]:
     if not isinstance(status, dict):
         return empty_box(occupied=True)
@@ -3322,8 +3378,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         player_name: str = "Dev",
         server_wait_s: int = 60,
         wait_for_box_s: float = 0.0,
+        auto_remediate_steam: StrictBool = False,
+        client_start_budget_s: StrictFloat | StrictInt | None = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
+        # Both parses run BEFORE the box queue: a request that is already
+        # invalid must not be able to take a queue slot, hold the tool lock or
+        # come back as box_queue_saturated with its real defect never reported.
+        budget_s = _parse_client_start_budget_s(client_start_budget_s)
         wait_s = _parse_wait_for_box_s(wait_for_box_s)
         client = _client_runtime()
         started = time.monotonic()
@@ -3390,6 +3452,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                             player_name=player_name,
                             server_wait_s=server_wait_s,
                             progress_cb=report,
+                            auto_remediate_steam=auto_remediate_steam,
+                            client_start_budget_s=budget_s,
                         )
                 except dayz_test_tool.DayzTestToolError as error:
                     execute_error = error
@@ -5062,7 +5126,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         return await playbook_tool_mod.execute_playbook_run(app, name, params)
 
     _patch_mode_enum_from_authority(app, "dayz_test_run")
-    _describe_run_id_matrix(app, "dayz_test_run")
+    _describe_run_parameters(app, "dayz_test_run")
     for _closed_tool in _CLOSED_SCHEMA_TOOLS:
         _patch_closed_tool_schema(app, _closed_tool)
     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")

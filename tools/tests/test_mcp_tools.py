@@ -1194,6 +1194,24 @@ class BridgeCapabilityComparisonTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ClientRenderSignalTest(unittest.TestCase):
+    @staticmethod
+    def _own_stamp() -> str:
+        """This process's creation time in the record's own format.
+
+        The fixtures below used to carry only pid and role, which is LESS than
+        the producer publishes: _projected_run is dataclasses.asdict of a
+        ProcessRecord and creation_time_utc is a required field. Once the
+        sample started being checked against the registered identity (a
+        recycled pid otherwise borrows a stranger's CPU), a fixture without it
+        stopped being a shorter version of reality and became a different one.
+        """
+        from datetime import datetime, timezone
+
+        sample = core.read_process_cpu_times(os.getpid())
+        assert sample is not None, "este proceso tiene que ser muestreable"
+        epoch_s = sample["created_100ns"] / 1e7 - 11644473600.0
+        return datetime.fromtimestamp(epoch_s, tz=timezone.utc).isoformat()
+
     def _snapshot(self) -> dict[str, Any]:
         return {
             "peers": {
@@ -1222,7 +1240,11 @@ class ClientRenderSignalTest(unittest.TestCase):
             "runs": [
                 {
                     "processes": [
-                        {"pid": os.getpid(), "role": "client"},
+                        {
+                            "pid": os.getpid(),
+                            "role": "client",
+                            "creation_time_utc": self._own_stamp(),
+                        },
                     ]
                 }
             ]
@@ -1296,7 +1318,11 @@ class ClientRenderSignalTest(unittest.TestCase):
             "runs": [
                 {
                     "processes": [
-                        {"pid": os.getpid(), "role": "client"},
+                        {
+                            "pid": os.getpid(),
+                            "role": "client",
+                            "creation_time_utc": self._own_stamp(),
+                        },
                     ]
                 }
             ]

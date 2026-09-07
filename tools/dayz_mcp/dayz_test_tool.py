@@ -682,12 +682,33 @@ _CLIENT_START_BUDGET_S = 360.0
 _CLIENT_START_BUDGET_ENV = "DAYZ_MCP_CLIENT_START_BUDGET_S"
 
 
-def _client_start_budget_s() -> float:
-    """The startup budget in seconds, overridable for an operator in a hurry.
+def _client_start_budget_s(override: float | None = None) -> float:
+    """The startup budget in seconds: call parameter, then environment, default.
 
-    A value that is not a finite number in [0, 3600] is ignored rather than
-    obeyed: an unreadable override must not silently disable the guard.
+    The two doors are deliberately ASYMMETRIC about a value they cannot read.
+
+    An env var is ignored: whoever exported it is not reading this response, and
+    an unreadable override must not silently disable the guard.
+
+    A call parameter is REJECTED. The caller does read the response, and a
+    budget quietly discarded would answer client_still_starting for six minutes
+    to someone who asked for five seconds - a mute failure, and one the caller
+    has no way to see. Bool is refused with the rest: ``True`` would otherwise
+    become a one-second budget by accident.
     """
+    if override is not None:
+        if isinstance(override, bool) or not isinstance(override, (int, float)):
+            raise ValueError(
+                "client_start_budget_s must be a number in [0, 3600], got "
+                f"{override!r}"
+            )
+        value = float(override)
+        if value != value or not 0.0 <= value <= 3600.0:
+            raise ValueError(
+                "client_start_budget_s must be a finite number in [0, 3600], got "
+                f"{override!r}"
+            )
+        return value
     raw = os.environ.get(_CLIENT_START_BUDGET_ENV)
     if raw is None:
         return _CLIENT_START_BUDGET_S
@@ -861,7 +882,10 @@ def _peer_row_is_usable(peer: dict[str, object]) -> bool:
 
 
 def _decide_client_replacement(
-    record: ClientRecordProjection, bridge_status_payload: object
+    record: ClientRecordProjection,
+    bridge_status_payload: object,
+    *,
+    budget_s: float | None = None,
 ) -> ClientReplacementDecision:
     """Decide from the run row and the bridge snapshot, before anything is sent.
 
@@ -930,7 +954,9 @@ def _decide_client_replacement(
         return ClientReplacementDecision(
             False, _CLIENT_RECORD_AGE_UNKNOWN, age, None
         )
-    if record.age_s < _client_start_budget_s():
+    if record.age_s < (
+        budget_s if budget_s is not None else _client_start_budget_s()
+    ):
         # A4-H1: it has not polled because it has not finished starting. The
         # response of the call that launched it says client_not_polling too;
         # without this branch that response is a licence to kill what it started.
@@ -1250,12 +1276,17 @@ async def execute_dayz_test_run(
     server_wait_s: int = 60,
     progress_cb: _ProgressCallback | None = None,
     auto_remediate_steam: bool = False,
+    client_start_budget_s: float | None = None,
 ) -> dict[str, object]:
     started_at = time.monotonic()
     if progress_cb is not None:
         await progress_cb("validating", None)
     if mode not in _public_modes():
         _fail(_mode_expected_error())
+    # Resolved HERE, before the session lock and before a single process is
+    # touched: a budget the caller got wrong must cost them an error message,
+    # not a launched client that then gets refused.
+    budget_s = _client_start_budget_s(client_start_budget_s)
     await _require_idle_session(runtime, tool="dayz_test_run")
     with open_approved_launcher("dayz-test-v1") as opened:
         opened.validate_native_pe()
@@ -1401,7 +1432,9 @@ async def execute_dayz_test_run(
                         # mean "replace"; ronda 2 made it a refusal, because a
                         # transport hiccup is not evidence that a client is hung.
                         bridge = None
-                    replacement = _decide_client_replacement(record, bridge)
+                    replacement = _decide_client_replacement(
+                        record, bridge, budget_s=budget_s
+                    )
                     if not replacement.replace:
                         refused = _compact_result(
                             terminal=WorkerTerminal(

@@ -210,12 +210,48 @@ def read_process_cpu_times(pid: object) -> dict[str, int] | None:
         _kernel32.CloseHandle(handle)
 
 
+_FILETIME_EPOCH_OFFSET_S = 11644473600.0
+# The record stamps whole microseconds at best and the two clocks are read at
+# different moments; a second is wide enough to survive that and far narrower
+# than any plausible pid reuse on the same machine.
+_CREATION_MATCH_TOLERANCE_S = 1.0
+
+
+def _creation_matches(sample: dict[str, int], recorded: object) -> bool:
+    """Does this sample belong to the process the record is about?
+
+    ``read_process_cpu_times`` already documents ``created_100ns`` as the
+    pid-recycle discriminator, but it can only compare a sample against another
+    sample -- and once the pid has been reused, BOTH samples belong to the new
+    process and agree with each other. The registered creation time is the only
+    thing that still points at the process the run actually launched.
+
+    Unverifiable is not the same as fine: an absent or malformed stamp returns
+    False, so the row goes out with no ``cpu`` key instead of one that may
+    belong to a stranger.
+    """
+    if not isinstance(recorded, str) or not recorded:
+        return False
+    created = sample.get("created_100ns")
+    if not isinstance(created, int) or created <= 0:
+        return False
+    try:
+        stamp = datetime.fromisoformat(recorded.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    sampled_epoch_s = created / 1e7 - _FILETIME_EPOCH_OFFSET_S
+    return abs(sampled_epoch_s - stamp.timestamp()) <= _CREATION_MATCH_TOLERANCE_S
+
+
 def attach_lifecycle_cpu_signals(lifecycle: dict[str, Any]) -> dict[str, Any]:
     """Copy lifecycle.public_status() and hang raw CPU times on each process.
 
     The pid already lives on the ProcessRecord; this does not scan the process
     table. A process that cannot be sampled is left without a ``cpu`` key
-    rather than given a zero that would look like idle rendering.
+    rather than given a zero that would look like idle rendering, and so is one
+    whose sampled creation time does not match the one the record registered.
     """
     if not isinstance(lifecycle, dict):
         return lifecycle
@@ -238,7 +274,9 @@ def attach_lifecycle_cpu_signals(lifecycle: dict[str, Any]) -> dict[str, Any]:
                 continue
             row = dict(process)
             sample = read_process_cpu_times(process.get("pid"))
-            if sample is not None:
+            if sample is not None and _creation_matches(
+                sample, process.get("creation_time_utc")
+            ):
                 row["cpu"] = sample
             attached_processes.append(row)
         attached_run = dict(run)
