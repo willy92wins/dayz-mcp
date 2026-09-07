@@ -1165,6 +1165,7 @@ class StatusProviderMarkerTest(unittest.TestCase):
                 self.assertIsNotNone(fresh["daemon_modules"]["daemon_started_at"])
 
                 # 2. the file is edited while the daemon keeps the old copy.
+                module.write_text("# fixture\nedited\n", encoding="utf-8")
                 stamp = module.stat().st_mtime + 120.0
                 os.utime(module, (stamp, stamp))
                 stale = provider()
@@ -1267,6 +1268,89 @@ class StatusProviderMarkerTest(unittest.TestCase):
                         ),
                     )
                 )
+
+
+class DaemonModuleStalenessTest(unittest.TestCase):
+    """Content, not mtime, decides daemon_modules.stale (fb-20260906-190446-3c65 §2)."""
+
+    def _inert_state(self) -> SimpleNamespace:
+        snapshot = {
+            "peers": {
+                "server": {"last_poll_age_s": None, "queue_depth": 0, "version": None},
+                "client": {"last_poll_age_s": None, "queue_depth": 0, "version": None},
+            },
+            "results_pending": 0,
+        }
+        return SimpleNamespace(
+            daemon_generation="generation-a",
+            coordination=SimpleNamespace(snapshot_payload=lambda: {"revision": 7}),
+            lifecycle=None,
+            status_snapshot=lambda: snapshot,
+        )
+
+    def test_a_module_rewritten_with_identical_bytes_is_not_stale(self) -> None:
+        state = self._inert_state()
+        with TemporaryDirectory() as directory:
+            module = Path(directory) / "loopback.py"
+            payload_bytes = b"# fixture\n"
+            module.write_bytes(payload_bytes)
+            with patch.object(
+                daemon,
+                "_loaded_module_files",
+                return_value={"loopback.py": str(module)},
+            ):
+                provider = daemon.make_status_provider(_config(), state)
+                self.assertEqual(provider()["daemon_modules"]["stale"], [])
+                stamp = module.stat().st_mtime + 120.0
+                module.write_bytes(payload_bytes)
+                os.utime(module, (stamp, stamp))
+                rewritten = provider()
+        self.assertEqual(rewritten["daemon_modules"]["stale"], [])
+        self.assertNotIn("daemon_module_stale", rewritten.get("warnings", []))
+
+    def test_a_module_whose_bytes_really_changed_is_stale(self) -> None:
+        state = self._inert_state()
+        with TemporaryDirectory() as directory:
+            module = Path(directory) / "loopback.py"
+            module.write_bytes(b"# fixture\n")
+            with patch.object(
+                daemon,
+                "_loaded_module_files",
+                return_value={"loopback.py": str(module)},
+            ):
+                provider = daemon.make_status_provider(_config(), state)
+                self.assertEqual(provider()["daemon_modules"]["stale"], [])
+                module.write_bytes(b"# fixture\nchanged\n")
+                stamp = module.stat().st_mtime + 120.0
+                os.utime(module, (stamp, stamp))
+                changed = provider()
+        self.assertEqual(changed["daemon_modules"]["stale"], ["loopback.py"])
+        self.assertIn("daemon_module_stale", changed["warnings"])
+
+    def test_a_module_whose_date_did_not_move_is_not_re_read(self) -> None:
+        state = self._inert_state()
+        with TemporaryDirectory() as directory:
+            module = Path(directory) / "loopback.py"
+            module.write_bytes(b"# fixture\n")
+            hashed: list[tuple[str, ...]] = []
+            original = daemon._module_hashes
+
+            def spy(files: dict[str, str]) -> dict[str, str | None]:
+                hashed.append(tuple(sorted(files)))
+                return original(files)
+
+            with patch.object(
+                daemon,
+                "_loaded_module_files",
+                return_value={"loopback.py": str(module)},
+            ), patch.object(daemon, "_module_hashes", side_effect=spy):
+                provider = daemon.make_status_provider(_config(), state)
+                boot_batches = len(hashed)
+                provider()
+                later = hashed[boot_batches:]
+        self.assertTrue(any("loopback.py" in batch for batch in hashed[:boot_batches]))
+        for batch in later:
+            self.assertNotIn("loopback.py", batch)
 
 
 class ConnectedSocketAuthenticationTest(unittest.TestCase):

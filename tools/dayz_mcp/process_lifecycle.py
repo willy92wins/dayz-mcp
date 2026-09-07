@@ -351,13 +351,108 @@ _PORT_STILL_HELD_HINT = (
 # the same order as PEER_STALE_S. The bound below is twice the measured maximum,
 # so a legitimate call never trips it while a request replayed minutes later does.
 _REPLACE_WITNESS_MAX_AGE_S = 60.0
-_REPLACE_WITNESS_HINTS = {
-    "replace_witness_missing": (
+
+
+def _request_parser_sha256() -> str | None:
+    path = Path(__file__).with_name("dayz_test_request.py")
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _tree_bundle_manifest_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "native-launchers"
+        / "dayz-test-v1"
+        / "closure-manifest.json"
+    )
+
+
+def _parse_bundle_manifest(manifest_path: Path) -> tuple[str | None, str | None]:
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    bundle_id = payload.get("bundle_id")
+    request_sha = payload.get("dayz_test_request_sha256")
+    if not isinstance(bundle_id, str) or not bundle_id:
+        bundle_id = None
+    if not isinstance(request_sha, str) or not request_sha:
+        request_sha = None
+    return bundle_id, request_sha
+
+
+def _installed_bundle_identity() -> tuple[str | None, str | None, str]:
+    """bundle_id, request-parser hash, and which manifest supplied them."""
+    tree_path = _tree_bundle_manifest_path()
+    try:
+        from dayz_mcp.launcher_registry import open_approved_launcher
+
+        with open_approved_launcher("dayz-test-v1") as opened:
+            manifest_path = opened.root / "closure-manifest.json"
+            bundle_id, request_sha = _parse_bundle_manifest(manifest_path)
+            return (
+                bundle_id,
+                request_sha,
+                f"approved launcher manifest {manifest_path}",
+            )
+    except Exception:
+        bundle_id, request_sha = _parse_bundle_manifest(tree_path)
+        return bundle_id, request_sha, f"module-tree manifest {tree_path}"
+
+
+def _printable_sha256(value: str | None) -> str:
+    """One hash, one spelling. The manifest stores it upper-case and hashlib
+    yields lower-case: printing both made the reader see two different strings
+    under a sentence saying they were the same, which is the very confusion
+    ficha e8eb exists to remove. The comparison already casefolds."""
+    if not value:
+        return "unreadable"
+    return value.casefold()
+
+
+def _replace_witness_missing_hint() -> str:
+    daemon_sha = _request_parser_sha256()
+    bundle_id, bundle_sha, source = _installed_bundle_identity()
+    daemon_label = _printable_sha256(daemon_sha)
+    bundle_label = _printable_sha256(bundle_sha)
+    bundle_name = bundle_id if bundle_id else "unreadable"
+    same = (
+        daemon_sha is not None
+        and bundle_sha is not None
+        and daemon_sha.casefold() == bundle_sha.casefold()
+    )
+    if same:
+        rebuild = (
+            "The launcher bundle and this daemon carry the same "
+            "dayz_test_request.py hash, so an old bundle is not the cause; "
+            "look for an orphan binding. Rebuild and reinstall app.pyz only "
+            "if those hashes differ."
+        )
+    else:
+        rebuild = (
+            "The launcher bundle and this daemon carry different "
+            "dayz_test_request.py hashes, so the bundle may be older than "
+            "this daemon. Rebuild and reinstall app.pyz only if that "
+            "mismatch is the cause, not an orphan binding."
+        )
+    return (
         "replace_witness_missing: superseding a live client needs the witness "
         "of the gate that authorised it, carried in the sealed request. Nothing "
-        "was terminated and nothing was launched. A launcher bundle older than "
-        "this daemon does not send it: rebuild and reinstall app.pyz."
-    ),
+        "was terminated and nothing was launched. "
+        f"launcher bundle {bundle_name} ({source}) "
+        f"dayz_test_request_sha256={bundle_label}; "
+        f"running daemon dayz_test_request_sha256={daemon_label}. "
+        + rebuild
+    )
+
+
+_REPLACE_WITNESS_HINTS = {
+    "replace_witness_missing": _replace_witness_missing_hint,
     "replace_witness_stale": (
         "replace_witness_stale: the gate read the bridge too long ago for its "
         "verdict to still stand. Nothing was terminated and nothing was "
@@ -1087,6 +1182,7 @@ class ProcessLifecycle:
         self.daemon_generation = (
             daemon_generation if isinstance(daemon_generation, str) else ""
         )
+        self._audit_rows_dropped = 0
         self._box_cache: tuple[float, int, _BoxProbes] | None = None
         self._box_revision = 0
         self._operation_lock = threading.RLock()
@@ -1227,15 +1323,16 @@ class ProcessLifecycle:
 
     def _note_post_persist_fault(self, run_id: str, reason: str) -> None:
         try:
-            self._audit(
+            if not self._audit(
                 "lifecycle_terminal_post_persist",
                 None,
                 reason,
                 "degraded",
                 run_id=run_id,
-            )
+            ):
+                self._note_audit_row_dropped()
         except Exception:
-            pass
+            self._note_audit_row_dropped()
 
     def _projected_run(self, run: RunRecord) -> dict[str, object]:
         row = dataclasses.asdict(run)
@@ -1736,24 +1833,38 @@ class ProcessLifecycle:
         writer = self.audit
         if not callable(writer):
             return
+        reason = getattr(result, "reason", None)
+        if not isinstance(reason, str) or not reason.strip():
+            reason = "storage_rotated"
+        decision = getattr(result, "decision", None)
+        if not isinstance(decision, str):
+            decision = ""
         try:
-            writer(
+            written = writer(
                 {
                     "event": "lifecycle_storage_rotated",
                     "run_id": run_id,
+                    "reason": reason,
+                    "duration_s": 0.0,
+                    "decision": decision,
                     "storage_backup": getattr(result, "storage_backup", None),
                     "storage_marker_backup": getattr(
                         result, "storage_marker_backup", None
                     ),
                     "storage_seal": getattr(result, "storage_seal", None),
-                    "reason": getattr(result, "reason", None),
                     "notice": getattr(result, "storage_reset_notice", None),
                 }
             )
         except Exception:
             # Observability only: a row that cannot be written never blocks a
             # launch the admissions already allowed.
+            self._note_audit_row_dropped()
             return
+        if written is False:
+            self._note_audit_row_dropped()
+
+    def _note_audit_row_dropped(self) -> None:
+        self._audit_rows_dropped += 1
 
     def _replacement_witness_error(
         self, parsed: dict[str, object], *, now: float
@@ -2360,7 +2471,8 @@ class ProcessLifecycle:
                         if replace_error == "port_still_held":
                             settled["hint"] = _PORT_STILL_HELD_HINT
                         elif replace_error in _REPLACE_WITNESS_HINTS:
-                            settled["hint"] = _REPLACE_WITNESS_HINTS[replace_error]
+                            hint = _REPLACE_WITNESS_HINTS[replace_error]
+                            settled["hint"] = hint() if callable(hint) else hint
                         return settled
                 minted, prepare_error = self._prepare_instance(
                     run_id, launch_role, str(parsed["profiles"]), existing is not None
@@ -3657,12 +3769,13 @@ class ProcessLifecycle:
         with self._operation_lock:
             self._require_legacy_identity_safe()
             if self._quarantined():
-                self._audit(
+                if not self._audit(
                     "reap_under_quarantine",
                     None,
                     "retail_quarantine",
                     "continued",
-                )
+                ):
+                    self._note_audit_row_dropped()
             return self._reap_dead_runs_locked()
 
     def reap_dead_run(
@@ -3726,6 +3839,7 @@ class ProcessLifecycle:
     def public_status(self) -> dict[str, object]:
         legacy_error = self._legacy_identity_error()
         if legacy_error is not None:
+            legacy_error["audit_rows_dropped"] = self._audit_rows_dropped
             return legacy_error
         runs, diagnostics = self._status_snapshot()
         # Keep every non-terminal state: admin recovery needs STARTING and STOPPING.
@@ -3735,6 +3849,7 @@ class ProcessLifecycle:
             "runs_retired": len(runs) - len(active_runs),
             "retail_quarantine": self._quarantined(),
             "retired_run_diagnostics": diagnostics,
+            "audit_rows_dropped": self._audit_rows_dropped,
         }
 
     def _diag_snapshot(

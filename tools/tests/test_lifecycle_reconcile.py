@@ -8,6 +8,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -23,6 +24,7 @@ from dayz_mcp.process_lifecycle import (
     RunRecord,
     _RUN_PROCESSES_GONE_HINT,
 )
+from dayz_mcp.runtime_state import JsonlAuditWriter
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import SessionCoordinator
 from tests.test_dayz_test_tool import (
@@ -1104,6 +1106,187 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.assertIs(second.get("ok"), True, second)
         self.assertEqual(self.roles(), ["server", "client"])
         self.assertEqual(self.pids(), [738, LAUNCH_PID])
+
+    def test_a_rotation_row_reaches_the_real_audit_writer(self) -> None:
+        """The durable jsonl, not AuditSink.events: that fake is how 7a6b hid."""
+        self.paths.audit_dir.mkdir(parents=True, exist_ok=True)
+        writer = JsonlAuditWriter(self.paths, "generation-rotation")
+        self.lifecycle.audit = writer.write
+        self.mission()
+
+        error = self.lifecycle._rotate_storage_for_launch(
+            self.server_request(), "run-real-audit"
+        )
+
+        self.assertIsNone(error)
+        rows = [
+            json.loads(line)
+            for line in writer.current_path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        rotated = [
+            row for row in rows if row.get("event") == "lifecycle_storage_rotated"
+        ]
+        self.assertEqual(len(rotated), 1, rows)
+        self.assertEqual(rotated[0].get("run_id"), "run-real-audit")
+
+    def test_a_dropped_audit_row_is_counted_where_it_can_be_seen(self) -> None:
+        def boom(_event: dict[str, object]) -> bool:
+            raise ValueError("invalid_audit_event")
+
+        self.lifecycle.audit = boom
+        self.mission()
+        error = self.lifecycle._rotate_storage_for_launch(
+            self.server_request(), "run-dropped-audit"
+        )
+        self.assertIsNone(error)
+
+        public = self.lifecycle.public_status()
+        dropped = public.get("audit_rows_dropped")
+        self.assertIsInstance(dropped, int)
+        self.assertGreaterEqual(dropped, 1)
+
+        from dayz_mcp import daemon
+        from tests.test_daemon import _config
+
+        snapshot = {
+            "peers": {
+                "server": {"last_poll_age_s": None, "queue_depth": 0, "version": None},
+                "client": {"last_poll_age_s": None, "queue_depth": 0, "version": None},
+            },
+            "results_pending": 0,
+        }
+        state = SimpleNamespace(
+            daemon_generation="generation-a",
+            coordination=SimpleNamespace(snapshot_payload=lambda: {"revision": 7}),
+            lifecycle=self.lifecycle,
+            status_snapshot=lambda: snapshot,
+        )
+        payload = daemon.make_status_provider(_config(), state)()
+        self.assertIn("audit_row_dropped", payload.get("warnings", []))
+        self.assertGreaterEqual(payload.get("audit_rows_dropped", 0), 1)
+
+    def test_the_witness_hint_names_the_bundle_and_daemon_versions(self) -> None:
+        result = self._replacement(replace_if_not_polling_since=None)
+        self._assert_nothing_was_touched(result, "replace_witness_missing")
+        hint = str(result.get("hint"))
+        daemon_sha = hashlib.sha256(
+            Path(process_lifecycle.__file__).with_name("dayz_test_request.py").read_bytes()
+        ).hexdigest()
+        manifest_path = (
+            Path(process_lifecycle.__file__).resolve().parents[1]
+            / "native-launchers"
+            / "dayz-test-v1"
+            / "closure-manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertIn(str(manifest["bundle_id"]), hint)
+        # Normalised: the manifest stores it upper-case, the hint prints one
+        # spelling. Asserting the raw spelling is what forced a redundant
+        # second copy of the same hash into the message.
+        self.assertIn(str(manifest["dayz_test_request_sha256"]).casefold(), hint)
+        self.assertIn(daemon_sha, hint)
+        self.assertIn("orphan", hint.casefold())
+        rebuild_at = hint.casefold().find("rebuild")
+        self.assertGreaterEqual(rebuild_at, 0)
+        self.assertIn("only", hint[rebuild_at:].casefold())
+
+    def test_the_witness_hint_is_computed_when_it_is_read(self) -> None:
+        distinctive = "c" * 64
+        with patch.object(
+            process_lifecycle, "_request_parser_sha256", return_value=distinctive
+        ):
+            result = self._replacement(replace_if_not_polling_since=None)
+        hint = str(result.get("hint"))
+        self.assertIn(distinctive, hint)
+
+    def test_the_witness_hint_names_the_approved_launcher_manifest(self) -> None:
+        distinctive_id = "approved-only-bundle-9f3c"
+        distinctive_sha = "ab" * 32
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "closure-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "bundle_id": distinctive_id,
+                        "dayz_test_request_sha256": distinctive_sha,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class _Approved:
+                def __init__(self) -> None:
+                    self.root = root
+
+                def __enter__(self) -> "_Approved":
+                    return self
+
+                def __exit__(self, *_args: object) -> None:
+                    return None
+
+            with patch(
+                "dayz_mcp.launcher_registry.open_approved_launcher",
+                return_value=_Approved(),
+            ):
+                result = self._replacement(replace_if_not_polling_since=None)
+            hint = str(result.get("hint"))
+        self.assertIn(distinctive_id, hint)
+        self.assertIn(str(root), hint)
+        self.assertIn("approved", hint.casefold())
+
+    def test_both_request_parser_hashes_are_printed_in_the_same_case(self) -> None:
+        result = self._replacement(replace_if_not_polling_since=None)
+        hint = str(result.get("hint"))
+        marker = "dayz_test_request_sha256="
+        found: list[str] = []
+        cursor = 0
+        while True:
+            at = hint.find(marker, cursor)
+            if at < 0:
+                break
+            digest = []
+            for char in hint[at + len(marker) :]:
+                if char in "0123456789abcdefABCDEF":
+                    digest.append(char)
+                else:
+                    break
+            if digest:
+                found.append("".join(digest))
+            cursor = at + len(marker)
+        self.assertGreaterEqual(len(found), 2, hint)
+        for digest in found:
+            self.assertEqual(digest, digest.casefold(), digest)
+
+    def test_a_dropped_row_from_any_silent_audit_path_is_counted(self) -> None:
+        def boom(_event: dict[str, object]) -> bool:
+            raise ValueError("invalid_audit_event")
+
+        self.lifecycle.audit = boom
+        before = int(self.lifecycle.public_status().get("audit_rows_dropped") or 0)
+        self.lifecycle._note_post_persist_fault("run-silent-post", "diagnostic")
+        after_post = int(self.lifecycle.public_status().get("audit_rows_dropped") or 0)
+        self.assertGreater(after_post, before)
+        self.lifecycle.retail_probe = lambda: {
+            "known": True,
+            "processes": [{"pid": 1, "name": "DayZ_x64.exe"}],
+        }
+        self.lifecycle.reap_dead_runs()
+        after_reap = int(self.lifecycle.public_status().get("audit_rows_dropped") or 0)
+        self.assertGreater(after_reap, after_post)
+
+    def test_the_dropped_row_counter_survives_the_legacy_identity_path(self) -> None:
+        self.lifecycle._note_audit_row_dropped()
+        self.lifecycle._note_audit_row_dropped()
+
+        def explode(_audit: object) -> list[str]:
+            raise RuntimeError("legacy_identity_transition_failed")
+
+        self.lifecycle.manifest.quarantine_legacy_active = explode
+        payload = self.lifecycle.public_status()
+        self.assertEqual(payload.get("error"), "legacy_identity_transition_failed")
+        self.assertIn("audit_rows_dropped", payload)
+        self.assertEqual(payload.get("audit_rows_dropped"), 2)
 
 
 _UUID = "11111111-1111-4111-8111-111111111111"

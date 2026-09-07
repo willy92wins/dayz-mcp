@@ -630,6 +630,16 @@ def _module_mtimes(files: dict[str, str]) -> dict[str, float | None]:
     return mtimes
 
 
+def _module_hashes(files: dict[str, str]) -> dict[str, str | None]:
+    digests: dict[str, str | None] = {}
+    for name, path in files.items():
+        try:
+            digests[name] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        except OSError:
+            digests[name] = None
+    return digests
+
+
 def make_status_provider(config: Any, state: ServerState) -> Callable[[], dict]:
     # Snapshot at construction (daemon boot). Comparing against the snapshot, not
     # against a wall-clock started_at, answers the exact question -- "did this
@@ -637,6 +647,7 @@ def make_status_provider(config: Any, state: ServerState) -> Callable[[], dict]:
     daemon_started_at = time.time()
     watched_files = _loaded_module_files()
     mtimes_at_start = _module_mtimes(watched_files)
+    hashes_at_start = _module_hashes(watched_files)
 
     def status_provider() -> dict:
         payload = core.build_status(
@@ -661,11 +672,32 @@ def make_status_provider(config: Any, state: ServerState) -> Callable[[], dict]:
         }
         if state.lifecycle is not None:
             payload["lifecycle"] = state.lifecycle.public_status()
+            dropped = payload["lifecycle"].get("audit_rows_dropped")
+            if (
+                isinstance(dropped, int)
+                and not isinstance(dropped, bool)
+                and dropped > 0
+            ):
+                payload["audit_rows_dropped"] = dropped
+                payload["warnings"] = sorted(
+                    set(payload.get("warnings", [])) | {"audit_row_dropped"}
+                )
         mtimes_now = _module_mtimes(watched_files)
+        # Date is the filter, hash is the verdict. /status is the daemon
+        # liveness discriminator: re-reading every module on every call
+        # turns a local stat into a OneDrive content read. A same-mtime
+        # rewrite is accepted as not stale; a restored date after an
+        # edit is the case this filter knowingly misses.
+        to_hash = {
+            name: path
+            for name, path in watched_files.items()
+            if mtimes_now.get(name) != mtimes_at_start.get(name)
+        }
+        hashes_now = _module_hashes(to_hash)
         stale = sorted(
             name
-            for name, mtime in mtimes_now.items()
-            if mtime is not None and mtime != mtimes_at_start.get(name)
+            for name, digest in hashes_now.items()
+            if digest is not None and digest != hashes_at_start.get(name)
         )
         payload["daemon_modules"] = {
             "daemon_started_at": daemon_started_at,
