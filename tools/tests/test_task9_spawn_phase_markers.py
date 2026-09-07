@@ -19,11 +19,33 @@ BRIDGE = WORKSPACE_ROOT / "scripts" / "5_Mission" / "MCPBridge.c"
 # The Enforce source is NOT under version control: this test is the only sentinel
 # for unintended bridge changes. Re-freeze ONLY on an in-game gated state,
 # never on a source-only edit.
+# (rev. 2026-09-07) The line above this one used to read "The Enforce source is NOT under
+# version control: this test is the only sentinel for unintended bridge changes." That was
+# true when it was written and is not true now: tests/_addon_paths.py resolves the bridge to
+# addon/scripts/5_Mission/MCPBridge.c, published INSIDE this repository by commit cfa353b,
+# and measured tracked and clean on 2026-09-07 (`git ls-files --error-unmatch` matches it,
+# `git log` shows its history). The byte-identical sibling DayZ_MCP/ IS unversioned -- but
+# _addon_paths.py deliberately refuses to search it, and says why. Re-freeze ONLY on an
+# in-game gated state, never on a source-only edit.
 # The gate has TWO halves and both are re-frozen together, against the same state:
-#   BRIDGE_SHA256      -> the whole file.
-#   BASE_BRIDGE_SHA256 -> the file with the four marker lines removed.
-# The second forces a re-freeze of both when the bridge is touched; if only the
+#   SPAWN_REGION_SHA256      -> the DispatchWorldSpawn region, delimited by signatures.
+#   BASE_SPAWN_REGION_SHA256 -> that same region with the four marker lines removed.
+# The second forces a re-freeze of both when the region is touched; if only the
 # first is updated, this one stays red and drags the whole pair into noise.
+#
+# (rev. 2026-09-07, ficha bd90) Both halves used to hash the WHOLE 80958-byte file, so an edit
+# anywhere in the bridge turned this module red and it was re-frozen with a paragraph -- the
+# fifteen below are that history. The cost was never the churn: it was that two unrelated real
+# failures travelled five days labelled "the two bd90 sentinels", because the module going red
+# was named after spawn markers. Scoped now to the region it is named after, the way
+# test_vehicle_telemetry_contract.py:15,19 does it. Blast radius 1213 B instead of 80958.
+#
+# What the whole-file half was worth, and why it is gone rather than moved: it claimed to be
+# the only tamper detection for an unversioned source. Measured 2026-09-07, it was not -- the
+# file is tracked, so `git status` and `git log` already answer "did the bridge change, and
+# who changed it", which is the whole of what the digest could say. What it did add was a
+# refusal until a human re-freezes; what it cost was a module that is red for reasons its
+# name does not describe. A change OUTSIDE this region is now caught by git, not here.
 # Re-frozen 2026-08-16 against the bridge with the readiness fix: IsSpawnReady
 # resolves by IDENTITY (found == job.subject) at SPAWN_READY_RADIUS 8.0, instead of by the
 # REQUESTED position at 2.0. In-game gate the same day, server + client 1.29.163709 and both
@@ -123,8 +145,8 @@ BRIDGE = WORKSPACE_ROOT / "scripts" / "5_Mission" / "MCPBridge.c"
 # tests/test_wave_fixes_20260824.py. Re-freeze both halves after the in-game gate of this
 # pair (the multi-agent site-certification run on the rebuilt PBO), not before.
 # Re-frozen 2026-08-24 (noche) against the v9 bridge, in-game gate the same day: multi-agent run 2026-08-24 (PBO 91A542E1..., pair v9): version gate ready, wave validation 7/8 live (clearance refusal at sea, object_id resolution, entities reliability, crash-log exclusion), and 3 external agent lanes (Grok 4.6 MCP-only, GPT-5.6 codex exec, Ox Alpha opencode) each drove spawn->fixture->driver seat->100-163 m XZ->door phase by object_id->verified delete->release, 3/3 PASS (ma_cert_report.json)
-BRIDGE_SHA256 = "6A7AC297E4F48C1E186C5C83E8D7177CFD9825686E6193F356ADC22780E7361C"
-BASE_BRIDGE_SHA256 = "FBA9515D11BA135876E2D11329F8C807777E9CDD508AE32CE1BF977C2981761F"
+SPAWN_REGION_SHA256 = "3EC442B31A7AE652C6EF9E069524AF25297317340A5532F7F58ED4BE6C53E238"
+BASE_SPAWN_REGION_SHA256 = "5C7B68AC8CE516364F8C60CCFD79A58ADE01C5F2240783797AE38DFB67548588"
 
 MARKERS = (
     'Log("spawn phase id=" + command.id + " phase=validate_begin");',
@@ -188,8 +210,9 @@ class Task9SpawnPhaseMarkerTests(unittest.TestCase):
         flags_end = cls.bridge_text.index("protected Human GetFirstHuman", flags_start)
         cls.flags_block = cls.bridge_text[flags_start:flags_end]
 
-    def test_full_source_hash_is_frozen(self) -> None:
-        self.assertEqual(hashlib.sha256(self.bridge_bytes).hexdigest().upper(), BRIDGE_SHA256)
+    def test_spawn_region_is_frozen(self) -> None:
+        digest = hashlib.sha256(self.spawn_block.encode("utf-8")).hexdigest().upper()
+        self.assertEqual(digest, SPAWN_REGION_SHA256)
 
     def test_world_spawn_and_following_batch_commands_are_deferred_fifo(self) -> None:
         self.assertEqual(self.bridge_text.count(WORLD_SPAWN_DEFERRAL), 1)
@@ -234,15 +257,17 @@ class Task9SpawnPhaseMarkerTests(unittest.TestCase):
         self.assertLess(create_call, create_return)
         self.assertLess(create_return, queued)
 
-    def test_removing_only_marker_lines_restores_frozen_source_hash(self) -> None:
-        stripped = self.bridge_bytes
+    def test_removing_only_marker_lines_restores_frozen_spawn_region(self) -> None:
+        stripped = self.spawn_block.encode("utf-8")
         for marker in MARKERS:
             marker_line = ("\t\t" + marker + "\n").encode("utf-8")
             with self.subTest(marker=marker):
                 self.assertEqual(stripped.count(marker_line), 1)
                 stripped = stripped.replace(marker_line, b"", 1)
 
-        self.assertEqual(hashlib.sha256(stripped).hexdigest().upper(), BASE_BRIDGE_SHA256)
+        self.assertEqual(
+            hashlib.sha256(stripped).hexdigest().upper(), BASE_SPAWN_REGION_SHA256
+        )
 
 
 if __name__ == "__main__":

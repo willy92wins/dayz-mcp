@@ -64,7 +64,22 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     tree = pathlib.Path(args.tree).resolve()
+    cwd = tree / "tools"
+    if not cwd.is_dir():
+        # --tree is the repo ROOT, the one holding tools/. Handing it tools/ itself made
+        # CreateProcess raise a bare WinError 267 thirty frames deep, which reads like a
+        # broken instrument instead of a wrong argument. Measured 2026-09-07.
+        print(f"!! --tree es la raiz que CONTIENE tools/, y no existe {cwd}", file=sys.stderr)
+        print(f"   recibido: {tree}", file=sys.stderr)
+        return 2
+
     target = tree / args.file
+    if not target.is_file():
+        # A path that is not there reads as an empty subject: the replacement would match 0
+        # times and the run would abort blaming the mutation instead of the path.
+        print(f"!! --file es relativo a --tree y no existe: {target}", file=sys.stderr)
+        return 2
+
     python = args.python or str(tree / "tools" / ".venv-mcp" / "Scripts" / "python.exe")
     if not pathlib.Path(python).is_file():
         # A faithful workspace built by montar_ws.sh excludes .venv-mcp, which is the main
@@ -85,7 +100,6 @@ def main(argv: list[str] | None = None) -> int:
               f"Nada tocado.", file=sys.stderr)
         return 2
 
-    cwd = tree / "tools"
     try:
         base_ok, base = _run(python, cwd, args.modules)
         print(f"  sin mutar:\n    {base}")
