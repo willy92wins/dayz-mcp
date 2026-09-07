@@ -23,9 +23,14 @@ from dayz_mcp.identity_migration import (
     scan_dayz_mcp_processes,
 )
 from dayz_mcp.daemon import DAEMON_STARTUP_BUDGET_S, build_daemon_argv
-from dayz_mcp.daemon_contract import daemon_runtime_cwd
 from dayz_mcp.host_config import CLAUDE_TIMEOUT_MS, CODEX_TIMEOUT_SECONDS
 from dayz_mcp.runtime_state import RuntimePaths
+from tests._tree_identity import (
+    TreeIdentityError,
+    assert_same_checkout,
+    checkout_root,
+    editable_mapped_tools_dir,
+)
 
 
 DAEMON_FIXTURE_SITE = Path(__file__).resolve().parent / "fixtures" / "dayz_mcp"
@@ -82,27 +87,14 @@ def fixture_daemon_argv(port: int, keyfile: Path) -> list[str]:
 def fixture_daemon_cwd() -> str:
     """Return the cwd a fixture-spawned daemon will accredit.
 
-    Crash-fixture sitecustomize imports dayz_mcp during site initialization,
-    which binds the interpreter's installed package. run_daemon then accredits
-    daemon_runtime_cwd() of that import. Spawning with a different cwd lets
-    unauthenticated /status answer while accredited startup never completes,
-    so the idle watchdog is never armed and communicate() times out.
+    Sitecustomize rebinds ``dayz_mcp`` onto this checkout before the daemon
+    starts, and run_daemon accredits ``daemon_runtime_cwd()`` of that import.
+    Spawning with a different cwd lets unauthenticated /status answer while
+    accredited startup never completes, so the idle watchdog is never armed
+    and communicate() times out. The tools directory next to this test is
+    that accredited path; the editable-install mapping is a different tree.
     """
-    for finder in sys.meta_path:
-        module_name = getattr(finder, "__module__", None)
-        if not isinstance(module_name, str) or not module_name:
-            continue
-        module = sys.modules.get(module_name)
-        mapping = getattr(module, "MAPPING", None) if module is not None else None
-        if not isinstance(mapping, dict):
-            continue
-        located = mapping.get("dayz_mcp")
-        if not isinstance(located, str) or not located:
-            continue
-        root = Path(located).resolve().parent
-        if (root / "dayz_mcp" / "daemon_contract.py").is_file():
-            return str(root)
-    return daemon_runtime_cwd()
+    return str(Path(__file__).resolve().parents[1])
 
 
 def write_client_host_fixture(home: Path, keyfile: Path) -> None:
@@ -171,6 +163,9 @@ def fixture_environment(
     environment["DAYZ_MCP_FIXTURE_MODE"] = mode
     environment["DAYZ_MCP_FIXTURE_SIGNAL"] = str(signal)
     environment["DAYZ_MCP_FIXTURE_MIGRATION"] = str(migration)
+    mapped = editable_mapped_tools_dir()
+    if mapped is not None:
+        environment["DAYZ_MCP_HOST_TOOLS"] = str(mapped)
     if start is not None:
         environment["DAYZ_MCP_FIXTURE_START"] = str(start)
     if fixture_pids_path is not None:
@@ -728,47 +723,76 @@ class BackupTransactionAdversarialTest(unittest.TestCase):
 
 
 class DaemonStartupElectionProcessTest(unittest.TestCase):
-    def test_real_canonical_clients_with_negative_and_equals_values_are_not_blockers(self) -> None:
-        variants = (
-            ["-Imdayz_mcp", "--client", "--idle-timeout", "-1"],
-            ["-mdayz_mcp", "--client", "--task-label=-nightly"],
+    def _assert_real_client_is_not_a_blocker(self, arguments: list[str]) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            keyfile = base / "fixture.key"
+            keyfile.write_text("fixture-key", encoding="ascii")
+            fixture_home = base / "home"
+            write_client_host_fixture(fixture_home, keyfile)
+            environment = os.environ.copy()
+            environment["LOCALAPPDATA"] = str(base / "local")
+            environment["HOME"] = str(fixture_home)
+            environment["USERPROFILE"] = str(fixture_home)
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    *arguments,
+                    f"--keyfile={keyfile}",
+                ],
+                cwd=str(Path(__file__).resolve().parents[1]),
+                env=environment,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline and child.poll() is None:
+                    self.assertNotIn(child.pid, scan_dayz_mcp_processes())
+                    time.sleep(0.02)
+                self.assertIsNone(child.poll())
+            finally:
+                if child.stdin is not None:
+                    child.stdin.close()
+                    child.stdin = None
+                _stdout, stderr = communicate_owned_fixture(child, 10.0)
+            self.assertEqual(child.returncode, 0, stderr)
+
+    def test_isolated_dash_I_client_argv_is_not_a_blocker(self) -> None:
+        """``-Imdayz_mcp`` is an argv classifier, not copy accreditation.
+
+        Isolated mode ignores cwd and PYTHONPATH. The child therefore loads
+        whatever the approved venv's editable finder maps — the live tree,
+        not this checkout. A green here only means that argv is not a
+        blocker. Identity of that isolation is
+        ``test_isolated_dash_I_import_does_not_accredit_this_checkout``.
+        """
+        self._assert_real_client_is_not_a_blocker(
+            ["-Imdayz_mcp", "--client", "--idle-timeout", "-1"]
         )
-        for arguments in variants:
-            with self.subTest(arguments=arguments), tempfile.TemporaryDirectory() as temporary:
-                base = Path(temporary)
-                keyfile = base / "fixture.key"
-                keyfile.write_text("fixture-key", encoding="ascii")
-                fixture_home = base / "home"
-                write_client_host_fixture(fixture_home, keyfile)
-                environment = os.environ.copy()
-                environment["LOCALAPPDATA"] = str(base / "local")
-                environment["HOME"] = str(fixture_home)
-                environment["USERPROFILE"] = str(fixture_home)
-                child = subprocess.Popen(
-                    [
-                        sys.executable,
-                        *arguments,
-                        f"--keyfile={keyfile}",
-                    ],
-                    cwd=str(Path(__file__).resolve().parents[1]),
-                    env=environment,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-                try:
-                    deadline = time.monotonic() + 5.0
-                    while time.monotonic() < deadline and child.poll() is None:
-                        self.assertNotIn(child.pid, scan_dayz_mcp_processes())
-                        time.sleep(0.02)
-                    self.assertIsNone(child.poll())
-                finally:
-                    if child.stdin is not None:
-                        child.stdin.close()
-                        child.stdin = None
-                    _stdout, stderr = communicate_owned_fixture(child, 10.0)
-                self.assertEqual(child.returncode, 0, stderr)
+
+    def test_compact_module_client_with_equals_value_is_not_a_blocker(self) -> None:
+        """``-mdayz_mcp`` without ``-I`` is scanned as a client, not a writer.
+
+        This spawn keeps cwd on ``sys.path``, so PathFinder can see this
+        checkout. The import probe below is the accreditation for that
+        resolution; the ``-I`` sibling test is not.
+        """
+        self._assert_real_client_is_not_a_blocker(
+            ["-mdayz_mcp", "--client", "--task-label=-nightly"]
+        )
+        probe = "import dayz_mcp; print(dayz_mcp.__file__, flush=True)"
+        completed = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        assert_same_checkout(Path(__file__), Path(completed.stdout.strip()))
 
     def test_module_main_entrypoint_is_observed_as_real_writer_process(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1135,6 +1159,301 @@ with daemon_startup_election(paths) as elected:
                 child.wait(timeout=5.0)
             with daemon_startup_election(paths) as elected:
                 self.assertTrue(elected)
+
+
+class TreeIdentityTest(unittest.TestCase):
+    def test_same_checkout_is_silent(self) -> None:
+        import dayz_mcp
+
+        assert_same_checkout(Path(__file__), Path(dayz_mcp.__file__))
+
+    def test_foreign_checkout_names_both_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            foreign = Path(temporary)
+            package = foreign / "tools" / "dayz_mcp"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            with self.assertRaises(TreeIdentityError) as raised:
+                assert_same_checkout(Path(__file__), package / "__init__.py")
+            message = str(raised.exception)
+            self.assertIn("another tree", message)
+            self.assertIn(str(checkout_root(Path(__file__))), message)
+            self.assertIn(str(foreign.resolve()), message)
+
+    def test_fixture_daemon_cwd_is_this_checkout_not_the_editable_mapping(self) -> None:
+        cwd = Path(fixture_daemon_cwd()).resolve()
+        self.assertEqual(cwd, Path(__file__).resolve().parents[1])
+        mapped = editable_mapped_tools_dir()
+        self.assertIsNotNone(mapped)
+        test_root = checkout_root(Path(__file__))
+        mapped_root = checkout_root(mapped)
+        if os.path.normcase(str(test_root)) == os.path.normcase(str(mapped_root)):
+            self.skipTest(
+                "this run is the editable checkout; fixture cwd and mapping coincide"
+            )
+        self.assertNotEqual(
+            os.path.normcase(str(cwd)),
+            os.path.normcase(str(mapped)),
+            "fixture cwd still follows the editable mapping",
+        )
+
+    def test_fixture_child_loads_dayz_mcp_from_this_checkout(self) -> None:
+        """A child with only the fixture on PYTHONPATH must still import this copy.
+
+        That is the historical spawn: cwd has no package, PYTHONPATH is the
+        crash-fixture site, and the editable finder used to win. Sitecustomize
+        has to beat the finder; cwd/PYTHONPATH alone did not.
+        """
+        probe = "import dayz_mcp; print(dayz_mcp.__file__, flush=True)"
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = os.environ.copy()
+            inherited = environment.get("PYTHONPATH")
+            environment["PYTHONPATH"] = str(DAEMON_FIXTURE_SITE)
+            if inherited:
+                environment["PYTHONPATH"] += os.pathsep + inherited
+            completed = subprocess.run(
+                [sys.executable, "-c", probe],
+                cwd=temporary,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15.0,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        loaded = Path(completed.stdout.strip()).resolve()
+        assert_same_checkout(Path(__file__), loaded)
+        test_root = checkout_root(Path(__file__))
+        loaded_s = os.path.normcase(str(loaded))
+        self.assertTrue(
+            loaded_s.startswith(os.path.normcase(str(test_root)) + os.sep),
+            f"child did not import this checkout: {loaded}",
+        )
+        mapped = editable_mapped_tools_dir()
+        if mapped is None:
+            return
+        mapped_root = checkout_root(mapped)
+        if os.path.normcase(str(mapped_root)) == os.path.normcase(str(test_root)):
+            return
+        self.assertFalse(
+            loaded_s.startswith(os.path.normcase(str(mapped_root)) + os.sep),
+            f"child imported the editable mapping: {loaded}",
+        )
+
+    def test_isolated_dash_I_import_does_not_accredit_this_checkout(self) -> None:
+        """The ``-I`` client spawn cannot accredit this copy's code.
+
+        Isolated mode drops cwd and PYTHONPATH. The editable finder then
+        serves the live tree. This is the identity measurement for that
+        isolation; it is not a copy-green.
+        """
+        mapped = editable_mapped_tools_dir()
+        self.assertIsNotNone(mapped)
+        test_root = checkout_root(Path(__file__))
+        mapped_root = checkout_root(mapped)
+        if os.path.normcase(str(test_root)) == os.path.normcase(str(mapped_root)):
+            self.skipTest(
+                "this run is the editable checkout; -I isolation and the copy coincide"
+            )
+        probe = "import dayz_mcp; print(dayz_mcp.__file__, flush=True)"
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(DAEMON_FIXTURE_SITE)
+        completed = subprocess.run(
+            [sys.executable, "-I", "-c", probe],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        loaded = Path(completed.stdout.strip()).resolve()
+        with self.assertRaises(TreeIdentityError):
+            assert_same_checkout(Path(__file__), loaded)
+        loaded_s = os.path.normcase(str(loaded))
+        self.assertTrue(
+            loaded_s.startswith(os.path.normcase(str(mapped_root)) + os.sep),
+            f"-I child did not import the editable mapping: {loaded}",
+        )
+
+    def test_fixture_child_with_live_cwd_loads_this_checkout(self) -> None:
+        """Bind must win when cwd is the live tools directory, without fixture mode.
+
+        Sitecustomize runs before Python prepends ``''``. A path insert made
+        there loses to a cwd that already contains ``dayz_mcp``. The helper
+        has to pin the copy anyway.
+        """
+        mapped = editable_mapped_tools_dir()
+        self.assertIsNotNone(mapped)
+        test_root = checkout_root(Path(__file__))
+        mapped_root = checkout_root(mapped)
+        if os.path.normcase(str(test_root)) == os.path.normcase(str(mapped_root)):
+            self.skipTest(
+                "this run is the editable checkout; live cwd and the copy coincide"
+            )
+        probe = "import dayz_mcp; print(dayz_mcp.__file__, flush=True)"
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(DAEMON_FIXTURE_SITE)
+        environment.pop("DAYZ_MCP_FIXTURE_MODE", None)
+        completed = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=str(mapped),
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        loaded = Path(completed.stdout.strip()).resolve()
+        assert_same_checkout(Path(__file__), loaded)
+        loaded_s = os.path.normcase(str(loaded))
+        self.assertFalse(
+            loaded_s.startswith(os.path.normcase(str(mapped_root)) + os.sep),
+            f"live cwd still imported the editable mapping: {loaded}",
+        )
+
+    def test_fixture_child_drops_editable_finder(self) -> None:
+        """Sitecustomize must call the helper; a path insert does not drop the finder."""
+        self.assertIsNotNone(editable_mapped_tools_dir())
+        probe = (
+            "import sys\n"
+            "from tests._tree_identity import PinnedDayzMcpFinder, editable_mapped_tools_dir\n"
+            "pinned = isinstance(sys.meta_path[0], PinnedDayzMcpFinder)\n"
+            "mapped = editable_mapped_tools_dir()\n"
+            "print('pinned' if pinned else 'unpinned', flush=True)\n"
+            "print('none' if mapped is None else 'present', flush=True)\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(DAEMON_FIXTURE_SITE)
+            environment.pop("DAYZ_MCP_FIXTURE_MODE", None)
+            completed = subprocess.run(
+                [sys.executable, "-c", probe],
+                cwd=temporary,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15.0,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.splitlines(), ["pinned", "none"], completed.stdout)
+
+    def test_bind_purges_preloaded_foreign_dayz_mcp(self) -> None:
+        """A live ``dayz_mcp`` already in ``sys.modules`` must not survive bind."""
+        mapped = editable_mapped_tools_dir()
+        self.assertIsNotNone(mapped)
+        test_root = checkout_root(Path(__file__))
+        mapped_root = checkout_root(mapped)
+        if os.path.normcase(str(test_root)) == os.path.normcase(str(mapped_root)):
+            self.skipTest(
+                "this run is the editable checkout; no foreign package to purge"
+            )
+        copy_tools = Path(__file__).resolve().parents[1]
+        probe = """
+import sys
+import dayz_mcp
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from tests._tree_identity import bind_child_import_tree, checkout_root
+before = checkout_root(dayz_mcp.__file__)
+bind_child_import_tree(Path(sys.argv[1]))
+import dayz_mcp as rebound
+after = checkout_root(rebound.__file__)
+print(before, after, sep='\\n', flush=True)
+"""
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        environment.pop("DAYZ_MCP_FIXTURE_MODE", None)
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = subprocess.run(
+                [sys.executable, "-c", probe, str(copy_tools)],
+                cwd=temporary,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15.0,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        lines = [line for line in completed.stdout.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 2, completed.stdout)
+        before_root = Path(lines[0])
+        after_root = Path(lines[1])
+        self.assertEqual(os.path.normcase(str(before_root)), os.path.normcase(str(mapped_root)))
+        self.assertEqual(os.path.normcase(str(after_root)), os.path.normcase(str(test_root)))
+
+
+class FixturePythonGuardTest(unittest.TestCase):
+    def test_same_shape_venv_is_rejected_by_independent_host_reference(self) -> None:
+        """A second ``<root>/.venv-mcp/Scripts/python.exe`` must not be approved.
+
+        The fixture may relocate the lookup when this copy has no sibling
+        venv, but the approved interpreter has to come from a host reference
+        independent of the executable under test. Matching the path shape is
+        not approval.
+        """
+        mapped = editable_mapped_tools_dir()
+        self.assertIsNotNone(mapped)
+        approved_site = (
+            Path(sys.executable).resolve().parents[1] / "Lib" / "site-packages"
+        )
+        probe = (
+            "from types import SimpleNamespace\n"
+            "from dayz_mcp import daemon\n"
+            "try:\n"
+            "    daemon._ensure_identity_migration(SimpleNamespace(port=49999))\n"
+            "except RuntimeError as exc:\n"
+            "    print(str(exc), flush=True)\n"
+            "else:\n"
+            "    print('ACCEPTED', flush=True)\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            venv_home = root / "shape" / ".venv-mcp"
+            created = subprocess.run(
+                [sys.executable, "-m", "venv", str(venv_home), "--without-pip"],
+                capture_output=True,
+                text=True,
+                timeout=60.0,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            other_python = venv_home / "Scripts" / "python.exe"
+            self.assertTrue(other_python.is_file(), other_python)
+            signal = root / "signal"
+            migration = root / "migration"
+            local = root / "local"
+            local.mkdir()
+            base_env = os.environ.copy()
+            base_env["PYTHONPATH"] = os.pathsep.join(
+                (str(DAEMON_FIXTURE_SITE), str(approved_site))
+            )
+            base_env["DAYZ_MCP_FIXTURE_MODE"] = "none"
+            base_env["DAYZ_MCP_FIXTURE_SIGNAL"] = str(signal)
+            base_env["DAYZ_MCP_FIXTURE_MIGRATION"] = str(migration)
+            base_env["LOCALAPPDATA"] = str(local)
+            variants = {
+                "host_tools_known": str(mapped),
+                "host_tools_absent": None,
+            }
+            for name, host_tools in variants.items():
+                with self.subTest(name=name):
+                    environment = dict(base_env)
+                    if host_tools is None:
+                        environment.pop("DAYZ_MCP_HOST_TOOLS", None)
+                    else:
+                        environment["DAYZ_MCP_HOST_TOOLS"] = host_tools
+                    completed = subprocess.run(
+                        [str(other_python), "-c", probe],
+                        cwd=str(root),
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        timeout=30.0,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    self.assertEqual(
+                        completed.stdout.strip(),
+                        "daemon_python_not_approved",
+                        completed.stdout + completed.stderr,
+                    )
 
 
 if __name__ == "__main__":
