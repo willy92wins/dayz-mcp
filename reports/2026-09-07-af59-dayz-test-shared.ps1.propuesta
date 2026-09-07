@@ -1,0 +1,104 @@
+# DRAFT -- not production. PowerShell 5.1.
+# Shared Invoke-Build body for af59. The rest of dayz-test.ps1 (lifecycle, preflight,
+# launch) is the SR2M/Heli trunk; this fragment is the only part the bug requires.
+
+function Invoke-Build {
+    $src = if ($Source) { $Source } else { Join-Path $WorkDrive $Mod }
+    if (-not (Test-Path $src)) { Die "Mod source not found: $src (pass -Source, or junction P:\$Mod -> your editable folder)." }
+    $target = Join-Path $ModsDir "@$Mod\Addons"
+    if (-not (Test-Path $target)) { New-Item -ItemType Directory -Force -Path $target | Out-Null }
+
+    # af59: temp MUST be outside P:. A concurrent AddonBuilder -addon="P:" keeps
+    # foreign files open; Clearing temp folder then fails with exit code 0.
+    $tempRoot = Join-Path $env:TEMP 'dayz-addonbuilder'
+    if (-not $tempRoot -or $tempRoot -like 'P:\*') {
+        $tempRoot = Join-Path $env:LOCALAPPDATA 'Temp\dayz-addonbuilder'
+    }
+    $temp = Join-Path $tempRoot $Mod
+    if (Test-Path -LiteralPath $temp) {
+        Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $hasAssets = @(Get-ChildItem $src -Recurse -Include *.p3d, *.paa, *.rvmat -File -ErrorAction SilentlyContinue).Count -gt 0
+    $usePackOnly = $PackOnly -or (-not $hasAssets)
+    if ($Release) { $usePackOnly = $false }
+
+    Info "Build: $src -> $target$(if ($usePackOnly) { ' (-packonly)' })"
+
+    $pbo = Join-Path $target "$Mod.pbo"
+    $mtimeBefore = $null
+    $hashBefore = $null
+    if (Test-Path -LiteralPath $pbo) {
+        $prev = Get-Item -LiteralPath $pbo
+        $mtimeBefore = $prev.LastWriteTimeUtc
+        $hashBefore = (Get-FileHash -LiteralPath $pbo -Algorithm SHA256).Hash
+    }
+
+    $abArgs = @("`"$src`"", "`"$target`"", "-prefix=$Mod", "`"-temp=$temp`"")
+    if ($Clean -or $Release) { $abArgs += '-clear' }
+    if ($usePackOnly) {
+        $abArgs += '-packonly'
+    }
+    else {
+        $includeFile = $IncludeList
+        if (-not $includeFile) {
+            $includeFile = Join-Path $env:TEMP "dayz-test-include-$Mod.txt"
+            Set-Content -Path $includeFile -Value '*.c;*.csv;*.xml;*.layout;*.json;*.ogg;*.wav;*.asi;*.anm;*.paa;*.rvmat' -Encoding ascii
+        }
+        if (-not (Test-Path -LiteralPath $includeFile)) { Die "Include list missing: $includeFile" }
+        $abArgs += "`"-include=$includeFile`""
+        $abArgs += '-binarizeFullLogs'
+    }
+
+    $stdoutLog = Join-Path $env:TEMP ("dayz-ab-" + $Mod + ".out.txt")
+    $stderrLog = Join-Path $env:TEMP ("dayz-ab-" + $Mod + ".err.txt")
+    foreach ($log in @($stdoutLog, $stderrLog)) {
+        if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+    }
+
+    $p = Start-Process -FilePath $AddonBuilder -ArgumentList $abArgs -Wait -NoNewWindow -PassThru -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+
+    $abOut = ''
+    if (Test-Path -LiteralPath $stdoutLog) { $abOut += [IO.File]::ReadAllText($stdoutLog) }
+    if (Test-Path -LiteralPath $stderrLog) { $abOut += [IO.File]::ReadAllText($stderrLog) }
+
+    $failedText = $false
+    if ($abOut -match '\[ERROR\]:\s*Build failed') { $failedText = $true }
+    $okText = $false
+    if ($abOut -match 'Build Successful') { $okText = $true }
+
+    if ($p.ExitCode -ne 0) {
+        Die "AddonBuilder failed (exit $($p.ExitCode)). Check config.cpp / paths."
+    }
+    if ($failedText -or -not $okText) {
+        Die "AddonBuilder printed a failed or incomplete build (exit $($p.ExitCode)). Refusing to treat the existing PBO as new."
+    }
+    if (-not (Test-Path -LiteralPath $pbo)) {
+        Die "Build reported success but $pbo is missing."
+    }
+
+    $now = Get-Item -LiteralPath $pbo
+    $hashAfter = (Get-FileHash -LiteralPath $pbo -Algorithm SHA256).Hash
+    if ($mtimeBefore -ne $null) {
+        if ($now.LastWriteTimeUtc -le $mtimeBefore -or $hashAfter -eq $hashBefore) {
+            Die "PBO was not replaced (mtime/hash unchanged). AddonBuilder exit 0 is not a successful deploy."
+        }
+    }
+
+    if ((Test-Path (Join-Path $src 'scripts')) -and (-not $usePackOnly)) {
+        $srcC = @(Get-ChildItem $src -Recurse -Include *.c -File -ErrorAction SilentlyContinue).Count
+        $bytes = [IO.File]::ReadAllBytes($pbo)
+        $head  = [Text.Encoding]::ASCII.GetString($bytes, 0, [Math]::Min($bytes.Length, 4194304))
+        $pboC  = ([regex]::Matches($head, '\.c\x00')).Count
+        if ($pboC -lt $srcC) {
+            Die "PBO carries $pboC .c entries but the source has $srcC. The include list is missing or wrong - do NOT test or publish this build."
+        }
+        Ok "script check: $pboC/$srcC .c entries present in the PBO"
+    }
+    elseif ((Test-Path (Join-Path $src 'scripts')) -and ($now.Length -lt 4096)) {
+        Warn "PBO is only $($now.Length) b but the mod has scripts\ - binarize likely dropped the .c. Re-run with -PackOnly."
+    }
+
+    if ($PostBuildScript) { & $PostBuildScript -Pbo $pbo -Src $src -Release:$Release }
+    Ok "deployed: $pbo ($($now.Length) b)"
+}
