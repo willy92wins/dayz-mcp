@@ -1415,6 +1415,11 @@ async def execute_dayz_test_run(
                             time.monotonic() - remediated_at, 3
                         ),
                     }
+                    steam_remediation_reason = getattr(steam, "steam_remediation_reason", None)
+                    if steam.error_code is not None:
+                        steam_remediation_report["steam_remediation_reason"] = (
+                            steam_remediation_reason or "remediation_failed"
+                        )
                     if steam_remediation_error is not None:
                         steam_remediation_report["steam_remediation_error"] = (
                             steam_remediation_error

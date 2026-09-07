@@ -3184,6 +3184,9 @@ def _bridge_status_description() -> str:
 
 
 def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
+    # Numeric tool annotations are strict at FastMCP ingress: handler guards
+    # cannot reject bool after Pydantic has already converted it to 0/1.
+    # StrictFloat still accepts JSON integers; optional None stays read/omit.
     runtime: Any = ClientRuntime(config) if config.mode == "client" else Runtime(config)
 
     @asynccontextmanager
@@ -3265,7 +3268,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description="LOW-LEVEL: prefer session_acquire_wait. Wait up to 30s for this client's FIFO ticket."
     )
-    async def session_wait(ticket: str, timeout_s: float = 30.0) -> dict[str, Any]:
+    async def session_wait(ticket: str, timeout_s: StrictFloat = 30.0) -> dict[str, Any]:
         if not isinstance(ticket, str) or not ticket:
             raise ToolError("bad_ticket")
         client = _client_runtime()
@@ -3284,7 +3287,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     )
     async def session_acquire_wait(
         purpose: str,
-        max_wait_s: float | None = None,
+        max_wait_s: StrictFloat | None = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         if not isinstance(purpose, str) or not purpose.strip():
@@ -3424,12 +3427,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         server_mods: list[str] | None = None,
         no_base_mods: bool = False,
         no_file_patching: bool = False,
-        port: int = 2302,
-        width: int = 1920,
-        height: int = 1080,
+        port: StrictInt = 2302,
+        width: StrictInt = 1920,
+        height: StrictInt = 1080,
         player_name: str = "Dev",
-        server_wait_s: int = 60,
-        wait_for_box_s: float = 0.0,
+        server_wait_s: StrictInt = 60,
+        wait_for_box_s: StrictFloat = 0.0,
         auto_remediate_steam: StrictBool = False,
         client_start_budget_s: StrictFloat | StrictInt | None = None,
         ctx: Context | None = None,
@@ -3591,12 +3594,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 raise ToolError(_opaque_dayz_test_failure(exc)) from exc
 
     @app.tool(description="Read the authoritative server-side player state.")
-    async def query_player_state(timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def query_player_state(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("query_player_state", {}, "server", _timeout(timeout_s))
 
     @app.tool(description="Read the authoritative state of every connected player.")
-    async def query_all_players(timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def query_all_players(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("query_all_players", {}, "server", _timeout(timeout_s))
 
@@ -3627,7 +3630,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     )
     async def logs_since(
         marker: str | dict[str, Any] | None = None,
-        max_lines: int = 200,
+        max_lines: StrictInt = 200,
         run_id: str | None = None,
     ) -> dict[str, Any]:
         """Drain RPT/script logs since a previous marker.
@@ -3723,10 +3726,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     )
     async def world_spawn(
         type: str,
-        pos: list[float],
-        flags: int = 0,
-        rotation: int = 0,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        pos: list[StrictFloat],
+        flags: StrictInt = 0,
+        rotation: StrictInt = 0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         args = {"type": type, "pos": _require_vec3(pos, "pos"), "flags": int(flags), "rotation": int(rotation)}
         async with runtime.tool_lock:
@@ -3741,7 +3744,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "was actually removed."
         )
     )
-    async def object_delete(object_id: int, timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def object_delete(object_id: StrictInt, timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         if not isinstance(object_id, int) or isinstance(object_id, bool):
             raise ToolError(
                 _bad_args("object_id", object_id, "be a positive int")
@@ -3764,12 +3767,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         )
     )
     async def notify_players(
-        show_time: float,
+        show_time: StrictFloat,
         title: str,
         detail: str = "",
         icon: str = "",
         uid: str = "",
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         show_time_error = _bad_args(
             "show_time", show_time, "be a finite number greater than 0"
@@ -3807,7 +3810,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "establish it with vehicle_get_in_client."
         )
     )
-    async def vehicle_enter(pos: list[float], timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def vehicle_enter(pos: list[StrictFloat], timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         args = {"pos": _require_vec3(pos, "pos")}
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_enter", args, "server", _timeout(timeout_s))
@@ -3819,13 +3822,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         )
     )
     async def scene_raycast(
-        from_pos: list[float],
-        to: list[float],
+        from_pos: list[StrictFloat],
+        to: list[StrictFloat],
         method: str = "rvproxy",
         ignore: str = "",
-        radius: float = 0.05,
+        radius: StrictFloat = 0.05,
         intersect: str = "view",
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         radius_error = _bad_args(
             "radius", radius, "be a non-negative finite number"
@@ -3863,11 +3866,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def telemetry_read(
         mode: str,
         type: str = "",
-        pos: list[float] | None = None,
-        radius: float = 0.0,
+        pos: list[StrictFloat] | None = None,
+        radius: StrictFloat = 0.0,
         path: str = "",
-        max_lines: int = 0,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        max_lines: StrictInt = 0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         # Name the field that is wrong. A bare "bad_args" makes the caller guess
         # between mode, type and radius, which is the whole cost of the error;
@@ -3889,9 +3892,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(description="Diagnose whether a normal get-in would be available on a vehicle and which gate blocks it. Pass a concrete `component` (a seat/action component index, not the default -1): with the default the bridge returns a partial diagnostic (`partial=true`, `available=false`, `first_block=\"no_component\"`) that only lists per-seat occupancy/through/area and never reports reachability or a usable `available`.")
     async def query_get_in_condition(
-        pos: list[float],
-        component: int = -1,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        pos: list[StrictFloat],
+        component: StrictInt = -1,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         args = {"pos": _require_vec3(pos, "pos"), "component": int(component)}
         async with runtime.tool_lock:
@@ -3907,9 +3910,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     )
     async def vehicle_prepare_fixture(
         type: str,
-        pos: list[float],
-        radius: float = 100.0,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        pos: list[StrictFloat],
+        radius: StrictFloat = 100.0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(type, str) or type == "":
             raise ToolError(_bad_args("type", type, "be a non-empty string"))
@@ -3933,9 +3936,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     # Pure read of terrain under (x, z).
     @app.tool(description="Query terrain surface Y, type, and normal at world (x, z).")
     async def surface_query(
-        x: float,
-        z: float,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        x: StrictFloat,
+        z: StrictFloat,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         args = {
             "x": _finite_float(x, _bad_args("x", x, "be a finite number")),
@@ -4030,10 +4033,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         )
     )
     async def player_teleport(
-        pos: list[float],
+        pos: list[StrictFloat],
         uid: str = "",
         skip_clearance_check: bool = False,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a string"))
@@ -4066,10 +4069,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def object_anim(
         source: str,
         type: str = "",
-        pos: list[float] | None = None,
-        phase: float | None = None,
-        object_id: int = 0,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        pos: list[StrictFloat] | None = None,
+        phase: StrictFloat | None = None,
+        object_id: StrictInt = 0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(source, str) or source == "":
             raise ToolError(_bad_args("source", source, "be a non-empty string"))
@@ -4095,11 +4098,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     )
     async def infected_drive(
         type: str,
-        pos: list[float],
-        heading: float | None = None,
-        speed: float | None = None,
+        pos: list[StrictFloat],
+        heading: StrictFloat | None = None,
+        speed: StrictFloat | None = None,
         mode: str | None = None,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(type, str) or type == "":
             raise ToolError(_bad_args("type", type, "be a non-empty string"))
@@ -4147,7 +4150,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         classname: str,
         dest: str = "hands",
         uid: str = "",
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(classname, str) or classname == "":
             raise ToolError(
@@ -4177,9 +4180,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def object_inspect(
         want: list[str],
         type: str = "",
-        pos: list[float] | None = None,
-        object_id: int = 0,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        pos: list[StrictFloat] | None = None,
+        object_id: StrictInt = 0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(want, list) or len(want) == 0:
             raise ToolError(
@@ -4224,10 +4227,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         )
     )
     async def entities_query(
-        pos: list[float],
-        radius: float,
-        limit: int = 32,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        pos: list[StrictFloat],
+        radius: StrictFloat,
+        limit: StrictInt = 32,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         radius_error = _bad_args(
             "radius", radius, "be a finite number greater than 0 and at most 200"
@@ -4260,13 +4263,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         )
     )
     async def world_time_set(
-        year: int,
-        month: int,
-        day: int,
-        hour: int,
-        minute: int,
-        time_multiplier: float | None = None,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        year: StrictInt,
+        month: StrictInt,
+        day: StrictInt,
+        hour: StrictInt,
+        minute: StrictInt,
+        time_multiplier: StrictFloat | None = None,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         month_value = int(month)
         day_value = int(day)
@@ -4333,12 +4336,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         )
     )
     async def world_weather_set(
-        overcast: float | None = None,
-        rain: float | None = None,
-        fog: float | None = None,
-        time: float = 0.0,
-        min_duration: float = 0.0,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        overcast: StrictFloat | None = None,
+        rain: StrictFloat | None = None,
+        fog: StrictFloat | None = None,
+        time: StrictFloat = 0.0,
+        min_duration: StrictFloat = 0.0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         args: dict[str, Any] = {}
         overcast_value = _optional_finite_float(
@@ -4389,13 +4392,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     ))
     async def camera_set(
         cam_mode: str = "orient",
-        cam_pos: list[float] | None = None,
-        cam_orientation: list[float] | None = None,
-        look_at: list[float] | None = None,
-        cam_matrix: list[float] | None = None,
-        fov: float = 0.0,
-        settle_ticks: int = 3,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        cam_pos: list[StrictFloat] | None = None,
+        cam_orientation: list[StrictFloat] | None = None,
+        look_at: list[StrictFloat] | None = None,
+        cam_matrix: list[StrictFloat] | None = None,
+        fov: StrictFloat = 0.0,
+        settle_ticks: StrictInt = 3,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         # The wire value is `lookat`, but the vector argument sitting
         # right beside it is `look_at`, so a caller naturally spells the mode
@@ -4437,7 +4440,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return await runtime.call_bridge("camera_set", args, "client", _timeout(timeout_s))
 
     @app.tool(description="Read the active client camera state through the existing camera_get bridge command.")
-    async def camera_get(cam_mode: str = "get", timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def camera_get(cam_mode: str = "get", timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         args = {"cam_mode": cam_mode} if cam_mode else {}
         async with runtime.tool_lock:
             return await runtime.call_bridge("camera_get", args, "client", _timeout(timeout_s))
@@ -4453,7 +4456,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "not_verified. The verb is idempotent, so a red can simply be retried. "
         "timeout_s bounds each of the two bridge calls."
     ))
-    async def restore_gameplay(timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def restore_gameplay(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
             timeout = _timeout(timeout_s)
             result = await runtime.call_bridge("restore_gameplay", {}, "client", timeout)
@@ -4492,7 +4495,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     ))
     async def key_press(
         dik: StrictInt,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(dik, int) or isinstance(dik, bool) or dik < 0:
             raise ToolError(_bad_args("dik", dik, "be a non-negative int"))
@@ -4508,7 +4511,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "issued; observe player state separately for completion."
     ))
     async def player_respawn(
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge(
@@ -4535,11 +4538,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     ))
     async def capture_screenshot(
         scale: str = "small",
-        max_tokens: int = mcp_capture.DEFAULT_MAX_TOKENS,
-        frames: int = mcp_capture.DEFAULT_FRAME_COUNT,
+        max_tokens: StrictInt = mcp_capture.DEFAULT_MAX_TOKENS,
+        frames: StrictInt = mcp_capture.DEFAULT_FRAME_COUNT,
         process_name: str = "DayZDiag_x64",
         fmt: str = mcp_capture.DEFAULT_FORMAT,
-        quality: int = mcp_capture.DEFAULT_QUALITY,
+        quality: StrictInt = mcp_capture.DEFAULT_QUALITY,
         crop: str = "",
         crop_space: str = mcp_capture.DEFAULT_CROP_SPACE,
         save_fullres: bool = False,
@@ -4630,7 +4633,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     if config.enable_exec_enforce:
 
         @app.tool(description="Execute an exact allowlisted Enforce script expression through the server bridge.")
-        async def exec_enforce(expr: str, main_fn: str = "", timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+        async def exec_enforce(expr: str, main_fn: str = "", timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
             args = {"expr": expr, "main_fn": main_fn}
             async with runtime.tool_lock:
                 return await runtime.call_exec_enforce(args, _timeout(timeout_s))
@@ -4649,7 +4652,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "client in a nearby vehicle (client-side ownership get-in)."
         )
     )
-    async def vehicle_get_in_client(pos: list[float], timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def vehicle_get_in_client(pos: list[StrictFloat], timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         args = {"pos": _require_vec3(pos, "pos")}
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_get_in_client", args, "client", _timeout(timeout_s))
@@ -4663,7 +4666,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "readback when available, otherwise null (accepted, not confirmed)."
         )
     )
-    async def engine_set(mode: str, timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def engine_set(mode: str, timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         if mode not in ("start", "stop"):
             raise ToolError("bad_mode")
         async with runtime.tool_lock:
@@ -4693,12 +4696,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         )
     )
     async def vehicle_control(
-        throttle: float = 0.0,
-        steer: float = 0.0,
-        brake: float = 0.0,
-        handbrake: float = 0.0,
-        hold_ttl_s: float = 0.0,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        throttle: StrictFloat = 0.0,
+        steer: StrictFloat = 0.0,
+        brake: StrictFloat = 0.0,
+        handbrake: StrictFloat = 0.0,
+        hold_ttl_s: StrictFloat = 0.0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         t = float(throttle)
         s = float(steer)
@@ -4720,7 +4723,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return await runtime.call_bridge("vehicle_control", args, "client", _timeout(timeout_s))
 
     @app.tool(description="Read owner-side vehicle telemetry (speed, gear, engine, pos, ownership).")
-    async def vehicle_telemetry(timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def vehicle_telemetry(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_telemetry", {}, "client", _timeout(timeout_s))
 
@@ -4730,11 +4733,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def vehicle_trace(
         mode: str,
         trace_id: str = "",
-        cursor: int = 0,
-        limit: int = 64,
-        sample_hz: int = 20,
-        max_samples: int = 4096,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        cursor: StrictInt = 0,
+        limit: StrictInt = 64,
+        sample_hz: StrictInt = 20,
+        max_samples: StrictInt = 4096,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         try:
             args = normalize_request(
@@ -4765,7 +4768,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "vehicle control (stop driving)."
         )
     )
-    async def vehicle_release(timeout_s: float = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def vehicle_release(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_release", {}, "client", _timeout(timeout_s))
 
@@ -4778,12 +4781,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     ))
     async def ui_tree(
         path: str = "",
-        limit: int = 256,
+        limit: StrictInt = 256,
         # Not `str | None`: FastMCP would publish anyOf[string,null] and collapse
         # explicit root=null into omit (global scope). `str = None` publishes
         # type:string so Pydantic rejects the null before enqueue.
         root: str = None,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str):
             raise ToolError(_bad_args("path", path, "be a string"))
@@ -4810,7 +4813,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         # explicit root=null into omit (global scope). `str = None` publishes
         # type:string so Pydantic rejects the null before enqueue.
         root: str = None,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str) or path == "":
             raise ToolError(_bad_args("path", path, "be a non-empty string"))
@@ -4842,7 +4845,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         root: str = None,
         mode: UiClickMode = "direct",
         bubble: StrictBool = False,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str) or path == "":
             raise ToolError(_bad_args("path", path, "be a non-empty string"))
@@ -4876,8 +4879,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def ui_reload_layout(
         path: str = "",
         mode: UiReloadLayoutMode = "reload",
-        limit: int = 256,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        limit: StrictInt = 256,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(mode, str) or mode not in {"reload", "close"}:
             raise ToolError(
@@ -4918,7 +4921,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         # explicit root=null into omit (global scope). `str = None` publishes
         # type:string so Pydantic rejects the null before enqueue.
         root: str = None,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(path, str) or path == "":
             raise ToolError(_bad_args("path", path, "be a non-empty string"))
@@ -4942,7 +4945,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         title: str,
         message: str = "",
         fields: list[dict[str, Any]] | None = None,
-        timeout_s: float = 60.0,
+        timeout_s: StrictFloat = 60.0,
     ) -> dict[str, Any]:
         return await execute_ui_dialog(
             runtime,
@@ -4963,9 +4966,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def action_use(
         action: str,
         classname: str = "",
-        pos: list[float] | None = None,
-        radius: float = 5.0,
-        timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+        pos: list[StrictFloat] | None = None,
+        radius: StrictFloat = 5.0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(action, str) or action == "":
             raise ToolError(_bad_args("action", action, "be a non-empty string"))
@@ -5018,11 +5021,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     )
     async def wait_for(
         condition: Literal["players_at_least", "players_at_most", "log_matches"],
-        value: int = 0,
+        value: StrictInt = 0,
         pattern: str = "",
-        timeout_s: float = 180.0,
-        poll_interval_s: float = 2.0,
-        lookback_lines: int = 200,
+        timeout_s: StrictFloat = 180.0,
+        poll_interval_s: StrictFloat = 2.0,
+        lookback_lines: StrictInt = 200,
         lookback_from: Literal["lines", "launch"] = "lines",
         marker: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -5103,7 +5106,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         )
     )
     async def pipeline_inbox(
-        limit: int = 20,
+        limit: StrictInt = 20,
         kind: str = "",
         include_resolved: bool = False,
     ) -> dict[str, Any]:

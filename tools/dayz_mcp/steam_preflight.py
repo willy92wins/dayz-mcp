@@ -57,6 +57,7 @@ class SteamRemediationResult(SteamSessionResult):
     """
 
     steam_left_down: bool = False
+    steam_remediation_reason: str | None = None
 
 
 class SteamPreflightProvider(Protocol):
@@ -310,11 +311,13 @@ def _wait_until(
 ) -> bool:
     deadline = host.monotonic() + timeout_s
     while True:
-        if predicate():
+        passed = predicate()
+        now = host.monotonic()
+        if passed and now <= deadline:
             return True
-        if host.monotonic() >= deadline:
+        if now >= deadline:
             return False
-        host.sleep(_POLL_INTERVAL_S)
+        host.sleep(min(_POLL_INTERVAL_S, deadline - now))
 
 
 def _wait_until_steam_down(
@@ -330,20 +333,23 @@ def _wait_until_steam_down(
             return "unknown"
         if live == ():
             return "down"
-        if host.monotonic() >= deadline:
+        now = host.monotonic()
+        if now >= deadline:
             return "alive"
-        host.sleep(_POLL_INTERVAL_S)
+        host.sleep(min(_POLL_INTERVAL_S, deadline - now))
 
 
 def _remediation_result(
-    session: SteamSessionResult, *, steam_left_down: bool = False
+    session: SteamSessionResult, *, steam_left_down: bool = False,
+    reason: str | None = None,
 ) -> SteamRemediationResult:
     return SteamRemediationResult(
-        error_code=session.error_code,
+        error_code=STEAM_SESSION_STALE if reason is not None else session.error_code,
         steam_registered_pid=session.steam_registered_pid,
         steam_live_pids=session.steam_live_pids,
         remediation=session.remediation,
         steam_left_down=steam_left_down,
+        steam_remediation_reason=reason,
     )
 
 
@@ -351,7 +357,7 @@ def remediate_stale_steam_session(
     provider: SteamPreflightProvider | None = None,
     host: SteamRemediationHost | None = None,
 ) -> SteamSessionResult:
-    """One shutdown, one silent relaunch, then a single re-evaluation.
+    """One shutdown, one silent relaunch, then bounded ActiveProcess polling.
 
     Callers must not invoke this twice for the same launch. A cycle that
     cannot restore ActiveProcess still returns ``steam_session_stale``.
@@ -365,14 +371,21 @@ def remediate_stale_steam_session(
     selected_host = WindowsSteamRemediationHost() if host is None else host
     executable = _steam_executable(selected_provider, selected_host)
     if executable is None:
-        return _remediation_result(evaluate_steam_session(selected_provider))
+        return _remediation_result(
+            evaluate_steam_session(selected_provider), reason="steam_executable_unavailable"
+        )
     try:
         selected_host.invoke_steam(executable, ("-shutdown",))
     except Exception:
-        return _remediation_result(evaluate_steam_session(selected_provider))
+        return _remediation_result(
+            evaluate_steam_session(selected_provider), reason="shutdown_failed"
+        )
     down_state = _wait_until_steam_down(selected_provider, selected_host)
     if down_state != "down":
-        return _remediation_result(evaluate_steam_session(selected_provider))
+        return _remediation_result(
+            evaluate_steam_session(selected_provider),
+            reason="shutdown_timeout" if down_state == "alive" else "process_list_unreadable",
+        )
     try:
         selected_host.invoke_steam(executable, ("-silent",))
     except Exception:
@@ -382,13 +395,25 @@ def remediate_stale_steam_session(
             return _remediation_result(
                 evaluate_steam_session(selected_provider),
                 steam_left_down=True,
+                reason="relaunch_failed",
             )
-    _wait_until(
+    last_session = _stale(None, ())
+
+    def active_process_matches() -> bool:
+        nonlocal last_session
+        last_session = evaluate_steam_session(selected_provider)
+        return last_session.error_code is None
+
+    matched = _wait_until(
         selected_host,
         _ACTIVE_WAIT_S,
-        lambda: evaluate_steam_session(selected_provider).error_code is None,
+        active_process_matches,
     )
-    return _remediation_result(evaluate_steam_session(selected_provider))
+    # Keep the verdict observed inside the budget. A fresh read after timeout
+    # must not turn a failed wait into a successful remediation.
+    return _remediation_result(
+        last_session, reason=None if matched else "active_process_timeout"
+    )
 
 
 __all__ = [

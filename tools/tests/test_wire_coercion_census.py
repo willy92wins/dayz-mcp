@@ -229,61 +229,8 @@ def _build_app(*, enable_exec_enforce: bool = True):
     )
 
 
-_TIMEOUT_S_COMMENT = (
-    "False becomes 0.0 then the >0 timeout bound rejects it; remaining values "
-    "are a duration, not a guard"
-)
-
-# Tools whose timeout_s goes through _timeout / an equivalent >0 bound.
-# A new tool with timeout_s is NOT auto-allowed: add it here with eyes open.
-_TIMEOUT_S_TOOLS = frozenset(
-    {
-        "action_use",
-        "camera_get",
-        "camera_set",
-        "engine_set",
-        "entities_query",
-        "exec_enforce",
-        "infected_drive",
-        "inventory_give",
-        "key_press",
-        "notify_players",
-        "object_anim",
-        "object_delete",
-        "object_inspect",
-        "player_respawn",
-        "player_teleport",
-        "query_all_players",
-        "query_get_in_condition",
-        "query_player_state",
-        "restore_gameplay",
-        "scene_raycast",
-        "surface_query",
-        "telemetry_read",
-        "ui_click",
-        "ui_dialog",
-        "ui_focus",
-        "ui_reload_layout",
-        "ui_set_text",
-        "ui_tree",
-        "vehicle_control",
-        "vehicle_enter",
-        "vehicle_get_in_client",
-        "vehicle_prepare_fixture",
-        "vehicle_release",
-        "vehicle_telemetry",
-        "vehicle_trace",
-        "wait_for",
-        "world_spawn",
-        "world_time_set",
-        "world_weather_set",
-    }
-)
-
 _FREE_TEXT = "free text; pydantic 2 rejects bool/int, and any string is valid here"
 _OPTIONAL_ID = "optional id string; omit/None means default, any text is an identifier"
-_COUNT = "any integer in the handler's range is a count, not a permission"
-_WORLD_FLOAT = "any finite number is a world magnitude here"
 _ENUM_LIKE_STR = (
     "bare str with a handler allowlist; False/0 are rejected, leftover values "
     "are names not switches"
@@ -293,28 +240,16 @@ _ENUM_LIKE_STR = (
 # THIS parameter's coercion is accepted as the past; a new key has no comment
 # and the ratchet fails. Defects stay listed so fixing them is a deliberate
 # allowlist edit, not a silent green.
-COERCIBLE_ALLOWLIST: dict[tuple[str, str], str] = {
-    (tool, "timeout_s"): _TIMEOUT_S_COMMENT for tool in sorted(_TIMEOUT_S_TOOLS)
-}
+COERCIBLE_ALLOWLIST: dict[tuple[str, str], str] = {}
 COERCIBLE_ALLOWLIST.update(
     {
         ("action_use", "action"): "free text Enforce action class name",
         ("action_use", "classname"): "free text target GetType()",
-        ("action_use", "radius"): _WORLD_FLOAT,
         ("camera_get", "cam_mode"): _ENUM_LIKE_STR,
         ("camera_set", "cam_mode"): _ENUM_LIKE_STR,
-        ("camera_set", "fov"): (
-            "0 already means leave FOV unchanged; False becomes that no-op"
-        ),
-        ("camera_set", "settle_ticks"): _COUNT,
         ("capture_screenshot", "scale"): _ENUM_LIKE_STR,
-        ("capture_screenshot", "max_tokens"): (
-            "budget clamp; False becomes 0 and the resolver treats <=0 as the cap"
-        ),
-        ("capture_screenshot", "frames"): _COUNT,
         ("capture_screenshot", "process_name"): "free text process name",
         ("capture_screenshot", "fmt"): _ENUM_LIKE_STR,
-        ("capture_screenshot", "quality"): _COUNT,
         ("capture_screenshot", "crop"): "free text crop spec",
         ("capture_screenshot", "crop_space"): _ENUM_LIKE_STR,
         ("capture_screenshot", "save_fullres"): (
@@ -347,21 +282,9 @@ COERCIBLE_ALLOWLIST.update(
         ("dayz_test_run", "no_file_patching"): (
             "defect: 1/'true' disables filepatching; inventoried until StrictBool"
         ),
-        ("dayz_test_run", "port"): "any port integer in range is a bind, not a guard",
-        ("dayz_test_run", "width"): _COUNT,
-        ("dayz_test_run", "height"): _COUNT,
         ("dayz_test_run", "player_name"): "free text player name",
-        ("dayz_test_run", "server_wait_s"): (
-            "seconds to wait; False becomes 0 which is a short wait, not a disabled guard"
-        ),
-        ("dayz_test_run", "wait_for_box_s"): (
-            "defect: False becomes 0.0 and skips the box wait; the bool parse never "
-            "runs. Same shape as the original budget. Inventoried until StrictFloat"
-        ),
         ("dayz_test_stop", "run_id"): "free text run id",
         ("engine_set", "mode"): _ENUM_LIKE_STR,
-        ("entities_query", "radius"): _WORLD_FLOAT,
-        ("entities_query", "limit"): _COUNT,
         ("exec_enforce", "expr"): (
             "free text Enforce expression; allowlist runs after pydantic"
         ),
@@ -369,53 +292,26 @@ COERCIBLE_ALLOWLIST.update(
             "free text entry function name; empty is the default"
         ),
         ("infected_drive", "type"): "free text classname",
-        ("infected_drive", "heading"): (
-            "defect: False becomes 0.0 degrees and drives; inventoried until StrictFloat"
-        ),
-        ("infected_drive", "speed"): (
-            "defect: False becomes 0.0 speed and drives; inventoried until StrictFloat"
-        ),
         ("infected_drive", "mode"): _OPTIONAL_ID,
         ("inventory_give", "classname"): "free text classname",
         ("inventory_give", "dest"): _ENUM_LIKE_STR,
         ("inventory_give", "uid"): "free text player id, empty means first human",
         ("lease_acquire", "purpose"): "free text purpose",
-        ("lease_acquire", "max_wait_s"): (
-            "False becomes 0.0 then the range rejects it; remaining values are a wait"
-        ),
         ("logs_since", "marker"): (
             "str | dict cursor; a bool is rejected, but the bare-str arm "
             "keeps this key coercible so a numeric branch cannot hide"
         ),
-        ("logs_since", "max_lines"): _COUNT,
         ("logs_since", "run_id"): _OPTIONAL_ID,
-        ("notify_players", "show_time"): (
-            "False becomes 0.0 then the >0 bound rejects it"
-        ),
         ("notify_players", "title"): "free text title",
         ("notify_players", "detail"): "free text body",
         ("notify_players", "icon"): "free text icon",
         ("notify_players", "uid"): "free text player id, empty means broadcast",
         ("object_anim", "source"): "free text source",
         ("object_anim", "type"): "free text classname",
-        ("object_anim", "phase"): (
-            "defect: False becomes 0.0 and WRITES phase 0; same float|None as the "
-            "original budget. Inventoried until StrictFloat"
-        ),
-        ("object_anim", "object_id"): (
-            "False becomes 0 (no object_id); True would name object 1"
-        ),
-        ("object_delete", "object_id"): (
-            "False becomes 0 and the positive-int check rejects it; True would name 1"
-        ),
         ("object_inspect", "type"): "free text classname",
-        ("object_inspect", "object_id"): (
-            "False becomes 0 (untargeted); True would name object 1"
-        ),
         ("pipeline_feedback", "title"): "free text title",
         ("pipeline_feedback", "body"): "free text body",
         ("pipeline_feedback", "project"): "free text project",
-        ("pipeline_inbox", "limit"): _COUNT,
         ("pipeline_inbox", "kind"): "free text kind filter",
         ("pipeline_inbox", "include_resolved"): (
             "1 includes resolved rows; a filter, not a safety guard"
@@ -429,32 +325,18 @@ COERCIBLE_ALLOWLIST.update(
             "defect: 1 and 'true' skip the covered-column probe; the isinstance(bool) "
             "check runs after pydantic already made a bool. Inventoried until StrictBool"
         ),
-        ("query_get_in_condition", "component"): (
-            "seat index; False becomes 0, which is a real component not a disabled probe"
-        ),
         ("scene_raycast", "method"): _ENUM_LIKE_STR,
         ("scene_raycast", "ignore"): _ENUM_LIKE_STR,
-        ("scene_raycast", "radius"): _WORLD_FLOAT,
         ("scene_raycast", "intersect"): _ENUM_LIKE_STR,
         ("session_acquire", "purpose"): "free text purpose",
         ("session_acquire_wait", "purpose"): "free text purpose",
-        ("session_acquire_wait", "max_wait_s"): (
-            "False becomes 0.0 then the range rejects it; remaining values are a wait"
-        ),
         ("session_cancel", "ticket"): "free text ticket",
         ("session_heartbeat", "lease_token"): "free text token",
         ("session_release", "lease_token"): "free text token",
         ("session_wait", "ticket"): "free text ticket",
-        ("session_wait", "timeout_s"): (
-            "False becomes 0.0 which this wait accepts as an immediate return"
-        ),
-        ("surface_query", "x"): _WORLD_FLOAT,
-        ("surface_query", "z"): _WORLD_FLOAT,
         ("telemetry_read", "mode"): _ENUM_LIKE_STR,
         ("telemetry_read", "type"): "free text classname",
-        ("telemetry_read", "radius"): _WORLD_FLOAT,
         ("telemetry_read", "path"): "free text path",
-        ("telemetry_read", "max_lines"): _COUNT,
         ("ui_click", "path"): "free text widget path",
         ("ui_click", "root"): "free text root name",
         ("ui_dialog", "title"): "free text title",
@@ -462,79 +344,20 @@ COERCIBLE_ALLOWLIST.update(
         ("ui_focus", "path"): "free text widget path",
         ("ui_focus", "root"): "free text root name",
         ("ui_reload_layout", "path"): "free text layout path",
-        ("ui_reload_layout", "limit"): _COUNT,
         ("ui_set_text", "path"): "free text widget path",
         ("ui_set_text", "text"): "free text widget value",
         ("ui_set_text", "root"): "free text root name",
         ("ui_tree", "path"): "free text widget path",
-        ("ui_tree", "limit"): _COUNT,
         ("ui_tree", "root"): "free text root name",
-        ("vehicle_control", "throttle"): (
-            "defect: True becomes 1.0 (full throttle); inventoried until StrictFloat"
-        ),
-        ("vehicle_control", "steer"): (
-            "defect: True becomes 1.0 full steer; inventoried until StrictFloat"
-        ),
-        ("vehicle_control", "brake"): (
-            "defect: True becomes 1.0 full brake; inventoried until StrictFloat"
-        ),
-        ("vehicle_control", "handbrake"): (
-            "defect: True becomes 1.0 which this field treats as on; inventoried until StrictFloat"
-        ),
-        ("vehicle_control", "hold_ttl_s"): (
-            "deadman seconds; False becomes 0.0 (release now), True becomes 1.0"
-        ),
         ("vehicle_prepare_fixture", "type"): "free text classname",
-        ("vehicle_prepare_fixture", "radius"): _WORLD_FLOAT,
         ("vehicle_trace", "mode"): _ENUM_LIKE_STR,
         ("vehicle_trace", "trace_id"): "free text trace id",
-        ("vehicle_trace", "cursor"): _COUNT,
-        ("vehicle_trace", "limit"): _COUNT,
-        ("vehicle_trace", "sample_hz"): _COUNT,
-        ("vehicle_trace", "max_samples"): _COUNT,
         ("wait_for", "marker"): (
             "str | dict cursor; a bool is rejected, but the bare-str arm "
             "keeps this key coercible so a numeric branch cannot hide"
         ),
-        ("wait_for", "value"): (
-            "False becomes 0, a legal player-count bound; the bool check never runs"
-        ),
         ("wait_for", "pattern"): "free text substring",
-        ("wait_for", "poll_interval_s"): (
-            "False becomes 0.0 then the >0 bound rejects it"
-        ),
-        ("wait_for", "lookback_lines"): _COUNT,
         ("world_spawn", "type"): "free text classname",
-        ("world_spawn", "flags"): (
-            "defect: True becomes 1 and changes CreateObjectEx flags; inventoried until StrictInt"
-        ),
-        ("world_spawn", "rotation"): (
-            "defect: True becomes 1, an RF_* flag not an angle; inventoried until StrictInt"
-        ),
-        ("world_time_set", "year"): _COUNT,
-        ("world_time_set", "month"): _COUNT,
-        ("world_time_set", "day"): _COUNT,
-        ("world_time_set", "hour"): _COUNT,
-        ("world_time_set", "minute"): _COUNT,
-        ("world_time_set", "time_multiplier"): (
-            "defect: False becomes 0.0, which the range accepts and freezes the sim; "
-            "same float|None as the original budget. Inventoried until StrictFloat"
-        ),
-        ("world_weather_set", "overcast"): (
-            "defect: False becomes 0.0 and SETS overcast to clear; inventoried until StrictFloat"
-        ),
-        ("world_weather_set", "rain"): (
-            "defect: False becomes 0.0 and SETS rain to none; inventoried until StrictFloat"
-        ),
-        ("world_weather_set", "fog"): (
-            "defect: False becomes 0.0 and SETS fog to none; inventoried until StrictFloat"
-        ),
-        ("world_weather_set", "time"): (
-            "transition seconds; False becomes 0.0 (instant), which the field documents"
-        ),
-        ("world_weather_set", "min_duration"): (
-            "hold seconds; False becomes 0.0 (no hold), which the field documents"
-        ),
     }
 )
 
@@ -733,15 +556,11 @@ class RegistryCensusTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertTrue(str(comment).strip(), key)
 
-    def test_live_float_or_none_is_flagged(self) -> None:
-        """Same annotation the original budget had, still on the live surface."""
-        flagged = {
-            (item.tool, item.name)
-            for item in self.records
-            if item.coercible and item.annotation == "float | None"
-        }
-        self.assertIn(("world_time_set", "time_multiplier"), flagged)
-        self.assertIn(("object_anim", "phase"), flagged)
+    def test_repaired_numeric_family_is_not_flagged(self) -> None:
+        live = _coercible_keys(self.records)
+        for key in (("world_time_set", "time_multiplier"),
+                    ("object_anim", "phase"), ("dayz_test_run", "wait_for_box_s")):
+            self.assertNotIn(key, live)
 
     def test_repaired_budget_is_not_flagged(self) -> None:
         live = _coercible_keys(self.records)
@@ -783,7 +602,7 @@ class RegistryCensusTests(unittest.TestCase):
         live = _coercible_keys(self.records)
         self.assertIn(("exec_enforce", "expr"), live)
         self.assertIn(("exec_enforce", "main_fn"), live)
-        self.assertIn(("exec_enforce", "timeout_s"), live)
+        self.assertNotIn(("exec_enforce", "timeout_s"), live)
         default_names = {
             tool.name for tool in iter_registered_tools(self.app_default)
         }
@@ -877,85 +696,27 @@ class WireCoercionTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(calls, ["surface_query", "scene_raycast"])
 
-    async def test_time_multiplier_false_arrives_as_zero(self) -> None:
-        payload = {
-            "year": 2020,
-            "month": 1,
-            "day": 1,
-            "hour": 12,
-            "minute": 0,
-        }
-        arrived = await _arrived(
-            self.app,
-            "world_time_set",
-            {**payload, "time_multiplier": False},
+    async def test_numeric_family_rejects_bool_and_strings_on_wire(self) -> None:
+        cases = (
+            ("world_time_set", "time_multiplier", {"year": 2020, "month": 1,
+                "day": 1, "hour": 12, "minute": 0}),
+            ("dayz_test_run", "wait_for_box_s", {"project": "ExampleMod", "mode": "server"}),
+            ("object_anim", "phase", {"source": "x"}),
         )
-        self.assertEqual(arrived["time_multiplier"], 0.0)
-        arrived_str = await _arrived(
-            self.app,
-            "world_time_set",
-            {**payload, "time_multiplier": "5"},
-        )
-        self.assertEqual(arrived_str["time_multiplier"], 5.0)
-        arrived_zero = await _arrived(
-            self.app,
-            "world_time_set",
-            {**payload, "time_multiplier": 0},
-        )
-        self.assertEqual(arrived_zero["time_multiplier"], 0.0)
-
-        seen: list[dict[str, Any]] = []
-
-        async def spy(cmd: str, args: dict[str, Any], peer: str, timeout_s: float):
-            seen.append(args)
-            return {"ok": 1, "applied": dict(args)}
-
-        with patch.object(self.runtime, "call_bridge", spy):
-            await self.app.call_tool(
-                "world_time_set",
-                {**payload, "time_multiplier": False},
-            )
-        self.assertEqual(seen[0]["time_multiplier"], 0.0)
-
-    async def test_wait_for_box_s_false_arrives_as_zero(self) -> None:
-        arrived = await _arrived(
-            self.app,
-            "dayz_test_run",
-            {"project": "ExampleMod", "mode": "server", "wait_for_box_s": False},
-        )
-        self.assertEqual(arrived["wait_for_box_s"], 0.0)
-        arrived_str = await _arrived(
-            self.app,
-            "dayz_test_run",
-            {"project": "ExampleMod", "mode": "server", "wait_for_box_s": "5"},
-        )
-        self.assertEqual(arrived_str["wait_for_box_s"], 5.0)
-        arrived_zero = await _arrived(
-            self.app,
-            "dayz_test_run",
-            {"project": "ExampleMod", "mode": "server", "wait_for_box_s": 0},
-        )
-        self.assertEqual(arrived_zero["wait_for_box_s"], 0.0)
-
-    async def test_phase_float_or_none_coerces_like_the_original_budget(self) -> None:
-        arrived = await _arrived(
-            self.app, "object_anim", {"source": "x", "phase": False}
-        )
-        self.assertEqual(arrived["phase"], 0.0)
-        arrived_str = await _arrived(
-            self.app, "object_anim", {"source": "x", "phase": "5"}
-        )
-        self.assertEqual(arrived_str["phase"], 5.0)
-        arrived_zero = await _arrived(
-            self.app, "object_anim", {"source": "x", "phase": 0}
-        )
-        self.assertEqual(arrived_zero["phase"], 0.0)
+        for tool, param, base in cases:
+            for bad in (False, True, "5"):
+                with self.subTest(tool=tool, bad=bad), self.assertRaises(ToolError):
+                    await _arrived(self.app, tool, {**base, param: bad})
+            for good in (0, 0.5, 5):
+                with self.subTest(tool=tool, good=good):
+                    arrived = await _arrived(self.app, tool, {**base, param: good})
+                    self.assertEqual(arrived[param], good)
 
     async def test_timeout_false_fail_closes_instead_of_disabling_a_guard(self) -> None:
         """Neighbor of wait_for_box_s: same bare float, False does not sneak through."""
         with self.assertRaises(ToolError) as ctx:
             await self.app.call_tool("query_player_state", {"timeout_s": False})
-        self.assertIn("bad_timeout", str(ctx.exception))
+        self.assertIn("timeout_s", str(ctx.exception))
         with self.assertRaises(ToolError) as ctx_zero:
             await self.app.call_tool("query_player_state", {"timeout_s": 0})
         self.assertIn("bad_timeout", str(ctx_zero.exception))
