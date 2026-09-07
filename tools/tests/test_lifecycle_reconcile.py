@@ -6,10 +6,14 @@ import time
 import hashlib
 import json
 import unittest
+from email.message import EmailMessage
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.error import HTTPError
+
+from mcp.server.fastmcp.exceptions import ToolError
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
@@ -1571,6 +1575,7 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
         relaunch: bool = True,
         processes_override: object = _UNSET,
         client_start_budget_s: float | None = None,
+        bridge_error: BaseException | None = None,
     ):
         policy = _policy()
         before = _extension_status(
@@ -1596,7 +1601,13 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
             return before if len(seen) == 1 else after
 
         runtime.lifecycle_status = lifecycle_status  # type: ignore[method-assign]
-        if bridge is _RAISES:
+        if bridge_error is not None:
+            async def boom() -> dict[str, object]:
+                runtime.bridge_calls += 1
+                raise bridge_error
+
+            runtime.bridge_status_payload = boom  # type: ignore[method-assign]
+        elif bridge is _RAISES:
             runtime.bridge_raises = True
         else:
             runtime.bridge_payload = bridge
@@ -1735,6 +1746,85 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["client_replace_reason"], "bridge_status_unknown")
         self.assertEqual(result["client_terminated"], 0)
         self.assertIn("Retry", str(result["remediation"]))
+
+    async def test_an_unreadable_bridge_publishes_the_exception_kind(self) -> None:
+        """The mute except used to refuse without saying why the snapshot failed."""
+        result, sent = await self.run_extension(bridge_error=TimeoutError())
+
+        self.assertEqual(sent, [])
+        self.assertEqual(result["error_code"], "bridge_status_unknown")
+        self.assertEqual(result["client_replace_reason"], "bridge_status_unknown")
+        self.assertEqual(result["bridge_status_cause"], "TimeoutError")
+
+    async def test_distinct_unreadability_kinds_stay_distinct(self) -> None:
+        """A discriminator that is the same for every exception discriminates nothing."""
+        timeout, _ = await self.run_extension(bridge_error=TimeoutError())
+        http, _ = await self.run_extension(
+            bridge_error=HTTPError(
+                "http://127.0.0.1/status",
+                503,
+                "Unavailable",
+                EmailMessage(),
+                None,
+            )
+        )
+        refused, _ = await self.run_extension(
+            bridge_error=OSError(111, "Connection refused")
+        )
+
+        self.assertEqual(timeout["error_code"], "bridge_status_unknown")
+        self.assertEqual(http["error_code"], "bridge_status_unknown")
+        self.assertEqual(refused["error_code"], "bridge_status_unknown")
+        self.assertEqual(timeout["bridge_status_cause"], "TimeoutError")
+        self.assertEqual(http["bridge_status_cause"], "HTTPError:503")
+        self.assertEqual(refused["bridge_status_cause"], "OSError:111")
+        self.assertEqual(
+            len({
+                timeout["bridge_status_cause"],
+                http["bridge_status_cause"],
+                refused["bridge_status_cause"],
+            }),
+            3,
+        )
+
+    async def test_a_call_shaped_toolerror_keeps_its_token(self) -> None:
+        """ClientRuntime._call raises ToolError(token), not the OS exception.
+
+        The positives above inject HTTPError and TimeoutError by replacing
+        bridge_status_payload, so they never take the token branch. Deleting
+        `return f"{name}:{token}"` left those 3/3 green while the form _call
+        actually raises -- ToolError("daemon_unavailable") -- published as
+        "ToolError". That token is a communication failure, not a crash, and
+        it is not a retry signal: timeout and a refused connection collapse
+        onto it in _call.
+        """
+        result, sent = await self.run_extension(
+            bridge_error=ToolError("daemon_unavailable")
+        )
+
+        self.assertEqual(sent, [])
+        self.assertEqual(result["error_code"], "bridge_status_unknown")
+        self.assertEqual(result["client_replace_reason"], "bridge_status_unknown")
+        self.assertEqual(result["client_terminated"], 0)
+        self.assertEqual(
+            result["bridge_status_cause"], "ToolError:daemon_unavailable"
+        )
+
+    async def test_a_readable_bridge_does_not_publish_a_cause(self) -> None:
+        """A successful snapshot must keep today's shape: no sibling field at all."""
+        polling, sent_polling = await self.run_extension(
+            bridge={"client_peer": _POLLING_PEER}
+        )
+        self.assertEqual(sent_polling, [])
+        self.assertEqual(polling["error_code"], "client_already_polling")
+        self.assertNotIn("bridge_status_cause", polling)
+
+        unreadable, sent_unreadable = await self.run_extension(
+            bridge={"ready": {"ready": True, "reason": "ready"}}
+        )
+        self.assertEqual(sent_unreadable, [])
+        self.assertEqual(unreadable["error_code"], "bridge_status_unknown")
+        self.assertNotIn("bridge_status_cause", unreadable)
 
     async def test_a_snapshot_without_the_peer_row_also_refuses(self) -> None:
         result, sent = await self.run_extension(

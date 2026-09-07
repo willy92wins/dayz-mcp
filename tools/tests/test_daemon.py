@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -265,6 +266,33 @@ class DaemonEndpointTest(unittest.TestCase):
         self.assertEqual(
             body["server_peer"]["version_state"], "never_polled_this_generation"
         )
+
+    def test_status_http_payload_carries_unreadable_after_a_real_disappearance(self) -> None:
+        # F3: the provider already publishes unreadable; this walks the hop
+        # that lives next to the write-set -- loopback _handle_status JSON --
+        # without substituting that layer. A disappearance after the snapshot
+        # must still be named in the consumed /status body.
+        with TemporaryDirectory() as directory:
+            module = Path(directory) / "loopback.py"
+            module.write_bytes(b"# fixture\n")
+            with patch.object(
+                daemon,
+                "_loaded_module_files",
+                return_value={"loopback.py": str(module)},
+            ):
+                srv = self._daemon()
+                status, fresh = _http(srv.base, "GET", "/status", srv.key)
+                self.assertEqual(status, 200)
+                self.assertEqual(fresh["daemon_modules"]["unreadable"], [])
+                self.assertNotIn(
+                    "daemon_module_unreadable", fresh.get("warnings", [])
+                )
+                module.unlink()
+                status, gone = _http(srv.base, "GET", "/status", srv.key)
+        self.assertEqual(status, 200)
+        self.assertEqual(gone["daemon_modules"]["stale"], [])
+        self.assertEqual(gone["daemon_modules"]["unreadable"], ["loopback.py"])
+        self.assertIn("daemon_module_unreadable", gone["warnings"])
 
     def test_status_requires_key(self) -> None:
         srv = self._daemon()
@@ -1161,6 +1189,7 @@ class StatusProviderMarkerTest(unittest.TestCase):
                 provider = daemon.make_status_provider(_config(), state)
                 fresh = provider()
                 self.assertEqual(fresh["daemon_modules"]["stale"], [])
+                self.assertEqual(fresh["daemon_modules"]["unreadable"], [])
                 self.assertNotIn("daemon_module_stale", fresh.get("warnings", []))
                 self.assertIsNotNone(fresh["daemon_modules"]["daemon_started_at"])
 
@@ -1170,6 +1199,7 @@ class StatusProviderMarkerTest(unittest.TestCase):
                 os.utime(module, (stamp, stamp))
                 stale = provider()
                 self.assertEqual(stale["daemon_modules"]["stale"], ["loopback.py"])
+                self.assertEqual(stale["daemon_modules"]["unreadable"], [])
                 self.assertIn("daemon_module_stale", stale["warnings"])
                 self.assertEqual(stale["daemon_modules"]["watched_count"], 1)
 
@@ -1181,7 +1211,10 @@ class StatusProviderMarkerTest(unittest.TestCase):
                 )
 
     def test_missing_watched_module_is_not_reported_stale(self) -> None:
-        # Negative control: absent file must not masquerade as an edit.
+        # A path already absent at the snapshot is not an edit. It is also
+        # not "unchanged": the provider cannot confirm the in-memory copy,
+        # and cannot tell "never existed" from "imported, then gone before
+        # the snapshot". Fail-closed is unreadable, not a clean bill.
         state = self._inert_state()
         with TemporaryDirectory() as directory:
             with patch.object(
@@ -1191,7 +1224,9 @@ class StatusProviderMarkerTest(unittest.TestCase):
             ):
                 payload = daemon.make_status_provider(_config(), state)()
         self.assertEqual(payload["daemon_modules"]["stale"], [])
+        self.assertEqual(payload["daemon_modules"]["unreadable"], ["absent.py"])
         self.assertNotIn("daemon_module_stale", payload.get("warnings", []))
+        self.assertIn("daemon_module_unreadable", payload.get("warnings", []))
 
     def test_watch_set_is_this_process_import_closure(self) -> None:
         # H5 (Grok R21 of F2.3): a hand-written list both lied (naming modules
@@ -1271,7 +1306,7 @@ class StatusProviderMarkerTest(unittest.TestCase):
 
 
 class DaemonModuleStalenessTest(unittest.TestCase):
-    """Content, not mtime, decides daemon_modules.stale (fb-20260906-190446-3c65 §2)."""
+    """Content, not mtime, decides whether a watched daemon module is stale."""
 
     def _inert_state(self) -> SimpleNamespace:
         snapshot = {
@@ -1288,8 +1323,12 @@ class DaemonModuleStalenessTest(unittest.TestCase):
             status_snapshot=lambda: snapshot,
         )
 
+    def _provider(self):
+        return daemon.make_status_provider(_config(), self._inert_state())
+
     def test_a_module_rewritten_with_identical_bytes_is_not_stale(self) -> None:
-        state = self._inert_state()
+        # OneDrive / a same-bytes checkout rewrites the date and used to
+        # trip daemon_module_stale. The signal then trains agents to ignore it.
         with TemporaryDirectory() as directory:
             module = Path(directory) / "loopback.py"
             payload_bytes = b"# fixture\n"
@@ -1299,17 +1338,21 @@ class DaemonModuleStalenessTest(unittest.TestCase):
                 "_loaded_module_files",
                 return_value={"loopback.py": str(module)},
             ):
-                provider = daemon.make_status_provider(_config(), state)
-                self.assertEqual(provider()["daemon_modules"]["stale"], [])
+                provider = self._provider()
+                fresh = provider()
+                self.assertEqual(fresh["daemon_modules"]["stale"], [])
+                self.assertEqual(fresh["daemon_modules"]["unreadable"], [])
                 stamp = module.stat().st_mtime + 120.0
                 module.write_bytes(payload_bytes)
                 os.utime(module, (stamp, stamp))
                 rewritten = provider()
         self.assertEqual(rewritten["daemon_modules"]["stale"], [])
+        self.assertEqual(rewritten["daemon_modules"]["unreadable"], [])
         self.assertNotIn("daemon_module_stale", rewritten.get("warnings", []))
+        self.assertNotIn("daemon_module_unreadable", rewritten.get("warnings", []))
 
     def test_a_module_whose_bytes_really_changed_is_stale(self) -> None:
-        state = self._inert_state()
+        # Negative control: the filter must still fire on a real edit.
         with TemporaryDirectory() as directory:
             module = Path(directory) / "loopback.py"
             module.write_bytes(b"# fixture\n")
@@ -1318,17 +1361,68 @@ class DaemonModuleStalenessTest(unittest.TestCase):
                 "_loaded_module_files",
                 return_value={"loopback.py": str(module)},
             ):
-                provider = daemon.make_status_provider(_config(), state)
+                provider = self._provider()
                 self.assertEqual(provider()["daemon_modules"]["stale"], [])
                 module.write_bytes(b"# fixture\nchanged\n")
                 stamp = module.stat().st_mtime + 120.0
                 os.utime(module, (stamp, stamp))
                 changed = provider()
         self.assertEqual(changed["daemon_modules"]["stale"], ["loopback.py"])
+        self.assertEqual(changed["daemon_modules"]["unreadable"], [])
         self.assertIn("daemon_module_stale", changed["warnings"])
+        self.assertNotIn("daemon_module_unreadable", changed.get("warnings", []))
+
+    def test_a_real_edit_stays_stale_on_a_second_probe(self) -> None:
+        # Re-anchoring the cheap identity after a content change would make
+        # the warning last one probe and then look resolved.
+        with TemporaryDirectory() as directory:
+            module = Path(directory) / "loopback.py"
+            module.write_bytes(b"# fixture\n")
+            with patch.object(
+                daemon,
+                "_loaded_module_files",
+                return_value={"loopback.py": str(module)},
+            ):
+                provider = self._provider()
+                self.assertEqual(provider()["daemon_modules"]["stale"], [])
+                module.write_bytes(b"# fixture\nchanged\n")
+                stamp = module.stat().st_mtime + 120.0
+                os.utime(module, (stamp, stamp))
+                first = provider()
+                second = provider()
+        self.assertEqual(first["daemon_modules"]["stale"], ["loopback.py"])
+        self.assertEqual(second["daemon_modules"]["stale"], ["loopback.py"])
+        self.assertIn("daemon_module_stale", first["warnings"])
+        self.assertIn("daemon_module_stale", second["warnings"])
+
+    def test_reanchor_then_real_edit_stays_stale_on_two_probes(self) -> None:
+        # Same bytes + new date may re-anchor; a later real edit must still
+        # survive two probes.
+        with TemporaryDirectory() as directory:
+            module = Path(directory) / "loopback.py"
+            payload_bytes = b"# fixture\n"
+            module.write_bytes(payload_bytes)
+            with patch.object(
+                daemon,
+                "_loaded_module_files",
+                return_value={"loopback.py": str(module)},
+            ):
+                provider = self._provider()
+                stamp = module.stat().st_mtime + 120.0
+                module.write_bytes(payload_bytes)
+                os.utime(module, (stamp, stamp))
+                reanchored = provider()
+                self.assertEqual(reanchored["daemon_modules"]["stale"], [])
+                module.write_bytes(b"# fixture\nchanged\n")
+                stamp = module.stat().st_mtime + 120.0
+                os.utime(module, (stamp, stamp))
+                first = provider()
+                second = provider()
+        self.assertEqual(first["daemon_modules"]["stale"], ["loopback.py"])
+        self.assertEqual(second["daemon_modules"]["stale"], ["loopback.py"])
+        self.assertIn("daemon_module_stale", second["warnings"])
 
     def test_a_module_whose_date_did_not_move_is_not_re_read(self) -> None:
-        state = self._inert_state()
         with TemporaryDirectory() as directory:
             module = Path(directory) / "loopback.py"
             module.write_bytes(b"# fixture\n")
@@ -1344,13 +1438,204 @@ class DaemonModuleStalenessTest(unittest.TestCase):
                 "_loaded_module_files",
                 return_value={"loopback.py": str(module)},
             ), patch.object(daemon, "_module_hashes", side_effect=spy):
-                provider = daemon.make_status_provider(_config(), state)
+                provider = self._provider()
                 boot_batches = len(hashed)
                 provider()
                 later = hashed[boot_batches:]
         self.assertTrue(any("loopback.py" in batch for batch in hashed[:boot_batches]))
         for batch in later:
             self.assertNotIn("loopback.py", batch)
+
+    def test_identical_bytes_with_a_new_date_are_not_rehashed_on_later_probes(self) -> None:
+        # After the hash confirms the bytes, the new date is re-anchored.
+        # Without that, every later /status would re-read the same file.
+        with TemporaryDirectory() as directory:
+            module = Path(directory) / "loopback.py"
+            payload_bytes = b"# fixture\n"
+            module.write_bytes(payload_bytes)
+            hashed: list[tuple[str, ...]] = []
+            original = daemon._module_hashes
+
+            def spy(files: dict[str, str]) -> dict[str, str | None]:
+                hashed.append(tuple(sorted(files)))
+                return original(files)
+
+            with patch.object(
+                daemon,
+                "_loaded_module_files",
+                return_value={"loopback.py": str(module)},
+            ), patch.object(daemon, "_module_hashes", side_effect=spy):
+                provider = self._provider()
+                stamp = module.stat().st_mtime + 120.0
+                module.write_bytes(payload_bytes)
+                os.utime(module, (stamp, stamp))
+                after_rewrite = len(hashed)
+                first = provider()
+                hashed_on_first_probe = hashed[after_rewrite:]
+                second = provider()
+                hashed_on_second_probe = hashed[after_rewrite + len(hashed_on_first_probe):]
+        self.assertEqual(first["daemon_modules"]["stale"], [])
+        self.assertEqual(second["daemon_modules"]["stale"], [])
+        self.assertTrue(
+            any("loopback.py" in batch for batch in hashed_on_first_probe)
+        )
+        for batch in hashed_on_second_probe:
+            self.assertNotIn("loopback.py", batch)
+
+    def test_a_watched_module_that_disappears_is_not_reported_unchanged(self) -> None:
+        # The old mtime-is-not-None guard treated a vanished file as clean.
+        with TemporaryDirectory() as directory:
+            module = Path(directory) / "loopback.py"
+            module.write_bytes(b"# fixture\n")
+            with patch.object(
+                daemon,
+                "_loaded_module_files",
+                return_value={"loopback.py": str(module)},
+            ):
+                provider = self._provider()
+                self.assertEqual(provider()["daemon_modules"]["unreadable"], [])
+                module.unlink()
+                gone = provider()
+        self.assertEqual(gone["daemon_modules"]["stale"], [])
+        self.assertEqual(gone["daemon_modules"]["unreadable"], ["loopback.py"])
+        self.assertIn("daemon_module_unreadable", gone["warnings"])
+        self.assertNotIn("daemon_module_stale", gone.get("warnings", []))
+
+    def test_a_watched_module_that_cannot_be_read_is_not_reported_unchanged(self) -> None:
+        # stat can still succeed (new date) while the bytes cannot be read.
+        with TemporaryDirectory() as directory:
+            module = Path(directory) / "loopback.py"
+            module.write_bytes(b"# fixture\n")
+            with patch.object(
+                daemon,
+                "_loaded_module_files",
+                return_value={"loopback.py": str(module)},
+            ):
+                provider = self._provider()
+                self.assertEqual(provider()["daemon_modules"]["unreadable"], [])
+                module.unlink()
+                module.mkdir()
+                blocked = provider()
+        self.assertEqual(blocked["daemon_modules"]["stale"], [])
+        self.assertEqual(blocked["daemon_modules"]["unreadable"], ["loopback.py"])
+        self.assertIn("daemon_module_unreadable", blocked["warnings"])
+        self.assertNotIn("daemon_module_stale", blocked.get("warnings", []))
+
+    def test_unreadability_is_detected_when_mtime_is_preserved(self) -> None:
+        # F1-A: replace the file with a directory and keep the date. A
+        # trigger of mtime alone never hashes, so both lists stay empty.
+        with TemporaryDirectory() as directory:
+            module = Path(directory) / "loopback.py"
+            module.write_bytes(b"# fixture\n")
+            stamp = 1_700_000_000
+            os.utime(module, (stamp, stamp))
+            with patch.object(
+                daemon,
+                "_loaded_module_files",
+                return_value={"loopback.py": str(module)},
+            ):
+                provider = self._provider()
+                self.assertEqual(provider()["daemon_modules"]["unreadable"], [])
+                kept = module.stat().st_mtime
+                module.unlink()
+                module.mkdir()
+                os.utime(module, (kept, kept))
+                self.assertEqual(module.stat().st_mtime, kept)
+                blocked = provider()
+        self.assertEqual(blocked["daemon_modules"]["stale"], [])
+        self.assertEqual(blocked["daemon_modules"]["unreadable"], ["loopback.py"])
+        self.assertIn("daemon_module_unreadable", blocked["warnings"])
+        self.assertNotIn("daemon_module_stale", blocked.get("warnings", []))
+
+    def test_a_size_change_with_restored_mtime_is_not_silent(self) -> None:
+        with TemporaryDirectory() as directory:
+            module = Path(directory) / "loopback.py"
+            module.write_bytes(b"# fixture\n")
+            stamp = 1_700_000_000
+            os.utime(module, (stamp, stamp))
+            with patch.object(
+                daemon,
+                "_loaded_module_files",
+                return_value={"loopback.py": str(module)},
+            ):
+                provider = self._provider()
+                self.assertEqual(provider()["daemon_modules"]["stale"], [])
+                module.write_bytes(b"#")
+                os.utime(module, (stamp, stamp))
+                self.assertEqual(module.stat().st_mtime, stamp)
+                changed = provider()
+        self.assertEqual(changed["daemon_modules"]["stale"], ["loopback.py"])
+        self.assertEqual(changed["daemon_modules"]["unreadable"], [])
+        self.assertIn("daemon_module_stale", changed["warnings"])
+
+    def test_imported_module_deleted_before_snapshot_is_unreadable(self) -> None:
+        # F1-B: real import, then delete, then make_status_provider
+        # (daemon.py:1436-1442). The module stays loaded; two None hashes
+        # must not read as unchanged.
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "_l7_r2_imported_then_deleted.py"
+            path.write_text("VALUE = 1\n", encoding="utf-8")
+            name = "dayz_mcp._l7_r2_imported_then_deleted"
+            spec = importlib.util.spec_from_file_location(name, path)
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.loader)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+            try:
+                self.assertEqual(module.VALUE, 1)
+                path.unlink()
+                files = daemon._loaded_module_files()
+                self.assertIn("_l7_r2_imported_then_deleted.py", files)
+                payload = self._provider()()
+            finally:
+                sys.modules.pop(name, None)
+        self.assertEqual(module.VALUE, 1)
+        self.assertIn(
+            "_l7_r2_imported_then_deleted.py",
+            payload["daemon_modules"]["unreadable"],
+        )
+        self.assertNotIn(
+            "_l7_r2_imported_then_deleted.py",
+            payload["daemon_modules"]["stale"],
+        )
+        self.assertIn("daemon_module_unreadable", payload["warnings"])
+
+    def test_common_probe_stats_the_watch_set_and_does_not_read_it(self) -> None:
+        files = daemon._loaded_module_files()
+        hashed: list[tuple[str, ...]] = []
+        stated: list[int] = []
+        original_hashes = daemon._module_hashes
+        original_idents = daemon._module_idents
+
+        def spy_hashes(batch: dict[str, str]) -> dict[str, str | None]:
+            hashed.append(tuple(sorted(batch)))
+            return original_hashes(batch)
+
+        def spy_idents(
+            batch: dict[str, str],
+        ) -> dict[str, tuple[float, int, int] | None]:
+            stated.append(len(batch))
+            return original_idents(batch)
+
+        with patch.object(
+            daemon, "_module_hashes", side_effect=spy_hashes
+        ), patch.object(daemon, "_module_idents", side_effect=spy_idents):
+            provider = self._provider()
+            boot_hash_batches = list(hashed)
+            boot_stat_counts = list(stated)
+            hashed.clear()
+            stated.clear()
+            payload = provider()
+        self.assertGreaterEqual(len(files), 1)
+        self.assertTrue(
+            any(set(batch) == set(files) for batch in boot_hash_batches)
+        )
+        self.assertIn(len(files), boot_stat_counts)
+        self.assertEqual(hashed, [])
+        self.assertEqual(stated, [len(files)])
+        self.assertEqual(payload["daemon_modules"]["stale"], [])
+        self.assertEqual(payload["daemon_modules"]["unreadable"], [])
 
 
 class ConnectedSocketAuthenticationTest(unittest.TestCase):

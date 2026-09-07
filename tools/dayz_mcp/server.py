@@ -204,6 +204,22 @@ _REMOTE_ERROR_CODES = frozenset({
 _STALE_TICKET_ERRORS = frozenset({"ticket_expired", "ticket_invalid"})
 _STALE_LEASE_ERRORS = frozenset({"lease_expired", "lease_invalid"})
 _ENQUEUE_HINT_MAX_CHARS = 240
+# ready.reason tokens that are not /enqueue whitelist codes. Treating them as
+# unknown collapses the only identifier a caller can use to tell a loading
+# client from a real enqueue failure -- if that token actually travelled on
+# the enqueue payload. Global /status readiness is computed separately and
+# does not by itself prove a given /enqueue was refused with this code.
+_PUBLISHED_NOT_READY_CODES = frozenset(
+    reason
+    for reason in READY_REASONS
+    if reason != "ready" and reason not in _REMOTE_ERROR_CODES
+)
+_WAIT_FOR_RETRYABLE_NOT_READY = frozenset({
+    "game_not_ready:reason=server_poll_stale",
+    "game_not_ready:reason=client_not_polling",
+    "server_poll_stale",
+    "client_not_polling",
+})
 
 
 def _carriable_hint(payload: object) -> str | None:
@@ -384,11 +400,37 @@ _CONTROL_CLIENT_ERROR_CODES = frozenset({
 })
 
 
+def _published_not_ready_code(payload: object) -> str | None:
+    """Return a published ready.reason carried on an enqueue-shaped payload.
+
+    `_remote_error_code` only accepts `_REMOTE_ERROR_CODES`. These tokens live
+    on bridge_status.ready.reason instead, so a payload that names them as
+    `error` or `reason` used to become the bare token remote_error.
+
+    Conditional: this recovers the token only when the enqueue body itself
+    carries it. A status snapshot with ready.reason=client_not_polling does
+    not imply that a given /enqueue was refused with that code.
+    """
+    if not isinstance(payload, dict):
+        return None
+    candidates: list[object] = [payload.get("error"), payload.get("reason")]
+    ready = payload.get("ready")
+    if isinstance(ready, dict):
+        candidates.append(ready.get("reason"))
+    for value in candidates:
+        if isinstance(value, str) and value in _PUBLISHED_NOT_READY_CODES:
+            return value
+    return None
+
+
 def _remote_error_code(payload: object) -> str:
     if isinstance(payload, dict):
         error = payload.get("error")
         if isinstance(error, str) and error in _REMOTE_ERROR_CODES:
             return error
+        published = _published_not_ready_code(payload)
+        if published is not None:
+            return published
     return "remote_error"
 
 
@@ -761,7 +803,11 @@ def _public_enqueue_error(
 
     A known code with a valid hint travels as "<code>: <hint>"; a known code
     without a hint stays bare; an unknown code stays the bare token remote_error
-    even when a hint is present.
+    even when a hint is present. A published ready.reason that is not on the
+    enqueue whitelist travels as game_not_ready:reason=<token> so the caller
+    still sees client_not_polling (and the other startup reasons) instead of
+    a stripped remote_error -- when that token is on the enqueue payload,
+    not merely on a sibling /status snapshot.
     """
     code = _remote_error_code(payload)
     if code == "retail_quarantine":
@@ -788,6 +834,8 @@ def _public_enqueue_error(
         if isinstance(expected, str):
             return f"version_blocked:bridge {got!r} != {expected!r}"
         return "version_blocked"
+    if code in _PUBLISHED_NOT_READY_CODES:
+        return f"game_not_ready:reason={code}"
     hint = _carriable_hint(payload)
     if code != "remote_error" and hint is not None:
         return f"{code}: {hint}"
@@ -2677,9 +2725,13 @@ async def execute_wait_for(
                     )
                 except ToolError as exc:
                     message = str(exc)
-                    if message == "game_not_ready:reason=server_poll_stale":
+                    if message in _WAIT_FOR_RETRYABLE_NOT_READY:
                         not_ready_probes += 1
-                        last_error = message
+                        last_error = (
+                            message
+                            if message.startswith("game_not_ready:reason=")
+                            else f"game_not_ready:reason={message}"
+                        )
                         satisfied = False
                     elif message.startswith("timeout waiting for"):
                         suffix = ""
@@ -4948,10 +5000,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "On timeout still returns "
             "ok: true with satisfied: false -- gate on satisfied, not ok. "
             "timeout_s <= 600 (bad_args above; never clamped). "
-            "players_* waits through server startup: a probe answered "
-            "game_not_ready:reason=server_poll_stale is retried until "
+            "players_* waits through startup: a probe answered "
+            "game_not_ready:reason=server_poll_stale or "
+            "game_not_ready:reason=client_not_polling is retried until "
             "timeout_s (not_ready_probes, last_error in the response); any "
             "other not-ready reason aborts on the first probe. "
+            "client_not_polling is the normal client-load window after launch; "
+            "a dead client still stops at timeout_s with that last_error. "
             "A probe refused with run_not_owned (the run has no owner) aborts on "
             "the first probe with the daemon's hint: adopt the run first with "
             "session_acquire_wait, whose grant adopts the single ownerless "

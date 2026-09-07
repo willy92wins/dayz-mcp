@@ -620,14 +620,21 @@ def _loaded_module_files() -> dict[str, str]:
     return files
 
 
-def _module_mtimes(files: dict[str, str]) -> dict[str, float | None]:
-    mtimes: dict[str, float | None] = {}
-    for name, path in files.items():
-        try:
-            mtimes[name] = Path(path).stat().st_mtime
-        except OSError:
-            mtimes[name] = None
-    return mtimes
+# Cheap per-probe identity from one stat: (mtime, size, file_id). file_id is
+# st_ino (nFileIndex on Windows). None means the stat itself failed.
+_ModuleIdent = tuple[float, int, int] | None
+
+
+def _stat_identity(path: str) -> _ModuleIdent:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime, st.st_size, st.st_ino)
+
+
+def _module_idents(files: dict[str, str]) -> dict[str, _ModuleIdent]:
+    return {name: _stat_identity(path) for name, path in files.items()}
 
 
 def _module_hashes(files: dict[str, str]) -> dict[str, str | None]:
@@ -640,13 +647,63 @@ def _module_hashes(files: dict[str, str]) -> dict[str, str | None]:
     return digests
 
 
+def _stale_watched_modules(
+    watched_files: dict[str, str],
+    idents_at_start: dict[str, _ModuleIdent],
+    hashes_at_start: dict[str, str | None],
+) -> tuple[list[str], list[str]]:
+    """Content verdict for watched daemon modules.
+
+    The cheap per-probe trigger is one ``stat`` per file: the triple
+    ``(mtime, size, file_id)`` where ``file_id`` is ``st_ino`` (Windows
+    nFileIndex). Only paths whose triple moved since the last confirmed
+    snapshot are hashed. A new identity with the same bytes is not stale
+    -- and the triple is re-anchored so later probes do not re-read.
+
+    An initial snapshot that could not be hashed stays unreadable. Two
+    ``None`` digests are not "unchanged": the in-memory copy was never
+    confirmed against disk. "Never existed" and "imported, then gone
+    before the snapshot" are not distinguished; fail-closed is unreadable.
+
+    Known miss: a replacement that preserves mtime, size, AND file
+    identity (same ``st_ino``) is invisible until something in the triple
+    moves. An ACL deny on the same object is the same miss. We do not
+    re-read the watch set (~1.45 MiB) on every ``/status``.
+    """
+    idents_now = _module_idents(watched_files)
+    stale: list[str] = []
+    unreadable: list[str] = []
+    to_hash: dict[str, str] = {}
+    for name, path in watched_files.items():
+        if hashes_at_start.get(name) is None:
+            unreadable.append(name)
+            continue
+        if idents_now.get(name) != idents_at_start.get(name):
+            to_hash[name] = path
+    hashes_now = _module_hashes(to_hash) if to_hash else {}
+    for name, digest in hashes_now.items():
+        if digest is None:
+            unreadable.append(name)
+            continue
+        if digest != hashes_at_start.get(name):
+            stale.append(name)
+            continue
+        new_ident = idents_now.get(name)
+        if new_ident is not None:
+            idents_at_start[name] = new_ident
+    stale.sort()
+    unreadable.sort()
+    return stale, unreadable
+
+
 def make_status_provider(config: Any, state: ServerState) -> Callable[[], dict]:
     # Snapshot at construction (daemon boot). Comparing against the snapshot, not
     # against a wall-clock started_at, answers the exact question -- "did this
     # file change after I loaded it?" -- and survives clock adjustments.
+    # One stat per file is the cheap per-probe filter; the hash is the boot content.
     daemon_started_at = time.time()
     watched_files = _loaded_module_files()
-    mtimes_at_start = _module_mtimes(watched_files)
+    idents_at_start = _module_idents(watched_files)
     hashes_at_start = _module_hashes(watched_files)
 
     def status_provider() -> dict:
@@ -687,31 +744,23 @@ def make_status_provider(config: Any, state: ServerState) -> Callable[[], dict]:
                 payload["warnings"] = sorted(
                     set(payload.get("warnings", [])) | {"audit_row_dropped"}
                 )
-        mtimes_now = _module_mtimes(watched_files)
-        # Date is the filter, hash is the verdict. /status is the daemon
-        # liveness discriminator: re-reading every module on every call
-        # turns a local stat into a OneDrive content read. A same-mtime
-        # rewrite is accepted as not stale; a restored date after an
-        # edit is the case this filter knowingly misses.
-        to_hash = {
-            name: path
-            for name, path in watched_files.items()
-            if mtimes_now.get(name) != mtimes_at_start.get(name)
-        }
-        hashes_now = _module_hashes(to_hash)
-        stale = sorted(
-            name
-            for name, digest in hashes_now.items()
-            if digest is not None and digest != hashes_at_start.get(name)
+        stale, unreadable = _stale_watched_modules(
+            watched_files, idents_at_start, hashes_at_start
         )
         payload["daemon_modules"] = {
             "daemon_started_at": daemon_started_at,
             "watched_count": len(watched_files),
             "stale": stale,
+            "unreadable": unreadable,
         }
+        extra_warnings: set[str] = set()
         if stale:
+            extra_warnings.add("daemon_module_stale")
+        if unreadable:
+            extra_warnings.add("daemon_module_unreadable")
+        if extra_warnings:
             payload["warnings"] = sorted(
-                set(payload.get("warnings", [])) | {"daemon_module_stale"}
+                set(payload.get("warnings", [])) | extra_warnings
             )
         return payload
 

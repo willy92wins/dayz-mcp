@@ -397,9 +397,9 @@ def replace_dayz_test_v1(*, expected_sha256: str) -> str:
 
 def describe_registry_provenance(
     *,
-    registry_path: Path = _CANONICAL_REGISTRY,
-    lock_path: Path = _CANONICAL_LOCK,
-    receipts_path: Path = _CANONICAL_RECEIPTS,
+    registry_path: Path | None = None,
+    lock_path: Path | None = None,
+    receipts_path: Path | None = None,
 ) -> dict[str, object]:
     """Report whether the live registry bytes came from a RECORDED transition.
 
@@ -429,13 +429,28 @@ def describe_registry_provenance(
     - "pristine"   no transition was ever recorded here (e.g. a fresh clone).
     - "unanchored" content nobody recorded -- the bug.
     - "ambiguous"  several receipts claim it; rollback-last refuses this too.
+    - "stalled"    leftover orphaned prepared.json whose sha overlaps the live
+      file, but the live identity is already explained (a later committed or
+      rolled-back receipt, or a prepared that recovery would promote). The next
+      install/replace/rollback proceeds. recoverable is True.
+    - "blocked"    overlapping orphan AND nothing valid explains the live file.
+      The next transition dies with identity_drift. recoverable is False.
     """
+    if registry_path is None:
+        registry_path = _CANONICAL_REGISTRY
+    if lock_path is None:
+        lock_path = _CANONICAL_LOCK
+    if receipts_path is None:
+        receipts_path = _CANONICAL_RECEIPTS
     with acquire_registry_lock(exclusive=False, path=lock_path):
         current_raw, current_identity = _read_pinned(registry_path)
         current_sha = _sha256(current_raw)
         anchors = 0
         restored = 0
         transactions = 0
+        blocker = None
+        repair = None
+        recoverable = None
         if receipts_path.is_dir():
             transactions = len(list(receipts_path.glob("*/prepared.json")))
             for committed_path in sorted(receipts_path.glob("*/committed.json")):
@@ -454,7 +469,21 @@ def describe_registry_provenance(
                     # carry the `from_identity` the receipt recorded. Requiring it
                     # would report every correct rollback as a broken chain.
                     restored += 1
-    if anchors == 1:
+            blocker = _orphaned_prepared_identity_conflict(
+                receipts_path, current_sha, current_identity
+            )
+            explained = _receipt_explains_live(
+                receipts_path, current_sha, current_identity
+            )
+            if blocker is None:
+                repair = None
+                recoverable = None
+            else:
+                recoverable = explained
+                repair = _stalled_repair(blocker, recoverable)
+    if blocker is not None:
+        status = "stalled" if recoverable else "blocked"
+    elif anchors == 1:
         status = "anchored"
     elif anchors > 1:
         status = "ambiguous"
@@ -466,6 +495,9 @@ def describe_registry_provenance(
         status = "unanchored"
     return {
         "anchors": anchors,
+        "blocking_receipt": None if blocker is None else str(blocker),
+        "recoverable": recoverable,
+        "repair": repair,
         "restored_anchors": restored,
         "sha256": current_sha,
         "status": status,
@@ -498,6 +530,52 @@ def _load_committed(path: Path) -> dict[str, object]:
         or raw != _canonical(value)
     ):
         _invalid("invalid_launcher_registry_receipt")
+    prepared, prepared_raw = _load_prepared(path.parent / "prepared.json")
+    if (
+        _sha256(prepared_raw) != value["prepared_sha256"]
+        or any(
+            prepared[key] != value[key]
+            for key in (
+                "format_version",
+                "from_identity",
+                "from_sha256",
+                "to_identity",
+                "to_sha256",
+            )
+        )
+    ):
+        _invalid("invalid_launcher_registry_receipt")
+    return value
+
+
+def _load_rolled_back(path: Path) -> dict[str, object]:
+    try:
+        raw = _read_receipt(path)
+        value = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("invalid_launcher_registry_receipt") from error
+    if (
+        type(value) is not dict
+        or set(value) != {
+            "format_version",
+            "from_sha256",
+            "outcome",
+            "to_identity",
+            "to_sha256",
+        }
+        or value.get("format_version") != 1
+        or value.get("outcome") != "rolled_back"
+        or not _valid_sha(value.get("from_sha256"))
+        or not _valid_sha(value.get("to_sha256"))
+        or raw != _canonical(value)
+    ):
+        _invalid("invalid_launcher_registry_receipt")
+    committed = _load_committed(path.parent / "committed.json")
+    if (
+        value["from_sha256"] != committed["to_sha256"]
+        or value["to_sha256"] != committed["from_sha256"]
+    ):
+        _invalid("invalid_launcher_registry_receipt")
     return value
 
 
@@ -527,6 +605,86 @@ def _load_prepared(path: Path) -> tuple[dict[str, object], bytes]:
     return value, raw
 
 
+def _receipt_explains_live(
+    receipts_path: Path,
+    current_sha: str,
+    current_identity: dict[str, object],
+) -> bool:
+    if not receipts_path.is_dir():
+        return False
+    explained = False
+    for prepared_path in receipts_path.glob("*/prepared.json"):
+        if (prepared_path.parent / "committed.json").exists():
+            continue
+        prepared, _prepared_raw = _load_prepared(prepared_path)
+        if (
+            prepared["to_sha256"] == current_sha
+            and prepared["to_identity"] == current_identity
+        ):
+            explained = True
+    for committed_path in receipts_path.glob("*/committed.json"):
+        committed = _load_committed(committed_path)
+        rolled_back_path = committed_path.parent / "rolled-back.json"
+        if rolled_back_path.exists():
+            rolled_back = _load_rolled_back(rolled_back_path)
+            if (
+                rolled_back["to_sha256"] == current_sha
+                and rolled_back["to_identity"] == current_identity
+            ):
+                explained = True
+            continue
+        if (
+            committed["to_sha256"] == current_sha
+            and committed["to_identity"] == current_identity
+        ):
+            explained = True
+    return explained
+
+
+def _orphaned_prepared_identity_conflict(
+    receipts_path: Path,
+    current_sha: str,
+    current_identity: dict[str, object],
+) -> Path | None:
+    if not receipts_path.is_dir():
+        return None
+    for prepared_path in sorted(receipts_path.glob("*/prepared.json")):
+        if (prepared_path.parent / "committed.json").exists():
+            continue
+        prepared, _prepared_raw = _load_prepared(prepared_path)
+        if (
+            prepared["to_sha256"] == current_sha
+            and prepared["to_identity"] == current_identity
+        ):
+            continue
+        if (
+            prepared["from_sha256"] == current_sha
+            and prepared["from_identity"] == current_identity
+        ):
+            continue
+        if current_sha in {prepared["from_sha256"], prepared["to_sha256"]}:
+            return prepared_path
+    return None
+
+
+def _stalled_repair(blocker: Path, recoverable: bool) -> str:
+    if recoverable:
+        return (
+            f"{blocker} is an orphaned prepared.json whose to_identity never "
+            "landed (aborted before ReplaceFileW). A later committed or "
+            "rolled-back receipt, or a prepared that recovery would promote, "
+            "already explains the live file; the next install/replace/rollback "
+            "skips this receipt."
+        )
+    return (
+        f"{blocker} overlaps the live sha256 but the NTFS identity does not "
+        "match, and no committed, rolled-back, or promotable prepared receipt "
+        "explains the live file. The registry was rewritten outside a recorded "
+        "transition; restore the recorded bytes. Do not delete the receipt to "
+        "silence this."
+    )
+
+
 def _recover_prepared(
     receipts_path: Path,
     current_sha: str,
@@ -534,7 +692,8 @@ def _recover_prepared(
 ) -> None:
     if not receipts_path.is_dir():
         return
-    for prepared_path in receipts_path.glob("*/prepared.json"):
+    prepared_paths = list(receipts_path.glob("*/prepared.json"))
+    for prepared_path in prepared_paths:
         committed_path = prepared_path.parent / "committed.json"
         if committed_path.exists():
             continue
@@ -549,12 +708,24 @@ def _recover_prepared(
                 "prepared_sha256": _sha256(prepared_raw),
             }
             _write_create_only(committed_path, _receipt_bytes(committed))
-        elif (
+    for prepared_path in prepared_paths:
+        committed_path = prepared_path.parent / "committed.json"
+        if committed_path.exists():
+            continue
+        prepared, _prepared_raw = _load_prepared(prepared_path)
+        if (
             prepared["from_sha256"] == current_sha
             and prepared["from_identity"] == current_identity
         ):
             continue
-        elif current_sha in {prepared["from_sha256"], prepared["to_sha256"]}:
+        if current_sha in {prepared["from_sha256"], prepared["to_sha256"]}:
+            # Promote every matching prepared first. Only then is an overlapping
+            # orphan drift: skipped when a committed/rolled-back/promotable
+            # receipt already explains the live file, rejected otherwise.
+            if _receipt_explains_live(
+                receipts_path, current_sha, current_identity
+            ):
+                continue
             _invalid("launcher_registry_receipt_identity_drift")
 
 
@@ -569,23 +740,6 @@ def _rollback_transition(
         if receipts_path.is_dir():
             for committed_path in receipts_path.glob("*/committed.json"):
                 committed = _load_committed(committed_path)
-                prepared, prepared_raw = _load_prepared(
-                    committed_path.parent / "prepared.json"
-                )
-                if (
-                    _sha256(prepared_raw) != committed["prepared_sha256"]
-                    or any(
-                        prepared[key] != committed[key]
-                        for key in (
-                            "format_version",
-                            "from_identity",
-                            "from_sha256",
-                            "to_identity",
-                            "to_sha256",
-                        )
-                    )
-                ):
-                    _invalid("invalid_launcher_registry_receipt")
                 if (
                     committed["to_sha256"] == current_sha
                     and committed["to_identity"] == current_identity

@@ -881,6 +881,48 @@ def _peer_row_is_usable(peer: dict[str, object]) -> bool:
     )
 
 
+def _http_status_of(exc: BaseException) -> int | None:
+    for attr in ("status", "code"):
+        value = getattr(exc, attr, None)
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and 100 <= value <= 599
+        ):
+            return value
+    return None
+
+
+def _bridge_status_cause(exc: BaseException) -> str:
+    """Name the unreadability without a traceback.
+
+    The replacement gate has to tell a timeout from a 503 from a
+    communication failure (refused or reset). A refused connection does
+    not prove the daemon crashed: it proves the call did not complete.
+    Messages and tracebacks carry host paths; type, HTTP status and
+    errno do not. error_code stays the stable token so existing equality
+    checks keep matching. The published token is not a retry policy.
+    """
+    name = type(exc).__name__
+    http_status = _http_status_of(exc)
+    if http_status is not None:
+        return f"{name}:{http_status}"
+    transport = getattr(exc, "errno", None)
+    if not isinstance(transport, int) or isinstance(transport, bool):
+        transport = getattr(exc, "winerror", None)
+    if isinstance(transport, int) and not isinstance(transport, bool):
+        return f"{name}:{transport}"
+    token = str(exc).strip()
+    if (
+        3 <= len(token) <= 64
+        and token[0].isascii()
+        and token[0].isalpha()
+        and all(ch.isascii() and (ch.isalnum() or ch == "_") for ch in token)
+    ):
+        return f"{name}:{token}"
+    return name
+
+
 def _decide_client_replacement(
     record: ClientRecordProjection,
     bridge_status_payload: object,
@@ -1404,6 +1446,7 @@ async def execute_dayz_test_run(
                     return failed
             replacement: ClientReplacementDecision | None = None
             client_pids_before: tuple[int, ...] | None = None
+            bridge_cause: str | None = None
             if run_id is not None and not preflight:
                 extension_status = await runtime.lifecycle_status()
                 require_extension_run(extension_status, policy, run_id)
@@ -1427,11 +1470,15 @@ async def execute_dayz_test_run(
                     decided_at_ms = int(time.time() * 1000)
                     try:
                         bridge = await runtime.bridge_status_payload()
-                    except Exception:
+                    except Exception as exc:
                         # A snapshot we could not read is no answer. It used to
                         # mean "replace"; ronda 2 made it a refusal, because a
                         # transport hiccup is not evidence that a client is hung.
+                        # The cause is published next to the stable error_code
+                        # so a mute timeout can be told from a 503 without
+                        # composing the token that callers already match.
                         bridge = None
+                        bridge_cause = _bridge_status_cause(exc)
                     replacement = _decide_client_replacement(
                         record, bridge, budget_s=budget_s
                     )
@@ -1475,6 +1522,14 @@ async def execute_dayz_test_run(
                         )
                         if steam_remediation_report is not None:
                             refused.update(steam_remediation_report)
+                        # Sibling, not a composed error_code: the token stays
+                        # comparable. Absent when the snapshot was read, even
+                        # if the row itself was unusable.
+                        if (
+                            bridge_cause is not None
+                            and replacement.reason == _BRIDGE_STATUS_UNKNOWN
+                        ):
+                            refused["bridge_status_cause"] = bridge_cause
                         return refused
             if replacement is not None and replacement.replace:
                 # H-A2-2 / 79e2: the verdict reached here is two broker hops and

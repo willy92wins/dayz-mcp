@@ -1829,10 +1829,17 @@ class ProcessLifecycle:
         return None
 
     def _audit_storage_rotation(self, run_id: str, result: object) -> None:
-        """A rotation resets the world and the characters: it leaves a row."""
-        writer = self.audit
-        if not callable(writer):
-            return
+        """A rotation resets the world and the characters: it leaves a row.
+
+        Routed through `_audit` so this event shares the payload path of the
+        other lifecycle rows, and so a missing writer is counted instead of
+        returning silently. That is a form improvement, not an incident
+        explanation: the previous emitter already sent a non-empty reason
+        and duration_s 0.0, and already counted writer exceptions, so this
+        helper does not repair a validation that used to reject the row.
+        Observability still cannot block a launch the admissions already
+        allowed.
+        """
         reason = getattr(result, "reason", None)
         if not isinstance(reason, str) or not reason.strip():
             reason = "storage_rotated"
@@ -1840,27 +1847,23 @@ class ProcessLifecycle:
         if not isinstance(decision, str):
             decision = ""
         try:
-            written = writer(
-                {
-                    "event": "lifecycle_storage_rotated",
-                    "run_id": run_id,
-                    "reason": reason,
-                    "duration_s": 0.0,
-                    "decision": decision,
-                    "storage_backup": getattr(result, "storage_backup", None),
-                    "storage_marker_backup": getattr(
-                        result, "storage_marker_backup", None
-                    ),
-                    "storage_seal": getattr(result, "storage_seal", None),
-                    "notice": getattr(result, "storage_reset_notice", None),
-                }
+            written = self._audit(
+                "lifecycle_storage_rotated",
+                None,
+                reason,
+                decision,
+                run_id=run_id,
+                storage_backup=getattr(result, "storage_backup", None),
+                storage_marker_backup=getattr(
+                    result, "storage_marker_backup", None
+                ),
+                storage_seal=getattr(result, "storage_seal", None),
+                notice=getattr(result, "storage_reset_notice", None),
             )
         except Exception:
-            # Observability only: a row that cannot be written never blocks a
-            # launch the admissions already allowed.
             self._note_audit_row_dropped()
             return
-        if written is False:
+        if not written:
             self._note_audit_row_dropped()
 
     def _note_audit_row_dropped(self) -> None:

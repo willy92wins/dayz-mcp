@@ -70,15 +70,22 @@ def main() -> int:
     except BaseException as error:
         failures.append(f"provenance unreadable: {type(error).__name__}: {error}")
     else:
-        if provenance["status"] in {"unanchored", "ambiguous"}:
+        status = provenance["status"]
+        if status in {"unanchored", "ambiguous"}:
             failures.append(
-                f"receipt chain broken (status={provenance['status']}): the live "
+                f"receipt chain broken (status={status}): the live "
                 f"registry sha {provenance['sha256']} is claimed by "
                 f"{provenance['anchors']} committed receipts across "
                 f"{provenance['transactions']} recorded transitions. The file was "
                 f"written in place, outside install-dayz-test-v1 / rollback-last, "
                 f"so rollback-last will fail with "
                 f"launcher_registry_rollback_predecessor_unknown."
+            )
+        elif status == "blocked" or provenance.get("recoverable") is False:
+            failures.append(
+                f"receipt chain blocked (status={status}): "
+                f"{provenance.get('repair')}. rollback-last will fail with "
+                f"launcher_registry_receipt_identity_drift."
             )
 
     # Seals, closure and the reproducibility receipt of the bundle itself.

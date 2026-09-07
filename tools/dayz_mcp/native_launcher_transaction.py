@@ -135,12 +135,19 @@ _MOD_META_NAME = "meta.cpp"
 # key or as the prefix of 1828439124evil, and accredited a foreign directory.
 _MOD_PUBLISHED_ID_KEY = "publishedid"
 VPP_PREFLIGHT_FAILED = "vpp_preflight_failed"
+# The absolute Workshop path is the form this gate can always verify. Naming
+# @VPPAdminTools first taught callers to retry the relative form that a
+# multi-root policy just refused.
 VPP_PREFLIGHT_HINT = (
     "the requested admin tools are not usable: put the "
-    "installed mod in extra_mods as @VPPAdminTools, or as its absolute "
-    "Workshop path (the form this gate can always verify), and make sure the "
+    "installed mod in extra_mods as its absolute Workshop path "
+    "(the form this gate can always verify), or as @VPPAdminTools when a "
+    "single policy root can resolve that name, and make sure the "
     "server serverDZ.cfg carries a live vppDisablePassword = 1"
 )
+VPP_CANDIDATE_ROOT_CAP = 8
+VPP_CANDIDATES_TRUNCATED = "vpp_mod_root_candidates_truncated"
+VPP_CANDIDATES_UNKNOWN = "vpp_mod_root_candidates_unknown"
 VPP_ABSENT_HINT = (
     "no admin tools in the effective -mod= list: the server starts without "
     "them. To use VPP, add @VPPAdminTools (or its absolute Workshop path) to "
@@ -196,7 +203,14 @@ class HostVppFiles:
 
 @dataclass(frozen=True, slots=True)
 class VppPreflightResult:
-    """Closed, path-free verdict: tokens only, so it can cross the MCP wire."""
+    """Closed verdict the MCP tool copies onto the caller dict.
+
+    warnings stay tokens so a consumer can switch on them. missing
+    carries tokens and, in the ambiguous-root case, the concrete
+    root×name candidate paths. hint is prose. Those two fields are
+    what the tool copies onto vpp_missing and remediation. A path
+    that lives only on this dataclass never reaches the caller.
+    """
 
     error_code: str | None
     missing: tuple[str, ...]
@@ -418,6 +432,77 @@ def _resolved_mod_path(
     return ntpath.join(policy.mod_roots[0], entry)
 
 
+def _ambiguous_vpp_candidate_census(
+    requested: tuple[str, ...] | list[str],
+    policy: dayz_test_request.RequestProjectPolicy,
+) -> tuple[tuple[str, ...], bool] | None:
+    """The root×name paths this gate refuses to pick among, or None.
+
+    None is not an empty tuple: an empty tuple would claim the census ran
+    and found nothing. Relative names join to one path per declared root;
+    with no roots or no relative names there is nothing to join, and that
+    absence must be said rather than serialised as [].
+    """
+    relative = [entry for entry in requested if not ntpath.isabs(entry)]
+    roots = policy.mod_roots
+    if not relative or not roots:
+        return None
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for entry in relative:
+        for root in roots:
+            path = ntpath.normpath(ntpath.join(root, entry))
+            key = ntpath.normcase(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append(path)
+    if not ordered:
+        return None
+    truncated = len(ordered) > VPP_CANDIDATE_ROOT_CAP
+    return tuple(ordered[:VPP_CANDIDATE_ROOT_CAP]), truncated
+
+
+def _ambiguous_vpp_hint(census: tuple[tuple[str, ...], bool] | None) -> str:
+    """Remediation that names the candidates, or says they could not be named."""
+    if census is None:
+        detail = "candidate roots could not be enumerated"
+    else:
+        shown, truncated = census
+        listed = "; ".join(shown)
+        if truncated:
+            detail = (
+                f"candidate roots (truncated at {VPP_CANDIDATE_ROOT_CAP}): "
+                f"{listed}"
+            )
+        else:
+            detail = f"candidate roots: {listed}"
+    return f"{VPP_PREFLIGHT_HINT}. {detail}"
+
+
+def _record_ambiguous_vpp_roots(
+    missing: list[str],
+    requested: list[str],
+    policy: dayz_test_request.RequestProjectPolicy,
+) -> str:
+    """Append census tokens and paths to missing; return the hint that names them.
+
+    Paths go into missing because the tool copies that tuple onto
+    vpp_missing. They also go into the hint because the same tool copies
+    hint onto remediation. Both pipes are how the caller sees them.
+    """
+    missing.append("vpp_mod_root_ambiguous")
+    census = _ambiguous_vpp_candidate_census(requested, policy)
+    if census is None:
+        missing.append(VPP_CANDIDATES_UNKNOWN)
+    else:
+        shown, truncated = census
+        if truncated:
+            missing.append(VPP_CANDIDATES_TRUNCATED)
+        missing.extend(shown)
+    return _ambiguous_vpp_hint(census)
+
+
 def _proves_vpp_identity(path: str, files: object) -> bool | None:
     """True/False from the mod's own meta.cpp; None when it cannot be read.
 
@@ -458,6 +543,7 @@ def evaluate_vpp_preflight(
     host = HostVppFiles() if files is None else files
     missing: list[str] = []
     warnings: list[str] = []
+    hint = VPP_PREFLIGHT_HINT
 
     requested = [
         entry for entry in effective_mod_entries(payload) if _is_vpp_candidate(entry)
@@ -474,10 +560,11 @@ def evaluate_vpp_preflight(
     if not paths:
         # Every candidate is a relative name under a multi-root policy.
         # Nothing can be proven about a path the launch may not even use,
-        # and "unknown" is not "authorised": the hint names the form that
-        # always verifies, the absolute Workshop path the six live
-        # multi-root policies already use.
-        missing.append("vpp_mod_root_ambiguous")
+        # and "unknown" is not "authorised". The census names the concrete
+        # root×name paths so the caller does not have to hunt the disk;
+        # the hint leads with the absolute Workshop path, the form that
+        # always verifies.
+        hint = _record_ambiguous_vpp_roots(missing, requested, policy)
     else:
         proofs = [_proves_vpp_identity(path, host) for path in paths]
         if any(proof is True for proof in proofs):
@@ -514,7 +601,7 @@ def evaluate_vpp_preflight(
         error_code=VPP_PREFLIGHT_FAILED if missing else None,
         missing=tuple(missing),
         warnings=tuple(warnings),
-        hint=VPP_PREFLIGHT_HINT,
+        hint=hint,
     )
 
 
