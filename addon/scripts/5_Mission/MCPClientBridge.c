@@ -2607,6 +2607,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		if (job.phase == CAMERA_PHASE_SETTLE)
 		{
+			// Do not query global camera state after losing the scripted view.
+			// REPORT uses BuildCameraResult to return the named unavailable state.
+			if (CameraReadError() != "")
+			{
+				job.phase = CAMERA_PHASE_REPORT;
+				return true;
+			}
 			bool interpolationComplete = Camera.IsInterpolationComplete();
 			float elapsed = m_JobRunner.GetElapsedS() - job.sample_start_s;
 			if (interpolationComplete || elapsed >= job.sample_s_target)
@@ -3661,37 +3668,64 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return ticks * CAMERA_SETTLE_STEP_S;
 	}
 
+	// GetCurrentCamera crashes inside the native getter before it can return
+	// null (SUB_BRZ RPTs 2026-09-08, deployed BuildCameraResult:3664).
+	// A local player does not prove that the native scripted camera exists.
+	// Inspect only our retained instance; absence is not proof of player view.
+	protected string CameraReadError()
+	{
+		if (!IsClientInGame())
+		{
+			return "client_not_in_game";
+		}
+
+		PlayerBase cameraPlayer = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!cameraPlayer)
+		{
+			return "camera_unavailable_player";
+		}
+
+		// Vehicle view can override a scripted camera. Check parentage too:
+		// a missing client vehicle command is not evidence of being on foot.
+		if (cameraPlayer.GetCommand_Vehicle())
+		{
+			return "camera_unavailable_vehicle";
+		}
+		if (cameraPlayer.GetParent())
+		{
+			return "camera_unavailable_parented_player";
+		}
+
+		if (!m_ActiveCam)
+		{
+			return "camera_unavailable_no_scripted_camera";
+		}
+		if (!m_ActiveCam.IsActive())
+		{
+			return "camera_unavailable_inactive";
+		}
+
+		return "";
+	}
+
 	protected MCPCamera BuildCameraResult(string mode)
 	{
 		MCPCamera camera = new MCPCamera();
 		camera.applied_mode = mode;
 
-		// Defense in depth for the Dispatch readiness gate: the native
-		// camera getters deref an unbuilt world camera before the client is
-		// in-game and crash. Reached via the camera_set job report too, which
-		// does not re-enter Dispatch. pos/matrix/dir stay empty (ctor-initialized).
-		if (!IsClientInGame())
+		// Shared by camera_get and the camera_set report (outside Dispatch).
+		// Rejected snapshots keep pos/matrix/dir empty (ctor-initialized).
+		string cameraError = CameraReadError();
+		if (cameraError != "")
 		{
 			camera.ok = false;
 			camera.viewport_moved = false;
-			camera.error = "client_not_in_game";
+			camera.error = cameraError;
 			return camera;
 		}
 
 		camera.ok = true;
-
-		Camera current = Camera.GetCurrentCamera();
-		if (!current)
-		{
-			camera.viewport_moved = false;
-			camera.error = "player_camera_active";
-			VectorToArray(GetGame().GetCurrentCameraPosition(), camera.pos);
-			VectorToArray(GetGame().GetCurrentCameraDirection(), camera.dir);
-			camera.fov = Camera.GetCurrentFOV();
-			camera.interpolation_complete = Camera.IsInterpolationComplete();
-			return camera;
-		}
-
+		Camera current = m_ActiveCam;
 		vector matrix[4];
 		current.GetTransform(matrix);
 		MatrixToArray(matrix, camera.matrix);
