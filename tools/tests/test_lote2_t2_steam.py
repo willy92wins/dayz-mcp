@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch, AsyncMock
 from types import SimpleNamespace
 from dayz_mcp import steam_preflight as sp
-from tools.tests.test_steam_preflight import _MutableSteamProvider, _FakeRemediationHost
+from tests.test_steam_preflight import _MutableSteamProvider, _FakeRemediationHost
 
 
 class SteamWaitT2Tests(unittest.TestCase):
@@ -77,7 +77,7 @@ class SteamWaitT2Tests(unittest.TestCase):
 
 class SteamEnvelopeT2Tests(unittest.IsolatedAsyncioTestCase):
     async def test_timeout_reason_and_false_are_exposed_without_launch(self):
-        from tools.tests import test_dayz_test_tool as fixtures
+        from tests import test_dayz_test_tool as fixtures
         tool = fixtures.dayz_test_tool
         stale = sp.SteamSessionResult(sp.STEAM_SESSION_STALE, 41, (41,), sp.REMEDIATION)
         failed = SimpleNamespace(error_code=sp.STEAM_SESSION_STALE,
