@@ -171,6 +171,51 @@ class BridgeGuardsTest(unittest.TestCase):
         context = _body(shutdown, 'if (m_Ctx)')
         self.assertIn('m_Ctx.reset();', _body(context, 'if (!postedTerminal)'))
 
+    def test_g6_client_admission_counts_inflight_and_jobs_not_just_the_queue(self) -> None:
+        source = _source('MCPClientBridge.c')
+        cap = _constant(source, 'MAX_CALLBACK_REFS')
+        batch = _constant(source, 'MAX_POLL_RESULTS')
+        self.assertEqual((cap, batch), (128, 20))
+        # The reservation is derived, not chosen: it is what a single poll can accept
+        # before QueuePendingOrFail starts refusing.
+        self.assertEqual(batch, _constant(source, 'MAX_DISPATCH_PER_TICK') + _constant(source, 'MAX_PENDING'),
+                         'reservation must track what one poll admits')
+        self.assertIn('client_bridge_queue_full',
+                      _body(source, 'protected void QueuePendingOrFail(MCPCommand command)'))
+
+        poll = _body(source, 'protected void StartPoll()')
+        expression = 'OutstandingWork() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS'
+        guard = 'if (' + expression + ')'
+        self.assertIn(guard, poll)
+        self.assertEqual(_body(poll, guard).strip(), 'return;')
+        self.assertLess(poll.index(guard), poll.index('m_PollInFlight = true;'))
+        self.assertNotIn('Log(', _body(poll, guard))
+
+        # All three terms counted, each behind its own null check.
+        outstanding = _body(source, 'protected int OutstandingWork()')
+        for term in ('m_CallbackRefs.Count()', 'm_Pending.Count()', 'm_JobRunner.Count()'):
+            self.assertIn(term, outstanding)
+            holder = term.split('.')[0]
+            self.assertLess(outstanding.index('if (' + holder + ')'), outstanding.index(term))
+
+        # Holding admission must not deadlock: OnTick advances jobs and drains pending
+        # above the poll decision, so the count can still fall while polling is held.
+        tick = _body(source, 'void OnTick(float timeslice)')
+        self.assertLess(tick.index('m_JobRunner.Tick(timeslice, this);'), tick.index('StartPoll();'))
+        self.assertLess(tick.index('DrainPending();'), tick.index('StartPoll();'))
+
+        # Evaluate the verified source condition against the capacity invariant.
+        translated = expression.replace('OutstandingWork()', 'callbacks + pending + jobs')
+        for callbacks, pending, jobs in itertools.product((0, 1, 32, 107, 108, 109, 127), repeat=3):
+            blocked = eval(translated, {'__builtins__': {}},
+                           dict(callbacks=callbacks, pending=pending, jobs=jobs,
+                                MAX_CALLBACK_REFS=cap, MAX_POLL_RESULTS=batch))
+            total = callbacks + pending + jobs
+            self.assertEqual(blocked, total > 108)
+            if not blocked:
+                self.assertLessEqual(total + batch, cap,
+                                     'every command one poll admits can still finish at once')
+
     def test_existing_callbacks_release_on_success_error_and_timeout(self) -> None:
         callbacks = (SCRIPTS / 'MCPCallbacks.c').read_text(encoding='utf-8-sig')
         for kind in ('MCPPollCallback', 'MCPResultCallback'):

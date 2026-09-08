@@ -142,6 +142,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const int MAX_DISPATCH_PER_TICK = 4;
 	protected const int MAX_PENDING = 16;
 	protected const int PENDING_POLL_THRESHOLD = 8;
+	protected const int MAX_CALLBACK_REFS = 128;
+	// One poll accepts at most MAX_DISPATCH_PER_TICK dispatched plus MAX_PENDING
+	// queued; QueuePendingOrFail refuses the rest. Reserve exactly that much.
+	protected const int MAX_POLL_RESULTS = 20;
 	protected const float CAMERA_JOB_TIMEOUT_S = 5.0;
 	protected const float CAMERA_SETTLE_STEP_S = 0.05;
 	protected const int CAMERA_DEFAULT_SETTLE_TICKS = 3;
@@ -420,9 +424,39 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		Log("client init pending: " + reason);
 	}
 
+	// Accepted work that still owes a result: POSTs in flight, queued commands and
+	// running jobs. The client counted only the queue; the server counts all three.
+	protected int OutstandingWork()
+	{
+		int total = 0;
+		if (m_CallbackRefs)
+		{
+			total = total + m_CallbackRefs.Count();
+		}
+
+		if (m_Pending)
+		{
+			total = total + m_Pending.Count();
+		}
+
+		if (m_JobRunner)
+		{
+			total = total + m_JobRunner.Count();
+		}
+
+		return total;
+	}
+
 	protected void StartPoll()
 	{
 		if (!m_PollCtx)
+		{
+			return;
+		}
+
+		// Pause admission only. OnTick ticks jobs and drains pending above the poll
+		// decision, so the count keeps falling while polling is held.
+		if (OutstandingWork() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS)
 		{
 			return;
 		}
