@@ -63,12 +63,24 @@ class MCPResultCallback : RestCallback
 		m_Bridge = bridge;
 	}
 
+	void AttachBridge(MCPBridge bridge)
+	{
+		m_Bridge = bridge;
+	}
+
+	void DetachBridge()
+	{
+		m_Bridge = null;
+	}
+
 	override void OnSuccess(string data, int dataSize)
 	{
 		if (m_Bridge)
 		{
 			m_Bridge.ReleaseCallback(this);
 			m_Bridge.OnResultSuccess(data, dataSize);
+			m_Bridge.RecycleResultCallback(this);
+			DetachBridge();
 		}
 	}
 
@@ -78,6 +90,8 @@ class MCPResultCallback : RestCallback
 		{
 			m_Bridge.ReleaseCallback(this);
 			m_Bridge.OnResultError(errorCode);
+			// OnError may repeat (restapi.c:53): never reuse this identity.
+			DetachBridge();
 		}
 	}
 
@@ -87,6 +101,7 @@ class MCPResultCallback : RestCallback
 		{
 			m_Bridge.ReleaseCallback(this);
 			m_Bridge.OnResultTimeout();
+			DetachBridge();
 		}
 	}
 };

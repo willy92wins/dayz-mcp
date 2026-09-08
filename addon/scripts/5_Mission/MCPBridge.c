@@ -57,6 +57,7 @@ class MCPBridge : Managed
 	protected bool m_ResultDropLogged;
 	protected ref array<ref RestCallback> m_CallbackRefs;
 	protected ref MCPPollCallback m_PollCallback;
+	protected ref array<ref MCPResultCallback> m_ResultCallbackPool;
 	protected ref array<Man> m_Players;
 	protected ref array<ref MCPCommand> m_Pending;
 	protected ref map<int, ref MCPJob> m_Jobs;
@@ -82,6 +83,7 @@ class MCPBridge : Managed
 		m_InitFailureLogged = false;
 		m_ResultDropLogged = false;
 		m_CallbackRefs = new array<ref RestCallback>();
+		m_ResultCallbackPool = new array<ref MCPResultCallback>();
 		m_Players = new array<Man>();
 		m_Pending = new array<ref MCPCommand>();
 		m_Jobs = new map<int, ref MCPJob>();
@@ -3483,7 +3485,7 @@ class MCPBridge : Managed
 			return;
 		}
 
-		MCPResultCallback cb = new MCPResultCallback(this);
+		MCPResultCallback cb = AcquireResultCallback();
 		m_CallbackRefs.Insert(cb);
 		string resultRequest = "result?key=" + m_Key;
 		if (m_PeerInstance != "")
@@ -3494,6 +3496,34 @@ class MCPBridge : Managed
 		string okStr = "0";
 		if (result.ok) { okStr = "1"; }
 		Log("result posted id=" + result.id + " ok=" + okStr + " sent_tick=" + result.tick_poll_sent + " callback_tick=" + result.tick_poll_callback + " dispatch_tick=" + result.tick_dispatch);
+	}
+
+	// Only successful requests enter this free-list. Each in-flight POST owns
+	// a distinct callback in m_CallbackRefs; pool entries are not admission debt.
+	// Existing StartPoll reservation bounds active + idle callbacks to 128.
+	protected MCPResultCallback AcquireResultCallback()
+	{
+		MCPResultCallback cb;
+		int last = m_ResultCallbackPool.Count() - 1;
+		if (last >= 0)
+		{
+			cb = m_ResultCallbackPool.Get(last);
+			m_ResultCallbackPool.Remove(last);
+			cb.AttachBridge(this);
+		}
+		else
+		{
+			cb = new MCPResultCallback(this);
+		}
+		return cb;
+	}
+
+	void RecycleResultCallback(MCPResultCallback cb)
+	{
+		if (m_ResultCallbackPool && m_ResultCallbackPool.Count() < MAX_CALLBACK_REFS)
+		{
+			m_ResultCallbackPool.Insert(cb);
+		}
 	}
 
 	void OnResultSuccess(string data, int dataSize)
@@ -3533,6 +3563,25 @@ class MCPBridge : Managed
 			m_PollCallback.DetachBridge();
 		}
 		m_PollCallback = null;
+
+		// A reset may complete outstanding POSTs. Retire their identities first.
+		int callbackIndex = 0;
+		MCPResultCallback resultCb;
+		while (m_CallbackRefs && callbackIndex < m_CallbackRefs.Count())
+		{
+			resultCb = MCPResultCallback.Cast(m_CallbackRefs.Get(callbackIndex));
+			if (resultCb)
+			{
+				resultCb.DetachBridge();
+			}
+			callbackIndex = callbackIndex + 1;
+		}
+		// Idle callbacks already detached in OnSuccess.
+		if (m_ResultCallbackPool)
+		{
+			m_ResultCallbackPool.Clear();
+		}
+		m_ResultCallbackPool = null;
 
 		if (m_Ctx)
 		{
