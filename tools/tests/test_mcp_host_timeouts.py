@@ -728,9 +728,10 @@ class DaemonProvenanceConfigTest(unittest.TestCase):
         final_path.assert_not_called()
         close.assert_called_once_with(fake_handle)
 
-    def test_final_pinned_revalidation_rejects_byte_drift(self) -> None:
+    def test_final_pinned_revalidation_accepts_byte_drift_with_same_registration(self) -> None:
         self._write_claude()
         self._write_codex()
+        expected = self._resolve()
         original = host_config._PinnedConfigFile.read
         reads: dict[str, int] = {}
 
@@ -745,10 +746,38 @@ class DaemonProvenanceConfigTest(unittest.TestCase):
         with mock.patch.object(
             host_config._PinnedConfigFile, "read", autospec=True,
             side_effect=drift_on_second_read,
-        ), self.assertRaisesRegex(
-            host_config.HostConfigError, "^daemon_provenance_conflict$"
         ):
-            self._resolve()
+            self.assertEqual(self._resolve(), expected)
+        # Initial read, reread of the pinned handle, and read through the reopen.
+        self.assertEqual(reads[str(self.codex_path)], 3)
+
+    def test_final_pinned_revalidation_rejects_byte_drift_with_changed_registration(self) -> None:
+        self._write_claude()
+        self._write_codex()
+        original = host_config._PinnedConfigFile.read
+        for path in (self.claude_path, self.codex_path):
+            for first_changed_read in (2, 3):
+                with self.subTest(path=path.name, first_changed_read=first_changed_read):
+                    reads: dict[str, int] = {}
+
+                    def drift_on_final_read(handle):
+                        value = original(handle)
+                        key = str(handle.path)
+                        reads[key] = reads.get(key, 0) + 1
+                        if handle.path == path and reads[key] >= first_changed_read:
+                            # Valid syntax and schema, but a different daemon policy.
+                            self.assertEqual(value.count(b'"12.5"'), 1)
+                            return value.replace(b'"12.5"', b'"13.0"', 1)
+                        return value
+
+                    with mock.patch.object(
+                        host_config._PinnedConfigFile, "read", autospec=True,
+                        side_effect=drift_on_final_read,
+                    ), self.assertRaisesRegex(
+                        host_config.HostConfigError, "^daemon_provenance_conflict$"
+                    ):
+                        self._resolve()
+                    self.assertEqual(reads[str(path)], first_changed_read)
 
     @unittest.skipUnless(os.name == "nt", "Windows no-reparse semantics required")
     def test_config_reparse_points_are_rejected(self) -> None:

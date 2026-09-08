@@ -27,14 +27,40 @@ class ControlClientError(RuntimeError):
         request_stage: str,
         http_bytes_sent: int,
         hint: str | None = None,
+        policy_cause: str | None = None,
     ) -> None:
         self.code = code
         self.request_stage = request_stage
         self.http_bytes_sent = http_bytes_sent
         self.hint = hint if isinstance(hint, str) and hint else None
+        # Separate metadata: callers must not parse or compose the stable code.
+        self.policy_cause = policy_cause
         super().__init__(
             code if self.hint is None else f"{code}: {self.hint}"
         )
+
+
+def _policy_revalidation_cause(exc: Exception) -> str:
+    """Safe discriminator, following dayz_test_tool._bridge_status_cause.
+
+    Never publish exception messages/tracebacks containing host paths. A cause
+    describes the rejected observation; it does not authorize a retry or bypass.
+    """
+    name = type(exc).__name__
+    transport_error = getattr(exc, "errno", None)
+    if not isinstance(transport_error, int) or isinstance(transport_error, bool):
+        transport_error = getattr(exc, "winerror", None)
+    if isinstance(transport_error, int) and not isinstance(transport_error, bool):
+        return f"{name}:{transport_error}"
+    token = str(exc).strip()
+    if (
+        3 <= len(token) <= 64
+        and token[0].isascii()
+        and token[0].isalpha()
+        and all(ch.isascii() and (ch.isalnum() or ch == "_") for ch in token)
+    ):
+        return f"{name}:{token}"
+    return name
 
 
 @dataclass(frozen=True)
@@ -147,11 +173,17 @@ class ControlClient:
     ) -> dict[str, object]:
         try:
             self.policy.revalidate()
-        except Exception:
+        except Exception as exc:
             raise ControlClientError(
                 "client_policy_untrusted_open_new_session",
                 request_stage="pre_request",
                 http_bytes_sent=0,
+                policy_cause=_policy_revalidation_cause(exc),
+                hint=(
+                    "Report this policy rejection to the host/operator for "
+                    "registration verification and MCP-client reconnection after repair. "
+                    "This client cannot open a new host session."
+                ),
             ) from None
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         deadline = _monotonic() + timeout_s

@@ -29,7 +29,10 @@ _FaultInjector = Callable[[str], None]
 
 
 class HostConfigError(RuntimeError):
-    pass
+    def __init__(self, code: str, *, winerror: int | None = None) -> None:
+        super().__init__(code)
+        # Preserve numeric I/O diagnostics without exposing paths or messages.
+        self.winerror = winerror
 
 
 class HostConfigCrash(BaseException):
@@ -335,16 +338,15 @@ def resolve_daemon_provenance(
         "codex": codex_path or (Path.home() / ".codex" / "config.toml"),
     }
     with _open_pinned_configs(paths) as handles:
-        snapshots: dict[str, tuple[tuple[object, ...], bytes] | None] = {}
+        identities: dict[str, tuple[object, ...]] = {}
         registrations: dict[str, _ClientRegistration | None] = {}
         for platform in ("claude", "codex"):
             handle = handles[platform]
             if handle is None:
-                snapshots[platform] = None
                 registrations[platform] = None
                 continue
             raw = handle.read()
-            snapshots[platform] = (handle.identity(), raw)
+            identities[platform] = handle.identity()
             registrations[platform] = _registration_from_raw(raw, platform=platform)
 
         present = sum(registration is not None for registration in registrations.values())
@@ -385,22 +387,30 @@ def resolve_daemon_provenance(
         )
         for platform in ("claude", "codex"):
             handle = handles[platform]
-            snapshot = snapshots[platform]
             if handle is None:
                 if os.path.lexists(paths[platform]):
                     raise HostConfigError("daemon_provenance_conflict")
                 continue
-            if snapshot is None:
-                raise HostConfigError("daemon_provenance_conflict")
-            identity, raw = snapshot
-            if handle.identity() != identity or handle.read() != raw:
+            # Compare content through the same strict registration parser.
+            # Within this resolution, the path must still name the pinned file;
+            # replacement between resolutions is allowed with the same registration.
+            identity = identities[platform]
+            if (
+                handle.identity() != identity
+                or _registration_from_raw(handle.read(), platform=platform)
+                != registrations[platform]
+            ):
                 raise HostConfigError("daemon_provenance_conflict")
             try:
                 reopened = _PinnedConfigFile(handle.path)
             except _PinnedConfigMissing:
                 raise HostConfigError("daemon_provenance_conflict") from None
             try:
-                if reopened.identity() != identity or reopened.read() != raw:
+                if (
+                    reopened.identity() != identity
+                    or _registration_from_raw(reopened.read(), platform=platform)
+                    != registrations[platform]
+                ):
                     raise HostConfigError("daemon_provenance_conflict")
             finally:
                 reopened.close()
@@ -710,7 +720,7 @@ class _PinnedConfigFile:
                 error = ctypes.get_last_error()
                 if error in {2, 3}:
                     raise _PinnedConfigMissing()
-                raise HostConfigError("daemon_provenance_conflict")
+                raise HostConfigError("daemon_provenance_conflict", winerror=error)
             self.handle = handle
             try:
                 attributes = _FILE_ATTRIBUTE_TAG_INFO()
@@ -763,7 +773,9 @@ class _PinnedConfigFile:
                     return b"".join(chunks)
                 chunks.append(chunk)
         if not _kernel32.SetFilePointerEx(self.handle, 0, None, _FILE_BEGIN):
-            raise HostConfigError("daemon_provenance_conflict")
+            raise HostConfigError(
+                "daemon_provenance_conflict", winerror=ctypes.get_last_error()
+            )
         chunks = []
         while True:
             buffer = ctypes.create_string_buffer(64 * 1024)
@@ -771,7 +783,9 @@ class _PinnedConfigFile:
             if not _kernel32.ReadFile(
                 self.handle, buffer, len(buffer), ctypes.byref(received), None
             ):
-                raise HostConfigError("daemon_provenance_conflict")
+                raise HostConfigError(
+                    "daemon_provenance_conflict", winerror=ctypes.get_last_error()
+                )
             if received.value == 0:
                 return b"".join(chunks)
             chunks.append(buffer.raw[: received.value])
