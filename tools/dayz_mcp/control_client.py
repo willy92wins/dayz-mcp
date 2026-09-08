@@ -174,12 +174,15 @@ class ControlClient:
         try:
             self.policy.revalidate()
         except Exception as exc:
+            policy_cause = _policy_revalidation_cause(exc)
             raise ControlClientError(
                 "client_policy_untrusted_open_new_session",
                 request_stage="pre_request",
                 http_bytes_sent=0,
-                policy_cause=_policy_revalidation_cause(exc),
+                policy_cause=policy_cause,
                 hint=(
+                    # The MCP adapter publishes code/hint, not exception metadata.
+                    f"policy_cause={policy_cause}. "
                     "Report this policy rejection to the host/operator for "
                     "registration verification and MCP-client reconnection after repair. "
                     "This client cannot open a new host session."
