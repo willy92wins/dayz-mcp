@@ -3,6 +3,9 @@ class MCPBridge
 	protected const int MAX_DISPATCH_PER_TICK = 4;
 	protected const int MAX_PENDING = 32;
 	protected const int PENDING_POLL_THRESHOLD = 8;
+	protected const int MAX_CALLBACK_REFS = 128;
+	// Reserve the existing daemon ingress cap (loopback.py MAX_QUEUE) per poll.
+	protected const int MAX_POLL_RESULTS = 64;
 	protected const float JOB_TIMEOUT_S = 5.0;
 	protected const float DRIVE_PROBE_TIMEOUT_S = 12.0;
 	protected const float DRIVE_PROBE_PREP_TIMEOUT_S = 5.0;
@@ -51,6 +54,7 @@ class MCPBridge
 	protected bool m_PollInFlight;
 	protected bool m_Configured;
 	protected bool m_InitFailureLogged;
+	protected bool m_ResultDropLogged;
 	protected ref array<ref RestCallback> m_CallbackRefs;
 	protected ref array<Man> m_Players;
 	protected ref array<ref MCPCommand> m_Pending;
@@ -75,6 +79,7 @@ class MCPBridge
 		m_PollInFlight = false;
 		m_Configured = false;
 		m_InitFailureLogged = false;
+		m_ResultDropLogged = false;
 		m_CallbackRefs = new array<ref RestCallback>();
 		m_Players = new array<Man>();
 		m_Pending = new array<ref MCPCommand>();
@@ -195,6 +200,10 @@ class MCPBridge
 		if (cfg.pollHz > 0.0)
 		{
 			m_PollHz = cfg.pollHz;
+			if (m_PollHz > 60.0)
+			{
+				m_PollHz = 60.0;
+			}
 		}
 
 		m_Ctx = api.GetRestContext(m_Url);
@@ -224,6 +233,13 @@ class MCPBridge
 
 	protected void StartPoll()
 	{
+		// Count accepted work too: jobs/pending each still owe one result.
+		// Pause admission only; draining and terminal POSTs must keep running.
+		if (m_CallbackRefs.Count() + m_Pending.Count() + m_Jobs.Count() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS)
+		{
+			return;
+		}
+
 		m_Accum = 0.0;
 		m_PollInFlight = true;
 		m_TickPollSent = m_Tick;
@@ -3435,6 +3451,11 @@ class MCPBridge
 	{
 		if (!m_Configured || !m_Ctx)
 		{
+			if (!m_ResultDropLogged)
+			{
+				m_ResultDropLogged = true;
+				Log("result dropped transport unavailable id=" + result.id);
+			}
 			return;
 		}
 

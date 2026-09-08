@@ -189,6 +189,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected float m_PollInFlightS;
 	protected bool m_Configured;
 	protected bool m_InitFailureLogged;
+	protected bool m_Shutdown;
 	protected bool m_ControlsSuppressed;
 	protected bool m_PlayerSimulationDisabled;
 	protected bool m_ActiveCamOwned;
@@ -222,6 +223,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_PollInFlightS = 0.0;
 		m_Configured = false;
 		m_InitFailureLogged = false;
+		m_Shutdown = false;
 		m_ControlsSuppressed = false;
 		m_PlayerSimulationDisabled = false;
 		m_ActiveCamOwned = false;
@@ -371,6 +373,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (cfg.pollHz > 0.0)
 		{
 			m_PollHz = cfg.pollHz;
+			if (m_PollHz > 60.0)
+			{
+				m_PollHz = 60.0;
+			}
 		}
 
 		m_Ctx = api.GetRestContext(m_Url);
@@ -3908,6 +3914,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	protected void RestoreGameplay()
 	{
+		// Destructor cleanup can outlive CGame, whose destructor nulls g_Game.
+		if (!GetGame())
+		{
+			return;
+		}
+
 		PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
 		if (player && m_PlayerSimulationDisabled)
 		{
@@ -4058,13 +4070,20 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	void Shutdown()
 	{
 		bool postedTerminal = false;
+		// ShutdownInstance calls here, then releasing m_Instance runs our destructor.
+		if (m_Shutdown)
+		{
+			return;
+		}
+		m_Shutdown = true;
 		if (m_Dialog && m_Dialog.IsOpen())
 		{
 			m_Dialog.FinishDisconnected();
 		}
 
-		// Shutdown is only reached from ~MissionGameplay / ~MCPClientBridge, so
-		// no later OnTick exists on this mission. reset() clears pending REST
+		// MissionGameplay.c only shuts down from its destructor; OnMissionStart /
+		// OnUpdate own the ticks. Our destructor may call Shutdown again (guard above).
+		// Keep m_Configured until the first terminal POST. reset() clears pending REST
 		// requests (restapi.c:130-133). After a terminal dialog POST, skip it
 		// and keep callback refs: RestApi is process-scoped and can finish the
 		// already-pushed request. A delayed reset() is unsafe because
