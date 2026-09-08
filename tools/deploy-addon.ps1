@@ -1,9 +1,10 @@
 # Sync the addon source tree into the mod folder the game filepatches from.
 #
-# DayZ reads loose scripts from P:\<PBOPREFIX>\ when -filePatching is on, which is
-# ..\DayZ_MCP\ -- a different tree from the one edited here. Nothing kept the two in
-# step, so an in-game test could run sources days older than the working tree without
-# saying so. This copies source -> deploy and reports what moved.
+# This tree is the INPUT to AddonBuilder, not what the engine executes. Despite
+# -filePatching on the command line, the engine loads the packed
+# !Workshop\@DayZ_MCP\Addons\DayZ_MCP.pbo, so a deploy alone changes nothing in game.
+# Run tools\pack-addon.ps1 after this or the next test measures the previous build.
+# This copies source -> deploy and reports what moved.
 #
 # Only files present in the source are written. Everything else in the destination is
 # left alone: CLAUDE.md and the .bak_* copies of earlier manual deploys live there and
@@ -105,5 +106,5 @@ foreach ($e in $work) {
 }
 
 if ($failed -gt 0) { Fail "$failed file(s) did not verify after copy." }
-Info "Deployed $($work.Count) file(s). Relaunch the game to load them; -filePatching reads them at mission start."
+Info "Deployed $($work.Count) file(s). NOT live yet: run tools\pack-addon.ps1 -- the engine loads the PBO, not this tree."
 exit 0
