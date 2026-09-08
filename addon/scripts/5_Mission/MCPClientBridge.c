@@ -200,6 +200,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool m_Configured;
 	protected bool m_InitFailureLogged;
 	protected bool m_Shutdown;
+	protected bool m_ShutdownReentryLogged;
+	protected bool m_RestoreNoGameLogged;
 	protected bool m_ControlsSuppressed;
 	protected bool m_PlayerSimulationDisabled;
 	protected bool m_ActiveCamOwned;
@@ -234,6 +236,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_Configured = false;
 		m_InitFailureLogged = false;
 		m_Shutdown = false;
+		m_ShutdownReentryLogged = false;
+		m_RestoreNoGameLogged = false;
 		m_ControlsSuppressed = false;
 		m_PlayerSimulationDisabled = false;
 		m_ActiveCamOwned = false;
@@ -3962,8 +3966,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected void RestoreGameplay()
 	{
 		// Destructor cleanup can outlive CGame, whose destructor nulls g_Game.
+		// Latched: this method has eight call sites and must not log per call.
+		// Log reaches only Print, which needs no CGame, so the line survives the
+		// teardown it reports.
 		if (!GetGame())
 		{
+			if (!m_RestoreNoGameLogged)
+			{
+				m_RestoreNoGameLogged = true;
+				Log("restore skipped: no game");
+			}
 			return;
 		}
 
@@ -4118,11 +4130,19 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	{
 		bool postedTerminal = false;
 		// ShutdownInstance calls here, then releasing m_Instance runs our destructor.
+		// The two lines are the only in-engine evidence this guard fired: the first
+		// entry alone means no re-entry happened, both mean the second was refused.
 		if (m_Shutdown)
 		{
+			if (!m_ShutdownReentryLogged)
+			{
+				m_ShutdownReentryLogged = true;
+				Log("shutdown re-entered");
+			}
 			return;
 		}
 		m_Shutdown = true;
+		Log("shutdown first entry");
 		if (m_Dialog && m_Dialog.IsOpen())
 		{
 			m_Dialog.FinishDisconnected();
