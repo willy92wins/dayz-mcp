@@ -1,10 +1,16 @@
 class MCPPollCallback : RestCallback
 {
-	protected ref MCPBridge m_Bridge;
+	// The mission singleton owns the Managed bridge; this is a weak soft link.
+	protected MCPBridge m_Bridge;
 
 	void MCPPollCallback(MCPBridge bridge)
 	{
 		m_Bridge = bridge;
+	}
+
+	void DetachBridge()
+	{
+		m_Bridge = null;
 	}
 
 	override void OnSuccess(string data, int dataSize)
@@ -12,6 +18,10 @@ class MCPPollCallback : RestCallback
 		if (m_Bridge)
 		{
 			m_Bridge.ReleaseCallback(this);
+			if (!m_Bridge.IsActivePollCallback(this))
+			{
+				return;
+			}
 			m_Bridge.OnPollSuccess(data, dataSize);
 		}
 	}
@@ -21,6 +31,10 @@ class MCPPollCallback : RestCallback
 		if (m_Bridge)
 		{
 			m_Bridge.ReleaseCallback(this);
+			if (!m_Bridge.IsActivePollCallback(this))
+			{
+				return;
+			}
 			m_Bridge.OnPollError(errorCode);
 		}
 	}
@@ -30,6 +44,10 @@ class MCPPollCallback : RestCallback
 		if (m_Bridge)
 		{
 			m_Bridge.ReleaseCallback(this);
+			if (!m_Bridge.IsActivePollCallback(this))
+			{
+				return;
+			}
 			m_Bridge.OnPollTimeout();
 		}
 	}
@@ -37,7 +55,8 @@ class MCPPollCallback : RestCallback
 
 class MCPResultCallback : RestCallback
 {
-	protected ref MCPBridge m_Bridge;
+	// The mission singleton owns the Managed bridge; this is a weak soft link.
+	protected MCPBridge m_Bridge;
 
 	void MCPResultCallback(MCPBridge bridge)
 	{

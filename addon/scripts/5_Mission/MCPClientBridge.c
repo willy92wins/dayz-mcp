@@ -1,5 +1,6 @@
 class MCPClientPollCallback : RestCallback
 {
+	// MCPJobRunnerOwner is not Managed: detach explicitly; a raw link can dangle.
 	protected ref MCPClientBridge m_Bridge;
 
 	void MCPClientPollCallback(MCPClientBridge bridge)
@@ -19,6 +20,7 @@ class MCPClientPollCallback : RestCallback
 			m_Bridge.ReleaseCallback(this);
 			if (!m_Bridge.IsActivePollCallback(this))
 			{
+				DetachBridge();
 				return;
 			}
 			m_Bridge.OnPollSuccess(data, dataSize);
@@ -32,9 +34,11 @@ class MCPClientPollCallback : RestCallback
 			m_Bridge.ReleaseCallback(this);
 			if (!m_Bridge.IsActivePollCallback(this))
 			{
+				DetachBridge();
 				return;
 			}
 			m_Bridge.OnPollError(errorCode);
+			DetachBridge();
 		}
 	}
 
@@ -45,15 +49,18 @@ class MCPClientPollCallback : RestCallback
 			m_Bridge.ReleaseCallback(this);
 			if (!m_Bridge.IsActivePollCallback(this))
 			{
+				DetachBridge();
 				return;
 			}
 			m_Bridge.OnPollTimeout();
+			DetachBridge();
 		}
 	}
 };
 
 class MCPClientResultCallback : RestCallback
 {
+	// MCPJobRunnerOwner is not Managed: detach explicitly; a raw link can dangle.
 	protected ref MCPClientBridge m_Bridge;
 
 	void MCPClientResultCallback(MCPClientBridge bridge)
@@ -72,6 +79,7 @@ class MCPClientResultCallback : RestCallback
 		{
 			m_Bridge.ReleaseCallback(this);
 			m_Bridge.OnResultSuccess(data, dataSize);
+			DetachBridge();
 		}
 	}
 
@@ -81,6 +89,7 @@ class MCPClientResultCallback : RestCallback
 		{
 			m_Bridge.ReleaseCallback(this);
 			m_Bridge.OnResultError(errorCode);
+			DetachBridge();
 		}
 	}
 
@@ -90,6 +99,7 @@ class MCPClientResultCallback : RestCallback
 		{
 			m_Bridge.ReleaseCallback(this);
 			m_Bridge.OnResultTimeout();
+			DetachBridge();
 		}
 	}
 };
@@ -546,11 +556,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	void OnPollError(int errorCode)
 	{
+		// OnError may repeat (restapi.c:53); retire this request identity.
+		m_PollCallback = null;
 		OnPollFail("error=" + errorCode);
 	}
 
 	void OnPollTimeout()
 	{
+		m_PollCallback = null;
 		OnPollFail("timeout");
 	}
 
@@ -4118,6 +4131,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPCarDrive.Clear();
 		RestoreGameplay();
 		ReleaseCamera();
+
+		// A completed cached callback is absent from m_PollCallbackRefs.
+		if (m_PollCallback)
+		{
+			m_PollCallback.DetachBridge();
+		}
 
 		// Break the callback->bridge->callback-array ref cycle before
 		// contexts are dropped. Shared context plus a posted terminal

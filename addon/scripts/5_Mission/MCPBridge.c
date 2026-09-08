@@ -1,4 +1,4 @@
-class MCPBridge
+class MCPBridge : Managed
 {
 	protected const int MAX_DISPATCH_PER_TICK = 4;
 	protected const int MAX_PENDING = 32;
@@ -56,6 +56,7 @@ class MCPBridge
 	protected bool m_InitFailureLogged;
 	protected bool m_ResultDropLogged;
 	protected ref array<ref RestCallback> m_CallbackRefs;
+	protected ref MCPPollCallback m_PollCallback;
 	protected ref array<Man> m_Players;
 	protected ref array<ref MCPCommand> m_Pending;
 	protected ref map<int, ref MCPJob> m_Jobs;
@@ -244,7 +245,13 @@ class MCPBridge
 		m_PollInFlight = true;
 		m_TickPollSent = m_Tick;
 
-		MCPPollCallback cb = new MCPPollCallback(this);
+		// Reuse across completed polls, as the client does. A native-retained
+		// RestCallback must not turn every successful poll into another object.
+		if (!m_PollCallback)
+		{
+			m_PollCallback = new MCPPollCallback(this);
+		}
+		MCPPollCallback cb = m_PollCallback;
 		m_CallbackRefs.Insert(cb);
 		string request = "poll?key=" + m_Key;
 		request = request + "&ver=" + GetPollVersion();
@@ -357,13 +364,21 @@ class MCPBridge
 		m_Pending.Insert(command);
 	}
 
+	bool IsActivePollCallback(MCPPollCallback cb)
+	{
+		return cb == m_PollCallback;
+	}
+
 	void OnPollError(int errorCode)
 	{
+		// OnError may repeat (restapi.c:53); retire this request identity.
+		m_PollCallback = null;
 		OnPollFail("error=" + errorCode);
 	}
 
 	void OnPollTimeout()
 	{
+		m_PollCallback = null;
 		OnPollFail("timeout");
 	}
 
@@ -3512,6 +3527,13 @@ class MCPBridge
 
 	void Shutdown()
 	{
+		// A completed cached callback is no longer in m_CallbackRefs.
+		if (m_PollCallback)
+		{
+			m_PollCallback.DetachBridge();
+		}
+		m_PollCallback = null;
+
 		if (m_Ctx)
 		{
 			m_Ctx.reset();
