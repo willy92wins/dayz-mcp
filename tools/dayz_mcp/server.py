@@ -780,7 +780,12 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # _bridge_error_detail; every other verb keeps the bare code.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
-    error = ToolError(f"{code}; {detail}" if detail else code)
+    if code == "binding_retired":
+        # The daemon also retires already queued commands. Carry the same
+        # bounded hint through /await as through a refused /enqueue.
+        error = ToolError(_public_enqueue_error(result))
+    else:
+        error = ToolError(f"{code}; {detail}" if detail else code)
     object_id = result.get("object_id")
     if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
         error.object_id = object_id
@@ -2734,11 +2739,20 @@ async def execute_wait_for(
                         )
                         satisfied = False
                     elif message.startswith("timeout waiting for"):
+                        # An accepted probe has its own (normally 15s) budget.
+                        # Keep its abort semantics, but do not claim the whole
+                        # wait expired when the caller still had time left.
+                        now = time.monotonic()
+                        outcome = "timed out" if now >= deadline else "aborted"
                         suffix = ""
                         if "; " in message:
-                            suffix = "; " + message.split("; ", 1)[1]
+                            # /status is peer-wide, not tied to this command or
+                            # the caller's adopted run; old polls may survive.
+                            suffix = "; station snapshot: " + message.split("; ", 1)[1]
                         raise ToolError(
-                            f"wait_for timed out waiting for {condition}{suffix}"
+                            f"wait_for {outcome} waiting for {condition}; "
+                            f"reason=probe_timeout; elapsed_s={now - started:.3f}; "
+                            f"timeout_s={timeout_s:g}; probe_timeout_s={probe_timeout:g}{suffix}"
                         ) from None
                     elif message.startswith("version_blocked") or message.startswith(
                         "game_not_ready"

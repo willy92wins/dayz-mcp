@@ -59,9 +59,9 @@ FENCE_HINTS: dict[str, str] = {
         "Wait for bridge_status.ready; do not enqueue yet."
     ),
     "binding_retired": (
-        "Target instance was retired (stop, reap, or role replace). Relaunch "
-        "that role via dayz_test_run so start_run mints a new instance. "
-        "Resending this command will keep failing until the new instance is BOUND."
+        "Target instance was retired; its cause is unavailable. Inspect "
+        "lifecycle_status and bridge_status to distinguish a stopped run "
+        "from a replacement before relaunching."
     ),
     "instance_peer_collision": (
         "Two live instances are bound for this peer. Stop the extra DayZDiag; "
@@ -154,9 +154,33 @@ def instance_prefix(instance: str | None) -> str | None:
     return parsed.hex[:8]
 
 
-def fence_error(code: str) -> tuple[int, dict[str, object]]:
+# These are retirement causes, not additional wire error codes or ready enums.
+_RETIREMENT_HINTS = {
+    "reaped": (
+        "retirement_reason=reaped; reason=all_processes_gone_or_foreign: "
+        "The target run has no live owned process. Relaunch via dayz_test_run; "
+        "rebinding cannot restore processes that are gone or foreign."
+    ),
+    "replace-role": (
+        "retirement_reason=replace-role: Target role was retired for replacement. "
+        "Wait for the replacement instance to become BOUND, then retry. "
+        "If none appears, inspect lifecycle_status for a launch failure."
+    ),
+    "stopped": (
+        "retirement_reason=stopped: Target instance was retired by the stop "
+        "path. Check lifecycle_status for stop completion before relaunching "
+        "via dayz_test_run."
+    ),
+}
+
+
+def fence_error(
+    code: str, *, retirement_reason: str | None = None
+) -> tuple[int, dict[str, object]]:
     payload: dict[str, object] = {"error": code}
     hint = FENCE_HINTS.get(code)
+    if code == "binding_retired":
+        hint = _RETIREMENT_HINTS.get(retirement_reason, hint)
     if hint is not None:
         payload["hint"] = hint
     return 409, payload
