@@ -43,9 +43,10 @@ _TERMINAL_KEYS = frozenset(
 
 
 class DayzTestToolError(RuntimeError):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, cause: str | None = None) -> None:
         super().__init__(code)
         self.code = code
+        self.cause = cause
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,8 +318,12 @@ def require_extension_run(
     run_id: str,
 ) -> dict[str, object]:
     run = _exact_run(status, run_id)
-    if run.get("state") != "RUNNING_IDLE":
-        _fail("run_not_extensible")
+    state = run.get("state")
+    if state != "RUNNING_IDLE":
+        raise DayzTestToolError(
+            "run_not_extensible",
+            cause=state if isinstance(state, str) and state else "unknown",
+        )
     if run.get("mod") != "@" + selected_policy.mod:
         _fail("run_project_mismatch")
     return run
@@ -1320,6 +1325,14 @@ async def execute_dayz_test_run(
     auto_remediate_steam: bool = False,
     client_start_budget_s: float | None = None,
 ) -> dict[str, object]:
+    """Run or preflight a request, with explicit omissions in this adapter.
+
+    Every preflight envelope includes preflight_skipped_checks, even when empty.
+    It lists checks disabled specifically by preflight: steam_session,
+    extension_run (run state/project), and client_replacement (live client/bridge).
+    It is not a list of later checks unreached after an earlier refusal, nor a
+    guarantee that build, process launch or readiness will succeed.
+    """
     started_at = time.monotonic()
     if progress_cb is not None:
         await progress_cb("validating", None)
@@ -1329,6 +1342,14 @@ async def execute_dayz_test_run(
     # touched: a budget the caller got wrong must cost them an error message,
     # not a launched client that then gets refused.
     budget_s = _client_start_budget_s(client_start_budget_s)
+    preflight_skipped_checks: list[str] = []
+    if preflight:
+        if _mode_starts_client(mode):
+            preflight_skipped_checks.append("steam_session")
+        if run_id is not None:
+            preflight_skipped_checks.append("extension_run")
+            if _mode_starts_client(mode):
+                preflight_skipped_checks.append("client_replacement")
     await _require_idle_session(runtime, tool="dayz_test_run")
     with open_approved_launcher("dayz-test-v1") as opened:
         opened.validate_native_pe()
@@ -1359,16 +1380,16 @@ async def execute_dayz_test_run(
             # The admin-tools gate runs before the host gate below: it is a
             # property of the request just composed, and a refusal here has
             # consulted neither Steam nor the lifecycle. A request that asks
-            # for no admin tools passes it with a warning. It applies to
-            # preflight:true too -- dayz_test_worker.py:547-550 states the rule
-            # this route must keep: a preflight fails exactly where a real
-            # launch would. native_launcher_transaction enforces the same
+            # for no admin tools passes it with a warning. Like the worker's
+            # mission-resolution gate, this request gate applies to preflight
+            # too. Host admission checks omitted by preflight are reported
+            # separately. native_launcher_transaction enforces the same admin
             # decision below; this call only names it for the caller.
             vpp = preflight_vpp_request(
                 raw_request, sealed_policies=bundle.sealed_policies
             )
             if vpp.error_code is not None:
-                return _compact_result(
+                refused = _compact_result(
                     terminal=WorkerTerminal(
                         cleanup_degraded=False,
                         error_code=vpp.error_code,
@@ -1385,6 +1406,9 @@ async def execute_dayz_test_run(
                     vpp_missing=list(vpp.missing),
                     vpp_warnings=list(vpp.warnings),
                 )
+                if preflight:
+                    refused["preflight_skipped_checks"] = preflight_skipped_checks
+                return refused
             steam_remediation_report: dict[str, object] | None = None
             if not preflight and _mode_starts_client(mode):
                 try:
@@ -1454,7 +1478,33 @@ async def execute_dayz_test_run(
             bridge_cause: str | None = None
             if run_id is not None and not preflight:
                 extension_status = await runtime.lifecycle_status()
-                require_extension_run(extension_status, policy, run_id)
+                try:
+                    require_extension_run(extension_status, policy, run_id)
+                except DayzTestToolError as exc:
+                    if exc.code != "run_not_extensible":
+                        raise
+                    # The server serializes only .code on exceptions. Publish the
+                    # known state in an envelope so it survives that boundary.
+                    refused = _compact_result(
+                        terminal=WorkerTerminal(
+                            cleanup_degraded=False,
+                            error_code=exc.code,
+                            exit_code=1,
+                            ok=False,
+                            run_id=run_id,
+                        ),
+                        project=policy.mod,
+                        mode=mode,
+                        started_at=started_at,
+                        artifacts_paths=[],
+                        phase="validating",
+                        vpp_missing=list(vpp.missing),
+                        vpp_warnings=list(vpp.warnings),
+                    )
+                    refused["run_not_extensible_cause"] = exc.cause
+                    if steam_remediation_report is not None:
+                        refused.update(steam_remediation_report)
+                    return refused
                 if _mode_starts_client(mode):
                     # Relaunching this role supersedes the client already on the
                     # run (the role replacement inside start_run). The caller
@@ -1565,6 +1615,8 @@ async def execute_dayz_test_run(
             )
             if steam_remediation_report is not None:
                 result.update(steam_remediation_report)
+            if preflight:
+                result["preflight_skipped_checks"] = preflight_skipped_checks
             return result
 
 
