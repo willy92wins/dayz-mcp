@@ -115,7 +115,7 @@ def launch_daemon(port, idle_timeout, errlog: Path):
     ]
     flags = 0
     if sys.platform == "win32":
-        flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        flags = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     err = open(errlog, "w", encoding="utf-8")
     return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=err, close_fds=True, cwd=str(_TOOLS), creationflags=flags)

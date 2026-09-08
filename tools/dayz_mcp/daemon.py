@@ -59,8 +59,8 @@ from dayz_mcp.process_lifecycle import (
 from dayz_mcp.native_process_guard import NativeProcessGuard
 from dayz_mcp.session_coordination import CleanupDisposition, SessionCoordinator
 
-# Windows process-creation flags for a detached, session-surviving child.
-_DETACHED_PROCESS = 0x00000008
+# Windows process-creation flags for a windowless, session-surviving child.
+_CREATE_NO_WINDOW = 0x08000000
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 _CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 
@@ -1602,9 +1602,18 @@ def run_daemon(config: Any, *, stop: threading.Event | None = None) -> int:
 def spawn_detached(argv: list[str], *, log: Callable[[str], None] = _noop, cwd: str | None = None) -> int | None:
     """Launch ``argv`` as a detached background process that aims to survive this session.
 
-    Returns the child pid, or None on failure. On Windows the child is detached from
-    the console/process-group and tries to break away from the parent Job so Cowork/node
-    closing does not kill it. If the job forbids breakaway the child stays job-bound and
+    Returns the child pid, or None on failure. On Windows the child gets its own
+    windowless console and process group, and tries to break away from the parent
+    Job so Cowork/node closing does not kill it. CREATE_NO_WINDOW, not
+    DETACHED_PROCESS and never the two OR'd together, which Windows resolves by
+    ignoring CREATE_NO_WINDOW. Under DETACHED_PROCESS there is no console to
+    inherit, so the venv redirector -- which creates the real interpreter with
+    creationflags 0 -- allocates a private console for it and a conhost child to
+    host it, leaving the wrapper outside that console and the daemon its sole
+    member: a console close then delivers CTRL_CLOSE_EVENT to the daemon alone.
+    Measured in vivo 2026-09-08; the console presented no desktop window, so the
+    exposure is a closable console and a stray host process, not a visible window.
+    If the job forbids breakaway the child stays job-bound and
     will die when the session's Job Object closes (KILL_ON_JOB_CLOSE); multi-session then
     degrades to "one owner at a time" — the next session's client re-spawns the daemon
     into its own job. Whether breakaway succeeds under Cowork is the in-vivo gate; each
@@ -1634,7 +1643,7 @@ def spawn_detached(argv: list[str], *, log: Callable[[str], None] = _noop, cwd: 
             log(f"SPAWN: failed to launch daemon: {exc}")
             return None
 
-    detached = _DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP
+    detached = _CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP
     try:
         pid = subprocess.Popen(
             argv,
