@@ -69,11 +69,22 @@ hacer nada durante la corrida**: arrancar y leer la linea `probe idx=1`.
     file_exist=0  -> (b) tampoco. filePatching no alcanza este mod por ninguna via y la
                      linea de comandos lo lleva de adorno; toca empaquetar siempre.
 
-**CONDICION DE NULIDAD.** Si se reconstruye el PBO despues de esta copia, el
-empaquetador incluira el fichero y un `file_exist=1` no probara nada. Huella del PBO al
-armar:
+**CONDICION DE NULIDAD.** Si se reconstruye el PBO con el fichero presente en el arbol
+de deploy, el empaquetador lo incluira y un `file_exist=1` no probara nada. Huella del
+PBO vigente:
 
-    sha256-16 E74918FA3E738AFA    236486 bytes    2026-09-09 01:08:30
+    sha256-16 B19882F0814328B4    237401 bytes    2026-09-09 01:49:01
 
-Antes de creerse un positivo, comprobar que el PBO sigue siendo ese. Si cambio, rehacer:
-empaquetar PRIMERO y copiar el fichero DESPUES.
+Antes de creerse un positivo, comprobar que el PBO sigue siendo ese. Si cambio, rehacer
+el armado: **empaquetar PRIMERO y copiar el fichero DESPUES**.
+
+Ya paso una vez, el mismo dia: el empaquetado que llevo el techo de admision del cliente
+habria anulado el experimento. Se resolvio aparcando el fichero fuera del arbol de
+deploy, empaquetando, y devolviendolo. Comprobado por bytes, con control positivo:
+
+    contenido de mcp_hot.layout dentro del PBO     -> False
+    contenido de mcp_dialog.layout dentro del PBO  -> True   (control: sabe detectarlo)
+
+Ojo con `grep -c` sobre el PBO para esto: cuenta LINEAS, y en un binario las lineas
+dependen de donde caigan los bytes de salto. Dio 1 antes y 2 despues sin que cambiara
+nada relevante. La comprobacion buena es contar ocurrencias del contenido, no lineas.
