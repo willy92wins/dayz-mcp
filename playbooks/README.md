@@ -26,6 +26,7 @@ gates. A FAIL on that expect is downgraded to WARN and the verdict reason is
 | place_safely | Before spawn or teleport to `(x, z)`: solid ground, clear vertical column, no players inside `clear_r`. **DRAFT** — the TOML declares `status = "DRAFT"` (the lifecycle still requires a cold probe by two independent agents), so a PASS does not certify a safe site. | DRAFT | `surface_query`, `scene_raycast`, `query_all_players`, `entities_query` |
 | box_is_mine | Before a mutating verb: this session holds the lease, no unmanaged DayZDiag, `box.runs[0].run_id` is the run I intend to handle. | DRAFT | `session_status` |
 | run_really_started | After `dayz_test_run` returns a `run_id`: that id is in `session_status.box.runs`, `state` is `RUNNING`, and `bridge_status.ready.reason` is `ready`. Complements `last_start_error` on the compact. | DRAFT | `session_status`, `bridge_status` |
+| lease_spawn_prepare_trace | Before `vehicle_trace`: the known path **lease → spawn → prepare → trace** as four ordered gates. A STOP names the skipped stage (`lease_not_held`, `spawn_missing`, `fixture_not_ready`, `trace_not_ready`). Does not mutate. Complements `box_is_mine` and `place_safely`; does not replace them. **DRAFT** — a PASS does not start a trace. | DRAFT | `session_status`, `object_inspect`, `vehicle_telemetry` |
 
 ## Running
 
@@ -123,3 +124,28 @@ does not fail the playbook).
 
 After a clean PASS, spawn or teleport at `pos=[x, S1.y, z]` (Spawn
 safely in [`../tools/README-mcp.md`](../tools/README-mcp.md)).
+
+## Known path: lease → spawn → prepare → trace
+
+Weak-agent friction is this order, not the tool menu. Mutating and
+lifecycle verbs stay **outside** the playbook (they are denied or they
+are not observational predicates). The known path is:
+
+1. **Lease** — `session_acquire_wait` (or `lease_acquire`). Gate:
+   `playbook_run(name="box_is_mine", params={"run_id":...})` and/or S1 of
+   `lease_spawn_prepare_trace` (`self.state == active`).
+2. **Spawn** — `playbook_run(name="place_safely", params={"x":..,"z":..})`
+   then `world_spawn`. Gate: S2 `object_inspect` at `(x, y, z)` for
+   `vehicle_type` (default `CivilianSedan`).
+3. **Prepare** — `vehicle_prepare_fixture` then `vehicle_get_in_client`.
+   Gate: S3 `vehicle_telemetry` `seated` and `is_owner`.
+4. **Trace** — `engine_set start` then `vehicle_trace`. Gate: S4
+   `engine_on_server`. A PASS means the path is observed, not that a
+   trace was started.
+
+`playbook_run(name="lease_spawn_prepare_trace", params={"x":..,"y":..,"z":..})`
+is the compositor for steps 1–4. CLI:
+
+```text
+python playbooks/runner.py playbooks/lease_spawn_prepare_trace.toml --fixtures playbooks/fixtures/lease_spawn_prepare_trace
+```

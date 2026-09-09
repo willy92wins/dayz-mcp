@@ -1,0 +1,83 @@
+{
+  "name": "red_trace_not_ready",
+  "params": {
+    "x": 4200.0,
+    "y": 0.0,
+    "z": 10650.0,
+    "vehicle_type": "CivilianSedan"
+  },
+  "responses": {
+    "S1": {
+      "owner": {
+        "state": "active",
+        "lease_id": "lease-a",
+        "purpose": "mutate",
+        "client": {
+          "platform": "claude",
+          "session": "abfd8d1d-f9c",
+          "started_at_utc": "2026-09-10T00:00:00Z",
+          "task_label": "playbook"
+        },
+        "expires_in_s": 90.0
+      },
+      "queue": [],
+      "self": {"state": "active", "lease_id": "lease-a", "position": 0},
+      "claimable": false,
+      "audit_fault": null,
+      "lifecycle_recovery_fault": null,
+      "operation_tombstones": {"count": 0, "capacity": 4096, "saturated": false},
+      "cleanup_degraded": [],
+      "daemon_generation": "generation-a",
+      "pending_commands": 0,
+      "box": {
+        "occupied": true,
+        "runs": [
+          {
+            "run_id": "abfd8d1d-f9ca-4daf-ba84-6e0c9cdfa734",
+            "mod": "@SameMod",
+            "label": "same",
+            "age_s": 3.0,
+            "owner_session": "A",
+            "state": "RUNNING"
+          }
+        ],
+        "foreign": [],
+        "ports_in_use": [2302],
+        "queue": [],
+        "scan_known": true
+      }
+    },
+    "S2": {
+      "ok": 1,
+      "inspect": {
+        "type": "CivilianSedan",
+        "memory_points": [
+          {"name": "bounding_center", "exists": true, "pos": [4200.0, 0.0, 10650.0]}
+        ]
+      }
+    },
+    "S3": {
+      "ok": 1,
+      "seated": true,
+      "seat": "driver",
+      "is_owner": true,
+      "is_authority_owner": false,
+      "engine_on_server": false,
+      "net_strategy": 2,
+      "type": "CivilianSedan"
+    },
+    "S4": {
+      "ok": 1,
+      "seated": true,
+      "seat": "driver",
+      "is_owner": true,
+      "is_authority_owner": false,
+      "engine_on_server": false,
+      "net_strategy": 2,
+      "type": "CivilianSedan"
+    }
+  },
+  "expect_overall": "FAIL",
+  "expect_stopped_at": "S4",
+  "expect_reason": "trace_not_ready"
+}
