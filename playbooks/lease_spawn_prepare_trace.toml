@@ -1,0 +1,52 @@
+id = "lease_spawn_prepare_trace"
+version = "1.0.0"
+status = "DRAFT"
+# DRAFT: no measured thresholds. Encodes the known path lease → spawn → prepare → trace
+# as ordered observable gates. Complements box_is_mine (lease family) and place_safely
+# (site family); does not replace them. Does NOT acquire/release a lease, spawn, prepare
+# a fixture, start an engine, or start a trace (session_acquire* / dayz_test_run /
+# playbook_run are denied inside playbooks; world_spawn / vehicle_prepare_fixture /
+# engine_set / vehicle_trace stay outside as mutating verbs). A STOP names the stage
+# the caller skipped. A PASS does not start a trace.
+summary = "Before vehicle_trace: this session holds the lease, the spawned vehicle is still at (x,y,z), the caller is the seated owner (prepare/get-in done), and engine_on_server is true. Ordered STOP reasons are the known path: lease_not_held → spawn_missing → fixture_not_ready → trace_not_ready. Does NOT mutate. Complements box_is_mine and place_safely; does not replace them."
+requires_tools = ["session_status", "object_inspect", "vehicle_telemetry"]
+
+[params]
+x = 0.0
+y = 0.0
+z = 0.0
+vehicle_type = "CivilianSedan"
+
+[[steps]]
+id = "S1"
+tool = "session_status"
+args = {}
+expect = [ { field = "self.state", op = "eq", value = "active" } ]
+on_fail = { action = "STOP", reason = "lease_not_held" }
+
+[[steps]]
+id = "S2"
+tool = "object_inspect"
+args = { type = "$vehicle_type", pos = ["$x", "$y", "$z"], want = ["bounding_center"] }
+expect = [
+  { field = "ok", op = "eq", value = 1 },
+  { field = "inspect.type", op = "eq", value = "$vehicle_type" },
+]
+on_fail = { action = "STOP", reason = "spawn_missing" }
+
+[[steps]]
+id = "S3"
+tool = "vehicle_telemetry"
+args = {}
+expect = [
+  { field = "seated", op = "eq", value = true },
+  { field = "is_owner", op = "eq", value = true },
+]
+on_fail = { action = "STOP", reason = "fixture_not_ready" }
+
+[[steps]]
+id = "S4"
+tool = "vehicle_telemetry"
+args = {}
+expect = [ { field = "engine_on_server", op = "eq", value = true } ]
+on_fail = { action = "STOP", reason = "trace_not_ready" }
