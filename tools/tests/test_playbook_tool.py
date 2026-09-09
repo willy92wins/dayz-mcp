@@ -379,18 +379,13 @@ class PlaybookRunExecuteTest(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_missing_runner_is_typed_without_host_path(self) -> None:
-        playbook_tool._runner = None
-        original = playbook_tool.PLAYBOOKS_DIR
-        with tempfile.TemporaryDirectory() as tmp:
-            playbook_tool.PLAYBOOKS_DIR = Path(tmp)
-            try:
-                with self.assertRaises(ToolError) as ctx:
-                    playbook_tool.load_runner()
-                self.assertEqual(str(ctx.exception), "playbook_runner_missing")
-                self.assertNotIn(tmp, str(ctx.exception))
-            finally:
-                playbook_tool.PLAYBOOKS_DIR = original
-                playbook_tool._runner = None
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            playbook_tool, "_runner", None
+        ), patch.object(playbook_tool, "PLAYBOOKS_DIR", Path(tmp)):
+            with self.assertRaises(ToolError) as ctx:
+                playbook_tool.load_runner()
+            self.assertEqual(str(ctx.exception), "playbook_runner_missing")
+            self.assertNotIn(tmp, str(ctx.exception))
 
     async def test_registered_tool_dispatches_and_does_not_hold_lock(self) -> None:
         app, _runtime = build_app(ServerConfig(log_sink=lambda _m: None))

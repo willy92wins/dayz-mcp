@@ -397,7 +397,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
         runner_path.with_name("fixture.toml").write_text('status = "DRAFT"\n', encoding="utf-8")
         with patch.object(adapter, "PLAYBOOKS_DIR", runner_path.parent), patch.object(
             adapter, "_runner", None
-        ), patch.dict(sys.modules):
+        ), patch.object(adapter, "_runner_source", None), patch.dict(sys.modules):
             loaded = adapter.load_runner()  # Real spec_from_file_location/cache path.
             watch = ServerSourceWatch(loaded_source_files())
             with patch.object(server, "_SERVER_SOURCES", watch):

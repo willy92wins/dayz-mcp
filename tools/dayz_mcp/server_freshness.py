@@ -2,6 +2,7 @@
 
 This is a source snapshot, not a bytecode attestation or a reload mechanism.
 Capture it at server import, not at the first status request or each app build.
+The sole reloadable runner supplies a receipt for its actual compiled source.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from typing import Any, Callable
 
 from mcp import types
 from mcp.server.fastmcp import FastMCP
+
+from dayz_mcp import playbook_tool
 
 REMEDIATION = "reopen_mcp_client"
 MARKER = "server_code_freshness"
@@ -77,6 +80,7 @@ class ServerSourceWatch:
             if self._identities[name] is None or self._identities[name] != _stat_identity(path):
                 self._hashes[name] = None
         self._cached_hashes = dict(self._hashes)
+        self._runner_observed_source = playbook_tool.runner_source_snapshot()
 
     def snapshot(self) -> dict[str, Any]:
         # Concurrent to_thread observers must not pair a new identity with an
@@ -85,16 +89,29 @@ class ServerSourceWatch:
             return self._snapshot()
 
     def _snapshot(self) -> dict[str, Any]:
+        runner_source = playbook_tool.runner_source_snapshot()
         current = loaded_source_files()
         files = {**current, **self._files}
         stale: list[str] = []
         unreadable: dict[str, str] = {}
         for name, path in sorted(files.items()):
+            runner = name == playbook_tool.RUNNER_MODULE
+            baseline = self._hashes.get(name)
+            if runner:
+                if runner_source is None:
+                    unreadable[name] = "runner_load_unverified"
+                    continue
+                if runner_source[1] != path:
+                    unreadable[name] = "loaded_module_path_changed"
+                    continue
+                # Compare against the bytes actually compiled, never a baseline
+                # refreshed by the reload tool or by a late observation.
+                baseline = runner_source[2]
             if name not in self._files:
                 # A late import has no baseline. Reading it now cannot prove
                 # which bytes were imported; never silently re-anchor it.
                 unreadable[name] = "loaded_after_server_snapshot"
-            elif self._hashes[name] is None:
+            elif baseline is None:
                 unreadable[name] = "source_unreadable_at_server_snapshot"
             elif name in current and current[name] != path:
                 unreadable[name] = "loaded_module_path_changed"
@@ -103,19 +120,30 @@ class ServerSourceWatch:
                 digest = self._cached_hashes[name]
                 if identity is None:
                     digest = None
-                elif identity != self._identities[name]:
+                elif (identity != self._identities[name]
+                      or (runner and runner_source is not self._runner_observed_source)):
                     digest = _digest(path)
                     if identity != _stat_identity(path):
                         digest = None
                     if digest is not None:
-                        # Cache stale hashes too: the immutable boot hash still
-                        # decides drift, without rereading a stale file per call.
+                        # Cache stale hashes too: the boot hash (or the
+                        # runner load receipt) still decides drift.
                         self._identities[name] = identity
                         self._cached_hashes[name] = digest
+                        if runner:
+                            self._runner_observed_source = runner_source
                 if digest is None:
                     unreadable[name] = "source_unreadable_now"
-                elif digest != self._hashes[name]:
+                elif digest != baseline:
                     stale.append(name)
+        if (playbook_tool.RUNNER_MODULE in files
+                and playbook_tool.runner_source_snapshot() is not runner_source):
+            # Do not mix an old receipt with disk observed after a concurrent
+            # publication (including a source edit reverted during that window).
+            name = playbook_tool.RUNNER_MODULE
+            if name in stale:
+                stale.remove(name)
+            unreadable[name] = "runner_changed_during_observation"
         snapshot = {
             "server_started_at": self.started_at,
             "server_pid": self.pid,

@@ -23,7 +23,7 @@ EXPECTED_PROFILE_TOOL_NAMES = {
         "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control", "vehicle_telemetry",
         "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click", "ui_reload_layout",
         "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects", "pipeline_feedback",
-        "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema",
+        "pipeline_inbox", "pipeline_resolve", "playbook_run", "playbook_reload", "dayz_effective_schema",
     ],
     ("standard", "codex"): [
         "dayz_knowledge_find", "dayz_knowledge_show", "dayz_knowledge_status", "dayz_knowledge_prepare",
@@ -37,7 +37,7 @@ EXPECTED_PROFILE_TOOL_NAMES = {
         "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control", "vehicle_telemetry",
         "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click", "ui_reload_layout",
         "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects", "pipeline_feedback",
-        "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema",
+        "pipeline_inbox", "pipeline_resolve", "playbook_run", "playbook_reload", "dayz_effective_schema",
     ],
     ("exec_enforce", "claude"): [
         "dayz_knowledge_find", "dayz_knowledge_show", "dayz_knowledge_status", "dayz_knowledge_prepare",
@@ -51,7 +51,7 @@ EXPECTED_PROFILE_TOOL_NAMES = {
         "exec_enforce", "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control",
         "vehicle_telemetry", "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click",
         "ui_reload_layout", "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects",
-        "pipeline_feedback", "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema",
+        "pipeline_feedback", "pipeline_inbox", "pipeline_resolve", "playbook_run", "playbook_reload", "dayz_effective_schema",
     ],
     ("exec_enforce", "codex"): [
         "dayz_knowledge_find", "dayz_knowledge_show", "dayz_knowledge_status", "dayz_knowledge_prepare",
@@ -65,7 +65,7 @@ EXPECTED_PROFILE_TOOL_NAMES = {
         "exec_enforce", "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control",
         "vehicle_telemetry", "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click",
         "ui_reload_layout", "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects",
-        "pipeline_feedback", "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema",
+        "pipeline_feedback", "pipeline_inbox", "pipeline_resolve", "playbook_run", "playbook_reload", "dayz_effective_schema",
     ],
 }
 EXPECTED_CONSTRAINT_IDS = (

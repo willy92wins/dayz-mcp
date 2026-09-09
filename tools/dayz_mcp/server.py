@@ -5335,6 +5335,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         """
         return await playbook_tool_mod.execute_playbook_run(app, name, params)
 
+    @app.tool(
+        description=(
+            "Explicitly reload only playbooks/runner.py in this MCP process: "
+            "module must be dayz_playbook_runner. Refuses while any playbook is "
+            "in flight or a load is in progress. Keeps the previous runner on "
+            "failure. Does not reload the tool registry, daemon or other clients. "
+            "The response may retain a freshness warning from call entry; check "
+            "bridge_status.server_modules on the next call."
+        )
+    )
+    async def playbook_reload(
+        module: Literal["dayz_playbook_runner"],
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(playbook_tool_mod.reload_runner, module)
+
     _patch_mode_enum_from_authority(app, "dayz_test_run")
     _describe_run_parameters(app, "dayz_test_run")
     for _closed_tool in _CLOSED_SCHEMA_TOOLS:
