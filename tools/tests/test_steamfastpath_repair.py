@@ -142,11 +142,13 @@ class SteamFastPathTests(unittest.TestCase):
     def run_repair(self):
         return sp.remediate_stale_steam_session(self.provider, self.host)
 
-    def assert_fallback(self, result, reason):
+    def assert_fallback(self, result, reason, invocations=None):
+        """invocations defaults to the full cycle; pass it when Steam was already down."""
         self.assertTrue(result.steam_restart_fallback)
         self.assertEqual(result.steam_pid_repair_reason, reason)
         self.assertEqual([args for _, args in self.host.invocations],
-                         [("-shutdown",), ("-silent",)])
+                         [("-shutdown",), ("-silent",)]
+                         if invocations is None else list(invocations))
 
     def test_repairs_only_pid_without_restarting_and_is_idempotent(self):
         result = self.run_repair()
@@ -220,7 +222,8 @@ class SteamFastPathTests(unittest.TestCase):
         self.provider.existing.clear()
         result = self.run_repair()
         self.assertEqual(self.host.write_attempts, [])
-        self.assert_fallback(result, "no_steam_process")
+        # No live Steam to close, so the cycle starts straight at the relaunch.
+        self.assert_fallback(result, "no_steam_process", [("-silent",)])
 
     def test_bad_process_list_is_never_used_for_writing(self):
         for pids in (PermissionError("snapshot"), (True,), ("41",), (0,), (2**32,)):
@@ -424,6 +427,57 @@ class SteamFastPathTests(unittest.TestCase):
                     sp.WindowsSteamRemediationHost().write_active_process_pid(pid)
         registry.OpenKey.assert_not_called()
         registry.SetValueEx.assert_not_called()
+
+
+class RestartShutdownSkipTests(unittest.TestCase):
+    """-shutdown against an already-down Steam starts one only to kill it."""
+
+    def setUp(self):
+        self.provider = MemoryProvider()
+        self.host = MemoryHost(self.provider)
+        self.popen = self.enterContext(patch.object(
+            sp.subprocess, "Popen", side_effect=AssertionError("Real launch forbidden")
+        ))
+        self.enterContext(patch.object(
+            sp.WindowsSteamPreflightProvider, "read_active_process",
+            side_effect=AssertionError("Real registry forbidden"),
+        ))
+
+    def tearDown(self):
+        self.popen.assert_not_called()
+
+    def run_repair(self):
+        return sp.remediate_stale_steam_session(self.provider, self.host)
+
+    def test_no_shutdown_is_sent_when_steam_is_already_down(self):
+        self.provider.pids = ()
+        self.provider.existing.clear()
+        result = self.run_repair()
+        self.assertEqual(self.host.invocations, [(STEAM_EXE, ("-silent",))])
+        self.assertIsNone(result.error_code)
+        self.assertTrue(result.steam_restart_fallback)
+        self.assertEqual(result.steam_pid_repair_reason, "no_steam_process")
+
+    def test_shutdown_is_still_sent_when_a_steam_is_running(self):
+        self.provider.pids = (41, 42)
+        self.provider.existing = {41, 42}
+        result = self.run_repair()
+        self.assertEqual(
+            self.host.invocations,
+            [(STEAM_EXE, ("-shutdown",)), (STEAM_EXE, ("-silent",))],
+        )
+        self.assertIsNone(result.error_code)
+        self.assertEqual(result.steam_pid_repair_reason, "multiple_steam_processes")
+
+    def test_unreadable_process_list_still_takes_the_shutdown_cycle(self):
+        def unreadable():
+            raise OSError("process list unreadable")
+
+        self.provider.on_enumerate = unreadable
+        result = self.run_repair()
+        self.assertEqual(self.host.invocations[0], (STEAM_EXE, ("-shutdown",)))
+        self.assertEqual(result.error_code, sp.STEAM_SESSION_STALE)
+        self.assertEqual(result.steam_remediation_reason, "process_list_unreadable")
 
 
 if __name__ == "__main__":

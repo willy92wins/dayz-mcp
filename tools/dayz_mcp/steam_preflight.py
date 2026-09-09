@@ -641,18 +641,24 @@ def _restart_steam_session(
         return _remediation_result(
             evaluate_steam_session(selected_provider), reason="steam_executable_unavailable"
         )
-    try:
-        selected_host.invoke_steam(executable, ("-shutdown",))
-    except Exception:
-        return _remediation_result(
-            evaluate_steam_session(selected_provider), reason="shutdown_failed"
-        )
-    down_state = _wait_until_steam_down(selected_provider, selected_host)
-    if down_state != "down":
-        return _remediation_result(
-            evaluate_steam_session(selected_provider),
-            reason="shutdown_timeout" if down_state == "alive" else "process_list_unreadable",
-        )
+    # A -shutdown aimed at a Steam that is already down does not no-op: it starts
+    # one just to kill it, and the relaunch cannot begin until that detour ends.
+    # Measured on a cold remediation: 8.8 s of 21.3 s. Skip it only on a positive
+    # read of an empty process list; an unreadable list still takes the whole
+    # cycle and keeps reporting its own reason.
+    if _safe_live_pids(selected_provider) != ():
+        try:
+            selected_host.invoke_steam(executable, ("-shutdown",))
+        except Exception:
+            return _remediation_result(
+                evaluate_steam_session(selected_provider), reason="shutdown_failed"
+            )
+        down_state = _wait_until_steam_down(selected_provider, selected_host)
+        if down_state != "down":
+            return _remediation_result(
+                evaluate_steam_session(selected_provider),
+                reason="shutdown_timeout" if down_state == "alive" else "process_list_unreadable",
+            )
     try:
         selected_host.invoke_steam(executable, ("-silent",))
     except Exception:
