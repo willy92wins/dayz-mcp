@@ -1,0 +1,31 @@
+{
+  "tools/dayz_mcp/steam_preflight.py": {
+    "bytes": 14942,
+    "sha256": "0eb4f0997a9190198cc7215ce9c99506e1ecd06d9ce336a678341415461b313a"
+  },
+  "tools/tests/test_steam_preflight.py": {
+    "bytes": 15321,
+    "sha256": "2651a355de212a496851cb86bf7c465bdb484acc47c5305e9ed1ad0db33e1f45"
+  },
+  "tools/tests/test_lote2_t2_steam.py": {
+    "bytes": 5450,
+    "sha256": "883b3b3e4ca634dd9a179fe0f939f4a1954b3663bdca53c036c3c335ddb8b945"
+  },
+  "tools/dayz_mcp/daemon.py": {
+    "bytes": 65091,
+    "sha256": "8c8174975abf15940bace317fca24ea834c8e59062555fdd57b570ad32ff2711"
+  },
+  "tools/dayz_mcp/dayz_test_tool.py": {
+    "bytes": 72917,
+    "sha256": "6909b46db9f0a0d1557f6c173c852d1603a4e2a953f71ef02efdbbe68e095979"
+  },
+  "tools/build_native_launcher.py": {
+    "bytes": 47468,
+    "sha256": "e1a8b657c7c223700ced4f628375764b7b3459b81750aa6646561d9902bc100c"
+  },
+  ".git/index": {
+    "bytes": 45093,
+    "sha256": "549540cc1da2c852816581a75ffcf11ec29c50511a33f7748f13cc248e81574e"
+  },
+  "git_head": "dbbf106ee5a0eab6884b7cb3f6a0055e977aa429"
+}

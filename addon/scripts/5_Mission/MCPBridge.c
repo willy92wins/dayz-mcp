@@ -1515,6 +1515,15 @@ class MCPBridge : Managed
 		while (i < command.args.want.Count())
 		{
 			string wantName = command.args.want.Get(i);
+			// Add a snapshot of the SAME resolved object, including by registry ID.
+			// Preserve the legacy memory-point result even for a point named inventory.
+			if (wantName == "inventory" && !result.telemetry)
+			{
+				MCPTelemetry inventoryTelemetry = new MCPTelemetry();
+				inventoryTelemetry.mode = "object_inspect";
+				PopulateTelemetryObject(match, inventoryTelemetry);
+				result.telemetry = inventoryTelemetry;
+			}
 			if (wantName == "bounding_center")
 			{
 				vector center = match.GetBoundingCenter();

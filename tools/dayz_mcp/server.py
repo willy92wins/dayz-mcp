@@ -86,6 +86,7 @@ WAIT_FOR_CONDITIONS = frozenset({
     "players_at_least",
     "players_at_most",
     "log_matches",
+    "entity_state",
 })
 LEASE_REQUIRED_RECIPE = "lease_required: call session_acquire_wait(purpose=...)"
 RETAIL_QUARANTINE_RECIPE = (
@@ -2593,6 +2594,71 @@ def _wait_for_response(
     return response
 
 
+def _entity_wait_request(entity: Any) -> dict[str, Any]:
+    """Validate the closed predicate before any bridge call or lock."""
+    if not isinstance(entity, dict) or set(entity) != {"type", "pos", "radius", "field", "equals"}:
+        raise ToolError("bad_args: entity requires exactly type,pos,radius,field,equals")
+    if not isinstance(entity["type"], str) or not entity["type"]:
+        raise ToolError("bad_args: entity.type must be non-empty")
+    position_value = entity["pos"]
+    if not isinstance(position_value, list) or len(position_value) != 3 or any(type(v) not in (int, float) for v in position_value):
+        raise ToolError("bad_args: entity.pos must be three finite numbers")
+    if type(entity["radius"]) not in (int, float):
+        raise ToolError("bad_args: entity.radius must be a number in (0,50]")
+    if any(not (-1e9 <= v <= 1e9) for v in position_value):
+        raise ToolError("bad_args: entity.pos must be finite world coordinates")
+    if not (0.0 < entity["radius"] <= 50.0):
+        raise ToolError("bad_args: entity.radius must be in (0,50]")
+    position = _require_vec3(position_value, "entity.pos")
+    radius = _finite_float(entity["radius"], "bad_args: entity.radius must be in (0,50]")
+    if radius <= 0.0 or radius > 50.0:
+        raise ToolError("bad_args: entity.radius must be in (0,50]")
+    field = entity["field"]
+    expected = entity["equals"]
+    if field == "found":
+        valid = type(expected) is bool
+    elif field == "health01":
+        valid = type(expected) in (int, float) and 0.0 <= expected <= 1.0 and math.isfinite(expected)
+    elif field in ("attachment_count", "cargo_count", "items_total"):
+        valid = type(expected) is int and expected >= 0
+    else:
+        raise ToolError("bad_args: entity.field is not an instrumented state field")
+    if not valid:
+        raise ToolError("bad_args: entity.equals has the wrong type or range for entity.field")
+    return {"mode": "object_at", "type": entity["type"], "pos": position, "radius": radius}
+
+
+def _entity_wait_observation(result: Any, entity: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Missing data is never interpreted as a false/zero entity state."""
+    if not isinstance(result, dict) or type(result.get("ok")) not in (bool, int):
+        raise ToolError("entity_state_unavailable: malformed result")
+    if result["ok"] not in (True, 1):
+        raise ToolError(str(result.get("error") or "entity_state_unavailable"))
+    telemetry = result.get("telemetry")
+    if not isinstance(telemetry, dict):
+        raise ToolError("entity_state_unavailable: missing telemetry")
+    found = telemetry.get("found")
+    if type(found) not in (bool, int) or found not in (False, True):
+        raise ToolError("entity_state_unavailable: invalid found")
+    field = entity["field"]
+    observed = {"found": bool(found), "field": field}
+    if field != "found" and not found:
+        return observed, False
+    if field not in telemetry:
+        raise ToolError("entity_state_unavailable: missing field " + field)
+    actual = bool(found) if field == "found" else telemetry[field]
+    if field == "health01":
+        valid = type(actual) in (int, float) and 0.0 <= actual <= 1.0 and math.isfinite(actual)
+    elif field == "found":
+        valid = True
+    else:
+        valid = type(actual) is int and actual >= 0
+    if not valid:
+        raise ToolError("entity_state_unavailable: invalid field " + field)
+    observed["value"] = actual
+    return observed, actual == entity["equals"]
+
+
 async def execute_wait_for(
     runtime: Any,
     condition: str,
@@ -2603,6 +2669,7 @@ async def execute_wait_for(
     lookback_lines: int = 200,
     lookback_from: str = "lines",
     marker: str | dict[str, Any] | None = None,
+    entity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Poll until a wait_for condition holds.
 
@@ -2623,7 +2690,7 @@ async def execute_wait_for(
     if condition not in WAIT_FOR_CONDITIONS:
         raise ToolError(
             "bad_args: condition must be one of "
-            "players_at_least, players_at_most, log_matches"
+            "players_at_least, players_at_most, log_matches, entity_state"
         )
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ToolError("bad_args: value must be a non-negative int")
@@ -2660,6 +2727,7 @@ async def execute_wait_for(
         if lookback_from not in WAIT_FOR_LOOKBACK_FROM:
             raise ToolError('bad_args: lookback_from must be "lines" or "launch"')
 
+    entity_args = _entity_wait_request(entity) if condition == "entity_state" else None
     started = time.monotonic()
     deadline = started + timeout_s
     probes = 0
@@ -2722,7 +2790,13 @@ async def execute_wait_for(
         async with runtime.tool_lock:
             probes += 1
             remaining = deadline - time.monotonic()
-            if condition in {"players_at_least", "players_at_most"}:
+            if condition == "entity_state":
+                if remaining <= 0.0:
+                    break
+                probe_timeout = min(DEFAULT_TOOL_TIMEOUT_S, remaining)
+                result = await runtime.call_bridge("telemetry_read", entity_args, "server", probe_timeout)
+                observed, satisfied = _entity_wait_observation(result, entity)
+            elif condition in {"players_at_least", "players_at_most"}:
                 probe_timeout = min(DEFAULT_TOOL_TIMEOUT_S, max(remaining, POLL_INTERVAL_S))
                 try:
                     result = await runtime.call_bridge(
@@ -3876,7 +3950,33 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("scene_raycast", args, "server", _timeout(timeout_s))
 
-    @app.tool(description="Read telemetry through object_at or fixture_jsonl bridge modes.")
+    @app.tool(description=(
+        "Read server-side telemetry. Exactly two modes are implemented; any other "
+        "string returns bad_mode. object_at consumes type (exact GetType match), "
+        "pos ([x,y,z], used as given), and radius (0 < radius <= 50 metres); "
+        "path/max_lines are ignored. Returns {ok, telemetry:{mode,found,type, "
+        "class_name,pos,orientation,direction,velocity,health01,declared_slots, "
+        "attachment_count,attachment_items,cargo_count,cargo_items,items, "
+        "items_total,items_truncated}}. Item arrays contain classnames, with a "
+        "16-entry cap per array; counts are uncapped, immediate inventory only. "
+        "Cars additionally populate engine_on_server,speedo,wheel_count, "
+        "fuel_fraction (default values on non-cars are not measurements). "
+        "Zero matches is ok:true with found:false; multiple exact-type matches "
+        "is ok:false/error:ambiguous_fixture. Only these instrumented fields "
+        "are read: no arbitrary script members, mod getters or synchronized "
+        "variables, and no client-side replication check. fixture_jsonl consumes "
+        "path and max_lines; type/pos/radius are ignored. path must be a direct "
+        "child of $mission:dayz_mcp/ (no subdirectories or '..'). max_lines=0 "
+        "means 64, positive values are capped at 64, negative is invalid. Reads "
+        "from the BEGINNING, not the tail; each line must deserialize as "
+        "{fixture_id:nonempty string,value:finite float,seq:int}; seq must differ "
+        "from the unset sentinel. Returns {ok,telemetry:{mode,path,found, "
+        "line_count_read,last_valid:{fixture_id,value,seq},parse_error}}; "
+        "last_valid is the last valid row within that prefix. Missing file: "
+        "fixture_not_found; empty/invalid/over-4096-character line: parse_error. "
+        "The shared telemetry object can include default fields from the other "
+        "mode. timeout_s bounds the server bridge request."
+    ))
     async def telemetry_read(
         mode: str,
         type: str = "",
@@ -4972,10 +5072,26 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Start a DayZ user action on the local player "
-        "without keyboard. Confirm with wait_for(condition=log_matches). "
+        "without keyboard. Verify the EFFECT you expect, not the call: for a "
+        "continuous action a longer wait cannot recover one the engine already "
+        "cancelled, so poll the world state the action should have changed. "
         "action = the Enforce class name of the user action "
         "(candidate.Type().ToString(), e.g. ActionOpenDoors), NOT the "
-        "visible/localized prompt text; classname = the target's GetType()."
+        "visible/localized prompt text; classname = the target's GetType(). "
+        "Routes to MCPClientBridge on the CLIENT and calls "
+        "ActionManagerClient.PerformActionStart with the held item and a "
+        "synthetic target (component=-1). This enters the normal client action "
+        "lifecycle, including client callbacks such as OnStartClient and, for "
+        "AnimatedActionBase when its execution animation event arrives, "
+        "OnExecuteClient; client-only mod code compiled under #ifndef SERVER "
+        "can therefore run. Non-local multiplayer actions are also sent to "
+        "the server, which can reject them. No callbacks are invoked directly "
+        "by this tool. started:true only means the client manager retained a "
+        "running/pending action immediately after the start call; it proves "
+        "neither server acceptance, callback execution nor completion. The "
+        "tool does not sustain continuous-action input or wait for progress "
+        "completion. Verify the intended effect separately; client callback "
+        "reachability by code is not an in-engine test of your mod."
     ))
     async def action_use(
         action: str,
@@ -5007,7 +5123,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Block until a condition holds. condition ENUM: players_at_least, "
-            "players_at_most, log_matches. pattern is a plain SUBSTRING, not a "
+            "players_at_most, log_matches, entity_state. entity_state requires "
+            "entity={type,pos,radius,field,equals}; it polls server telemetry_read "
+            "object_at with an exact type and radius in (0,50]. field is found "
+            "(bool), health01 (0..1), attachment_count, cargo_count or items_total "
+            "(non-negative int). Equality only, no float tolerance. Absence "
+            "satisfies only found=false; missing state and bridge errors abort. "
+            "Inventory counts are immediate, not recursive. Querying existence "
+            "inherits the engine streaming limits of object_at. This does not "
+            "read arbitrary mod members, sorter power, or client SyncVars. "
+            "pattern is a plain SUBSTRING, not a "
             r"regex: pass '[MOD]', never '\[MOD\]'. For log_matches, marker "
             "is the exact cursor returned by logs_since; when present, "
             "lookback_lines and lookback_from are ignored. Without marker, "
@@ -5034,7 +5159,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         )
     )
     async def wait_for(
-        condition: Literal["players_at_least", "players_at_most", "log_matches"],
+        condition: Literal["players_at_least", "players_at_most", "log_matches", "entity_state"],
         value: StrictInt = 0,
         pattern: str = "",
         timeout_s: StrictFloat = 180.0,
@@ -5042,6 +5167,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         lookback_lines: StrictInt = 200,
         lookback_from: Literal["lines", "launch"] = "lines",
         marker: str | dict[str, Any] | None = None,
+        entity: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # wait_for, ui_dialog, and playbook_run: do not wrap the whole body
         # in tool_lock. Any tool that waits on a human or a slow condition
@@ -5058,6 +5184,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             lookback_lines=lookback_lines,
             lookback_from=lookback_from,
             marker=marker,
+            entity=entity,
         )
 
     def _pipeline_platform() -> str:

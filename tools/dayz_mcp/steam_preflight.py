@@ -8,7 +8,7 @@ reading the local registry or enumerating real processes.
 from __future__ import annotations
 
 import ctypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import ntpath
 import subprocess
 import time
@@ -50,14 +50,20 @@ class SteamSessionResult:
 
 @dataclass(frozen=True, slots=True)
 class SteamRemediationResult(SteamSessionResult):
-    """Session verdict after one shutdown/silent cycle.
+    """Verdict and PID-repair diagnostics, separate from the evaluate contract.
 
-    ``steam_left_down`` is not part of the evaluate contract: it is only
-    published when this cycle shut Steam down and could not bring it back.
+    ``steam_left_down`` is true only when the restart fallback shut Steam down
+    and could not bring it back. ``steam_remediation_reason`` retains the
+    existing restart failure reasons; PID-repair outcomes have their own field.
     """
 
     steam_left_down: bool = False
     steam_remediation_reason: str | None = None
+    steam_pid_repair_reason: str | None = None
+    steam_previous_registered_pid: int | None = None
+    steam_pid_repair_target_pid: int | None = None
+    steam_pid_repair_error: str | None = None
+    steam_restart_fallback: bool = False
 
 
 class SteamPreflightProvider(Protocol):
@@ -247,7 +253,9 @@ def evaluate_steam_session(
 
 
 class SteamRemediationHost(Protocol):
-    """Host commands for one Steam shutdown/silent cycle. Tests inject doubles."""
+    """Mutating PID repair and Steam restart commands. Tests inject doubles."""
+
+    def write_active_process_pid(self, pid: int) -> None: ...
 
     def steam_executable(self) -> str | None: ...
 
@@ -259,7 +267,18 @@ class SteamRemediationHost(Protocol):
 
 
 class WindowsSteamRemediationHost:
-    """Launch steam.exe detached; never wait on the child itself."""
+    """Write the verified PID or launch Steam detached; never wait on the child."""
+
+    def write_active_process_pid(self, pid: int) -> None:
+        """Set only pid as REG_DWORD; the caller must verify the live Steam PID."""
+        if not _is_int(pid) or not 0 < pid <= 0xFFFFFFFF:
+            raise ValueError("Steam PID must be a positive DWORD")
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, _ACTIVE_PROCESS_KEY, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.SetValueEx(key, "pid", 0, winreg.REG_DWORD, pid)
 
     def steam_executable(self) -> str | None:
         import winreg
@@ -353,22 +372,128 @@ def _remediation_result(
     )
 
 
+def _try_repair_steam_pid(
+    provider: SteamPreflightProvider, host: SteamRemediationHost,
+) -> SteamRemediationResult:
+    """One conservative write attempt; uncertainty leaves the restart fallback."""
+    snapshot = _read_stable_snapshot(provider)
+    previous_pid = None
+    target_pid = None
+    live_pids: tuple[int, ...] = ()
+
+    def result(
+        reason: str, error: Exception | None = None,
+        session: SteamSessionResult | None = None,
+    ) -> SteamRemediationResult:
+        verdict = _stale(previous_pid, live_pids) if session is None else session
+        return replace(
+            _remediation_result(verdict),
+            steam_pid_repair_reason=reason,
+            steam_previous_registered_pid=previous_pid,
+            steam_pid_repair_target_pid=target_pid,
+            steam_pid_repair_error=None if error is None else type(error).__name__,
+        )
+
+    if snapshot is None:
+        return result("snapshot_unreadable_or_unstable")
+    if not _is_int(snapshot.pid) or not 0 <= snapshot.pid <= 0xFFFFFFFF:
+        return result("registered_pid_invalid")
+    previous_pid = snapshot.pid
+    if not _is_int(snapshot.active_user) or not 0 < snapshot.active_user <= 0xFFFFFFFF:
+        return result("active_user_invalid")
+    candidates = _safe_live_pids(provider)
+    if candidates is None:
+        return result("process_list_unreadable")
+    live_pids = candidates
+    if not candidates:
+        return result("no_steam_process")
+    if len(candidates) != 1:
+        return result("multiple_steam_processes")
+    if candidates[0] > 0xFFFFFFFF:
+        return result("target_pid_invalid")
+    target_pid = candidates[0]
+
+    def target_failure() -> SteamRemediationResult | None:
+        try:
+            if not provider.process_exists(target_pid):
+                return result("target_not_running")
+            image_path = provider.process_image_path(target_pid)
+        except Exception as exc:
+            return result("target_probe_failed", exc)
+        if not isinstance(image_path, str) or ntpath.basename(image_path).casefold() != "steam.exe":
+            return result("target_not_steam")
+        return None
+
+    failure = target_failure()
+    if failure is not None:
+        return failure
+    if _safe_live_pids(provider) != candidates:
+        return result("process_list_changed")
+    if _read_stable_snapshot(provider) != snapshot:
+        return result("registry_changed")
+
+    # Legacy hosts only supported a restart; preserve that contract when they
+    # have not opted into the PID-repair capability (including its healthy no-op).
+    writer = getattr(host, "write_active_process_pid", None)
+    if not callable(writer):
+        return result("writer_unavailable")
+
+    if previous_pid == target_pid:
+        session = evaluate_steam_session(provider)
+        if session.error_code is None and session.steam_registered_pid == target_pid:
+            return result("already_correct", session=session)
+        return result("verification_failed")
+
+    # Recheck liveness AND image immediately before mutation. These independent
+    # reads cannot make process/registry changes atomic; verify again afterward.
+    failure = target_failure()
+    if failure is not None:
+        return failure
+    try:
+        writer(target_pid)
+    except Exception as exc:
+        return result("write_failed", exc)
+
+    repaired = _read_stable_snapshot(provider)
+    if repaired != SteamActiveProcessSnapshot(target_pid, snapshot.active_user):
+        return result("verification_failed")
+    session = evaluate_steam_session(provider)
+    if session.error_code is not None or session.steam_registered_pid != target_pid:
+        return result("verification_failed")
+    return result("applied", session=session)
+
+
 def remediate_stale_steam_session(
     provider: SteamPreflightProvider | None = None,
     host: SteamRemediationHost | None = None,
-) -> SteamSessionResult:
-    """One shutdown, one silent relaunch, then bounded ActiveProcess polling.
+) -> SteamRemediationResult:
+    """Repair only the verified live Steam PID first, otherwise use one restart.
 
-    Callers must not invoke this twice for the same launch. A cycle that
-    cannot restore ActiveProcess still returns ``steam_session_stale``.
-    An unreadable process list aborts the cycle; a shutdown that never
-    finishes does not proceed to ``-silent``. If ``-silent`` raises after
-    a completed shutdown, one retry is attempted; both failures publish
-    ``steam_left_down``.
+    The fast path needs a stable registry snapshot, a valid ActiveUser, and a
+    single live steam.exe whose identity is checked before writing. An already
+    correct PID is a no-op. Failure retains the bounded shutdown/silent cycle
+    and its existing error reasons. Call at most once for the same launch.
     """
-
     selected_provider = WindowsSteamPreflightProvider() if provider is None else provider
     selected_host = WindowsSteamRemediationHost() if host is None else host
+    repair = _try_repair_steam_pid(selected_provider, selected_host)
+    if repair.error_code is None:
+        return repair
+    restarted = _restart_steam_session(selected_provider, selected_host)
+    return replace(
+        restarted,
+        steam_pid_repair_reason=repair.steam_pid_repair_reason,
+        steam_previous_registered_pid=repair.steam_previous_registered_pid,
+        steam_pid_repair_target_pid=repair.steam_pid_repair_target_pid,
+        steam_pid_repair_error=repair.steam_pid_repair_error,
+        steam_restart_fallback=True,
+    )
+
+
+def _restart_steam_session(
+    selected_provider: SteamPreflightProvider, selected_host: SteamRemediationHost,
+) -> SteamRemediationResult:
+    """Existing bounded shutdown/relaunch, including its one relaunch retry."""
     executable = _steam_executable(selected_provider, selected_host)
     if executable is None:
         return _remediation_result(

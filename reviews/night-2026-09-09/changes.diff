@@ -1,0 +1,82 @@
+diff --git a/addon/scripts/5_Mission/MCPBridge.c b/addon/scripts/5_Mission/MCPBridge.c
+index a01bb17..23847ff 100644
+--- a/addon/scripts/5_Mission/MCPBridge.c
++++ b/addon/scripts/5_Mission/MCPBridge.c
+@@ -1515,6 +1515,15 @@ class MCPBridge : Managed
+ 		while (i < command.args.want.Count())
+ 		{
+ 			string wantName = command.args.want.Get(i);
++			// Add a snapshot of the SAME resolved object, including by registry ID.
++			// Preserve the legacy memory-point result even for a point named inventory.
++			if (wantName == "inventory" && !result.telemetry)
++			{
++				MCPTelemetry inventoryTelemetry = new MCPTelemetry();
++				inventoryTelemetry.mode = "object_inspect";
++				PopulateTelemetryObject(match, inventoryTelemetry);
++				result.telemetry = inventoryTelemetry;
++			}
+ 			if (wantName == "bounding_center")
+ 			{
+ 				vector center = match.GetBoundingCenter();
+diff --git a/tools/dayz_mcp/server.py b/tools/dayz_mcp/server.py
+index b4ee528..6f4f676 100644
+--- a/tools/dayz_mcp/server.py
++++ b/tools/dayz_mcp/server.py
+@@ -3876,7 +3876,33 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
+         async with runtime.tool_lock:
+             return await runtime.call_bridge("scene_raycast", args, "server", _timeout(timeout_s))
+ 
+-    @app.tool(description="Read telemetry through object_at or fixture_jsonl bridge modes.")
++    @app.tool(description=(
++        "Read server-side telemetry. Exactly two modes are implemented; any other "
++        "string returns bad_mode. object_at consumes type (exact GetType match), "
++        "pos ([x,y,z], used as given), and radius (0 < radius <= 50 metres); "
++        "path/max_lines are ignored. Returns {ok, telemetry:{mode,found,type, "
++        "class_name,pos,orientation,direction,velocity,health01,declared_slots, "
++        "attachment_count,attachment_items,cargo_count,cargo_items,items, "
++        "items_total,items_truncated}}. Item arrays contain classnames, with a "
++        "16-entry cap per array; counts are uncapped, immediate inventory only. "
++        "Cars additionally populate engine_on_server,speedo,wheel_count, "
++        "fuel_fraction (default values on non-cars are not measurements). "
++        "Zero matches is ok:true with found:false; multiple exact-type matches "
++        "is ok:false/error:ambiguous_fixture. Only these instrumented fields "
++        "are read: no arbitrary script members, mod getters or synchronized "
++        "variables, and no client-side replication check. fixture_jsonl consumes "
++        "path and max_lines; type/pos/radius are ignored. path must be a direct "
++        "child of $mission:dayz_mcp/ (no subdirectories or '..'). max_lines=0 "
++        "means 64, positive values are capped at 64, negative is invalid. Reads "
++        "from the BEGINNING, not the tail; each line must deserialize as "
++        "{fixture_id:nonempty string,value:finite float,seq:int}; seq must differ "
++        "from the unset sentinel. Returns {ok,telemetry:{mode,path,found, "
++        "line_count_read,last_valid:{fixture_id,value,seq},parse_error}}; "
++        "last_valid is the last valid row within that prefix. Missing file: "
++        "fixture_not_found; empty/invalid/over-4096-character line: parse_error. "
++        "The shared telemetry object can include default fields from the other "
++        "mode. timeout_s bounds the server bridge request."
++    ))
+     async def telemetry_read(
+         mode: str,
+         type: str = "",
+@@ -4975,7 +5001,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
+         "without keyboard. Confirm with wait_for(condition=log_matches). "
+         "action = the Enforce class name of the user action "
+         "(candidate.Type().ToString(), e.g. ActionOpenDoors), NOT the "
+-        "visible/localized prompt text; classname = the target's GetType()."
++        "visible/localized prompt text; classname = the target's GetType(). "
++        "Routes to MCPClientBridge on the CLIENT and calls "
++        "ActionManagerClient.PerformActionStart with the held item and a "
++        "synthetic target (component=-1). This enters the normal client action "
++        "lifecycle, including client callbacks such as OnStartClient and, for "
++        "AnimatedActionBase when its execution animation event arrives, "
++        "OnExecuteClient; client-only mod code compiled under #ifndef SERVER "
++        "can therefore run. Non-local multiplayer actions are also sent to "
++        "the server, which can reject them. No callbacks are invoked directly "
++        "by this tool. started:true only means the client manager retained a "
++        "running/pending action immediately after the start call; it proves "
++        "neither server acceptance, callback execution nor completion. The "
++        "tool does not sustain continuous-action input or wait for progress "
++        "completion. Verify the intended effect separately; client callback "
++        "reachability by code is not an in-engine test of your mod."
+     ))
+     async def action_use(
+         action: str,

@@ -1,0 +1,39 @@
+Set-Location -LiteralPath 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools'
+$env:PYTHONIOENCODING='utf-8'
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:PYTHONPATH='C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
+$env:NIGHT0909_BRIDGE_SOURCE='C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\night-2026-09-09\b256\MCPBridge.c.BEFORE'
+& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -m unittest tests.test_night0909_inventory_inspect -v
+
+test_existing_public_tool_forwards_inventory_and_keeps_both_payloads (tests.test_night0909_inventory_inspect.InventoryInspectPublicTest.test_existing_public_tool_forwards_inventory_and_keeps_both_payloads) ... ok
+test_ingress_and_lease_contract_remain_read_only (tests.test_night0909_inventory_inspect.InventoryInspectStructureTest.test_ingress_and_lease_contract_remain_read_only) ... ok
+test_inventory_snapshot_uses_same_resolved_target_before_success (tests.test_night0909_inventory_inspect.InventoryInspectStructureTest.test_inventory_snapshot_uses_same_resolved_target_before_success) ... FAIL
+test_missing_target_fails_before_inventory_read (tests.test_night0909_inventory_inspect.InventoryInspectStructureTest.test_missing_target_fails_before_inventory_read) ... ok
+test_python_consumer_retains_empty_inventory_snapshot (tests.test_night0909_inventory_inspect.InventoryInspectStructureTest.test_python_consumer_retains_empty_inventory_snapshot) ... ok
+test_requesting_inventory_preserves_existing_memory_point_behavior (tests.test_night0909_inventory_inspect.InventoryInspectStructureTest.test_requesting_inventory_preserves_existing_memory_point_behavior) ... FAIL
+test_reused_reader_reports_immediate_counts_and_separate_lists (tests.test_night0909_inventory_inspect.InventoryInspectStructureTest.test_reused_reader_reports_immediate_counts_and_separate_lists) ... ok
+
+======================================================================
+FAIL: test_inventory_snapshot_uses_same_resolved_target_before_success (tests.test_night0909_inventory_inspect.InventoryInspectStructureTest.test_inventory_snapshot_uses_same_resolved_target_before_success)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_inventory_inspect.py", line 38, in test_inventory_snapshot_uses_same_resolved_target_before_success
+    self.assertIn('wantName == "inventory"', self.body)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'wantName == "inventory"' not found in '\n\t\tif (!command.args || !command.args.want || command.args.want.Count() == 0)\n\t\t{\n\t\t\tresult.ok = false;\n\t\t\tresult.error = "bad_args";\n\t\t\treturn true;\n\t\t}\n\n\t\tstring error = "";\n\t\tObject match = ResolveCommandObject(command.args, error);\n\t\tif (!match)\n\t\t{\n\t\t\tresult.ok = false;\n\t\t\tresult.error = error;\n\t\t\treturn true;\n\t\t}\n\n\t\tMCPObjectInspect inspect = new MCPObjectInspect();\n\t\tinspect.type = match.GetType();\n\n\t\tint i = 0;\n\t\twhile (i < command.args.want.Count())\n\t\t{\n\t\t\tstring wantName = command.args.want.Get(i);\n\t\t\tif (wantName == "bounding_center")\n\t\t\t{\n\t\t\t\tvector center = match.GetBoundingCenter();\n\t\t\t\tVectorToArray(center, inspect.bounding_center);\n\t\t\t\tinspect.has_bounding_center = true;\n\t\t\t}\n\t\t\telse\n\t\t\t{\n\t\t\t\tMCPMemoryPoint point = new MCPMemoryPoint();\n\t\t\t\tpoint.name = wantName;\n\t\t\t\tif (match.MemoryPointExists(wantName))\n\t\t\t\t{\n\t\t\t\t\tpoint.exists = true;\n\t\t\t\t\tVectorToArray(match.GetMemoryPointPos(wantName), point.pos);\n\t\t\t\t}\n\t\t\t\telse\n\t\t\t\t{\n\t\t\t\t\tpoint.exists = false;\n\t\t\t\t}\n\n\t\t\t\tinspect.memory_points.Insert(point);\n\t\t\t}\n\n\t\t\ti = i + 1;\n\t\t}\n\n\t\tresult.inspect = inspect;\n\t\tresult.type = inspect.type;\n\t\tif (command.args.object_id > 0)\n\t\t{\n\t\t\tresult.object_id = command.args.object_id;\n\t\t}\n\t\tresult.ok = true;\n\t\treturn true;\n\t'
+
+======================================================================
+FAIL: test_requesting_inventory_preserves_existing_memory_point_behavior (tests.test_night0909_inventory_inspect.InventoryInspectStructureTest.test_requesting_inventory_preserves_existing_memory_point_behavior)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_inventory_inspect.py", line 54, in test_requesting_inventory_preserves_existing_memory_point_behavior
+    self.assertIn('wantName == "inventory" && !result.telemetry', self.body)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'wantName == "inventory" && !result.telemetry' not found in '\n\t\tif (!command.args || !command.args.want || command.args.want.Count() == 0)\n\t\t{\n\t\t\tresult.ok = false;\n\t\t\tresult.error = "bad_args";\n\t\t\treturn true;\n\t\t}\n\n\t\tstring error = "";\n\t\tObject match = ResolveCommandObject(command.args, error);\n\t\tif (!match)\n\t\t{\n\t\t\tresult.ok = false;\n\t\t\tresult.error = error;\n\t\t\treturn true;\n\t\t}\n\n\t\tMCPObjectInspect inspect = new MCPObjectInspect();\n\t\tinspect.type = match.GetType();\n\n\t\tint i = 0;\n\t\twhile (i < command.args.want.Count())\n\t\t{\n\t\t\tstring wantName = command.args.want.Get(i);\n\t\t\tif (wantName == "bounding_center")\n\t\t\t{\n\t\t\t\tvector center = match.GetBoundingCenter();\n\t\t\t\tVectorToArray(center, inspect.bounding_center);\n\t\t\t\tinspect.has_bounding_center = true;\n\t\t\t}\n\t\t\telse\n\t\t\t{\n\t\t\t\tMCPMemoryPoint point = new MCPMemoryPoint();\n\t\t\t\tpoint.name = wantName;\n\t\t\t\tif (match.MemoryPointExists(wantName))\n\t\t\t\t{\n\t\t\t\t\tpoint.exists = true;\n\t\t\t\t\tVectorToArray(match.GetMemoryPointPos(wantName), point.pos);\n\t\t\t\t}\n\t\t\t\telse\n\t\t\t\t{\n\t\t\t\t\tpoint.exists = false;\n\t\t\t\t}\n\n\t\t\t\tinspect.memory_points.Insert(point);\n\t\t\t}\n\n\t\t\ti = i + 1;\n\t\t}\n\n\t\tresult.inspect = inspect;\n\t\tresult.type = inspect.type;\n\t\tif (command.args.object_id > 0)\n\t\t{\n\t\t\tresult.object_id = command.args.object_id;\n\t\t}\n\t\tresult.ok = true;\n\t\treturn true;\n\t'
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.090s
+
+FAILED (failures=2)
+
+exit code: 1

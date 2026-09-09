@@ -1,0 +1,648 @@
+cwd: C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools
+$env:PYTHONPATH = 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
+$env:PYTHONDONTWRITEBYTECODE = '1'
+$env:STEAMFASTPATH_SOURCE = 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\steamfastpath-2026-09-09\steam_preflight.py.BEFORE'
+& "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -B -m unittest tests.test_steamfastpath_repair -v
+test_active_user_changes_before_write_do_not_get_overwritten (tests.test_steamfastpath_repair.SteamFastPathTests.test_active_user_changes_before_write_do_not_get_overwritten) ... ERROR
+test_active_user_changing_after_write_uses_fallback (tests.test_steamfastpath_repair.SteamFastPathTests.test_active_user_changing_after_write_uses_fallback) ... ERROR
+test_bad_process_list_is_never_used_for_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_bad_process_list_is_never_used_for_writing) ... 
+  test_bad_process_list_is_never_used_for_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_bad_process_list_is_never_used_for_writing) (pids=PermissionError('snapshot')) ... ERROR
+  test_bad_process_list_is_never_used_for_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_bad_process_list_is_never_used_for_writing) (pids=(True,)) ... ERROR
+  test_bad_process_list_is_never_used_for_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_bad_process_list_is_never_used_for_writing) (pids=('41',)) ... ERROR
+  test_bad_process_list_is_never_used_for_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_bad_process_list_is_never_used_for_writing) (pids=(0,)) ... ERROR
+  test_bad_process_list_is_never_used_for_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_bad_process_list_is_never_used_for_writing) (pids=(4294967296,)) ... ERROR
+test_dead_candidate_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_dead_candidate_is_never_written) ... ERROR
+test_exists_probe_failure_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_exists_probe_failure_is_never_written) ... ERROR
+test_failed_relaunch_retains_retry_and_steam_left_down (tests.test_steamfastpath_repair.SteamFastPathTests.test_failed_relaunch_retains_retry_and_steam_left_down) ... ERROR
+test_failed_write_preserves_cause_and_uses_old_cycle (tests.test_steamfastpath_repair.SteamFastPathTests.test_failed_write_preserves_cause_and_uses_old_cycle) ... FAIL
+test_fallback_failure_keeps_old_reason_and_new_write_diagnostic (tests.test_steamfastpath_repair.SteamFastPathTests.test_fallback_failure_keeps_old_reason_and_new_write_diagnostic) ... ERROR
+test_healthy_legacy_host_retains_its_restart_only_contract (tests.test_steamfastpath_repair.SteamFastPathTests.test_healthy_legacy_host_retains_its_restart_only_contract) ... ERROR
+test_image_probe_failure_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_image_probe_failure_is_never_written) ... ERROR
+test_legacy_host_without_writer_still_runs_old_cycle (tests.test_steamfastpath_repair.SteamFastPathTests.test_legacy_host_without_writer_still_runs_old_cycle) ... ERROR
+test_malformed_registered_pid_is_not_repaired_as_a_dword (tests.test_steamfastpath_repair.SteamFastPathTests.test_malformed_registered_pid_is_not_repaired_as_a_dword) ... 
+  test_malformed_registered_pid_is_not_repaired_as_a_dword (tests.test_steamfastpath_repair.SteamFastPathTests.test_malformed_registered_pid_is_not_repaired_as_a_dword) (pid=True) ... ERROR
+  test_malformed_registered_pid_is_not_repaired_as_a_dword (tests.test_steamfastpath_repair.SteamFastPathTests.test_malformed_registered_pid_is_not_repaired_as_a_dword) (pid='99') ... ERROR
+  test_malformed_registered_pid_is_not_repaired_as_a_dword (tests.test_steamfastpath_repair.SteamFastPathTests.test_malformed_registered_pid_is_not_repaired_as_a_dword) (pid=-1) ... ERROR
+  test_malformed_registered_pid_is_not_repaired_as_a_dword (tests.test_steamfastpath_repair.SteamFastPathTests.test_malformed_registered_pid_is_not_repaired_as_a_dword) (pid=None) ... ERROR
+  test_malformed_registered_pid_is_not_repaired_as_a_dword (tests.test_steamfastpath_repair.SteamFastPathTests.test_malformed_registered_pid_is_not_repaired_as_a_dword) (pid=4294967296) ... ERROR
+test_missing_active_user_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_missing_active_user_does_not_write) ... 
+  test_missing_active_user_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_missing_active_user_does_not_write) (active_user=0) ... ERROR
+  test_missing_active_user_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_missing_active_user_does_not_write) (active_user=None) ... ERROR
+  test_missing_active_user_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_missing_active_user_does_not_write) (active_user=True) ... ERROR
+  test_missing_active_user_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_missing_active_user_does_not_write) (active_user='7') ... ERROR
+  test_missing_active_user_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_missing_active_user_does_not_write) (active_user=-1) ... ERROR
+test_multiple_live_steam_processes_are_never_guessed (tests.test_steamfastpath_repair.SteamFastPathTests.test_multiple_live_steam_processes_are_never_guessed) ... ERROR
+test_no_live_steam_process_falls_back (tests.test_steamfastpath_repair.SteamFastPathTests.test_no_live_steam_process_falls_back) ... ERROR
+test_pid_already_correct_does_not_write_or_restart (tests.test_steamfastpath_repair.SteamFastPathTests.test_pid_already_correct_does_not_write_or_restart) ... FAIL
+test_process_list_changes_before_write_does_not_get_guessed (tests.test_steamfastpath_repair.SteamFastPathTests.test_process_list_changes_before_write_does_not_get_guessed) ... ERROR
+test_registry_changes_before_write_does_not_get_overwritten (tests.test_steamfastpath_repair.SteamFastPathTests.test_registry_changes_before_write_does_not_get_overwritten) ... ERROR
+test_registry_unreadable_or_unstable_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_registry_unreadable_or_unstable_does_not_write) ... 
+  test_registry_unreadable_or_unstable_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_registry_unreadable_or_unstable_does_not_write) (changing=False) ... ERROR
+  test_registry_unreadable_or_unstable_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_registry_unreadable_or_unstable_does_not_write) (changing=True) ... ERROR
+test_repairs_only_pid_without_restarting_and_is_idempotent (tests.test_steamfastpath_repair.SteamFastPathTests.test_repairs_only_pid_without_restarting_and_is_idempotent) ... FAIL
+test_target_dying_after_write_uses_fallback (tests.test_steamfastpath_repair.SteamFastPathTests.test_target_dying_after_write_uses_fallback) ... ERROR
+test_target_is_rechecked_immediately_before_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_target_is_rechecked_immediately_before_writing) ... 
+  test_target_is_rechecked_immediately_before_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_target_is_rechecked_immediately_before_writing) (defect='dead') ... ERROR
+  test_target_is_rechecked_immediately_before_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_target_is_rechecked_immediately_before_writing) (defect='image') ... ERROR
+test_windows_host_writes_only_pid_as_dword_through_fake_winreg (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_host_writes_only_pid_as_dword_through_fake_winreg) ... FAIL
+test_windows_host_writes_only_pid_as_dword_through_fake_winreg (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_host_writes_only_pid_as_dword_through_fake_winreg) ... FAIL
+test_windows_writer_open_error_is_offline_and_retains_fallback (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_writer_open_error_is_offline_and_retains_fallback) ... ERROR
+test_windows_writer_rejects_invalid_dword_before_opening_key (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_writer_rejects_invalid_dword_before_opening_key) ... 
+  test_windows_writer_rejects_invalid_dword_before_opening_key (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_writer_rejects_invalid_dword_before_opening_key) (pid=True) ... ERROR
+  test_windows_writer_rejects_invalid_dword_before_opening_key (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_writer_rejects_invalid_dword_before_opening_key) (pid=0) ... ERROR
+  test_windows_writer_rejects_invalid_dword_before_opening_key (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_writer_rejects_invalid_dword_before_opening_key) (pid=-1) ... ERROR
+  test_windows_writer_rejects_invalid_dword_before_opening_key (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_writer_rejects_invalid_dword_before_opening_key) (pid='41') ... ERROR
+  test_windows_writer_rejects_invalid_dword_before_opening_key (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_writer_rejects_invalid_dword_before_opening_key) (pid=4294967296) ... ERROR
+test_write_without_effect_is_not_reported_as_success (tests.test_steamfastpath_repair.SteamFastPathTests.test_write_without_effect_is_not_reported_as_success) ... FAIL
+test_wrong_or_unreadable_image_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_wrong_or_unreadable_image_is_never_written) ... 
+  test_wrong_or_unreadable_image_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_wrong_or_unreadable_image_is_never_written) (image='C:\\Steam\\steamwebhelper.exe') ... ERROR
+  test_wrong_or_unreadable_image_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_wrong_or_unreadable_image_is_never_written) (image=None) ... ERROR
+  test_wrong_or_unreadable_image_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_wrong_or_unreadable_image_is_never_written) (image=b'steam.exe') ... ERROR
+  test_wrong_or_unreadable_image_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_wrong_or_unreadable_image_is_never_written) (image=41) ... ERROR
+test_zero_registered_pid_and_case_insensitive_image_are_repaired (tests.test_steamfastpath_repair.SteamFastPathTests.test_zero_registered_pid_and_case_insensitive_image_are_repaired) ... FAIL
+
+======================================================================
+ERROR: test_active_user_changes_before_write_do_not_get_overwritten (tests.test_steamfastpath_repair.SteamFastPathTests.test_active_user_changes_before_write_do_not_get_overwritten)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 368, in test_active_user_changes_before_write_do_not_get_overwritten
+    self.assert_fallback(result, "registry_changed")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_active_user_changing_after_write_uses_fallback (tests.test_steamfastpath_repair.SteamFastPathTests.test_active_user_changing_after_write_uses_fallback)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 316, in test_active_user_changing_after_write_uses_fallback
+    self.assert_fallback(result, "verification_failed")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_bad_process_list_is_never_used_for_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_bad_process_list_is_never_used_for_writing) (pids=PermissionError('snapshot'))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 229, in test_bad_process_list_is_never_used_for_writing
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_bad_process_list_is_never_used_for_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_bad_process_list_is_never_used_for_writing) (pids=(True,))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 229, in test_bad_process_list_is_never_used_for_writing
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_bad_process_list_is_never_used_for_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_bad_process_list_is_never_used_for_writing) (pids=('41',))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 229, in test_bad_process_list_is_never_used_for_writing
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_bad_process_list_is_never_used_for_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_bad_process_list_is_never_used_for_writing) (pids=(0,))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 229, in test_bad_process_list_is_never_used_for_writing
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_bad_process_list_is_never_used_for_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_bad_process_list_is_never_used_for_writing) (pids=(4294967296,))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 229, in test_bad_process_list_is_never_used_for_writing
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_dead_candidate_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_dead_candidate_is_never_written)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 180, in test_dead_candidate_is_never_written
+    self.assert_fallback(result, "target_not_running")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_exists_probe_failure_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_exists_probe_failure_is_never_written)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 186, in test_exists_probe_failure_is_never_written
+    self.assert_fallback(result, "target_probe_failed")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_failed_relaunch_retains_retry_and_steam_left_down (tests.test_steamfastpath_repair.SteamFastPathTests.test_failed_relaunch_retains_retry_and_steam_left_down)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 341, in test_failed_relaunch_retains_retry_and_steam_left_down
+    self.assertEqual(result.steam_pid_repair_reason, "write_failed")
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_pid_repair_reason'
+
+======================================================================
+ERROR: test_fallback_failure_keeps_old_reason_and_new_write_diagnostic (tests.test_steamfastpath_repair.SteamFastPathTests.test_fallback_failure_keeps_old_reason_and_new_write_diagnostic)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 331, in test_fallback_failure_keeps_old_reason_and_new_write_diagnostic
+    self.assertEqual(result.steam_pid_repair_reason, "write_failed")
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_pid_repair_reason'
+
+======================================================================
+ERROR: test_healthy_legacy_host_retains_its_restart_only_contract (tests.test_steamfastpath_repair.SteamFastPathTests.test_healthy_legacy_host_retains_its_restart_only_contract)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 385, in test_healthy_legacy_host_retains_its_restart_only_contract
+    self.assert_fallback(result, "writer_unavailable")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_image_probe_failure_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_image_probe_failure_is_never_written)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 194, in test_image_probe_failure_is_never_written
+    self.assert_fallback(result, "target_probe_failed")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_legacy_host_without_writer_still_runs_old_cycle (tests.test_steamfastpath_repair.SteamFastPathTests.test_legacy_host_without_writer_still_runs_old_cycle)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 322, in test_legacy_host_without_writer_still_runs_old_cycle
+    self.assert_fallback(result, "writer_unavailable")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_malformed_registered_pid_is_not_repaired_as_a_dword (tests.test_steamfastpath_repair.SteamFastPathTests.test_malformed_registered_pid_is_not_repaired_as_a_dword) (pid=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 251, in test_malformed_registered_pid_is_not_repaired_as_a_dword
+    self.assert_fallback(result, "registered_pid_invalid")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_malformed_registered_pid_is_not_repaired_as_a_dword (tests.test_steamfastpath_repair.SteamFastPathTests.test_malformed_registered_pid_is_not_repaired_as_a_dword) (pid='99')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 251, in test_malformed_registered_pid_is_not_repaired_as_a_dword
+    self.assert_fallback(result, "registered_pid_invalid")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_malformed_registered_pid_is_not_repaired_as_a_dword (tests.test_steamfastpath_repair.SteamFastPathTests.test_malformed_registered_pid_is_not_repaired_as_a_dword) (pid=-1)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 251, in test_malformed_registered_pid_is_not_repaired_as_a_dword
+    self.assert_fallback(result, "registered_pid_invalid")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_malformed_registered_pid_is_not_repaired_as_a_dword (tests.test_steamfastpath_repair.SteamFastPathTests.test_malformed_registered_pid_is_not_repaired_as_a_dword) (pid=None)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 251, in test_malformed_registered_pid_is_not_repaired_as_a_dword
+    self.assert_fallback(result, "registered_pid_invalid")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_malformed_registered_pid_is_not_repaired_as_a_dword (tests.test_steamfastpath_repair.SteamFastPathTests.test_malformed_registered_pid_is_not_repaired_as_a_dword) (pid=4294967296)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 251, in test_malformed_registered_pid_is_not_repaired_as_a_dword
+    self.assert_fallback(result, "registered_pid_invalid")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_missing_active_user_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_missing_active_user_does_not_write) (active_user=0)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 241, in test_missing_active_user_does_not_write
+    self.assert_fallback(result, "active_user_invalid")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_missing_active_user_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_missing_active_user_does_not_write) (active_user=None)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 241, in test_missing_active_user_does_not_write
+    self.assert_fallback(result, "active_user_invalid")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_missing_active_user_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_missing_active_user_does_not_write) (active_user=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 241, in test_missing_active_user_does_not_write
+    self.assert_fallback(result, "active_user_invalid")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_missing_active_user_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_missing_active_user_does_not_write) (active_user='7')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 241, in test_missing_active_user_does_not_write
+    self.assert_fallback(result, "active_user_invalid")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_missing_active_user_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_missing_active_user_does_not_write) (active_user=-1)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 241, in test_missing_active_user_does_not_write
+    self.assert_fallback(result, "active_user_invalid")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_multiple_live_steam_processes_are_never_guessed (tests.test_steamfastpath_repair.SteamFastPathTests.test_multiple_live_steam_processes_are_never_guessed)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 212, in test_multiple_live_steam_processes_are_never_guessed
+    self.assert_fallback(result, "multiple_steam_processes")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_no_live_steam_process_falls_back (tests.test_steamfastpath_repair.SteamFastPathTests.test_no_live_steam_process_falls_back)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 219, in test_no_live_steam_process_falls_back
+    self.assert_fallback(result, "no_steam_process")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_process_list_changes_before_write_does_not_get_guessed (tests.test_steamfastpath_repair.SteamFastPathTests.test_process_list_changes_before_write_does_not_get_guessed)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 289, in test_process_list_changes_before_write_does_not_get_guessed
+    self.assert_fallback(result, "process_list_changed")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_registry_changes_before_write_does_not_get_overwritten (tests.test_steamfastpath_repair.SteamFastPathTests.test_registry_changes_before_write_does_not_get_overwritten)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 276, in test_registry_changes_before_write_does_not_get_overwritten
+    self.assert_fallback(result, "registry_changed")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_registry_unreadable_or_unstable_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_registry_unreadable_or_unstable_does_not_write) (changing=False)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 266, in test_registry_unreadable_or_unstable_does_not_write
+    self.assert_fallback(result, "snapshot_unreadable_or_unstable")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_registry_unreadable_or_unstable_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_registry_unreadable_or_unstable_does_not_write) (changing=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 266, in test_registry_unreadable_or_unstable_does_not_write
+    self.assert_fallback(result, "snapshot_unreadable_or_unstable")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_target_dying_after_write_uses_fallback (tests.test_steamfastpath_repair.SteamFastPathTests.test_target_dying_after_write_uses_fallback)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 311, in test_target_dying_after_write_uses_fallback
+    self.assert_fallback(result, "verification_failed")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_target_is_rechecked_immediately_before_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_target_is_rechecked_immediately_before_writing) (defect='dead')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 359, in test_target_is_rechecked_immediately_before_writing
+    self.assert_fallback(result, reason)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_target_is_rechecked_immediately_before_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_target_is_rechecked_immediately_before_writing) (defect='image')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 359, in test_target_is_rechecked_immediately_before_writing
+    self.assert_fallback(result, reason)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_windows_writer_open_error_is_offline_and_retains_fallback (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_writer_open_error_is_offline_and_retains_fallback)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 392, in test_windows_writer_open_error_is_offline_and_retains_fallback
+    self.host.write_active_process_pid = sp.WindowsSteamRemediationHost().write_active_process_pid
+                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'WindowsSteamRemediationHost' object has no attribute 'write_active_process_pid'
+
+======================================================================
+ERROR: test_windows_writer_rejects_invalid_dword_before_opening_key (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_writer_rejects_invalid_dword_before_opening_key) (pid=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 420, in test_windows_writer_rejects_invalid_dword_before_opening_key
+    sp.WindowsSteamRemediationHost().write_active_process_pid(pid)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'WindowsSteamRemediationHost' object has no attribute 'write_active_process_pid'
+
+======================================================================
+ERROR: test_windows_writer_rejects_invalid_dword_before_opening_key (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_writer_rejects_invalid_dword_before_opening_key) (pid=0)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 420, in test_windows_writer_rejects_invalid_dword_before_opening_key
+    sp.WindowsSteamRemediationHost().write_active_process_pid(pid)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'WindowsSteamRemediationHost' object has no attribute 'write_active_process_pid'
+
+======================================================================
+ERROR: test_windows_writer_rejects_invalid_dword_before_opening_key (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_writer_rejects_invalid_dword_before_opening_key) (pid=-1)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 420, in test_windows_writer_rejects_invalid_dword_before_opening_key
+    sp.WindowsSteamRemediationHost().write_active_process_pid(pid)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'WindowsSteamRemediationHost' object has no attribute 'write_active_process_pid'
+
+======================================================================
+ERROR: test_windows_writer_rejects_invalid_dword_before_opening_key (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_writer_rejects_invalid_dword_before_opening_key) (pid='41')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 420, in test_windows_writer_rejects_invalid_dword_before_opening_key
+    sp.WindowsSteamRemediationHost().write_active_process_pid(pid)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'WindowsSteamRemediationHost' object has no attribute 'write_active_process_pid'
+
+======================================================================
+ERROR: test_windows_writer_rejects_invalid_dword_before_opening_key (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_writer_rejects_invalid_dword_before_opening_key) (pid=4294967296)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 420, in test_windows_writer_rejects_invalid_dword_before_opening_key
+    sp.WindowsSteamRemediationHost().write_active_process_pid(pid)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'WindowsSteamRemediationHost' object has no attribute 'write_active_process_pid'
+
+======================================================================
+ERROR: test_wrong_or_unreadable_image_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_wrong_or_unreadable_image_is_never_written) (image='C:\\Steam\\steamwebhelper.exe')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 204, in test_wrong_or_unreadable_image_is_never_written
+    self.assert_fallback(result, "target_not_steam")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_wrong_or_unreadable_image_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_wrong_or_unreadable_image_is_never_written) (image=None)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 204, in test_wrong_or_unreadable_image_is_never_written
+    self.assert_fallback(result, "target_not_steam")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_wrong_or_unreadable_image_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_wrong_or_unreadable_image_is_never_written) (image=b'steam.exe')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 204, in test_wrong_or_unreadable_image_is_never_written
+    self.assert_fallback(result, "target_not_steam")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+ERROR: test_wrong_or_unreadable_image_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_wrong_or_unreadable_image_is_never_written) (image=41)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 204, in test_wrong_or_unreadable_image_is_never_written
+    self.assert_fallback(result, "target_not_steam")
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 142, in assert_fallback
+    self.assertTrue(result.steam_restart_fallback)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'SteamRemediationResult' object has no attribute 'steam_restart_fallback'
+
+======================================================================
+FAIL: test_failed_write_preserves_cause_and_uses_old_cycle (tests.test_steamfastpath_repair.SteamFastPathTests.test_failed_write_preserves_cause_and_uses_old_cycle)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 294, in test_failed_write_preserves_cause_and_uses_old_cycle
+    self.assertEqual(self.host.write_attempts, [41])
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Lists differ: [] != [41]
+
+Second list contains 1 additional elements.
+First extra element 0:
+41
+
+- []
++ [41]
+
+======================================================================
+FAIL: test_pid_already_correct_does_not_write_or_restart (tests.test_steamfastpath_repair.SteamFastPathTests.test_pid_already_correct_does_not_write_or_restart)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 172, in test_pid_already_correct_does_not_write_or_restart
+    self.assertEqual(self.host.invocations, [])
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Lists differ: [('C:\\Steam\\steam.exe', ('-shutdown',)),[35 chars]',))] != []
+
+First list contains 2 additional elements.
+First extra element 0:
+('C:\\Steam\\steam.exe', ('-shutdown',))
+
++ []
+- [('C:\\Steam\\steam.exe', ('-shutdown',)),
+-  ('C:\\Steam\\steam.exe', ('-silent',))]
+
+======================================================================
+FAIL: test_repairs_only_pid_without_restarting_and_is_idempotent (tests.test_steamfastpath_repair.SteamFastPathTests.test_repairs_only_pid_without_restarting_and_is_idempotent)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 149, in test_repairs_only_pid_without_restarting_and_is_idempotent
+    self.assertEqual(self.host.writes, [41])
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Lists differ: [] != [41]
+
+Second list contains 1 additional elements.
+First extra element 0:
+41
+
+- []
++ [41]
+
+======================================================================
+FAIL: test_windows_host_writes_only_pid_as_dword_through_fake_winreg (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_host_writes_only_pid_as_dword_through_fake_winreg)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 408, in test_windows_host_writes_only_pid_as_dword_through_fake_winreg
+    self.assertIsNone(result.error_code)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+AssertionError: 'steam_session_stale' is not None
+
+======================================================================
+FAIL: test_windows_host_writes_only_pid_as_dword_through_fake_winreg (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_host_writes_only_pid_as_dword_through_fake_winreg)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 136, in tearDown
+    self.popen.assert_not_called()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Python314\Lib\unittest\mock.py", line 946, in assert_not_called
+    raise AssertionError(msg)
+AssertionError: Expected 'Popen' to not have been called. Called 1 times.
+Calls: [call(['C:\\Steam\\steam.exe', '-shutdown'], close_fds=True, creationflags=134217736)].
+
+======================================================================
+FAIL: test_write_without_effect_is_not_reported_as_success (tests.test_steamfastpath_repair.SteamFastPathTests.test_write_without_effect_is_not_reported_as_success)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 305, in test_write_without_effect_is_not_reported_as_success
+    self.assertEqual(self.host.writes, [41])
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Lists differ: [] != [41]
+
+Second list contains 1 additional elements.
+First extra element 0:
+41
+
+- []
++ [41]
+
+======================================================================
+FAIL: test_zero_registered_pid_and_case_insensitive_image_are_repaired (tests.test_steamfastpath_repair.SteamFastPathTests.test_zero_registered_pid_and_case_insensitive_image_are_repaired)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_steamfastpath_repair.py", line 374, in test_zero_registered_pid_and_case_insensitive_image_are_repaired
+    self.assertEqual(self.host.writes, [41])
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Lists differ: [] != [41]
+
+Second list contains 1 additional elements.
+First extra element 0:
+41
+
+- []
++ [41]
+
+----------------------------------------------------------------------
+Ran 28 tests in 0.017s
+
+FAILED (failures=7, errors=43)
+EXIT CODE: 1
+

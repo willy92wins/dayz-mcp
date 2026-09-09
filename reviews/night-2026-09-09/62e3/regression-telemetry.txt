@@ -1,0 +1,18 @@
+Set-Location -LiteralPath 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools'
+$env:PYTHONIOENCODING='utf-8'
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:PYTHONPATH='C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
+& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -m unittest tests.test_telemetry_read_names_the_bad_field -v
+
+test_object_at_with_bad_radius_says_radius (tests.test_telemetry_read_names_the_bad_field.TelemetryReadNamesTheBadFieldTest.test_object_at_with_bad_radius_says_radius) ... ok
+test_object_at_without_type_says_type (tests.test_telemetry_read_names_the_bad_field.TelemetryReadNamesTheBadFieldTest.test_object_at_without_type_says_type) ... ok
+test_the_three_errors_are_distinguishable (tests.test_telemetry_read_names_the_bad_field.TelemetryReadNamesTheBadFieldTest.test_the_three_errors_are_distinguishable) ... ok
+test_unknown_mode_says_mode (tests.test_telemetry_read_names_the_bad_field.TelemetryReadNamesTheBadFieldTest.test_unknown_mode_says_mode) ... Executing <Task finished name='Task-16' coro=<TelemetryReadNamesTheBadFieldTest.asyncSetUp() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_telemetry_read_names_the_bad_field.py:33> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.102 seconds
+ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.398s
+
+OK
+
+exit code: 0

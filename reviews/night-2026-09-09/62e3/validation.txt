@@ -1,0 +1,3 @@
+AST parse: OK
+Descripci?n ampliada; firma y cuerpo sin cambios (diff por lectura).
+exit code: 0

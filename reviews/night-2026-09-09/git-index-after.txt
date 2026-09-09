@@ -1,0 +1,5 @@
+COMMAND: git diff --cached --raw
+:000000 100644 0000000 bcf1595 A	decisions/decision-log.md
+warning: unable to access 'C:\Users\guill/.config/git/ignore': Permission denied
+
+exit code: 0

@@ -1,0 +1,20 @@
+Set-Location -LiteralPath 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools'
+$env:PYTHONIOENCODING='utf-8'
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:PYTHONPATH='C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
+& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -m unittest tests.test_night0909_inventory_inspect -v
+
+test_existing_public_tool_forwards_inventory_and_keeps_both_payloads (tests.test_night0909_inventory_inspect.InventoryInspectPublicTest.test_existing_public_tool_forwards_inventory_and_keeps_both_payloads) ... ok
+test_ingress_and_lease_contract_remain_read_only (tests.test_night0909_inventory_inspect.InventoryInspectStructureTest.test_ingress_and_lease_contract_remain_read_only) ... ok
+test_inventory_snapshot_uses_same_resolved_target_before_success (tests.test_night0909_inventory_inspect.InventoryInspectStructureTest.test_inventory_snapshot_uses_same_resolved_target_before_success) ... ok
+test_missing_target_fails_before_inventory_read (tests.test_night0909_inventory_inspect.InventoryInspectStructureTest.test_missing_target_fails_before_inventory_read) ... ok
+test_python_consumer_retains_empty_inventory_snapshot (tests.test_night0909_inventory_inspect.InventoryInspectStructureTest.test_python_consumer_retains_empty_inventory_snapshot) ... ok
+test_requesting_inventory_preserves_existing_memory_point_behavior (tests.test_night0909_inventory_inspect.InventoryInspectStructureTest.test_requesting_inventory_preserves_existing_memory_point_behavior) ... ok
+test_reused_reader_reports_immediate_counts_and_separate_lists (tests.test_night0909_inventory_inspect.InventoryInspectStructureTest.test_reused_reader_reports_immediate_counts_and_separate_lists) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.082s
+
+OK
+
+exit code: 0

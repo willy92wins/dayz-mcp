@@ -1,0 +1,18 @@
+{
+  "tools/dayz_mcp/server.py": {
+    "bytes": 227237,
+    "sha256": "a998041e99683b5147ed6b36995d33f028930b2fc72ff134d378b3344b686477"
+  },
+  "tools/dayz_mcp/loopback.py": {
+    "bytes": 156799,
+    "sha256": "dbab5c590cff8b23af987902a38f92e4b082c2d9f433cd1ded97f73b0b62d0b6"
+  },
+  "addon/scripts/5_Mission/MCPBridge.c": {
+    "bytes": 83667,
+    "sha256": "8137e231f6e648a6b2ea9d7633a323cc4fdd37cbb4ef7de06fa9fac84ef5668d"
+  },
+  "addon/scripts/5_Mission/MCPClientBridge.c": {
+    "bytes": 97353,
+    "sha256": "fbbdc4357100586f1a7eb5bf23b9b27fc357688af18f0d8b61fa3ac20e56f2d3"
+  }
+}

@@ -1,0 +1,4 @@
+A  decisions/decision-log.md
+ M tools/dayz_mcp/steam_preflight.py
+ D tools/native-launchers/dayz-test-v1/src/app_main.py
+ D tools/native-launchers/dayz-test-v1/src/launcher.cpp
