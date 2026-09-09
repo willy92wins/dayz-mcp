@@ -107,8 +107,11 @@ class DayzTestToolRequestTest(unittest.TestCase):
             )
         self.assertEqual(
             caught.exception.code,
-            "bridge_mod_missing: add extra_mods=['@DayZ_MCP']",
+            dayz_test_tool._BRIDGE_MOD_MISSING,
         )
+        self.assertTrue(caught.exception.code.startswith("bridge_mod_missing:"))
+        self.assertIn("folder name", caught.exception.code)
+        self.assertIn("@DayZ_MCP", caught.exception.code)
 
         for excluded_field in ("base_mods", "server_mods"):
             with self.subTest(excluded_field=excluded_field):
@@ -121,7 +124,7 @@ class DayzTestToolRequestTest(unittest.TestCase):
                     )
                 self.assertEqual(
                     caught.exception.code,
-                    "bridge_mod_missing: add extra_mods=['@DayZ_MCP']",
+                    dayz_test_tool._BRIDGE_MOD_MISSING,
                 )
 
         raw, selected = dayz_test_tool.build_run_request(
@@ -190,8 +193,28 @@ class DayzTestToolRequestTest(unittest.TestCase):
         )
         for arguments, code in invalid:
             with self.subTest(arguments=arguments):
-                with self.assertRaisesRegex(dayz_test_tool.DayzTestToolError, code):
+                with self.assertRaisesRegex(dayz_test_tool.DayzTestToolError, code) as caught:
                     dayz_test_tool.build_run_request(sealed, **arguments)
+                if code == "bad_mod":
+                    self.assertEqual(caught.exception.code, dayz_test_tool._BAD_MOD)
+                    self.assertTrue(caught.exception.code.startswith("bad_mod:"))
+                    self.assertIn("folder name", caught.exception.code)
+                    self.assertIn("@DayZ_MCP", caught.exception.code)
+
+    def test_build_run_request_names_accepted_form_for_relative_mod_path(self) -> None:
+        """fb-20260909-213257-49a9: a relative path is not a folder name."""
+        sealed = _sealed(_policy())
+        with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+            dayz_test_tool.build_run_request(
+                sealed,
+                project="ExampleMod",
+                mode="offline",
+                extra_mods=[r"mods\@DayZ_MCP"],
+            )
+        self.assertEqual(caught.exception.code, dayz_test_tool._BAD_MOD)
+        self.assertTrue(caught.exception.code.startswith("bad_mod:"))
+        self.assertIn("single folder name", caught.exception.code)
+        self.assertIn("absolute path inside the project's mod_roots", caught.exception.code)
 
     def test_build_run_request_accepts_absolute_mission_inside_roots(self) -> None:
         policy = _policy()
@@ -782,7 +805,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         launch.assert_not_awaited()
         self.assertEqual(
             caught.exception.code,
-            "bridge_mod_missing: add extra_mods=['@DayZ_MCP']",
+            dayz_test_tool._BRIDGE_MOD_MISSING,
         )
 
     async def test_run_reports_progress_and_returns_compact_terminal_result(self) -> None:
