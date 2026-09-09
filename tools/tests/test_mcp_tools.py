@@ -654,8 +654,9 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn(key, status)
         self.assertEqual(status["tool_registry_remediation"], "reopen_mcp_client")
         stale = status["tool_registry_source_stale"]
-        self.assertIn(stale, (None, "unknown"))
-        self.assertIsNot(stale, False)
+        self.assertIs(type(stale), bool)
+        self.assertIs(stale, status["server_modules"]["status"] != "fresh")
+        self.assertGreater(status["server_modules"]["watched_count"], 0)
         with patch.object(server_module, "capture_registry_snapshot") as capture:
             again = _content_json(await app.call_tool("bridge_status", {}))
         capture.assert_not_called()
@@ -665,6 +666,24 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             again["tool_registry_captured_at"], status["tool_registry_captured_at"]
         )
+
+    async def test_bridge_status_source_stale_is_boolean_for_all_three_states(self) -> None:
+        app, _runtime = self.build_started()
+        description = next(tool.description for tool in await app.list_tools() if tool.name == "bridge_status")
+        self.assertIn("always a boolean: true for stale OR unknown", description)
+        self.assertIn("false only for verified fresh", description)
+        for state, expected in (("fresh", False), ("stale", True), ("unknown", True)):
+            with self.subTest(state=state):
+                snapshot = {
+                    "server_started_at": 1.0, "server_pid": 123, "watched_count": 1,
+                    "stale": ["fixture"] if state == "stale" else [],
+                    "unreadable": ["fixture"] if state == "unknown" else [],
+                    "unreadable_reasons": {"fixture": "source_unreadable_now"} if state == "unknown" else {},
+                }
+                with patch.object(server_module._SERVER_SOURCES, "snapshot", return_value=snapshot):
+                    status = _content_json(await app.call_tool("bridge_status", {}))
+                self.assertIs(status["tool_registry_source_stale"], expected)
+                self.assertEqual(status["server_modules"]["status"], state)
 
     async def test_loopback_status_omits_tool_registry_overlay(self) -> None:
         _app, runtime = self.build_started()

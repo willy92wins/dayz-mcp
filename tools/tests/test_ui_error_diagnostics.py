@@ -10,6 +10,7 @@ and a world_spawn timeout keeps the bare code the rest of the suite pins.
 """
 from __future__ import annotations
 
+import json
 import unittest
 from types import SimpleNamespace
 from typing import Any
@@ -159,7 +160,13 @@ async def _wire_error_text(tool: str, arguments: dict[str, Any], result: dict[st
         async with create_connected_server_and_client_session(app._mcp_server) as session:
             call = await session.call_tool(tool, arguments)
     assert call.isError, call
-    return " ".join(getattr(block, "text", "") for block in call.content)
+    # S3 adds process freshness as a separate block, not to the domain error.
+    # Check that sidecar independently and retain the exact diagnostic assertion.
+    for block in call.content[1:]:
+        marker = call.meta["server_code_freshness"]
+        assert block.text.startswith(f"SERVER_CODE_FRESHNESS {marker['status']}: "), call
+        assert "remediation=reopen_mcp_client" in block.text, call
+    return call.content[0].text
 
 
 class UiClickWireTest(unittest.IsolatedAsyncioTestCase):

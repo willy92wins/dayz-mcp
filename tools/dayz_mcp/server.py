@@ -32,6 +32,7 @@ from dayz_mcp import (
     inbox,
     orphan_guard,
     playbook_tool as playbook_tool_mod,
+    registry_lock,
     ui_dialog as ui_dialog_mod,
 )
 from dayz_mcp.control_client import ControlClient, ControlClientError, ControlIdentity
@@ -39,11 +40,14 @@ from dayz_mcp.accredited_daemon_transport import AccreditedTransportError
 from dayz_mcp.daemon_policy import load_normal_daemon_policy
 from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from dayz_mcp.effective_schema_core import project_server_config_identity
-from dayz_mcp.tool_registry_fingerprint import (
-    AuthorityBundleBytes,
-    capture_registry_snapshot,
-    compare_snapshot_to_authority,
-    read_authority_marker,
+from dayz_mcp.tool_registry_fingerprint import capture_registry_snapshot
+from dayz_mcp.knowledge import register_knowledge_tools
+from dayz_mcp.server_freshness import (
+    REMEDIATION as _TOOL_REGISTRY_REMEDIATION,
+    ServerSourceWatch,
+    install_result_freshness,
+    loaded_source_files,
+    source_stale,
 )
 from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import LoopbackServer, read_key
@@ -51,6 +55,14 @@ from dayz_mcp.server_cli import CLIENT_PLATFORM_ALIASES, build_server_parser
 from dayz_mcp.process_lifecycle import empty_box, occupancy_error_fields
 from dayz_mcp.session_coordination import ClientIdentity
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
+
+# Import the production lazy closures before freezing their source baseline.
+# These imports bind definitions only; they do not launch or acquire anything.
+if os.name == "nt":
+    from dayz_mcp import native_bundle, native_launcher_backend
+playbook_tool_mod.load_runner()
+# Freeze at import, before build_app can be delayed or repeated.
+_SERVER_SOURCES = ServerSourceWatch(loaded_source_files())
 
 UiClickMode = Literal["direct", "complete"]
 UiReloadLayoutMode = Literal["reload", "close"]
@@ -637,9 +649,6 @@ def _with_capability_comparison(
     return enriched
 
 
-_TOOL_REGISTRY_REMEDIATION = "reopen_mcp_client"
-
-
 def _registry_tool_records(app: FastMCP) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for tool in app._tool_manager.list_tools():
@@ -674,21 +683,9 @@ def _capture_process_registry(app: FastMCP, config: ServerConfig) -> Any:
 
 def _frozen_tool_registry_overlay(app: FastMCP, config: ServerConfig) -> dict[str, Any]:
     snapshot = _capture_process_registry(app, config)
-    authority = read_authority_marker(
-        AuthorityBundleBytes(
-            marker=None,
-            fingerprint_sidecar=None,
-            verdict_sidecar=None,
-            producers_sidecar=None,
-            receipts=None,
-        ),
-        expected_profile=snapshot.profile,
-        expected_role=snapshot.role,
-    )
     return {
         "tool_registry_fingerprint": snapshot.fingerprint,
         "tool_registry_captured_at": snapshot.captured_at_utc,
-        "tool_registry_source_stale": compare_snapshot_to_authority(snapshot, authority),
         "tool_registry_remediation": _TOOL_REGISTRY_REMEDIATION,
     }
 
@@ -3267,7 +3264,19 @@ def _bridge_status_description() -> str:
         "Inspect peer liveness, version_state, and ready "
         f"{{ready, reason is an OPEN set (today: {reason_list}): validate by shape "
         "(ready: bool, reason: non-empty string), never against a whitelist}}. "
-        "daemon_modules.stale = source newer than daemon, not a crash."
+        "daemon_modules.stale = source newer than daemon, not a crash. "
+        "server_modules watches this tools process's loaded Python sources; "
+        "stale lists changed content, unreadable lists unverifiable sources. "
+        "tool_registry_source_stale is always a boolean: true for stale OR "
+        "unknown, false only for verified fresh. server_modules.status "
+        "distinguishes fresh/stale/unknown; unreadable_reasons and "
+        "observation_errors explain unknown, including a detached result hook. "
+        "Sources use stat(mtime_ns,size,file_id) then hash on change; edits/ACL "
+        "denies preserving that triple can be missed. A separate non-JSON "
+        "SERVER_CODE_FRESHNESS text block and result _meta mark responses "
+        "observed as stale/unknown. Read the original payload separately, "
+        "not by concatenating text blocks. Reopen the MCP client to load new "
+        "server code."
     )
 
 
@@ -3316,8 +3325,6 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         ),
         lifespan=lifespan,
     )
-    from dayz_mcp.knowledge import register_knowledge_tools
-
     register_knowledge_tools(app)
 
     def _client_runtime() -> ClientRuntime:
@@ -3332,10 +3339,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     # overlay is local to this FastMCP process; loopback /status does not
     # publish it.
     _tool_registry_overlay: dict[str, Any] = {}
+    server_sources = _SERVER_SOURCES
 
-    def _with_tool_registry(payload: dict[str, Any]) -> dict[str, Any]:
+    async def _with_tool_registry(payload: dict[str, Any]) -> dict[str, Any]:
         overlay = dict(payload)
         overlay.update(_tool_registry_overlay)
+        modules = await asyncio.to_thread(observe_server_sources)
+        overlay["server_modules"] = modules
+        overlay["tool_registry_source_stale"] = source_stale(modules)
         return overlay
 
     async def _bridge_tool_names() -> frozenset[str]:
@@ -4756,7 +4767,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def bridge_status() -> dict[str, Any]:
         runtime.touch()
         payload = await runtime.bridge_status_payload()
-        return _with_tool_registry(
+        return await _with_tool_registry(
             _with_capability_comparison(payload, await _bridge_tool_names())
         )
 
@@ -5330,6 +5341,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         _patch_closed_tool_schema(app, _closed_tool)
     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
     _tool_registry_overlay.update(_frozen_tool_registry_overlay(app, config))
+    observe_server_sources = install_result_freshness(app, server_sources)
     return app, runtime
 
 
