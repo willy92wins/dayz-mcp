@@ -2005,6 +2005,14 @@ AUTO_REMEDIATE_STEAM_DESCRIPTION = (
     "because it ends a session the caller may be using; when on, the result "
     "reports steam_remediated and how long it took."
 )
+EXTRA_MODS_DESCRIPTION = (
+    "Additional mods for this run. Each entry must be a single folder name "
+    "(for example '@DayZ_MCP') or an absolute path inside the project's "
+    "mod_roots; relative paths with '\\' or '/' are rejected as bad_mod. "
+    "When the selected project is not DayZ_MCP, include '@DayZ_MCP' here "
+    "explicitly (bridge_mod_missing otherwise); base_mods and server_mods "
+    "do not satisfy that gate."
+)
 CLIENT_START_BUDGET_MAX_S = 3600.0
 CLIENT_START_BUDGET_DESCRIPTION = (
     "Seconds a freshly launched client may take to reach its first poll before "
@@ -2041,6 +2049,7 @@ def _describe_run_parameters(app: FastMCP, tool_name: str) -> None:
     for field, text in (
         ("mode", RUN_ID_MATRIX_MODE_DESCRIPTION),
         ("run_id", RUN_ID_MATRIX_RUN_ID_DESCRIPTION),
+        ("extra_mods", EXTRA_MODS_DESCRIPTION),
         ("auto_remediate_steam", AUTO_REMEDIATE_STEAM_DESCRIPTION),
         ("client_start_budget_s", CLIENT_START_BUDGET_DESCRIPTION),
     ):
@@ -3490,8 +3499,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "live run, preserving the server and the world state (no server "
             "reboot); mode=server|all must NOT pass run_id. "
             "preflight does not relax that matrix. "
-            "extra_mods accepts any folder under the project's mod_roots "
-            "(a disposable probe need not be registered as a project). "
+            "extra_mods entries must be a single folder name "
+            "(for example '@DayZ_MCP') or an absolute path inside the "
+            "project's mod_roots; relative paths with '\\' or '/' are "
+            "rejected as bad_mod. A disposable probe need not be "
+            "registered as a project. When the selected project is not "
+            "DayZ_MCP, pass extra_mods=['@DayZ_MCP'] explicitly "
+            "(bridge_mod_missing otherwise); '@DayZ_MCP' in base_mods or "
+            "server_mods does not satisfy that gate. "
             "wait_for_box_s>0 waits "
             "until session_status.box is free (FIFO, no tool_lock while "
             "sleeping). A DayZ server holding a game port counts as an "

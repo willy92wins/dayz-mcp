@@ -135,6 +135,23 @@ class RunIdMatrixDescriptionTest(unittest.TestCase):
         self.assertNotIn("offline", props["mode"]["enum"])
 
 
+class PublishedExtraModsNameFormTest(unittest.TestCase):
+    """fb-20260909-213257-49a9: extra_mods name-form is on the tool and the property."""
+
+    def test_tool_and_property_descriptions_name_the_accepted_form(self) -> None:
+        app, _ = build_app(ServerConfig(key="k", port=0, log_sink=lambda _m: None))
+        desc = _tool_desc(app, "dayz_test_run")
+        self.assertIn("single folder name", desc)
+        self.assertIn("@DayZ_MCP", desc)
+        self.assertIn("bad_mod", desc)
+        self.assertIn("bridge_mod_missing", desc)
+        self.assertNotIn("extra_mods accepts any folder", desc)
+        props = app._tool_manager.get_tool("dayz_test_run").parameters["properties"]
+        self.assertEqual(props["extra_mods"]["description"], server.EXTRA_MODS_DESCRIPTION)
+        self.assertIn("single folder name", props["extra_mods"]["description"])
+        self.assertIn("bridge_mod_missing", props["extra_mods"]["description"])
+
+
 class ReachableCapabilityTest(unittest.TestCase):
     """Two capabilities were built, tested and left unreachable from the wire.
 
