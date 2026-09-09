@@ -1,0 +1,64 @@
+{
+  "method": "Read-only file evidence. Steam account IDs and addresses removed before saving.",
+  "steam_events": [
+    {
+      "path": "C:\\Program Files (x86)\\Steam\\logs\\bootstrap_log.txt",
+      "line": 28228,
+      "text": "[2026-09-09 12:53:04] Startup - Steam Client launched with: \"C:\\Program Files (x86)\\Steam\\steam.exe\" -silent"
+    },
+    {
+      "path": "C:\\Program Files (x86)\\Steam\\logs\\bootstrap_log.txt",
+      "line": 28236,
+      "text": "[2026-09-09 12:53:04] Verification complete"
+    },
+    {
+      "path": "C:\\Program Files (x86)\\Steam\\logs\\connection_log.txt",
+      "line": 6276,
+      "text": "[2026-09-09 12:53:16] [Logged Off, 4, 0] <user> LogOn() called; not connected yet, scheduling connection. Schedule init returned 1"
+    },
+    {
+      "path": "C:\\Program Files (x86)\\Steam\\logs\\connection_log.txt",
+      "line": 6306,
+      "text": "[2026-09-09 12:53:17] [Logging On, 4, 7] <user> RecvMsgClientLogOnResponse() : <user> 'OK'"
+    },
+    {
+      "path": "C:\\Program Files (x86)\\Steam\\logs\\connection_log.txt",
+      "line": 6307,
+      "text": "[2026-09-09 12:53:17] [Logged On, 4, 7] <user> RecvMsgClientLogOnResponse() : processing complete"
+    },
+    {
+      "path": "C:\\Program Files (x86)\\Steam\\logs\\console_log.txt",
+      "line": 2264,
+      "text": "[2026-09-09 12:53:18] System startup time: 13.36 seconds"
+    },
+    {
+      "path": "C:\\Program Files (x86)\\Steam\\logs\\console_log.txt",
+      "line": 2267,
+      "text": "[2026-09-09 12:55:24] Game process added : AppID 221100 \"\"C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ\\DayZDiag_x64.exe\" -mod=P:\\Mods\\@DayZ_MCP -connect=<address> -port=2302 -profiles=P:\\DayZ_MCP_dev\\_client\\profiles -name=Dev -window -x=1920 -y=1080 -noPause -filePatching\", ProcID 38572, IP <address>"
+    }
+  ],
+  "client_logs": [
+    {
+      "path": "_client/profiles/DayZDiag_x64_2026-09-09_12-53-15.RPT",
+      "bytes": 549,
+      "header_exe": "== C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ\\DayZDiag_x64.exe",
+      "header_argv": "== \"C:\\Program -mod=P:\\Mods\\@DayZ_MCP -connect=127.0.0.1 -port=2302 -profiles=P:\\DayZ_MCP_dev\\_client\\profiles -name=Dev -window -x=1920 -y=1080 -noPause -filePatching",
+      "header_time": "Current time:  2026/09/09 12:53:15",
+      "first_engine": null,
+      "sha256": "41b3021ff90748fe7ed31c5c59f409ef0f8b6fc886dbe70c3ead87a89b223431"
+    },
+    {
+      "path": "_client/profiles/DayZDiag_x64_2026-09-09_12-55-24.RPT",
+      "bytes": 48724,
+      "header_exe": "== C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ\\DayZDiag_x64.exe",
+      "header_argv": "== \"C:\\Program -mod=P:\\Mods\\@DayZ_MCP -connect=127.0.0.1 -port=2302 -profiles=P:\\DayZ_MCP_dev\\_client\\profiles -name=Dev -window -x=1920 -y=1080 -noPause -filePatching",
+      "header_time": "Current time:  2026/09/09 12:55:26",
+      "first_engine": [
+        10,
+        "12:55:26.302 ENGINE    (E): Can't load settings ./$CurrentDir:DayZSetting.xml"
+      ],
+      "sha256": "ec62509ccc7ae400b11a0a0bccd61c7d0d3226cdbfa5b5598e8ffaea8703aedb"
+    }
+  ],
+  "registry_limit": "HKCU ActiveProcess absent in exec context; target loaded-user key access failed. No values recovered."
+}

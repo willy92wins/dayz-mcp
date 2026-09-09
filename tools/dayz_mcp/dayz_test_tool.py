@@ -1435,6 +1435,12 @@ async def execute_dayz_test_run(
                         )
                     steam_remediation_report = {
                         "steam_remediated": steam.error_code is None,
+                        "steam_pid_repair_reason": getattr(
+                            steam, "steam_pid_repair_reason", None
+                        ),
+                        "steam_restart_fallback": getattr(
+                            steam, "steam_restart_fallback", False
+                        ),
                         "steam_remediation_s": round(
                             time.monotonic() - remediated_at, 3
                         ),

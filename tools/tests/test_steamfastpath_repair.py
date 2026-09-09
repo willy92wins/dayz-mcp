@@ -54,6 +54,10 @@ class MemoryProvider:
             raise self.pids
         return self.pids
 
+    def steam_startup_complete(self, pid: int) -> bool:
+        # These existing fixtures model a fully initialized Steam client.
+        return True
+
     def process_exists(self, pid):
         self.events.append(("exists", pid))
         if self.exists_error:

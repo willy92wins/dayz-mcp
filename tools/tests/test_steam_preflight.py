@@ -304,6 +304,10 @@ class _MutableSteamProvider:
             raise value
         return value
 
+    def steam_startup_complete(self, pid: int) -> bool:
+        # These existing fixtures model a fully initialized Steam client.
+        return True
+
     def shut_down(self) -> None:
         self.steam_pids = ()
         self.existing.clear()

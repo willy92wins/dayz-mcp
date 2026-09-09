@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import ctypes
 from dataclasses import dataclass, replace
+from datetime import datetime
 import ntpath
+from pathlib import Path
+import re
 import subprocess
 import time
 from collections.abc import Callable
@@ -24,6 +27,12 @@ _STEAM_KEY = r"Software\Valve\Steam"
 _MAX_LIVE_PIDS = 8
 _SHUTDOWN_WAIT_S = 15.0
 _ACTIVE_WAIT_S = 20.0
+_STARTUP_WAIT_S = 180.0
+_STARTUP_LOG_BYTES = 128 * 1024
+_STARTUP_MARKER = re.compile(
+    rb"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] "
+    rb"System startup time: [0-9]+(?:\.[0-9]+)? seconds"
+)
 _POLL_INTERVAL_S = 0.2
 _STEAM_INVOKE_FLAGS = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
     subprocess, "CREATE_NO_WINDOW", 0
@@ -77,9 +86,13 @@ class SteamPreflightProvider(Protocol):
 
     def steam_process_pids(self) -> tuple[int, ...]: ...
 
+    def steam_startup_complete(self, pid: int) -> bool:
+        """Read the current process's completion marker, not an IPC guarantee."""
+        ...
+
 
 class WindowsSteamPreflightProvider:
-    """Windows implementation that reads only Steam's ActiveProcess key."""
+    """Read Steam's ActiveProcess key, process identity and bounded startup log."""
 
     def read_active_process(self) -> SteamActiveProcessSnapshot:
         import winreg
@@ -140,6 +153,69 @@ class WindowsSteamPreflightProvider:
             kernel32.CloseHandle(snapshot)
 
 
+    def steam_startup_complete(self, pid: int) -> bool:
+        """Mitigation: require Steam's startup marker from this process lifetime.
+
+        A query-only handle pins process identity across the log read. No DLL
+        is loaded and no registry/process mutation is performed. Steamworks
+        initialization by the actual game remains the acceptance test.
+        """
+        if not _is_int(pid) or not 0 < pid <= 0xFFFFFFFF:
+            raise ValueError("Steam PID must be a positive DWORD")
+        kernel32 = _kernel32()
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            raise OSError(ctypes.get_last_error(), "OpenProcess failed")
+        try:
+            created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+            if not kernel32.GetProcessTimes(
+                handle, ctypes.byref(created), ctypes.byref(exited),
+                ctypes.byref(kernel), ctypes.byref(user),
+            ):
+                raise OSError(ctypes.get_last_error(), "GetProcessTimes failed")
+            created_ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+            started_at = (created_ticks - 116444736000000000) / 10_000_000
+            buffer = ctypes.create_unicode_buffer(32768)
+            size = wintypes.DWORD(len(buffer))
+            if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                raise OSError(ctypes.get_last_error(), "QueryFullProcessImageNameW failed")
+            if ntpath.basename(buffer.value).casefold() != "steam.exe":
+                return False
+            log_path = Path(buffer.value).parent / "logs" / "console_log.txt"
+            # Ignore filesystem mtime: a still-open Steam log can contain newer
+            # records. Discard a partial first/last line in the bounded tail.
+            with log_path.open("rb") as stream:
+                start = max(0, stream.seek(0, 2) - _STARTUP_LOG_BYTES)
+                stream.seek(start)
+                tail = stream.read(_STARTUP_LOG_BYTES)
+            if start:
+                tail = tail.partition(b"\n")[2]
+            completed = _startup_marker_in_lifetime(tail, started_at, time.time())
+            exit_code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                raise OSError(ctypes.get_last_error(), "GetExitCodeProcess failed")
+            return completed and exit_code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+
+
+def _startup_marker_in_lifetime(tail: bytes, started_at: float, now: float) -> bool:
+    """Require a complete dated record after creation; old/future logs fail closed."""
+    for line in reversed(tail.split(b"\n")[:-1]):
+        match = _STARTUP_MARKER.fullmatch(line.rstrip(b"\r"))
+        if match is None:
+            continue
+        try:
+            # Steam timestamps are local wall time, with one-second precision.
+            marked_at = datetime.strptime(
+                match[1].decode("ascii"), "%Y-%m-%d %H:%M:%S"
+            ).timestamp()
+        except (ValueError, OverflowError, OSError):
+            return False
+        return 0 < started_at <= marked_at <= now
+    return False
+
+
 class _ProcessEntry32W(ctypes.Structure):
     _fields_ = [
         ("dwSize", ctypes.c_ulong),
@@ -161,6 +237,12 @@ def _kernel32() -> ctypes.WinDLL:
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.GetProcessTimes.argtypes = (
+        wintypes.HANDLE, *(ctypes.POINTER(wintypes.FILETIME),) * 4
+    )
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
     kernel32.QueryFullProcessImageNameW.argtypes = (
         wintypes.HANDLE,
         wintypes.DWORD,
@@ -472,21 +554,81 @@ def remediate_stale_steam_session(
     The fast path needs a stable registry snapshot, a valid ActiveUser, and a
     single live steam.exe whose identity is checked before writing. An already
     correct PID is a no-op. Failure retains the bounded shutdown/silent cycle
-    and its existing error reasons. Call at most once for the same launch.
+    and its existing error reasons. Both branches then require the current
+    Steam process's startup log marker within a separate bounded wait. This is
+    a startup mitigation, not proof that the game can initialize Steamworks.
+    Call at most once for the same launch.
     """
     selected_provider = WindowsSteamPreflightProvider() if provider is None else provider
     selected_host = WindowsSteamRemediationHost() if host is None else host
+    # Legacy providers cannot prove even startup completion. Fail before any
+    # mutation rather than silently falling back to the old registry-only gate.
+    if not callable(getattr(selected_provider, "steam_startup_complete", None)):
+        return _remediation_result(
+            evaluate_steam_session(selected_provider), reason="startup_probe_unavailable"
+        )
     repair = _try_repair_steam_pid(selected_provider, selected_host)
     if repair.error_code is None:
-        return repair
+        return _wait_for_steam_startup(selected_provider, selected_host, repair)
     restarted = _restart_steam_session(selected_provider, selected_host)
-    return replace(
+    restarted = replace(
         restarted,
         steam_pid_repair_reason=repair.steam_pid_repair_reason,
         steam_previous_registered_pid=repair.steam_previous_registered_pid,
         steam_pid_repair_target_pid=repair.steam_pid_repair_target_pid,
         steam_pid_repair_error=repair.steam_pid_repair_error,
         steam_restart_fallback=True,
+    )
+    if restarted.error_code is not None:
+        return restarted
+    return _wait_for_steam_startup(selected_provider, selected_host, restarted)
+
+
+def _wait_for_steam_startup(
+    provider: SteamPreflightProvider, host: SteamRemediationHost,
+    remediated: SteamRemediationResult,
+) -> SteamRemediationResult:
+    """Bounded startup mitigation shared by the PID repair and restart branches."""
+    expected_pid = remediated.steam_registered_pid
+    last_session: SteamSessionResult = remediated
+    reason = "startup_timeout"
+
+    def startup_observed() -> bool:
+        nonlocal last_session, reason
+        last_session = evaluate_steam_session(provider)
+        if (
+            last_session.error_code is not None
+            or last_session.steam_registered_pid != expected_pid
+            or last_session.steam_live_pids != (expected_pid,)
+        ):
+            reason = "startup_session_changed"
+            return False
+        try:
+            completed = provider.steam_startup_complete(expected_pid)
+        except Exception:
+            reason = "startup_probe_failed"
+            return False
+        if type(completed) is not bool:
+            reason = "startup_probe_failed"
+            return False
+        reason = "startup_timeout"
+        if not completed:
+            return False
+        # The registry or process list may have changed while the log was read.
+        after = evaluate_steam_session(provider)
+        if after != last_session:
+            last_session = after
+            reason = "startup_session_changed"
+            return False
+        return True
+
+    passed = _wait_until(host, _STARTUP_WAIT_S, startup_observed)
+    return replace(
+        remediated,
+        error_code=None if passed else STEAM_SESSION_STALE,
+        steam_registered_pid=last_session.steam_registered_pid,
+        steam_live_pids=last_session.steam_live_pids,
+        steam_remediation_reason=None if passed else reason,
     )
 
 
