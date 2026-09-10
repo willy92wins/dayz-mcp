@@ -441,6 +441,123 @@ class SessionStatusFixtureShapeTest(unittest.TestCase):
         self.assertGreaterEqual(seen, 1)
 
 
+class LiveExplicitCoordsTest(unittest.TestCase):
+    def _boom(self, step_id: str, tool: str, arguments: object) -> dict:
+        del step_id, tool, arguments
+        raise AssertionError("live coord gate must not invoke tools")
+
+    def _pass_invoke(self, step_id: str, tool: str, arguments: object) -> dict:
+        del step_id
+        if tool == "surface_query":
+            return {"ok": 1, "y": 315.56}
+        if tool == "scene_raycast":
+            origin = arguments["from"] if isinstance(arguments, dict) else [0.0, 315.56, 0.0]
+            return {
+                "ok": 1,
+                "raycast": {"hit": True, "pos": [origin[0], 315.56, origin[2]]},
+            }
+        if tool == "query_all_players":
+            return {"ok": 1, "players": []}
+        if tool == "entities_query":
+            return {"ok": 1, "count_total": 0, "entities": []}
+        raise AssertionError(tool)
+
+    def test_live_omitted_xz_is_named_error_and_does_not_run(self) -> None:
+        playbook = load_place()
+        with self.assertRaises(runner.SchemaError) as ctx:
+            runner.run_playbook(playbook, params={}, invoke=self._boom, mode="live")
+        self.assertEqual(ctx.exception.field, "params.x")
+        message = str(ctx.exception)
+        self.assertIn("params.x", message)
+        self.assertIn("params.z", message)
+        self.assertIn("required in live", message)
+
+    def test_live_only_x_names_params_z(self) -> None:
+        playbook = load_place()
+        with self.assertRaises(runner.SchemaError) as ctx:
+            runner.run_playbook(
+                playbook, params={"x": 7512.0}, invoke=self._boom, mode="live"
+            )
+        self.assertEqual(ctx.exception.field, "params.z")
+        message = str(ctx.exception)
+        self.assertIn("params.z", message)
+        self.assertIn("required in live", message)
+        self.assertNotIn("params.x", message)
+
+    def test_live_explicit_zero_is_valid_and_keeps_clear_r_default(self) -> None:
+        playbook = load_place()
+        verdict = runner.run_playbook(
+            playbook, params={"x": 0, "z": 0}, invoke=self._pass_invoke, mode="live"
+        )
+        self.assertEqual(verdict["mode"], "live")
+        self.assertEqual(verdict["params"]["x"], 0)
+        self.assertEqual(verdict["params"]["z"], 0)
+        self.assertEqual(verdict["params"]["clear_r"], 15.0)
+        self.assertIn(verdict["overall"], {"PASS", "PASS_WITH_WARNINGS"})
+
+    def test_fixtures_mode_still_mixes_toml_xz_defaults(self) -> None:
+        playbook = load_place()
+        verdict = runner.run_playbook(playbook, params={}, invoke=self._pass_invoke)
+        self.assertEqual(verdict["mode"], "fixtures")
+        self.assertEqual(verdict["params"]["x"], 0.0)
+        self.assertEqual(verdict["params"]["z"], 0.0)
+        self.assertIn(verdict["overall"], {"PASS", "PASS_WITH_WARNINGS"})
+
+    def test_live_does_not_require_xz_when_undeclared(self) -> None:
+        playbook = {
+            "id": "no_xz",
+            "version": "0",
+            "status": "DRAFT",
+            "requires_tools": ["surface_query"],
+            "params": {"run_id": ""},
+            "steps": [
+                {
+                    "id": "S1",
+                    "tool": "surface_query",
+                    "args": {},
+                    "expect": [{"field": "ok", "op": "eq", "value": 1}],
+                    "on_fail": {"action": "STOP", "reason": "x"},
+                }
+            ],
+        }
+        verdict = runner.run_playbook(
+            playbook, params={}, invoke=self._pass_invoke, mode="live"
+        )
+        self.assertEqual(verdict["overall"], "PASS")
+        self.assertEqual(verdict["params"]["run_id"], "")
+
+    def test_live_lease_spawn_prepare_trace_omitted_xz_inherits_toml(self) -> None:
+        playbook = runner.load_playbook(PLAYBOOKS / "lease_spawn_prepare_trace.toml")
+
+        def invoke(step_id: str, tool: str, arguments: object) -> dict:
+            del step_id, arguments
+            if tool == "session_status":
+                return {"self": {"state": "idle"}}
+            raise AssertionError(tool)
+
+        verdict = runner.run_playbook(
+            playbook, params={}, invoke=invoke, mode="live"
+        )
+        self.assertEqual(verdict["mode"], "live")
+        self.assertEqual(verdict["params"]["x"], 0.0)
+        self.assertEqual(verdict["params"]["z"], 0.0)
+        self.assertEqual(verdict["params"]["y"], 0.0)
+        self.assertEqual(verdict["params"]["vehicle_type"], "CivilianSedan")
+        self.assertEqual(verdict["overall"], "FAIL")
+        self.assertEqual(verdict["stopped_at"], "S1")
+
+    def test_live_xz_declared_under_other_id_inherits_toml(self) -> None:
+        playbook = load_place()
+        playbook["id"] = "not_place_safely"
+        verdict = runner.run_playbook(
+            playbook, params={}, invoke=self._pass_invoke, mode="live"
+        )
+        self.assertEqual(verdict["mode"], "live")
+        self.assertEqual(verdict["params"]["x"], 0.0)
+        self.assertEqual(verdict["params"]["z"], 0.0)
+        self.assertIn(verdict["overall"], {"PASS", "PASS_WITH_WARNINGS"})
+
+
 class RequiresBridgeAbsentTest(unittest.TestCase):
     """requires_bridge is not a gate. Re-adding it to a shipped TOML fails this test."""
 
