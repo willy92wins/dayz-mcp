@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.steam_helpers import FakeSteamGate
+
 import asyncio
 import json
 import sys
@@ -117,6 +119,7 @@ class BoxOccupancyTest(unittest.TestCase):
         self.launcher = FakeLauncher()
         self.argv: dict[int, list[str]] = {}
         self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=self.audit,
@@ -562,6 +565,7 @@ class RunCommandActivityTest(unittest.TestCase):
         self.guard = FakeGuard()
         self.launcher = FakeLauncher()
         self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=self.audit,
@@ -735,6 +739,7 @@ class RunCommandActivityTest(unittest.TestCase):
     def test_corrupt_jsonl_does_not_change_activity(self) -> None:
         writer = JsonlAuditWriter(self.paths, "gen-json")
         life = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=writer.write,
@@ -759,6 +764,7 @@ class RunCommandActivityTest(unittest.TestCase):
     def test_cleared_jsonl_does_not_change_recorded_activity(self) -> None:
         writer = JsonlAuditWriter(self.paths, "gen-json")
         life = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=writer.write,
@@ -1539,6 +1545,7 @@ class JsonlActivityLookupTest(unittest.TestCase):
         self.guard = FakeGuard()
         self.launcher = FakeLauncher()
         self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=self.writer.write,
@@ -2194,6 +2201,7 @@ class BoxOccupancyGenerationProjectionTest(unittest.TestCase):
         self.launcher = FakeLauncher()
         self.generation = "gen-box-h"
         self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=self.audit,

@@ -1340,14 +1340,23 @@ class SessionCoordinator:
         lease_id: str,
         reservation_id: str,
         command: str,
+        *,
+        expire: bool = True,
     ) -> bool:
-        """Read-only exact authority check used before lifecycle preflight I/O."""
+        """Exact authority check; monitors may inspect TTL without running cleanup.
+
+        The normal path expires the lease as before. A cancellation monitor must
+        return False immediately at expiry, before a possibly slow release hook:
+        it needs to stop its own supervised writer before ordinary cleanup runs.
+        """
 
         with self._condition:
-            self._expire_due()
+            if expire:
+                self._expire_due()
             lease = self._active
             return bool(
                 lease is not None
+                and (expire or self._time_fn() < lease.effective_expiry())
                 and lease.client.session_id == owner_session_id
                 and lease.lease_id == lease_id
                 and any(

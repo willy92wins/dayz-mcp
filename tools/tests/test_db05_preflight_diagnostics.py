@@ -25,7 +25,7 @@ class Db05DiagnosticsTest(unittest.IsolatedAsyncioTestCase):
         self.launch = AsyncMock(side_effect=self._launch)
         self.evaluate = self._patch(tool, "evaluate_steam_session",
                                     side_effect=lambda: steam.evaluate_steam_session(self.provider))
-        self.remediate = self._patch(tool, "remediate_stale_steam_session")
+        self.remediate = self._patch(steam, "remediate_stale_steam_session")
         self._patch(tool, "open_approved_launcher", return_value=fixtures._Opened())
         self._patch(tool.secure_launcher, "load_verified_bundle",
                     return_value=fixtures._Bundle(fixtures._sealed(self.policy)))

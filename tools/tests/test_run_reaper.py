@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.steam_helpers import FakeSteamGate
+
 import sys
 import threading
 import time
@@ -100,6 +102,7 @@ class RunReaperCoordinatorWakeTest(unittest.TestCase):
         self.guard = FakeGuard()
         self.launcher = FakeLauncher()
         self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=self.audit,

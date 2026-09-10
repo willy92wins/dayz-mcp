@@ -21,6 +21,7 @@ tools/native-launchers/dayz-test-v1/*.zip
 tools/native-launchers/dayz-test-v1/*.pyz
 tools/native-launchers/dayz-test-v1/*.json
 tools/native-launchers/dayz-test-v1/runtime/
+tools/native-launchers/dayz-test-v1/vendor/
 
 # Virtualenv created by install-mcp.ps1, and the packaging metadata that
 # `pip install -e` leaves beside it.

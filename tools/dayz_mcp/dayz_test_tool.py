@@ -23,7 +23,6 @@ from dayz_mcp.steam_preflight import (
     STEAM_SESSION_STALE,
     SteamSessionResult,
     evaluate_steam_session,
-    remediate_stale_steam_session,
 )
 _BRIDGE_MOD_NAMES = frozenset({"dayz_mcp", "@dayz_mcp"})
 # fb-20260909-213257-49a9: the token stays the prefix so existing matchers
@@ -210,6 +209,7 @@ def build_run_request(
     server_mods: list[str] | None = None,
     no_base_mods: bool = False,
     no_file_patching: bool = False,
+    auto_remediate_steam: bool = False,
     port: int = 2302,
     width: int = 1920,
     height: int = 1080,
@@ -225,6 +225,7 @@ def build_run_request(
     public_base = _public_mod_list(base_mods, selected.mod_roots)
     public_server = _public_mod_list(server_mods, selected.mod_roots)
     document: dict[str, object] = {
+        "auto_remediate_steam": auto_remediate_steam,
         "build": build,
         "clean": clean,
         "dev_root": selected.dev_root,
@@ -1380,6 +1381,7 @@ async def execute_dayz_test_run(
                 "server_mods": server_mods,
                 "no_base_mods": no_base_mods,
                 "no_file_patching": no_file_patching,
+                "auto_remediate_steam": auto_remediate_steam,
                 "port": port,
                 "width": width,
                 "height": height,
@@ -1421,7 +1423,6 @@ async def execute_dayz_test_run(
                 if preflight:
                     refused["preflight_skipped_checks"] = preflight_skipped_checks
                 return refused
-            steam_remediation_report: dict[str, object] | None = None
             if not preflight and _mode_starts_client(mode):
                 try:
                     steam = evaluate_steam_session()
@@ -1432,43 +1433,8 @@ async def execute_dayz_test_run(
                         steam_live_pids=(),
                         remediation=REMEDIATION,
                     )
-                if steam.error_code is not None and auto_remediate_steam is True:
-                    remediated_at = time.monotonic()
-                    steam_remediation_error: str | None = None
-                    try:
-                        steam = await asyncio.to_thread(remediate_stale_steam_session)
-                    except Exception as exc:
-                        steam_remediation_error = type(exc).__name__
-                        steam = SteamSessionResult(
-                            error_code=STEAM_SESSION_STALE,
-                            steam_registered_pid=steam.steam_registered_pid,
-                            steam_live_pids=steam.steam_live_pids,
-                            remediation=REMEDIATION,
-                        )
-                    steam_remediation_report = {
-                        "steam_remediated": steam.error_code is None,
-                        "steam_pid_repair_reason": getattr(
-                            steam, "steam_pid_repair_reason", None
-                        ),
-                        "steam_restart_fallback": getattr(
-                            steam, "steam_restart_fallback", False
-                        ),
-                        "steam_remediation_s": round(
-                            time.monotonic() - remediated_at, 3
-                        ),
-                    }
-                    steam_remediation_reason = getattr(steam, "steam_remediation_reason", None)
-                    if steam.error_code is not None:
-                        steam_remediation_report["steam_remediation_reason"] = (
-                            steam_remediation_reason or "remediation_failed"
-                        )
-                    if steam_remediation_error is not None:
-                        steam_remediation_report["steam_remediation_error"] = (
-                            steam_remediation_error
-                        )
-                    if getattr(steam, "steam_left_down", False) is True:
-                        steam_remediation_report["steam_left_down"] = True
-                if steam.error_code is not None:
+                # Remediation belongs to admitted daemon authority, never stdio.
+                if steam.error_code is not None and not auto_remediate_steam:
                     failed = _compact_result(
                         terminal=WorkerTerminal(
                             cleanup_degraded=False,
@@ -1488,8 +1454,6 @@ async def execute_dayz_test_run(
                         vpp_missing=list(vpp.missing),
                         vpp_warnings=list(vpp.warnings),
                     )
-                    if steam_remediation_report is not None:
-                        failed.update(steam_remediation_report)
                     return failed
             replacement: ClientReplacementDecision | None = None
             client_pids_before: tuple[int, ...] | None = None
@@ -1520,8 +1484,6 @@ async def execute_dayz_test_run(
                         vpp_warnings=list(vpp.warnings),
                     )
                     refused["run_not_extensible_cause"] = exc.cause
-                    if steam_remediation_report is not None:
-                        refused.update(steam_remediation_report)
                     return refused
                 if _mode_starts_client(mode):
                     # Relaunching this role supersedes the client already on the
@@ -1593,8 +1555,6 @@ async def execute_dayz_test_run(
                             vpp_missing=list(vpp.missing),
                             vpp_warnings=list(vpp.warnings),
                         )
-                        if steam_remediation_report is not None:
-                            refused.update(steam_remediation_report)
                         # Sibling, not a composed error_code: the token stays
                         # comparable. Absent when the snapshot was read, even
                         # if the row itself was unusable.
@@ -1631,8 +1591,6 @@ async def execute_dayz_test_run(
                 client_pids_before=client_pids_before,
                 vpp=vpp,
             )
-            if steam_remediation_report is not None:
-                result.update(steam_remediation_report)
             if preflight:
                 result["preflight_skipped_checks"] = preflight_skipped_checks
             return result

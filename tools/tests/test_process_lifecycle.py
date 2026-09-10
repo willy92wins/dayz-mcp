@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.steam_helpers import FakeSteamGate
+
 import json
 import hashlib
 import dataclasses
@@ -247,6 +249,7 @@ class ProcessLifecycleStatusPruneTest(unittest.TestCase):
             audit=audit,
         )
         return ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=coordinator,
             manifest=store,
             audit=audit,
@@ -508,6 +511,7 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.launcher = FakeLauncher()
         self.probe_result: dict[str, object] = {"known": True, "processes": []}
         self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=self.audit,
@@ -3854,6 +3858,7 @@ class ProcessLifecycleTest(unittest.TestCase):
         manifest2.recover_after_restart()
         state2 = loopback.ServerState("k")
         life2 = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=manifest2,
             audit=self.audit,
@@ -4038,6 +4043,7 @@ class RetiredRunDiagnosticsAndGenerationTest(unittest.TestCase):
         self.launcher = FakeLauncher()
         self.generation = "gen-lote-h-test"
         self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=self.audit,
@@ -4911,6 +4917,7 @@ class StorageRotationAuditTest(unittest.TestCase):
         self.guard = FakeGuard()
         self.launcher = FakeLauncher()
         self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=self.audit,

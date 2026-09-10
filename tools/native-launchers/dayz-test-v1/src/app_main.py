@@ -309,7 +309,7 @@ def _lifecycle_main() -> int:
         query={},
         body=_canonical(payload),
         headers={"Content-Type": "application/json"},
-        deadline=time.monotonic() + 15.0,
+        deadline=time.monotonic() + (235.0 if command == "start" else 15.0),
         expected_executable=policy.native_executable,
         expected_argv=list(policy.argv),
         expected_cwd=policy.cwd,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.steam_helpers import FakeSteamGate
+
 import json
 import os
 import subprocess
@@ -273,6 +275,7 @@ class LifecycleFixture:
         self.launcher = Launcher(Handle(confirmed_exit=confirmed_exit))
         self.probe = {"known": True, "processes": []}
         self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=self.audit,

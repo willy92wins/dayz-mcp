@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.steam_helpers import FakeSteamGate
+
 import ctypes
 import dataclasses
 import inspect
@@ -439,6 +441,7 @@ class CleanupBudgetAndFencingTest(unittest.TestCase):
             state.coordination = coordinator
             state.retail_probe = lambda: {"known": True, "processes": []}
             lifecycle = ProcessLifecycle(
+                steam_gate=FakeSteamGate(),
                 coordinator=coordinator,
                 manifest=RunManifestStore(paths),
                 audit=lambda _event: True,
