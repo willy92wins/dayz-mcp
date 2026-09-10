@@ -98,6 +98,8 @@ razon: bajo un supervisor, el padre del trabajador pasa a ser el supervisor.
 
 - **Nada por HTTP.** El coordinador es real, pero el `ControlClient`, la credencial, el
   orphan guard y la persistencia del daemon no se tocan.
+- **(rev. 2026-09-10)** El coste de reenvio que el spike atribuia al supervisor no era suyo:
+  medido con control, el supervisor anade un 3% sobre 32 MB. Ver SPIKE-RESULT.md §curva.
 - **No se reciclo ningun proceso.** El spike probo el reciclo; esto prueba que el lease lo
   sobrevive *a juicio del coordinador*. Los dos no se han corrido juntos todavia.
 - **El portador no existe.** El grupo F prueba QUE tiene que llevar, no que algo lo lleve.

@@ -34,11 +34,21 @@ El riesgo que nombró Gemini —deadlock de pipe anónima con cargas tipo `captu
 | 8 MB | 1,04 s | ~7,7 MB/s |
 | 32 MB | 15,63 s | ~2,1 MB/s |
 
-**Superlineal**: la carga crece 32x y el tiempo 390x. El rendimiento cae 13x. Con reenvío
-por líneas sobre respuestas de megabytes eso es lo esperable, y significa que un supervisor
-de producción **no puede reenviar con `readline` sobre líneas gigantes**: necesita troceado
-o marco por longitud. No es un bloqueante de la vía; es un requisito de diseño que la vía
-no tenía escrito y que sale gratis saberlo ahora.
+**Superlineal**: la carga crece 32x y el tiempo 390x. El rendimiento cae 13x.
+
+> **(rev. 2026-09-10) La atribución de esta curva era mía y era falsa.** Estos tiempos se
+> midieron con `session.call_tool` del SDK `mcp`, que abarca los dos extremos SDK ademas del
+> supervisor. Desglosado el 2026-09-10: para 32 MB, `readline` cuesta 0,028 s, `json.loads`
+> 0,026 s, `json.dumps` 0,058 s y las dos tuberias 0,085 s — **~0,2 s en total, y lineales**.
+> El **control que este spike no corrio** —el mismo payload SIN supervisor— da **12,154 s
+> contra 12,543 s con el**: el supervisor anade un **3%**. La curva es del SDK y se paga
+> igual sin supervisor.
+>
+> Queda **anulado** el requisito que esta seccion dedujo ("no puede reenviar con `readline`
+> sobre lineas gigantes: necesita troceado o marco por longitud"). Reenviar por lineas vale,
+> y el diseno simple es el correcto. Lo que si queda, y es un hallazgo mejor: **32 MB por el
+> SDK cuestan 12 s hoy, con supervisor o sin el** — el techo del cliente a volumen, que
+> estaba en la lista de pendientes sin medir.
 
 ## Dos cosas que el spike encontró y no buscaba
 

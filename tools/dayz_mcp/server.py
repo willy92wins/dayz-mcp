@@ -6,6 +6,7 @@ import inspect
 import json
 import math
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -53,6 +54,8 @@ from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import LoopbackServer, read_key
 from dayz_mcp.server_cli import CLIENT_PLATFORM_ALIASES, build_server_parser
 from dayz_mcp.process_lifecycle import empty_box, occupancy_error_fields
+from dayz_mcp import session_handoff
+from dayz_mcp.mcp_supervisor import Supervisor
 from dayz_mcp.session_coordination import ClientIdentity
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
 
@@ -874,6 +877,9 @@ class ServerConfig:
     task_label: str = ""
     session_ttl_s: float = 120.0
     runtime_dir: str | None = None
+    # Own stdio and run the real server as a replaceable child. Orthogonal to mode:
+    # the child inherits the mode flags this process was given.
+    supervised: bool = False
     # CLI flag is the spawn authority for this process. It need not match
     # the registered host argv (registration-False / CLI-True is allowed).
     auto_spawn_daemon: bool = True
@@ -1207,7 +1213,19 @@ class ClientRuntime:
         self._time_fn = time_fn or time.monotonic
         self._sleep_fn = sleep_fn or time.sleep
         self._startup_budget_s = daemon.validated_startup_budget_s(startup_budget_s)
-        self.identity = ClientIdentity(
+        # A replacement worker mints a new identity -- new pid, ppid, timestamp and
+        # uuid -- and the coordinator compares all six fields by value, so a fresh one
+        # cannot reach the live lease. When a supervisor hands this generation a
+        # carrier, the identity crosses WHOLE or not at all: carrying part of it is
+        # worse than carrying none (session_coordination.py:2766 then refuses a fresh
+        # acquire too). Measured in REHEARSAL-LEASE.md, 34/34.
+        self._handoff_path = os.environ.get(session_handoff.HANDOFF_ENV) or None
+        carried = (
+            session_handoff.consume_handoff(self._handoff_path)
+            if self._handoff_path
+            else None
+        )
+        self.identity = carried.identity if carried is not None else ClientIdentity(
             platform=config.client_platform,
             pid=os.getpid(),
             ppid=os.getppid(),
@@ -1226,6 +1244,46 @@ class ClientRuntime:
             credential_provider=self._credential_provider,
         )
         self.daemon_policy = daemon_policy
+        if self._handoff_path:
+            self._control.on_lease_change = self._mirror_lease_to_carrier
+        if carried is not None:
+            # The token names the same lease the previous generation held. Whether it
+            # still OWNS the box is not decided here and is not assumed: the daemon
+            # re-validates on every authorize, and answers lease_invalid if a slow
+            # recycle let the TTL lapse and the queue take it.
+            self._control.active_lease_token = carried.lease_token
+            self._control.active_lease_id = carried.lease_id
+            self._log(
+                f"SESSION: adopted lease {carried.lease_id} from worker generation "
+                f"{carried.generation}; ownership re-checked by the daemon"
+            )
+
+    def _mirror_lease_to_carrier(
+        self, lease_token: str | None, lease_id: str | None
+    ) -> None:
+        """Keep the carrier in step with the lease, so any death hands it on.
+
+        Written on every change rather than only when a recycle is requested: a worker
+        that dies unplanned leaves the carrier behind for its replacement, and a worker
+        that releases its lease leaves nothing to inherit.
+        """
+        if not self._handoff_path:
+            return
+        try:
+            if lease_token and lease_id:
+                session_handoff.write_handoff(
+                    self._handoff_path,
+                    identity=self.identity,
+                    lease_token=lease_token,
+                    lease_id=lease_id,
+                    generation=0,
+                )
+            else:
+                session_handoff.clear_handoff(self._handoff_path)
+        except (OSError, ValueError, TypeError) as exc:
+            # Losing the carrier costs a lease across the next recycle; it must never
+            # cost the call that happened to change the lease.
+            self._log(f"SESSION: carrier write failed: {exc}")
 
     def touch(self) -> None:
         # No local idle watchdog in client mode; the daemon tracks its own idle.
@@ -5397,6 +5455,7 @@ def parse_args(argv: list[str] | None = None) -> ServerConfig:
         ),
         client_platform_raw=client_platform_raw,
         task_label=args.task_label,
+        supervised=bool(args.supervised),
         auto_spawn_daemon=bool(args.auto_spawn_daemon),
     )
 
@@ -5412,8 +5471,51 @@ def _release_and_exit(runtime: Runtime) -> None:
     os._exit(0)
 
 
+def run_supervisor(argv: list[str]) -> int:
+    """Own stdio and serve the host from a worker this process can replace.
+
+    The worker is this same module with --supervised removed, so it keeps the mode and
+    every other flag the host registered. The lease crosses each replacement through a
+    carrier file whose PATH -- never the token -- travels in the child's environment.
+    """
+    import tempfile
+
+    child_argv = [value for value in argv if value != "--supervised"]
+    command = [sys.executable, "-u", "-m", "dayz_mcp", *child_argv]
+    carrier = session_handoff.carrier_path(
+        tempfile.mkdtemp(prefix="dayz-mcp-handoff-")
+    )
+    child_env = dict(os.environ)
+    child_env[session_handoff.HANDOFF_ENV] = str(carrier)
+
+    def log(message: str) -> None:
+        print(f"[supervisor] {message}", file=sys.stderr, flush=True)
+
+    def spawn() -> subprocess.Popen:
+        return subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            env=child_env,
+        )
+
+    supervisor = Supervisor(spawn=spawn, out_stream=sys.stdout.buffer, log=log)
+    try:
+        supervisor.run(sys.stdin.buffer)
+    finally:
+        session_handoff.clear_handoff(carrier)
+        try:
+            os.rmdir(carrier.parent)
+        except OSError:
+            pass
+    return 0
+
+
 def run(argv: list[str] | None = None) -> int:
     config = parse_args(argv)
+    if config.supervised:
+        return run_supervisor(list(sys.argv[1:] if argv is None else argv))
     if config.mode == "daemon":
         return daemon.run_daemon(config)
 
