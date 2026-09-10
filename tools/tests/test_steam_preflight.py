@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import fields
+import subprocess
 import unittest
+from unittest.mock import patch
 
 from collections.abc import Callable
 
+from dayz_mcp import steam_preflight
 from dayz_mcp.steam_preflight import (
     REMEDIATION,
     STEAM_SESSION_STALE,
     SteamActiveProcessSnapshot,
+    WindowsSteamRemediationHost,
     evaluate_steam_session,
     remediate_stale_steam_session,
+    _STEAM_INVOKE_FLAGS,
 )
 
 
@@ -418,6 +423,35 @@ class SteamRemediationHostTest(unittest.TestCase):
         self.assertNotIn(("-silent",), host.extra_args())
         self.assertLess(host._now, _SHUTDOWN_BUDGET_S)
         self.assertIs(getattr(result, "steam_left_down", False), False)
+
+
+_WINDOWS_INVOKE_FLAGS = hasattr(subprocess, "DETACHED_PROCESS") and hasattr(
+    subprocess, "CREATE_NO_WINDOW"
+)
+
+
+class SteamInvokeFlagsTests(unittest.TestCase):
+    @unittest.skipUnless(
+        _WINDOWS_INVOKE_FLAGS,
+        "DETACHED_PROCESS and CREATE_NO_WINDOW are Windows subprocess attributes",
+    )
+    def test_fb_296f_invoke_flags_equal_detached_process_without_create_no_window(self) -> None:
+        self.assertEqual(_STEAM_INVOKE_FLAGS, subprocess.DETACHED_PROCESS)
+        self.assertEqual(_STEAM_INVOKE_FLAGS & subprocess.CREATE_NO_WINDOW, 0)
+
+    def test_fb_296f_invoke_steam_passes_creationflags_and_close_fds(self) -> None:
+        seen: list[dict] = []
+
+        def fake_popen(_argv, **kwargs):
+            seen.append(kwargs)
+            return object()
+
+        with patch.object(steam_preflight.subprocess, "Popen", fake_popen):
+            WindowsSteamRemediationHost().invoke_steam(_STEAM_EXE, ("-silent",))
+
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["creationflags"], _STEAM_INVOKE_FLAGS)
+        self.assertIs(seen[0]["close_fds"], True)
 
 
 if __name__ == "__main__":
