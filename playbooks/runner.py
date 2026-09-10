@@ -493,6 +493,32 @@ def _verdict_reason(steps: list[dict[str, Any]], stopped_at: str | None) -> str 
     return None
 
 
+# Live place_safely must not inherit TOML x/z. Identity is the playbook id
+# (other TOMLs that declare x/z, e.g. lease_spawn_prepare_trace, keep defaults).
+# Presence (not truthiness) is the test: explicit 0 is a real site; omitted 0
+# was the silent origin that hid the caller's site.
+LIVE_EXPLICIT_COORD_PLAYBOOK = "place_safely"
+LIVE_EXPLICIT_COORD_KEYS = ("x", "z")
+
+
+def _require_live_xz(playbook: dict[str, Any], supplied: dict[str, Any]) -> None:
+    if playbook.get("id") != LIVE_EXPLICIT_COORD_PLAYBOOK:
+        return
+    declared = playbook.get("params")
+    if not isinstance(declared, dict):
+        declared = {}
+    missing = [
+        key for key in LIVE_EXPLICIT_COORD_KEYS if key in declared and key not in supplied
+    ]
+    if not missing:
+        return
+    named = " and ".join(f"params.{key}" for key in missing)
+    raise SchemaError(
+        f"{named} required in live (explicit 0 is valid)",
+        field=f"params.{missing[0]}",
+    )
+
+
 async def _async_run(
     playbook: dict[str, Any],
     params: dict[str, Any],
@@ -500,8 +526,11 @@ async def _async_run(
     mode: str,
 ) -> dict[str, Any]:
     validate_schema(playbook)
+    supplied = dict(params)
+    if mode == "live":
+        _require_live_xz(playbook, supplied)
     merged = dict(playbook.get("params") or {})
-    merged.update(params)
+    merged.update(supplied)
     cals = calibrations_by_name(playbook)
     results: dict[str, Any] = {}
     steps_out: list[dict[str, Any]] = []

@@ -5446,7 +5446,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             f"{LEASE_TOOL_LINE} Run a named playbook checklist from the "
-            "dictionary. Does not launch DayZ. certified is always false."
+            "dictionary. Does not launch DayZ. certified is always false. "
+            "Live place_safely requires params.x and params.z (0 ok)."
         )
     )
     async def playbook_run(
@@ -5462,7 +5463,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         ``MAX_TIMEOUT_S`` 300s; ``wait_for`` <= 600s; ``ui_dialog``
         <= 250s). At most ``MAX_PLAYBOOK_STEPS`` steps. ``certified``
         is always false until a FROZEN sidecar registry exists. Does
-        not launch DayZ.
+        not launch DayZ. Live ``place_safely`` requires explicit
+        ``params.x`` and ``params.z`` (the site); explicit ``0`` is
+        valid. Omitting either is ``bad_args``.
         """
         return await playbook_tool_mod.execute_playbook_run(app, name, params)
 
