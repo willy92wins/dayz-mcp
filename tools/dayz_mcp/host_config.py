@@ -83,6 +83,7 @@ _VALUE_OPTIONS = frozenset(
 _BOOLEAN_OPTIONS = frozenset(
     {
         "--client",
+        "--supervised",
         "--require-version",
         "--enable-exec-enforce",
         "--no-daemon-autospawn",
@@ -274,6 +275,7 @@ def _registration_from_entry(
         or (option_counts["--exec-allowlist"] == 0 and namespace.exec_allowlist is not None)
         or (option_counts["--exec-audit-path"] == 0 and namespace.exec_audit_path is not None)
         or (option_counts["--task-label"] == 0 and namespace.task_label != "")
+        or (option_counts["--supervised"] == 0 and namespace.supervised is not False)
         or (option_counts["--no-daemon-autospawn"] == 0 and namespace.auto_spawn_daemon is not True)
     ):
         raise HostConfigError("daemon_provenance_conflict")

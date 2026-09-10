@@ -249,5 +249,100 @@ class ProvenanceGateTests(unittest.TestCase):
         self.send.assert_not_called()
 
 
+
+class SupervisedFlagRegistrationTests(unittest.TestCase):
+    """--supervised may be registered, and widening that allowlist opened nothing else.
+
+    The registrable options are a closed set (host_config._scan_raw_options). Adding a
+    flag to it is the step that has to reach every client BEFORE any registration
+    carries it: a client with the older list rejects the whole file with
+    daemon_provenance_conflict, which is how a machine loses its MCP everywhere.
+    Measured on 2026-09-10 by doing exactly that and reverting.
+    """
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="supervised-reg-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name).resolve()
+        self.paths = {"claude": self.root / ".claude.json",
+                      "codex": self.root / "config.toml"}
+        self.keyfile = self.root / "daemon.key"
+        self.keyfile.write_bytes(b"test-fixture-only")
+
+    def _entry(self, platform, extra=()):
+        entry = {"command": str(Path(sys.executable).resolve()),
+                 "args": ["-m", "dayz_mcp", "--client", *extra, "--port", "18765",
+                          "--keyfile", str(self.keyfile), "--idle-timeout", "12.5",
+                          "--client-platform", platform]}
+        if platform == "claude":
+            entry.update(type="stdio", timeout=host_config.CLAUDE_TIMEOUT_MS)
+        else:
+            entry["tool_timeout_sec"] = host_config.CODEX_TIMEOUT_SECONDS
+        return entry
+
+    def _write_pair(self, claude_extra=(), codex_extra=()):
+        claude = {"mcpServers": {"dayz-mcp": self._entry("claude", claude_extra)}}
+        self.paths["claude"].write_bytes((json.dumps(claude) + chr(10)).encode())
+        entry = self._entry("codex", codex_extra)
+        lines = ["[mcp_servers.dayz-mcp]",
+                 f"command = {json.dumps(entry['command'])}",
+                 f"args = {json.dumps(entry['args'])}",
+                 f"tool_timeout_sec = {host_config.CODEX_TIMEOUT_SECONDS}", ""]
+        self.paths["codex"].write_bytes(chr(10).join(lines).encode())
+
+    def _resolve(self):
+        return host_config.resolve_daemon_provenance(
+            claude_path=self.paths["claude"], codex_path=self.paths["codex"]
+        )
+
+    def test_the_pair_without_the_flag_is_the_control_and_resolves(self):
+        self._write_pair()
+        self.assertEqual(self._resolve().port, 18765)
+
+    def test_supervised_in_both_registrations_resolves(self):
+        self._write_pair(("--supervised",), ("--supervised",))
+        self.assertEqual(self._resolve().port, 18765)
+
+    def test_supervised_may_differ_between_the_two_registrations(self):
+        # Deliberate, and checked because it is easy to "fix" by mistake: --supervised
+        # is a client-side concern that never reaches the daemon's argv, so it is not
+        # part of _ClientRegistration and the two files may disagree about it. That is
+        # what makes a per-platform rollout possible -- Claude supervised, Codex not --
+        # while both still pin the same daemon.
+        self._write_pair(("--supervised",), ())
+        self.assertEqual(self._resolve().port, 18765)
+        self._write_pair((), ("--supervised",))
+        self.assertEqual(self._resolve().port, 18765)
+
+    def test_a_real_daemon_difference_between_the_two_still_conflicts(self):
+        # The control for the test above: what DOES reach the daemon still has to match,
+        # or the widening would have quietly turned the pair check into a formality.
+        other = self.root / "other.key"
+        other.write_bytes(b"test-fixture-only")
+        claude = {"mcpServers": {"dayz-mcp": self._entry("claude")}}
+        self.paths["claude"].write_bytes((json.dumps(claude) + chr(10)).encode())
+        entry = self._entry("codex")
+        entry["args"][entry["args"].index(str(self.keyfile))] = str(other)
+        lines = ["[mcp_servers.dayz-mcp]",
+                 f"command = {json.dumps(entry['command'])}",
+                 f"args = {json.dumps(entry['args'])}",
+                 f"tool_timeout_sec = {host_config.CODEX_TIMEOUT_SECONDS}", ""]
+        self.paths["codex"].write_bytes(chr(10).join(lines).encode())
+        with self.assertRaises(host_config.HostConfigError) as caught:
+            self._resolve()
+        self.assertEqual(str(caught.exception), "daemon_provenance_conflict")
+
+    def test_the_allowlist_did_not_become_open(self):
+        # LL-343: widening a filter opens the symmetric false negative. An unknown flag
+        # must still be refused, or the registration stops being a closed contract.
+        self._write_pair(("--totally-made-up",), ("--totally-made-up",))
+        with self.assertRaises(host_config.HostConfigError):
+            self._resolve()
+
+    def test_the_flag_still_cannot_be_repeated(self):
+        self._write_pair(("--supervised", "--supervised"), ("--supervised", "--supervised"))
+        with self.assertRaises(host_config.HostConfigError):
+            self._resolve()
+
 if __name__ == "__main__":
     unittest.main()
