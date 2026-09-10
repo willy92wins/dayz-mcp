@@ -374,6 +374,94 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("secret", message, expected)
             self.assertNotIn("host", message, expected)
 
+    async def test_fb_c9ca_fine_code_crosses_the_wire_as_a_fourth_part(self) -> None:
+        from dayz_mcp.native_launcher_backend import NativeLauncherBackendError
+        from tests.test_client_mode import _fixture_client_runtime
+
+        config = ServerConfig(
+            mode="client",
+            key=self.key,
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _message: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        with patch.object(server_module, "ClientRuntime", return_value=runtime):
+            app, _built = build_app(config)
+
+        cases = (
+            (
+                NativeLauncherBackendError(
+                    "native_job_cleanup_incomplete",
+                    r"secret C:\Users\host",
+                    fine_code="active_zero_never_observed",
+                ),
+                "NativeLauncherBackendError:native_job_cleanup_incomplete:active_zero_never_observed",
+            ),
+            (
+                NativeLauncherBackendError(
+                    "native_job_cleanup_incomplete",
+                    (
+                        "drain_s=0.0"
+                        " second_wait=True"
+                        " open_handles=0"
+                        " continues=4"
+                    ),
+                    fine_code="active_zero_wait_timed_out",
+                ),
+                "NativeLauncherBackendError:native_job_cleanup_incomplete:active_zero_wait_timed_out",
+            ),
+            (
+                NativeLauncherBackendError(
+                    "native_job_cleanup_incomplete",
+                    r"secret C:\Users\host",
+                    fine_code=r"C:\x",
+                ),
+                "NativeLauncherBackendError:native_job_cleanup_incomplete",
+            ),
+            (
+                NativeLauncherBackendError(
+                    "native_job_cleanup_incomplete",
+                    r"secret C:\Users\host",
+                    fine_code="has a space",
+                ),
+                "NativeLauncherBackendError:native_job_cleanup_incomplete",
+            ),
+            (
+                NativeLauncherBackendError(
+                    "native_job_cleanup_incomplete",
+                    r"secret C:\Users\host",
+                    fine_code=None,
+                ),
+                "NativeLauncherBackendError:native_job_cleanup_incomplete",
+            ),
+            (
+                RuntimeError(r"boom C:\Users\host\secret"),
+                "RuntimeError",
+            ),
+        )
+        for error, expected in cases:
+
+            async def boom(*_args: object, **_kwargs: object) -> dict[str, Any]:
+                raise error
+
+            with patch.object(
+                server_module.dayz_test_tool, "execute_dayz_test_run", side_effect=boom
+            ):
+                with self.assertRaises(Exception) as err:
+                    await app.call_tool(
+                        "dayz_test_run", {"project": "ExampleMod", "mode": "server"}
+                    )
+            message = str(err.exception)
+            _assert_tool_error(self, err.exception)
+            self.assertIn("dayz_test_failed:", message, expected)
+            tail = message.split("dayz_test_failed:", 1)[1].split()[0].rstrip(".,;)")
+            self.assertEqual(tail, expected)
+            self.assertNotIn("secret", message, expected)
+            self.assertNotIn("host", message, expected)
+            self.assertNotIn("drain_s", message, expected)
+            self.assertNotIn("open_handles", message, expected)
+
     async def test_dayz_test_untyped_failure_carries_the_exception_type(self) -> None:
         # The bare `except Exception` swallowed the cause, which is exactly
         # what makes build:true undiagnosable. A non-existent `project` would NOT
