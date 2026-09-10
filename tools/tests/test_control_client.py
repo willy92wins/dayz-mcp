@@ -487,6 +487,111 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.http_bytes_sent, 0)
         self.assertEqual(requests, 0)
 
+    async def test_fb_c261_untrusted_hint_starts_with_policy_cause_and_names_server_reload(
+        self,
+    ) -> None:
+        control = importlib.import_module("dayz_mcp.control_client")
+        supervisor = importlib.import_module("dayz_mcp.mcp_supervisor")
+        identity = control.ControlIdentity(
+            platform="unknown",
+            pid=123,
+            ppid=45,
+            started_at_utc="2026-07-22T00:00:00Z",
+            session_id="12345678-1234-4234-8234-1234567890ab",
+            task_label="fb-c261-hint-reload",
+        )
+
+        revalidations = 0
+        requests = 0
+
+        def revalidate() -> None:
+            nonlocal revalidations
+            revalidations += 1
+            if revalidations > 3:
+                raise ValueError("daemon_provenance_conflict")
+
+        def request(**_kwargs: object) -> tuple[int, bytes]:
+            nonlocal requests
+            requests += 1
+            return 200, b'{"status":"ok"}'
+
+        with tempfile.TemporaryDirectory() as temporary:
+            keyfile = Path(temporary) / "daemon.key"
+            keyfile.write_text("fixture-key\n", encoding="utf-8")
+            policy = _policy(keyfile)
+            object.__setattr__(policy, "_revalidation_hook", revalidate)
+            client = control.ControlClient(policy=policy, identity=identity)
+            with patch.object(
+                control.transport,
+                "verified_daemon_http_request",
+                side_effect=request,
+            ):
+                with self.assertRaises(
+                    control.ControlClientError
+                ) as raised:
+                    await client.session_status()
+
+        self.assertEqual(
+            raised.exception.code,
+            "client_policy_untrusted_open_new_session",
+        )
+        self.assertEqual(raised.exception.request_stage, "pre_request")
+        self.assertEqual(raised.exception.http_bytes_sent, 0)
+        self.assertEqual(requests, 0)
+        hint = raised.exception.hint
+        self.assertIsInstance(hint, str)
+        self.assertTrue(hint.startswith("policy_cause="))
+        self.assertIn(supervisor.RELOAD_TOOL_NAME, hint)
+
+    async def test_fb_c261_untrusted_hint_contains_operator_fallback_and_cannot_open_session(
+        self,
+    ) -> None:
+        control = importlib.import_module("dayz_mcp.control_client")
+        identity = control.ControlIdentity(
+            platform="unknown",
+            pid=123,
+            ppid=45,
+            started_at_utc="2026-07-22T00:00:00Z",
+            session_id="12345678-1234-4234-8234-1234567890ab",
+            task_label="fb-c261-hint-fallback",
+        )
+
+        revalidations = 0
+        requests = 0
+
+        def revalidate() -> None:
+            nonlocal revalidations
+            revalidations += 1
+            if revalidations > 3:
+                raise ValueError("daemon_provenance_conflict")
+
+        def request(**_kwargs: object) -> tuple[int, bytes]:
+            nonlocal requests
+            requests += 1
+            return 200, b'{"status":"ok"}'
+
+        with tempfile.TemporaryDirectory() as temporary:
+            keyfile = Path(temporary) / "daemon.key"
+            keyfile.write_text("fixture-key\n", encoding="utf-8")
+            policy = _policy(keyfile)
+            object.__setattr__(policy, "_revalidation_hook", revalidate)
+            client = control.ControlClient(policy=policy, identity=identity)
+            with patch.object(
+                control.transport,
+                "verified_daemon_http_request",
+                side_effect=request,
+            ):
+                with self.assertRaises(
+                    control.ControlClientError
+                ) as raised:
+                    await client.session_status()
+
+        hint = raised.exception.hint
+        self.assertIsInstance(hint, str)
+        self.assertIn("host/operator", hint)
+        self.assertIn("cannot open a new host session", hint)
+        self.assertEqual(requests, 0)
+
     async def test_credential_refresh_error_metadata_reaches_control_caller(
         self,
     ) -> None:
