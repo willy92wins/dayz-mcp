@@ -207,8 +207,14 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.guard.snapshots[pid] = snapshot(record)
         return record
 
-    def request(self, role: str = "client") -> dict[str, object]:
-        return {
+    def request(
+        self,
+        role: str = "client",
+        *,
+        with_witness: bool = False,
+        run_id: str | None = RUN_ID,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
             "argv": [str(self.game / "DayZDiag_x64.exe"), "-mission=test"],
             "cwd": str(self.game),
             "role": role,
@@ -217,11 +223,17 @@ class LifecycleReconcileTest(unittest.TestCase):
             "mod": "@SameMod",
             "profiles": "profiles",
             "mission": "test",
-            "run_id": RUN_ID,
-            # 79e2: the witness of the gate, stamped now, so the revalidation
-            # inside start_run has something to compare against.
-            "replace_if_not_polling_since": int(time.time() * 1000),
         }
+        if run_id is not None:
+            payload["run_id"] = run_id
+        # The worker forwards the witness only when the launch carries a
+        # run_id, the role is client, and the witness is an int
+        # (dayz_test_worker.py:325-332). Whether the tool sends one is decided
+        # in the replacement branches of dayz_test_tool.py, which include
+        # the no-client and dead-PID cases.
+        if with_witness:
+            payload["replace_if_not_polling_since"] = int(time.time() * 1000)
+        return payload
 
     def arm_launch(self, role: str = "client") -> ProcessRecord:
         launched = process(LAUNCH_PID, role)
@@ -380,7 +392,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.install_run([server, hung], state="RUNNING", owner="A")
         self.arm_launch()
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIs(result.get("ok"), True, result)
         self.assertEqual(self.pids(), [720, LAUNCH_PID])
@@ -410,7 +424,6 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.install_run([server], state="RUNNING", owner="A")
         self.arm_launch()
         request = self.request()
-        request.pop("replace_if_not_polling_since")
 
         result = self.lifecycle.start_run(IDENTITY_A, self.token_a, request)
 
@@ -439,7 +452,7 @@ class LifecycleReconcileTest(unittest.TestCase):
         hung = self.owned(761, "client")
         self.install_run([server, hung], state="RUNNING", owner="A")
         self.arm_launch()
-        request = self.request()
+        request = self.request(with_witness=True)
         request.update(overrides)
         return self.lifecycle.start_run(IDENTITY_A, self.token_a, request)
 
@@ -809,7 +822,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.mission()
         before = self.digest()
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIs(result.get("ok"), True, result)
         self.assertEqual(self.digest(), before)
@@ -834,7 +849,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.install_run([server, dead], state="RUNNING", owner="A")
         self.arm_launch()
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIs(result.get("ok"), True, result)
         self.assertEqual(self.pids(), [723, LAUNCH_PID])
@@ -848,7 +865,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.install_run([server, stranger], state="RUNNING", owner="A")
         self.arm_launch()
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIs(result.get("ok"), True, result)
         self.assertEqual(self.guard.terminate_calls, [])
@@ -861,7 +880,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.arm_launch()
         self.port_table = holders((2302, 728, "DayZDiag_x64.exe"))
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertEqual(result.get("error"), "port_still_held", result)
         self.assertEqual(
@@ -880,7 +901,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.arm_launch()
         self.port_table = holders((2302, 44444, "svchost.exe"))
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIs(result.get("ok"), True, result)
         self.assertEqual(self.pids(), [729, LAUNCH_PID])
@@ -923,7 +946,9 @@ class LifecycleReconcileTest(unittest.TestCase):
 
         self.lifecycle.port_probe = flaky
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertEqual(result.get("error"), "port_scan_unknown", result)
         self.assertEqual(self.launcher.calls, [])
@@ -939,7 +964,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.install_run([hung], state="RUNNING", owner="A")
         self.arm_launch()
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertEqual(result.get("error"), "run_would_be_empty", result)
         self.assertEqual(self.guard.terminate_calls, [])
@@ -956,7 +983,9 @@ class LifecycleReconcileTest(unittest.TestCase):
             {"terminated": False, "error": "termination_unavailable", "exit_code": 3}
         ]
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIn("error", result)
         self.assertEqual(self.launcher.calls, [])
@@ -986,7 +1015,9 @@ class LifecycleReconcileTest(unittest.TestCase):
 
         self.store.replace = spy  # type: ignore[method-assign]
         with self.assertRaises(KeyboardInterrupt):
-            self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+            self.lifecycle.start_run(
+                IDENTITY_A, self.token_a, self.request(with_witness=True)
+            )
         self.store.replace = original  # type: ignore[method-assign]
 
         self.assertIn(("STARTING", [736]), seen)
@@ -1029,7 +1060,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         # socket que nada tiene que ver con DayZ (mDNS, 5353).
         self.port_table = holders((5353, 751, "svchost.exe"))
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIs(result.get("ok"), True, result)
         self.assertEqual(self.pids(), [750, LAUNCH_PID])
@@ -1042,7 +1075,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.arm_launch()
         self.port_table = holders((5353, 753, "DayZDiag_x64.exe"))
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertEqual(result.get("error"), "port_still_held", result)
         self.assertEqual(self.launcher.calls, [])
@@ -1055,7 +1090,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.arm_launch()
         self.port_table = holders((2302, 755, "svchost.exe"))
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertEqual(result.get("error"), "port_still_held", result)
 
@@ -1097,7 +1134,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.install_run([hung], state="RUNNING", owner="A")
         self.arm_launch()
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertEqual(result.get("error"), "run_would_be_empty", result)
 
@@ -1107,10 +1146,14 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.install_run([server, hung], state="RUNNING", owner="A")
         self.arm_launch()
 
-        first = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        first = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
         # The relaunched client is now the record to supersede; the guard vouches
         # for it because arm_launch registered its identity.
-        second = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        second = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIs(first.get("ok"), True, first)
         self.assertIs(second.get("ok"), True, second)
