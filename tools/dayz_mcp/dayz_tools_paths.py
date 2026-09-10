@@ -148,6 +148,10 @@ def _registry_tools(
 
 
 def _unique(paths: list[Path]) -> list[Path]:
+    """Drop later paths equal under os.path.normcase; the first spelling wins.
+
+    On Windows, case-only and separator-only differences collapse to one entry.
+    """
     seen: set[str] = set()
     ordered: list[Path] = []
     for path in paths:
@@ -226,10 +230,11 @@ def require_dayz_layout(
     *,
     environ: Mapping[str, str] | None = None,
     is_file: Callable[[Path], bool] | None = None,
+    registry: Callable[[str, str, str], str | None] | None = None,
 ) -> DayZLayout:
     """First candidate whose marker file exists; otherwise name every path tried."""
     exists = Path.is_file if is_file is None else is_file
-    tools_tried = tools_root_candidates(environ)
+    tools_tried = tools_root_candidates(environ, registry=registry)
     tools = _first_file(tools_tried, Path(*ADDON_BUILDER_RELATIVE), exists)
     if tools is None:
         raise ValueError(

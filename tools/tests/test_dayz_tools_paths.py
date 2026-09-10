@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import ntpath
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from dayz_mcp import dayz_tools_paths
 from dayz_mcp.dayz_tools_paths import (
@@ -51,6 +53,10 @@ _FALLBACK_EXTERNAL = (
     r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\PboUtils\exclude.lst",
     r"C:\Program Files (x86)\Steam\steamapps\common\DayZ\DayZDiag_x64.exe",
 )
+
+
+def _null_registry(_hive: str, _subkey: str, _value: str) -> None:
+    return None
 
 
 def _markers(*paths: Path) -> set[str]:
@@ -116,7 +122,7 @@ class DayZToolsPathsTest(unittest.TestCase):
 
     def test_blank_env_is_treated_as_unset(self) -> None:
         self.assertEqual(
-            tools_root_candidates(environ={TOOLS_ENV: "   "}),
+            tools_root_candidates(environ={TOOLS_ENV: "   "}, registry=_null_registry),
             [DEFAULT_TOOLS_ROOT],
         )
         self.assertEqual(selected_layout(environ={TOOLS_ENV: ""}).tools, DEFAULT_TOOLS_ROOT)
@@ -132,6 +138,7 @@ class DayZToolsPathsTest(unittest.TestCase):
             layout = require_dayz_layout(
                 environ={TOOLS_ENV: str(tools)},
                 is_file=_is_file(present),
+                registry=_null_registry,
             )
             self.assertEqual(layout.tools, tools)
             self.assertEqual(layout.steam, root)
@@ -147,6 +154,7 @@ class DayZToolsPathsTest(unittest.TestCase):
         layout = require_dayz_layout(
             environ={TOOLS_ENV: str(env_tools)},
             is_file=_is_file(present),
+            registry=_null_registry,
         )
         self.assertEqual(layout.tools, DEFAULT_TOOLS_ROOT)
         self.assertEqual(layout.steam, DEFAULT_STEAM_ROOT)
@@ -158,6 +166,7 @@ class DayZToolsPathsTest(unittest.TestCase):
             require_dayz_layout(
                 environ={TOOLS_ENV: str(env_tools)},
                 is_file=lambda _path: False,
+                registry=_null_registry,
             )
         message = str(ctx.exception)
         self.assertIn("dayz_tools_not_found", message)
@@ -176,6 +185,7 @@ class DayZToolsPathsTest(unittest.TestCase):
                 require_dayz_layout(
                     environ={TOOLS_ENV: str(tools)},
                     is_file=_is_file(present),
+                    registry=_null_registry,
                 )
             message = str(ctx.exception)
             self.assertIn("dayz_diag_not_found", message)
@@ -242,11 +252,72 @@ class RegistryStepTests(unittest.TestCase):
         found = dayz_tools_paths.tools_root_candidates(environ={}, registry=reader)
         self.assertEqual(found[0], Path(r"F:\Tools"))
 
+    def test_fb_dacd_registry_lowercase_steam_root_appears_once(self) -> None:
+        env_tools = Path(r"E:\Missing\DayZ Tools")
+        steam_raw = "c:/program files (x86)/steam"
+        reader = self._reader({
+            ("HKEY_CURRENT_USER", r"Software\Valve\Steam", "SteamPath"): steam_raw,
+        })
+        derived = Path(steam_raw) / "steamapps" / "common" / "DayZ Tools"
+        with self.assertRaises(ValueError) as ctx:
+            require_dayz_layout(
+                environ={TOOLS_ENV: str(env_tools)},
+                is_file=lambda _path: False,
+                registry=reader,
+            )
+        message = str(ctx.exception)
+        self.assertTrue(message.startswith("dayz_tools_not_found"))
+        self.assertIn(str(env_tools), message)
+        self.assertIn(str(derived), message)
+        folded = os.path.normcase(str(derived))
+        self.assertEqual(os.path.normcase(message).count(folded), 1)
+        self.assertNotIn(str(DEFAULT_TOOLS_ROOT), message)
+
+    def test_fb_dacd_null_registry_lists_default_tools_root_verbatim(self) -> None:
+        env_tools = Path(r"E:\Missing\DayZ Tools")
+        with self.assertRaises(ValueError) as ctx:
+            require_dayz_layout(
+                environ={TOOLS_ENV: str(env_tools)},
+                is_file=lambda _path: False,
+                registry=_null_registry,
+            )
+        message = str(ctx.exception)
+        self.assertTrue(message.startswith("dayz_tools_not_found"))
+        self.assertIn(str(DEFAULT_TOOLS_ROOT), message)
+
+    def test_fb_dacd_require_and_candidates_share_injected_registry(self) -> None:
+        env_tools = Path(r"E:\Missing\DayZ Tools")
+        environ = {TOOLS_ENV: str(env_tools)}
+        reader = self._reader({
+            ("HKEY_CURRENT_USER", r"Software\Valve\Steam", "SteamPath"):
+                r"Z:\injected-steam",
+        })
+        expected = tools_root_candidates(environ=environ, registry=reader)
+        with self.assertRaises(ValueError) as ctx:
+            require_dayz_layout(
+                environ=environ,
+                is_file=lambda _path: False,
+                registry=reader,
+            )
+        message = str(ctx.exception)
+        self.assertIn("; ".join(str(path) for path in expected), message)
+
     def test_read_registry_string_swallows_every_bad_input(self) -> None:
         read = dayz_tools_paths.read_registry_string
         self.assertIsNone(read("HKEY_NOT_A_HIVE", "Software", "x"))
-        self.assertIsNone(read("HKEY_CURRENT_USER", r"Software\Nope\Nope\Nope", "x"))
-        self.assertIsNone(read("HKEY_CURRENT_USER", r"Software\Valve\Steam", "NoSuchValue"))
+        with patch("winreg.OpenKey", side_effect=FileNotFoundError):
+            self.assertIsNone(read("HKEY_CURRENT_USER", r"Software\Nope\Nope\Nope", "x"))
+        with patch("winreg.OpenKey") as open_key:
+            open_key.return_value.__enter__.return_value = object()
+            open_key.return_value.__exit__.return_value = False
+            with patch("winreg.QueryValueEx", side_effect=FileNotFoundError):
+                self.assertIsNone(
+                    read("HKEY_CURRENT_USER", r"Software\Valve\Steam", "NoSuchValue")
+                )
+            with patch("winreg.QueryValueEx", return_value=(1, 4)):
+                self.assertIsNone(
+                    read("HKEY_CURRENT_USER", r"Software\Valve\Steam", "SteamPath")
+                )
 
 
 if __name__ == "__main__":
