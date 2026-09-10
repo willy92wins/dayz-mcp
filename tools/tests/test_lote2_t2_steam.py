@@ -76,7 +76,7 @@ class SteamWaitT2Tests(unittest.TestCase):
 
 
 class SteamEnvelopeT2Tests(unittest.IsolatedAsyncioTestCase):
-    async def test_timeout_reason_and_false_are_exposed_without_launch(self):
+    async def test_without_consent_stale_refuses_without_running_the_remediator(self):
         from tests import test_dayz_test_tool as fixtures
         tool = fixtures.dayz_test_tool
         stale = sp.SteamSessionResult(sp.STEAM_SESSION_STALE, 41, (41,), sp.REMEDIATION)
@@ -88,15 +88,15 @@ class SteamEnvelopeT2Tests(unittest.IsolatedAsyncioTestCase):
             tool.secure_launcher, "load_verified_bundle", return_value=fixtures._Bundle(fixtures._sealed(fixtures._policy()))
         ), patch.object(tool, "preflight_vpp_request", return_value=SimpleNamespace(error_code=None, missing=(), warnings=(), hint="")), patch.object(
             tool, "evaluate_steam_session", return_value=stale
-        ), patch.object(tool, "remediate_stale_steam_session", return_value=failed), patch.object(
+        ), patch.object(sp, "remediate_stale_steam_session", side_effect=AssertionError("must not mutate")) as remediate, patch.object(
             tool.secure_launcher, "execute_secure_launcher_request", new=launch
         ):
             result = await tool.execute_dayz_test_run(fixtures._Runtime(), project="ExampleMod",
                 mode="client", preflight=False, run_id=fixtures.RUN_ID,
-                extra_mods=["@DayZ_MCP"], auto_remediate_steam=True)
+                extra_mods=["@DayZ_MCP"], auto_remediate_steam=False)
         launch.assert_not_awaited()
-        self.assertIs(result["steam_remediated"], False)
-        self.assertEqual(result.get("steam_remediation_reason"), "active_process_timeout")
+        remediate.assert_not_called()
+        self.assertEqual(result["error_code"], "steam_session_stale")
         self.assertEqual(result["status"], "failed")
 
 

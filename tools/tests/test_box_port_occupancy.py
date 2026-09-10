@@ -9,6 +9,8 @@ occupied box, and ``start_run`` refuses to launch onto a socket we do not own.
 """
 from __future__ import annotations
 
+from tests.steam_helpers import FakeSteamGate
+
 import json
 import sys
 import unittest
@@ -78,6 +80,7 @@ class PortOccupancyTest(unittest.TestCase):
         self.argv: dict[int, list[str]] = {}
         self.port_holders: dict[str, object] = _holders()
         self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=self.audit,

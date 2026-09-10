@@ -5,6 +5,8 @@ assertion on new behavior, or a reference to a symbol the old code lacks.
 """
 from __future__ import annotations
 
+from tests.steam_helpers import FakeSteamGate
+
 import ast
 import dataclasses
 import hashlib
@@ -409,6 +411,7 @@ class LifecycleFenceTest(unittest.TestCase):
                 return {"terminated": True}
 
         self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=lambda event: self.events.append(event) or True,

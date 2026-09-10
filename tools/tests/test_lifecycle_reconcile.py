@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.steam_helpers import FakeSteamGate
+
 import os
 import sys
 import time
@@ -156,6 +158,7 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.launcher = FakeLauncher(LAUNCH_PID)
         self.port_table: dict[str, object] = holders()
         self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=self.audit,
@@ -914,7 +917,9 @@ class LifecycleReconcileTest(unittest.TestCase):
 
         def flaky() -> dict[str, object]:
             reads.append(1)
-            return holders() if len(reads) == 1 else {"known": False}
+            # Admission runs both before and after Steam preparation. Isolate
+            # the unreadable table at the post-termination confirmation here.
+            return holders() if len(reads) <= 2 else {"known": False}
 
         self.lifecycle.port_probe = flaky
 
@@ -991,6 +996,7 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.assertEqual([r.pid for r in recovered.get(RUN_ID).processes], [736])
 
         reborn = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=recovered,
             audit=self.audit,

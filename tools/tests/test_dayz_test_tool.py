@@ -2182,7 +2182,7 @@ class SteamAutoRemediationTest(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             dayz_test_tool, "evaluate_steam_session", return_value=self._stale()
         ), patch.object(
-            dayz_test_tool,
+            steam_preflight,
             "remediate_stale_steam_session",
             side_effect=_record_remediation,
         ):
@@ -2204,7 +2204,7 @@ class SteamAutoRemediationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("steam_remediated", result)
         self.assertNotIn("steam_remediation_s", result)
 
-    async def test_with_the_opt_in_a_stale_steam_session_is_remediated_and_reported(
+    async def test_opt_in_is_sealed_and_no_remediation_occurs_before_admission(
         self,
     ) -> None:
         policy = _policy()
@@ -2216,6 +2216,7 @@ class SteamAutoRemediationTest(unittest.IsolatedAsyncioTestCase):
             return self._healthy()
 
         async def launch(_raw_request: bytes, **kwargs: object) -> int:
+            self.assertIs(json.loads(_raw_request)["auto_remediate_steam"], True)
             await kwargs["execution_started_cb"]()
             kwargs["output_sink"](
                 "stdout",
@@ -2244,7 +2245,7 @@ class SteamAutoRemediationTest(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             dayz_test_tool, "evaluate_steam_session", return_value=self._stale()
         ), patch.object(
-            dayz_test_tool,
+            steam_preflight,
             "remediate_stale_steam_session",
             side_effect=_fake_remediate,
         ):
@@ -2256,9 +2257,8 @@ class SteamAutoRemediationTest(unittest.IsolatedAsyncioTestCase):
                 auto_remediate_steam=True,
             )
 
-        self.assertEqual(len(remediations), 1)
-        self.assertIs(result["steam_remediated"], True)
-        self.assertIsInstance(result["steam_remediation_s"], float)
+        self.assertEqual(remediations, [])
+        self.assertNotIn("steam_remediated", result)
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["run_id"], RUN_ID)
 
@@ -2287,7 +2287,7 @@ class SteamAutoRemediationTest(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             dayz_test_tool, "evaluate_steam_session", return_value=self._stale()
         ), patch.object(
-            dayz_test_tool,
+            steam_preflight,
             "remediate_stale_steam_session",
             side_effect=_record_remediation,
         ):

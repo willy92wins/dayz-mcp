@@ -36,6 +36,7 @@ _REQUEST_KEYS = frozenset(
         "kill",
         "run_id",
         "replace_if_not_polling_since",
+        "auto_remediate_steam",
     }
 )
 _MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal", "lfheli"})
@@ -60,6 +61,8 @@ _CANONICAL_KEYSETS = frozenset(
     {
         _REQUEST_KEYS,
         _REQUEST_KEYS - {"replace_if_not_polling_since"},
+        _REQUEST_KEYS - {"auto_remediate_steam"},
+        _REQUEST_KEYS - {"replace_if_not_polling_since", "auto_remediate_steam"},
     }
 )
 
@@ -353,6 +356,7 @@ def parse_dayz_test_request(
     no_file_patching = value.get("no_file_patching", False)
     preflight = value.get("preflight", False)
     kill = value.get("kill", False)
+    auto_remediate_steam = value.get("auto_remediate_steam", False)
     run_id = value.get("run_id")
     replace_witness = value.get("replace_if_not_polling_since")
 
@@ -382,6 +386,7 @@ def parse_dayz_test_request(
             no_file_patching,
             preflight,
             kill,
+            auto_remediate_steam,
         )
     ):
         _invalid("flag_not_boolean")
@@ -434,6 +439,7 @@ def parse_dayz_test_request(
             _invalid("replace_witness_invalid")
 
     payload: dict[str, object] = {
+        "auto_remediate_steam": auto_remediate_steam,
         "base_mods": [] if no_base_mods else list(base_mods),
         "build": effective_build,
         "clean": clean,

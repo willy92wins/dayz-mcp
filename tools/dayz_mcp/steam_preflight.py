@@ -84,6 +84,10 @@ class SteamPreflightProvider(Protocol):
 
     def process_image_path(self, pid: int) -> str: ...
 
+    def process_creation_ticks(self, pid: int) -> int:
+        """Live process creation FILETIME used by admitted launch preparation."""
+        ...
+
     def steam_process_pids(self) -> tuple[int, ...]: ...
 
     def steam_startup_complete(self, pid: int) -> bool:
@@ -93,6 +97,26 @@ class SteamPreflightProvider(Protocol):
 
 class WindowsSteamPreflightProvider:
     """Read Steam's ActiveProcess key, process identity and bounded startup log."""
+
+    def process_creation_ticks(self, pid: int) -> int:
+        """FILETIME identity, checked on a live query-only process handle."""
+        kernel32 = _kernel32()
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            raise OSError(ctypes.get_last_error(), "OpenProcess failed")
+        try:
+            created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+            if not kernel32.GetProcessTimes(
+                handle, ctypes.byref(created), ctypes.byref(exited),
+                ctypes.byref(kernel), ctypes.byref(user),
+            ):
+                raise OSError(ctypes.get_last_error(), "GetProcessTimes failed")
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:
+                raise OSError("Steam process exited")
+            return (created.dwHighDateTime << 32) | created.dwLowDateTime
+        finally:
+            kernel32.CloseHandle(handle)
 
     def read_active_process(self) -> SteamActiveProcessSnapshot:
         import winreg
@@ -405,6 +429,12 @@ def _steam_executable(
     return host.steam_executable()
 
 
+def _checkpoint(host: SteamRemediationHost) -> None:
+    check = getattr(host, "checkpoint", None)
+    if callable(check):
+        check()
+
+
 def _wait_until(
     host: SteamRemediationHost,
     timeout_s: float,
@@ -412,7 +442,9 @@ def _wait_until(
 ) -> bool:
     deadline = host.monotonic() + timeout_s
     while True:
+        _checkpoint(host)
         passed = predicate()
+        _checkpoint(host)
         now = host.monotonic()
         if passed and now <= deadline:
             return True
@@ -429,6 +461,7 @@ def _wait_until_steam_down(
 
     deadline = host.monotonic() + _SHUTDOWN_WAIT_S
     while True:
+        _checkpoint(host)
         live = _safe_live_pids(provider)
         if live is None:
             return "unknown"
@@ -532,6 +565,7 @@ def _try_repair_steam_pid(
     if failure is not None:
         return failure
     try:
+        _checkpoint(host)
         writer(target_pid)
     except Exception as exc:
         return result("write_failed", exc)
@@ -548,6 +582,8 @@ def _try_repair_steam_pid(
 def remediate_stale_steam_session(
     provider: SteamPreflightProvider | None = None,
     host: SteamRemediationHost | None = None,
+    *,
+    startup_waiter: Callable | None = None,
 ) -> SteamRemediationResult:
     """Repair only the verified live Steam PID first, otherwise use one restart.
 
@@ -561,6 +597,8 @@ def remediate_stale_steam_session(
     """
     selected_provider = WindowsSteamPreflightProvider() if provider is None else provider
     selected_host = WindowsSteamRemediationHost() if host is None else host
+    waiter = startup_waiter or _wait_for_steam_startup
+    _checkpoint(selected_host)
     # Legacy providers cannot prove even startup completion. Fail before any
     # mutation rather than silently falling back to the old registry-only gate.
     if not callable(getattr(selected_provider, "steam_startup_complete", None)):
@@ -569,7 +607,7 @@ def remediate_stale_steam_session(
         )
     repair = _try_repair_steam_pid(selected_provider, selected_host)
     if repair.error_code is None:
-        return _wait_for_steam_startup(selected_provider, selected_host, repair)
+        return waiter(selected_provider, selected_host, repair)
     restarted = _restart_steam_session(selected_provider, selected_host)
     restarted = replace(
         restarted,
@@ -581,7 +619,7 @@ def remediate_stale_steam_session(
     )
     if restarted.error_code is not None:
         return restarted
-    return _wait_for_steam_startup(selected_provider, selected_host, restarted)
+    return waiter(selected_provider, selected_host, restarted)
 
 
 def _wait_for_steam_startup(
@@ -595,6 +633,7 @@ def _wait_for_steam_startup(
 
     def startup_observed() -> bool:
         nonlocal last_session, reason
+        _checkpoint(host)
         last_session = evaluate_steam_session(provider)
         if (
             last_session.error_code is not None
@@ -648,6 +687,7 @@ def _restart_steam_session(
     # cycle and keeps reporting its own reason.
     if _safe_live_pids(selected_provider) != ():
         try:
+            _checkpoint(selected_host)
             selected_host.invoke_steam(executable, ("-shutdown",))
         except Exception:
             return _remediation_result(
@@ -660,9 +700,11 @@ def _restart_steam_session(
                 reason="shutdown_timeout" if down_state == "alive" else "process_list_unreadable",
             )
     try:
+        _checkpoint(selected_host)
         selected_host.invoke_steam(executable, ("-silent",))
     except Exception:
         try:
+            _checkpoint(selected_host)
             selected_host.invoke_steam(executable, ("-silent",))
         except Exception:
             return _remediation_result(

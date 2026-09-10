@@ -377,7 +377,7 @@ class SteamBranchEnvelopeTests(unittest.IsolatedAsyncioTestCase):
             steam_previous_registered_pid=99, steam_pid_repair_target_pid=41,
         )
         self.remediation = self.enterContext(patch.object(
-            self.tool, "remediate_stale_steam_session", return_value=self.remediated
+            sp, "remediate_stale_steam_session", return_value=self.remediated
         ))
 
     async def run_tool(self, *, extension=False, **kwargs):
@@ -387,84 +387,43 @@ class SteamBranchEnvelopeTests(unittest.IsolatedAsyncioTestCase):
             extra_mods=["@DayZ_MCP"], auto_remediate_steam=True, **kwargs,
         )
 
-    def assert_branch(self, result, reason, restarted):
-        self.assertIn("steam_pid_repair_reason", result)
-        self.assertEqual(result["steam_pid_repair_reason"], reason)
-        self.assertIs(result["steam_restart_fallback"], restarted)
-        self.assertNotIn("active_user", result)
-        self.assertNotIn("987654321", repr(result))
-        self.assertNotIn("steam_previous_registered_pid", result)
-        self.assertNotIn("steam_pid_repair_target_pid", result)
+    async def test_stale_opt_in_never_invokes_public_remediation(self):
+        # A remediator configured to fail must remain completely uncalled:
+        # only daemon admission can decide whether any mutation is allowed.
+        self.remediation.side_effect = AssertionError("public mutation forbidden")
+        result = await self.run_tool()
+        self.assertEqual(result["status"], "succeeded")
+        self.remediation.assert_not_called()
+        self.assertNotIn("steam_remediated", result)
+        self.launch.assert_awaited_once()
 
-    async def test_success_copies_fast_and_restart_branch_without_private_values(self):
-        for reason, restart in (("applied", False), ("already_correct", False),
-                                ("writer_unavailable", True)):
-            with self.subTest(reason=reason):
-                self.remediated.steam_pid_repair_reason = reason
-                self.remediated.steam_restart_fallback = restart
-                result = await self.run_tool()
-                self.assertEqual(result["status"], "succeeded")
-                self.assertIs(result["steam_remediated"], True)
-                self.assert_branch(result, reason, restart)
-
-    async def test_failed_remediation_copies_both_branches_and_never_launches(self):
-        for restart in (False, True):
-            with self.subTest(restart=restart):
-                self.remediated.error_code = "steam_session_stale"
-                self.remediated.steam_restart_fallback = restart
-                self.remediated.steam_remediation_reason = "startup_timeout"
-                result = await self.run_tool()
-                self.assertEqual(result["status"], "failed")
-                self.assertIs(result["steam_remediated"], False)
-                self.assertEqual(result["steam_remediation_reason"], "startup_timeout")
-                self.assert_branch(result, "applied", restart)
-        self.launch.assert_not_awaited()
-
-    async def test_non_extensible_refusal_preserves_remediation_branch(self):
+    async def test_non_extensible_run_refuses_without_touching_steam(self):
         self.runtime.lifecycle = {"runs": [{
             "run_id": self.fixtures.RUN_ID, "state": "RUNNING", "mod": "@ExampleMod",
         }]}
         result = await self.run_tool(extension=True)
         self.assertEqual(result["error_code"], "run_not_extensible")
-        self.assert_branch(result, "applied", False)
         self.launch.assert_not_awaited()
+        self.remediation.assert_not_called()
 
-    async def test_client_replacement_refusal_preserves_remediation_branch(self):
+    async def test_client_replacement_refuses_without_touching_steam(self):
         self.runtime.lifecycle = {"runs": [{
             "run_id": self.fixtures.RUN_ID, "state": "RUNNING_IDLE", "mod": "@ExampleMod",
             "profiles": r"P:\ExampleMod_Suite\_client\profiles",
         }]}
-        self.remediated.steam_pid_repair_reason = "write_failed"
-        self.remediated.steam_restart_fallback = True
-        # A known refusal at the policy seam isolates the report's third merge.
         decision = self.tool.ClientReplacementDecision(False, "client_polling", 0.1, 60.0)
         with patch.object(self.tool, "_decide_client_replacement", return_value=decision):
             result = await self.run_tool(extension=True)
         self.assertEqual(result["error_code"], "client_already_polling")
-        self.assert_branch(result, "write_failed", True)
         self.launch.assert_not_awaited()
-
-    async def test_legacy_result_defaults_are_explicit_without_attribute_errors(self):
-        self.remediation.return_value = sp.SteamSessionResult(None, 41, (41,), sp.REMEDIATION)
-        result = await self.run_tool()
-        self.assertEqual(result["status"], "succeeded")
-        self.assert_branch(result, None, False)
-
-    async def test_exception_reports_unknown_branch_and_does_not_launch(self):
-        self.remediation.side_effect = OSError("private account 987654321")
-        result = await self.run_tool()
-        self.assertIs(result["steam_remediated"], False)
-        self.assertEqual(result["steam_remediation_error"], "OSError")
-        self.assert_branch(result, None, False)
-        self.launch.assert_not_awaited()
-
-    async def test_no_remediation_does_not_add_branch_fields(self):
-        with patch.object(self.tool, "evaluate_steam_session", return_value=
-                          sp.SteamSessionResult(None, 41, (41,), sp.REMEDIATION)):
-            result = await self.run_tool()
-        self.assertNotIn("steam_pid_repair_reason", result)
-        self.assertNotIn("steam_restart_fallback", result)
         self.remediation.assert_not_called()
+
+    async def test_preflight_never_reads_or_repairs_steam(self):
+        with patch.object(self.tool, "evaluate_steam_session") as evaluate:
+            result = await self.run_tool(preflight=True)
+        evaluate.assert_not_called()
+        self.remediation.assert_not_called()
+        self.assertIn("steam_session", result["preflight_skipped_checks"])
 
 
 if __name__ == "__main__":
