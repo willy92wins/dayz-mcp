@@ -360,12 +360,16 @@ def _opaque_dayz_test_failure(exc: BaseException) -> str:
     constant in ``code`` -- invalid_native_launcher_environment,
     native_launcher_create_failed, ... -- and any host detail in ``detail``,
     which never travels. Only an identifier-shaped code crosses the wire.
+    An identifier-shaped ``fine_code`` is appended as a fourth part.
     Ficha ae65 (2026-09-04): build=true died in that backend and the caller saw
     the class name alone, with the code one frame away in the local log.
     """
     name = type(exc).__name__
     code = getattr(exc, "code", None) if name == "NativeLauncherBackendError" else None
     if isinstance(code, str) and _is_safe_error_token(code):
+        fine_code = getattr(exc, "fine_code", None)
+        if isinstance(fine_code, str) and _is_safe_error_token(fine_code):
+            return f"dayz_test_failed:{name}:{code}:{fine_code}"
         return f"dayz_test_failed:{name}:{code}"
     return f"dayz_test_failed:{name}"
 
