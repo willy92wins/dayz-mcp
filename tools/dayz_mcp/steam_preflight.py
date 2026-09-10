@@ -34,9 +34,10 @@ _STARTUP_MARKER = re.compile(
     rb"System startup time: [0-9]+(?:\.[0-9]+)? seconds"
 )
 _POLL_INTERVAL_S = 0.2
-_STEAM_INVOKE_FLAGS = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
-    subprocess, "CREATE_NO_WINDOW", 0
-)
+# Windows ignores CREATE_NO_WINDOW when it is combined with DETACHED_PROCESS.
+# steam.exe is a GUI process, so the no-window bit would not apply anyway.
+# Detaching from the caller's console is the whole intent.
+_STEAM_INVOKE_FLAGS = getattr(subprocess, "DETACHED_PROCESS", 0)
 
 
 @dataclass(frozen=True, slots=True)
