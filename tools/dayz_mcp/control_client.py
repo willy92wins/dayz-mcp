@@ -192,9 +192,12 @@ class ControlClient:
                 hint=(
                     # The MCP adapter publishes code/hint, not exception metadata.
                     f"policy_cause={policy_cause}. "
-                    "Report this policy rejection to the host/operator for "
-                    "registration verification and MCP-client reconnection after repair. "
-                    "This client cannot open a new host session."
+                    "If the tool list includes server_reload, call it: it replaces "
+                    "the serving process, which re-reads the registration and "
+                    "re-accredits. Otherwise report this policy rejection to the "
+                    "host/operator for registration verification and MCP-client "
+                    "reconnection after repair. This client cannot open a new host "
+                    "session by itself."
                 ),
             ) from None
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
