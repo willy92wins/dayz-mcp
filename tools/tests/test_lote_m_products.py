@@ -25,6 +25,13 @@ def _text_json(result):
     return json.loads(result[0].text)
 
 
+def _closed_schema_error_text(exc: BaseException) -> str:
+    text = str(exc)
+    marker = "bad_args: unexpected arguments"
+    pos = text.find(marker)
+    return text[pos:] if pos >= 0 else text
+
+
 class LoteMProductsTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.app, self.runtime = build_app(
@@ -201,6 +208,47 @@ class LoteMProductsTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Exception) as ctx:
             await self.app.call_tool("dayz_test_run", {"project": "DayZ_MCP", "mode": "offline"})
         self.assertIn("mode", str(ctx.exception))
+
+    async def test_fb_b319_unknown_id_names_key_and_missing_feedback_id(self) -> None:
+        with self.assertRaises(Exception) as ctx:
+            await self.app.call_tool("pipeline_resolve", {
+                "id": "x", "resolution": "y",
+            })
+        text = _closed_schema_error_text(ctx.exception)
+        self.assertTrue(text.startswith("bad_args: unexpected arguments"), text)
+        self.assertIn("unexpected arguments: id", text)
+        self.assertIn("missing: feedback_id", text)
+
+    async def test_fb_b319_unsafe_key_is_redacted(self) -> None:
+        unsafe = "foo/bar baz"
+        with self.assertRaises(Exception) as ctx:
+            await self.app.call_tool("pipeline_resolve", {
+                "feedback_id": "x", "resolution": "y", unsafe: 1,
+            })
+        text = _closed_schema_error_text(ctx.exception)
+        self.assertTrue(text.startswith("bad_args: unexpected arguments"), text)
+        self.assertIn("<unsafe>", text)
+        self.assertNotIn(unsafe, str(ctx.exception))
+
+    async def test_fb_b319_accepted_lists_schema_properties(self) -> None:
+        with self.assertRaises(Exception) as ctx:
+            await self.app.call_tool("pipeline_resolve", {
+                "feedback_id": "x", "resolution": "y", "bogus": 1,
+            })
+        text = _closed_schema_error_text(ctx.exception)
+        tool = self.app._tool_manager.get_tool("pipeline_resolve")
+        accepted = ", ".join(sorted(tool.parameters.get("properties", {})))
+        self.assertIn(f"accepted: {accepted}", text)
+        for name in tool.parameters.get("properties", {}):
+            self.assertIn(name, text)
+
+    async def test_fb_b319_message_starts_with_legacy_prefix(self) -> None:
+        with self.assertRaises(Exception) as ctx:
+            await self.app.call_tool("pipeline_resolve", {
+                "feedback_id": "x", "resolution": "y", "bogus": 1,
+            })
+        text = _closed_schema_error_text(ctx.exception)
+        self.assertTrue(text.startswith("bad_args: unexpected arguments"), text)
 
 
 if __name__ == "__main__":
