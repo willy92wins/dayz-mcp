@@ -2001,6 +2001,55 @@ def _patch_public_argument_alias(app: FastMCP, tool_name: str, internal: str, pu
     object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
 
 
+_CLOSED_UNEXPECTED_ARGUMENT_CAP = 5
+
+
+def _echo_unexpected_argument_key(key: str) -> str:
+    """Render a caller-supplied argument name for a closed-schema error.
+
+    Identifier-shaped keys are echoed. Anything else (path, space, punctuation)
+    becomes ``<unsafe>`` so host text never crosses the MCP wire. Short names
+    such as ``id`` fail ``_is_safe_error_token``'s 3-char floor but are still
+    identifier-shaped and safe to name.
+    """
+    if not isinstance(key, str):
+        return "<unsafe>"
+    if _is_safe_error_token(key):
+        return key
+    if (
+        1 <= len(key) <= 2
+        and key[0].isascii()
+        and key[0].isalpha()
+        and all(char.isascii() and (char.isalnum() or char == "_") for char in key)
+    ):
+        return key
+    return "<unsafe>"
+
+
+def _closed_unexpected_arguments_message(
+    unknown: set[str],
+    allowed: set[str],
+    required: list[str] | tuple[str, ...],
+    provided: object,
+) -> str:
+    """``bad_args: unexpected arguments: ... (accepted: ...)`` plus ``; missing:``."""
+    ranked = sorted(unknown)
+    echoed = [
+        _echo_unexpected_argument_key(name)
+        for name in ranked[:_CLOSED_UNEXPECTED_ARGUMENT_CAP]
+    ]
+    unexpected = ", ".join(echoed)
+    overflow = len(ranked) - _CLOSED_UNEXPECTED_ARGUMENT_CAP
+    if overflow > 0:
+        unexpected = f"{unexpected} +{overflow} more"
+    accepted = ", ".join(sorted(allowed))
+    message = f"bad_args: unexpected arguments: {unexpected} (accepted: {accepted})"
+    missing = sorted(name for name in required if name not in provided)
+    if missing:
+        message = f"{message}; missing: {', '.join(missing)}"
+    return message
+
+
 def _patch_closed_tool_schema(app: FastMCP, tool_name: str) -> None:
     tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
     if tool is None:
@@ -2010,12 +2059,17 @@ def _patch_closed_tool_schema(app: FastMCP, tool_name: str) -> None:
     # calls from the schema must see a closed, empty contract, not an absent key.
     tool.parameters.setdefault("required", [])
     allowed = set(tool.parameters.get("properties", {}))
+    required = tuple(tool.parameters.get("required") or [])
     original = tool.fn_metadata.call_fn_with_arg_validation
 
     async def patched(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly):
         unknown = set(arguments_to_validate) - allowed
         if unknown:
-            raise ToolError("bad_args: unexpected arguments")
+            raise ToolError(
+                _closed_unexpected_arguments_message(
+                    unknown, allowed, required, arguments_to_validate
+                )
+            )
         return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
 
     object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
