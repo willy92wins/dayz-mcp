@@ -3611,7 +3611,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             "Queue and run an approved DayZ test project; lease ownership and "
             "heartbeat remain internal to the tool. Release any held session "
-            "lease before calling. "
+            "lease before calling. Cycle: session_release (if holding) -> "
+            "dayz_test_run -> session_acquire_wait for later mutating tools. "
             "Reattach sequence: server -> run_id -> client(run_id). "
             "mode=client requires run_id: it reattaches only the client to a "
             "live run, preserving the server and the world state (no server "
@@ -3953,7 +3954,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             f"{LEASE_TOOL_LINE} Spawn a DayZ object through the existing "
             "world_spawn bridge command. rotation is an RF_* CreateObjectEx "
-            "flag integer, not an angle; 0 uses the bridge default RF_DEFAULT."
+            "flag integer, not an angle; 0 uses the bridge default RF_DEFAULT. "
+            "Does not attach wheels, battery, or spark plug; for a usable "
+            "vehicle follow with vehicle_prepare_fixture."
         )
     )
     async def world_spawn(
@@ -4990,7 +4993,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return await runtime.call_bridge("vehicle_telemetry", {}, "client", _timeout(timeout_s))
 
     @app.tool(
-        description=f"{LEASE_TOOL_LINE} Capture and read an atomic owner-client vehicle trace."
+        description=(
+            f"{LEASE_TOOL_LINE} Capture and read an atomic owner-client vehicle "
+            "trace. mode=start requires the local player seated in the vehicle; "
+            "otherwise the bridge returns not_seated. mode=start while a trace "
+            "already exists returns trace_exists; call mode=clear before reuse."
+        )
     )
     async def vehicle_trace(
         mode: str,
