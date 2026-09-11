@@ -49,11 +49,24 @@ def _body(source: str, signature: str) -> str:
 DENIED = (
     ("!IsClientInGame()", "client_not_in_game"),
     ("!cameraPlayer", "camera_unavailable_player"),
-    ("cameraPlayer.GetCommand_Vehicle()", "camera_unavailable_vehicle"),
+    ("cameraPlayer.IsInTransport()", "camera_unavailable_vehicle"),
     ("cameraPlayer.GetParent()", "camera_unavailable_parented_player"),
     ("!m_ActiveCam", "camera_unavailable_no_scripted_camera"),
     ("!m_ActiveCam.IsActive()", "camera_unavailable_inactive"),
 )
+
+
+def assert_live_vehicle_guard(source: str) -> None:
+    body = _body(source, READ_ERROR)
+    if "cameraPlayer.GetCommand_Vehicle()" in body:
+        raise AssertionError("cached vehicle command can poison camera_set after release")
+    if "if (cameraPlayer.IsInTransport())" not in body:
+        raise AssertionError("camera guard does not query live transport parentage")
+    live = body.index("if (cameraPlayer.IsInTransport())")
+    parent = body.index("if (cameraPlayer.GetParent())")
+    active = body.index("if (!m_ActiveCam)")
+    if not live < parent < active:
+        raise AssertionError("live transport/parent guards must precede camera natives")
 
 
 class CameraNativeCrashSourceTest(unittest.TestCase):
@@ -76,12 +89,24 @@ class CameraNativeCrashSourceTest(unittest.TestCase):
         self.assertTrue(body.rstrip().endswith('return "";'))
         self.assertNotRegex(body, r"(?:Camera\.|GetCurrentCamera|GetTransform|GetWorldPosition)")
 
-    def test_vehicle_guard_does_not_depend_only_on_the_vehicle_command(self) -> None:
-        body = _body(_source(), READ_ERROR)
-        # Independent parent evidence matters when a client command is missing.
-        parent = body.index("if (cameraPlayer.GetParent())")
-        self.assertLess(parent, body.index("m_ActiveCam.IsActive()"))
-        self.assertIn('return "camera_unavailable_parented_player";', body)
+    def test_release_or_not_in_vehicle_cannot_leave_a_cached_command_poison(self) -> None:
+        source = _source()
+        assert_live_vehicle_guard(source)
+        release = _body(source, "protected bool DispatchVehicleRelease(")
+        self.assertIn("MCPCarDrive.Clear();", release)
+        self.assertIn("result.ok = true;", release)
+
+    def test_stale_vehicle_command_red_control(self) -> None:
+        source = _source()
+        assert_live_vehicle_guard(source)
+        mutant = source.replace(
+            "cameraPlayer.IsInTransport()",
+            "cameraPlayer.GetCommand_Vehicle()",
+            1,
+        )
+        self.assertNotEqual(mutant, source)
+        with self.assertRaises(AssertionError):
+            assert_live_vehicle_guard(mutant)
 
     def test_camera_reference_is_checked_before_the_instance_native(self) -> None:
         body = _body(_source(), READ_ERROR)

@@ -1169,11 +1169,57 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	protected bool DispatchVehicleTelemetry(MCPCommand command, MCPResult result)
 	{
-		CarScript car = ResolveOwnedCar();
+		PlayerBase player;
+		HumanCommandVehicle vehicleCommand;
+		Transport transport;
+		CarScript car;
+		PlayerIdentity ownerIdentity;
+		int crewIndex = -1;
+		int lowBits = 0;
+		int highBits = 0;
+
+		result.ok = true;
+		result.found = false;
+		result.seated = false;
+		result.seat = "";
+		result.type = "";
+		result.classname = "";
+
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!player)
+		{
+			return true;
+		}
+
+		vehicleCommand = player.GetCommand_Vehicle();
+		if (!vehicleCommand)
+		{
+			return true;
+		}
+
+		transport = vehicleCommand.GetTransport();
+		if (!transport)
+		{
+			return true;
+		}
+
+		result.found = true;
+		result.type = transport.GetType();
+		result.classname = transport.ClassName();
+		crewIndex = transport.CrewMemberIndex(player);
+		if (crewIndex >= 0)
+		{
+			result.seated = true;
+			result.seat = VehicleTelemetrySeatToken(vehicleCommand.GetVehicleSeat());
+		}
+		else
+		{
+			result.seat = "unknown";
+		}
+
+		car = CarScript.Cast(transport);
 		if (!car)
 		{
-			result.ok = false;
-			result.error = "not_seated";
 			return true;
 		}
 
@@ -1186,7 +1232,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		result.is_owner = car.IsOwner();
 		result.is_authority_owner = car.IsAuthorityOwner();
 
-		PlayerIdentity ownerIdentity = car.GetOwnerIdentity();
+		ownerIdentity = car.GetOwnerIdentity();
 		if (ownerIdentity)
 		{
 			result.owner_identity = ownerIdentity.GetPlainId();
@@ -1196,13 +1242,33 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			result.owner_identity = "";
 		}
 
-		int lowBits = 0;
-		int highBits = 0;
 		car.GetNetworkID(lowBits, highBits);
 		result.net_id_low = lowBits;
 		result.net_id_high = highBits;
 		result.ok = true;
 		return true;
+	}
+
+	protected string VehicleTelemetrySeatToken(int vehicleSeat)
+	{
+		if (vehicleSeat == DayZPlayerConstants.VEHICLESEAT_DRIVER)
+		{
+			return "driver";
+		}
+		if (vehicleSeat == DayZPlayerConstants.VEHICLESEAT_CODRIVER)
+		{
+			return "codriver";
+		}
+		if (vehicleSeat == DayZPlayerConstants.VEHICLESEAT_PASSENGER_L)
+		{
+			return "passenger_left";
+		}
+		if (vehicleSeat == DayZPlayerConstants.VEHICLESEAT_PASSENGER_R)
+		{
+			return "passenger_right";
+		}
+
+		return "unknown";
 	}
 
 	protected bool DispatchVehicleTrace(MCPCommand command, MCPResult result)
@@ -3723,9 +3789,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return "camera_unavailable_player";
 		}
 
-		// Vehicle view can override a scripted camera. Check parentage too:
-		// a missing client vehicle command is not evidence of being on foot.
-		if (cameraPlayer.GetCommand_Vehicle())
+		// Vehicle view can override a scripted camera. IsInTransport reads live
+		// Transport parentage, so a stale vehicle command cannot poison camera_set.
+		if (cameraPlayer.IsInTransport())
 		{
 			return "camera_unavailable_vehicle";
 		}
