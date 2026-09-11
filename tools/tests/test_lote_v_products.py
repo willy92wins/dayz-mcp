@@ -114,6 +114,8 @@ class ActionUseDescriptionTest(unittest.TestCase):
         self.assertIn("class name", low)
         self.assertIn("gettype()", low)
         self.assertIn("not the visible", low)
+        self.assertIn("started:1", desc)
+        self.assertIn("neither server acceptance", desc)
 
 
 class RunIdMatrixDescriptionTest(unittest.TestCase):

@@ -3661,6 +3661,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "mode=client requires run_id: it reattaches only the client to a "
             "live run, preserving the server and the world state (no server "
             "reboot); mode=server|all must NOT pass run_id. "
+            "mode=all plus wait_for(players_at_least, 1) can complete without "
+            "human intervention (viable night session). "
             "preflight does not relax that matrix. "
             "extra_mods entries must be a single folder name "
             "(for example '@DayZ_MCP') or an absolute path inside the "
@@ -4849,6 +4851,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "previous_sha256, age_s, repeat_count, key_kind and state_backend, plus the intra-call frames, distinct_frames and max_adjacent_delta, which need no "
         "stored state and are therefore there on the very first capture. A repeated frame is a fact about pixels, not an error: a paused sim, an open menu "
         "and a still scene all produce it legitimately. "
+        "With a live simulation and a position that advances, frames>=2 (default frames=4) "
+        "with distinct_frames=1 plus max_adjacent_delta=0 is a frozen-render signal, not a "
+        "process hang. With frames=1 those metrics are non-discriminating (always "
+        "distinct_frames=1 and max_adjacent_delta=0; no adjacent pairs) and are not a freeze "
+        "signal. "
         "With two DayZ clients, capture targets the live run's client through cmdline_match/client_pid. "
         "window_surface and client_surface rects are PHYSICAL pixels (DPI-aware): a host helper that never calls "
         "SetProcessDpiAwareness sees virtualized coordinates instead (at 150%: 1920 -> 1280), so a 'client_rect == "
@@ -4967,7 +4974,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Seat the connected "
-            "client in a nearby vehicle (client-side ownership get-in)."
+            "client in a nearby vehicle (client-side ownership get-in). "
+            "This is client ownership for engine_set, vehicle_control, and "
+            "vehicle_trace; it does not place the player in the server crew. "
+            "ActionCondition gates such as ActionSwitchLights still fail "
+            "until vehicle_enter."
         )
     )
     async def vehicle_get_in_client(pos: list[StrictFloat], timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
@@ -4986,7 +4997,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     )
     async def engine_set(mode: str, timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         if mode not in ("start", "stop"):
-            raise ToolError("bad_mode")
+            raise ToolError(
+                f"bad_mode: mode {mode!r} must be one of 'start' or 'stop'"
+            )
         async with runtime.tool_lock:
             result = await runtime.call_bridge(
                 "engine_set", {"mode": mode}, "client", _timeout(timeout_s)
@@ -5035,7 +5048,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if not math.isfinite(h) or (h != 0.0 and h != 1.0):
             raise ToolError("bad_handbrake")
         if not math.isfinite(ttl) or ttl < 0.0 or ttl > VEHICLE_CONTROL_MAX_TTL_S:
-            raise ToolError("bad_hold_ttl_s")
+            raise ToolError(
+                "bad_hold_ttl_s: hold_ttl_s "
+                f"{ttl!r} must be in [0, {VEHICLE_CONTROL_MAX_TTL_S}]"
+            )
         args = {"throttle": t, "steer": s, "brake": b, "handbrake": h, "hold_ttl_s": ttl}
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_control", args, "client", _timeout(timeout_s))
@@ -5295,9 +5311,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "OnExecuteClient; client-only mod code compiled under #ifndef SERVER "
         "can therefore run. Non-local multiplayer actions are also sent to "
         "the server, which can reject them. No callbacks are invoked directly "
-        "by this tool. started:true only means the client manager retained a "
-        "running/pending action immediately after the start call; it proves "
-        "neither server acceptance, callback execution nor completion. The "
+        "by this tool. started:true / started:1 only means the client manager "
+        "retained a running/pending action immediately after the start call; "
+        "it proves neither server acceptance, callback execution nor "
+        "completion. The "
         "tool does not sustain continuous-action input or wait for progress "
         "completion. Verify the intended effect separately; client callback "
         "reachability by code is not an in-engine test of your mod."
