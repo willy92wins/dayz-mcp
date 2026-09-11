@@ -1,0 +1,4 @@
+Ran 10 tests in 0.162s
+FAILED (failures=2)
+exit code: 1
+Causa aislada: entity.radius=True convertido a 1.0 por _finite_float. Corregido en candidato, sin modificar helper compartido.

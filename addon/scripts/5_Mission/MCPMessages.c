@@ -107,9 +107,10 @@ class MCPArgs
 	// F3.4 object_anim (phase == MCP_ARG_FLOAT_UNSET means read-only)
 	string source;
 	float phase;
-	// F3.5 inventory_give
+	// F3.5 inventory_give / b256 inventory_attach
 	string classname;
 	string dest;
+	string slot;
 	// F3.6 object_inspect — memory-point / bounding_center names
 	ref array<string> want;
 	// Optional player identity (GetPlainId). Empty = first human / broadcast.
@@ -420,6 +421,12 @@ class MCPUiRequestEcho
 	string matched_path;
 };
 
+class MCPInventoryAttachReceipt
+{
+	string dest;
+	string slot;
+};
+
 class MCPResult
 {
 	int id;
@@ -461,8 +468,9 @@ class MCPResult
 	// F3.4 object_anim phase after read or write.
 	float phase;
 	string source;
-	// F3.5 inventory_give classname echoed on success.
+	// F3.5 inventory_give / b256 inventory_attach item identity.
 	string classname;
+	ref MCPInventoryAttachReceipt inventory_attach;
 	// F3.5: true when dest=hands and hands were occupied — vanilla drops the held
 	// item and CallLater-spawns ~500 ms later (SpawnEntityInPlayerInventory returns null).
 	bool deferred;

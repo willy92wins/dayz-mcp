@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
+import os
 import socket
 import threading
 import time
 import unittest
 import urllib.parse
 import urllib.request
+from ctypes import wintypes
 from pathlib import Path
 from typing import Any, Callable
 from unittest.mock import AsyncMock, patch
 
+from dayz_mcp import core
 from dayz_mcp import server as server_module
 from dayz_mcp.server import EXPECTED_BRIDGE_VERSION, ServerConfig, Runtime, build_app
 from tests.fence_helpers import INST_CLIENT, INST_SERVER, bind_both_peers
@@ -370,6 +374,94 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("secret", message, expected)
             self.assertNotIn("host", message, expected)
 
+    async def test_fb_c9ca_fine_code_crosses_the_wire_as_a_fourth_part(self) -> None:
+        from dayz_mcp.native_launcher_backend import NativeLauncherBackendError
+        from tests.test_client_mode import _fixture_client_runtime
+
+        config = ServerConfig(
+            mode="client",
+            key=self.key,
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _message: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        with patch.object(server_module, "ClientRuntime", return_value=runtime):
+            app, _built = build_app(config)
+
+        cases = (
+            (
+                NativeLauncherBackendError(
+                    "native_job_cleanup_incomplete",
+                    r"secret C:\Users\host",
+                    fine_code="active_zero_never_observed",
+                ),
+                "NativeLauncherBackendError:native_job_cleanup_incomplete:active_zero_never_observed",
+            ),
+            (
+                NativeLauncherBackendError(
+                    "native_job_cleanup_incomplete",
+                    (
+                        "drain_s=0.0"
+                        " second_wait=True"
+                        " open_handles=0"
+                        " continues=4"
+                    ),
+                    fine_code="active_zero_wait_timed_out",
+                ),
+                "NativeLauncherBackendError:native_job_cleanup_incomplete:active_zero_wait_timed_out",
+            ),
+            (
+                NativeLauncherBackendError(
+                    "native_job_cleanup_incomplete",
+                    r"secret C:\Users\host",
+                    fine_code=r"C:\x",
+                ),
+                "NativeLauncherBackendError:native_job_cleanup_incomplete",
+            ),
+            (
+                NativeLauncherBackendError(
+                    "native_job_cleanup_incomplete",
+                    r"secret C:\Users\host",
+                    fine_code="has a space",
+                ),
+                "NativeLauncherBackendError:native_job_cleanup_incomplete",
+            ),
+            (
+                NativeLauncherBackendError(
+                    "native_job_cleanup_incomplete",
+                    r"secret C:\Users\host",
+                    fine_code=None,
+                ),
+                "NativeLauncherBackendError:native_job_cleanup_incomplete",
+            ),
+            (
+                RuntimeError(r"boom C:\Users\host\secret"),
+                "RuntimeError",
+            ),
+        )
+        for error, expected in cases:
+
+            async def boom(*_args: object, **_kwargs: object) -> dict[str, Any]:
+                raise error
+
+            with patch.object(
+                server_module.dayz_test_tool, "execute_dayz_test_run", side_effect=boom
+            ):
+                with self.assertRaises(Exception) as err:
+                    await app.call_tool(
+                        "dayz_test_run", {"project": "ExampleMod", "mode": "server"}
+                    )
+            message = str(err.exception)
+            _assert_tool_error(self, err.exception)
+            self.assertIn("dayz_test_failed:", message, expected)
+            tail = message.split("dayz_test_failed:", 1)[1].split()[0].rstrip(".,;)")
+            self.assertEqual(tail, expected)
+            self.assertNotIn("secret", message, expected)
+            self.assertNotIn("host", message, expected)
+            self.assertNotIn("drain_s", message, expected)
+            self.assertNotIn("open_handles", message, expected)
+
     async def test_dayz_test_untyped_failure_carries_the_exception_type(self) -> None:
         # The bare `except Exception` swallowed the cause, which is exactly
         # what makes build:true undiagnosable. A non-existent `project` would NOT
@@ -650,8 +742,9 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn(key, status)
         self.assertEqual(status["tool_registry_remediation"], "reopen_mcp_client")
         stale = status["tool_registry_source_stale"]
-        self.assertIn(stale, (None, "unknown"))
-        self.assertIsNot(stale, False)
+        self.assertIs(type(stale), bool)
+        self.assertIs(stale, status["server_modules"]["status"] != "fresh")
+        self.assertGreater(status["server_modules"]["watched_count"], 0)
         with patch.object(server_module, "capture_registry_snapshot") as capture:
             again = _content_json(await app.call_tool("bridge_status", {}))
         capture.assert_not_called()
@@ -661,6 +754,24 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             again["tool_registry_captured_at"], status["tool_registry_captured_at"]
         )
+
+    async def test_bridge_status_source_stale_is_boolean_for_all_three_states(self) -> None:
+        app, _runtime = self.build_started()
+        description = next(tool.description for tool in await app.list_tools() if tool.name == "bridge_status")
+        self.assertIn("always a boolean: true for stale OR unknown", description)
+        self.assertIn("false only for verified fresh", description)
+        for state, expected in (("fresh", False), ("stale", True), ("unknown", True)):
+            with self.subTest(state=state):
+                snapshot = {
+                    "server_started_at": 1.0, "server_pid": 123, "watched_count": 1,
+                    "stale": ["fixture"] if state == "stale" else [],
+                    "unreadable": ["fixture"] if state == "unknown" else [],
+                    "unreadable_reasons": {"fixture": "source_unreadable_now"} if state == "unknown" else {},
+                }
+                with patch.object(server_module._SERVER_SOURCES, "snapshot", return_value=snapshot):
+                    status = _content_json(await app.call_tool("bridge_status", {}))
+                self.assertIs(status["tool_registry_source_stale"], expected)
+                self.assertEqual(status["server_modules"]["status"], state)
 
     async def test_loopback_status_omits_tool_registry_overlay(self) -> None:
         _app, runtime = self.build_started()
@@ -1187,3 +1298,160 @@ class BridgeCapabilityComparisonTest(unittest.IsolatedAsyncioTestCase):
                     continue
                 with self.subTest(f"{peer}:{command}"):
                     self.assertIn(tool, self.registered)
+
+
+class ClientRenderSignalTest(unittest.TestCase):
+    @staticmethod
+    def _own_stamp() -> str:
+        """This process's creation time in the record's own format.
+
+        The fixtures below used to carry only pid and role, which is LESS than
+        the producer publishes: _projected_run is dataclasses.asdict of a
+        ProcessRecord and creation_time_utc is a required field. Once the
+        sample started being checked against the registered identity (a
+        recycled pid otherwise borrows a stranger's CPU), a fixture without it
+        stopped being a shorter version of reality and became a different one.
+        """
+        from datetime import datetime, timezone
+
+        sample = core.read_process_cpu_times(os.getpid())
+        assert sample is not None, "este proceso tiene que ser muestreable"
+        epoch_s = sample["created_100ns"] / 1e7 - 11644473600.0
+        return datetime.fromtimestamp(epoch_s, tz=timezone.utc).isoformat()
+
+    def _snapshot(self) -> dict[str, Any]:
+        return {
+            "peers": {
+                "server": {
+                    "last_poll_age_s": 0.1,
+                    "queue_depth": 0,
+                    "version": None,
+                    "binding_state": "BOUND",
+                    "instance_prefix": "ab",
+                    "bound_last_poll_age_s": 0.1,
+                },
+                "client": {
+                    "last_poll_age_s": 0.1,
+                    "queue_depth": 0,
+                    "version": None,
+                    "binding_state": "BOUND",
+                    "instance_prefix": "cd",
+                    "bound_last_poll_age_s": 0.1,
+                },
+            },
+            "results_pending": 0,
+        }
+
+    def test_the_client_process_publishes_a_cpu_signal(self) -> None:
+        lifecycle = {
+            "runs": [
+                {
+                    "processes": [
+                        {
+                            "pid": os.getpid(),
+                            "role": "client",
+                            "creation_time_utc": self._own_stamp(),
+                        },
+                    ]
+                }
+            ]
+        }
+        payload = core.build_status(
+            self._snapshot(),
+            require_version=False,
+            expected_game_version=None,
+        )
+        enriched = core.attach_lifecycle_cpu_signals(lifecycle)
+        payload["lifecycle"] = enriched
+        process = enriched["runs"][0]["processes"][0]
+        cpu = process.get("cpu")
+        self.assertIsInstance(cpu, dict)
+        self.assertIn("user_100ns", cpu)
+        self.assertIn("kernel_100ns", cpu)
+        self.assertIn("sampled_at_ns", cpu)
+        self.assertIsInstance(cpu["user_100ns"], int)
+        self.assertIsInstance(cpu["kernel_100ns"], int)
+        self.assertIsInstance(cpu["sampled_at_ns"], int)
+        self.assertGreaterEqual(int(cpu["user_100ns"]) + int(cpu["kernel_100ns"]), 0)
+        self.assertNotIn("percent", cpu)
+        self.assertNotIn("cpu_percent", cpu)
+        self.assertNotIn("cpu", payload["client_peer"])
+        self.assertNotIn("cpu_percent", payload["client_peer"])
+
+    def test_a_peer_with_no_process_record_publishes_no_false_cpu_signal(self) -> None:
+        payload = core.build_status(
+            self._snapshot(),
+            require_version=False,
+            expected_game_version=None,
+        )
+        enriched = core.attach_lifecycle_cpu_signals({"runs": []})
+        payload["lifecycle"] = enriched
+        self.assertNotIn("cpu", payload["client_peer"])
+        self.assertNotIn("cpu_percent", payload["client_peer"])
+        self.assertIsNone(payload["client_peer"].get("cpu"))
+        self.assertNotIn("cpu", enriched)
+        self.assertNotIn("cpu_percent", enriched)
+        self.assertEqual(enriched["runs"], [])
+
+    def test_a_process_that_has_exited_publishes_no_cpu_signal(self) -> None:
+        def _write_filetime(pointer: object, value_100ns: int) -> None:
+            stamp = ctypes.cast(pointer, ctypes.POINTER(wintypes.FILETIME)).contents
+            stamp.dwLowDateTime = value_100ns & 0xFFFFFFFF
+            stamp.dwHighDateTime = (value_100ns >> 32) & 0xFFFFFFFF
+
+        def fake_get_process_times(handle, created, exited, kernel, user):
+            _write_filetime(created, 133000000000000136)
+            _write_filetime(exited, 133000000000000185)
+            _write_filetime(kernel, 156250)
+            _write_filetime(user, 0)
+            return True
+
+        lifecycle = {
+            "runs": [
+                {
+                    "processes": [
+                        {"pid": os.getpid(), "role": "client"},
+                    ]
+                }
+            ]
+        }
+        with patch.object(core._kernel32, "GetProcessTimes", side_effect=fake_get_process_times):
+            enriched = core.attach_lifecycle_cpu_signals(lifecycle)
+        process = enriched["runs"][0]["processes"][0]
+        self.assertNotIn("cpu", process)
+
+    def test_the_cpu_signal_carries_the_process_creation_time(self) -> None:
+        lifecycle = {
+            "runs": [
+                {
+                    "processes": [
+                        {
+                            "pid": os.getpid(),
+                            "role": "client",
+                            "creation_time_utc": self._own_stamp(),
+                        },
+                    ]
+                }
+            ]
+        }
+        enriched = core.attach_lifecycle_cpu_signals(lifecycle)
+        cpu = enriched["runs"][0]["processes"][0].get("cpu")
+        self.assertIsInstance(cpu, dict)
+        self.assertIn("created_100ns", cpu)
+        self.assertIsInstance(cpu["created_100ns"], int)
+        self.assertGreater(int(cpu["created_100ns"]), 0)
+
+    def test_a_process_that_cannot_be_sampled_publishes_no_cpu_signal(self) -> None:
+        lifecycle = {
+            "runs": [
+                {
+                    "processes": [
+                        {"pid": -1, "role": "client"},
+                    ]
+                }
+            ]
+        }
+        enriched = core.attach_lifecycle_cpu_signals(lifecycle)
+        process = enriched["runs"][0]["processes"][0]
+        self.assertNotIn("cpu", process)
+        self.assertNotIn("cpu_percent", process)

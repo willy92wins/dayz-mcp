@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.steam_helpers import FakeSteamGate
+
 import json
 import hashlib
 import dataclasses
@@ -17,7 +19,7 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from dayz_mcp import loopback
+from dayz_mcp import dayz_test_storage, loopback
 from dayz_mcp.instance_fence import BINDING_STARTING, Binding
 from dayz_mcp.process_lifecycle import (
     ProcessLifecycle,
@@ -26,7 +28,7 @@ from dayz_mcp.process_lifecycle import (
     RunRecord,
     _ADOPT_NOT_DISPATCHABLE_HINT,
 )
-from dayz_mcp.runtime_state import RuntimePaths
+from dayz_mcp.runtime_state import JsonlAuditWriter, RuntimePaths
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 from tests.fence_helpers import INST_CLIENT, INST_SERVER, accredited_poll, bind_both_peers
 
@@ -247,6 +249,7 @@ class ProcessLifecycleStatusPruneTest(unittest.TestCase):
             audit=audit,
         )
         return ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=coordinator,
             manifest=store,
             audit=audit,
@@ -508,6 +511,7 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.launcher = FakeLauncher()
         self.probe_result: dict[str, object] = {"known": True, "processes": []}
         self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=self.audit,
@@ -3854,6 +3858,7 @@ class ProcessLifecycleTest(unittest.TestCase):
         manifest2.recover_after_restart()
         state2 = loopback.ServerState("k")
         life2 = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=manifest2,
             audit=self.audit,
@@ -4038,6 +4043,7 @@ class RetiredRunDiagnosticsAndGenerationTest(unittest.TestCase):
         self.launcher = FakeLauncher()
         self.generation = "gen-lote-h-test"
         self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=self.audit,
@@ -4877,6 +4883,268 @@ class RetiredRunRingCommitAndSnapshotTest(RetiredRunDiagnosticsAndGenerationTest
             if event.get("event") == "admin_reconcile"
         ]
         self.assertIn(dirty, audit_reasons)
+
+
+class StorageRotationAuditTest(unittest.TestCase):
+    """The rotation row has to land in the durable jsonl, not only in AuditSink."""
+
+    STORAGE_SEAL_A = "a" * 64
+    STORAGE_SEAL_B = "b" * 64
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.game = self.root / "DayZ"
+        self.game.mkdir()
+        (self.game / "DayZDiag_x64.exe").write_bytes(b"")
+        self.paths = RuntimePaths(
+            self.root / "runtime",
+            self.root / "runtime" / "audit",
+            self.root / "runtime" / "coordination.json",
+            self.root / "runtime" / "runs.json",
+        )
+        self.paths.audit_dir.mkdir(parents=True, exist_ok=True)
+        self.audit = AuditSink()
+        self.coordinator = SessionCoordinator(
+            token_fn=lambda: "token-A",
+            id_fn=lambda: "lease-A",
+            audit=self.audit,
+        )
+        status, acquired = self.coordinator.acquire(IDENTITY_A, "lifecycle")
+        self.assertEqual(status, 200)
+        self.token_a = acquired["lease_token"]
+        self.store = RunManifestStore(self.paths)
+        self.guard = FakeGuard()
+        self.launcher = FakeLauncher()
+        self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
+            coordinator=self.coordinator,
+            manifest=self.store,
+            audit=self.audit,
+            guard=self.guard,
+            retail_probe=lambda: {"known": True, "processes": []},
+            diag_probe=lambda: {"known": True, "processes": []},
+            game_path=self.game,
+            launcher=self.launcher,
+            id_fn=lambda: "run-1",
+        )
+        self.lifecycle.bridge_probe = FakeBridgeBindings().status_snapshot
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def mission(self) -> Path:
+        directory = Path(self.temporary.name) / "mpmissions" / "dayzOffline"
+        if not directory.exists():
+            tree = directory / "storage_1"
+            (tree / "players").mkdir(parents=True)
+            (tree / "data.bin").write_bytes(b"world-and-characters")
+            (tree / "players" / "p1.bin").write_bytes(b"survivor")
+        return directory
+
+    def server_request(self, seal: str | None = STORAGE_SEAL_A) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "argv": [str(self.game / "DayZDiag_x64.exe"), "-mission=test"],
+            "cwd": str(self.game),
+            "role": "server",
+            "window_style": "normal",
+            "label": "gate",
+            "mod": "@SameMod",
+            "profiles": "profiles",
+            "mission": str(self.mission()),
+        }
+        if seal is not None:
+            payload["storage_seal"] = seal
+        return payload
+
+    def _rotation_rows(self, events: list[dict[str, object]]) -> list[dict[str, object]]:
+        return [
+            event
+            for event in events
+            if event.get("event") == "lifecycle_storage_rotated"
+        ]
+
+    def _jsonl_rows(self, writer: JsonlAuditWriter) -> list[dict[str, object]]:
+        if not writer.current_path.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in writer.current_path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+
+    def _assert_jsonl_carries_the_rotation_paths(
+        self,
+        row: dict[str, object],
+        mission: Path,
+        *,
+        original_world: bytes,
+        original_player: bytes,
+        original_marker: dict[str, object] | None,
+    ) -> None:
+        """The JSONL row, not the producer object: that is the F-02 joint."""
+        self.assertIn("storage_backup", row)
+        backup_name = row["storage_backup"]
+        self.assertIsInstance(backup_name, str)
+        self.assertTrue(backup_name)
+        backup = mission / backup_name
+        self.assertTrue(backup.is_dir(), backup)
+        self.assertEqual((backup / "data.bin").read_bytes(), original_world)
+        self.assertEqual(
+            (backup / "players" / "p1.bin").read_bytes(), original_player
+        )
+        self.assertIn("storage_marker_backup", row)
+        marker_name = row["storage_marker_backup"]
+        if original_marker is None:
+            self.assertIsNone(marker_name)
+            return
+        self.assertIsInstance(marker_name, str)
+        self.assertTrue(marker_name)
+        kept = mission / marker_name
+        self.assertTrue(kept.is_file(), kept)
+        self.assertEqual(
+            json.loads(kept.read_text(encoding="utf-8")), original_marker
+        )
+
+    def test_a_real_rotation_writes_lifecycle_storage_rotated_to_jsonl(self) -> None:
+        """JsonlAuditWriter is the production sink; AuditSink would accept anything."""
+        writer = JsonlAuditWriter(self.paths, "generation-rotation")
+        self.lifecycle.audit = writer.write
+        mission = self.mission()
+        original_world = (mission / dayz_test_storage.STORAGE_NAME / "data.bin").read_bytes()
+        original_player = (
+            mission / dayz_test_storage.STORAGE_NAME / "players" / "p1.bin"
+        ).read_bytes()
+
+        error = self.lifecycle._rotate_storage_for_launch(
+            self.server_request(), "run-real-audit"
+        )
+
+        self.assertIsNone(error)
+        rotated = self._rotation_rows(self._jsonl_rows(writer))
+        self.assertEqual(len(rotated), 1, rotated)
+        self.assertEqual(rotated[0].get("run_id"), "run-real-audit")
+        self.assertTrue(str(rotated[0].get("reason") or "").strip())
+        self.assertIsInstance(rotated[0].get("duration_s"), (int, float))
+        self._assert_jsonl_carries_the_rotation_paths(
+            rotated[0],
+            mission,
+            original_world=original_world,
+            original_player=original_player,
+            original_marker=None,
+        )
+
+    def test_a_rotation_with_a_prior_marker_copies_the_marker_backup_into_jsonl(
+        self,
+    ) -> None:
+        writer = JsonlAuditWriter(self.paths, "generation-rotation")
+        self.lifecycle.audit = writer.write
+        mission = self.mission()
+        original_world = (mission / dayz_test_storage.STORAGE_NAME / "data.bin").read_bytes()
+        original_player = (
+            mission / dayz_test_storage.STORAGE_NAME / "players" / "p1.bin"
+        ).read_bytes()
+        original_marker = {
+            "schema_version": dayz_test_storage.MARKER_SCHEMA_VERSION,
+            "algorithm": dayz_test_storage.MARKER_ALGORITHM,
+            "seal": self.STORAGE_SEAL_B,
+            "project": "SameMod",
+        }
+        (mission / dayz_test_storage.MARKER_NAME).write_text(
+            json.dumps(original_marker), encoding="utf-8"
+        )
+
+        error = self.lifecycle._rotate_storage_for_launch(
+            self.server_request(), "run-marker-backup"
+        )
+
+        self.assertIsNone(error)
+        rotated = self._rotation_rows(self._jsonl_rows(writer))
+        self.assertEqual(len(rotated), 1, rotated)
+        self.assertEqual(rotated[0].get("run_id"), "run-marker-backup")
+        self._assert_jsonl_carries_the_rotation_paths(
+            rotated[0],
+            mission,
+            original_world=original_world,
+            original_player=original_player,
+            original_marker=original_marker,
+        )
+
+    def test_an_admitted_server_launch_rotates_and_leaves_the_row(self) -> None:
+        launched = process(self.launcher.pid, "server")
+        self.guard.snapshots[self.launcher.pid] = snapshot(launched)
+        self.mission()
+
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.server_request()
+        )
+
+        self.assertIs(result.get("ok"), True, result)
+        self.assertEqual(len(self.launcher.calls), 1)
+        rows = self._rotation_rows(self.audit.events)
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0].get("run_id"), "run-1")
+
+    def test_a_launch_that_does_not_rotate_writes_no_rotation_row(self) -> None:
+        writer = JsonlAuditWriter(self.paths, "generation-rotation")
+        self.lifecycle.audit = writer.write
+        request = self.server_request()
+        first = self.lifecycle._rotate_storage_for_launch(request, "run-one")
+        self.assertIsNone(first)
+        after_first = self._rotation_rows(self._jsonl_rows(writer))
+        self.assertEqual(len(after_first), 1, after_first)
+
+        second = self.lifecycle._rotate_storage_for_launch(request, "run-two")
+
+        self.assertIsNone(second)
+        self.assertEqual(
+            self._rotation_rows(self._jsonl_rows(writer)),
+            after_first,
+        )
+
+    def test_a_client_start_never_writes_a_rotation_row(self) -> None:
+        launched = process(self.launcher.pid, "client")
+        self.guard.snapshots[self.launcher.pid] = snapshot(launched)
+        self.mission()
+        request = self.server_request()
+        request["role"] = "client"
+        request["replace_if_not_polling_since"] = int(time.time() * 1000)
+
+        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, request)
+
+        self.assertIs(result.get("ok"), True, result)
+        self.assertEqual(self._rotation_rows(self.audit.events), [])
+
+    def test_a_writer_that_raises_does_not_block_the_launch(self) -> None:
+        def boom(_event: dict[str, object]) -> bool:
+            raise ValueError("invalid_audit_event")
+
+        self.lifecycle.audit = boom
+        self.mission()
+        before = int(self.lifecycle.public_status().get("audit_rows_dropped") or 0)
+
+        error = self.lifecycle._rotate_storage_for_launch(
+            self.server_request(), "run-dropped-audit"
+        )
+
+        self.assertIsNone(error)
+        dropped = self.lifecycle.public_status().get("audit_rows_dropped")
+        self.assertIsInstance(dropped, int)
+        self.assertGreaterEqual(dropped, before + 1)
+
+    def test_a_missing_writer_still_counts_the_dropped_row(self) -> None:
+        self.lifecycle.audit = None
+        self.mission()
+        before = int(self.lifecycle.public_status().get("audit_rows_dropped") or 0)
+
+        error = self.lifecycle._rotate_storage_for_launch(
+            self.server_request(), "run-no-writer"
+        )
+
+        self.assertIsNone(error)
+        dropped = self.lifecycle.public_status().get("audit_rows_dropped")
+        self.assertIsInstance(dropped, int)
+        self.assertGreaterEqual(dropped, before + 1)
 
 
 if __name__ == "__main__":

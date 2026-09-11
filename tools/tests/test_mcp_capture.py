@@ -773,5 +773,56 @@ class CaptureDualCropSpaceTest(unittest.TestCase):
                     self.assertEqual((1, 1), _decode(result["inline"]).size)
 
 
+class AllBlackFrameReportTest(unittest.TestCase):
+    def test_an_all_black_frame_reports_whether_the_frame_was_advancing(self) -> None:
+        window = {
+            "pid": 4242,
+            "class": "DayZ",
+            "title": "DayZ",
+            "left": 0,
+            "top": 0,
+            "width": 200,
+            "height": 120,
+        }
+        client = {"left": 0, "top": 20, "width": 200, "height": 100}
+
+        def black_frame(output_path: str, **_: object) -> dict[str, object]:
+            Image.new("RGB", (200, 120), (0, 0, 0)).save(output_path, format="PNG")
+            return {
+                "ok": True,
+                "error": "",
+                "method": "printwindow",
+                "window": dict(window),
+                "client": dict(client),
+                "clientStats": {"meanBrightness": 0.0, "nonBlackRatio": 0.0},
+                "sha256": "0" * 64,
+            }
+
+        with tempfile.TemporaryDirectory(prefix="frame_state_") as tmp:
+            state_path = os.path.join(tmp, "capture-frame-state.json")
+            with mock.patch.dict(os.environ, {"DAYZ_MCP_FRAME_STATE_PATH": state_path}):
+                with mock.patch.object(
+                    mcp_capture, "_run_window_capture", side_effect=black_frame
+                ):
+                    first = mcp_capture.grab_stable_frame(
+                        frames=1, cmdline_match=r"P:\profiles"
+                    )
+                    second = mcp_capture.grab_stable_frame(
+                        frames=1, cmdline_match=r"P:\profiles"
+                    )
+
+        for result in (first, second):
+            self.assertIsInstance(result, dict)
+            self.assertIs(True, result.get("isError"))
+            self.assertEqual("frame_client_all_black", result.get("error"))
+            report = result.get("frame_stale_report")
+            self.assertIsInstance(report, dict)
+            self.assertIn("stale", report)
+            self.assertIn("detail", report)
+
+        self.assertIsNone(first["frame_stale_report"]["stale"])
+        self.assertIs(True, second["frame_stale_report"]["stale"])
+
+
 if __name__ == "__main__":
     unittest.main()

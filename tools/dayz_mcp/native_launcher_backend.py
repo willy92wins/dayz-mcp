@@ -168,8 +168,10 @@ class _DebugImageAuthority(Protocol):
 class NativeLauncherBackendError(RuntimeError):
     """Stable-code launcher failure; optional local-only diagnostic detail.
 
-    ``str(self)`` always starts with ``code``. Structured fields are for local
-    tracebacks/logs only — they must not be forwarded over the MCP wire.
+    ``str(self)`` always starts with ``code``. ``code`` and an identifier-shaped
+    ``fine_code`` are the only parts that may cross the MCP wire (through
+    server._opaque_dayz_test_failure); ``detail``, ``event_kind``, ``pid`` and
+    ``image_path`` stay local (tracebacks/logs).
     """
 
     def __init__(
@@ -1487,6 +1489,7 @@ def _supervise_created_launcher(
             deadline=time.monotonic() + _DEBUG_DRAIN_SECONDS,
             creator_thread_id=creator_thread_id,
         )
+        second_wait_ran = not active_zero_completed
         if not active_zero_completed:
             active_zero_completed = _wait_active_zero(
                 created.completion_port_handle,
@@ -1504,6 +1507,22 @@ def _supervise_created_launcher(
                 and gate_rejection is not None
             ):
                 raise gate_rejection
+            if failure == "native_job_cleanup_incomplete":
+                fine_code = (
+                    "active_zero_never_observed"
+                    if not state.active_zero
+                    else "active_zero_wait_timed_out"
+                )
+                raise NativeLauncherBackendError(
+                    failure,
+                    (
+                        f"drain_s={_DEBUG_DRAIN_SECONDS}"
+                        f" second_wait={second_wait_ran}"
+                        f" open_handles={state.open_handle_count}"
+                        f" continues={state.continue_count}"
+                    ),
+                    fine_code=fine_code,
+                )
             raise NativeLauncherBackendError(failure)
         if not request_written or root_exit_code is None:
             raise NativeLauncherBackendError("native_debug_incomplete")

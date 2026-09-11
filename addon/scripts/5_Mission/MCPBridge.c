@@ -1,8 +1,11 @@
-class MCPBridge
+class MCPBridge : Managed
 {
 	protected const int MAX_DISPATCH_PER_TICK = 4;
 	protected const int MAX_PENDING = 32;
 	protected const int PENDING_POLL_THRESHOLD = 8;
+	protected const int MAX_CALLBACK_REFS = 128;
+	// Reserve the existing daemon ingress cap (loopback.py MAX_QUEUE) per poll.
+	protected const int MAX_POLL_RESULTS = 64;
 	protected const float JOB_TIMEOUT_S = 5.0;
 	protected const float DRIVE_PROBE_TIMEOUT_S = 12.0;
 	protected const float DRIVE_PROBE_PREP_TIMEOUT_S = 5.0;
@@ -29,7 +32,7 @@ class MCPBridge
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,infected_drive,inventory_give,notify_players," + "object_anim,object_delete,object_inspect,player_teleport,query_all_players," + "query_get_in_condition,query_player_state,scene_raycast,surface_query,telemetry_read," + "vehicle_drive,vehicle_enter,vehicle_prepare_fixture,world_spawn,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_inspect,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_drive,vehicle_enter,vehicle_prepare_fixture,world_spawn," + "world_time_set,world_weather_set";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -51,7 +54,10 @@ class MCPBridge
 	protected bool m_PollInFlight;
 	protected bool m_Configured;
 	protected bool m_InitFailureLogged;
+	protected bool m_ResultDropLogged;
 	protected ref array<ref RestCallback> m_CallbackRefs;
+	protected ref MCPPollCallback m_PollCallback;
+	protected ref array<ref MCPResultCallback> m_ResultCallbackPool;
 	protected ref array<Man> m_Players;
 	protected ref array<ref MCPCommand> m_Pending;
 	protected ref map<int, ref MCPJob> m_Jobs;
@@ -75,7 +81,9 @@ class MCPBridge
 		m_PollInFlight = false;
 		m_Configured = false;
 		m_InitFailureLogged = false;
+		m_ResultDropLogged = false;
 		m_CallbackRefs = new array<ref RestCallback>();
+		m_ResultCallbackPool = new array<ref MCPResultCallback>();
 		m_Players = new array<Man>();
 		m_Pending = new array<ref MCPCommand>();
 		m_Jobs = new map<int, ref MCPJob>();
@@ -195,6 +203,10 @@ class MCPBridge
 		if (cfg.pollHz > 0.0)
 		{
 			m_PollHz = cfg.pollHz;
+			if (m_PollHz > 60.0)
+			{
+				m_PollHz = 60.0;
+			}
 		}
 
 		m_Ctx = api.GetRestContext(m_Url);
@@ -224,11 +236,24 @@ class MCPBridge
 
 	protected void StartPoll()
 	{
+		// Count accepted work too: jobs/pending each still owe one result.
+		// Pause admission only; draining and terminal POSTs must keep running.
+		if (m_CallbackRefs.Count() + m_Pending.Count() + m_Jobs.Count() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS)
+		{
+			return;
+		}
+
 		m_Accum = 0.0;
 		m_PollInFlight = true;
 		m_TickPollSent = m_Tick;
 
-		MCPPollCallback cb = new MCPPollCallback(this);
+		// Reuse across completed polls, as the client does. A native-retained
+		// RestCallback must not turn every successful poll into another object.
+		if (!m_PollCallback)
+		{
+			m_PollCallback = new MCPPollCallback(this);
+		}
+		MCPPollCallback cb = m_PollCallback;
 		m_CallbackRefs.Insert(cb);
 		string request = "poll?key=" + m_Key;
 		request = request + "&ver=" + GetPollVersion();
@@ -341,13 +366,21 @@ class MCPBridge
 		m_Pending.Insert(command);
 	}
 
+	bool IsActivePollCallback(MCPPollCallback cb)
+	{
+		return cb == m_PollCallback;
+	}
+
 	void OnPollError(int errorCode)
 	{
+		// OnError may repeat (restapi.c:53); retire this request identity.
+		m_PollCallback = null;
 		OnPollFail("error=" + errorCode);
 	}
 
 	void OnPollTimeout()
 	{
+		m_PollCallback = null;
 		OnPollFail("timeout");
 	}
 
@@ -508,6 +541,10 @@ class MCPBridge
 		else if (command.cmd == "inventory_give")
 		{
 			postNow = DispatchInventoryGive(command, result);
+		}
+		else if (command.cmd == "inventory_attach")
+		{
+			postNow = DispatchInventoryAttach(command, result);
 		}
 		else if (command.cmd == "object_inspect")
 		{
@@ -1376,6 +1413,180 @@ class MCPBridge
 		return true;
 	}
 
+	// Create an item directly in one world entity's attachment slot or cargo.
+	// Resolution is shared with object_inspect, so object_id is position-independent
+	// and type+pos remains unique-or-fail. Success includes an immediate inventory
+	// snapshot of this same target; callers can re-read it with object_inspect.
+	protected bool DispatchInventoryAttach(MCPCommand command, MCPResult result)
+	{
+		if (!command.args || command.args.classname == "")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		if (command.args.dest == "attachment")
+		{
+			if (command.args.slot == "")
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+		}
+		else if (command.args.dest == "cargo")
+		{
+			if (command.args.slot != "")
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+		}
+		else
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		string attachResolveError = "";
+		Object attachTarget = ResolveCommandObject(command.args, attachResolveError);
+		if (!attachTarget)
+		{
+			result.ok = false;
+			result.error = attachResolveError;
+			return true;
+		}
+
+		EntityAI attachOwner = EntityAI.Cast(attachTarget);
+		if (!attachOwner)
+		{
+			result.ok = false;
+			result.error = "not_entity_ai";
+			return true;
+		}
+
+		GameInventory attachInventory = attachOwner.GetInventory();
+		if (!attachInventory)
+		{
+			result.ok = false;
+			result.error = "inventory_unavailable";
+			return true;
+		}
+
+		if (!IsKnownInventoryClassname(command.args.classname))
+		{
+			result.ok = false;
+			result.error = "invalid_classname";
+			return true;
+		}
+
+		EntityAI attachedItem = null;
+		int attachSlotId = InventorySlots.INVALID;
+		if (command.args.dest == "attachment")
+		{
+			attachSlotId = InventorySlots.GetSlotIdFromString(command.args.slot);
+			if (!InventorySlots.IsSlotIdValid(attachSlotId))
+			{
+				result.ok = false;
+				result.error = "slot_not_found";
+				return true;
+			}
+			if (!attachInventory.HasAttachmentSlot(attachSlotId))
+			{
+				result.ok = false;
+				result.error = "slot_not_found";
+				return true;
+			}
+			if (attachInventory.FindAttachment(attachSlotId))
+			{
+				result.ok = false;
+				result.error = "slot_occupied";
+				return true;
+			}
+
+			attachedItem = attachInventory.CreateAttachmentEx(command.args.classname, attachSlotId);
+			if (!attachedItem)
+			{
+				result.ok = false;
+				result.error = "attachment_create_failed";
+				return true;
+			}
+			if (attachInventory.FindAttachment(attachSlotId) != attachedItem)
+			{
+				result.ok = false;
+				result.error = "attachment_postcondition_failed";
+				return true;
+			}
+		}
+		else
+		{
+			if (!attachInventory.GetCargo())
+			{
+				result.ok = false;
+				result.error = "cargo_unavailable";
+				return true;
+			}
+
+			attachedItem = attachInventory.CreateEntityInCargo(command.args.classname);
+			if (!attachedItem)
+			{
+				result.ok = false;
+				result.error = "cargo_create_failed";
+				return true;
+			}
+			if (!attachInventory.HasEntityInCargo(attachedItem))
+			{
+				result.ok = false;
+				result.error = "cargo_postcondition_failed";
+				return true;
+			}
+		}
+
+		result.classname = command.args.classname;
+		result.type = attachedItem.GetType();
+		result.found = true;
+		if (command.args.object_id > 0)
+		{
+			result.object_id = command.args.object_id;
+		}
+
+		MCPInventoryAttachReceipt attachReceipt = new MCPInventoryAttachReceipt();
+		attachReceipt.dest = command.args.dest;
+		attachReceipt.slot = command.args.slot;
+		result.inventory_attach = attachReceipt;
+
+		MCPTelemetry attachTelemetry = new MCPTelemetry();
+		attachTelemetry.mode = "inventory_attach";
+		PopulateTelemetryObject(attachOwner, attachTelemetry);
+		result.telemetry = attachTelemetry;
+		result.ok = true;
+		return true;
+	}
+
+	protected bool IsKnownInventoryClassname(string classname)
+	{
+		if (classname == "")
+		{
+			return false;
+		}
+		if (GetGame().ConfigIsExisting("CfgVehicles " + classname))
+		{
+			return true;
+		}
+		if (GetGame().ConfigIsExisting("CfgWeapons " + classname))
+		{
+			return true;
+		}
+		if (GetGame().ConfigIsExisting("CfgMagazines " + classname))
+		{
+			return true;
+		}
+		return false;
+	}
+
 	// Raw nearby objects via GetObjectsAtPosition3D. No classname filter.
 	// result.entities is the nearest `limit` hits; result.count_total is the uncut size.
 	// has_cargo reports cargo capacity (HasCargoCapacity), never occupancy.
@@ -1482,6 +1693,15 @@ class MCPBridge
 		while (i < command.args.want.Count())
 		{
 			string wantName = command.args.want.Get(i);
+			// Add a snapshot of the SAME resolved object, including by registry ID.
+			// Preserve the legacy memory-point result even for a point named inventory.
+			if (wantName == "inventory" && !result.telemetry)
+			{
+				MCPTelemetry inventoryTelemetry = new MCPTelemetry();
+				inventoryTelemetry.mode = "object_inspect";
+				PopulateTelemetryObject(match, inventoryTelemetry);
+				result.telemetry = inventoryTelemetry;
+			}
 			if (wantName == "bounding_center")
 			{
 				vector center = match.GetBoundingCenter();
@@ -3435,6 +3655,11 @@ class MCPBridge
 	{
 		if (!m_Configured || !m_Ctx)
 		{
+			if (!m_ResultDropLogged)
+			{
+				m_ResultDropLogged = true;
+				Log("result dropped transport unavailable id=" + result.id);
+			}
 			return;
 		}
 
@@ -3447,7 +3672,7 @@ class MCPBridge
 			return;
 		}
 
-		MCPResultCallback cb = new MCPResultCallback(this);
+		MCPResultCallback cb = AcquireResultCallback();
 		m_CallbackRefs.Insert(cb);
 		string resultRequest = "result?key=" + m_Key;
 		if (m_PeerInstance != "")
@@ -3458,6 +3683,34 @@ class MCPBridge
 		string okStr = "0";
 		if (result.ok) { okStr = "1"; }
 		Log("result posted id=" + result.id + " ok=" + okStr + " sent_tick=" + result.tick_poll_sent + " callback_tick=" + result.tick_poll_callback + " dispatch_tick=" + result.tick_dispatch);
+	}
+
+	// Only successful requests enter this free-list. Each in-flight POST owns
+	// a distinct callback in m_CallbackRefs; pool entries are not admission debt.
+	// Existing StartPoll reservation bounds active + idle callbacks to 128.
+	protected MCPResultCallback AcquireResultCallback()
+	{
+		MCPResultCallback cb;
+		int last = m_ResultCallbackPool.Count() - 1;
+		if (last >= 0)
+		{
+			cb = m_ResultCallbackPool.Get(last);
+			m_ResultCallbackPool.Remove(last);
+			cb.AttachBridge(this);
+		}
+		else
+		{
+			cb = new MCPResultCallback(this);
+		}
+		return cb;
+	}
+
+	void RecycleResultCallback(MCPResultCallback cb)
+	{
+		if (m_ResultCallbackPool && m_ResultCallbackPool.Count() < MAX_CALLBACK_REFS)
+		{
+			m_ResultCallbackPool.Insert(cb);
+		}
 	}
 
 	void OnResultSuccess(string data, int dataSize)
@@ -3491,6 +3744,32 @@ class MCPBridge
 
 	void Shutdown()
 	{
+		// A completed cached callback is no longer in m_CallbackRefs.
+		if (m_PollCallback)
+		{
+			m_PollCallback.DetachBridge();
+		}
+		m_PollCallback = null;
+
+		// A reset may complete outstanding POSTs. Retire their identities first.
+		int callbackIndex = 0;
+		MCPResultCallback resultCb;
+		while (m_CallbackRefs && callbackIndex < m_CallbackRefs.Count())
+		{
+			resultCb = MCPResultCallback.Cast(m_CallbackRefs.Get(callbackIndex));
+			if (resultCb)
+			{
+				resultCb.DetachBridge();
+			}
+			callbackIndex = callbackIndex + 1;
+		}
+		// Idle callbacks already detached in OnSuccess.
+		if (m_ResultCallbackPool)
+		{
+			m_ResultCallbackPool.Clear();
+		}
+		m_ResultCallbackPool = null;
+
 		if (m_Ctx)
 		{
 			m_Ctx.reset();

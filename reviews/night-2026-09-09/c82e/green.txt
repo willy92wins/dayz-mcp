@@ -1,0 +1,23 @@
+Set-Location -LiteralPath 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools'
+$env:PYTHONIOENCODING='utf-8'
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:PYTHONPATH='C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
+& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -m unittest tests.test_night0909_entity_wait -v
+
+test_absence_can_satisfy_explicit_found_false (tests.test_night0909_entity_wait.EntityWaitTest.test_absence_can_satisfy_explicit_found_false) ... ok
+test_absence_cannot_satisfy_zero_cargo (tests.test_night0909_entity_wait.EntityWaitTest.test_absence_cannot_satisfy_zero_cargo) ... ok
+test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) ... ok
+test_bridge_error_and_ownership_error_abort_first_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bridge_error_and_ownership_error_abort_first_probe) ... ok
+test_every_supported_field (tests.test_night0909_entity_wait.EntityWaitTest.test_every_supported_field) ... ok
+test_legacy_players_condition_still_works (tests.test_night0909_entity_wait.EntityWaitTest.test_legacy_players_condition_still_works) ... ok
+test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) ... ok
+test_public_tool_schema_and_handler_forward_predicate (tests.test_night0909_entity_wait.EntityWaitTest.test_public_tool_schema_and_handler_forward_predicate) ... ok
+test_real_polling_uses_existing_server_verb_and_satisfies_third_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_real_polling_uses_existing_server_verb_and_satisfies_third_probe) ... ok
+test_timeout_is_unsatisfied_and_bounded (tests.test_night0909_entity_wait.EntityWaitTest.test_timeout_is_unsatisfied_and_bounded) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.144s
+
+OK
+
+exit code: 0

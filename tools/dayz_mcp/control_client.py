@@ -27,14 +27,40 @@ class ControlClientError(RuntimeError):
         request_stage: str,
         http_bytes_sent: int,
         hint: str | None = None,
+        policy_cause: str | None = None,
     ) -> None:
         self.code = code
         self.request_stage = request_stage
         self.http_bytes_sent = http_bytes_sent
         self.hint = hint if isinstance(hint, str) and hint else None
+        # Separate metadata: callers must not parse or compose the stable code.
+        self.policy_cause = policy_cause
         super().__init__(
             code if self.hint is None else f"{code}: {self.hint}"
         )
+
+
+def _policy_revalidation_cause(exc: Exception) -> str:
+    """Safe discriminator, following dayz_test_tool._bridge_status_cause.
+
+    Never publish exception messages/tracebacks containing host paths. A cause
+    describes the rejected observation; it does not authorize a retry or bypass.
+    """
+    name = type(exc).__name__
+    transport_error = getattr(exc, "errno", None)
+    if not isinstance(transport_error, int) or isinstance(transport_error, bool):
+        transport_error = getattr(exc, "winerror", None)
+    if isinstance(transport_error, int) and not isinstance(transport_error, bool):
+        return f"{name}:{transport_error}"
+    token = str(exc).strip()
+    if (
+        3 <= len(token) <= 64
+        and token[0].isascii()
+        and token[0].isalpha()
+        and all(ch.isascii() and (ch.isalnum() or ch == "_") for ch in token)
+    ):
+        return f"{name}:{token}"
+    return name
 
 
 @dataclass(frozen=True)
@@ -96,6 +122,15 @@ def _remote_error_code(payload: dict[str, object]) -> str:
 
 
 class ControlClient:
+    # Declared on the class, not only in __init__: a bare instance built with
+    # object.__new__ -- which the authority regression tests do on purpose, wiring
+    # nothing but _state_lock -- still has to answer for these.
+    active_lease_id: str | None = None
+    # Set by the owner when this session can outlive its own process. Called outside
+    # the state lock with (lease_token, lease_id), both None once the lease is gone.
+    # A listener that raises is swallowed: see _announce_lease.
+    on_lease_change: Callable[[str | None, str | None], None] | None = None
+
     def __init__(
         self,
         *,
@@ -147,11 +182,23 @@ class ControlClient:
     ) -> dict[str, object]:
         try:
             self.policy.revalidate()
-        except Exception:
+        except Exception as exc:
+            policy_cause = _policy_revalidation_cause(exc)
             raise ControlClientError(
                 "client_policy_untrusted_open_new_session",
                 request_stage="pre_request",
                 http_bytes_sent=0,
+                policy_cause=policy_cause,
+                hint=(
+                    # The MCP adapter publishes code/hint, not exception metadata.
+                    f"policy_cause={policy_cause}. "
+                    "If the tool list includes server_reload, call it: it replaces "
+                    "the serving process, which re-reads the registration and "
+                    "re-accredits. Otherwise report this policy rejection to the "
+                    "host/operator for registration verification and MCP-client "
+                    "reconnection after repair. This client cannot open a new host "
+                    "session by itself."
+                ),
             ) from None
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         deadline = _monotonic() + timeout_s
@@ -243,11 +290,14 @@ class ControlClient:
             lease_token = response.get("lease_token")
             if not isinstance(lease_token, str) or not lease_token:
                 self._bad_session_response()
+            lease_id = response.get("lease_id")
             with self._state_lock:
                 self.active_lease_token = lease_token
+                self.active_lease_id = lease_id if isinstance(lease_id, str) else None
                 self.active_ticket = None
                 self.active_operation_id = operation_id
                 self.state = "ACTIVE"
+            self._announce_lease()
             return
         if status == "queued":
             ticket = response.get("ticket")
@@ -255,9 +305,11 @@ class ControlClient:
                 self._bad_session_response()
             with self._state_lock:
                 self.active_lease_token = None
+                self.active_lease_id = None
                 self.active_ticket = ticket
                 self.active_operation_id = operation_id
                 self.state = "QUEUED"
+            self._announce_lease()
             return
         self._bad_session_response()
 
@@ -293,11 +345,24 @@ class ControlClient:
                 self.active_operation_id = None
                 self.state = "CLOSED"
 
+    def _announce_lease(self) -> None:
+        """Tell the owner the lease moved. A listener's failure is never the caller's."""
+        listener = self.on_lease_change
+        if listener is None:
+            return
+        with self._state_lock:
+            token, lease_id = self.active_lease_token, self.active_lease_id
+        try:
+            listener(token, lease_id)
+        except Exception:
+            return
+
     def _clear_matching_lease(self, lease_token: str) -> None:
         with self._state_lock:
             if self.active_lease_token != lease_token:
                 return
             self.active_lease_token = None
+            self.active_lease_id = None
             if self.active_ticket is None:
                 self.active_operation_id = None
                 self.state = "CLOSED"

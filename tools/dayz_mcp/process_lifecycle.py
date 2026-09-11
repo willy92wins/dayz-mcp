@@ -22,6 +22,8 @@ from typing import Callable, Mapping, TypeVar
 
 from dayz_mcp import dayz_test_storage
 from dayz_mcp.instance_fence import BindingPrepareError
+from dayz_mcp.steam_launch_guard import Preparation
+from dayz_mcp.steam_prepare_supervisor import SteamPreparationGate
 from dayz_mcp.runtime_state import RuntimePaths, atomic_write_bytes
 from dayz_mcp.session_coordination import (
     AuthorizationDecision,
@@ -236,7 +238,7 @@ def _copy_box(payload: dict[str, object]) -> dict[str, object]:
         "foreign": [dict(item) for item in foreign] if isinstance(foreign, list) else [],
         "ports_in_use": list(ports) if isinstance(ports, list) else [],
         "queue": list(queue) if isinstance(queue, list) else [],
-        # Additive. Missing/unknown → False (fail-closed). Distinguishes a
+        # Additive. Missing/unknown â†’ False (fail-closed). Distinguishes a
         # clean empty foreign list from a scan that never ran.
         "scan_known": payload.get("scan_known") is True,
     }
@@ -351,13 +353,108 @@ _PORT_STILL_HELD_HINT = (
 # the same order as PEER_STALE_S. The bound below is twice the measured maximum,
 # so a legitimate call never trips it while a request replayed minutes later does.
 _REPLACE_WITNESS_MAX_AGE_S = 60.0
-_REPLACE_WITNESS_HINTS = {
-    "replace_witness_missing": (
+
+
+def _request_parser_sha256() -> str | None:
+    path = Path(__file__).with_name("dayz_test_request.py")
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _tree_bundle_manifest_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "native-launchers"
+        / "dayz-test-v1"
+        / "closure-manifest.json"
+    )
+
+
+def _parse_bundle_manifest(manifest_path: Path) -> tuple[str | None, str | None]:
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    bundle_id = payload.get("bundle_id")
+    request_sha = payload.get("dayz_test_request_sha256")
+    if not isinstance(bundle_id, str) or not bundle_id:
+        bundle_id = None
+    if not isinstance(request_sha, str) or not request_sha:
+        request_sha = None
+    return bundle_id, request_sha
+
+
+def _installed_bundle_identity() -> tuple[str | None, str | None, str]:
+    """bundle_id, request-parser hash, and which manifest supplied them."""
+    tree_path = _tree_bundle_manifest_path()
+    try:
+        from dayz_mcp.launcher_registry import open_approved_launcher
+
+        with open_approved_launcher("dayz-test-v1") as opened:
+            manifest_path = opened.root / "closure-manifest.json"
+            bundle_id, request_sha = _parse_bundle_manifest(manifest_path)
+            return (
+                bundle_id,
+                request_sha,
+                f"approved launcher manifest {manifest_path}",
+            )
+    except Exception:
+        bundle_id, request_sha = _parse_bundle_manifest(tree_path)
+        return bundle_id, request_sha, f"module-tree manifest {tree_path}"
+
+
+def _printable_sha256(value: str | None) -> str:
+    """One hash, one spelling. The manifest stores it upper-case and hashlib
+    yields lower-case: printing both made the reader see two different strings
+    under a sentence saying they were the same, which is the very confusion
+    ficha e8eb exists to remove. The comparison already casefolds."""
+    if not value:
+        return "unreadable"
+    return value.casefold()
+
+
+def _replace_witness_missing_hint() -> str:
+    daemon_sha = _request_parser_sha256()
+    bundle_id, bundle_sha, source = _installed_bundle_identity()
+    daemon_label = _printable_sha256(daemon_sha)
+    bundle_label = _printable_sha256(bundle_sha)
+    bundle_name = bundle_id if bundle_id else "unreadable"
+    same = (
+        daemon_sha is not None
+        and bundle_sha is not None
+        and daemon_sha.casefold() == bundle_sha.casefold()
+    )
+    if same:
+        rebuild = (
+            "The launcher bundle and this daemon carry the same "
+            "dayz_test_request.py hash, so an old bundle is not the cause; "
+            "look for an orphan binding. Rebuild and reinstall app.pyz only "
+            "if those hashes differ."
+        )
+    else:
+        rebuild = (
+            "The launcher bundle and this daemon carry different "
+            "dayz_test_request.py hashes, so the bundle may be older than "
+            "this daemon. Rebuild and reinstall app.pyz only if that "
+            "mismatch is the cause, not an orphan binding."
+        )
+    return (
         "replace_witness_missing: superseding a live client needs the witness "
         "of the gate that authorised it, carried in the sealed request. Nothing "
-        "was terminated and nothing was launched. A launcher bundle older than "
-        "this daemon does not send it: rebuild and reinstall app.pyz."
-    ),
+        "was terminated and nothing was launched. "
+        f"launcher bundle {bundle_name} ({source}) "
+        f"dayz_test_request_sha256={bundle_label}; "
+        f"running daemon dayz_test_request_sha256={daemon_label}. "
+        + rebuild
+    )
+
+
+_REPLACE_WITNESS_HINTS = {
+    "replace_witness_missing": _replace_witness_missing_hint,
     "replace_witness_stale": (
         "replace_witness_stale: the gate read the bridge too long ago for its "
         "verdict to still stand. Nothing was terminated and nothing was "
@@ -1069,6 +1166,7 @@ class ProcessLifecycle:
         # refusal, never a licence.
         bridge_probe: object | None = None,
         daemon_generation: str | None = None,
+        steam_gate: object | None = None,
     ) -> None:
         self.coordinator = coordinator
         self.manifest = manifest
@@ -1079,6 +1177,7 @@ class ProcessLifecycle:
         self.port_probe = port_probe
         self.game_path = Path(game_path).resolve()
         self.launcher = launcher or self._launch
+        self.steam_gate = steam_gate if steam_gate is not None else SteamPreparationGate()
         self.id_fn = id_fn or (lambda: uuid.uuid4().hex)
         self.recovery_fault_arm = recovery_fault_arm
         self.argv_of = argv_of or _default_argv_of
@@ -1087,6 +1186,7 @@ class ProcessLifecycle:
         self.daemon_generation = (
             daemon_generation if isinstance(daemon_generation, str) else ""
         )
+        self._audit_rows_dropped = 0
         self._box_cache: tuple[float, int, _BoxProbes] | None = None
         self._box_revision = 0
         self._operation_lock = threading.RLock()
@@ -1227,15 +1327,16 @@ class ProcessLifecycle:
 
     def _note_post_persist_fault(self, run_id: str, reason: str) -> None:
         try:
-            self._audit(
+            if not self._audit(
                 "lifecycle_terminal_post_persist",
                 None,
                 reason,
                 "degraded",
                 run_id=run_id,
-            )
+            ):
+                self._note_audit_row_dropped()
         except Exception:
-            pass
+            self._note_audit_row_dropped()
 
     def _projected_run(self, run: RunRecord) -> dict[str, object]:
         row = dataclasses.asdict(run)
@@ -1732,28 +1833,45 @@ class ProcessLifecycle:
         return None
 
     def _audit_storage_rotation(self, run_id: str, result: object) -> None:
-        """A rotation resets the world and the characters: it leaves a row."""
-        writer = self.audit
-        if not callable(writer):
-            return
+        """A rotation resets the world and the characters: it leaves a row.
+
+        Routed through `_audit` so this event shares the payload path of the
+        other lifecycle rows, and so a missing writer is counted instead of
+        returning silently. That is a form improvement, not an incident
+        explanation: the previous emitter already sent a non-empty reason
+        and duration_s 0.0, and already counted writer exceptions, so this
+        helper does not repair a validation that used to reject the row.
+        Observability still cannot block a launch the admissions already
+        allowed.
+        """
+        reason = getattr(result, "reason", None)
+        if not isinstance(reason, str) or not reason.strip():
+            reason = "storage_rotated"
+        decision = getattr(result, "decision", None)
+        if not isinstance(decision, str):
+            decision = ""
         try:
-            writer(
-                {
-                    "event": "lifecycle_storage_rotated",
-                    "run_id": run_id,
-                    "storage_backup": getattr(result, "storage_backup", None),
-                    "storage_marker_backup": getattr(
-                        result, "storage_marker_backup", None
-                    ),
-                    "storage_seal": getattr(result, "storage_seal", None),
-                    "reason": getattr(result, "reason", None),
-                    "notice": getattr(result, "storage_reset_notice", None),
-                }
+            written = self._audit(
+                "lifecycle_storage_rotated",
+                None,
+                reason,
+                decision,
+                run_id=run_id,
+                storage_backup=getattr(result, "storage_backup", None),
+                storage_marker_backup=getattr(
+                    result, "storage_marker_backup", None
+                ),
+                storage_seal=getattr(result, "storage_seal", None),
+                notice=getattr(result, "storage_reset_notice", None),
             )
         except Exception:
-            # Observability only: a row that cannot be written never blocks a
-            # launch the admissions already allowed.
+            self._note_audit_row_dropped()
             return
+        if not written:
+            self._note_audit_row_dropped()
+
+    def _note_audit_row_dropped(self) -> None:
+        self._audit_rows_dropped += 1
 
     def _replacement_witness_error(
         self, parsed: dict[str, object], *, now: float
@@ -1835,6 +1953,7 @@ class ProcessLifecycle:
             or not isinstance(role, str)
             or not role
             or style not in {"normal", "hidden"}
+            or type(request.get("auto_remediate_steam", False)) is not bool
         ):
             return None, "invalid_start_request"
         result = dict(request)
@@ -2005,7 +2124,7 @@ class ProcessLifecycle:
         return result
 
     def _quiesce_then_release_owner(self, session_id: str, lease_id: str) -> list[str]:
-        """Quiesce runs → persist → confirm or revert.
+        """Quiesce runs â†’ persist â†’ confirm or revert.
 
         Every transition into RUNNING_IDLE goes through the fence.
         """
@@ -2098,6 +2217,52 @@ class ProcessLifecycle:
         authority = self._authority(decision)
         if authority is None:
             return self._error("lease_required", 403)
+        return self._start_run_reserved(client, authority, request)
+
+    def _steam_mutation_allowed(self) -> bool | str:
+        """Probe outside the lifecycle lock, then compare the captured run state."""
+        if not self._operation_lock.acquire(timeout=0.1):
+            return "steam_prepare_busy"
+        try:
+            before = [dataclasses.asdict(run) for run in self.manifest.list_runs()]
+            servers = {
+                record.pid: record
+                for run in self.manifest.list_runs() if run.state in _ACTIVE_STATES
+                for record in run.processes if record.role == "server"
+            }
+        finally:
+            self._operation_lock.release()
+        # A hung OS identity/argv/retail probe must never retain the lifecycle
+        # lock after the supervisor cancels and drains its helper.
+        if self._quarantined():
+            return False
+        reason, processes = self._diag_snapshot()
+        if reason is not None or processes is None:
+            return False
+        for row in processes:
+            record = servers.get(row["pid"])
+            if record is None:
+                return False
+            try:
+                if not self._identity_matches(record, self.guard.snapshot(record.pid)):
+                    return False
+                argv = self.argv_of(record.pid)
+                if not isinstance(argv, list) or "-server" not in [str(arg).casefold() for arg in argv[1:]]:
+                    return False
+            except Exception:
+                return False
+        if not self._operation_lock.acquire(timeout=0.1):
+            return "steam_prepare_busy"
+        try:
+            return before == [dataclasses.asdict(run) for run in self.manifest.list_runs()]
+        finally:
+            self._operation_lock.release()
+
+    def _start_run_reserved(
+        self, client: ClientIdentity, authority: tuple[str, str, str], request: object,
+        steam: Preparation | None = None,
+    ) -> dict[str, object]:
+        command = "lifecycle_start"
         with self._operation_lock:
             if not self._reservation_active(authority, command):
                 return self._error("lease_invalid", 409)
@@ -2214,7 +2379,43 @@ class ProcessLifecycle:
                 )
             if self._quarantined():
                 return self._reject_reserved(authority, command, "retail_quarantine")
-            if not self._audit("lifecycle_start", client, "lease_valid", "allowed"):
+            # The process arguments decide whether Steam is needed. A forged
+            # role label must not bypass the client gate on the direct route.
+            if "-server" not in [arg.casefold() for arg in parsed["argv"][1:]]:
+                if steam is None:
+                    if not self.steam_gate.claim():
+                        code = "steam_cleanup_degraded" if self.steam_gate.degraded else "steam_prepare_busy"
+                        return self._start_rejection(client, authority, code)
+                    try:
+                        # This frame owns exactly one RLock acquisition. No run
+                        # state or instance has changed. Retain the Steam claim
+                        # until the recursive admission AND spawn have finished.
+                        self._operation_lock.release()
+                        try:
+                            prepared = self.steam_gate.prepare(
+                                consent=parsed.get("auto_remediate_steam", False),
+                                authority_active=lambda: self.coordinator.reservation_active(
+                                    *authority, command, expire=False
+                                ),
+                                mutation_allowed=self._steam_mutation_allowed,
+                            )
+                        finally:
+                            self._operation_lock.acquire()
+                        if prepared.error_code is not None:
+                            rejected = self._start_rejection(client, authority, prepared.error_code)
+                            rejected["steam_preparation"] = prepared.payload()
+                            if prepared.cleanup_degraded:
+                                self._add_degradation(rejected, "steam_helper_exit_unverified")
+                            return rejected
+                        # Reuse ALL admission checks with the SAME reservation:
+                        # ownership, box, runs, ports, quarantine and identities.
+                        return self._start_run_reserved(client, authority, request, prepared)
+                    finally:
+                        self.steam_gate.release()
+                if not self.steam_gate.final_check(steam):
+                    return self._start_rejection(client, authority, "steam_identity_changed")
+            steam_fields = {"steam_preparation": steam.payload()} if steam is not None else {}
+            if not self._audit("lifecycle_start", client, "lease_valid", "allowed", **steam_fields):
                 self.coordinator.reject_reservation(
                     authority[0], authority[1], authority[2], "audit_failed"
                 )
@@ -2360,7 +2561,8 @@ class ProcessLifecycle:
                         if replace_error == "port_still_held":
                             settled["hint"] = _PORT_STILL_HELD_HINT
                         elif replace_error in _REPLACE_WITNESS_HINTS:
-                            settled["hint"] = _REPLACE_WITNESS_HINTS[replace_error]
+                            hint = _REPLACE_WITNESS_HINTS[replace_error]
+                            settled["hint"] = hint() if callable(hint) else hint
                         return settled
                 minted, prepare_error = self._prepare_instance(
                     run_id, launch_role, str(parsed["profiles"]), existing is not None
@@ -2427,6 +2629,13 @@ class ProcessLifecycle:
                         )
                         settled["hint"] = _STORAGE_ROTATE_HINTS[storage_error]
                         return settled
+                if steam is not None and not self.steam_gate.final_check(steam):
+                    self._retire_minted(run_id, launch_role, minted, "launch_failed")
+                    return self._settle_failed_launch(
+                        client=client, previous=previous, provisional=provisional,
+                        launched=None, record=None, confirmed_error="steam_identity_changed",
+                        attempt_started_at=attempt_started_at,
+                    )
                 try:
                     launched = self.launcher(
                         list(parsed["argv"]),
@@ -3600,7 +3809,7 @@ class ProcessLifecycle:
 
     def _reap_run_locked(self, run: RunRecord, *, client: ClientIdentity | None) -> str:
         """Audit-before-act retire of a confirmed-dead run to EXITED. Caller holds
-        _operation_lock and has already proven _run_all_dead. Terminates nothing —
+        _operation_lock and has already proven _run_all_dead. Terminates nothing â€”
         there is no live process by construction. Returns "" on success, or the exact
         failure cause ("audit_failed" / "manifest_failed") so the agent path reports the
         real reason instead of conflating a disk failure with an audit failure. On a
@@ -3651,18 +3860,19 @@ class ProcessLifecycle:
         """Daemon housekeeping: retire every reapable run whose processes are all
         gone or foreign, so a crashed DayZ never permanently blocks the box (the run
         would otherwise linger active and fail every start/adopt/stop until a manual
-        admin reconcile). Safe by construction — reaps only zero-owned-process runs
+        admin reconcile). Safe by construction â€” reaps only zero-owned-process runs
         and never calls terminate. Runs under retail quarantine; that pass is
         audited so a later ghost can be told apart from a skipped reaper."""
         with self._operation_lock:
             self._require_legacy_identity_safe()
             if self._quarantined():
-                self._audit(
+                if not self._audit(
                     "reap_under_quarantine",
                     None,
                     "retail_quarantine",
                     "continued",
-                )
+                ):
+                    self._note_audit_row_dropped()
             return self._reap_dead_runs_locked()
 
     def reap_dead_run(
@@ -3671,7 +3881,7 @@ class ProcessLifecycle:
         """Agent-callable, non-TTY recovery restricted to the all-dead-or-foreign
         case. Lease-gated like other lifecycle ops. Rejects (run_not_reapable)
         any run with a still-owned process, an unavailable guard or an ambiguous
-        diag — those keep the TTY-gated admin_reconcile path. Terminates nothing."""
+        diag â€” those keep the TTY-gated admin_reconcile path. Terminates nothing."""
         legacy_error = self._legacy_identity_error()
         if legacy_error is not None:
             return legacy_error
@@ -3726,6 +3936,7 @@ class ProcessLifecycle:
     def public_status(self) -> dict[str, object]:
         legacy_error = self._legacy_identity_error()
         if legacy_error is not None:
+            legacy_error["audit_rows_dropped"] = self._audit_rows_dropped
             return legacy_error
         runs, diagnostics = self._status_snapshot()
         # Keep every non-terminal state: admin recovery needs STARTING and STOPPING.
@@ -3735,6 +3946,7 @@ class ProcessLifecycle:
             "runs_retired": len(runs) - len(active_runs),
             "retail_quarantine": self._quarantined(),
             "retired_run_diagnostics": diagnostics,
+            "audit_rows_dropped": self._audit_rows_dropped,
         }
 
     def _diag_snapshot(

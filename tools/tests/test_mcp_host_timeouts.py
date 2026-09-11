@@ -326,27 +326,79 @@ class DaemonProvenanceConfigTest(unittest.TestCase):
         ):
             self._resolve()
 
-    def test_timeout_fields_require_exact_integers_not_numeric_equality(self) -> None:
-        self._write_claude(entry_updates={"timeout": float(CLAUDE_TIMEOUT_MS)})
-        self._write_codex()
-        with self.assertRaisesRegex(
-            host_config.HostConfigError, "^daemon_provenance_conflict$"
-        ):
-            self._resolve()
-
-        self._write_claude()
-        self._write_codex()
+    def _rewrite_codex_timeout(self, literal: str) -> None:
+        """Rewrite the codex budget as a raw TOML literal, the way the CLI itself would."""
         self.codex_path.write_text(
             self.codex_path.read_text(encoding="utf-8").replace(
                 f"tool_timeout_sec = {CODEX_TIMEOUT_SECONDS}",
-                f"tool_timeout_sec = {float(CODEX_TIMEOUT_SECONDS)}",
+                f"tool_timeout_sec = {literal}",
             ),
             encoding="utf-8",
         )
-        with self.assertRaisesRegex(
-            host_config.HostConfigError, "^daemon_provenance_conflict$"
-        ):
-            self._resolve()
+
+    def test_timeout_fields_compare_by_value_so_an_integral_float_is_the_same_budget(
+        self,
+    ) -> None:
+        """The budget is a value, not a spelling.
+
+        This replaces a test that required the literal to be an int on both hosts. The intent
+        was anti-tamper -- our installer writes an int, so a float meant someone else had
+        rewritten the file. Measured twice, that someone else is the host CLI: Codex's TOML
+        round-trip turns 604800 into 604800.0, and the gate then killed every client at
+        startup (fb-20260824-000930-7af8 on 2026-08-24, again on 2026-09-07). The spelling
+        carried no information an adversary could not forge -- anyone able to rewrite the file
+        can type an int -- while the other provenance signals (exact key set, command path,
+        args, keyfile, port) are untouched. So: same budget, accepted; anything else, refused.
+        """
+        self._write_claude(entry_updates={"timeout": float(CLAUDE_TIMEOUT_MS)})
+        self._write_codex()
+        self._rewrite_codex_timeout(str(float(CODEX_TIMEOUT_SECONDS)))
+        provenance = self._resolve()
+        self.assertEqual(provenance.port, 18765)
+
+    def test_timeout_fields_still_refuse_everything_that_is_not_the_pinned_budget(
+        self,
+    ) -> None:
+        """The negatives the old test protected, kept and widened.
+
+        Without these the change above would be "accept any number", which is the fail-open
+        it would be easy to mistake it for.
+        """
+        forbidden_claude = (
+            CLAUDE_TIMEOUT_MS + 0.5,
+            float(CLAUDE_TIMEOUT_MS) + 1.0,
+            CLAUDE_TIMEOUT_MS + 1,
+            True,
+            str(CLAUDE_TIMEOUT_MS),
+            None,
+        )
+        for value in forbidden_claude:
+            with self.subTest(host="claude", timeout=value):
+                self._write_claude(entry_updates={"timeout": value})
+                self._write_codex()
+                with self.assertRaisesRegex(
+                    host_config.HostConfigError, "^daemon_provenance_conflict$"
+                ):
+                    self._resolve()
+
+        forbidden_codex = (
+            f"{CODEX_TIMEOUT_SECONDS}.5",
+            str(float(CODEX_TIMEOUT_SECONDS + 1)),
+            str(CODEX_TIMEOUT_SECONDS + 1),
+            "true",
+            f"'{CODEX_TIMEOUT_SECONDS}'",
+            "nan",
+            "inf",
+        )
+        for literal in forbidden_codex:
+            with self.subTest(host="codex", timeout=literal):
+                self._write_claude()
+                self._write_codex()
+                self._rewrite_codex_timeout(literal)
+                with self.assertRaisesRegex(
+                    host_config.HostConfigError, "^daemon_provenance_conflict$"
+                ):
+                    self._resolve()
 
     def test_mixed_equals_duplicates_and_boolean_equals_are_rejected(self) -> None:
         for duplicate in (
@@ -676,9 +728,10 @@ class DaemonProvenanceConfigTest(unittest.TestCase):
         final_path.assert_not_called()
         close.assert_called_once_with(fake_handle)
 
-    def test_final_pinned_revalidation_rejects_byte_drift(self) -> None:
+    def test_final_pinned_revalidation_accepts_byte_drift_with_same_registration(self) -> None:
         self._write_claude()
         self._write_codex()
+        expected = self._resolve()
         original = host_config._PinnedConfigFile.read
         reads: dict[str, int] = {}
 
@@ -693,10 +746,38 @@ class DaemonProvenanceConfigTest(unittest.TestCase):
         with mock.patch.object(
             host_config._PinnedConfigFile, "read", autospec=True,
             side_effect=drift_on_second_read,
-        ), self.assertRaisesRegex(
-            host_config.HostConfigError, "^daemon_provenance_conflict$"
         ):
-            self._resolve()
+            self.assertEqual(self._resolve(), expected)
+        # Initial read, reread of the pinned handle, and read through the reopen.
+        self.assertEqual(reads[str(self.codex_path)], 3)
+
+    def test_final_pinned_revalidation_rejects_byte_drift_with_changed_registration(self) -> None:
+        self._write_claude()
+        self._write_codex()
+        original = host_config._PinnedConfigFile.read
+        for path in (self.claude_path, self.codex_path):
+            for first_changed_read in (2, 3):
+                with self.subTest(path=path.name, first_changed_read=first_changed_read):
+                    reads: dict[str, int] = {}
+
+                    def drift_on_final_read(handle):
+                        value = original(handle)
+                        key = str(handle.path)
+                        reads[key] = reads.get(key, 0) + 1
+                        if handle.path == path and reads[key] >= first_changed_read:
+                            # Valid syntax and schema, but a different daemon policy.
+                            self.assertEqual(value.count(b'"12.5"'), 1)
+                            return value.replace(b'"12.5"', b'"13.0"', 1)
+                        return value
+
+                    with mock.patch.object(
+                        host_config._PinnedConfigFile, "read", autospec=True,
+                        side_effect=drift_on_final_read,
+                    ), self.assertRaisesRegex(
+                        host_config.HostConfigError, "^daemon_provenance_conflict$"
+                    ):
+                        self._resolve()
+                    self.assertEqual(reads[str(path)], first_changed_read)
 
     @unittest.skipUnless(os.name == "nt", "Windows no-reparse semantics required")
     def test_config_reparse_points_are_rejected(self) -> None:

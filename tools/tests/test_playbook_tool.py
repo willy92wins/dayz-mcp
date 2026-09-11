@@ -234,11 +234,61 @@ class PlaybookRunExecuteTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_subtool_error_is_collected_not_raised(self) -> None:
         app = _StubApp(_place_handlers(fail_tool="surface_query"))
-        result = await playbook_tool.execute_playbook_run(app, "place_safely")
+        result = await playbook_tool.execute_playbook_run(
+            app, "place_safely", {"x": 7512.0, "z": 7502.0}
+        )
         self.assertEqual(result["overall"], "FAIL")
         self.assertEqual(result["stopped_at"], "S1")
         self.assertIn("tool_error:", result["reason"] or "")
         self.assertIn("lease_required", result["reason"] or "")
+
+    async def test_live_place_safely_without_coords_is_bad_args(self) -> None:
+        for params in (None, {}):
+            with self.subTest(params=params):
+                with self.assertRaises(ToolError) as ctx:
+                    await playbook_tool.execute_playbook_run(
+                        _StubApp(_place_handlers()), "place_safely", params
+                    )
+                message = str(ctx.exception)
+                self.assertTrue(message.startswith("bad_args:"))
+                self.assertIn("params.x", message)
+                self.assertIn("params.z", message)
+                self.assertIn("required in live", message)
+
+    async def test_live_place_safely_only_x_is_bad_args(self) -> None:
+        with self.assertRaises(ToolError) as ctx:
+            await playbook_tool.execute_playbook_run(
+                _StubApp(_place_handlers()), "place_safely", {"x": 7512.0}
+            )
+        message = str(ctx.exception)
+        self.assertTrue(message.startswith("bad_args:"))
+        self.assertIn("params.z", message)
+        self.assertIn("required in live", message)
+        self.assertNotIn("params.x", message)
+
+    async def test_live_place_safely_explicit_zero_is_valid(self) -> None:
+        result = await playbook_tool.execute_playbook_run(
+            _StubApp(_place_handlers()), "place_safely", {"x": 0, "z": 0}
+        )
+        self.assertIn(result["overall"], {"PASS", "PASS_WITH_WARNINGS"})
+        self.assertEqual(result["mode"], "live")
+        self.assertEqual(result["params"]["x"], 0)
+        self.assertEqual(result["params"]["z"], 0)
+        self.assertEqual(result["params"]["clear_r"], 15.0)
+
+    async def test_live_lease_spawn_prepare_trace_without_coords_inherits_toml(
+        self,
+    ) -> None:
+        result = await playbook_tool.execute_playbook_run(
+            _StubApp({}), "lease_spawn_prepare_trace"
+        )
+        self.assertEqual(result["mode"], "live")
+        self.assertEqual(result["params"]["x"], 0.0)
+        self.assertEqual(result["params"]["z"], 0.0)
+        self.assertEqual(result["params"]["y"], 0.0)
+        self.assertEqual(result["params"]["vehicle_type"], "CivilianSedan")
+        self.assertEqual(result["overall"], "FAIL")
+        self.assertIn("tool_error:", result["reason"] or "")
 
     async def test_frozen_on_disk_is_still_uncertified(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -379,18 +429,13 @@ class PlaybookRunExecuteTest(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_missing_runner_is_typed_without_host_path(self) -> None:
-        playbook_tool._runner = None
-        original = playbook_tool.PLAYBOOKS_DIR
-        with tempfile.TemporaryDirectory() as tmp:
-            playbook_tool.PLAYBOOKS_DIR = Path(tmp)
-            try:
-                with self.assertRaises(ToolError) as ctx:
-                    playbook_tool.load_runner()
-                self.assertEqual(str(ctx.exception), "playbook_runner_missing")
-                self.assertNotIn(tmp, str(ctx.exception))
-            finally:
-                playbook_tool.PLAYBOOKS_DIR = original
-                playbook_tool._runner = None
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            playbook_tool, "_runner", None
+        ), patch.object(playbook_tool, "PLAYBOOKS_DIR", Path(tmp)):
+            with self.assertRaises(ToolError) as ctx:
+                playbook_tool.load_runner()
+            self.assertEqual(str(ctx.exception), "playbook_runner_missing")
+            self.assertNotIn(tmp, str(ctx.exception))
 
     async def test_registered_tool_dispatches_and_does_not_hold_lock(self) -> None:
         app, _runtime = build_app(ServerConfig(log_sink=lambda _m: None))
@@ -403,6 +448,9 @@ class PlaybookRunExecuteTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(description), 200)
         self.assertIn("Does not launch DayZ", description)
         self.assertIn("certified is always false", description)
+        self.assertIn("params.x", description)
+        self.assertIn("params.z", description)
+        self.assertIn("Live", description)
         self.assertTrue(description.startswith("Requires a lease"))
 
     async def test_happy_path_uses_registered_tools_and_releases_lock(self) -> None:

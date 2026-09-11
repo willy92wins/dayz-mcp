@@ -12,7 +12,11 @@
 # size overflow, which is the failure mode you want (loud), not a silent 16 GB copy.
 set -u
 REPO="${1:?repo dir}"; WS="${2:?ws dir}"; MAX_MIB="${3:-600}"
-EXCLUDES=(.git .venv-mcp __pycache__ _s0 _fase1 _fase2 _fase3 _poc _server _step0 reviews)
+# 2026-09-06 (lote df53): _client (253 MiB of client RPT profiles), _compile and
+# _gamemaster_h0_release pushed the faithful tree to 871 MiB. They are run artefacts like
+# _server, which the tests only ever name as a string, never read from disk.
+EXCLUDES=(.git .venv-mcp __pycache__ _s0 _fase1 _fase2 _fase3 _poc _server _step0 reviews
+         _client _compile _gamemaster_h0_release)
 args=(); for e in "${EXCLUDES[@]}"; do args+=(--exclude="$e"); done
 est=$(cd "$REPO" && du -sm "${args[@]}" . | cut -f1)
 if [ "$est" -gt "$MAX_MIB" ]; then

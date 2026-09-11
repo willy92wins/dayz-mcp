@@ -352,6 +352,137 @@ class VppPreflightDecisionTest(unittest.TestCase):
         self.assertEqual(result.error_code, transaction.VPP_PREFLIGHT_FAILED)
         self.assertIn("vpp_mod_root_ambiguous", result.missing)
 
+    def test_a_relative_entry_with_several_roots_names_the_candidate_paths(
+        self,
+    ) -> None:
+        policy = _policy(mod_roots=(r"P:\ModsRuntime", r"P:\ModsSecondary"))
+        runtime = ntpath.normpath(ntpath.join(r"P:\ModsRuntime", "@VPPAdminTools"))
+        secondary = ntpath.normpath(
+            ntpath.join(r"P:\ModsSecondary", "@VPPAdminTools")
+        )
+        result = self._result(
+            policy=policy,
+            files=_healthy(policy),
+            mode="all",
+            extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+        )
+
+        self.assertEqual(result.error_code, transaction.VPP_PREFLIGHT_FAILED)
+        self.assertIn("vpp_mod_root_ambiguous", result.missing)
+        self.assertIn(runtime, result.missing)
+        self.assertIn(secondary, result.missing)
+        self.assertNotIn(transaction.VPP_CANDIDATES_UNKNOWN, result.missing)
+        self.assertIn(runtime, result.hint)
+        self.assertIn(secondary, result.hint)
+        self.assertIn("candidate roots:", result.hint)
+        _assert_hint_leads_with_absolute_workshop_form(self, result.hint)
+
+    def test_the_preflight_hint_constant_names_both_forms_in_order(self) -> None:
+        _assert_hint_leads_with_absolute_workshop_form(
+            self, transaction.VPP_PREFLIGHT_HINT
+        )
+
+    def test_dropping_the_absolute_form_from_the_hint_fails_the_order_pin(
+        self,
+    ) -> None:
+        """The find()-order trap: absence of A made find(A) < find(B) true.
+
+        Substituting VPP_PREFLIGHT_HINT in memory with a text that only
+        names @VPPAdminTools used to leave the two order tests green.
+        This is that mutation. Presence is required first, so the pin
+        must reject the mutated hint.
+        """
+        mutated = (
+            "the requested admin tools are not usable: put the installed "
+            "mod in extra_mods as @VPPAdminTools"
+        )
+        with patch.object(transaction, "VPP_PREFLIGHT_HINT", mutated):
+            policy = _policy(mod_roots=(r"P:\ModsRuntime", r"P:\ModsSecondary"))
+            result = self._result(
+                policy=policy,
+                files=_healthy(policy),
+                mode="all",
+                extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+            )
+        # Census still lists the paths. Only the recommendation lost the
+        # absolute form. find() still treats that as "A leads B".
+        self.assertEqual(result.hint.find("absolute Workshop path"), -1)
+        self.assertGreater(result.hint.find("@VPPAdminTools"), -1)
+        self.assertLess(
+            result.hint.find("absolute Workshop path"),
+            result.hint.find("@VPPAdminTools"),
+        )
+        with self.assertRaises(AssertionError):
+            _assert_hint_leads_with_absolute_workshop_form(self, result.hint)
+
+    def test_the_result_docstring_admits_paths_in_missing(self) -> None:
+        text = " ".join((transaction.VppPreflightResult.__doc__ or "").split())
+        self.assertNotIn("missing and warnings stay tokens", text)
+        self.assertIn("missing carries tokens", text)
+        self.assertIn("candidate paths", text)
+
+    def test_a_single_root_success_does_not_name_candidate_roots(self) -> None:
+        result = self._result(
+            mode="all", extra_mods=["@DayZ_MCP", "@VPPAdminTools"]
+        )
+
+        self.assertIsNone(result.error_code)
+        self.assertEqual(result.missing, ())
+        self.assertNotIn("candidate roots", result.hint)
+        self.assertNotIn(transaction.VPP_CANDIDATES_UNKNOWN, result.missing)
+        self.assertNotIn(transaction.VPP_CANDIDATES_TRUNCATED, result.missing)
+
+    def test_candidate_roots_are_capped_and_marked_truncated(self) -> None:
+        cap = transaction.VPP_CANDIDATE_ROOT_CAP
+        roots = tuple(rf"P:\Mods{index}" for index in range(cap + 1))
+        policy = _policy(mod_roots=roots)
+        shown = [
+            ntpath.normpath(ntpath.join(root, "@VPPAdminTools"))
+            for root in roots[:cap]
+        ]
+        omitted = ntpath.normpath(ntpath.join(roots[-1], "@VPPAdminTools"))
+        result = self._result(
+            policy=policy,
+            files=_healthy(policy),
+            mode="all",
+            extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+        )
+
+        self.assertEqual(result.error_code, transaction.VPP_PREFLIGHT_FAILED)
+        self.assertIn("vpp_mod_root_ambiguous", result.missing)
+        self.assertIn(transaction.VPP_CANDIDATES_TRUNCATED, result.missing)
+        for path in shown:
+            self.assertIn(path, result.missing)
+            self.assertIn(path, result.hint)
+        self.assertNotIn(omitted, result.missing)
+        self.assertNotIn(omitted, result.hint)
+        self.assertIn(f"truncated at {cap}", result.hint)
+        named = [item for item in result.missing if ntpath.isabs(item)]
+        self.assertEqual(named, shown)
+
+    def test_unenumerable_candidate_roots_are_not_an_empty_list(self) -> None:
+        # parse_dayz_test_request rejects an empty mod_roots tuple, so this
+        # call goes straight to evaluate_vpp_preflight with a raw policy.
+        policy = _policy(mod_roots=())
+        result = transaction.evaluate_vpp_preflight(
+            {
+                "mode": "all",
+                "mod": policy.mod,
+                "dev_root": policy.dev_root,
+                "base_mods": [],
+                "extra_mods": ["@DayZ_MCP", "@VPPAdminTools"],
+            },
+            policy,
+            files=FakeFiles(),
+        )
+
+        self.assertEqual(result.error_code, transaction.VPP_PREFLIGHT_FAILED)
+        self.assertIn("vpp_mod_root_ambiguous", result.missing)
+        self.assertIn(transaction.VPP_CANDIDATES_UNKNOWN, result.missing)
+        self.assertFalse(any(ntpath.isabs(item) for item in result.missing))
+        self.assertIn("could not be enumerated", result.hint)
+        self.assertNotIn("candidate roots:", result.hint)
+
     def test_an_absolute_entry_passes_under_a_multi_root_policy(self) -> None:
         # The escape the refusal above points at, and the shape the six live
         # multi-root policies carry.
@@ -837,6 +968,33 @@ class VppPreflightEnforcementTest(unittest.TestCase):
         self.assertEqual(public, {"read_text"})
 
 
+def _assert_hint_leads_with_absolute_workshop_form(
+    test: unittest.TestCase, hint: str
+) -> None:
+    """Presence first: find() returning -1 is absence, not a valid order.
+
+    The two forms are the absolute Workshop path and the relative
+    recommendation `as @VPPAdminTools`. The unique-root condition is
+    what stops that relative form being offered as if it always worked.
+    A Windows path such as P:\\ModsRuntime\\@VPPAdminTools contains the
+    folder name, so the relative form is the `as @VPPAdminTools` phrase,
+    not a bare `@VPPAdminTools` substring.
+    """
+    absolute = "absolute Workshop path"
+    relative = "as @VPPAdminTools"
+    single_root = "single policy root"
+    test.assertIn(absolute, hint)
+    test.assertIn(relative, hint)
+    test.assertIn(single_root, hint)
+    absolute_at = hint.find(absolute)
+    relative_at = hint.find(relative)
+    # assertIn already refused absence. These two make the -1 trap
+    # visible: -1 means "the subject is not there", not "it leads".
+    test.assertNotEqual(absolute_at, -1)
+    test.assertNotEqual(relative_at, -1)
+    test.assertLess(absolute_at, relative_at)
+
+
 class _CountingControlClient:
     def __init__(self) -> None:
         self.acquire_calls = 0
@@ -1278,6 +1436,100 @@ class DayzTestRunVppGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["vpp_warnings"], ["vpp_mod_not_requested"])
         self.assertEqual(result["vpp_missing"], [])
+
+    async def test_ambiguous_roots_travel_to_the_caller_dict(self) -> None:
+        policy = _policy(mod_roots=(r"P:\ModsRuntime", r"P:\ModsSecondary"))
+        files = _healthy(policy)
+        runtime = ntpath.normpath(ntpath.join(r"P:\ModsRuntime", "@VPPAdminTools"))
+        secondary = ntpath.normpath(
+            ntpath.join(r"P:\ModsSecondary", "@VPPAdminTools")
+        )
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            transaction, "HostVppFiles", return_value=files
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            new=AsyncMock(),
+        ) as launch:
+            result = await dayz_test_tool.execute_dayz_test_run(
+                _Runtime(),
+                project="ExampleMod",
+                mode="all",
+                extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+            )
+
+        launch.assert_not_awaited()
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["phase"], "validating")
+        self.assertEqual(result["error_code"], transaction.VPP_PREFLIGHT_FAILED)
+        self.assertIn("vpp_mod_root_ambiguous", result["vpp_missing"])
+        self.assertIn(runtime, result["vpp_missing"])
+        self.assertIn(secondary, result["vpp_missing"])
+        self.assertIn(runtime, result["remediation"])
+        self.assertIn(secondary, result["remediation"])
+        _assert_hint_leads_with_absolute_workshop_form(
+            self, str(result["remediation"])
+        )
+
+    async def test_a_single_root_success_does_not_carry_candidate_roots(
+        self,
+    ) -> None:
+        policy = _policy()
+        files = _healthy(policy)
+
+        async def launch(_raw_request: bytes, **kwargs: object) -> int:
+            kwargs["output_sink"](
+                "stdout",
+                json.dumps(
+                    {
+                        "cleanup_degraded": False,
+                        "error_code": None,
+                        "exit_code": 0,
+                        "ok": True,
+                        "run_id": RUN_ID,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
+            )
+            return 0
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            transaction, "HostVppFiles", return_value=files
+        ), patch.object(
+            dayz_test_tool, "evaluate_steam_session", return_value=_steam_ok()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch,
+        ):
+            result = await dayz_test_tool.execute_dayz_test_run(
+                _Runtime(),
+                project="ExampleMod",
+                mode="all",
+                extra_mods=["@DayZ_MCP", "@VPPAdminTools"],
+            )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["vpp_missing"], [])
+        self.assertNotIn("vpp_candidate_roots", result)
+        self.assertNotIn(
+            ntpath.normpath(ntpath.join(r"P:\Mods", "@VPPAdminTools")),
+            result["vpp_missing"],
+        )
+        self.assertIsNone(result["remediation"])
 
 
 def _refused(*_args: object, **_kwargs: object) -> object:

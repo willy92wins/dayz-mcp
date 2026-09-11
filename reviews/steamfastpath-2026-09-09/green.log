@@ -1,0 +1,87 @@
+cwd: C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools
+$env:PYTHONPATH = 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
+$env:PYTHONDONTWRITEBYTECODE = '1'
+Remove-Item Env:STEAMFASTPATH_SOURCE -ErrorAction SilentlyContinue
+& "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -B -m unittest tests.test_steamfastpath_repair -v
+test_active_user_changes_before_write_do_not_get_overwritten (tests.test_steamfastpath_repair.SteamFastPathTests.test_active_user_changes_before_write_do_not_get_overwritten) ... ok
+test_active_user_changing_after_write_uses_fallback (tests.test_steamfastpath_repair.SteamFastPathTests.test_active_user_changing_after_write_uses_fallback) ... ok
+test_bad_process_list_is_never_used_for_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_bad_process_list_is_never_used_for_writing) ... ok
+test_dead_candidate_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_dead_candidate_is_never_written) ... ok
+test_exists_probe_failure_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_exists_probe_failure_is_never_written) ... ok
+test_failed_relaunch_retains_retry_and_steam_left_down (tests.test_steamfastpath_repair.SteamFastPathTests.test_failed_relaunch_retains_retry_and_steam_left_down) ... ok
+test_failed_write_preserves_cause_and_uses_old_cycle (tests.test_steamfastpath_repair.SteamFastPathTests.test_failed_write_preserves_cause_and_uses_old_cycle) ... ok
+test_fallback_failure_keeps_old_reason_and_new_write_diagnostic (tests.test_steamfastpath_repair.SteamFastPathTests.test_fallback_failure_keeps_old_reason_and_new_write_diagnostic) ... ok
+test_healthy_legacy_host_retains_its_restart_only_contract (tests.test_steamfastpath_repair.SteamFastPathTests.test_healthy_legacy_host_retains_its_restart_only_contract) ... ok
+test_image_probe_failure_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_image_probe_failure_is_never_written) ... ok
+test_legacy_host_without_writer_still_runs_old_cycle (tests.test_steamfastpath_repair.SteamFastPathTests.test_legacy_host_without_writer_still_runs_old_cycle) ... ok
+test_malformed_registered_pid_is_not_repaired_as_a_dword (tests.test_steamfastpath_repair.SteamFastPathTests.test_malformed_registered_pid_is_not_repaired_as_a_dword) ... ok
+test_missing_active_user_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_missing_active_user_does_not_write) ... ok
+test_multiple_live_steam_processes_are_never_guessed (tests.test_steamfastpath_repair.SteamFastPathTests.test_multiple_live_steam_processes_are_never_guessed) ... ok
+test_no_live_steam_process_falls_back (tests.test_steamfastpath_repair.SteamFastPathTests.test_no_live_steam_process_falls_back) ... ok
+test_pid_already_correct_does_not_write_or_restart (tests.test_steamfastpath_repair.SteamFastPathTests.test_pid_already_correct_does_not_write_or_restart) ... ok
+test_process_list_changes_before_write_does_not_get_guessed (tests.test_steamfastpath_repair.SteamFastPathTests.test_process_list_changes_before_write_does_not_get_guessed) ... ok
+test_registry_changes_before_write_does_not_get_overwritten (tests.test_steamfastpath_repair.SteamFastPathTests.test_registry_changes_before_write_does_not_get_overwritten) ... ok
+test_registry_unreadable_or_unstable_does_not_write (tests.test_steamfastpath_repair.SteamFastPathTests.test_registry_unreadable_or_unstable_does_not_write) ... ok
+test_repairs_only_pid_without_restarting_and_is_idempotent (tests.test_steamfastpath_repair.SteamFastPathTests.test_repairs_only_pid_without_restarting_and_is_idempotent) ... ok
+test_target_dying_after_write_uses_fallback (tests.test_steamfastpath_repair.SteamFastPathTests.test_target_dying_after_write_uses_fallback) ... ok
+test_target_is_rechecked_immediately_before_writing (tests.test_steamfastpath_repair.SteamFastPathTests.test_target_is_rechecked_immediately_before_writing) ... ok
+test_windows_host_writes_only_pid_as_dword_through_fake_winreg (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_host_writes_only_pid_as_dword_through_fake_winreg) ... ok
+test_windows_writer_open_error_is_offline_and_retains_fallback (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_writer_open_error_is_offline_and_retains_fallback) ... ok
+test_windows_writer_rejects_invalid_dword_before_opening_key (tests.test_steamfastpath_repair.SteamFastPathTests.test_windows_writer_rejects_invalid_dword_before_opening_key) ... ok
+test_write_without_effect_is_not_reported_as_success (tests.test_steamfastpath_repair.SteamFastPathTests.test_write_without_effect_is_not_reported_as_success) ... ok
+test_wrong_or_unreadable_image_is_never_written (tests.test_steamfastpath_repair.SteamFastPathTests.test_wrong_or_unreadable_image_is_never_written) ... ok
+test_zero_registered_pid_and_case_insensitive_image_are_repaired (tests.test_steamfastpath_repair.SteamFastPathTests.test_zero_registered_pid_and_case_insensitive_image_are_repaired) ... ok
+
+----------------------------------------------------------------------
+Ran 28 tests in 0.006s
+
+OK
+EXIT CODE: 0
+
+cwd: C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools
+$env:PYTHONPATH = 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
+$env:PYTHONDONTWRITEBYTECODE = '1'
+Remove-Item Env:STEAMFASTPATH_SOURCE -ErrorAction SilentlyContinue
+& "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -B -m unittest tests.test_steam_preflight -v
+test_accepts_only_registered_live_steam_process_with_active_user (tests.test_steam_preflight.SteamPreflightTests.test_accepts_only_registered_live_steam_process_with_active_user) ... ok
+test_bounds_and_deduplicates_live_steam_pids (tests.test_steam_preflight.SteamPreflightTests.test_bounds_and_deduplicates_live_steam_pids) ... ok
+test_pass_keeps_empty_or_foreign_enumeration_out_of_the_verdict (tests.test_steam_preflight.SteamPreflightTests.test_pass_keeps_empty_or_foreign_enumeration_out_of_the_verdict) ... ok
+test_public_result_has_only_safe_contract_fields (tests.test_steam_preflight.SteamPreflightTests.test_public_result_has_only_safe_contract_fields) ... ok
+test_rejects_absent_or_zero_active_user (tests.test_steam_preflight.SteamPreflightTests.test_rejects_absent_or_zero_active_user) ... ok
+test_rejects_bool_and_string_registry_values (tests.test_steam_preflight.SteamPreflightTests.test_rejects_bool_and_string_registry_values) ... ok
+test_rejects_failed_or_malformed_process_enumeration (tests.test_steam_preflight.SteamPreflightTests.test_rejects_failed_or_malformed_process_enumeration) ... ok
+test_rejects_gone_registered_pid_even_when_another_steam_is_live (tests.test_steam_preflight.SteamPreflightTests.test_rejects_gone_registered_pid_even_when_another_steam_is_live) ... ok
+test_rejects_non_string_image_path (tests.test_steam_preflight.SteamPreflightTests.test_rejects_non_string_image_path) ... ok
+test_rejects_registered_process_with_non_steam_basename (tests.test_steam_preflight.SteamPreflightTests.test_rejects_registered_process_with_non_steam_basename) ... ok
+test_rejects_registry_access_denied_and_partial_or_changing_snapshots (tests.test_steam_preflight.SteamPreflightTests.test_rejects_registry_access_denied_and_partial_or_changing_snapshots) ... ok
+test_rejects_when_liveness_or_image_probe_raises (tests.test_steam_preflight.SteamPreflightTests.test_rejects_when_liveness_or_image_probe_raises) ... ok
+test_unaccreditable_registered_pid_is_null_and_stale (tests.test_steam_preflight.SteamPreflightTests.test_unaccreditable_registered_pid_is_null_and_stale) ... ok
+test_a_clean_shutdown_and_relaunch_reports_success (tests.test_steam_preflight.SteamRemediationHostTest.test_a_clean_shutdown_and_relaunch_reports_success) ... ok
+test_a_relaunch_that_fails_reports_steam_left_down (tests.test_steam_preflight.SteamRemediationHostTest.test_a_relaunch_that_fails_reports_steam_left_down) ... ok
+test_a_shutdown_that_never_finishes_does_not_relaunch (tests.test_steam_preflight.SteamRemediationHostTest.test_a_shutdown_that_never_finishes_does_not_relaunch) ... ok
+test_an_unreadable_process_list_is_not_read_as_shut_down (tests.test_steam_preflight.SteamRemediationHostTest.test_an_unreadable_process_list_is_not_read_as_shut_down) ... ok
+
+----------------------------------------------------------------------
+Ran 17 tests in 0.001s
+
+OK
+EXIT CODE: 0
+
+cwd: C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools
+$env:PYTHONPATH = 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
+$env:PYTHONDONTWRITEBYTECODE = '1'
+Remove-Item Env:STEAMFASTPATH_SOURCE -ErrorAction SilentlyContinue
+& "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -B -m unittest tests.test_lote2_t2_steam -v
+test_timeout_reason_and_false_are_exposed_without_launch (tests.test_lote2_t2_steam.SteamEnvelopeT2Tests.test_timeout_reason_and_false_are_exposed_without_launch) ... Executing <Task finished name='Task-2' coro=<SteamEnvelopeT2Tests.test_timeout_reason_and_false_are_exposed_without_launch() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_lote2_t2_steam.py:79> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.520 seconds
+ok
+test_does_not_recheck_after_timeout_and_promote_late_success (tests.test_lote2_t2_steam.SteamWaitT2Tests.test_does_not_recheck_after_timeout_and_promote_late_success) ... ok
+test_failed_shutdown_cannot_be_reported_as_remediated (tests.test_lote2_t2_steam.SteamWaitT2Tests.test_failed_shutdown_cannot_be_reported_as_remediated) ... ok
+test_timeout_is_stale_with_reason_and_bounded_clock (tests.test_lote2_t2_steam.SteamWaitT2Tests.test_timeout_is_stale_with_reason_and_bounded_clock) ... ok
+test_waits_for_both_active_user_and_live_matching_image (tests.test_lote2_t2_steam.SteamWaitT2Tests.test_waits_for_both_active_user_and_live_matching_image) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.532s
+
+OK
+EXIT CODE: 0
+

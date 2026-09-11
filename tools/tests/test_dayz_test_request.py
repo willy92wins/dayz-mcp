@@ -225,6 +225,7 @@ class DayzTestRequestTests(unittest.TestCase):
 
         parsed = request_module.parse_dayz_test_request(raw, policies=(policy,))
         expected_payload = {
+            "auto_remediate_steam": False,
             "base_mods": ["@CF", "@Dabs Framework", "@VPPAdminTools"],
             "build": False,
             "clean": False,

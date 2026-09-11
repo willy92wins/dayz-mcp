@@ -1,0 +1,34 @@
+{
+  "reviews\\steamfastpath-2026-09-09\\baseline.json": {
+    "bytes": 1056,
+    "sha256": "d102e66d416092b63aff2ee0ff380f428f2855748ce8b43fb03b4ea2b530ea78"
+  },
+  "reviews\\steamfastpath-2026-09-09\\DIAGNOSIS.md": {
+    "bytes": 2027,
+    "sha256": "1b20e4d3fe6d9534ef54d9d63fcd25b0ece7860e59ff470f26739844879bd8ca"
+  },
+  "reviews\\steamfastpath-2026-09-09\\STATE.md": {
+    "bytes": 1015,
+    "sha256": "18a08922401837b1da7f2cfbb39968f2ea35032006f02adbfa8d88cfe4833ddf"
+  },
+  "reviews\\steamfastpath-2026-09-09\\steam_preflight.py.BEFORE": {
+    "bytes": 14942,
+    "sha256": "0eb4f0997a9190198cc7215ce9c99506e1ecd06d9ce336a678341415461b313a"
+  },
+  "tools\\dayz_mcp\\steam_preflight.py": {
+    "bytes": 14942,
+    "sha256": "0eb4f0997a9190198cc7215ce9c99506e1ecd06d9ce336a678341415461b313a"
+  },
+  "tools\\tests\\test_steam_preflight.py": {
+    "bytes": 15321,
+    "sha256": "2651a355de212a496851cb86bf7c465bdb484acc47c5305e9ed1ad0db33e1f45"
+  },
+  "tools\\tests\\test_steamfastpath_repair.py": {
+    "bytes": 15653,
+    "sha256": "f74e5100b99b3a58f52e8676ef8b251d1effa7dbb52ba9044ad22196df9d3247"
+  },
+  ".git\\index": {
+    "bytes": 45093,
+    "sha256": "6769e84b810d1337b530f5af12600abb5f119d2725cafc2e4805721292a24fb2"
+  }
+}

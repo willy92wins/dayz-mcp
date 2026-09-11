@@ -1,0 +1,47 @@
+--- a/README.md
++++ b/README.md
+@@ -1,7 +1,7 @@
+ # DayZ-MCP
+ 
+ **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
+-game, put the world into a state, act, and read back what the engine did — 60 typed
++game, put the world into a state, act, and read back what the engine did — 61 typed
+ tools, server-authoritative, no keyboard, no OCR.**
+ 
+ Two things fall out of that, and both are new for this game:
+@@ -62,13 +62,13 @@
+ visual capture — `MakeScreenshot` is broken in the diag build (T165276), so frames
+ come from an external window grab of the rendered client, which only reads pixels.
+ 
+-**60 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
++**61 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+ vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
+ `action_use`, `bridge_status`, `camera_get`, `camera_set`, `capture_screenshot`,
+ `dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `infected_drive`, `inventory_give`, `key_press`,
+ `lease_acquire`, `list_projects`, `logs_since`, `notify_players`, `object_anim`,
+ `object_delete`, `object_inspect`, `pipeline_feedback`, `pipeline_inbox`,
+-`pipeline_resolve`, `playbook_run`, `player_respawn`, `player_teleport`, `query_all_players`, `query_get_in_condition`,
++`pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_respawn`, `player_teleport`, `query_all_players`, `query_get_in_condition`,
+ `query_player_state`, `restore_gameplay`, `scene_raycast`, `session_acquire`,
+ `session_acquire_wait`, `session_cancel`, `session_heartbeat`, `session_release`,
+ `session_status`, `session_wait`, `surface_query`, `telemetry_read`, `ui_click`, `ui_dialog`, `ui_focus`, `ui_reload_layout`,
+--- a/dayz-mcp-architecture.md
++++ b/dayz-mcp-architecture.md
+@@ -7,7 +7,7 @@
+ > **Base:** 2 workflows de investigación (≈2.5M tokens) + spot-check directo de Claude sobre
+ > cada API load-bearing (leídas en el source vanilla bajo `<vanilla scripts root>`).
+ > Generado 2026-06-06 como documento de diseño. **Implementado y en produccion desde
+-> entonces**: el servidor expone hoy 60 tools y el puente va por `MCP_BRIDGE_VERSION = "10"`.
++> entonces**: el servidor expone hoy 61 tools y el puente va por `MCP_BRIDGE_VERSION = "10"`.
+ > Esto queda como el diseño original — util para entender por que las piezas son como son,
+ > no como descripcion del estado actual. Para eso, `README.md` (superficie de tools) y el
+ > bloque LIVE-STATE de `HANDOFF.md`.
+@@ -122,7 +122,7 @@
+ 
+ ---
+ 
+-## 4. Tool surface (60 tools (+ `exec_enforce` when an allowlist is configured))
++## 4. Tool surface (61 tools (+ `exec_enforce` when an allowlist is configured))
+ 
+ El recuento sale de `tools/tests/test_install_mcp.py::PublicToolCountDocsTest`:
+ `build_app` → `app._tool_manager.list_tools()`, sin descartar tools del número

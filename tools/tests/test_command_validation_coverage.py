@@ -55,6 +55,8 @@ def _minimal_args(cmd: str) -> dict:
         return {"type": "CarScript", "pos": [0.0, 0.0, 0.0], "source": "idle"}
     if cmd == "inventory_give":
         return {"classname": "Item", "dest": "hands"}
+    if cmd == "inventory_attach":
+        return {"object_id": 1, "classname": "Item", "dest": "cargo"}
     if cmd == "object_inspect":
         return {"type": "CarScript", "pos": [0.0, 0.0, 0.0], "want": ["health"]}
     if cmd == "object_delete":

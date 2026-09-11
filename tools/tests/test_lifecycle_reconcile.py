@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+from tests.steam_helpers import FakeSteamGate
+
 import os
 import sys
 import time
 import hashlib
 import json
 import unittest
+from email.message import EmailMessage
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.error import HTTPError
+
+from mcp.server.fastmcp.exceptions import ToolError
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
@@ -23,6 +30,7 @@ from dayz_mcp.process_lifecycle import (
     RunRecord,
     _RUN_PROCESSES_GONE_HINT,
 )
+from dayz_mcp.runtime_state import JsonlAuditWriter
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import SessionCoordinator
 from tests.test_dayz_test_tool import (
@@ -150,6 +158,7 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.launcher = FakeLauncher(LAUNCH_PID)
         self.port_table: dict[str, object] = holders()
         self.lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=self.store,
             audit=self.audit,
@@ -198,8 +207,14 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.guard.snapshots[pid] = snapshot(record)
         return record
 
-    def request(self, role: str = "client") -> dict[str, object]:
-        return {
+    def request(
+        self,
+        role: str = "client",
+        *,
+        with_witness: bool = False,
+        run_id: str | None = RUN_ID,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
             "argv": [str(self.game / "DayZDiag_x64.exe"), "-mission=test"],
             "cwd": str(self.game),
             "role": role,
@@ -208,11 +223,17 @@ class LifecycleReconcileTest(unittest.TestCase):
             "mod": "@SameMod",
             "profiles": "profiles",
             "mission": "test",
-            "run_id": RUN_ID,
-            # 79e2: the witness of the gate, stamped now, so the revalidation
-            # inside start_run has something to compare against.
-            "replace_if_not_polling_since": int(time.time() * 1000),
         }
+        if run_id is not None:
+            payload["run_id"] = run_id
+        # The worker forwards the witness only when the launch carries a
+        # run_id, the role is client, and the witness is an int
+        # (dayz_test_worker.py:325-332). Whether the tool sends one is decided
+        # in the replacement branches of dayz_test_tool.py, which include
+        # the no-client and dead-PID cases.
+        if with_witness:
+            payload["replace_if_not_polling_since"] = int(time.time() * 1000)
+        return payload
 
     def arm_launch(self, role: str = "client") -> ProcessRecord:
         launched = process(LAUNCH_PID, role)
@@ -371,7 +392,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.install_run([server, hung], state="RUNNING", owner="A")
         self.arm_launch()
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIs(result.get("ok"), True, result)
         self.assertEqual(self.pids(), [720, LAUNCH_PID])
@@ -401,7 +424,6 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.install_run([server], state="RUNNING", owner="A")
         self.arm_launch()
         request = self.request()
-        request.pop("replace_if_not_polling_since")
 
         result = self.lifecycle.start_run(IDENTITY_A, self.token_a, request)
 
@@ -430,7 +452,7 @@ class LifecycleReconcileTest(unittest.TestCase):
         hung = self.owned(761, "client")
         self.install_run([server, hung], state="RUNNING", owner="A")
         self.arm_launch()
-        request = self.request()
+        request = self.request(with_witness=True)
         request.update(overrides)
         return self.lifecycle.start_run(IDENTITY_A, self.token_a, request)
 
@@ -800,7 +822,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.mission()
         before = self.digest()
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIs(result.get("ok"), True, result)
         self.assertEqual(self.digest(), before)
@@ -825,7 +849,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.install_run([server, dead], state="RUNNING", owner="A")
         self.arm_launch()
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIs(result.get("ok"), True, result)
         self.assertEqual(self.pids(), [723, LAUNCH_PID])
@@ -839,7 +865,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.install_run([server, stranger], state="RUNNING", owner="A")
         self.arm_launch()
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIs(result.get("ok"), True, result)
         self.assertEqual(self.guard.terminate_calls, [])
@@ -852,7 +880,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.arm_launch()
         self.port_table = holders((2302, 728, "DayZDiag_x64.exe"))
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertEqual(result.get("error"), "port_still_held", result)
         self.assertEqual(
@@ -871,7 +901,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.arm_launch()
         self.port_table = holders((2302, 44444, "svchost.exe"))
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIs(result.get("ok"), True, result)
         self.assertEqual(self.pids(), [729, LAUNCH_PID])
@@ -908,11 +940,15 @@ class LifecycleReconcileTest(unittest.TestCase):
 
         def flaky() -> dict[str, object]:
             reads.append(1)
-            return holders() if len(reads) == 1 else {"known": False}
+            # Admission runs both before and after Steam preparation. Isolate
+            # the unreadable table at the post-termination confirmation here.
+            return holders() if len(reads) <= 2 else {"known": False}
 
         self.lifecycle.port_probe = flaky
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertEqual(result.get("error"), "port_scan_unknown", result)
         self.assertEqual(self.launcher.calls, [])
@@ -928,7 +964,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.install_run([hung], state="RUNNING", owner="A")
         self.arm_launch()
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertEqual(result.get("error"), "run_would_be_empty", result)
         self.assertEqual(self.guard.terminate_calls, [])
@@ -945,7 +983,9 @@ class LifecycleReconcileTest(unittest.TestCase):
             {"terminated": False, "error": "termination_unavailable", "exit_code": 3}
         ]
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIn("error", result)
         self.assertEqual(self.launcher.calls, [])
@@ -975,7 +1015,9 @@ class LifecycleReconcileTest(unittest.TestCase):
 
         self.store.replace = spy  # type: ignore[method-assign]
         with self.assertRaises(KeyboardInterrupt):
-            self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+            self.lifecycle.start_run(
+                IDENTITY_A, self.token_a, self.request(with_witness=True)
+            )
         self.store.replace = original  # type: ignore[method-assign]
 
         self.assertIn(("STARTING", [736]), seen)
@@ -985,6 +1027,7 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.assertEqual([r.pid for r in recovered.get(RUN_ID).processes], [736])
 
         reborn = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
             coordinator=self.coordinator,
             manifest=recovered,
             audit=self.audit,
@@ -1017,7 +1060,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         # socket que nada tiene que ver con DayZ (mDNS, 5353).
         self.port_table = holders((5353, 751, "svchost.exe"))
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIs(result.get("ok"), True, result)
         self.assertEqual(self.pids(), [750, LAUNCH_PID])
@@ -1030,7 +1075,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.arm_launch()
         self.port_table = holders((5353, 753, "DayZDiag_x64.exe"))
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertEqual(result.get("error"), "port_still_held", result)
         self.assertEqual(self.launcher.calls, [])
@@ -1043,7 +1090,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.arm_launch()
         self.port_table = holders((2302, 755, "svchost.exe"))
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertEqual(result.get("error"), "port_still_held", result)
 
@@ -1085,7 +1134,9 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.install_run([hung], state="RUNNING", owner="A")
         self.arm_launch()
 
-        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertEqual(result.get("error"), "run_would_be_empty", result)
 
@@ -1095,15 +1146,200 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.install_run([server, hung], state="RUNNING", owner="A")
         self.arm_launch()
 
-        first = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        first = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
         # The relaunched client is now the record to supersede; the guard vouches
         # for it because arm_launch registered its identity.
-        second = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        second = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
 
         self.assertIs(first.get("ok"), True, first)
         self.assertIs(second.get("ok"), True, second)
         self.assertEqual(self.roles(), ["server", "client"])
         self.assertEqual(self.pids(), [738, LAUNCH_PID])
+
+    def test_a_rotation_row_reaches_the_real_audit_writer(self) -> None:
+        """The durable jsonl, not AuditSink.events: that fake is how 7a6b hid."""
+        self.paths.audit_dir.mkdir(parents=True, exist_ok=True)
+        writer = JsonlAuditWriter(self.paths, "generation-rotation")
+        self.lifecycle.audit = writer.write
+        self.mission()
+
+        error = self.lifecycle._rotate_storage_for_launch(
+            self.server_request(), "run-real-audit"
+        )
+
+        self.assertIsNone(error)
+        rows = [
+            json.loads(line)
+            for line in writer.current_path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        rotated = [
+            row for row in rows if row.get("event") == "lifecycle_storage_rotated"
+        ]
+        self.assertEqual(len(rotated), 1, rows)
+        self.assertEqual(rotated[0].get("run_id"), "run-real-audit")
+
+    def test_a_dropped_audit_row_is_counted_where_it_can_be_seen(self) -> None:
+        def boom(_event: dict[str, object]) -> bool:
+            raise ValueError("invalid_audit_event")
+
+        self.lifecycle.audit = boom
+        self.mission()
+        error = self.lifecycle._rotate_storage_for_launch(
+            self.server_request(), "run-dropped-audit"
+        )
+        self.assertIsNone(error)
+
+        public = self.lifecycle.public_status()
+        dropped = public.get("audit_rows_dropped")
+        self.assertIsInstance(dropped, int)
+        self.assertGreaterEqual(dropped, 1)
+
+        from dayz_mcp import daemon
+        from tests.test_daemon import _config
+
+        snapshot = {
+            "peers": {
+                "server": {"last_poll_age_s": None, "queue_depth": 0, "version": None},
+                "client": {"last_poll_age_s": None, "queue_depth": 0, "version": None},
+            },
+            "results_pending": 0,
+        }
+        state = SimpleNamespace(
+            daemon_generation="generation-a",
+            coordination=SimpleNamespace(snapshot_payload=lambda: {"revision": 7}),
+            lifecycle=self.lifecycle,
+            status_snapshot=lambda: snapshot,
+        )
+        payload = daemon.make_status_provider(_config(), state)()
+        self.assertIn("audit_row_dropped", payload.get("warnings", []))
+        self.assertGreaterEqual(payload.get("audit_rows_dropped", 0), 1)
+
+    def test_the_witness_hint_names_the_bundle_and_daemon_versions(self) -> None:
+        result = self._replacement(replace_if_not_polling_since=None)
+        self._assert_nothing_was_touched(result, "replace_witness_missing")
+        hint = str(result.get("hint"))
+        daemon_sha = hashlib.sha256(
+            Path(process_lifecycle.__file__).with_name("dayz_test_request.py").read_bytes()
+        ).hexdigest()
+        manifest_path = (
+            Path(process_lifecycle.__file__).resolve().parents[1]
+            / "native-launchers"
+            / "dayz-test-v1"
+            / "closure-manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertIn(str(manifest["bundle_id"]), hint)
+        # Normalised: the manifest stores it upper-case, the hint prints one
+        # spelling. Asserting the raw spelling is what forced a redundant
+        # second copy of the same hash into the message.
+        self.assertIn(str(manifest["dayz_test_request_sha256"]).casefold(), hint)
+        self.assertIn(daemon_sha, hint)
+        self.assertIn("orphan", hint.casefold())
+        rebuild_at = hint.casefold().find("rebuild")
+        self.assertGreaterEqual(rebuild_at, 0)
+        self.assertIn("only", hint[rebuild_at:].casefold())
+
+    def test_the_witness_hint_is_computed_when_it_is_read(self) -> None:
+        distinctive = "c" * 64
+        with patch.object(
+            process_lifecycle, "_request_parser_sha256", return_value=distinctive
+        ):
+            result = self._replacement(replace_if_not_polling_since=None)
+        hint = str(result.get("hint"))
+        self.assertIn(distinctive, hint)
+
+    def test_the_witness_hint_names_the_approved_launcher_manifest(self) -> None:
+        distinctive_id = "approved-only-bundle-9f3c"
+        distinctive_sha = "ab" * 32
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "closure-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "bundle_id": distinctive_id,
+                        "dayz_test_request_sha256": distinctive_sha,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class _Approved:
+                def __init__(self) -> None:
+                    self.root = root
+
+                def __enter__(self) -> "_Approved":
+                    return self
+
+                def __exit__(self, *_args: object) -> None:
+                    return None
+
+            with patch(
+                "dayz_mcp.launcher_registry.open_approved_launcher",
+                return_value=_Approved(),
+            ):
+                result = self._replacement(replace_if_not_polling_since=None)
+            hint = str(result.get("hint"))
+        self.assertIn(distinctive_id, hint)
+        self.assertIn(str(root), hint)
+        self.assertIn("approved", hint.casefold())
+
+    def test_both_request_parser_hashes_are_printed_in_the_same_case(self) -> None:
+        result = self._replacement(replace_if_not_polling_since=None)
+        hint = str(result.get("hint"))
+        marker = "dayz_test_request_sha256="
+        found: list[str] = []
+        cursor = 0
+        while True:
+            at = hint.find(marker, cursor)
+            if at < 0:
+                break
+            digest = []
+            for char in hint[at + len(marker) :]:
+                if char in "0123456789abcdefABCDEF":
+                    digest.append(char)
+                else:
+                    break
+            if digest:
+                found.append("".join(digest))
+            cursor = at + len(marker)
+        self.assertGreaterEqual(len(found), 2, hint)
+        for digest in found:
+            self.assertEqual(digest, digest.casefold(), digest)
+
+    def test_a_dropped_row_from_any_silent_audit_path_is_counted(self) -> None:
+        def boom(_event: dict[str, object]) -> bool:
+            raise ValueError("invalid_audit_event")
+
+        self.lifecycle.audit = boom
+        before = int(self.lifecycle.public_status().get("audit_rows_dropped") or 0)
+        self.lifecycle._note_post_persist_fault("run-silent-post", "diagnostic")
+        after_post = int(self.lifecycle.public_status().get("audit_rows_dropped") or 0)
+        self.assertGreater(after_post, before)
+        self.lifecycle.retail_probe = lambda: {
+            "known": True,
+            "processes": [{"pid": 1, "name": "DayZ_x64.exe"}],
+        }
+        self.lifecycle.reap_dead_runs()
+        after_reap = int(self.lifecycle.public_status().get("audit_rows_dropped") or 0)
+        self.assertGreater(after_reap, after_post)
+
+    def test_the_dropped_row_counter_survives_the_legacy_identity_path(self) -> None:
+        self.lifecycle._note_audit_row_dropped()
+        self.lifecycle._note_audit_row_dropped()
+
+        def explode(_audit: object) -> list[str]:
+            raise RuntimeError("legacy_identity_transition_failed")
+
+        self.lifecycle.manifest.quarantine_legacy_active = explode
+        payload = self.lifecycle.public_status()
+        self.assertEqual(payload.get("error"), "legacy_identity_transition_failed")
+        self.assertIn("audit_rows_dropped", payload)
+        self.assertEqual(payload.get("audit_rows_dropped"), 2)
 
 
 _UUID = "11111111-1111-4111-8111-111111111111"
@@ -1274,6 +1510,49 @@ class ClientReplacementDecisionTest(unittest.TestCase):
                     dayz_test_tool._CLIENT_START_BUDGET_S,
                 )
 
+    def test_the_budget_travels_as_a_call_parameter(self) -> None:
+        """The only door to the budget was the environment of the process that
+        serves the tools, and whoever drives this MCP does not launch that
+        process. A gate that needs a human to relaunch the server is a gate an
+        agent cannot run -- which is the whole point of the product.
+        """
+        self.assertEqual(dayz_test_tool._client_start_budget_s(5.0), 5.0)
+        decision = dayz_test_tool._decide_client_replacement(
+            _record(age_s=30.0), {"client_peer": _STALE_PEER}, budget_s=5.0
+        )
+        self.assertEqual(
+            (decision.replace, decision.reason), (True, "client_not_polling")
+        )
+
+    def test_the_call_parameter_wins_over_the_environment(self) -> None:
+        with patch.dict(os.environ, {_BUDGET_ENV: "3000"}):
+            self.assertEqual(dayz_test_tool._client_start_budget_s(5.0), 5.0)
+            decision = dayz_test_tool._decide_client_replacement(
+                _record(age_s=30.0), {"client_peer": _STALE_PEER}, budget_s=5.0
+            )
+            self.assertTrue(decision.replace)
+
+    def test_no_parameter_falls_back_to_the_environment_then_the_default(self) -> None:
+        with patch.dict(os.environ, {_BUDGET_ENV: "7"}):
+            self.assertEqual(dayz_test_tool._client_start_budget_s(None), 7.0)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                dayz_test_tool._client_start_budget_s(None),
+                dayz_test_tool._CLIENT_START_BUDGET_S,
+            )
+
+    def test_a_bad_call_parameter_is_rejected_not_ignored(self) -> None:
+        """Deliberately asymmetric with the env var, which ignores garbage.
+
+        The operator who exports an env var never sees the response; the caller
+        who passes a parameter does. Silently ignoring their override would be
+        a mute failure, and it would answer client_still_starting for six
+        minutes while the caller believed it had asked for five seconds.
+        """
+        for bad in (-1.0, 3600.5, float("nan"), "5"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                dayz_test_tool._client_start_budget_s(bad)
+
     def test_the_record_projection_does_not_confuse_absent_with_unknown(self) -> None:
         """A4-H2: un _pid_alive que no sabe responder NO es «no hay cliente»."""
         status = _extension_status(with_client=True)
@@ -1344,6 +1623,8 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
         client_age_s: float = 3600.0,
         relaunch: bool = True,
         processes_override: object = _UNSET,
+        client_start_budget_s: float | None = None,
+        bridge_error: BaseException | None = None,
     ):
         policy = _policy()
         before = _extension_status(
@@ -1369,7 +1650,13 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
             return before if len(seen) == 1 else after
 
         runtime.lifecycle_status = lifecycle_status  # type: ignore[method-assign]
-        if bridge is _RAISES:
+        if bridge_error is not None:
+            async def boom() -> dict[str, object]:
+                runtime.bridge_calls += 1
+                raise bridge_error
+
+            runtime.bridge_status_payload = boom  # type: ignore[method-assign]
+        elif bridge is _RAISES:
             runtime.bridge_raises = True
         else:
             runtime.bridge_payload = bridge
@@ -1408,6 +1695,7 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
                 mode=mode,
                 run_id=run_id,
                 extra_mods=["@DayZ_MCP"],
+                client_start_budget_s=client_start_budget_s,
             )
         return result, sent
 
@@ -1426,6 +1714,30 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["client_last_poll_age_s"], 0.2)
         self.assertEqual(result["phase"], "validating")
         self.assertIn("dayz_test_stop", str(result["remediation"]))
+
+    async def test_the_budget_override_crosses_the_executor(self) -> None:
+        """The ONLY control that spans the executor-to-decision hop.
+
+        The cross-family review removed ``budget_s=budget_s`` from the internal
+        call by AST and every one of the new tests stayed green: they measured
+        either the bare helper or the wrapper with the executor spied out, so
+        nothing watched the hop between them. This is the same fixture as
+        ``test_a_starting_client_is_not_replaced`` -- a 30 s client that has not
+        polled -- with the override that makes 30 s old rather than starting.
+        """
+        default, sent_default = await self.run_extension(
+            bridge={"client_peer": _STALE_PEER}, client_age_s=30.0
+        )
+        self.assertEqual(default["error_code"], "client_still_starting")
+        self.assertEqual(sent_default, [], "sin override no debe salir la peticion")
+
+        overridden, sent_over = await self.run_extension(
+            bridge={"client_peer": _STALE_PEER},
+            client_age_s=30.0,
+            client_start_budget_s=5.0,
+        )
+        self.assertNotEqual(overridden["error_code"], "client_still_starting")
+        self.assertNotEqual(sent_over, [], "con override de 5 s la peticion SALE")
 
     async def test_a_starting_client_is_not_replaced(self) -> None:
         """A4-H1: el que aun no ha sondeado NUNCA ha sondeado, no es un colgado."""
@@ -1483,6 +1795,85 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["client_replace_reason"], "bridge_status_unknown")
         self.assertEqual(result["client_terminated"], 0)
         self.assertIn("Retry", str(result["remediation"]))
+
+    async def test_an_unreadable_bridge_publishes_the_exception_kind(self) -> None:
+        """The mute except used to refuse without saying why the snapshot failed."""
+        result, sent = await self.run_extension(bridge_error=TimeoutError())
+
+        self.assertEqual(sent, [])
+        self.assertEqual(result["error_code"], "bridge_status_unknown")
+        self.assertEqual(result["client_replace_reason"], "bridge_status_unknown")
+        self.assertEqual(result["bridge_status_cause"], "TimeoutError")
+
+    async def test_distinct_unreadability_kinds_stay_distinct(self) -> None:
+        """A discriminator that is the same for every exception discriminates nothing."""
+        timeout, _ = await self.run_extension(bridge_error=TimeoutError())
+        http, _ = await self.run_extension(
+            bridge_error=HTTPError(
+                "http://127.0.0.1/status",
+                503,
+                "Unavailable",
+                EmailMessage(),
+                None,
+            )
+        )
+        refused, _ = await self.run_extension(
+            bridge_error=OSError(111, "Connection refused")
+        )
+
+        self.assertEqual(timeout["error_code"], "bridge_status_unknown")
+        self.assertEqual(http["error_code"], "bridge_status_unknown")
+        self.assertEqual(refused["error_code"], "bridge_status_unknown")
+        self.assertEqual(timeout["bridge_status_cause"], "TimeoutError")
+        self.assertEqual(http["bridge_status_cause"], "HTTPError:503")
+        self.assertEqual(refused["bridge_status_cause"], "OSError:111")
+        self.assertEqual(
+            len({
+                timeout["bridge_status_cause"],
+                http["bridge_status_cause"],
+                refused["bridge_status_cause"],
+            }),
+            3,
+        )
+
+    async def test_a_call_shaped_toolerror_keeps_its_token(self) -> None:
+        """ClientRuntime._call raises ToolError(token), not the OS exception.
+
+        The positives above inject HTTPError and TimeoutError by replacing
+        bridge_status_payload, so they never take the token branch. Deleting
+        `return f"{name}:{token}"` left those 3/3 green while the form _call
+        actually raises -- ToolError("daemon_unavailable") -- published as
+        "ToolError". That token is a communication failure, not a crash, and
+        it is not a retry signal: timeout and a refused connection collapse
+        onto it in _call.
+        """
+        result, sent = await self.run_extension(
+            bridge_error=ToolError("daemon_unavailable")
+        )
+
+        self.assertEqual(sent, [])
+        self.assertEqual(result["error_code"], "bridge_status_unknown")
+        self.assertEqual(result["client_replace_reason"], "bridge_status_unknown")
+        self.assertEqual(result["client_terminated"], 0)
+        self.assertEqual(
+            result["bridge_status_cause"], "ToolError:daemon_unavailable"
+        )
+
+    async def test_a_readable_bridge_does_not_publish_a_cause(self) -> None:
+        """A successful snapshot must keep today's shape: no sibling field at all."""
+        polling, sent_polling = await self.run_extension(
+            bridge={"client_peer": _POLLING_PEER}
+        )
+        self.assertEqual(sent_polling, [])
+        self.assertEqual(polling["error_code"], "client_already_polling")
+        self.assertNotIn("bridge_status_cause", polling)
+
+        unreadable, sent_unreadable = await self.run_extension(
+            bridge={"ready": {"ready": True, "reason": "ready"}}
+        )
+        self.assertEqual(sent_unreadable, [])
+        self.assertEqual(unreadable["error_code"], "bridge_status_unknown")
+        self.assertNotIn("bridge_status_cause", unreadable)
 
     async def test_a_snapshot_without_the_peer_row_also_refuses(self) -> None:
         result, sent = await self.run_extension(

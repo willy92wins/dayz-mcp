@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import ntpath
 import os
@@ -24,6 +25,18 @@ from dayz_mcp.steam_preflight import (
     evaluate_steam_session,
 )
 _BRIDGE_MOD_NAMES = frozenset({"dayz_mcp", "@dayz_mcp"})
+# fb-20260909-213257-49a9: the token stays the prefix so existing matchers
+# keep working; the suffix names the accepted extra_mods form.
+_BAD_MOD = (
+    "bad_mod: extra_mods/base_mods/server_mods entries must be a single "
+    "folder name such as '@DayZ_MCP', or an absolute path inside the "
+    "project's mod_roots; relative paths with '\\' or '/' are rejected"
+)
+_BRIDGE_MOD_MISSING = (
+    "bridge_mod_missing: add extra_mods=['@DayZ_MCP'] "
+    "(the folder name '@DayZ_MCP' must be explicit in extra_mods or as "
+    "the project mod; base_mods and server_mods do not count)"
+)
 _HELD_LEASE_RUN = (
     "session_transition_conflict: release your session lease first - "
     "dayz_test_run manages its own lease internally"
@@ -41,9 +54,10 @@ _TERMINAL_KEYS = frozenset(
 
 
 class DayzTestToolError(RuntimeError):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, cause: str | None = None) -> None:
         super().__init__(code)
         self.code = code
+        self.cause = cause
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,7 +189,7 @@ def _public_mod_list(
     if not isinstance(value, list) or any(
         not _valid_public_mod(item, roots) for item in value
     ):
-        _fail("bad_mod")
+        _fail(_BAD_MOD)
     return list(value)
 
 
@@ -195,6 +209,7 @@ def build_run_request(
     server_mods: list[str] | None = None,
     no_base_mods: bool = False,
     no_file_patching: bool = False,
+    auto_remediate_steam: bool = False,
     port: int = 2302,
     width: int = 1920,
     height: int = 1080,
@@ -210,6 +225,7 @@ def build_run_request(
     public_base = _public_mod_list(base_mods, selected.mod_roots)
     public_server = _public_mod_list(server_mods, selected.mod_roots)
     document: dict[str, object] = {
+        "auto_remediate_steam": auto_remediate_steam,
         "build": build,
         "clean": clean,
         "dev_root": selected.dev_root,
@@ -277,7 +293,7 @@ def build_run_request(
         ntpath.basename(mod).casefold() in _BRIDGE_MOD_NAMES
         for mod in effective_mods
     ):
-        _fail("bridge_mod_missing: add extra_mods=['@DayZ_MCP']")
+        _fail(_BRIDGE_MOD_MISSING)
     return parsed.canonical_bytes, selected
 
 
@@ -315,8 +331,12 @@ def require_extension_run(
     run_id: str,
 ) -> dict[str, object]:
     run = _exact_run(status, run_id)
-    if run.get("state") != "RUNNING_IDLE":
-        _fail("run_not_extensible")
+    state = run.get("state")
+    if state != "RUNNING_IDLE":
+        raise DayzTestToolError(
+            "run_not_extensible",
+            cause=state if isinstance(state, str) and state else "unknown",
+        )
     if run.get("mod") != "@" + selected_policy.mod:
         _fail("run_project_mismatch")
     return run
@@ -680,12 +700,33 @@ _CLIENT_START_BUDGET_S = 360.0
 _CLIENT_START_BUDGET_ENV = "DAYZ_MCP_CLIENT_START_BUDGET_S"
 
 
-def _client_start_budget_s() -> float:
-    """The startup budget in seconds, overridable for an operator in a hurry.
+def _client_start_budget_s(override: float | None = None) -> float:
+    """The startup budget in seconds: call parameter, then environment, default.
 
-    A value that is not a finite number in [0, 3600] is ignored rather than
-    obeyed: an unreadable override must not silently disable the guard.
+    The two doors are deliberately ASYMMETRIC about a value they cannot read.
+
+    An env var is ignored: whoever exported it is not reading this response, and
+    an unreadable override must not silently disable the guard.
+
+    A call parameter is REJECTED. The caller does read the response, and a
+    budget quietly discarded would answer client_still_starting for six minutes
+    to someone who asked for five seconds - a mute failure, and one the caller
+    has no way to see. Bool is refused with the rest: ``True`` would otherwise
+    become a one-second budget by accident.
     """
+    if override is not None:
+        if isinstance(override, bool) or not isinstance(override, (int, float)):
+            raise ValueError(
+                "client_start_budget_s must be a number in [0, 3600], got "
+                f"{override!r}"
+            )
+        value = float(override)
+        if value != value or not 0.0 <= value <= 3600.0:
+            raise ValueError(
+                "client_start_budget_s must be a finite number in [0, 3600], got "
+                f"{override!r}"
+            )
+        return value
     raw = os.environ.get(_CLIENT_START_BUDGET_ENV)
     if raw is None:
         return _CLIENT_START_BUDGET_S
@@ -831,7 +872,10 @@ def _peer_age(value: object) -> float | None:
     """A poll age only counts when it is a finite, non-negative number."""
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
     if number != number or number in (float("inf"), float("-inf")) or number < 0.0:
         return None
     return number
@@ -855,8 +899,53 @@ def _peer_row_is_usable(peer: dict[str, object]) -> bool:
     )
 
 
+def _http_status_of(exc: BaseException) -> int | None:
+    for attr in ("status", "code"):
+        value = getattr(exc, attr, None)
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and 100 <= value <= 599
+        ):
+            return value
+    return None
+
+
+def _bridge_status_cause(exc: BaseException) -> str:
+    """Name the unreadability without a traceback.
+
+    The replacement gate has to tell a timeout from a 503 from a
+    communication failure (refused or reset). A refused connection does
+    not prove the daemon crashed: it proves the call did not complete.
+    Messages and tracebacks carry host paths; type, HTTP status and
+    errno do not. error_code stays the stable token so existing equality
+    checks keep matching. The published token is not a retry policy.
+    """
+    name = type(exc).__name__
+    http_status = _http_status_of(exc)
+    if http_status is not None:
+        return f"{name}:{http_status}"
+    transport = getattr(exc, "errno", None)
+    if not isinstance(transport, int) or isinstance(transport, bool):
+        transport = getattr(exc, "winerror", None)
+    if isinstance(transport, int) and not isinstance(transport, bool):
+        return f"{name}:{transport}"
+    token = str(exc).strip()
+    if (
+        3 <= len(token) <= 64
+        and token[0].isascii()
+        and token[0].isalpha()
+        and all(ch.isascii() and (ch.isalnum() or ch == "_") for ch in token)
+    ):
+        return f"{name}:{token}"
+    return name
+
+
 def _decide_client_replacement(
-    record: ClientRecordProjection, bridge_status_payload: object
+    record: ClientRecordProjection,
+    bridge_status_payload: object,
+    *,
+    budget_s: float | None = None,
 ) -> ClientReplacementDecision:
     """Decide from the run row and the bridge snapshot, before anything is sent.
 
@@ -925,7 +1014,9 @@ def _decide_client_replacement(
         return ClientReplacementDecision(
             False, _CLIENT_RECORD_AGE_UNKNOWN, age, None
         )
-    if record.age_s < _client_start_budget_s():
+    if record.age_s < (
+        budget_s if budget_s is not None else _client_start_budget_s()
+    ):
         # A4-H1: it has not polled because it has not finished starting. The
         # response of the call that launched it says client_not_polling too;
         # without this branch that response is a licence to kill what it started.
@@ -1060,14 +1151,25 @@ def _stop_artifacts(
         return []
     if not isinstance(profiles, str) or not profiles:
         _fail("lifecycle_status_invalid")
+    candidates = _artifact_paths(policy, "all")
     normalized = ntpath.normcase(ntpath.normpath(profiles))
     matches = [
         candidate
-        for candidate in _artifact_paths(policy, "all")
+        for candidate in candidates
         if ntpath.normcase(ntpath.normpath(candidate)) == normalized
     ]
     if len(matches) != 1:
         _fail("lifecycle_status_invalid")
+    processes = run.get("processes")
+    roles: set[str] = set()
+    if isinstance(processes, list):
+        for item in processes:
+            if isinstance(item, dict):
+                role = item.get("role")
+                if isinstance(role, str) and role:
+                    roles.add(role)
+    if len(roles) > 1:
+        return list(candidates)
     return matches
 
 
@@ -1233,12 +1335,34 @@ async def execute_dayz_test_run(
     player_name: str = "Dev",
     server_wait_s: int = 60,
     progress_cb: _ProgressCallback | None = None,
+    auto_remediate_steam: bool = False,
+    client_start_budget_s: float | None = None,
 ) -> dict[str, object]:
+    """Run or preflight a request, with explicit omissions in this adapter.
+
+    Every preflight envelope includes preflight_skipped_checks, even when empty.
+    It lists checks disabled specifically by preflight: steam_session,
+    extension_run (run state/project), and client_replacement (live client/bridge).
+    It is not a list of later checks unreached after an earlier refusal, nor a
+    guarantee that build, process launch or readiness will succeed.
+    """
     started_at = time.monotonic()
     if progress_cb is not None:
         await progress_cb("validating", None)
     if mode not in _public_modes():
         _fail(_mode_expected_error())
+    # Resolved HERE, before the session lock and before a single process is
+    # touched: a budget the caller got wrong must cost them an error message,
+    # not a launched client that then gets refused.
+    budget_s = _client_start_budget_s(client_start_budget_s)
+    preflight_skipped_checks: list[str] = []
+    if preflight:
+        if _mode_starts_client(mode):
+            preflight_skipped_checks.append("steam_session")
+        if run_id is not None:
+            preflight_skipped_checks.append("extension_run")
+            if _mode_starts_client(mode):
+                preflight_skipped_checks.append("client_replacement")
     await _require_idle_session(runtime, tool="dayz_test_run")
     with open_approved_launcher("dayz-test-v1") as opened:
         opened.validate_native_pe()
@@ -1257,6 +1381,7 @@ async def execute_dayz_test_run(
                 "server_mods": server_mods,
                 "no_base_mods": no_base_mods,
                 "no_file_patching": no_file_patching,
+                "auto_remediate_steam": auto_remediate_steam,
                 "port": port,
                 "width": width,
                 "height": height,
@@ -1269,16 +1394,16 @@ async def execute_dayz_test_run(
             # The admin-tools gate runs before the host gate below: it is a
             # property of the request just composed, and a refusal here has
             # consulted neither Steam nor the lifecycle. A request that asks
-            # for no admin tools passes it with a warning. It applies to
-            # preflight:true too -- dayz_test_worker.py:547-550 states the rule
-            # this route must keep: a preflight fails exactly where a real
-            # launch would. native_launcher_transaction enforces the same
+            # for no admin tools passes it with a warning. Like the worker's
+            # mission-resolution gate, this request gate applies to preflight
+            # too. Host admission checks omitted by preflight are reported
+            # separately. native_launcher_transaction enforces the same admin
             # decision below; this call only names it for the caller.
             vpp = preflight_vpp_request(
                 raw_request, sealed_policies=bundle.sealed_policies
             )
             if vpp.error_code is not None:
-                return _compact_result(
+                refused = _compact_result(
                     terminal=WorkerTerminal(
                         cleanup_degraded=False,
                         error_code=vpp.error_code,
@@ -1295,6 +1420,9 @@ async def execute_dayz_test_run(
                     vpp_missing=list(vpp.missing),
                     vpp_warnings=list(vpp.warnings),
                 )
+                if preflight:
+                    refused["preflight_skipped_checks"] = preflight_skipped_checks
+                return refused
             if not preflight and _mode_starts_client(mode):
                 try:
                     steam = evaluate_steam_session()
@@ -1305,8 +1433,9 @@ async def execute_dayz_test_run(
                         steam_live_pids=(),
                         remediation=REMEDIATION,
                     )
-                if steam.error_code is not None:
-                    return _compact_result(
+                # Remediation belongs to admitted daemon authority, never stdio.
+                if steam.error_code is not None and not auto_remediate_steam:
+                    failed = _compact_result(
                         terminal=WorkerTerminal(
                             cleanup_degraded=False,
                             error_code=steam.error_code,
@@ -1325,11 +1454,37 @@ async def execute_dayz_test_run(
                         vpp_missing=list(vpp.missing),
                         vpp_warnings=list(vpp.warnings),
                     )
+                    return failed
             replacement: ClientReplacementDecision | None = None
             client_pids_before: tuple[int, ...] | None = None
+            bridge_cause: str | None = None
             if run_id is not None and not preflight:
                 extension_status = await runtime.lifecycle_status()
-                require_extension_run(extension_status, policy, run_id)
+                try:
+                    require_extension_run(extension_status, policy, run_id)
+                except DayzTestToolError as exc:
+                    if exc.code != "run_not_extensible":
+                        raise
+                    # The server serializes only .code on exceptions. Publish the
+                    # known state in an envelope so it survives that boundary.
+                    refused = _compact_result(
+                        terminal=WorkerTerminal(
+                            cleanup_degraded=False,
+                            error_code=exc.code,
+                            exit_code=1,
+                            ok=False,
+                            run_id=run_id,
+                        ),
+                        project=policy.mod,
+                        mode=mode,
+                        started_at=started_at,
+                        artifacts_paths=[],
+                        phase="validating",
+                        vpp_missing=list(vpp.missing),
+                        vpp_warnings=list(vpp.warnings),
+                    )
+                    refused["run_not_extensible_cause"] = exc.cause
+                    return refused
                 if _mode_starts_client(mode):
                     # Relaunching this role supersedes the client already on the
                     # run (the role replacement inside start_run). The caller
@@ -1350,14 +1505,20 @@ async def execute_dayz_test_run(
                     decided_at_ms = int(time.time() * 1000)
                     try:
                         bridge = await runtime.bridge_status_payload()
-                    except Exception:
+                    except Exception as exc:
                         # A snapshot we could not read is no answer. It used to
                         # mean "replace"; ronda 2 made it a refusal, because a
                         # transport hiccup is not evidence that a client is hung.
+                        # The cause is published next to the stable error_code
+                        # so a mute timeout can be told from a 503 without
+                        # composing the token that callers already match.
                         bridge = None
-                    replacement = _decide_client_replacement(record, bridge)
+                        bridge_cause = _bridge_status_cause(exc)
+                    replacement = _decide_client_replacement(
+                        record, bridge, budget_s=budget_s
+                    )
                     if not replacement.replace:
-                        return _compact_result(
+                        refused = _compact_result(
                             terminal=WorkerTerminal(
                                 cleanup_degraded=False,
                                 error_code=_REFUSAL_ERROR_CODE.get(
@@ -1394,6 +1555,15 @@ async def execute_dayz_test_run(
                             vpp_missing=list(vpp.missing),
                             vpp_warnings=list(vpp.warnings),
                         )
+                        # Sibling, not a composed error_code: the token stays
+                        # comparable. Absent when the snapshot was read, even
+                        # if the row itself was unusable.
+                        if (
+                            bridge_cause is not None
+                            and replacement.reason == _BRIDGE_STATUS_UNKNOWN
+                        ):
+                            refused["bridge_status_cause"] = bridge_cause
+                        return refused
             if replacement is not None and replacement.replace:
                 # H-A2-2 / 79e2: the verdict reached here is two broker hops and
                 # one process start away from the kill, so it does not travel as
@@ -1405,7 +1575,7 @@ async def execute_dayz_test_run(
                     **request_arguments,
                     replace_if_not_polling_since=decided_at_ms,
                 )
-            return await _execute_request(
+            result = await _execute_request(
                 runtime,
                 opened_launcher=opened,
                 verified_bundle=bundle,
@@ -1421,6 +1591,9 @@ async def execute_dayz_test_run(
                 client_pids_before=client_pids_before,
                 vpp=vpp,
             )
+            if preflight:
+                result["preflight_skipped_checks"] = preflight_skipped_checks
+            return result
 
 
 def _run_row(status: object, run_id: str) -> dict[str, object] | None:

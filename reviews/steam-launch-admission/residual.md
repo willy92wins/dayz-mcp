@@ -1,0 +1,8 @@
+**SOUND** — los tres ajustes están como se describen.
+
+- `process_lifecycle.py:2222` firma `-> bool | str`; `:2225` y `:2255` devuelven `"steam_prepare_busy"` en los dos fallos de `acquire(timeout=0.1)`; el resto de negativas (quarantine `:2238`, snapshot `:2241`, identidad/argv `:2245-2253`) siguen siendo `False`, y `:2257` devuelve la comparación booleana.
+- `steam_prepare_supervisor.py:187` almacena el valor crudo (`allowed = pending_check.get(...)`, sin `is True`); `:191` distingue literalmente `"steam_prepare_busy"` y `:194` `allowed is not True` → `steam_client_active` (fail-closed para cualquier otro valor). Slot ocupado en `:215-217` → `steam_probe_pending`, con `release()` en `finally` del probe (`:225`) y en el fallo de arranque del hilo (`:230`).
+- `dayz_test_worker.py:35` añade `steam_probe_pending` a `STEAM_PREPARATION_REJECTION_CODES`, fuera de `PRE_ADMISSION_REJECTION_CODES` (`:29`).
+- Tests: `test_steam_launch_guard.py:256` demuestra el residual 2 (sonda colgada → un slot retenido, segunda mutación `steam_probe_pending`, tercera preparación sin mutación `consent=False` sigue sana, `error_code is None`); `:279` verifica contención → `steam_prepare_busy` y que **no** se emitió `{"permit": True}`; `:376` exige `run_id` en el rechazo post-commit y que `_pre_admission_rejection` devuelva `None`, con `launcher.calls == []`.
+
+Sin regresiones en el ámbito acotado. No comprobado (fuera de alcance declarado): log de suite, base-comparison, prueba Steamworks y cierre documental.

@@ -1,0 +1,6 @@
+{
+  "tools/dayz_mcp/server.py": "875fef7709f9ba1fe886b7cb13ea68f18e4be030353546089a9f31b1f6b9b05e",
+  "tools/dayz_mcp/loopback.py": "dbab5c590cff8b23af987902a38f92e4b082c2d9f433cd1ded97f73b0b62d0b6",
+  "addon/scripts/5_Mission/MCPBridge.c": "f753519d1ab25bf56b650c273758818a40184d9728c970a5344771b293cf0acd",
+  "addon/scripts/5_Mission/MCPClientBridge.c": "fbbdc4357100586f1a7eb5bf23b9b27fc357688af18f0d8b61fa3ac20e56f2d3"
+}

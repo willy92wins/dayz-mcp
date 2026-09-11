@@ -1,0 +1,13 @@
+{
+  "scope": "offline_new_python_import_no_build_app_no_daemon_contact",
+  "server_modules": {
+    "server_started_at": 1788965442.416985,
+    "server_pid": 25432,
+    "watched_count": 51,
+    "stale": [],
+    "unreadable": [],
+    "unreadable_reasons": {}
+  },
+  "tool_registry_source_stale": false,
+  "snapshot_elapsed_ms": 6.2954000022728
+}

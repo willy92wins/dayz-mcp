@@ -29,7 +29,10 @@ _FaultInjector = Callable[[str], None]
 
 
 class HostConfigError(RuntimeError):
-    pass
+    def __init__(self, code: str, *, winerror: int | None = None) -> None:
+        super().__init__(code)
+        # Preserve numeric I/O diagnostics without exposing paths or messages.
+        self.winerror = winerror
 
 
 class HostConfigCrash(BaseException):
@@ -80,6 +83,7 @@ _VALUE_OPTIONS = frozenset(
 _BOOLEAN_OPTIONS = frozenset(
     {
         "--client",
+        "--supervised",
         "--require-version",
         "--enable-exec-enforce",
         "--no-daemon-autospawn",
@@ -179,6 +183,36 @@ def _scan_raw_options(args: list[str]) -> dict[str, int]:
     return counts
 
 
+def _is_pinned_budget(value: object, expected: int) -> bool:
+    """True when ``value`` is ``expected``, written as an int or as an integral float.
+
+    The host CLIs own these files and rewrite them. Codex's TOML round-trip turns
+    ``tool_timeout_sec = 604800`` into ``604800.0``: the same seven-day budget, spelled
+    differently. Refusing the float cost two measured outages in which every client died at
+    startup on ``daemon_provenance_conflict`` -- 2026-08-24 (fb-20260824-000930-7af8, patched
+    by hand in the TOML, which the next round-trip undid) and 2026-09-07. The durable fix was
+    named in the first one and is this: compare the budget by VALUE, not by the literal's
+    spelling.
+
+    Strictness is otherwise unchanged, and both halves are load-bearing. ``bool`` is refused
+    because it is an ``int`` subclass and ``True == 1`` would let a flag through as a budget.
+    A fractional float is refused because it is not the pinned budget however close it looks;
+    that also rejects NaN and the infinities, which are not integral.
+
+    This aligns the provenance gate with the two checks that already accepted the float --
+    install_mcp.py:608 and the post-write verifiers below. Three checks on one field, and only
+    the fail-closed one was strict: that asymmetry is why the doctor reported healthy while
+    the gate killed the client.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value == expected
+    if isinstance(value, float):
+        return value.is_integer() and value == expected
+    return False
+
+
 def _registration_from_entry(
     entry: object,
     *,
@@ -199,18 +233,12 @@ def _registration_from_entry(
         timeout = entry.get("timeout")
         if (
             entry.get("type") != "stdio"
-            or isinstance(timeout, bool)
-            or not isinstance(timeout, int)
-            or timeout != CLAUDE_TIMEOUT_MS
+            or not _is_pinned_budget(timeout, CLAUDE_TIMEOUT_MS)
         ):
             raise HostConfigError("daemon_provenance_conflict")
     else:
         timeout = entry.get("tool_timeout_sec")
-        if (
-            isinstance(timeout, bool)
-            or not isinstance(timeout, int)
-            or timeout != CODEX_TIMEOUT_SECONDS
-        ):
+        if not _is_pinned_budget(timeout, CODEX_TIMEOUT_SECONDS):
             raise HostConfigError("daemon_provenance_conflict")
     command = _canonical_existing_file(entry.get("command"))
     if os.path.normcase(os.path.normpath(command)) != os.path.normcase(
@@ -247,6 +275,7 @@ def _registration_from_entry(
         or (option_counts["--exec-allowlist"] == 0 and namespace.exec_allowlist is not None)
         or (option_counts["--exec-audit-path"] == 0 and namespace.exec_audit_path is not None)
         or (option_counts["--task-label"] == 0 and namespace.task_label != "")
+        or (option_counts["--supervised"] == 0 and namespace.supervised is not False)
         or (option_counts["--no-daemon-autospawn"] == 0 and namespace.auto_spawn_daemon is not True)
     ):
         raise HostConfigError("daemon_provenance_conflict")
@@ -311,16 +340,15 @@ def resolve_daemon_provenance(
         "codex": codex_path or (Path.home() / ".codex" / "config.toml"),
     }
     with _open_pinned_configs(paths) as handles:
-        snapshots: dict[str, tuple[tuple[object, ...], bytes] | None] = {}
+        identities: dict[str, tuple[object, ...]] = {}
         registrations: dict[str, _ClientRegistration | None] = {}
         for platform in ("claude", "codex"):
             handle = handles[platform]
             if handle is None:
-                snapshots[platform] = None
                 registrations[platform] = None
                 continue
             raw = handle.read()
-            snapshots[platform] = (handle.identity(), raw)
+            identities[platform] = handle.identity()
             registrations[platform] = _registration_from_raw(raw, platform=platform)
 
         present = sum(registration is not None for registration in registrations.values())
@@ -361,22 +389,30 @@ def resolve_daemon_provenance(
         )
         for platform in ("claude", "codex"):
             handle = handles[platform]
-            snapshot = snapshots[platform]
             if handle is None:
                 if os.path.lexists(paths[platform]):
                     raise HostConfigError("daemon_provenance_conflict")
                 continue
-            if snapshot is None:
-                raise HostConfigError("daemon_provenance_conflict")
-            identity, raw = snapshot
-            if handle.identity() != identity or handle.read() != raw:
+            # Compare content through the same strict registration parser.
+            # Within this resolution, the path must still name the pinned file;
+            # replacement between resolutions is allowed with the same registration.
+            identity = identities[platform]
+            if (
+                handle.identity() != identity
+                or _registration_from_raw(handle.read(), platform=platform)
+                != registrations[platform]
+            ):
                 raise HostConfigError("daemon_provenance_conflict")
             try:
                 reopened = _PinnedConfigFile(handle.path)
             except _PinnedConfigMissing:
                 raise HostConfigError("daemon_provenance_conflict") from None
             try:
-                if reopened.identity() != identity or reopened.read() != raw:
+                if (
+                    reopened.identity() != identity
+                    or _registration_from_raw(reopened.read(), platform=platform)
+                    != registrations[platform]
+                ):
                     raise HostConfigError("daemon_provenance_conflict")
             finally:
                 reopened.close()
@@ -686,7 +722,7 @@ class _PinnedConfigFile:
                 error = ctypes.get_last_error()
                 if error in {2, 3}:
                     raise _PinnedConfigMissing()
-                raise HostConfigError("daemon_provenance_conflict")
+                raise HostConfigError("daemon_provenance_conflict", winerror=error)
             self.handle = handle
             try:
                 attributes = _FILE_ATTRIBUTE_TAG_INFO()
@@ -739,7 +775,9 @@ class _PinnedConfigFile:
                     return b"".join(chunks)
                 chunks.append(chunk)
         if not _kernel32.SetFilePointerEx(self.handle, 0, None, _FILE_BEGIN):
-            raise HostConfigError("daemon_provenance_conflict")
+            raise HostConfigError(
+                "daemon_provenance_conflict", winerror=ctypes.get_last_error()
+            )
         chunks = []
         while True:
             buffer = ctypes.create_string_buffer(64 * 1024)
@@ -747,7 +785,9 @@ class _PinnedConfigFile:
             if not _kernel32.ReadFile(
                 self.handle, buffer, len(buffer), ctypes.byref(received), None
             ):
-                raise HostConfigError("daemon_provenance_conflict")
+                raise HostConfigError(
+                    "daemon_provenance_conflict", winerror=ctypes.get_last_error()
+                )
             if received.value == 0:
                 return b"".join(chunks)
             chunks.append(buffer.raw[: received.value])

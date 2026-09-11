@@ -28,6 +28,13 @@ _UUID4 = re.compile(
 
 PRE_ADMISSION_REJECTION_CODES = frozenset({"active_run_exists"})
 
+STEAM_PREPARATION_REJECTION_CODES = frozenset({
+    "steam_session_stale", "steam_prepare_busy", "steam_prepare_cancelled",
+    "steam_prepare_timeout", "steam_prepare_failed", "steam_cleanup_degraded",
+    "steam_client_active", "steam_identity_changed",
+    "steam_probe_pending",
+})
+
 
 # fb-20260904-200816-79e2 / A3-F3. A lifecycle refusal used to reach the caller
 # as worker_failed, because a code outside WORKER_ERROR_CODES cannot be raised
@@ -45,7 +52,7 @@ LIFECYCLE_REJECTION_CODES = frozenset(
         "storage_recovery_required",
         "storage_rotate_failed",
     }
-)
+) | STEAM_PREPARATION_REJECTION_CODES
 
 
 WORKER_ERROR_CODES = frozenset(
@@ -313,6 +320,8 @@ def _start_core(
         "role": role,
         "window_style": "normal",
     }
+    if role in {"client", "offline"}:
+        core["auto_remediate_steam"] = payload.get("auto_remediate_steam", False)
     if run_id is not None:
         core["run_id"] = run_id
         # 79e2. Only the client relaunch over a live run can supersede a
@@ -418,6 +427,12 @@ def _lifecycle_rejection(result: object) -> str | None:
 
 
 def _pre_admission_rejection(result: dict[str, object]) -> str | None:
+    # A named preparation refusal has created no run. Retrying it would repeat
+    # the wait/repair and reset the absolute Steam budget. Post-commit settlement
+    # carries run_id and must retain the normal cleanup path instead.
+    code = result.get("error")
+    if isinstance(code, str) and code in STEAM_PREPARATION_REJECTION_CODES and "run_id" not in result:
+        return code
     if set(result) != {"error"}:
         return None
     code = result.get("error")
@@ -499,16 +514,22 @@ async def _start(
         try:
             result = await invoke_start()
         except DayzTestWorkerError:
-            if operation_id is None:
+            # A lost client/offline response may follow a whole Steam wait or
+            # mutation. Reissuing start would allocate a fresh preparation budget.
+            # Only server creation retains transport replay; exact-run cleanup
+            # handles an uncertain new offline launch below.
+            if operation_id is None or role != "server":
                 raise
             result = await invoke_start()
-        else:
-            pre_admission_rejection = _pre_admission_rejection(result)
-            if pre_admission_rejection is not None:
-                raise _failed(pre_admission_rejection)
-        if operation_id is not None and not _successful_run(
+        pre_admission_rejection = _pre_admission_rejection(result)
+        if pre_admission_rejection is not None:
+            degraded = bool(result.get("cleanup_degraded")) or pre_admission_rejection == "steam_cleanup_degraded"
+            raise _failed(pre_admission_rejection,
+                          run_id=target_run_id if degraded else None,
+                          cleanup_degraded=degraded)
+        if operation_id is not None and role == "server" and not _successful_run(
             result, target_run_id, "RUNNING"
-        ):
+        ) and _lifecycle_rejection(result) not in STEAM_PREPARATION_REJECTION_CODES:
             result = await invoke_start()
         elif (
             operation_id is None
@@ -540,7 +561,7 @@ async def _start(
             raise _failed()
     except BaseException as error:
         if pre_admission_rejection is not None:
-            raise _failed(pre_admission_rejection) from None
+            raise error from None
         cleanup_degraded = False
         if operation_id is not None:
             cleanup_degraded = not await _stop_best_effort(broker, target_run_id)

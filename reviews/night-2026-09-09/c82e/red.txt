@@ -1,0 +1,490 @@
+Set-Location -LiteralPath 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools'
+$env:PYTHONIOENCODING='utf-8'
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:PYTHONPATH='C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
+$env:NIGHT0909_SERVER_SOURCE='C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\night-2026-09-09\c82e\server.py.BEFORE'
+& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -m unittest tests.test_night0909_entity_wait -v
+
+test_absence_can_satisfy_explicit_found_false (tests.test_night0909_entity_wait.EntityWaitTest.test_absence_can_satisfy_explicit_found_false) ... ERROR
+test_absence_cannot_satisfy_zero_cargo (tests.test_night0909_entity_wait.EntityWaitTest.test_absence_cannot_satisfy_zero_cargo) ... ERROR
+test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) ... 
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [True, 0.0, 0.0], 'radius': 3.0, 'field': 'cargo_count', 'equals': 1}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [nan, 0.0, 0.0], 'radius': 3.0, 'field': 'cargo_count', 'equals': 1}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, 'field': 'cargo_count', 'equals': 1}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'health01', 'equals': 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value=None) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'cargo_count', 'equals': 1, 'extra': 1}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 51, 'field': 'cargo_count', 'equals': 1}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': True, 'field': 'cargo_count', 'equals': 1}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': nan, 'field': 'cargo_count', 'equals': 1}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [0.0, 0.0], 'radius': 3.0, 'field': 'cargo_count', 'equals': 1}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': '', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'cargo_count', 'equals': 1}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'm_IsPowered', 'equals': True}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'engine_on_server', 'equals': True}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'cargo_count', 'equals': False}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'health01', 'equals': inf}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'health01', 'equals': 2.0}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'found', 'equals': 0}) ... ERROR
+  test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'cargo_count', 'equals': -1}) ... ERROR
+test_bridge_error_and_ownership_error_abort_first_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bridge_error_and_ownership_error_abort_first_probe) ... 
+  test_bridge_error_and_ownership_error_abort_first_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bridge_error_and_ownership_error_abort_first_probe) (error={'ok': 0, 'error': 'ambiguous_fixture'}) ... ERROR
+test_bridge_error_and_ownership_error_abort_first_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bridge_error_and_ownership_error_abort_first_probe) ... FAIL
+test_every_supported_field (tests.test_night0909_entity_wait.EntityWaitTest.test_every_supported_field) ... 
+  test_every_supported_field (tests.test_night0909_entity_wait.EntityWaitTest.test_every_supported_field) (field='found') ... ERROR
+  test_every_supported_field (tests.test_night0909_entity_wait.EntityWaitTest.test_every_supported_field) (field='health01') ... ERROR
+  test_every_supported_field (tests.test_night0909_entity_wait.EntityWaitTest.test_every_supported_field) (field='attachment_count') ... ERROR
+  test_every_supported_field (tests.test_night0909_entity_wait.EntityWaitTest.test_every_supported_field) (field='cargo_count') ... ERROR
+  test_every_supported_field (tests.test_night0909_entity_wait.EntityWaitTest.test_every_supported_field) (field='items_total') ... ERROR
+test_legacy_players_condition_still_works (tests.test_night0909_entity_wait.EntityWaitTest.test_legacy_players_condition_still_works) ... ok
+test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) ... 
+  test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={}) ... ERROR
+  test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={'ok': 1}) ... ERROR
+  test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={'ok': 1, 'telemetry': {}}) ... ERROR
+  test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={'ok': 1, 'telemetry': {'found': 1, 'cargo_count': None}}) ... ERROR
+  test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={'ok': 1, 'telemetry': {'found': 1, 'cargo_count': False}}) ... ERROR
+  test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={'ok': 1, 'telemetry': {'found': 1, 'cargo_count': -1}}) ... ERROR
+  test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={'ok': 1, 'telemetry': {'found': 2, 'cargo_count': 1}}) ... ERROR
+  test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={'ok': 'true', 'telemetry': {'found': 1, 'cargo_count': 1}}) ... ERROR
+test_public_tool_schema_and_handler_forward_predicate (tests.test_night0909_entity_wait.EntityWaitTest.test_public_tool_schema_and_handler_forward_predicate) ... FAIL
+test_real_polling_uses_existing_server_verb_and_satisfies_third_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_real_polling_uses_existing_server_verb_and_satisfies_third_probe) ... ERROR
+test_timeout_is_unsatisfied_and_bounded (tests.test_night0909_entity_wait.EntityWaitTest.test_timeout_is_unsatisfied_and_bounded) ... ERROR
+
+======================================================================
+ERROR: test_absence_can_satisfy_explicit_found_false (tests.test_night0909_entity_wait.EntityWaitTest.test_absence_can_satisfy_explicit_found_false)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Python314\Lib\asyncio\runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 94, in test_absence_can_satisfy_explicit_found_false
+    result = await self.run_wait(Runtime([reading(found=0)]), predicate("found", False))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_absence_cannot_satisfy_zero_cargo (tests.test_night0909_entity_wait.EntityWaitTest.test_absence_cannot_satisfy_zero_cargo)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Python314\Lib\asyncio\runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 89, in test_absence_cannot_satisfy_zero_cargo
+    result = await self.run_wait(Runtime([reading(found=0, cargo_count=0)]), predicate(equals=0), timeout_s=0.5)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [True, 0.0, 0.0], 'radius': 3.0, 'field': 'cargo_count', 'equals': 1})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [nan, 0.0, 0.0], 'radius': 3.0, 'field': 'cargo_count', 'equals': 1})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, 'field': 'cargo_count', 'equals': 1})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'health01', 'equals': 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value=None)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'cargo_count', 'equals': 1, 'extra': 1})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 51, 'field': 'cargo_count', 'equals': 1})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': True, 'field': 'cargo_count', 'equals': 1})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': nan, 'field': 'cargo_count', 'equals': 1})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [0.0, 0.0], 'radius': 3.0, 'field': 'cargo_count', 'equals': 1})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': '', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'cargo_count', 'equals': 1})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'm_IsPowered', 'equals': True})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'engine_on_server', 'equals': True})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'cargo_count', 'equals': False})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'health01', 'equals': inf})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'health01', 'equals': 2.0})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'found', 'equals': 0})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bad_predicates_are_rejected_before_any_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bad_predicates_are_rejected_before_any_probe) (value={'type': 'WoodenCrate', 'pos': [7500.0, 10.0, 7500.0], 'radius': 3.0, 'field': 'cargo_count', 'equals': -1})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 109, in test_bad_predicates_are_rejected_before_any_probe
+    await subject.execute_wait_for(runtime, "entity_state", entity=value, timeout_s=1.0)
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_bridge_error_and_ownership_error_abort_first_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bridge_error_and_ownership_error_abort_first_probe) (error={'ok': 0, 'error': 'ambiguous_fixture'})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 122, in test_bridge_error_and_ownership_error_abort_first_probe
+    await self.run_wait(runtime)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_every_supported_field (tests.test_night0909_entity_wait.EntityWaitTest.test_every_supported_field) (field='found')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 101, in test_every_supported_field
+    result = await self.run_wait(Runtime([reading(**{field: value})]), predicate(field, value))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_every_supported_field (tests.test_night0909_entity_wait.EntityWaitTest.test_every_supported_field) (field='health01')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 101, in test_every_supported_field
+    result = await self.run_wait(Runtime([reading(**{field: value})]), predicate(field, value))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_every_supported_field (tests.test_night0909_entity_wait.EntityWaitTest.test_every_supported_field) (field='attachment_count')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 101, in test_every_supported_field
+    result = await self.run_wait(Runtime([reading(**{field: value})]), predicate(field, value))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_every_supported_field (tests.test_night0909_entity_wait.EntityWaitTest.test_every_supported_field) (field='cargo_count')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 101, in test_every_supported_field
+    result = await self.run_wait(Runtime([reading(**{field: value})]), predicate(field, value))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_every_supported_field (tests.test_night0909_entity_wait.EntityWaitTest.test_every_supported_field) (field='items_total')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 101, in test_every_supported_field
+    result = await self.run_wait(Runtime([reading(**{field: value})]), predicate(field, value))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 116, in test_missing_or_invalid_data_never_becomes_false
+    await self.run_wait(Runtime([value]))
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={'ok': 1})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 116, in test_missing_or_invalid_data_never_becomes_false
+    await self.run_wait(Runtime([value]))
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={'ok': 1, 'telemetry': {}})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 116, in test_missing_or_invalid_data_never_becomes_false
+    await self.run_wait(Runtime([value]))
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={'ok': 1, 'telemetry': {'found': 1, 'cargo_count': None}})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 116, in test_missing_or_invalid_data_never_becomes_false
+    await self.run_wait(Runtime([value]))
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={'ok': 1, 'telemetry': {'found': 1, 'cargo_count': False}})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 116, in test_missing_or_invalid_data_never_becomes_false
+    await self.run_wait(Runtime([value]))
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={'ok': 1, 'telemetry': {'found': 1, 'cargo_count': -1}})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 116, in test_missing_or_invalid_data_never_becomes_false
+    await self.run_wait(Runtime([value]))
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={'ok': 1, 'telemetry': {'found': 2, 'cargo_count': 1}})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 116, in test_missing_or_invalid_data_never_becomes_false
+    await self.run_wait(Runtime([value]))
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_missing_or_invalid_data_never_becomes_false (tests.test_night0909_entity_wait.EntityWaitTest.test_missing_or_invalid_data_never_becomes_false) (value={'ok': 'true', 'telemetry': {'found': 1, 'cargo_count': 1}})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 116, in test_missing_or_invalid_data_never_becomes_false
+    await self.run_wait(Runtime([value]))
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_real_polling_uses_existing_server_verb_and_satisfies_third_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_real_polling_uses_existing_server_verb_and_satisfies_third_probe)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Python314\Lib\asyncio\runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 71, in test_real_polling_uses_existing_server_verb_and_satisfies_third_probe
+    result = await self.run_wait(runtime)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+ERROR: test_timeout_is_unsatisfied_and_bounded (tests.test_night0909_entity_wait.EntityWaitTest.test_timeout_is_unsatisfied_and_bounded)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Python314\Lib\asyncio\runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 81, in test_timeout_is_unsatisfied_and_bounded
+    result = await self.run_wait(runtime, timeout_s=0.6, poll_interval_s=20.0)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 67, in run_wait
+    return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: execute_wait_for() got an unexpected keyword argument 'entity'
+
+======================================================================
+FAIL: test_bridge_error_and_ownership_error_abort_first_probe (tests.test_night0909_entity_wait.EntityWaitTest.test_bridge_error_and_ownership_error_abort_first_probe)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Python314\Lib\asyncio\runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 123, in test_bridge_error_and_ownership_error_abort_first_probe
+    self.assertEqual(len(runtime.calls), 1)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_public_tool_schema_and_handler_forward_predicate (tests.test_night0909_entity_wait.EntityWaitTest.test_public_tool_schema_and_handler_forward_predicate)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Python314\Lib\asyncio\runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_night0909_entity_wait.py", line 140, in test_public_tool_schema_and_handler_forward_predicate
+    self.assertIn("entity_state", tool.parameters["properties"]["condition"]["enum"])
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'entity_state' not found in ['players_at_least', 'players_at_most', 'log_matches']
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.170s
+
+FAILED (failures=2, errors=37)
+
+exit code: 1

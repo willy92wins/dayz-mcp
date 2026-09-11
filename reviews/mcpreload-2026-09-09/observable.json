@@ -1,0 +1,47 @@
+{
+  "verdict": "PASS",
+  "scope": "offline_fresh_python_process_with_real_MCP_handler",
+  "fresh_source_stale": false,
+  "stale_source_stale": true,
+  "server_modules": {
+    "server_started_at": 1788964911.9017034,
+    "server_pid": 30636,
+    "watched_count": 51,
+    "stale": [
+      "dayz_mcp.dayz_test_tool"
+    ],
+    "unreadable": [],
+    "unreadable_reasons": {}
+  },
+  "stale_tool_result": {
+    "_meta": {
+      "server_code_freshness": {
+        "status": "stale",
+        "scope": "loaded_server_modules",
+        "stale": [
+          "dayz_mcp.dayz_test_tool"
+        ],
+        "unreadable": [],
+        "unreadable_reasons": {},
+        "server_pid": 30636,
+        "server_started_at": 1788964911.9017034,
+        "remediation": "reopen_mcp_client"
+      }
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"status\": \"succeeded\",\n  \"implementation\": \"old\"\n}"
+      },
+      {
+        "type": "text",
+        "text": "{\"server_code_freshness\": {\"status\": \"stale\", \"scope\": \"loaded_server_modules\", \"stale\": [\"dayz_mcp.dayz_test_tool\"], \"unreadable\": [], \"unreadable_reasons\": {}, \"server_pid\": 30636, \"server_started_at\": 1788964911.9017034, \"remediation\": \"reopen_mcp_client\"}}"
+      }
+    ],
+    "structuredContent": {
+      "status": "succeeded",
+      "implementation": "old"
+    },
+    "isError": false
+  }
+}

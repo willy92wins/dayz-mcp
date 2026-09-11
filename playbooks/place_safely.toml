@@ -6,7 +6,11 @@ status = "DRAFT"            # DRAFT | PROBED | CALIBRATED | FROZEN
 summary = "Is (x,z) safe to spawn/teleport to? Checks solid ground, the vertical column and nearby players. Does NOT check lateral solids. The canopy gate is calibrated (2026-08-19) and STOPS: on clear ground raycast and surface agree to within 8 ULP of float32, an obstructed site sat 4.89 m up (the ray hit something at that height; with intersect=geom the report does not record what)."
 requires_tools = ["surface_query", "scene_raycast", "query_all_players", "entities_query"]
 
-[params]                     # defaults; the CLI may override them
+[params]                     # fixtures / non-live still fill omitted keys from here
+# Live (playbook_run / --live): place_safely only — x and z must be passed
+# explicitly. Explicit 0 is a real site and is valid. Omitting either is a
+# named error; these defaults are not mixed in. Other playbooks that declare
+# x/z still inherit their TOML defaults when params are omitted.
 x = 0.0
 z = 0.0
 clear_r = 15.0

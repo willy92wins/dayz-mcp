@@ -38,7 +38,9 @@ def _request(
         query={},
         body=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
         headers={"Content-Type": "application/json"},
-        deadline=time.monotonic() + 15.0,
+        # Start includes the admitted Steam preparation (215 s + 5 s cleanup).
+        # Other lifecycle calls retain their short transport deadline.
+        deadline=time.monotonic() + (235.0 if path == "/lifecycle/start" else 15.0),
         expected_executable=policy.native_executable,
         expected_argv=list(policy.argv),
         expected_cwd=policy.cwd,

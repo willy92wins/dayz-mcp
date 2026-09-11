@@ -143,17 +143,34 @@ class SpawnMarkerTest(unittest.TestCase):
             self._marker_of(seen[1]),
             f"{daemon.SPAWN_BRANCH_JOB_BOUND}:{os.getpid()}",
         )
-        # Observability changed nothing about the launch itself: same two attempts,
-        # same order, same creationflags as HEAD.
+        # Both attempts stay windowless, preserving the process group and the
+        # breakaway-first, job-bound-fallback order.
         self.assertEqual(
             int(seen[0]["creationflags"]),
-            daemon._DETACHED_PROCESS
+            daemon._CREATE_NO_WINDOW
             | daemon._CREATE_NEW_PROCESS_GROUP
             | daemon._CREATE_BREAKAWAY_FROM_JOB,
         )
         self.assertEqual(
             int(seen[1]["creationflags"]),
-            daemon._DETACHED_PROCESS | daemon._CREATE_NEW_PROCESS_GROUP,
+            daemon._CREATE_NO_WINDOW | daemon._CREATE_NEW_PROCESS_GROUP,
+        )
+
+    def test_the_windowless_flag_is_the_documented_constant_and_stands_alone(self) -> None:
+        """The assertions above compare symbol to symbol and would pass on any value.
+
+        This one pins what the fix is actually about. Windows ignores CREATE_NO_WINDOW
+        when DETACHED_PROCESS is also set, so a launch that ORs them is a launch with no
+        console at all -- and under the venv redirector that is what hands the daemon a
+        visible console window it can be killed by.
+        """
+        self.assertEqual(daemon._CREATE_NO_WINDOW, 0x08000000)
+        self.assertEqual(daemon._CREATE_NEW_PROCESS_GROUP, 0x00000200)
+        self.assertEqual(daemon._CREATE_BREAKAWAY_FROM_JOB, 0x01000000)
+        self.assertFalse(
+            hasattr(daemon, "_DETACHED_PROCESS"),
+            "DETACHED_PROCESS is back; combined with CREATE_NO_WINDOW it wins and the "
+            "stray-console defect returns",
         )
 
     @unittest.skipUnless(sys.platform == "win32", _WINDOWS_ONLY)

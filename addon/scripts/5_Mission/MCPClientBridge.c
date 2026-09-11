@@ -1,5 +1,6 @@
 class MCPClientPollCallback : RestCallback
 {
+	// MCPJobRunnerOwner is not Managed: detach explicitly; a raw link can dangle.
 	protected ref MCPClientBridge m_Bridge;
 
 	void MCPClientPollCallback(MCPClientBridge bridge)
@@ -19,6 +20,7 @@ class MCPClientPollCallback : RestCallback
 			m_Bridge.ReleaseCallback(this);
 			if (!m_Bridge.IsActivePollCallback(this))
 			{
+				DetachBridge();
 				return;
 			}
 			m_Bridge.OnPollSuccess(data, dataSize);
@@ -32,9 +34,11 @@ class MCPClientPollCallback : RestCallback
 			m_Bridge.ReleaseCallback(this);
 			if (!m_Bridge.IsActivePollCallback(this))
 			{
+				DetachBridge();
 				return;
 			}
 			m_Bridge.OnPollError(errorCode);
+			DetachBridge();
 		}
 	}
 
@@ -45,15 +49,18 @@ class MCPClientPollCallback : RestCallback
 			m_Bridge.ReleaseCallback(this);
 			if (!m_Bridge.IsActivePollCallback(this))
 			{
+				DetachBridge();
 				return;
 			}
 			m_Bridge.OnPollTimeout();
+			DetachBridge();
 		}
 	}
 };
 
 class MCPClientResultCallback : RestCallback
 {
+	// MCPJobRunnerOwner is not Managed: detach explicitly; a raw link can dangle.
 	protected ref MCPClientBridge m_Bridge;
 
 	void MCPClientResultCallback(MCPClientBridge bridge)
@@ -72,6 +79,7 @@ class MCPClientResultCallback : RestCallback
 		{
 			m_Bridge.ReleaseCallback(this);
 			m_Bridge.OnResultSuccess(data, dataSize);
+			DetachBridge();
 		}
 	}
 
@@ -81,6 +89,7 @@ class MCPClientResultCallback : RestCallback
 		{
 			m_Bridge.ReleaseCallback(this);
 			m_Bridge.OnResultError(errorCode);
+			DetachBridge();
 		}
 	}
 
@@ -90,6 +99,7 @@ class MCPClientResultCallback : RestCallback
 		{
 			m_Bridge.ReleaseCallback(this);
 			m_Bridge.OnResultTimeout();
+			DetachBridge();
 		}
 	}
 };
@@ -132,6 +142,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const int MAX_DISPATCH_PER_TICK = 4;
 	protected const int MAX_PENDING = 16;
 	protected const int PENDING_POLL_THRESHOLD = 8;
+	protected const int MAX_CALLBACK_REFS = 128;
+	// One poll accepts at most MAX_DISPATCH_PER_TICK dispatched plus MAX_PENDING
+	// queued; QueuePendingOrFail refuses the rest. Reserve exactly that much.
+	protected const int MAX_POLL_RESULTS = 20;
 	protected const float CAMERA_JOB_TIMEOUT_S = 5.0;
 	protected const float CAMERA_SETTLE_STEP_S = 0.05;
 	protected const int CAMERA_DEFAULT_SETTLE_TICKS = 3;
@@ -189,6 +203,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected float m_PollInFlightS;
 	protected bool m_Configured;
 	protected bool m_InitFailureLogged;
+	protected bool m_Shutdown;
+	protected bool m_ShutdownReentryLogged;
+	protected bool m_RestoreNoGameLogged;
 	protected bool m_ControlsSuppressed;
 	protected bool m_PlayerSimulationDisabled;
 	protected bool m_ActiveCamOwned;
@@ -222,6 +239,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_PollInFlightS = 0.0;
 		m_Configured = false;
 		m_InitFailureLogged = false;
+		m_Shutdown = false;
+		m_ShutdownReentryLogged = false;
+		m_RestoreNoGameLogged = false;
 		m_ControlsSuppressed = false;
 		m_PlayerSimulationDisabled = false;
 		m_ActiveCamOwned = false;
@@ -371,6 +391,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (cfg.pollHz > 0.0)
 		{
 			m_PollHz = cfg.pollHz;
+			if (m_PollHz > 60.0)
+			{
+				m_PollHz = 60.0;
+			}
 		}
 
 		m_Ctx = api.GetRestContext(m_Url);
@@ -400,9 +424,39 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		Log("client init pending: " + reason);
 	}
 
+	// Accepted work that still owes a result: POSTs in flight, queued commands and
+	// running jobs. The client counted only the queue; the server counts all three.
+	protected int OutstandingWork()
+	{
+		int total = 0;
+		if (m_CallbackRefs)
+		{
+			total = total + m_CallbackRefs.Count();
+		}
+
+		if (m_Pending)
+		{
+			total = total + m_Pending.Count();
+		}
+
+		if (m_JobRunner)
+		{
+			total = total + m_JobRunner.Count();
+		}
+
+		return total;
+	}
+
 	protected void StartPoll()
 	{
 		if (!m_PollCtx)
+		{
+			return;
+		}
+
+		// Pause admission only. OnTick ticks jobs and drains pending above the poll
+		// decision, so the count keeps falling while polling is held.
+		if (OutstandingWork() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS)
 		{
 			return;
 		}
@@ -540,11 +594,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	void OnPollError(int errorCode)
 	{
+		// OnError may repeat (restapi.c:53); retire this request identity.
+		m_PollCallback = null;
 		OnPollFail("error=" + errorCode);
 	}
 
 	void OnPollTimeout()
 	{
+		m_PollCallback = null;
 		OnPollFail("timeout");
 	}
 
@@ -2588,6 +2645,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		if (job.phase == CAMERA_PHASE_SETTLE)
 		{
+			// Do not query global camera state after losing the scripted view.
+			// REPORT uses BuildCameraResult to return the named unavailable state.
+			if (CameraReadError() != "")
+			{
+				job.phase = CAMERA_PHASE_REPORT;
+				return true;
+			}
 			bool interpolationComplete = Camera.IsInterpolationComplete();
 			float elapsed = m_JobRunner.GetElapsedS() - job.sample_start_s;
 			if (interpolationComplete || elapsed >= job.sample_s_target)
@@ -3642,37 +3706,64 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return ticks * CAMERA_SETTLE_STEP_S;
 	}
 
+	// GetCurrentCamera crashes inside the native getter before it can return
+	// null (SUB_BRZ RPTs 2026-09-08, deployed BuildCameraResult:3664).
+	// A local player does not prove that the native scripted camera exists.
+	// Inspect only our retained instance; absence is not proof of player view.
+	protected string CameraReadError()
+	{
+		if (!IsClientInGame())
+		{
+			return "client_not_in_game";
+		}
+
+		PlayerBase cameraPlayer = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!cameraPlayer)
+		{
+			return "camera_unavailable_player";
+		}
+
+		// Vehicle view can override a scripted camera. Check parentage too:
+		// a missing client vehicle command is not evidence of being on foot.
+		if (cameraPlayer.GetCommand_Vehicle())
+		{
+			return "camera_unavailable_vehicle";
+		}
+		if (cameraPlayer.GetParent())
+		{
+			return "camera_unavailable_parented_player";
+		}
+
+		if (!m_ActiveCam)
+		{
+			return "camera_unavailable_no_scripted_camera";
+		}
+		if (!m_ActiveCam.IsActive())
+		{
+			return "camera_unavailable_inactive";
+		}
+
+		return "";
+	}
+
 	protected MCPCamera BuildCameraResult(string mode)
 	{
 		MCPCamera camera = new MCPCamera();
 		camera.applied_mode = mode;
 
-		// Defense in depth for the Dispatch readiness gate: the native
-		// camera getters deref an unbuilt world camera before the client is
-		// in-game and crash. Reached via the camera_set job report too, which
-		// does not re-enter Dispatch. pos/matrix/dir stay empty (ctor-initialized).
-		if (!IsClientInGame())
+		// Shared by camera_get and the camera_set report (outside Dispatch).
+		// Rejected snapshots keep pos/matrix/dir empty (ctor-initialized).
+		string cameraError = CameraReadError();
+		if (cameraError != "")
 		{
 			camera.ok = false;
 			camera.viewport_moved = false;
-			camera.error = "client_not_in_game";
+			camera.error = cameraError;
 			return camera;
 		}
 
 		camera.ok = true;
-
-		Camera current = Camera.GetCurrentCamera();
-		if (!current)
-		{
-			camera.viewport_moved = false;
-			camera.error = "player_camera_active";
-			VectorToArray(GetGame().GetCurrentCameraPosition(), camera.pos);
-			VectorToArray(GetGame().GetCurrentCameraDirection(), camera.dir);
-			camera.fov = Camera.GetCurrentFOV();
-			camera.interpolation_complete = Camera.IsInterpolationComplete();
-			return camera;
-		}
-
+		Camera current = m_ActiveCam;
 		vector matrix[4];
 		current.GetTransform(matrix);
 		MatrixToArray(matrix, camera.matrix);
@@ -3908,6 +3999,20 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	protected void RestoreGameplay()
 	{
+		// Destructor cleanup can outlive CGame, whose destructor nulls g_Game.
+		// Latched: this method has eight call sites and must not log per call.
+		// Log reaches only Print, which needs no CGame, so the line survives the
+		// teardown it reports.
+		if (!GetGame())
+		{
+			if (!m_RestoreNoGameLogged)
+			{
+				m_RestoreNoGameLogged = true;
+				Log("restore skipped: no game");
+			}
+			return;
+		}
+
 		PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
 		if (player && m_PlayerSimulationDisabled)
 		{
@@ -4058,13 +4163,28 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	void Shutdown()
 	{
 		bool postedTerminal = false;
+		// ShutdownInstance calls here, then releasing m_Instance runs our destructor.
+		// The two lines are the only in-engine evidence this guard fired: the first
+		// entry alone means no re-entry happened, both mean the second was refused.
+		if (m_Shutdown)
+		{
+			if (!m_ShutdownReentryLogged)
+			{
+				m_ShutdownReentryLogged = true;
+				Log("shutdown re-entered");
+			}
+			return;
+		}
+		m_Shutdown = true;
+		Log("shutdown first entry");
 		if (m_Dialog && m_Dialog.IsOpen())
 		{
 			m_Dialog.FinishDisconnected();
 		}
 
-		// Shutdown is only reached from ~MissionGameplay / ~MCPClientBridge, so
-		// no later OnTick exists on this mission. reset() clears pending REST
+		// MissionGameplay.c only shuts down from its destructor; OnMissionStart /
+		// OnUpdate own the ticks. Our destructor may call Shutdown again (guard above).
+		// Keep m_Configured until the first terminal POST. reset() clears pending REST
 		// requests (restapi.c:130-133). After a terminal dialog POST, skip it
 		// and keep callback refs: RestApi is process-scoped and can finish the
 		// already-pushed request. A delayed reset() is unsafe because
@@ -4099,6 +4219,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPCarDrive.Clear();
 		RestoreGameplay();
 		ReleaseCamera();
+
+		// A completed cached callback is absent from m_PollCallbackRefs.
+		if (m_PollCallback)
+		{
+			m_PollCallback.DetachBridge();
+		}
 
 		// Break the callback->bridge->callback-array ref cycle before
 		// contexts are dropped. Shared context plus a posted terminal

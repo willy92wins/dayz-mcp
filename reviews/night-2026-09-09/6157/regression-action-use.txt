@@ -1,0 +1,16 @@
+Set-Location -LiteralPath 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools'
+$env:PYTHONIOENCODING='utf-8'
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:PYTHONPATH='C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
+& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -m unittest tests.test_action_use -v
+
+test_app_tool_registered_and_forwards (tests.test_action_use.ActionUseAppToolTest.test_app_tool_registered_and_forwards) ... ok
+test_dispatch_passes_real_item_in_hands (tests.test_action_use.ActionUseHeldItemContractTest.test_dispatch_passes_real_item_in_hands) ... ok
+test_happy_path_client_mutating (tests.test_action_use.ActionUseIngressTest.test_happy_path_client_mutating) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.086s
+
+OK
+
+exit code: 0

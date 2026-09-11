@@ -69,6 +69,15 @@ def _configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         dest="auto_spawn_daemon",
         help="Fail if the daemon is unavailable instead of spawning one.",
     )
+    parser.add_argument(
+        "--supervised",
+        action="store_true",
+        help=(
+            "Own stdio and run the real server as a replaceable child process, so "
+            "server_reload can serve sources edited after startup without the host "
+            "reconnecting. Wraps a mode rather than being one."
+        ),
+    )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
         "--client",

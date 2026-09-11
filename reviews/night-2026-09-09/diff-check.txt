@@ -1,0 +1,3 @@
+COMMAND: git diff --check -- tools/dayz_mcp/server.py addon/scripts/5_Mission/MCPBridge.c
+
+exit code: 0

@@ -15,6 +15,7 @@ assertions come from is reviews/2026-09-04-reserva/R1-storage-4407-diseno.md §5
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -234,6 +235,35 @@ class PrepareStorageTest(unittest.TestCase):
         self.assertIsNotNone(result.storage_backup)
         self.assertIn(storage.LEGACY_SEAL8, str(result.storage_backup))
         self.assertEqual(result.storage_reset_notice, storage.RESET_NOTICE)
+
+    def test_a_rotation_result_carries_the_fields_the_lifecycle_auditor_reads(self) -> None:
+        """The auditor copies these off the producer. A richer fixture would hide a hole."""
+        _make_storage(self.mission)
+        result = self._prepare()
+        self.assertTrue(result.storage_rotated)
+        # JsonlAuditWriter rejects an empty reason; the row is built from this.
+        self.assertIsInstance(result.reason, str)
+        self.assertTrue(result.reason.strip())
+        self.assertIsInstance(result.decision, str)
+        self.assertTrue(result.decision.strip())
+        self.assertIsInstance(result.storage_backup, str)
+        self.assertTrue(result.storage_backup)
+        self.assertIsInstance(result.storage_seal, str)
+        self.assertEqual(result.storage_reset_notice, storage.RESET_NOTICE)
+        self.assertEqual(
+            {item.name for item in dataclasses.fields(result)},
+            {
+                "launch_allowed",
+                "storage_rotated",
+                "storage_backup",
+                "storage_marker_backup",
+                "storage_seal",
+                "storage_recovery_required",
+                "storage_reset_notice",
+                "decision",
+                "reason",
+            },
+        )
 
     def test_an_unreadable_marker_rotates_and_is_kept_as_evidence(self) -> None:
         _make_storage(self.mission, marker_payload={"schema_version": 9})

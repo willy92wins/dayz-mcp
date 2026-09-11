@@ -114,6 +114,8 @@ class ActionUseDescriptionTest(unittest.TestCase):
         self.assertIn("class name", low)
         self.assertIn("gettype()", low)
         self.assertIn("not the visible", low)
+        self.assertIn("started:1", desc)
+        self.assertIn("neither server acceptance", desc)
 
 
 class RunIdMatrixDescriptionTest(unittest.TestCase):
@@ -133,6 +135,167 @@ class RunIdMatrixDescriptionTest(unittest.TestCase):
         # The enum published from the authority survives the description patch.
         self.assertIn("server", props["mode"]["enum"])
         self.assertNotIn("offline", props["mode"]["enum"])
+
+
+class PublishedExtraModsNameFormTest(unittest.TestCase):
+    """fb-20260909-213257-49a9: extra_mods name-form is on the tool and the property."""
+
+    def test_tool_and_property_descriptions_name_the_accepted_form(self) -> None:
+        app, _ = build_app(ServerConfig(key="k", port=0, log_sink=lambda _m: None))
+        desc = _tool_desc(app, "dayz_test_run")
+        self.assertIn("single folder name", desc)
+        self.assertIn("@DayZ_MCP", desc)
+        self.assertIn("bad_mod", desc)
+        self.assertIn("bridge_mod_missing", desc)
+        self.assertNotIn("extra_mods accepts any folder", desc)
+        props = app._tool_manager.get_tool("dayz_test_run").parameters["properties"]
+        self.assertEqual(props["extra_mods"]["description"], server.EXTRA_MODS_DESCRIPTION)
+        self.assertIn("single folder name", props["extra_mods"]["description"])
+        self.assertIn("bridge_mod_missing", props["extra_mods"]["description"])
+
+
+class ReachableCapabilityTest(unittest.TestCase):
+    """Two capabilities were built, tested and left unreachable from the wire.
+
+    ``auto_remediate_steam`` was accepted by execute_dayz_test_run and never
+    exposed by the tool; the startup budget could only be changed by the
+    environment of a process the caller does not launch. Both were complete
+    features with no path from the surface the caller actually has.
+    """
+
+    def _props(self) -> dict:
+        app, _ = build_app(ServerConfig(key="k", port=0, log_sink=lambda _m: None))
+        return app._tool_manager.get_tool("dayz_test_run").parameters["properties"]
+
+    def test_dayz_test_run_publishes_both_with_a_description(self) -> None:
+        props = self._props()
+        for field in ("auto_remediate_steam", "client_start_budget_s"):
+            with self.subTest(field):
+                self.assertIn(field, props)
+                self.assertTrue((props[field].get("description") or "").strip())
+
+    def test_the_budget_description_names_the_unit_and_the_range(self) -> None:
+        description = self._props()["client_start_budget_s"]["description"]
+        self.assertIn("second", description.lower())
+        self.assertIn("3600", description)
+
+
+class ReachableCapabilityWireTest(unittest.IsolatedAsyncioTestCase):
+    """The schema publishing a field does not prove the value travels.
+
+    A description attached to a parameter the handler never forwards reads
+    exactly like a working feature, so this walks the path the caller actually
+    has -- call_tool -> dayz_test_run -> execute_dayz_test_run -- and reads the
+    kwargs that arrived at the far end.
+    """
+
+    async def _kwargs_from(self, args: dict) -> dict:
+        # Client mode, like the caller's own session: dayz_test_run is a session
+        # tool and a daemon-mode app refuses it before any parameter is read.
+        from tests.test_client_mode import _fixture_client_runtime
+
+        config = ServerConfig(
+            mode="client",
+            key="k",
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _m: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        with patch.object(server, "ClientRuntime", return_value=runtime):
+            app, _built = build_app(config)
+        seen: dict = {}
+
+        async def spy(*_a: object, **kwargs: object) -> dict:
+            seen.update(kwargs)
+            return {
+                "status": "succeeded",
+                "project": "ExampleMod",
+                "mode": "server",
+                "run_id": "12345678-1234-4234-8234-1234567890ab",
+                "phase": "completed",
+                "elapsed_s": 0.1,
+                "artifacts_paths": [],
+                "error_code": None,
+                "cleanup_degraded": False,
+            }
+
+        with patch.object(server.dayz_test_tool, "execute_dayz_test_run", spy):
+            await app.call_tool("dayz_test_run", {"project": "ExampleMod", **args})
+        return seen
+
+    async def test_both_values_reach_the_executor(self) -> None:
+        seen = await self._kwargs_from(
+            {"mode": "server", "client_start_budget_s": 5.0, "auto_remediate_steam": True}
+        )
+        self.assertEqual(seen.get("client_start_budget_s"), 5.0)
+        self.assertIs(seen.get("auto_remediate_steam"), True)
+
+    async def test_a_coerced_bool_cannot_disable_the_startup_guard(self) -> None:
+        """P1 of the cross-family review, reproduced before it was fixed.
+
+        pydantic coerces before any of our code runs: ``false`` used to arrive
+        as ``0.0`` and ``"5"`` as ``5.0``, and a budget of zero passes every
+        range check while disabling the guard entirely. Fail-open, reached by
+        the input that most looks like "no". StrictFloat|StrictInt is what stops
+        it, so this test dies the moment someone relaxes the annotation.
+        """
+        for bad in (False, True, "5", "abc"):
+            with self.subTest(bad=bad), self.assertRaises(ToolError):
+                await self._kwargs_from({"mode": "server", "client_start_budget_s": bad})
+
+    async def test_an_out_of_range_budget_names_the_field_and_the_range(self) -> None:
+        """P2: a bare ValueError from the executor reached the caller as
+        ``dayz_test_failed:ValueError``, naming neither."""
+        for bad in (-1, 3601, 4000.5):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ToolError) as ctx:
+                    await self._kwargs_from(
+                        {"mode": "server", "client_start_budget_s": bad}
+                    )
+                message = str(ctx.exception)
+                self.assertIn("client_start_budget_s", message)
+                self.assertIn("3600", message)
+                self.assertIn("bad_args", message)
+
+    async def test_an_invalid_budget_never_reaches_the_box_queue(self) -> None:
+        """P2: the rejection used to happen inside the executor, so an already
+        invalid request could wait in the queue, take a slot and come back as
+        box_queue_saturated with its real defect never reported."""
+        from tests.test_client_mode import _fixture_client_runtime
+
+        config = ServerConfig(
+            mode="client", key="k", port=12345, client_platform="codex",
+            log_sink=lambda _m: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        with patch.object(server, "ClientRuntime", return_value=runtime):
+            app, _built = build_app(config)
+        waits: list[object] = []
+
+        async def spy_wait(*a: object, **k: object) -> dict:
+            waits.append(a)
+            return {"ok": False, "error": "box_queue_saturated", "box": {}}
+
+        with patch.object(server, "execute_wait_for_box", spy_wait):
+            with self.assertRaises(ToolError):
+                await app.call_tool(
+                    "dayz_test_run",
+                    {
+                        "project": "ExampleMod",
+                        "mode": "server",
+                        "client_start_budget_s": -1,
+                        "wait_for_box_s": 10.0,
+                    },
+                )
+        self.assertEqual(waits, [], "la cola no debe llegar a consultarse")
+
+    async def test_the_defaults_are_off_and_absent(self) -> None:
+        """Omitting them must not invent a budget: None is what makes the
+        environment and then the measured default still apply."""
+        seen = await self._kwargs_from({"mode": "server"})
+        self.assertIsNone(seen.get("client_start_budget_s"))
+        self.assertIs(seen.get("auto_remediate_steam"), False)
 
 
 if __name__ == "__main__":

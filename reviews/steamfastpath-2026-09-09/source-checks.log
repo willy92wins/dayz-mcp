@@ -1,0 +1,30 @@
+evaluate_steam_session: identical source (ignoring file newline encoding)
+SteamSessionResult: identical source (ignoring file newline encoding)
+SteamPreflightProvider: identical source (ignoring file newline encoding)
+WindowsSteamPreflightProvider: identical source (ignoring file newline encoding)
+_read_stable_snapshot: identical source (ignoring file newline encoding)
+_safe_live_pids: identical source (ignoring file newline encoding)
+_wait_until: identical source (ignoring file newline encoding)
+_wait_until_steam_down: identical source (ignoring file newline encoding)
+_remediation_result: identical source (ignoring file newline encoding)
+restart body from executable lookup through final verdict: identical source
+tools/dayz_mcp/steam_preflight.py: bytes=20872 sha256=d88e0d0b3f93ced5208af45d260efc1e2efce19fe8627c5daa0028ca30185898
+  original baseline match: False
+tools/tests/test_steamfastpath_repair.py: bytes=18282 sha256=df59dd309795ae892c862285983a24cd7ca6a55c505d8b71c01674642bb6a1d9
+tools/tests/test_steam_preflight.py: bytes=15321 sha256=2651a355de212a496851cb86bf7c465bdb484acc47c5305e9ed1ad0db33e1f45
+  original baseline match: True
+tools/tests/test_lote2_t2_steam.py: bytes=5450 sha256=883b3b3e4ca634dd9a179fe0f939f4a1954b3663bdca53c036c3c335ddb8b945
+  original baseline match: True
+tools/dayz_mcp/daemon.py: bytes=65091 sha256=8c8174975abf15940bace317fca24ea834c8e59062555fdd57b570ad32ff2711
+  original baseline match: True
+tools/dayz_mcp/dayz_test_tool.py: bytes=72917 sha256=6909b46db9f0a0d1557f6c173c852d1603a4e2a953f71ef02efdbbe68e095979
+  original baseline match: True
+tools/build_native_launcher.py: bytes=47468 sha256=e1a8b657c7c223700ced4f628375764b7b3459b81750aa6646561d9902bc100c
+  original baseline match: True
+.git/index: bytes=45093 sha256=6769e84b810d1337b530f5af12600abb5f119d2725cafc2e4805721292a24fb2
+  original baseline match: False
+BEFORE hash: 0eb4f0997a9190198cc7215ce9c99506e1ecd06d9ce336a678341415461b313a
+git staged name/status (read without optional locks):
+A	decisions/decision-log.md
+git diff --check exit code: 0
+warning: in the working copy of 'tools/dayz_mcp/steam_preflight.py', CRLF will be replaced by LF the next time Git touches it

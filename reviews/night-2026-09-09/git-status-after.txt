@@ -1,0 +1,10 @@
+COMMAND: git status --short --untracked-files=no
+ M addon/scripts/5_Mission/MCPBridge.c
+A  decisions/decision-log.md
+ M tools/dayz_mcp/server.py
+ M tools/dayz_mcp/steam_preflight.py
+ D tools/native-launchers/dayz-test-v1/src/app_main.py
+ D tools/native-launchers/dayz-test-v1/src/launcher.cpp
+warning: unable to access 'C:\Users\guill/.config/git/ignore': Permission denied
+
+exit code: 0

@@ -273,6 +273,14 @@ class ToolDescriptionTruthTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("null", description)
         # A repeated frame is a fact about pixels, not a tool error.
         self.assertIn("not an error", description)
+        self.assertIn("frames>=2", description)
+        self.assertIn("frames=4", description)
+        self.assertIn("distinct_frames=1", description)
+        self.assertIn("max_adjacent_delta=0", description)
+        self.assertIn("frozen-render", description)
+        self.assertIn("frames=1", description)
+        self.assertIn("non-discriminating", description)
+        self.assertIn("not a freeze signal", description)
 
     async def test_engine_set_documents_ownership_and_confirmation_fields(self) -> None:
         description = self.tools["engine_set"].description or ""
@@ -281,6 +289,12 @@ class ToolDescriptionTruthTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("command_sent", description)
         self.assertIn("state_confirmed", description)
         self.assertIn("accepted, not confirmed", description)
+
+    async def test_vehicle_get_in_client_is_not_server_crew(self) -> None:
+        description = self.tools["vehicle_get_in_client"].description or ""
+        self.assertIn("does not place the player in the server crew", description)
+        self.assertIn("ActionSwitchLights", description)
+        self.assertIn("until vehicle_enter", description)
 
 
 if __name__ == "__main__":

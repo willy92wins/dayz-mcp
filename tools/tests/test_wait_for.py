@@ -61,6 +61,51 @@ class _FakeRuntime:
         return {"ok": 1, "players": [{} for _ in range(count)]}
 
 
+_MAPPED_CLIENT_NOT_POLLING = "game_not_ready:reason=client_not_polling"
+
+
+def _real_client_runtime_http_only(handler):
+    """Real ClientRuntime; only the HTTP transport ``_call`` is replaced."""
+    runtime = _fixture_client_runtime(
+        ServerConfig(
+            mode="client",
+            key="k",
+            port=12345,
+            log_sink=lambda _m: None,
+        )
+    )
+    runtime._call = handler
+    return runtime
+
+
+def _http_always_client_not_polling(*_a, **_k):
+    return 409, {"error": "client_not_polling"}
+
+
+class _HttpClientNotPollingThenPlayers:
+    """First /enqueue is the 409; the next accepted enqueue returns one player."""
+
+    def __init__(self, player_count: int = 1) -> None:
+        self.enqueue_calls = 0
+        self.player_count = player_count
+
+    def __call__(self, method, path, *_a, **_k):
+        if path == "/enqueue":
+            self.enqueue_calls += 1
+            if self.enqueue_calls == 1:
+                return 409, {"error": "client_not_polling"}
+            return 200, {"id": 7}
+        if path == "/await":
+            return 200, {
+                "status": "done",
+                "result": {
+                    "ok": 1,
+                    "players": [{} for _ in range(self.player_count)],
+                },
+            }
+        raise AssertionError(f"unexpected transport path {path!r}")
+
+
 class WaitForTest(unittest.IsolatedAsyncioTestCase):
     async def test_satisfied_on_first_probe(self) -> None:
         runtime = _FakeRuntime(player_counts=[2])
@@ -157,6 +202,143 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["timed_out"])
         self.assertEqual(result["last_error"], stale)
         self.assertGreaterEqual(result["not_ready_probes"], 2)
+
+    async def test_waits_through_client_not_polling(self) -> None:
+        not_ready = "game_not_ready:reason=client_not_polling"
+        runtime = _FakeRuntime(player_counts=[not_ready, not_ready, 1])
+        result = await server.execute_wait_for(
+            runtime, "players_at_least", value=1, timeout_s=10.0, poll_interval_s=0.2
+        )
+        self.assertTrue(result["satisfied"])
+        self.assertEqual(result["probes"], 3)
+        self.assertEqual(result["not_ready_probes"], 2)
+        self.assertEqual(result["observed"], 1)
+        self.assertEqual(runtime.bridge_calls, 3)
+        self.assertEqual(result["last_error"], not_ready)
+
+    async def test_client_not_polling_timeout_reports_last_error(self) -> None:
+        not_ready = "game_not_ready:reason=client_not_polling"
+        runtime = _FakeRuntime(fallback=not_ready)
+        result = await server.execute_wait_for(
+            runtime, "players_at_least", value=1, timeout_s=1.2, poll_interval_s=0.3
+        )
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["satisfied"])
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["last_error"], not_ready)
+        self.assertGreaterEqual(result["not_ready_probes"], 2)
+        self.assertGreaterEqual(result["probes"], result["not_ready_probes"])
+        self.assertGreater(result["elapsed_s"], 0.0)
+
+    async def test_client_not_polling_wait_is_bounded_by_timeout_s(self) -> None:
+        import time
+
+        not_ready = "game_not_ready:reason=client_not_polling"
+        runtime = _FakeRuntime(fallback=not_ready)
+        t0 = time.monotonic()
+        result = await server.execute_wait_for(
+            runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
+        )
+        wall = time.monotonic() - t0
+        self.assertFalse(result["satisfied"])
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["last_error"], not_ready)
+        self.assertEqual(runtime.bridge_calls, 1)
+        self.assertLess(wall, 0.3, f"deadline exceeded: {wall:.3f}s for timeout_s=0.1")
+
+    async def test_bare_client_not_polling_token_is_retried_and_named(self) -> None:
+        runtime = _FakeRuntime(player_counts=["client_not_polling", 1])
+        result = await server.execute_wait_for(
+            runtime, "players_at_least", value=1, timeout_s=10.0, poll_interval_s=0.2
+        )
+        self.assertTrue(result["satisfied"])
+        self.assertEqual(result["not_ready_probes"], 1)
+        self.assertEqual(result["last_error"], "game_not_ready:reason=client_not_polling")
+        self.assertEqual(runtime.bridge_calls, 2)
+
+    async def test_daemon_unavailable_aborts_first_probe(self) -> None:
+        runtime = _FakeRuntime(player_counts=["daemon_unavailable", 1])
+        with self.assertRaises(server.ToolError) as ctx:
+            await server.execute_wait_for(
+                runtime, "players_at_least", value=1, timeout_s=5.0, poll_interval_s=0.2
+            )
+        self.assertEqual(str(ctx.exception), "daemon_unavailable")
+        self.assertEqual(runtime.bridge_calls, 1)
+
+    def test_client_not_polling_payload_is_not_stripped_to_remote_error(self) -> None:
+        cases = (
+            {"error": "client_not_polling"},
+            {"reason": "client_not_polling"},
+            {"error": "client_not_polling", "hint": "do-not-leak-this"},
+            {"ready": {"ready": False, "reason": "client_not_polling"}},
+            {
+                "error": "arbitrary_remote_text",
+                "reason": "client_not_polling",
+                "hint": "do-not-leak-this",
+            },
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                code = server._remote_error_code(payload)
+                text = server._public_enqueue_error(payload)
+                self.assertEqual(code, "client_not_polling")
+                self.assertEqual(text, "game_not_ready:reason=client_not_polling")
+                self.assertNotIn("do-not-leak", text)
+
+    def test_unknown_enqueue_code_still_stays_remote_error(self) -> None:
+        text = server._public_enqueue_error(
+            {"error": "arbitrary_remote_text", "hint": "do-not-leak-this"}
+        )
+        self.assertEqual(text, "remote_error")
+        self.assertNotIn("do-not-leak", text)
+
+    async def test_client_mode_enqueue_keeps_client_not_polling(self) -> None:
+        runtime = _fixture_client_runtime(
+            ServerConfig(
+                mode="client",
+                key="k",
+                port=12345,
+                log_sink=lambda _m: None,
+            )
+        )
+        runtime._call = lambda *_a, **_k: (409, {"error": "client_not_polling"})
+        with self.assertRaises(server.ToolError) as ctx:
+            await runtime.call_bridge("query_all_players", {}, "server", 1.0)
+        message = str(ctx.exception)
+        self.assertEqual(message, "game_not_ready:reason=client_not_polling")
+        self.assertNotEqual(message, "remote_error")
+
+    async def test_real_runtime_client_not_polling_times_out_as_wait_for_json(self) -> None:
+        # Seam: ClientRuntime.call_bridge + execute_wait_for. A prefix on
+        # _enqueue_error that still contains client_not_polling must fail here:
+        # wait_for retries only the exact mapped string.
+        runtime = _real_client_runtime_http_only(_http_always_client_not_polling)
+        result = await server.execute_wait_for(
+            runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
+        )
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["satisfied"])
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["probes"], 1)
+        self.assertEqual(result["not_ready_probes"], 1)
+        self.assertEqual(result["last_error"], _MAPPED_CLIENT_NOT_POLLING)
+        self.assertEqual(result["tool"], "wait_for")
+        self.assertGreater(result["elapsed_s"], 0.0)
+
+    async def test_real_runtime_client_not_polling_then_players_satisfies(self) -> None:
+        transport = _HttpClientNotPollingThenPlayers(player_count=1)
+        runtime = _real_client_runtime_http_only(transport)
+        result = await server.execute_wait_for(
+            runtime, "players_at_least", value=1, timeout_s=5.0, poll_interval_s=0.2
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["satisfied"])
+        self.assertFalse(result["timed_out"])
+        self.assertEqual(result["probes"], 2)
+        self.assertEqual(result["not_ready_probes"], 1)
+        self.assertEqual(result["observed"], 1)
+        self.assertEqual(result["last_error"], _MAPPED_CLIENT_NOT_POLLING)
+        self.assertEqual(transport.enqueue_calls, 2)
 
     async def test_other_game_not_ready_aborts_first_probe(self) -> None:
         runtime = _FakeRuntime(player_counts=["game_not_ready:reason=no_run", 1])

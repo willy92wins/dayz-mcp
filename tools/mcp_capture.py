@@ -766,6 +766,10 @@ def _frame_stale_report(
     stored timestamp is the FIRST capture of a run of identical frames, so age_s answers "frozen
     since when" and not "how long ago was the previous call".
 
+    On an all-black frame the second capture has the same sha by construction (black == black),
+    so stale=True whether the host failed to compose or the client failed to draw. stale is not
+    the discriminant there: detail.distinct_frames / max_adjacent_delta is.
+
     The whole cycle runs inside _FrameStateLock: read, compare, prune and write are one transaction
     across processes. Serialising it is not tidiness -- without it a writer carrying an older
     snapshot replaces a newer file, resurrects a hash that a later capture then matches, and
@@ -976,7 +980,17 @@ def grab_stable_frame(
         ):
             return _error("frame_client_area_unverified")
         if float(mean) <= 1.0 and float(nonblack) <= 0.01:
-            return _error("frame_client_all_black")
+            payload = _error("frame_client_all_black")
+            # black == black by construction: stale cannot tell a frozen host
+            # from a client that is not drawing. The discriminant is
+            # detail.distinct_frames / max_adjacent_delta, not stale.
+            payload["frame_stale_report"] = frame_stale_report
+            payload["frame_stale_note"] = (
+                "on an all-black frame, stale is not the discriminant "
+                "(identical sha by construction); use detail.distinct_frames "
+                "/ max_adjacent_delta"
+            )
+            return payload
         chosen.info["window"] = chosen_result.get("window")
         chosen.info["sha256"] = chosen_result.get("sha256")
         # Client viewport of the SAME chosen frame, verified later by the consumer that needs it.

@@ -107,8 +107,11 @@ class DayzTestToolRequestTest(unittest.TestCase):
             )
         self.assertEqual(
             caught.exception.code,
-            "bridge_mod_missing: add extra_mods=['@DayZ_MCP']",
+            dayz_test_tool._BRIDGE_MOD_MISSING,
         )
+        self.assertTrue(caught.exception.code.startswith("bridge_mod_missing:"))
+        self.assertIn("folder name", caught.exception.code)
+        self.assertIn("@DayZ_MCP", caught.exception.code)
 
         for excluded_field in ("base_mods", "server_mods"):
             with self.subTest(excluded_field=excluded_field):
@@ -121,7 +124,7 @@ class DayzTestToolRequestTest(unittest.TestCase):
                     )
                 self.assertEqual(
                     caught.exception.code,
-                    "bridge_mod_missing: add extra_mods=['@DayZ_MCP']",
+                    dayz_test_tool._BRIDGE_MOD_MISSING,
                 )
 
         raw, selected = dayz_test_tool.build_run_request(
@@ -190,8 +193,28 @@ class DayzTestToolRequestTest(unittest.TestCase):
         )
         for arguments, code in invalid:
             with self.subTest(arguments=arguments):
-                with self.assertRaisesRegex(dayz_test_tool.DayzTestToolError, code):
+                with self.assertRaisesRegex(dayz_test_tool.DayzTestToolError, code) as caught:
                     dayz_test_tool.build_run_request(sealed, **arguments)
+                if code == "bad_mod":
+                    self.assertEqual(caught.exception.code, dayz_test_tool._BAD_MOD)
+                    self.assertTrue(caught.exception.code.startswith("bad_mod:"))
+                    self.assertIn("folder name", caught.exception.code)
+                    self.assertIn("@DayZ_MCP", caught.exception.code)
+
+    def test_build_run_request_names_accepted_form_for_relative_mod_path(self) -> None:
+        """fb-20260909-213257-49a9: a relative path is not a folder name."""
+        sealed = _sealed(_policy())
+        with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+            dayz_test_tool.build_run_request(
+                sealed,
+                project="ExampleMod",
+                mode="offline",
+                extra_mods=[r"mods\@DayZ_MCP"],
+            )
+        self.assertEqual(caught.exception.code, dayz_test_tool._BAD_MOD)
+        self.assertTrue(caught.exception.code.startswith("bad_mod:"))
+        self.assertIn("single folder name", caught.exception.code)
+        self.assertIn("absolute path inside the project's mod_roots", caught.exception.code)
 
     def test_build_run_request_accepts_absolute_mission_inside_roots(self) -> None:
         policy = _policy()
@@ -782,7 +805,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         launch.assert_not_awaited()
         self.assertEqual(
             caught.exception.code,
-            "bridge_mod_missing: add extra_mods=['@DayZ_MCP']",
+            dayz_test_tool._BRIDGE_MOD_MISSING,
         )
 
     async def test_run_reports_progress_and_returns_compact_terminal_result(self) -> None:
@@ -2087,6 +2110,208 @@ class DayzTestStopEnvelopeTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
             await self._stop({"runs": [row]})
         self.assertEqual(caught.exception.code, "run_not_active")
+
+
+class PeerAgeTest(unittest.TestCase):
+    def test_an_enormous_int_is_not_a_usable_age(self) -> None:
+        self.assertIsNone(dayz_test_tool._peer_age(10**400))
+
+    def test_a_normal_float_age_is_still_read(self) -> None:
+        self.assertTrue(
+            dayz_test_tool._peer_row_is_usable(
+                {
+                    "last_poll_age_s": 10**400,
+                    "bound_last_poll_age_s": 1.5,
+                }
+            )
+        )
+        self.assertEqual(dayz_test_tool._peer_age(1.5), 1.5)
+
+
+class SteamAutoRemediationTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        vpp_patcher = patch.object(
+            dayz_test_tool,
+            "preflight_vpp_request",
+            return_value=native_launcher_transaction.VppPreflightResult(
+                error_code=None,
+                missing=(),
+                warnings=(),
+                hint=native_launcher_transaction.VPP_PREFLIGHT_HINT,
+            ),
+        )
+        vpp_patcher.start()
+        self.addCleanup(vpp_patcher.stop)
+
+    def _stale(self) -> steam_preflight.SteamSessionResult:
+        return steam_preflight.SteamSessionResult(
+            error_code=steam_preflight.STEAM_SESSION_STALE,
+            steam_registered_pid=0,
+            steam_live_pids=(4321,),
+            remediation=steam_preflight.REMEDIATION,
+        )
+
+    def _healthy(self) -> steam_preflight.SteamSessionResult:
+        return steam_preflight.SteamSessionResult(
+            error_code=None,
+            steam_registered_pid=4321,
+            steam_live_pids=(4321,),
+            remediation=steam_preflight.REMEDIATION,
+        )
+
+    async def test_without_the_opt_in_a_stale_steam_session_still_aborts(self) -> None:
+        policy = _policy()
+        runtime = _Runtime()
+        launch = AsyncMock()
+        remediations: list[object] = []
+
+        def _record_remediation(*_args: object, **_kwargs: object) -> object:
+            remediations.append(1)
+            return self._healthy()
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            new=launch,
+        ), patch.object(
+            dayz_test_tool, "evaluate_steam_session", return_value=self._stale()
+        ), patch.object(
+            steam_preflight,
+            "remediate_stale_steam_session",
+            side_effect=_record_remediation,
+        ):
+            result = await dayz_test_tool.execute_dayz_test_run(
+                runtime,
+                project="ExampleMod",
+                mode="client",
+                preflight=False,
+                run_id=RUN_ID,
+                extra_mods=["@DayZ_MCP"],
+                auto_remediate_steam=False,
+            )
+
+        launch.assert_not_awaited()
+        self.assertEqual(remediations, [])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], steam_preflight.STEAM_SESSION_STALE)
+        self.assertEqual(result["phase"], "validating")
+        self.assertNotIn("steam_remediated", result)
+        self.assertNotIn("steam_remediation_s", result)
+
+    async def test_opt_in_is_sealed_and_no_remediation_occurs_before_admission(
+        self,
+    ) -> None:
+        policy = _policy()
+        runtime = _Runtime()
+        remediations: list[object] = []
+
+        def _fake_remediate(*_args: object, **_kwargs: object) -> object:
+            remediations.append(1)
+            return self._healthy()
+
+        async def launch(_raw_request: bytes, **kwargs: object) -> int:
+            self.assertIs(json.loads(_raw_request)["auto_remediate_steam"], True)
+            await kwargs["execution_started_cb"]()
+            kwargs["output_sink"](
+                "stdout",
+                _terminal(
+                    {
+                        "cleanup_degraded": False,
+                        "error_code": None,
+                        "exit_code": 0,
+                        "ok": True,
+                        "run_id": RUN_ID,
+                    }
+                ),
+            )
+            return 0
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch,
+        ), patch.object(
+            dayz_test_tool, "evaluate_steam_session", return_value=self._stale()
+        ), patch.object(
+            steam_preflight,
+            "remediate_stale_steam_session",
+            side_effect=_fake_remediate,
+        ):
+            result = await dayz_test_tool.execute_dayz_test_run(
+                runtime,
+                project="ExampleMod",
+                mode="all",
+                extra_mods=["@DayZ_MCP"],
+                auto_remediate_steam=True,
+            )
+
+        self.assertEqual(remediations, [])
+        self.assertNotIn("steam_remediated", result)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["run_id"], RUN_ID)
+
+    async def test_the_default_is_no_remediation_when_the_flag_is_not_passed(
+        self,
+    ) -> None:
+        policy = _policy()
+        runtime = _Runtime()
+        launch = AsyncMock()
+        remediations: list[object] = []
+
+        def _record_remediation(*_args: object, **_kwargs: object) -> object:
+            remediations.append(1)
+            return self._healthy()
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            new=launch,
+        ), patch.object(
+            dayz_test_tool, "evaluate_steam_session", return_value=self._stale()
+        ), patch.object(
+            steam_preflight,
+            "remediate_stale_steam_session",
+            side_effect=_record_remediation,
+        ):
+            result = await dayz_test_tool.execute_dayz_test_run(
+                runtime,
+                project="ExampleMod",
+                mode="client",
+                preflight=False,
+                run_id=RUN_ID,
+                extra_mods=["@DayZ_MCP"],
+            )
+
+        launch.assert_not_awaited()
+        self.assertEqual(remediations, [])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], steam_preflight.STEAM_SESSION_STALE)
+        self.assertNotIn("steam_remediated", result)
+        self.assertNotIn("steam_remediation_s", result)
+        self.assertIs(
+            inspect.signature(dayz_test_tool.execute_dayz_test_run)
+            .parameters["auto_remediate_steam"]
+            .default,
+            False,
+        )
 
 
 if __name__ == "__main__":

@@ -59,8 +59,8 @@ from dayz_mcp.process_lifecycle import (
 from dayz_mcp.native_process_guard import NativeProcessGuard
 from dayz_mcp.session_coordination import CleanupDisposition, SessionCoordinator
 
-# Windows process-creation flags for a detached, session-surviving child.
-_DETACHED_PROCESS = 0x00000008
+# Windows process-creation flags for a windowless, session-surviving child.
+_CREATE_NO_WINDOW = 0x08000000
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 _CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 
@@ -620,23 +620,91 @@ def _loaded_module_files() -> dict[str, str]:
     return files
 
 
-def _module_mtimes(files: dict[str, str]) -> dict[str, float | None]:
-    mtimes: dict[str, float | None] = {}
+# Cheap per-probe identity from one stat: (mtime, size, file_id). file_id is
+# st_ino (nFileIndex on Windows). None means the stat itself failed.
+_ModuleIdent = tuple[float, int, int] | None
+
+
+def _stat_identity(path: str) -> _ModuleIdent:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime, st.st_size, st.st_ino)
+
+
+def _module_idents(files: dict[str, str]) -> dict[str, _ModuleIdent]:
+    return {name: _stat_identity(path) for name, path in files.items()}
+
+
+def _module_hashes(files: dict[str, str]) -> dict[str, str | None]:
+    digests: dict[str, str | None] = {}
     for name, path in files.items():
         try:
-            mtimes[name] = Path(path).stat().st_mtime
+            digests[name] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
         except OSError:
-            mtimes[name] = None
-    return mtimes
+            digests[name] = None
+    return digests
+
+
+def _stale_watched_modules(
+    watched_files: dict[str, str],
+    idents_at_start: dict[str, _ModuleIdent],
+    hashes_at_start: dict[str, str | None],
+) -> tuple[list[str], list[str]]:
+    """Content verdict for watched daemon modules.
+
+    The cheap per-probe trigger is one ``stat`` per file: the triple
+    ``(mtime, size, file_id)`` where ``file_id`` is ``st_ino`` (Windows
+    nFileIndex). Only paths whose triple moved since the last confirmed
+    snapshot are hashed. A new identity with the same bytes is not stale
+    -- and the triple is re-anchored so later probes do not re-read.
+
+    An initial snapshot that could not be hashed stays unreadable. Two
+    ``None`` digests are not "unchanged": the in-memory copy was never
+    confirmed against disk. "Never existed" and "imported, then gone
+    before the snapshot" are not distinguished; fail-closed is unreadable.
+
+    Known miss: a replacement that preserves mtime, size, AND file
+    identity (same ``st_ino``) is invisible until something in the triple
+    moves. An ACL deny on the same object is the same miss. We do not
+    re-read the watch set (~1.45 MiB) on every ``/status``.
+    """
+    idents_now = _module_idents(watched_files)
+    stale: list[str] = []
+    unreadable: list[str] = []
+    to_hash: dict[str, str] = {}
+    for name, path in watched_files.items():
+        if hashes_at_start.get(name) is None:
+            unreadable.append(name)
+            continue
+        if idents_now.get(name) != idents_at_start.get(name):
+            to_hash[name] = path
+    hashes_now = _module_hashes(to_hash) if to_hash else {}
+    for name, digest in hashes_now.items():
+        if digest is None:
+            unreadable.append(name)
+            continue
+        if digest != hashes_at_start.get(name):
+            stale.append(name)
+            continue
+        new_ident = idents_now.get(name)
+        if new_ident is not None:
+            idents_at_start[name] = new_ident
+    stale.sort()
+    unreadable.sort()
+    return stale, unreadable
 
 
 def make_status_provider(config: Any, state: ServerState) -> Callable[[], dict]:
     # Snapshot at construction (daemon boot). Comparing against the snapshot, not
     # against a wall-clock started_at, answers the exact question -- "did this
     # file change after I loaded it?" -- and survives clock adjustments.
+    # One stat per file is the cheap per-probe filter; the hash is the boot content.
     daemon_started_at = time.time()
     watched_files = _loaded_module_files()
-    mtimes_at_start = _module_mtimes(watched_files)
+    idents_at_start = _module_idents(watched_files)
+    hashes_at_start = _module_hashes(watched_files)
 
     def status_provider() -> dict:
         payload = core.build_status(
@@ -660,21 +728,39 @@ def make_status_provider(config: Any, state: ServerState) -> Callable[[], dict]:
             "coordination_revision": coordination.get("revision"),
         }
         if state.lifecycle is not None:
-            payload["lifecycle"] = state.lifecycle.public_status()
-        mtimes_now = _module_mtimes(watched_files)
-        stale = sorted(
-            name
-            for name, mtime in mtimes_now.items()
-            if mtime is not None and mtime != mtimes_at_start.get(name)
+            # The CPU sample rides along here rather than in a tool of its own:
+            # /status is the one payload every client already reads, and a
+            # signal published nowhere is a signal nobody can act on.
+            payload["lifecycle"] = core.attach_lifecycle_cpu_signals(
+                state.lifecycle.public_status()
+            )
+            dropped = payload["lifecycle"].get("audit_rows_dropped")
+            if (
+                isinstance(dropped, int)
+                and not isinstance(dropped, bool)
+                and dropped > 0
+            ):
+                payload["audit_rows_dropped"] = dropped
+                payload["warnings"] = sorted(
+                    set(payload.get("warnings", [])) | {"audit_row_dropped"}
+                )
+        stale, unreadable = _stale_watched_modules(
+            watched_files, idents_at_start, hashes_at_start
         )
         payload["daemon_modules"] = {
             "daemon_started_at": daemon_started_at,
             "watched_count": len(watched_files),
             "stale": stale,
+            "unreadable": unreadable,
         }
+        extra_warnings: set[str] = set()
         if stale:
+            extra_warnings.add("daemon_module_stale")
+        if unreadable:
+            extra_warnings.add("daemon_module_unreadable")
+        if extra_warnings:
             payload["warnings"] = sorted(
-                set(payload.get("warnings", [])) | {"daemon_module_stale"}
+                set(payload.get("warnings", [])) | extra_warnings
             )
         return payload
 
@@ -1516,9 +1602,18 @@ def run_daemon(config: Any, *, stop: threading.Event | None = None) -> int:
 def spawn_detached(argv: list[str], *, log: Callable[[str], None] = _noop, cwd: str | None = None) -> int | None:
     """Launch ``argv`` as a detached background process that aims to survive this session.
 
-    Returns the child pid, or None on failure. On Windows the child is detached from
-    the console/process-group and tries to break away from the parent Job so Cowork/node
-    closing does not kill it. If the job forbids breakaway the child stays job-bound and
+    Returns the child pid, or None on failure. On Windows the child gets its own
+    windowless console and process group, and tries to break away from the parent
+    Job so Cowork/node closing does not kill it. CREATE_NO_WINDOW, not
+    DETACHED_PROCESS and never the two OR'd together, which Windows resolves by
+    ignoring CREATE_NO_WINDOW. Under DETACHED_PROCESS there is no console to
+    inherit, so the venv redirector -- which creates the real interpreter with
+    creationflags 0 -- allocates a private console for it and a conhost child to
+    host it, leaving the wrapper outside that console and the daemon its sole
+    member: a console close then delivers CTRL_CLOSE_EVENT to the daemon alone.
+    Measured in vivo 2026-09-08; the console presented no desktop window, so the
+    exposure is a closable console and a stray host process, not a visible window.
+    If the job forbids breakaway the child stays job-bound and
     will die when the session's Job Object closes (KILL_ON_JOB_CLOSE); multi-session then
     degrades to "one owner at a time" — the next session's client re-spawns the daemon
     into its own job. Whether breakaway succeeds under Cowork is the in-vivo gate; each
@@ -1548,7 +1643,7 @@ def spawn_detached(argv: list[str], *, log: Callable[[str], None] = _noop, cwd: 
             log(f"SPAWN: failed to launch daemon: {exc}")
             return None
 
-    detached = _DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP
+    detached = _CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP
     try:
         pid = subprocess.Popen(
             argv,

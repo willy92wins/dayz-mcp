@@ -81,7 +81,10 @@ def main() -> int:
             tocados.append(rel)
             # STATE.md is the worker's report; BRIEF.txt is the brief the Cursor runner copies
             # into the workspace (its .cmd wrapper cannot take a multi-line prompt).
-            if rel not in permitidos and rel not in ("STATE.md", "BRIEF.txt"):
+            # suite_full-last.txt is written by gate/suite_full.sh itself (2026-09-07, lote G2:
+            # it showed up as "outside the allowlist" on a delivery whose three gates were all
+            # green -- the instrument accusing the worker of its own artefact).
+            if rel not in permitidos and rel not in ("STATE.md", "BRIEF.txt", "suite_full-last.txt"):
                 fuera.append(rel)
     print(f"[2] write-set: {len(tocados)} ficheros tocados desde STARTED; fuera del allowlist: {fuera or 'ninguno'}")
     for rel in sorted(tocados):

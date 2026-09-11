@@ -65,6 +65,7 @@ SERVER_COMMANDS = {
     "surface_query",
     "player_teleport",
     "object_anim",
+    "inventory_attach",
     "inventory_give",
     "object_inspect",
     "infected_drive",
@@ -611,6 +612,44 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             },
         )
     ),
+    "inventory_attach": _command_schema(
+        _schema_variant(
+            required=("object_id", "classname", "dest", "slot"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "classname": _is_non_empty_string,
+                "dest": _equal_to("attachment"),
+                "slot": _is_non_empty_string,
+            },
+        ),
+        _schema_variant(
+            required=("type", "pos", "classname", "dest", "slot"),
+            validators={
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "classname": _is_non_empty_string,
+                "dest": _equal_to("attachment"),
+                "slot": _is_non_empty_string,
+            },
+        ),
+        _schema_variant(
+            required=("object_id", "classname", "dest"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "classname": _is_non_empty_string,
+                "dest": _equal_to("cargo"),
+            },
+        ),
+        _schema_variant(
+            required=("type", "pos", "classname", "dest"),
+            validators={
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "classname": _is_non_empty_string,
+                "dest": _equal_to("cargo"),
+            },
+        ),
+    ),
     "object_inspect": _command_schema(
         _schema_variant(
             required=("type", "pos", "want"),
@@ -908,7 +947,8 @@ class ServerState:
         }
         self._command_fence: dict[int, tuple[str, int, int]] = {}
         self._test_identity_override: TestIdentityOverride | None = None
-        self._retired_instances: OrderedDict[str, None] = OrderedDict()
+        # Bounded tombstones retain (role, cause) for caller-facing errors.
+        self._retired_instances: OrderedDict[str, tuple[str, str]] = OrderedDict()
         self._retired_roles: set[str] = set()
         self._creation_time_fn: Callable[[int], str | None] | None = None
         self._connections_fn: Callable[[], object] | None = None
@@ -1128,10 +1168,13 @@ class ServerState:
             return
         self._station_epoch += 1
         queue = self._bound_queues.get(instance, [])
+        _, retirement = fence_error("binding_retired", retirement_reason=reason)
+        hint = retirement.get("hint")
         self._discard_queue(
-            queue, "binding_retired", discarded_exec, finished_operations
+            queue, "binding_retired", discarded_exec, finished_operations,
+            hint=hint if isinstance(hint, str) else None,
         )
-        self._retired_instances[instance] = None
+        self._retired_instances[instance] = (binding.role, reason)
         self._retired_instances.move_to_end(instance)
         while len(self._retired_instances) > RETIRED_INSTANCE_LIMIT:
             self._retired_instances.popitem(last=False)
@@ -1320,10 +1363,22 @@ class ServerState:
             return "run_state_unavailable"
         return "binding_retired"
 
-    def _fence_reject_response(self, code: str) -> tuple[int, dict]:
+    def _fence_reject_response(
+        self, code: str, *, peer: str | None = None
+    ) -> tuple[int, dict]:
         if code == "run_state_unavailable":
             return 503, {"error": "run_state_unavailable"}
-        status, payload = fence_error(code)
+        retirement_reason = None
+        if code == "binding_retired" and peer is not None:
+            with self._lock:
+                # A present target may have its own terminal durable row. Never
+                # attribute an older run's tombstone to that newer binding.
+                if not self._active_bindings_for_peer(peer):
+                    for role, reason in reversed(self._retired_instances.values()):
+                        if role == peer or role == "offline":
+                            retirement_reason = reason
+                            break
+        status, payload = fence_error(code, retirement_reason=retirement_reason)
         if code == "run_not_owned":
             payload["hint"] = _RUN_NOT_OWNED_HINT
         return status, payload
@@ -1809,7 +1864,7 @@ class ServerState:
                 self._fence_reject_counts[code] = (
                     self._fence_reject_counts.get(code, 0) + 1
                 )
-                return self._fence_reject_response(code)
+                return self._fence_reject_response(code, peer=peer)
             if self._peer_queue_len(peer) >= MAX_QUEUE:
                 return 429, {"error": "queue_full"}
 
@@ -1887,7 +1942,7 @@ class ServerState:
                 self._fence_reject_counts[fence_error_code] = (
                     self._fence_reject_counts.get(fence_error_code, 0) + 1
                 )
-                return self._fence_reject_response(fence_error_code)
+                return self._fence_reject_response(fence_error_code, peer=peer)
             if self._peer_queue_len(peer) >= MAX_QUEUE:
                 return 429, {"error": "queue_full"}
             command_id = self._next_id
@@ -1962,7 +2017,7 @@ class ServerState:
             return 429, {"error": "queue_full"}
         if fence_lost:
             if fence_error_code is not None:
-                return self._fence_reject_response(fence_error_code)
+                return self._fence_reject_response(fence_error_code, peer=peer)
             return 409, {"error": "enqueue_cancelled"}
         if commit_failed:
             return 409, {"error": "lease_invalid"}
@@ -2405,12 +2460,14 @@ class ServerState:
         reason: str,
         discarded_exec: list[tuple[str, str, int]],
         finished_operations: list[tuple[ClientIdentity, str, int, str, str]],
+        *,
+        hint: str | None = None,
     ) -> None:
         # Caller holds self._lock. Empties the queue, recording a failed result
         # per command so its enqueuer's /await resolves instead of hanging.
         for command in queue:
             self._mark_discarded(
-                command, reason, discarded_exec, finished_operations
+                command, reason, discarded_exec, finished_operations, hint=hint
             )
         queue.clear()
 
@@ -2443,6 +2500,8 @@ class ServerState:
         reason: str,
         discarded_exec: list[tuple[str, str, int]],
         finished_operations: list[tuple[ClientIdentity, str, int, str, str]],
+        *,
+        hint: str | None = None,
     ) -> None:
         # Caller holds self._lock. Records the failed result and, for exec_enforce,
         # collects an audit tuple to be written by the caller outside the lock.
@@ -2455,6 +2514,8 @@ class ServerState:
             self._results.pop(command_id, None)
         elif command_id not in self._results:
             self._results[command_id] = {"id": command_id, "ok": False, "error": reason}
+            if hint is not None:
+                self._results[command_id]["hint"] = hint
             self._trim_results_locked()
         self._enqueued_at.pop(command_id, None)
         self._operation_deadlines.pop(command_id, None)
