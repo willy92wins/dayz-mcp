@@ -257,6 +257,8 @@ class ToolDescriptionTruthTest(unittest.IsolatedAsyncioTestCase):
     async def test_capture_screenshot_warns_about_focus_and_two_clients(self) -> None:
         description = self.tools["capture_screenshot"].description or ""
         self.assertIn("Without window focus", description)
+        self.assertIn("never steals OS focus", description)
+        self.assertIn("no SetForegroundWindow", description)
         self.assertIn("frame can be frozen", description)
         self.assertIn("cmdline_match/client_pid", description)
         self.assertIn("live run's client", description)

@@ -853,7 +853,12 @@ def _frame_stale_report(
     return {"stale": stale, "detail": detail}
 
 
-def _run_window_capture(output_path: str, process_name: str, timeout_s: float, method: str = "auto", client_pid: int = 0, cmdline_match: str = "") -> dict[str, Any]:
+# printwindow first, never ForceForeground: AttachThreadInput+SetForegroundWindow
+# has killed the live DayZ client (fb-20260904-025027-8f76).
+DEFAULT_GRAB_METHOD = "printwindow"
+
+
+def _run_window_capture(output_path: str, process_name: str, timeout_s: float, method: str = DEFAULT_GRAB_METHOD, client_pid: int = 0, cmdline_match: str = "") -> dict[str, Any]:
     if not os.path.exists(GRAB_SCRIPT):
         return {"ok": False, "error": f"capture_backend_failed: grab script missing {GRAB_SCRIPT}"}
     cmd = [
@@ -906,7 +911,7 @@ def _run_window_capture(output_path: str, process_name: str, timeout_s: float, m
         return {"ok": False, "error": f"capture_backend_failed: {exc}"}
 
 
-def grab_window_to_file(output_path: str, process_name: str = "DayZDiag_x64", method: str = "auto", timeout_s: float = 8.0, client_pid: int = 0, cmdline_match: str = "") -> dict[str, Any]:
+def grab_window_to_file(output_path: str, process_name: str = "DayZDiag_x64", method: str = DEFAULT_GRAB_METHOD, timeout_s: float = 8.0, client_pid: int = 0, cmdline_match: str = "") -> dict[str, Any]:
     """Single host-side grab to a PNG file. Returns the backend payload
     ({ok, method, error, window, stats, client, clientStats, sha256}). Public so content-validation
     harnesses can grab twice (subject vs control) and diff the actual pixels. cmdline_match (preferred) or client_pid
@@ -918,7 +923,7 @@ def grab_window_to_file(output_path: str, process_name: str = "DayZDiag_x64", me
 def grab_stable_frame(
     frames: int = DEFAULT_FRAME_COUNT,
     process_name: str = "DayZDiag_x64",
-    method: str = "auto",
+    method: str = DEFAULT_GRAB_METHOD,
     client_pid: int = 0,
     cmdline_match: str = "",
 ) -> Image.Image | dict[str, Any]:
@@ -1004,7 +1009,7 @@ def capture_screenshot(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     frames: int = DEFAULT_FRAME_COUNT,
     process_name: str = "DayZDiag_x64",
-    method: str = "auto",
+    method: str = DEFAULT_GRAB_METHOD,
     client_pid: int = 0,
     cmdline_match: str = "",
     fmt: str = DEFAULT_FORMAT,
@@ -1043,7 +1048,7 @@ def capture_dual(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     frames: int = DEFAULT_FRAME_COUNT,
     process_name: str = "DayZDiag_x64",
-    method: str = "auto",
+    method: str = DEFAULT_GRAB_METHOD,
     client_pid: int = 0,
     cmdline_match: str = "",
     fmt: str = DEFAULT_FORMAT,

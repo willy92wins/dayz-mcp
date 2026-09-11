@@ -39,6 +39,11 @@ from dayz_mcp import (
 from dayz_mcp.control_client import ControlClient, ControlClientError, ControlIdentity
 from dayz_mcp.accredited_daemon_transport import AccreditedTransportError
 from dayz_mcp.daemon_policy import load_normal_daemon_policy
+from dayz_mcp.camera_restore import (
+    RESTORE_CAMERA_PROBE_CMD,
+    RESTORE_NOT_VERIFIED,
+    restore_camera_verdict as _restore_camera_verdict,
+)
 from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from dayz_mcp.effective_schema_core import project_server_config_identity
 from dayz_mcp.tool_registry_fingerprint import capture_registry_snapshot
@@ -1942,46 +1947,9 @@ def _timeout(timeout_s: float) -> float:
     return value
 
 
-# restore_gameplay closes its verdict blind in Enforce: RestoreGameplay() and
-# ReleaseCamera() return nothing and `result.ok = true` is unconditional
-# (addon/scripts/5_Mission/MCPClientBridge.c:706-711), while both have exits
-# that do nothing at all -- `if (!mission) return;` at :3919-3922 and the
-# m_ControlsSuppressed guard at :3924. Ficha fb-20260903-125244-4f83.
-#
-# Of the four things the verb promises -- simulation, input, HUD and the camera
-# -- only the camera is readable from this layer, through the camera_get verb
-# that already exists: BuildCameraResult (:3645-3684) answers
-# error="player_camera_active" exactly when no scripted camera is mounted, the
-# discriminator measured in-game on 2026-08-16 (BUG-075). So the tool confirms
-# that one postcondition and refuses to answer ok when it cannot read it (G6,
-# fail closed): a false green here leaves the client unusable with reconnecting
-# as the only documented way out, and the verb is idempotent, so a retry after a
-# red is cheap. Controls, HUD and simulation stay unverifiable until the bridge
-# exposes a reader for them, and the successful response says so out loud.
-RESTORE_CAMERA_PROBE_CMD = "camera_get"
-RESTORE_NOT_VERIFIED = ("controls", "hud", "simulation")
-
-
-def _restore_camera_verdict(probe: dict[str, Any]) -> tuple[str, str]:
-    """Classify a camera_get result as released | still_active | unverified.
-
-    Anything that is not a positive reading of the released camera is
-    ``unverified``; absence is never taken for success.
-    """
-    camera = probe.get("camera") if isinstance(probe, dict) else None
-    if not isinstance(camera, dict):
-        return "unverified", "camera_get returned no camera block"
-    if not camera.get("ok"):
-        reason = str(camera.get("error") or "camera_not_readable")
-        return "unverified", f"camera_get could not read the camera ({reason})"
-    if camera.get("viewport_moved"):
-        return "still_active", str(camera.get("error") or "")
-    if camera.get("error") == "player_camera_active" or "viewport_moved" in camera:
-        return "released", ""
-    return (
-        "unverified",
-        "camera_get reported neither viewport_moved nor player_camera_active",
-    )
+# restore_gameplay closes its verdict blind in Enforce (ficha 4f83). The
+# observer is dayz_mcp.camera_restore: view=player vs view=scripted vs ok=0.
+# Re-exported below so existing tests keep importing from server.
 
 
 # Mirrors VEHICLE_CONTROL_MAX_TTL_S in addon/scripts/5_Mission/MCPClientBridge.c:114.
@@ -4760,7 +4728,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "matrix (cam_matrix of 12), free (cam_pos, then look_at or cam_orientation). "
         "cam_orientation is [yaw, pitch, roll] in degrees. fov is the FOV angle "
         "in radians; 0 leaves the current/default FOV unchanged. "
-        "cam_mode look_at is accepted as an alias of lookat and is sent as lookat."
+        "cam_mode look_at is accepted as an alias of lookat and is sent as lookat. "
+        "Settle is wall-time only (no Camera.IsInterpolationComplete / GetCurrentFOV). "
+        "Use restore_gameplay to leave the scripted camera; camera_get.view is the observer."
     ))
     async def camera_set(
         cam_mode: str = "orient",
@@ -4811,7 +4781,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("camera_set", args, "client", _timeout(timeout_s))
 
-    @app.tool(description="Read the active client camera state through the existing camera_get bridge command.")
+    @app.tool(description=(
+        "Read the client camera through camera_get. Observable trichotomy "
+        "(decision 6): camera.view='player' + ok + viewport_moved=0 is the "
+        "liberated player camera (DayZPlayer.GetCurrentCameraTransform); "
+        "camera.view='scripted' + ok + viewport_moved=1 is a mounted "
+        "scripted camera; ok=0 plus a named camera.error is illegible "
+        "(client_not_in_game, camera_unavailable_*, "
+        "camera_illegible_player_transform). Absence of m_ActiveCam is not "
+        "liberation. Live-client recipe that does not poll (L5/L6, ficha "
+        "5cca): this tool is one client command; do not wait_for a poll "
+        "heartbeat to decide the camera. A live process that is not polling "
+        "is classified by the dayz_test_run replace-gate (pid alive + "
+        "readable peer + record age past the start budget + not "
+        "_peer_is_live → client_not_polling), not by camera_get."
+    ))
     async def camera_get(cam_mode: str = "get", timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         args = {"cam_mode": cam_mode} if cam_mode else {}
         async with runtime.tool_lock:
@@ -4821,12 +4805,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         f"{LEASE_TOOL_LINE} Restore local player simulation, input, HUD, and "
         "release the camera. camera_set has no off mode. The bridge closes this "
         "verdict without checking anything, so the tool re-reads the camera with "
-        "camera_get and fails closed: ok only when the view is back on the "
-        "player (camera_released: true), otherwise camera_still_active or "
-        "restore_unverified. Controls, HUD and simulation are NOT verified -- no "
-        "reader for them exists on the wire -- and the ok names them in "
-        "not_verified. The verb is idempotent, so a red can simply be retried. "
-        "timeout_s bounds each of the two bridge calls."
+        "camera_get and fails closed: ok only when camera.view='player' "
+        "(camera_released: true), camera_still_active when view='scripted' or "
+        "viewport_moved, restore_unverified when the probe is illegible "
+        "(ok=0). Do not treat a missing scripted camera as liberation. "
+        "Controls, HUD and simulation are NOT verified -- no reader for them "
+        "exists on the wire -- and the ok names them in not_verified. The "
+        "verb is idempotent, so a red can simply be retried. timeout_s bounds "
+        "each of the two bridge calls."
     ))
     async def restore_gameplay(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
@@ -4897,7 +4883,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "The result is ALWAYS two blocks: the image, then a JSON text block with the surface map (crop_space, window_surface, client_surface, effective_surface, frame_sha256, frame_stale, frame_stale_detail, fullres_path). "
         "crop_space='client' (default) normalizes crop over the rendered viewport (the space ui_tree rects use) and fails closed with frame_client_rect_unverified; 'window' is the legacy whole-window bitmap. save_fullres=True also writes the "
         "native-resolution frame to disk and reports its path as fullres_path — read that file for "
-        "fine detail, bypassing the inline token budget. Without window focus, the frame can be frozen: frame_stale (bool | null) declares it. true means these "
+        "fine detail, bypassing the inline token budget. Capture never steals OS focus "
+        "(PrintWindow, then CopyFromScreen; no SetForegroundWindow) because focus theft "
+        "has killed the live client (ficha 8f76). Without window focus, the frame can be frozen: frame_stale (bool | null) declares it. true means these "
         "pixels repeat the previous capture of the same window, false that the render advanced, and null that no comparison was possible (first capture, an "
         "unidentifiable window, a record over a different surface or geometry, or an unusable state store). frame_stale_detail carries the evidence: "
         "previous_sha256, age_s, repeat_count, key_kind and state_backend, plus the intra-call frames, distinct_frames and max_adjacent_delta, which need no "

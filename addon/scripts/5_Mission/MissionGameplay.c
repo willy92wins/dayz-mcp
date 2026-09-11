@@ -13,6 +13,7 @@ modded class MissionGameplay
 		if (bridge)
 		{
 			bridge.OnTick(0.0);
+			bridge.ReleaseGameFocus();
 		}
 	}
 
