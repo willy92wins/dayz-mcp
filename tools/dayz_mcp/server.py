@@ -3843,7 +3843,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(
         description=(
-            "Queue adoption and shutdown of one exact approved DayZ run."
+            "Queue adoption and shutdown of one exact approved DayZ run. "
+            "Stop uses forced process kill, not orderly mission teardown: "
+            "RPT exit metrics (Leaked counts, Destroying game, Termination "
+            "successfully completed) are not valid after this tool. status "
+            "succeeded means processes are gone; exit_metrics_valid is false."
         )
     )
     async def dayz_test_stop(

@@ -3249,11 +3249,19 @@ class ProcessLifecycle:
                         state="STOPPING",
                         terminated=terminated,
                     )
+                # fb-20260908-202102-2edd (2edd-2): stop_run terminates via
+                # guard.kill, not orderly mission teardown. Callers that read
+                # RPT Leaked/Destroying-game lines after a "succeeded" stop
+                # were reading an unexecuted check as zero. Say so on the wire.
                 result = {
                     "ok": True,
                     "run_id": run_id,
                     "state": "EXITED",
                     "terminated": terminated,
+                    "stop_method": (
+                        "forced_kill" if terminated > 0 else "no_live_owned"
+                    ),
+                    "exit_metrics_valid": False,
                 }
                 return self._terminal_outcome(
                     result,

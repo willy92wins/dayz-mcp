@@ -1562,6 +1562,8 @@ class ProcessLifecycleTest(unittest.TestCase):
                 "run_id": "run-existing",
                 "state": "EXITED",
                 "terminated": 0,
+                "stop_method": "no_live_owned",
+                "exit_metrics_valid": False,
             },
         )
         stored = self.store.get("run-existing")
@@ -1604,6 +1606,8 @@ class ProcessLifecycleTest(unittest.TestCase):
                 "run_id": "run-existing",
                 "state": "EXITED",
                 "terminated": 1,
+                "stop_method": "forced_kill",
+                "exit_metrics_valid": False,
             },
         )
         self.assertEqual([item.pid for item in self.guard.terminate_calls], [second.pid])
@@ -1622,6 +1626,8 @@ class ProcessLifecycleTest(unittest.TestCase):
                 "run_id": "run-existing",
                 "state": "EXITED",
                 "terminated": 1,
+                "stop_method": "forced_kill",
+                "exit_metrics_valid": False,
             },
         )
         exited = self.store.get(run.run_id)
@@ -1948,6 +1954,8 @@ class ProcessLifecycleTest(unittest.TestCase):
                 "run_id": "run-existing",
                 "state": "EXITED",
                 "terminated": 1,
+                "stop_method": "forced_kill",
+                "exit_metrics_valid": False,
             },
         )
         stored = self.store.get(run.run_id)

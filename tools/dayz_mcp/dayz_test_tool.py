@@ -1170,6 +1170,14 @@ def _stop_artifacts(
                     roles.add(role)
     if len(roles) > 1:
         return list(candidates)
+    # fb-20260904-200821-dae1 (dae1-3 / A4 MEDIO): a server-anchored run
+    # used to return only the server profiles root when the client role had
+    # already left the row (hung client, 8f76). Hung-client RPTs under
+    # _client\profiles were then never collected on stop. Keep client-only
+    # anchors as a single root; expand server anchors to the full "all" set.
+    server_roots = _artifact_paths(policy, "server")
+    if matches == server_roots:
+        return list(candidates)
     return matches
 
 
@@ -1760,4 +1768,10 @@ async def execute_dayz_test_stop(
                         error_code=None,
                         cleanup_degraded=False,
                     )
+            # 2edd-2: dayz_test_stop always drives the kill path today. Surface
+            # that on the MCP envelope so "succeeded" is not read as "exit
+            # metrics were collected" (Leaked lines, Destroying game, etc.).
+            if result.get("status") == "succeeded":
+                result.setdefault("stop_method", "forced_kill")
+                result["exit_metrics_valid"] = False
             return result
