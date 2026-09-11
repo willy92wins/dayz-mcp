@@ -65,6 +65,7 @@ SERVER_COMMANDS = {
     "surface_query",
     "player_teleport",
     "object_anim",
+    "inventory_attach",
     "inventory_give",
     "object_inspect",
     "infected_drive",
@@ -610,6 +611,44 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "dest": _one_of("hands", "inventory"),
             },
         )
+    ),
+    "inventory_attach": _command_schema(
+        _schema_variant(
+            required=("object_id", "classname", "dest", "slot"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "classname": _is_non_empty_string,
+                "dest": _equal_to("attachment"),
+                "slot": _is_non_empty_string,
+            },
+        ),
+        _schema_variant(
+            required=("type", "pos", "classname", "dest", "slot"),
+            validators={
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "classname": _is_non_empty_string,
+                "dest": _equal_to("attachment"),
+                "slot": _is_non_empty_string,
+            },
+        ),
+        _schema_variant(
+            required=("object_id", "classname", "dest"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "classname": _is_non_empty_string,
+                "dest": _equal_to("cargo"),
+            },
+        ),
+        _schema_variant(
+            required=("type", "pos", "classname", "dest"),
+            validators={
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "classname": _is_non_empty_string,
+                "dest": _equal_to("cargo"),
+            },
+        ),
     ),
     "object_inspect": _command_schema(
         _schema_variant(

@@ -10,6 +10,7 @@
       "entities_query": "entities_query",
       "exec_enforce": null,
       "infected_drive": "infected_drive",
+      "inventory_attach": "inventory_attach",
       "inventory_give": "inventory_give",
       "notify_players": "notify_players",
       "object_anim": "object_anim",

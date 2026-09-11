@@ -32,7 +32,7 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,infected_drive,inventory_give,notify_players," + "object_anim,object_delete,object_inspect,player_teleport,query_all_players," + "query_get_in_condition,query_player_state,scene_raycast,surface_query,telemetry_read," + "vehicle_drive,vehicle_enter,vehicle_prepare_fixture,world_spawn,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_inspect,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_drive,vehicle_enter,vehicle_prepare_fixture,world_spawn," + "world_time_set,world_weather_set";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -541,6 +541,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "inventory_give")
 		{
 			postNow = DispatchInventoryGive(command, result);
+		}
+		else if (command.cmd == "inventory_attach")
+		{
+			postNow = DispatchInventoryAttach(command, result);
 		}
 		else if (command.cmd == "object_inspect")
 		{
@@ -1407,6 +1411,180 @@ class MCPBridge : Managed
 		result.deferred = false;
 		result.ok = true;
 		return true;
+	}
+
+	// Create an item directly in one world entity's attachment slot or cargo.
+	// Resolution is shared with object_inspect, so object_id is position-independent
+	// and type+pos remains unique-or-fail. Success includes an immediate inventory
+	// snapshot of this same target; callers can re-read it with object_inspect.
+	protected bool DispatchInventoryAttach(MCPCommand command, MCPResult result)
+	{
+		if (!command.args || command.args.classname == "")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		if (command.args.dest == "attachment")
+		{
+			if (command.args.slot == "")
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+		}
+		else if (command.args.dest == "cargo")
+		{
+			if (command.args.slot != "")
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+		}
+		else
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		string attachResolveError = "";
+		Object attachTarget = ResolveCommandObject(command.args, attachResolveError);
+		if (!attachTarget)
+		{
+			result.ok = false;
+			result.error = attachResolveError;
+			return true;
+		}
+
+		EntityAI attachOwner = EntityAI.Cast(attachTarget);
+		if (!attachOwner)
+		{
+			result.ok = false;
+			result.error = "not_entity_ai";
+			return true;
+		}
+
+		GameInventory attachInventory = attachOwner.GetInventory();
+		if (!attachInventory)
+		{
+			result.ok = false;
+			result.error = "inventory_unavailable";
+			return true;
+		}
+
+		if (!IsKnownInventoryClassname(command.args.classname))
+		{
+			result.ok = false;
+			result.error = "invalid_classname";
+			return true;
+		}
+
+		EntityAI attachedItem = null;
+		int attachSlotId = InventorySlots.INVALID;
+		if (command.args.dest == "attachment")
+		{
+			attachSlotId = InventorySlots.GetSlotIdFromString(command.args.slot);
+			if (!InventorySlots.IsSlotIdValid(attachSlotId))
+			{
+				result.ok = false;
+				result.error = "slot_not_found";
+				return true;
+			}
+			if (!attachInventory.HasAttachmentSlot(attachSlotId))
+			{
+				result.ok = false;
+				result.error = "slot_not_found";
+				return true;
+			}
+			if (attachInventory.FindAttachment(attachSlotId))
+			{
+				result.ok = false;
+				result.error = "slot_occupied";
+				return true;
+			}
+
+			attachedItem = attachInventory.CreateAttachmentEx(command.args.classname, attachSlotId);
+			if (!attachedItem)
+			{
+				result.ok = false;
+				result.error = "attachment_create_failed";
+				return true;
+			}
+			if (attachInventory.FindAttachment(attachSlotId) != attachedItem)
+			{
+				result.ok = false;
+				result.error = "attachment_postcondition_failed";
+				return true;
+			}
+		}
+		else
+		{
+			if (!attachInventory.GetCargo())
+			{
+				result.ok = false;
+				result.error = "cargo_unavailable";
+				return true;
+			}
+
+			attachedItem = attachInventory.CreateEntityInCargo(command.args.classname);
+			if (!attachedItem)
+			{
+				result.ok = false;
+				result.error = "cargo_create_failed";
+				return true;
+			}
+			if (!attachInventory.HasEntityInCargo(attachedItem))
+			{
+				result.ok = false;
+				result.error = "cargo_postcondition_failed";
+				return true;
+			}
+		}
+
+		result.classname = command.args.classname;
+		result.type = attachedItem.GetType();
+		result.found = true;
+		if (command.args.object_id > 0)
+		{
+			result.object_id = command.args.object_id;
+		}
+
+		MCPInventoryAttachReceipt attachReceipt = new MCPInventoryAttachReceipt();
+		attachReceipt.dest = command.args.dest;
+		attachReceipt.slot = command.args.slot;
+		result.inventory_attach = attachReceipt;
+
+		MCPTelemetry attachTelemetry = new MCPTelemetry();
+		attachTelemetry.mode = "inventory_attach";
+		PopulateTelemetryObject(attachOwner, attachTelemetry);
+		result.telemetry = attachTelemetry;
+		result.ok = true;
+		return true;
+	}
+
+	protected bool IsKnownInventoryClassname(string classname)
+	{
+		if (classname == "")
+		{
+			return false;
+		}
+		if (GetGame().ConfigIsExisting("CfgVehicles " + classname))
+		{
+			return true;
+		}
+		if (GetGame().ConfigIsExisting("CfgWeapons " + classname))
+		{
+			return true;
+		}
+		if (GetGame().ConfigIsExisting("CfgMagazines " + classname))
+		{
+			return true;
+		}
+		return false;
 	}
 
 	// Raw nearby objects via GetObjectsAtPosition3D. No classname filter.

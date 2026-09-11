@@ -40,6 +40,7 @@ PRUNABLE_FIELDS = (
     "trace",
     "pos_real",
     "normal",
+    "inventory_attach",
     "inspect",
     "entities",
     "ui",

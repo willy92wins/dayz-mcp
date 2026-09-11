@@ -63,6 +63,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "entities_query",
     "exec_enforce",
     "infected_drive",
+    "inventory_attach",
     "inventory_give",
     "notify_players",
     "object_anim",

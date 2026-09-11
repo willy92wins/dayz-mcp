@@ -20,7 +20,7 @@ from typing import Annotated, Any, Awaitable, Callable, Iterator, Literal
 
 from mcp.server.fastmcp import Context, FastMCP, Image
 from mcp.server.fastmcp.exceptions import ToolError
-from pydantic import Field, StrictBool, StrictFloat, StrictInt
+from pydantic import Field, StrictBool, StrictFloat, StrictInt, StrictStr
 
 import mcp_capture
 from dayz_mcp import (
@@ -68,6 +68,7 @@ playbook_tool_mod.load_runner()
 _SERVER_SOURCES = ServerSourceWatch(loaded_source_files())
 
 UiClickMode = Literal["direct", "complete"]
+InventoryAttachDest = Literal["attachment", "cargo"]
 UiReloadLayoutMode = Literal["reload", "close"]
 TelemetryReadMode = Literal["object_at", "fixture_jsonl"]
 
@@ -575,6 +576,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "entities_query": "entities_query",
         "exec_enforce": None,  # not a public tool by decision
         "infected_drive": "infected_drive",
+        "inventory_attach": "inventory_attach",
         "inventory_give": "inventory_give",
         "notify_players": "notify_players",
         "object_anim": "object_anim",
@@ -4487,6 +4489,52 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["uid"] = uid
         async with runtime.tool_lock:
             return await runtime.call_bridge("inventory_give", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} "
+            "Create classname in a world EntityAI selected by object_id or by "
+            "unique type+pos. dest='attachment' requires a non-empty slot and "
+            "uses CreateAttachmentEx; dest='cargo' requires slot to be omitted. "
+            "Success returns the destination receipt plus an immediate inventory "
+            "snapshot; object_inspect(want=['inventory']) can re-read it."
+        )
+    )
+    async def inventory_attach(
+        classname: StrictStr,
+        dest: InventoryAttachDest,
+        type: StrictStr = "",
+        pos: list[StrictFloat] | None = None,
+        object_id: StrictInt = 0,
+        slot: StrictStr = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(classname, str) or classname == "":
+            raise ToolError(
+                _bad_args("classname", classname, "be a non-empty string")
+            )
+        if not isinstance(dest, str) or dest not in {"attachment", "cargo"}:
+            raise ToolError(
+                _bad_args("dest", dest, "be one of 'attachment' or 'cargo'")
+            )
+        if not isinstance(slot, str):
+            raise ToolError(_bad_args("slot", slot, "be a string"))
+        if dest == "attachment" and slot == "":
+            raise ToolError(
+                _bad_args("slot", slot, "be non-empty when dest is 'attachment'")
+            )
+        if dest == "cargo" and slot != "":
+            raise ToolError(
+                _bad_args("slot", slot, "be omitted when dest is 'cargo'")
+            )
+        args: dict[str, Any] = {"classname": classname, "dest": dest}
+        if dest == "attachment":
+            args["slot"] = slot
+        args.update(_object_target_args(type, pos, object_id))
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "inventory_attach", args, "server", _timeout(timeout_s)
+            )
 
     # Memory points + bounding_center. Missing points are exists:false, ok:true.
     @app.tool(
