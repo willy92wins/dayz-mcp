@@ -53,6 +53,7 @@ from dayz_mcp.server_freshness import (
     ServerSourceWatch,
     install_result_freshness,
     loaded_source_files,
+    schema_signal,
     source_stale,
 )
 from dayz_mcp import log_tail, result_prune
@@ -789,9 +790,12 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     clicked=false, and a world_spawn timeout has to stay "timeout". The click
     scalars are reported for ui_click only, an empty handler included -- no
     handler ran, which is a different diagnosis from one that ran and declined.
-    The echo is whitelisted and empty values are omitted; requested_text stays
-    out on purpose, it would replay caller input (possibly sensitive, unbounded)
-    into an error message.
+    The echo is whitelisted; requested_root and requested_path are echoed
+    whenever the bridge sent the key (empty root included, ficha f4f2).
+    matched_path is filled only after a unique match, so an empty value is
+    omitted (it is not a request input). requested_text stays out on purpose,
+    it would replay caller input (possibly sensitive, unbounded) into an
+    error message.
     """
     if cmd not in _UI_ECHO_VERBS:
         return ""
@@ -804,9 +808,17 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
             parts.append(" ".join(fields))
     echo = result.get("ui_request")
     if isinstance(echo, dict):
-        pairs = [
-            f"{key}={echo[key]!r}" for key in _UI_ECHO_KEYS if echo.get(key) not in (None, "")
-        ]
+        pairs = []
+        for key in _UI_ECHO_KEYS:
+            if key not in echo:
+                continue
+            value = echo[key]
+            if value is None:
+                continue
+            # Empty matched_path is unset resolution, not an echoed input.
+            if key == "matched_path" and value == "":
+                continue
+            pairs.append(f"{key}={value!r}")
         if pairs:
             parts.append(" ".join(pairs))
     return "; ".join(parts)
@@ -2861,7 +2873,9 @@ async def execute_wait_for(
             or lookback_lines < 0
             or lookback_lines > WAIT_FOR_LOOKBACK_MAX
         ):
-            raise ToolError("bad_args: lookback_lines must be in 0..2000")
+            raise ToolError(
+                f"bad_args: lookback_lines must be in 0..{WAIT_FOR_LOOKBACK_MAX}"
+            )
         if lookback_from not in WAIT_FOR_LOOKBACK_FROM:
             raise ToolError('bad_args: lookback_from must be "lines" or "launch"')
 
@@ -3409,7 +3423,9 @@ def _bridge_status_description() -> str:
         "server_modules watches this tools process's loaded Python sources; "
         "stale lists changed content, unreadable lists unverifiable sources. "
         "tool_registry_source_stale is always a boolean: true for stale OR "
-        "unknown, false only for verified fresh. server_modules.status "
+        "unknown, false only for verified fresh. tool_registry_schema_signal "
+        "is fresh | stale_client | unknown (stale_client means reopen the MCP "
+        "client). server_modules.status "
         "distinguishes fresh/stale/unknown; unreadable_reasons and "
         "observation_errors explain unknown, including a detached result hook. "
         "Sources use stat(mtime_ns,size,file_id) then hash on change; edits/ACL "
@@ -3488,6 +3504,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         modules = await asyncio.to_thread(observe_server_sources)
         overlay["server_modules"] = modules
         overlay["tool_registry_source_stale"] = source_stale(modules)
+        overlay["tool_registry_schema_signal"] = schema_signal(modules)
         return overlay
 
     async def _bridge_tool_names() -> frozenset[str]:
@@ -4599,7 +4616,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Set server world "
-            "date/time and optionally the time multiplier."
+            "date/time and optionally the time multiplier. This is a server "
+            "world-effect: Python confirms the applied echo "
+            "(date_applied / multiplier_applied). Visual/particle confirmation "
+            "is in_game_required, not a wire guarantee."
         )
     )
     async def world_time_set(
@@ -4672,7 +4692,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Requires a lease (session_acquire_wait). Set server weather "
             "overcast, rain, or fog forecast values. time is the transition "
             "duration in seconds; min_duration is the minimum hold duration "
-            "in seconds passed to the weather phenomenon Set method."
+            "in seconds passed to the weather phenomenon Set method. "
+            "This is a server world-effect: the wire confirms the requested "
+            "fields were accepted. Sky/particle look is in_game_required."
         )
     )
     async def world_weather_set(
@@ -5212,12 +5234,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Click a client widget by name. button is "
-        "0=left, 1=right, 2=middle. mode='direct' is the default; the bridge "
-        "rejects mode='complete' with mode_not_implemented. On failure the "
-        "error text keeps the bridge diagnostics after the code, e.g. "
+        "0=left, 1=right, 2=middle. root scopes a search that would otherwise "
+        "be global (homonyms without root return ambiguous_path). "
+        "bubble=true is forwarded only with mode='complete'; direct mode "
+        "ignores it. mode='direct' is the default; the bridge rejects "
+        "mode='complete' with mode_not_implemented (complete would click the "
+        "widget center via down→up→click with explicit bubbling). On failure "
+        "the error text keeps the bridge diagnostics after the code, e.g. "
         "not_handled; handler='X' user_id=506 clicked=False; "
-        "requested_path='BtnCloseX' matched_path='...': an empty handler means "
-        "no handler ran, a named one ran and declined."
+        "requested_path='BtnCloseX' requested_root='...' matched_path='...': "
+        "an empty handler means no handler ran, a named one ran and declined."
     ))
     async def ui_click(
         path: str,
@@ -5406,7 +5432,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             r"regex: pass '[MOD]', never '\[MOD\]'. For log_matches, marker "
             "is the exact cursor returned by logs_since; when present, "
             "lookback_lines and lookback_from are ignored. Without marker, "
-            "lookback_lines (default 200) rewinds N lines, or "
+            "lookback_lines (default 200, max "
+            f"{WAIT_FOR_LOOKBACK_MAX}) rewinds N lines, or "
             "lookback_from='launch' scans from byte 0. That heuristic can match "
             "a line written before the caller's action and cause a false positive. "
             "On timeout still returns "

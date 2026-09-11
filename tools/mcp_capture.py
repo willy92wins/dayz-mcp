@@ -1137,6 +1137,9 @@ def capture_dual(
         "native_height": chosen.height,
         "crop": crop or "",
         "crop_space": crop_space,
+        # True only when the delivered surface is the accredited client viewport
+        # (ficha 268a): title-bar / border chrome cannot be in that bitmap.
+        "chrome_excluded": crop_space == CROP_SPACE_CLIENT,
         "inline_mimeType": inline.get("mimeType"),
         "inline_base64_len": len(inline.get("data") or ""),
         "window": chosen.info.get("window"),

@@ -25,6 +25,7 @@ from dayz_mcp.tool_registry_fingerprint import (
     capture_registry_snapshot,
     compare_snapshot_to_authority,
     read_authority_marker,
+    schema_signal,
 )
 
 PAIR_BYTES = {
@@ -443,7 +444,9 @@ class SnapshotComparatorTests(unittest.TestCase):
             status="known",
         )
         self.assertEqual(compare_snapshot_to_authority(local_x, authority_y_digest), "stale")
+        self.assertEqual(schema_signal(local_x, authority_y_digest), "stale_client")
         self.assertEqual(compare_snapshot_to_authority(local_y, authority_y_digest), "fresh")
+        self.assertEqual(schema_signal(local_y, authority_y_digest), "fresh")
         crossed = read_authority_marker(
             _known_bundle(),
             expected_profile="standard",
@@ -494,6 +497,7 @@ class SnapshotComparatorTests(unittest.TestCase):
         )
         self.assertEqual(compare_snapshot_to_authority(local, bad_txid), "unknown")
         self.assertEqual(compare_snapshot_to_authority(UNKNOWN_REGISTRY, UNKNOWN_AUTHORITY), "unknown")
+        self.assertEqual(schema_signal(UNKNOWN_REGISTRY, UNKNOWN_AUTHORITY), "unknown")
 
 
 class AuthorityBundleTests(unittest.TestCase):

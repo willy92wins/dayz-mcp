@@ -171,6 +171,19 @@ def source_stale(snapshot: dict[str, Any]) -> bool:
     return _status(snapshot) != "fresh"
 
 
+def schema_signal(snapshot: dict[str, Any]) -> str:
+    """Named signal for a stale MCP client (ficha 9b7b).
+
+    fresh stays fresh. A verified content drift is stale_client (reopen the
+    client). Unreadable/unknown observations stay unknown so they are not
+    collapsed into the boolean source_stale=true bucket.
+    """
+    status = _status(snapshot)
+    if status == "stale":
+        return "stale_client"
+    return status
+
+
 def _call_marker(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any] | None:
     stale = sorted(set(before["stale"]) | set(after["stale"]))
     unreadable = sorted(set(before["unreadable"]) | set(after["unreadable"]))

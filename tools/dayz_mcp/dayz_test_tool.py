@@ -18,6 +18,7 @@ from dayz_mcp import (
 )
 from dayz_mcp.launcher_registry import open_approved_launcher
 from dayz_mcp.native_launcher_transaction import preflight_vpp_request
+from dayz_mcp.client_steam_bootstrap import diagnose_client_steam_bootstrap
 from dayz_mcp.steam_preflight import (
     REMEDIATION,
     STEAM_SESSION_STALE,
@@ -1083,6 +1084,7 @@ def _compact_result(
     client_record_age_s: float | None = None,
     vpp_missing: list[str] | None = None,
     vpp_warnings: list[str] | None = None,
+    steam_startup: object = None,
 ) -> dict[str, object]:
     projection = readiness or _NULL_READINESS
     return {
@@ -1123,6 +1125,13 @@ def _compact_result(
         # native_launcher_transaction for every launch, named or not.
         "vpp_missing": vpp_missing,
         "vpp_warnings": vpp_warnings,
+        # ficha 47c4: name the Steam-bootstrap death, never repair Steam here.
+        "steam_startup": steam_startup if type(steam_startup) is str else None,
+        "client_death_diagnosis": diagnose_client_steam_bootstrap(
+            error_code=terminal.error_code,
+            client_alive=client_alive,
+            steam_startup=steam_startup,
+        ),
     }
 
 
@@ -1298,6 +1307,7 @@ async def _execute_request(
                 error_code="client_dead_after_ack",
                 exit_code=1,
             )
+    steam_startup = _steam_startup_from_status(status)
     return _compact_result(
         terminal=terminal,
         project=policy.mod,
@@ -1318,7 +1328,18 @@ async def _execute_request(
         ),
         vpp_missing=None if vpp is None else list(vpp.missing),
         vpp_warnings=None if vpp is None else list(vpp.warnings),
+        steam_startup=steam_startup,
     )
+
+
+def _steam_startup_from_status(status: object) -> str | None:
+    if not isinstance(status, dict):
+        return None
+    prep = status.get("steam_preparation")
+    if isinstance(prep, dict) and type(prep.get("startup")) is str:
+        return prep["startup"]
+    value = status.get("steam_startup")
+    return value if type(value) is str else None
 
 
 async def execute_dayz_test_run(

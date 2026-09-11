@@ -738,6 +738,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             "tool_registry_captured_at",
             "tool_registry_source_stale",
             "tool_registry_remediation",
+            "tool_registry_schema_signal",
         ):
             self.assertIn(key, status)
         self.assertEqual(status["tool_registry_remediation"], "reopen_mcp_client")
@@ -772,6 +773,12 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
                     status = _content_json(await app.call_tool("bridge_status", {}))
                 self.assertIs(status["tool_registry_source_stale"], expected)
                 self.assertEqual(status["server_modules"]["status"], state)
+                signal = {
+                    "fresh": "fresh",
+                    "stale": "stale_client",
+                    "unknown": "unknown",
+                }[state]
+                self.assertEqual(status["tool_registry_schema_signal"], signal)
 
     async def test_loopback_status_omits_tool_registry_overlay(self) -> None:
         _app, runtime = self.build_started()
@@ -786,6 +793,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             "tool_registry_captured_at",
             "tool_registry_source_stale",
             "tool_registry_remediation",
+            "tool_registry_schema_signal",
         ):
             self.assertNotIn(key, raw)
             self.assertNotIn(key, encoded)
