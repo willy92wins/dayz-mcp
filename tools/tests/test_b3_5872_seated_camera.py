@@ -219,7 +219,7 @@ class SeatedPresenceCaseTableTest(unittest.TestCase):
         cases = (
             (
                 "parent+crew",
-                "ResolveLiveSeatedTransport",
+                "Transport.Cast(player.GetParent())",
                 "FillSeatedCameraView",
             ),
             (
@@ -239,6 +239,7 @@ class SeatedPresenceCaseTableTest(unittest.TestCase):
             ),
         )
         self.assertIn(cases[0][1], helper)
+        self.assertIn("transport.CrewMemberIndex(player)", helper)
         self.assertIn(cases[0][2], build)
         self.assertIn(cases[1][1], helper)
         self.assertIn(f'return "{cases[1][2]}";', read)
