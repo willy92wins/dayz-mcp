@@ -609,6 +609,19 @@ def remediate_stale_steam_session(
     repair = _try_repair_steam_pid(selected_provider, selected_host)
     if repair.error_code is None:
         return waiter(selected_provider, selected_host, repair)
+    # Race guard (audit L8540 / Guillermo 2026-09-11): ActiveUser invalid while
+    # steam.exe is already alive. A -shutdown/-silent cycle races another
+    # bootstrap and must not run. Wait/abort with coherent identity; never
+    # hand-write HKCU ActiveProcess here.
+    if repair.steam_pid_repair_reason == "active_user_invalid":
+        live = _safe_live_pids(selected_provider)
+        if live:
+            return replace(
+                repair,
+                steam_live_pids=live,
+                steam_restart_fallback=False,
+                steam_remediation_reason="active_user_invalid_live_steam",
+            )
     restarted = _restart_steam_session(selected_provider, selected_host)
     restarted = replace(
         restarted,
