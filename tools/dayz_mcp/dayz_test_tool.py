@@ -18,6 +18,7 @@ from dayz_mcp import (
 )
 from dayz_mcp.launcher_registry import open_approved_launcher
 from dayz_mcp.native_launcher_transaction import preflight_vpp_request
+from dayz_mcp.client_steam_bootstrap import diagnose_client_steam_bootstrap
 from dayz_mcp.steam_preflight import (
     REMEDIATION,
     STEAM_SESSION_STALE,
@@ -1132,28 +1133,6 @@ def _compact_result(
             steam_startup=steam_startup,
         ),
     }
-
-
-def diagnose_client_steam_bootstrap(
-    *,
-    error_code: object,
-    client_alive: object,
-    steam_startup: object,
-) -> str | None:
-    """Offline diagnosis only (fb-20260907-142752-47c4).
-
-    When the client is dead after ack and Steam preparation passed on the
-    limited old-process path without a startup marker, the death is
-    steam_bootstrap. This does not wait on Steam, rewrite the registry, or
-    relaunch anything (738a remains HOLD).
-    """
-    if error_code != "client_dead_after_ack":
-        return None
-    if client_alive is not False:
-        return None
-    if steam_startup == "old_stable_unobserved":
-        return "steam_bootstrap"
-    return None
 
 
 def _validate_terminal_context(
