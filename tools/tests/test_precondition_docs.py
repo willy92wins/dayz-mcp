@@ -31,6 +31,13 @@ _TRACE_EXISTS_CLAUSE = "already exists returns trace_exists"
 _TRACE_CLEAR_CLAUSE = "mode=clear before reuse"
 _SPAWN_NO_ATTACH_CLAUSE = "Does not attach wheels, battery, or spark plug"
 _SPAWN_PREPARE_CLAUSE = "follow with vehicle_prepare_fixture"
+_SPAWN_FLAGS_MASK_CLAUSE = (
+    "Allowed non-zero values are the exact pair ECE_CREATEPHYSICS|ECE_TRACE"
+)
+_SPAWN_KEEPHEIGHT_EXCLUDED = "ECE_KEEPHEIGHT (524288)"
+_SPAWN_NOLIFETIME_EXCLUDED = "ECE_NOLIFETIME (4194304)"
+_SPAWN_COMBO_EXCLUDED = "flags=4718592"
+_SPAWN_BAD_FLAGS_CLAUSE = "return bad_flags"
 _RUN_RELEASE_FIRST = "Release any held session lease before calling"
 
 
@@ -48,6 +55,13 @@ def _assert_world_spawn_copy(test: unittest.TestCase, description: str) -> None:
     test.assertIn(_SPAWN_NO_ATTACH_CLAUSE, description)
     test.assertNotIn("attaches wheels", description)
     test.assertIn(_SPAWN_PREPARE_CLAUSE, description)
+    test.assertIn(_SPAWN_FLAGS_MASK_CLAUSE, description)
+    test.assertIn(_SPAWN_KEEPHEIGHT_EXCLUDED, description)
+    test.assertIn(_SPAWN_NOLIFETIME_EXCLUDED, description)
+    test.assertIn(_SPAWN_COMBO_EXCLUDED, description)
+    test.assertIn(_SPAWN_BAD_FLAGS_CLAUSE, description)
+    test.assertNotIn("accepts ECE_KEEPHEIGHT", description)
+    test.assertNotIn("accepts ECE_NOLIFETIME", description)
 
 
 def _assert_dayz_test_run_copy(test: unittest.TestCase, description: str) -> None:
@@ -129,6 +143,13 @@ class PreconditionDocsTest(unittest.IsolatedAsyncioTestCase):
                 self,
                 f"{LEASE_TOOL_LINE} world_spawn attaches wheels, battery, or "
                 "spark plug; follow with vehicle_prepare_fixture.",
+            )
+        with self.assertRaises(AssertionError):
+            _assert_world_spawn_copy(
+                self,
+                f"{LEASE_TOOL_LINE} {_SPAWN_NO_ATTACH_CLAUSE}; "
+                f"{_SPAWN_PREPARE_CLAUSE}. accepts ECE_KEEPHEIGHT (524288) "
+                "and accepts ECE_NOLIFETIME (4194304).",
             )
         with self.assertRaises(AssertionError):
             _assert_dayz_test_run_copy(

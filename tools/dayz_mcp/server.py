@@ -118,6 +118,33 @@ _RETAIL_QUARANTINE_REASONS = frozenset({
     "retail_present",
 })
 LEASE_TOOL_LINE = "Requires a lease (session_acquire_wait)."
+
+# Vanilla ECE_* from centraleconomy.c. world_spawn flags=0 is the documented
+# surface default (bridge applies ECE_PLACE_ON_SURFACE). Non-zero values must
+# match MCPBridge.IsAllowedSpawnFlags; ECE_KEEPHEIGHT / ECE_NOLIFETIME are
+# engine-defined but not in that allowlist (Enforce widening is out of scope).
+ECE_TRACE = 4
+ECE_CREATEPHYSICS = 1024
+ECE_INITAI = 2048
+ECE_EQUIP_ATTACHMENTS = 8192
+ECE_PLACE_ON_SURFACE = 1060
+ECE_KEEPHEIGHT = 524288
+ECE_NOLIFETIME = 4194304
+ECE_NOPERSISTENCY_WORLD = 8388608
+ECE_KEEPHEIGHT_NOLIFETIME = ECE_KEEPHEIGHT | ECE_NOLIFETIME  # 4718592
+WORLD_SPAWN_ALLOWED_EXTRA_FLAGS = (
+    ECE_INITAI | ECE_EQUIP_ATTACHMENTS | ECE_NOPERSISTENCY_WORLD | ECE_CREATEPHYSICS
+)
+WORLD_SPAWN_FLAGS_LINE = (
+    "flags=0 uses ECE_PLACE_ON_SURFACE. Allowed non-zero values are the exact "
+    "pair ECE_CREATEPHYSICS|ECE_TRACE, or any value that includes "
+    "ECE_PLACE_ON_SURFACE plus extras from "
+    "ECE_INITAI|ECE_EQUIP_ATTACHMENTS|ECE_NOPERSISTENCY_WORLD|ECE_CREATEPHYSICS. "
+    "ECE_KEEPHEIGHT (524288) and ECE_NOLIFETIME (4194304), alone or together "
+    "(flags=4718592), return bad_flags because IsAllowedSpawnFlags does not "
+    "admit those bits (KEEPHEIGHT skips surface placement; NOLIFETIME is not "
+    "in the extra allowlist). Unknown bits also return bad_flags."
+)
 DAEMON_AUTOSPAWN_DISABLED = (
     "daemon_autospawn_disabled: start the daemon (--daemon) or omit "
     "--no-daemon-autospawn"
@@ -1850,6 +1877,23 @@ def required_keyfile(config: ServerConfig) -> str:
 
 def _bad_args(field: str, value: object, requirement: str) -> str:
     return f"bad_args: {field} {value!r} must {requirement}"
+
+
+def is_allowed_spawn_flags(flags: int) -> bool:
+    """True when world_spawn will not return bad_flags for this ECE mask.
+
+    Mirrors MCPBridge.IsAllowedSpawnFlags, plus flags==0 which ValidateSpawnArgs
+    accepts as the ECE_PLACE_ON_SURFACE default.
+    """
+    if flags == 0:
+        return True
+    no_pathgraph_flags = ECE_CREATEPHYSICS | ECE_TRACE
+    if flags == no_pathgraph_flags:
+        return True
+    if (flags & ECE_PLACE_ON_SURFACE) != ECE_PLACE_ON_SURFACE:
+        return False
+    extra_flags = flags - ECE_PLACE_ON_SURFACE
+    return (extra_flags | WORLD_SPAWN_ALLOWED_EXTRA_FLAGS) == WORLD_SPAWN_ALLOWED_EXTRA_FLAGS
 
 
 def _require_vec3(value: list[float] | None, name: str) -> list[float]:
@@ -3955,6 +3999,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             f"{LEASE_TOOL_LINE} Spawn a DayZ object through the existing "
             "world_spawn bridge command. rotation is an RF_* CreateObjectEx "
             "flag integer, not an angle; 0 uses the bridge default RF_DEFAULT. "
+            f"{WORLD_SPAWN_FLAGS_LINE} "
             "Does not attach wheels, battery, or spark plug; for a usable "
             "vehicle follow with vehicle_prepare_fixture."
         )
@@ -3966,7 +4011,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         rotation: StrictInt = 0,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
-        args = {"type": type, "pos": _require_vec3(pos, "pos"), "flags": int(flags), "rotation": int(rotation)}
+        parsed_flags = int(flags)
+        if not is_allowed_spawn_flags(parsed_flags):
+            raise ToolError("bad_flags")
+        args = {
+            "type": type,
+            "pos": _require_vec3(pos, "pos"),
+            "flags": parsed_flags,
+            "rotation": int(rotation),
+        }
         async with runtime.tool_lock:
             return await runtime.call_bridge("world_spawn", args, "server", _timeout(timeout_s))
 
