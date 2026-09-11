@@ -334,7 +334,6 @@ COERCIBLE_ALLOWLIST.update(
         ("session_heartbeat", "lease_token"): "free text token",
         ("session_release", "lease_token"): "free text token",
         ("session_wait", "ticket"): "free text ticket",
-        ("telemetry_read", "mode"): _ENUM_LIKE_STR,
         ("telemetry_read", "type"): "free text classname",
         ("telemetry_read", "path"): "free text path",
         ("ui_click", "path"): "free text widget path",

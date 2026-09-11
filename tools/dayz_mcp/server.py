@@ -69,6 +69,7 @@ _SERVER_SOURCES = ServerSourceWatch(loaded_source_files())
 
 UiClickMode = Literal["direct", "complete"]
 UiReloadLayoutMode = Literal["reload", "close"]
+TelemetryReadMode = Literal["object_at", "fixture_jsonl"]
 
 _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "pipeline_resolve",
@@ -103,6 +104,7 @@ WAIT_FOR_CONDITIONS = frozenset({
     "log_matches",
     "entity_state",
 })
+TELEMETRY_READ_MODES = frozenset({"object_at", "fixture_jsonl"})
 LEASE_REQUIRED_RECIPE = "lease_required: call session_acquire_wait(purpose=...)"
 RETAIL_QUARANTINE_RECIPE = (
     "retail_quarantine: a DayZ retail process is running on this machine; "
@@ -4093,34 +4095,38 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return await runtime.call_bridge("scene_raycast", args, "server", _timeout(timeout_s))
 
     @app.tool(description=(
-        "Read server-side telemetry. Exactly two modes are implemented; any other "
-        "string returns bad_mode. object_at consumes type (exact GetType match), "
-        "pos ([x,y,z], used as given), and radius (0 < radius <= 50 metres); "
-        "path/max_lines are ignored. Returns {ok, telemetry:{mode,found,type, "
-        "class_name,pos,orientation,direction,velocity,health01,declared_slots, "
-        "attachment_count,attachment_items,cargo_count,cargo_items,items, "
-        "items_total,items_truncated}}. Item arrays contain classnames, with a "
-        "16-entry cap per array; counts are uncapped, immediate inventory only. "
-        "Cars additionally populate engine_on_server,speedo,wheel_count, "
-        "fuel_fraction (default values on non-cars are not measurements). "
-        "Zero matches is ok:true with found:false; multiple exact-type matches "
-        "is ok:false/error:ambiguous_fixture. Only these instrumented fields "
-        "are read: no arbitrary script members, mod getters or synchronized "
-        "variables, and no client-side replication check. fixture_jsonl consumes "
-        "path and max_lines; type/pos/radius are ignored. path must be a direct "
-        "child of $mission:dayz_mcp/ (no subdirectories or '..'). max_lines=0 "
-        "means 64, positive values are capped at 64, negative is invalid. Reads "
-        "from the BEGINNING, not the tail; each line must deserialize as "
-        "{fixture_id:nonempty string,value:finite float,seq:int}; seq must differ "
-        "from the unset sentinel. Returns {ok,telemetry:{mode,path,found, "
-        "line_count_read,last_valid:{fixture_id,value,seq},parse_error}}; "
-        "last_valid is the last valid row within that prefix. Missing file: "
-        "fixture_not_found; empty/invalid/over-4096-character line: parse_error. "
-        "The shared telemetry object can include default fields from the other "
-        "mode. timeout_s bounds the server bridge request."
+        "Read server-side telemetry. Closed mode set object_at|fixture_jsonl "
+        "(schema enum; other strings fail validation before the handler). "
+        "object_at consumes type (exact GetType match), pos ([x,y,z] as given), "
+        "radius (0 < radius <= 50 metres); path and max_lines are ignored. "
+        "Returns {ok,telemetry:{mode,found,type,class_name,pos,orientation,"
+        "direction,velocity,health01,declared_slots,attachment_count,"
+        "attachment_items,cargo_count,cargo_items,items,items_total,"
+        "items_truncated}}; item arrays are classnames with a 16-entry cap per "
+        "array, counts uncapped, immediate inventory only; cars additionally "
+        "populate engine_on_server,speedo,wheel_count,fuel_fraction (defaults on "
+        "non-cars are not measurements); zero matches is a successful return with "
+        "found:false. Multiple exact-type matches raise ToolError("
+        "ambiguous_fixture); that is an MCP tool error, not a returned dict. "
+        "object_at reads only those instrumented fields: "
+        "it does not reach arbitrary script members, mod getters, or synchronized "
+        "variables of a modded entity, and does not check client-side replication. "
+        "fixture_jsonl consumes path and max_lines; type/pos/radius are ignored. "
+        "path must be a direct child of $mission:dayz_mcp/ (no subdirectories or "
+        "'..'); max_lines=0 means 64, positive values are capped at 64, negative "
+        "is invalid. Reads from the BEGINNING, not the tail; each line must "
+        "deserialize as {fixture_id:nonempty string,value:finite float,seq:int}; "
+        "seq must differ from the unset sentinel. Returns {ok,telemetry:{mode,"
+        "path,found,line_count_read,last_valid:{fixture_id,value,seq},"
+        "parse_error}} on success; last_valid is the last valid row within that "
+        "prefix. Missing file raises ToolError(fixture_not_found); an empty/"
+        "invalid/over-4096-character line raises ToolError(parse_error). Both "
+        "runtimes convert a falsy bridge ok into that ToolError before the tool "
+        "returns. The shared telemetry object can include default "
+        "fields from the other mode. timeout_s bounds the server bridge request."
     ))
     async def telemetry_read(
-        mode: str,
+        mode: TelemetryReadMode,
         type: str = "",
         pos: list[StrictFloat] | None = None,
         radius: StrictFloat = 0.0,

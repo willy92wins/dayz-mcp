@@ -47,9 +47,15 @@ class TelemetryReadNamesTheBadFieldTest(unittest.IsolatedAsyncioTestCase):
             await self.app.call_tool("telemetry_read", kwargs)
         return str(ctx.exception)
 
-    async def test_unknown_mode_says_mode(self) -> None:
+    async def test_unknown_mode_is_rejected_as_mode(self) -> None:
+        # Schema enum (not a free string): pydantic names `mode` before the
+        # handler's leftover bad_mode arm can run.
         message = await self._error_for(mode="nonsense")
-        self.assertIn("bad_mode", message)
+        self.assertIn("mode", message)
+        self.assertIn("object_at", message)
+        self.assertIn("fixture_jsonl", message)
+        self.assertNotIn("bad_type", message)
+        self.assertNotIn("bad_radius", message)
 
     async def test_object_at_without_type_says_type(self) -> None:
         message = await self._error_for(
@@ -72,6 +78,8 @@ class TelemetryReadNamesTheBadFieldTest(unittest.IsolatedAsyncioTestCase):
             mode="object_at", type="CivilianSedan", pos=[1.0, 2.0, 3.0], radius=-1.0
         )
         self.assertEqual(3, len({mode, kind, radius}), (mode, kind, radius))
+        self.assertIn("bad_type", kind)
+        self.assertIn("bad_radius", radius)
 
 
 if __name__ == "__main__":
