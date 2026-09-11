@@ -291,6 +291,7 @@ class MCPCamera
 	float fov;
 	bool interpolation_complete;
 	bool viewport_moved;
+	string view;
 	string error;
 
 	void MCPCamera()

@@ -10,10 +10,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import sys
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from dayz_mcp import server
 from tests._addon_paths import addon_root
 
 
@@ -150,19 +150,23 @@ class CameraNativeCrashSourceTest(unittest.TestCase):
         body = _body(source, BUILD)
         self.assertIn("protected Camera m_ActiveCam;", source)
         self.assertIn("Camera current = m_ActiveCam;", body)
+        self.assertIn('camera.view = "scripted";', body)
         guard = body.index('if (cameraError != "")')
         for statement in ("current.GetTransform(matrix);",
-                          "VectorToArray(current.GetWorldPosition(), camera.pos);",
-                          "camera.fov = Camera.GetCurrentFOV();",
-                          "camera.interpolation_complete = Camera.IsInterpolationComplete();"):
+                          "VectorToArray(current.GetWorldPosition(), camera.pos);"):
             self.assertGreater(body.index(statement), guard)
         self.assertGreater(body.index("camera.viewport_moved = true;"),
                            body.index("current.GetTransform(matrix);"))
+        self.assertNotIn("Camera.GetCurrentFOV()", body)
+        self.assertNotIn("Camera.IsInterpolationComplete()", body)
 
     def test_missing_owned_camera_is_never_claimed_as_observed_player_camera(self) -> None:
         body = _body(_source(), BUILD)
         self.assertNotIn('"player_camera_active"', body)
         self.assertNotRegex(body, r"GetCurrentCamera(?:Position|Direction)\s*\(")
+        self.assertNotRegex(body, r"\bGetCurrentCamera\s*\(")
+        self.assertIn("FillPlayerCameraView(", body)
+        self.assertIn('camera.error = "camera_illegible_player_transform";', body)
 
     def test_camera_get_uses_the_common_snapshot(self) -> None:
         body = _body(_source(), "protected bool DispatchCameraGet(MCPCommand command, MCPResult result)")
@@ -174,28 +178,42 @@ class CameraNativeCrashSourceTest(unittest.TestCase):
         self.assertIn("result.camera = BuildCameraResult(job.args.cam_mode);", report)
         self.assertGreater(report.index("PostResult(result);"), report.index("BuildCameraResult("))
 
-    def test_settle_reports_unavailable_state_before_global_interpolation_read(self) -> None:
+    def test_settle_is_wall_time_only_and_never_queries_global_camera_natives(self) -> None:
         body = _body(_source(), "protected bool ProcessCameraSetJob(MCPJob job)")
         settle = _body(body, "if (job.phase == CAMERA_PHASE_SETTLE)")
         guard = _body(settle, 'if (CameraReadError() != "")')
         self.assertIn("job.phase = CAMERA_PHASE_REPORT;", guard)
         self.assertIn("return true;", guard)
         self.assertNotIn("job.error", guard)  # report produces the camera.ok=false block
-        self.assertLess(settle.index("CameraReadError()"),
-                        settle.index("Camera.IsInterpolationComplete()"))
+        self.assertNotIn("Camera.IsInterpolationComplete()", settle)
+        self.assertNotIn("Camera.GetCurrentFOV()", settle)
+        self.assertIn("elapsed >= job.sample_s_target", settle)
 
 
+ILLEGIBLE_WIRE = (
+    "client_not_in_game",
+    "camera_unavailable_player",
+    "camera_unavailable_vehicle",
+    "camera_unavailable_parented_player",
+    "camera_illegible_player_transform",
+)
+
+
+@unittest.skipUnless(sys.platform == "win32", "restore consumer imports the Win32 MCP server")
 class CameraRestoreConsumerTest(unittest.IsolatedAsyncioTestCase):
     async def test_actual_restore_tool_keeps_every_unavailable_state_unverified(self) -> None:
+        from dayz_mcp import server
+
         body = _body(_source(), READ_ERROR)
         for _condition, error in DENIED:
+            self.assertIn(f'return "{error}";', body)
+        for error in ILLEGIBLE_WIRE:
             with self.subTest(error=error):
-                self.assertIn(f'return "{error}";', body)
                 app, runtime = server.build_app(
                     server.ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
                 )
                 probe = {"ok": 1, "camera": {"ok": 0, "viewport_moved": 0,
-                         "error": error, "pos": [], "matrix": [], "dir": []}}
+                         "view": "", "error": error, "pos": [], "matrix": [], "dir": []}}
                 with patch.object(runtime, "call_bridge", new=AsyncMock(side_effect=[
                     {"ok": 1, "error": ""}, probe,
                 ])) as call:
@@ -208,10 +226,23 @@ class CameraRestoreConsumerTest(unittest.IsolatedAsyncioTestCase):
                                  ["restore_gameplay", "camera_get"])
 
     def test_consumer_retains_positive_reading_and_active_camera_distinction(self) -> None:
-        released = {"camera": {"ok": 1, "viewport_moved": 0, "error": "player_camera_active"}}
-        active = {"camera": {"ok": 1, "viewport_moved": 1, "error": ""}}
+        from dayz_mcp import server
+
+        released = {"camera": {"ok": 1, "viewport_moved": 0, "view": "player", "error": ""}}
+        legacy = {"camera": {"ok": 1, "viewport_moved": 0, "error": "player_camera_active"}}
+        active = {"camera": {"ok": 1, "viewport_moved": 1, "view": "scripted", "error": ""}}
+        missing_scripted = {
+            "camera": {
+                "ok": 0,
+                "viewport_moved": 0,
+                "view": "",
+                "error": "camera_unavailable_no_scripted_camera",
+            }
+        }
         self.assertEqual(server._restore_camera_verdict(released)[0], "released")
+        self.assertEqual(server._restore_camera_verdict(legacy)[0], "released")
         self.assertEqual(server._restore_camera_verdict(active)[0], "still_active")
+        self.assertEqual(server._restore_camera_verdict(missing_scripted)[0], "unverified")
 
 
 if __name__ == "__main__":

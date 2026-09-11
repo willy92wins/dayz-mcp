@@ -32,16 +32,17 @@ def _camera_probe(**camera: object) -> dict[str, Any]:
     """A camera_get result as it comes off the wire.
 
     Enforce serializes bools as 0/1 (tests/test_mcp_tools.py:80) and
-    BuildCameraResult (MCPClientBridge.c:3645-3684) has exactly three exits:
-    not in game (camera.ok=false), no scripted camera (viewport_moved=false
-    plus error="player_camera_active") and a scripted camera mounted
-    (viewport_moved=true). The middle one is the discriminator measured
-    in-game on 2026-08-16 for BUG-075.
+    BuildCameraResult has three observable exits: illegible (camera.ok=false
+    plus a named error), liberated player view (view="player",
+    viewport_moved=false), and a scripted camera mounted (view="scripted",
+    viewport_moved=true). Liberation is a positive transform read, not the
+    absence of m_ActiveCam.
     """
     block: dict[str, Any] = {
         "ok": 1,
         "applied_mode": "get",
         "viewport_moved": 0,
+        "view": "player",
         "error": "",
     }
     block.update(camera)
@@ -98,7 +99,7 @@ class RestoreGameplayFastMCPContractTest(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(
                 side_effect=[
                     {"id": 7, "ok": 1, "error": ""},
-                    _camera_probe(error="player_camera_active"),
+                    _camera_probe(),
                 ]
             ),
         ) as call:
@@ -200,7 +201,7 @@ class RestoreGameplayPostconditionContractTest(unittest.IsolatedAsyncioTestCase)
             new=AsyncMock(
                 side_effect=[
                     {"id": 7, "ok": 1, "error": ""},
-                    _camera_probe(error="player_camera_active"),
+                    _camera_probe(),
                 ]
             ),
         ) as call:
@@ -225,7 +226,7 @@ class RestoreGameplayPostconditionContractTest(unittest.IsolatedAsyncioTestCase)
             new=AsyncMock(
                 side_effect=[
                     {"id": 7, "ok": 1, "error": ""},
-                    _camera_probe(viewport_moved=1, error=""),
+                    _camera_probe(viewport_moved=1, view="scripted", error=""),
                 ]
             ),
         ):
@@ -295,6 +296,29 @@ class RestoreGameplayPostconditionContractTest(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(type(raised.exception).__name__, "ToolError")
         self.assertIn("restore_unverified", str(raised.exception))
         self.assertIn("client_not_in_game", str(raised.exception))
+
+    async def test_a_missing_scripted_camera_without_player_view_is_unverified(self) -> None:
+        app, runtime = self._app()
+        with patch.object(
+            runtime,
+            "call_bridge",
+            new=AsyncMock(
+                side_effect=[
+                    {"id": 7, "ok": 1, "error": ""},
+                    _camera_probe(
+                        ok=0,
+                        view="",
+                        error="camera_unavailable_no_scripted_camera",
+                    ),
+                ]
+            ),
+        ):
+            with self.assertRaises(Exception) as raised:
+                await app.call_tool("restore_gameplay", {"timeout_s": 1.0})
+
+        self.assertEqual(type(raised.exception).__name__, "ToolError")
+        self.assertIn("restore_unverified", str(raised.exception))
+        self.assertIn("camera_unavailable_no_scripted_camera", str(raised.exception))
 
     async def test_a_failed_restore_is_never_masked_by_the_probe(self) -> None:
         # wait_for_result already raises on a falsy bridge ok, so the probe must

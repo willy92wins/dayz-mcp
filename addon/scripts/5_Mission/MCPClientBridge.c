@@ -2724,16 +2724,17 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		if (job.phase == CAMERA_PHASE_SETTLE)
 		{
-			// Do not query global camera state after losing the scripted view.
-			// REPORT uses BuildCameraResult to return the named unavailable state.
+			// Time-only settle. Camera.IsInterpolationComplete / GetCurrentFOV
+			// walk the same native camera object as GetCurrentCamera (SUB_BRZ
+			// 2026-09-08) and have frozen the client render after camera_set
+			// (f47b). REPORT still snapshots m_ActiveCam or the player view.
 			if (CameraReadError() != "")
 			{
 				job.phase = CAMERA_PHASE_REPORT;
 				return true;
 			}
-			bool interpolationComplete = Camera.IsInterpolationComplete();
 			float elapsed = m_JobRunner.GetElapsedS() - job.sample_start_s;
-			if (interpolationComplete || elapsed >= job.sample_s_target)
+			if (elapsed >= job.sample_s_target)
 			{
 				job.phase = CAMERA_PHASE_REPORT;
 				return true;
@@ -3825,6 +3826,71 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return "";
 	}
 
+	protected bool CameraErrorIsMissingScripted(string cameraError)
+	{
+		if (cameraError == "camera_unavailable_no_scripted_camera")
+		{
+			return true;
+		}
+
+		if (cameraError == "camera_unavailable_inactive")
+		{
+			return true;
+		}
+
+		return false;
+	}
+
+	protected bool IsNonZeroFiniteVector(vector value)
+	{
+		if (!IsFiniteFloat(value[0]) || !IsFiniteFloat(value[1]) || !IsFiniteFloat(value[2]))
+		{
+			return false;
+		}
+
+		if (value[0] == 0.0 && value[1] == 0.0 && value[2] == 0.0)
+		{
+			return false;
+		}
+
+		return true;
+	}
+
+	// Positive player-view read. DayZPlayer.GetCurrentCameraTransform is a
+	// different native from Camera.GetCurrentCamera (the SUB_BRZ crash). A
+	// finite non-zero direction is the liberated discriminator; empty or
+	// non-finite vectors stay illegible. Never infer player view from the
+	// mere absence of m_ActiveCam (0d65 / decision 6).
+	protected bool FillPlayerCameraView(MCPCamera camera, PlayerBase cameraPlayer)
+	{
+		if (!camera || !cameraPlayer)
+		{
+			return false;
+		}
+
+		vector playerPos;
+		vector playerDir;
+		vector playerRot;
+		cameraPlayer.GetCurrentCameraTransform(playerPos, playerDir, playerRot);
+		if (!IsFiniteFloat(playerPos[0]) || !IsFiniteFloat(playerPos[1]) || !IsFiniteFloat(playerPos[2]))
+		{
+			return false;
+		}
+
+		if (!IsNonZeroFiniteVector(playerDir))
+		{
+			return false;
+		}
+
+		VectorToArray(playerPos, camera.pos);
+		VectorToArray(playerDir, camera.dir);
+		camera.ok = true;
+		camera.viewport_moved = false;
+		camera.view = "player";
+		camera.error = "";
+		return true;
+	}
+
 	protected MCPCamera BuildCameraResult(string mode)
 	{
 		MCPCamera camera = new MCPCamera();
@@ -3833,23 +3899,38 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// Shared by camera_get and the camera_set report (outside Dispatch).
 		// Rejected snapshots keep pos/matrix/dir empty (ctor-initialized).
 		string cameraError = CameraReadError();
+		if (CameraErrorIsMissingScripted(cameraError))
+		{
+			PlayerBase liberatedPlayer = PlayerBase.Cast(GetGame().GetPlayer());
+			if (FillPlayerCameraView(camera, liberatedPlayer))
+			{
+				return camera;
+			}
+
+			camera.ok = false;
+			camera.viewport_moved = false;
+			camera.view = "";
+			camera.error = "camera_illegible_player_transform";
+			return camera;
+		}
+
 		if (cameraError != "")
 		{
 			camera.ok = false;
 			camera.viewport_moved = false;
+			camera.view = "";
 			camera.error = cameraError;
 			return camera;
 		}
 
 		camera.ok = true;
+		camera.view = "scripted";
 		Camera current = m_ActiveCam;
 		vector matrix[4];
 		current.GetTransform(matrix);
 		MatrixToArray(matrix, camera.matrix);
 		VectorToArray(current.GetWorldPosition(), camera.pos);
 		VectorToArray(matrix[2], camera.dir);
-		camera.fov = Camera.GetCurrentFOV();
-		camera.interpolation_complete = Camera.IsInterpolationComplete();
 		camera.viewport_moved = true;
 		return camera;
 	}
@@ -4114,6 +4195,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			}
 			m_ControlsSuppressed = false;
 		}
+
+		ReleaseGameFocus();
 	}
 
 	// RestoreGameplay covers simulation, controls and HUD and never the
@@ -4131,7 +4214,33 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			m_ActiveCam.SetActive(false);
 		}
 
+		// FreeDebugCamera is a singleton the bridge does not own. camera_set
+		// free can leave it active after m_ActiveCam is cleared (f5a7-3 trap).
+		FreeDebugCamera freeCam = FreeDebugCamera.GetInstance();
+		if (freeCam)
+		{
+			freeCam.SetActive(false);
+		}
+
 		DeleteOwnedCamera();
+	}
+
+	// Windowed diag clients capture the OS mouse on join (f298). Resetting
+	// game focus returns the cursor to the desktop without touching OS input.
+	void ReleaseGameFocus()
+	{
+		if (!GetGame())
+		{
+			return;
+		}
+
+		Input input = GetGame().GetInput();
+		if (!input)
+		{
+			return;
+		}
+
+		input.ResetGameFocus();
 	}
 
 	protected void DeleteOwnedCamera()

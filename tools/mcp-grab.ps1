@@ -11,7 +11,8 @@
 # FIX: PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT=2) renders the window's OWN surface (incl. the
 # DWM-redirected DirectX backbuffer of a windowed client) into our DC, robust to occlusion / no focus
 # / multi-monitor, without stealing focus from the user. If PrintWindow returns black (some DX paths
-# do), fall back to a REAL foreground (AttachThreadInput defeats the foreground lock) + CopyFromScreen.
+# do), auto falls back to CopyFromScreen without SetForegroundWindow. Method=foreground remains
+# explicit opt-in; AttachThreadInput+SetForegroundWindow has killed the live client (ficha 8f76).
 #
 # Emits exactly one compact JSON line on stdout:
 #   { ok, error, method, window:{pid,class,title,left,top,width,height}, stats:{meanBrightness,nonBlackRatio}, sha256,
@@ -303,7 +304,10 @@ function Save-And-Emit($bmp, $method, $geometry) {
   Emit $true '' $method $geometry.window $stats $sha $geometry.client $clientStats
 }
 
-# auto: PrintWindow first (occlusion-robust, no focus theft); fall back to real-foreground grab.
+# auto/printwindow: PrintWindow first (occlusion-robust, no focus theft). auto
+# then falls back to CopyFromScreen WITHOUT SetForegroundWindow: ForceForeground
+# via AttachThreadInput has killed the live DayZ client (ficha 8f76).
+# Method=foreground remains an explicit opt-in for operators who accept that risk.
 if ($Method -eq 'printwindow' -or $Method -eq 'auto') {
   $geometry = Get-CaptureGeometry
   $bmp = [MCPGrab]::CapturePrintWindow($chosen.H, $geometry.width, $geometry.height)
@@ -314,16 +318,12 @@ if ($Method -eq 'printwindow' -or $Method -eq 'auto') {
   if ($bmp) { $bmp.Dispose() }
 }
 
-if ($Method -eq 'foreground' -or $Method -eq 'auto') {
+if ($Method -eq 'foreground') {
   [MCPGrab]::ForceForeground($chosen.H)
   Start-Sleep -Milliseconds $ForegroundSettleMs
   $geometry = Get-CaptureGeometry
   $bmp = [MCPGrab]::CaptureScreen($geometry.left, $geometry.top, $geometry.width, $geometry.height)
-  if ($Method -eq 'foreground') {
-    if ($bmp) { Save-And-Emit $bmp 'foreground' $geometry; exit 0 } else { Emit $false 'foreground_failed' 'foreground' $geometry.window $null '' $geometry.client $null; exit 0 }
-  }
-  if (Is-Live $bmp $geometry.client) { Save-And-Emit $bmp 'foreground' $geometry; exit 0 }
-  if ($bmp) { $bmp.Dispose() }
+  if ($bmp) { Save-And-Emit $bmp 'foreground' $geometry; exit 0 } else { Emit $false 'foreground_failed' 'foreground' $geometry.window $null '' $geometry.client $null; exit 0 }
 }
 
 # screen: plain CopyFromScreen (baseline / last resort).
