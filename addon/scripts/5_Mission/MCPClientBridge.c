@@ -1167,6 +1167,28 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return true;
 	}
 
+	protected Transport ResolveLiveSeatedTransport(PlayerBase player)
+	{
+		if (!player)
+		{
+			return null;
+		}
+
+		Transport transport = Transport.Cast(player.GetParent());
+		if (!transport)
+		{
+			return null;
+		}
+
+		int crewIndex = transport.CrewMemberIndex(player);
+		if (crewIndex < 0)
+		{
+			return null;
+		}
+
+		return transport;
+	}
+
 	protected bool DispatchVehicleTelemetry(MCPCommand command, MCPResult result)
 	{
 		PlayerBase player;
@@ -1174,7 +1196,6 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		Transport transport;
 		CarScript car;
 		PlayerIdentity ownerIdentity;
-		int crewIndex = -1;
 		int lowBits = 0;
 		int highBits = 0;
 
@@ -1191,30 +1212,22 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
-		vehicleCommand = player.GetCommand_Vehicle();
-		if (!vehicleCommand)
-		{
-			return true;
-		}
-
-		transport = vehicleCommand.GetTransport();
+		transport = ResolveLiveSeatedTransport(player);
 		if (!transport)
 		{
 			return true;
 		}
 
 		result.found = true;
+		result.seated = true;
+		result.seat = "unknown";
 		result.type = transport.GetType();
 		result.classname = transport.ClassName();
-		crewIndex = transport.CrewMemberIndex(player);
-		if (crewIndex >= 0)
+
+		vehicleCommand = player.GetCommand_Vehicle();
+		if (vehicleCommand && vehicleCommand.GetTransport() == transport)
 		{
-			result.seated = true;
 			result.seat = VehicleTelemetrySeatToken(vehicleCommand.GetVehicleSeat());
-		}
-		else
-		{
-			result.seat = "unknown";
 		}
 
 		car = CarScript.Cast(transport);
@@ -3789,9 +3802,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return "camera_unavailable_player";
 		}
 
-		// Vehicle view can override a scripted camera. IsInTransport reads live
-		// Transport parentage, so a stale vehicle command cannot poison camera_set.
-		if (cameraPlayer.IsInTransport())
+		// Vehicle view can override a scripted camera. Require both current
+		// Transport parentage and live crew membership; never trust a stale command.
+		if (ResolveLiveSeatedTransport(cameraPlayer))
 		{
 			return "camera_unavailable_vehicle";
 		}
