@@ -342,6 +342,7 @@ class CaptureDualCropSpaceTest(unittest.TestCase):
         self.assertNotIn("isError", result)
         meta = result["meta"]
         self.assertEqual("client", meta["crop_space"])
+        self.assertIs(True, meta["chrome_excluded"])
         window = _expected_region(0, 0, WINDOW_W, WINDOW_H)
         viewport = _expected_region(*CLIENT_RECT)
 
@@ -547,6 +548,7 @@ class CaptureDualCropSpaceTest(unittest.TestCase):
                 self.assertNotIn("isError", result)
                 meta = result["meta"]
                 self.assertEqual("window", meta["crop_space"])
+                self.assertIs(False, meta["chrome_excluded"])
                 expected = _expected_region(*rect)
                 effective = meta["effective_surface"]
                 self.assertEqual(_rect(*rect), effective["rect_window"])

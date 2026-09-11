@@ -896,6 +896,8 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "client_record_age_s",
                 "vpp_missing",
                 "vpp_warnings",
+                "steam_startup",
+                "client_death_diagnosis",
             },
         )
         self.assertEqual(result["status"], "succeeded")
@@ -1042,6 +1044,8 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "client_record_age_s",
                 "vpp_missing",
                 "vpp_warnings",
+                "steam_startup",
+                "client_death_diagnosis",
             },
         )
         self.assertEqual(result["status"], "failed")
@@ -1118,6 +1122,8 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "client_record_age_s",
                 "vpp_missing",
                 "vpp_warnings",
+                "steam_startup",
+                "client_death_diagnosis",
             },
         )
 
@@ -1188,6 +1194,8 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "client_record_age_s",
                 "vpp_missing",
                 "vpp_warnings",
+                "steam_startup",
+                "client_death_diagnosis",
             },
         )
 

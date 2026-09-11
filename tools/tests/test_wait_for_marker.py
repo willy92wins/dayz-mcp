@@ -128,6 +128,7 @@ class WaitForMarkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("logs_since", description)
         self.assertIn("ignored", description)
         self.assertIn("false positive", description)
+        self.assertIn(str(server.WAIT_FOR_LOOKBACK_MAX), description)
 
         marker_schema = tool.inputSchema["properties"]["marker"]
         self.assertIn("null", json.dumps(marker_schema))

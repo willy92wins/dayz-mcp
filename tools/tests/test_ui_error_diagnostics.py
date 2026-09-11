@@ -67,7 +67,7 @@ class BridgeErrorDiagnosticsTest(unittest.TestCase):
         self.assertEqual(
             message,
             "not_handled; handler='LFPG_SorterView_TEST' user_id=506 clicked=False; "
-            "requested_path='BtnCloseX' matched_path='LFPG_Sorter/BtnCloseX'",
+            "requested_path='BtnCloseX' requested_root='' matched_path='LFPG_Sorter/BtnCloseX'",
         )
 
     def test_empty_handler_is_reported_as_no_handler_ran(self) -> None:
@@ -114,7 +114,7 @@ class BridgeErrorDiagnosticsTest(unittest.TestCase):
             },
         }
         message = str(server._bridge_error(result, "ui_set_text"))
-        self.assertEqual(message, "text_not_writable; requested_path='Cmd'")
+        self.assertEqual(message, "text_not_writable; requested_path='Cmd' requested_root=''")
         # requested_text replays caller input: it never enters an error message.
         self.assertNotIn("secret-token", str(server._bridge_error(result, "ui_click")))
 
@@ -175,7 +175,8 @@ class UiClickWireTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             text,
             "Error executing tool ui_click: not_handled; handler='LFPG_SorterView_TEST' "
-            "user_id=506 clicked=False; requested_path='BtnCloseX' matched_path='LFPG_Sorter/BtnCloseX'",
+            "user_id=506 clicked=False; requested_path='BtnCloseX' requested_root='' "
+            "matched_path='LFPG_Sorter/BtnCloseX'",
         )
 
     async def test_world_spawn_timeout_with_flat_scalars_stays_bare(self) -> None:

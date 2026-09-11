@@ -1083,6 +1083,7 @@ def _compact_result(
     client_record_age_s: float | None = None,
     vpp_missing: list[str] | None = None,
     vpp_warnings: list[str] | None = None,
+    steam_startup: object = None,
 ) -> dict[str, object]:
     projection = readiness or _NULL_READINESS
     return {
@@ -1123,7 +1124,36 @@ def _compact_result(
         # native_launcher_transaction for every launch, named or not.
         "vpp_missing": vpp_missing,
         "vpp_warnings": vpp_warnings,
+        # ficha 47c4: name the Steam-bootstrap death, never repair Steam here.
+        "steam_startup": steam_startup if type(steam_startup) is str else None,
+        "client_death_diagnosis": diagnose_client_steam_bootstrap(
+            error_code=terminal.error_code,
+            client_alive=client_alive,
+            steam_startup=steam_startup,
+        ),
     }
+
+
+def diagnose_client_steam_bootstrap(
+    *,
+    error_code: object,
+    client_alive: object,
+    steam_startup: object,
+) -> str | None:
+    """Offline diagnosis only (fb-20260907-142752-47c4).
+
+    When the client is dead after ack and Steam preparation passed on the
+    limited old-process path without a startup marker, the death is
+    steam_bootstrap. This does not wait on Steam, rewrite the registry, or
+    relaunch anything (738a remains HOLD).
+    """
+    if error_code != "client_dead_after_ack":
+        return None
+    if client_alive is not False:
+        return None
+    if steam_startup == "old_stable_unobserved":
+        return "steam_bootstrap"
+    return None
 
 
 def _validate_terminal_context(
@@ -1298,6 +1328,7 @@ async def _execute_request(
                 error_code="client_dead_after_ack",
                 exit_code=1,
             )
+    steam_startup = _steam_startup_from_status(status)
     return _compact_result(
         terminal=terminal,
         project=policy.mod,
@@ -1318,7 +1349,18 @@ async def _execute_request(
         ),
         vpp_missing=None if vpp is None else list(vpp.missing),
         vpp_warnings=None if vpp is None else list(vpp.warnings),
+        steam_startup=steam_startup,
     )
+
+
+def _steam_startup_from_status(status: object) -> str | None:
+    if not isinstance(status, dict):
+        return None
+    prep = status.get("steam_preparation")
+    if isinstance(prep, dict) and type(prep.get("startup")) is str:
+        return prep["startup"]
+    value = status.get("steam_startup")
+    return value if type(value) is str else None
 
 
 async def execute_dayz_test_run(

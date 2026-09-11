@@ -781,3 +781,11 @@ def compare_snapshot_to_authority(
     if local.fingerprint == authority.fingerprint:
         return "fresh"
     return "stale"
+
+
+def schema_signal(local: RegistrySnapshot, authority: AuthoritySnapshot) -> AuthorityStatus | Literal["stale_client"]:
+    """Map a registry compare onto the stale-client schema signal (ficha 9b7b)."""
+    status = compare_snapshot_to_authority(local, authority)
+    if status == "stale":
+        return "stale_client"
+    return status
