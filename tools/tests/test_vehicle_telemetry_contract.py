@@ -13,7 +13,7 @@ CLIENT_BRIDGE = MOD_SCRIPTS / "5_Mission" / "MCPClientBridge.c"
 MESSAGES = MOD_SCRIPTS / "5_Mission" / "MCPMessages.c"
 
 TELEMETRY_REGION_SHA256 = (
-    "31d4012c51e3de93113af00dfac6a1c686723d8127d8640f30034ad88695fbef"
+    "a275595bca2c83df6c2e0411f7d123dc94ed556f835b70efd95925619a202650"
 )
 
 _TELEMETRY_REGION = re.compile(
@@ -49,6 +49,21 @@ def _telemetry_sha256(source: str) -> str:
     return hashlib.sha256(_telemetry_region(source).encode("utf-8")).hexdigest()
 
 
+def _mutate_telemetry(source: str, old: str, new: str) -> str:
+    region = _telemetry_region(source)
+    mutant_region = region.replace(old, new, 1)
+    if mutant_region == region:
+        raise AssertionError(f"telemetry mutation target not found: {old}")
+    return source.replace(region, mutant_region, 1)
+
+
+def _mutate_source(source: str, old: str, new: str) -> str:
+    mutant = source.replace(old, new, 1)
+    if mutant == source:
+        raise AssertionError(f"source mutation target not found: {old}")
+    return mutant
+
+
 def _get_in_result_block(source: str) -> str:
     match = _GET_IN_RESULT.search(source)
     if not match:
@@ -66,6 +81,57 @@ def map_vehicle_get_in_seat_token(vehicle_seat: int, named: dict[str, int]) -> s
     if vehicle_seat == named["VEHICLESEAT_PASSENGER_R"]:
         return "passenger_right"
     return "unknown"
+
+
+def map_vehicle_telemetry_seat_token(vehicle_seat: int, named: dict[str, int]) -> str:
+    if vehicle_seat == named["VEHICLESEAT_DRIVER"]:
+        return "driver"
+    if vehicle_seat == named["VEHICLESEAT_CODRIVER"]:
+        return "codriver"
+    if vehicle_seat == named["VEHICLESEAT_PASSENGER_L"]:
+        return "passenger_left"
+    if vehicle_seat == named["VEHICLESEAT_PASSENGER_R"]:
+        return "passenger_right"
+    return "unknown"
+
+
+def observed_telemetry(
+    observed: dict[str, object] | None, named_seats: dict[str, int]
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "ok": True,
+        "found": False,
+        "seated": False,
+        "seat": "",
+        "type": "",
+        "classname": "",
+    }
+    if observed is None:
+        return result
+
+    if int(observed["crew_index"]) < 0:
+        return result
+
+    result.update(
+        found=True,
+        seated=True,
+        seat="unknown",
+        type=observed["type"],
+        classname=observed["classname"],
+    )
+    vehicle_seat = observed.get("vehicle_seat")
+    if vehicle_seat is not None and bool(observed.get("command_transport_matches", True)):
+        result["seat"] = map_vehicle_telemetry_seat_token(
+            int(vehicle_seat), named_seats
+        )
+
+    if bool(observed["is_carscript"]):
+        result.update(
+            speedo_max=observed["speedo_max"],
+            gear=observed["gear"],
+            engine_on_server=observed["engine_on_server"],
+        )
+    return result
 
 
 def select_get_in_transport(
@@ -106,6 +172,108 @@ def observed_receipt(
         "type": observed["type"],
         "classname": observed["classname"],
     }
+
+
+def assert_vehicle_telemetry_source(source: str) -> None:
+    live_transport = _method_body(
+        source, "protected Transport ResolveLiveSeatedTransport(PlayerBase player)"
+    )
+    telemetry = _method_body(source, "protected bool DispatchVehicleTelemetry(")
+    mapper = _method_body(source, "protected string VehicleTelemetrySeatToken(")
+
+    if "GetCommand_Vehicle" in live_transport:
+        raise AssertionError("live transport helper must not use the vehicle command")
+    helper_ordered = (
+        "if (!player)",
+        "Transport.Cast(player.GetParent())",
+        "if (!transport)",
+        "transport.CrewMemberIndex(player)",
+        "if (crewIndex < 0)",
+        "return transport;",
+    )
+    previous = -1
+    for token in helper_ordered:
+        index = live_transport.find(token)
+        if index < 0 or index <= previous:
+            raise AssertionError(f"live transport helper order/contract missing: {token}")
+        previous = index
+    if _method_body(live_transport, "if (crewIndex < 0)").strip() != "return null;":
+        raise AssertionError("live transport helper must reject missing crew membership")
+
+    forbidden = (
+        "ResolveOwnedCar()",
+        'result.error = "not_seated"',
+        "GetSeatAnimationType",
+        "metrics_available",
+        "VehicleGetInSeatToken(",
+        "Transport.Cast(player.GetParent())",
+        "transport.CrewMemberIndex(player)",
+    )
+    for token in forbidden:
+        if token in telemetry:
+            raise AssertionError(f"telemetry contains forbidden contract: {token}")
+
+    required_defaults = (
+        "result.ok = true;",
+        "result.found = false;",
+        "result.seated = false;",
+        'result.seat = "";',
+        'result.type = "";',
+        'result.classname = "";',
+    )
+    player_idx = telemetry.find("PlayerBase.Cast(GetGame().GetPlayer())")
+    if player_idx < 0:
+        raise AssertionError("telemetry does not resolve the live local player")
+    for token in required_defaults:
+        index = telemetry.find(token)
+        if index < 0 or index > player_idx:
+            raise AssertionError(f"telemetry default missing before lookup: {token}")
+
+    ordered = (
+        "ResolveLiveSeatedTransport(player)",
+        "result.found = true;",
+        "result.seated = true;",
+        'result.seat = "unknown";',
+        "result.type = transport.GetType();",
+        "result.classname = transport.ClassName();",
+        "player.GetCommand_Vehicle()",
+        "vehicleCommand.GetTransport() == transport",
+        "VehicleTelemetrySeatToken(vehicleCommand.GetVehicleSeat())",
+        "CarScript.Cast(transport)",
+        "car.GetSpeedometer()",
+    )
+    previous = -1
+    for token in ordered:
+        index = telemetry.find(token)
+        if index < 0 or index <= previous:
+            raise AssertionError(f"telemetry order/contract missing: {token}")
+        previous = index
+
+    if telemetry.count("ResolveLiveSeatedTransport(player)") != 1:
+        raise AssertionError("telemetry must use exactly one live presence source")
+    if "if (!vehicleCommand)" in telemetry:
+        raise AssertionError("missing optional command must not make telemetry absent")
+    optional_seat = _method_body(
+        telemetry, "if (vehicleCommand && vehicleCommand.GetTransport() == transport)"
+    )
+    if optional_seat.strip() != (
+        "result.seat = VehicleTelemetrySeatToken(vehicleCommand.GetVehicleSeat());"
+    ):
+        raise AssertionError("vehicle command must only enrich the observed seat token")
+
+    for token in (
+        'return "driver";',
+        'return "codriver";',
+        'return "passenger_left";',
+        'return "passenger_right";',
+        'return "unknown";',
+        "DayZPlayerConstants.VEHICLESEAT_DRIVER",
+        "DayZPlayerConstants.VEHICLESEAT_CODRIVER",
+        "DayZPlayerConstants.VEHICLESEAT_PASSENGER_L",
+        "DayZPlayerConstants.VEHICLESEAT_PASSENGER_R",
+    ):
+        if token not in mapper:
+            raise AssertionError(f"telemetry seat mapper missing {token}")
 
 
 def assert_get_in_wire_source(source: str) -> None:
@@ -277,14 +445,167 @@ class TestVehicleTelemetryWireContract(unittest.TestCase):
         self.assertEqual(classes, ["TestVehicleTelemetryWireContract"])
         self.assertFalse(hasattr(module, "TestVehicleTelemetryLiveContract"))
 
-    def test_telemetry_region_is_frozen_before_and_independent_of_wire(self) -> None:
+    def test_telemetry_region_is_frozen_after_semantic_fix(self) -> None:
         self.assertEqual(_telemetry_sha256(self.bridge), TELEMETRY_REGION_SHA256)
-        telemetry = _method_body(
-            self.bridge, "protected bool DispatchVehicleTelemetry("
+        assert_vehicle_telemetry_source(self.bridge)
+
+    def test_telemetry_presence_rows_and_mocked_seated_fields(self) -> None:
+        car_driver = {
+            "crew_index": 0,
+            "vehicle_seat": self.named_seats["VEHICLESEAT_DRIVER"],
+            "type": "CivilianSedan",
+            "classname": "CivilianSedan",
+            "is_carscript": True,
+            "speedo_max": 0.0,
+            "gear": 0,
+            "engine_on_server": False,
+        }
+        driver = observed_telemetry(car_driver, self.named_seats)
+        self.assertEqual(
+            {key: driver[key] for key in ("ok", "found", "seated", "seat", "type", "classname")},
+            {
+                "ok": True,
+                "found": True,
+                "seated": True,
+                "seat": "driver",
+                "type": "CivilianSedan",
+                "classname": "CivilianSedan",
+            },
         )
-        self.assertIn("ResolveOwnedCar()", telemetry)
-        self.assertNotIn("ProcessVehicleGetInClientPrep", telemetry)
-        self.assertNotIn("job.args.seat", telemetry)
+        self.assertEqual(driver["speedo_max"], 0.0)
+
+        car_codriver = dict(car_driver)
+        car_codriver.update(
+            crew_index=1,
+            vehicle_seat=self.named_seats["VEHICLESEAT_CODRIVER"],
+        )
+        self.assertEqual(
+            observed_telemetry(car_codriver, self.named_seats)["seat"], "codriver"
+        )
+
+        self.assertEqual(
+            observed_telemetry(None, self.named_seats),
+            {
+                "ok": True,
+                "found": False,
+                "seated": False,
+                "seat": "",
+                "type": "",
+                "classname": "",
+            },
+        )
+
+        transition = dict(car_driver)
+        transition.update(crew_index=-1)
+        transition_result = observed_telemetry(transition, self.named_seats)
+        self.assertEqual(
+            transition_result,
+            {
+                "ok": True,
+                "found": False,
+                "seated": False,
+                "seat": "",
+                "type": "",
+                "classname": "",
+            },
+        )
+
+        commandless = dict(car_driver)
+        commandless.pop("vehicle_seat")
+        commandless_result = observed_telemetry(commandless, self.named_seats)
+        self.assertEqual(
+            (commandless_result["found"], commandless_result["seated"], commandless_result["seat"]),
+            (True, True, "unknown"),
+        )
+
+        stale_command = dict(car_driver)
+        stale_command["command_transport_matches"] = False
+        stale_result = observed_telemetry(stale_command, self.named_seats)
+        self.assertEqual(
+            (stale_result["found"], stale_result["seated"], stale_result["seat"]),
+            (True, True, "unknown"),
+        )
+
+        boat = dict(car_driver)
+        boat.update(
+            type="Boat_01_Blue",
+            classname="Boat_01_Blue",
+            is_carscript=False,
+        )
+        boat_result = observed_telemetry(boat, self.named_seats)
+        self.assertEqual(
+            (boat_result["found"], boat_result["seated"], boat_result["seat"]),
+            (True, True, "driver"),
+        )
+        self.assertNotIn("speedo_max", boat_result)
+        self.assertEqual(
+            map_vehicle_telemetry_seat_token(-999, self.named_seats), "unknown"
+        )
+
+    def test_discriminating_telemetry_mutants_fail(self) -> None:
+        assert_vehicle_telemetry_source(self.bridge)
+        mutants = {
+            "legacy_not_seated": (
+                "CarScript car;",
+                'CarScript car;\n\t\tresult.error = "not_seated";',
+            ),
+            "drop_found": ("result.found = true;", "result.found = false;"),
+            "drop_seated": ("result.seated = true;", "result.seated = false;"),
+            "drop_type": (
+                "result.type = transport.GetType();",
+                'result.type = "";',
+            ),
+            "drop_classname": (
+                "result.classname = transport.ClassName();",
+                'result.classname = "";',
+            ),
+            "hardcode_driver": (
+                "VehicleTelemetrySeatToken(vehicleCommand.GetVehicleSeat())",
+                '"driver"',
+            ),
+            "drop_unknown_fallback": (
+                'result.seat = "unknown";',
+                'result.seat = "";',
+            ),
+            "early_car_only": (
+                "CarScript.Cast(transport)",
+                "ResolveOwnedCar()",
+            ),
+            "command_only_presence": (
+                "transport = ResolveLiveSeatedTransport(player);",
+                "vehicleCommand = player.GetCommand_Vehicle();\n"
+                "\t\tif (!vehicleCommand)\n"
+                "\t\t{\n"
+                "\t\t\treturn true;\n"
+                "\t\t}\n"
+                "\t\ttransport = vehicleCommand.GetTransport();",
+            ),
+        }
+        for name, (old, new) in mutants.items():
+            with self.subTest(mutant=name):
+                mutant = _mutate_telemetry(self.bridge, old, new)
+                with self.assertRaises(AssertionError, msg=name):
+                    assert_vehicle_telemetry_source(mutant)
+
+        helper_mutants = {
+            "drop_parent_source": (
+                "Transport transport = Transport.Cast(player.GetParent());",
+                "Transport transport = null;",
+            ),
+            "drop_membership_source": (
+                "int crewIndex = transport.CrewMemberIndex(player);",
+                "int crewIndex = 0;",
+            ),
+            "accept_missing_membership": (
+                "if (crewIndex < 0)",
+                "if (false)",
+            ),
+        }
+        for name, (old, new) in helper_mutants.items():
+            with self.subTest(mutant=name):
+                mutant = _mutate_source(self.bridge, old, new)
+                with self.assertRaises(AssertionError, msg=name):
+                    assert_vehicle_telemetry_source(mutant)
 
     def test_mcp_args_wire_defaults_are_empty_type_and_seat_zero(self) -> None:
         args = _method_body(self.messages, "class MCPArgs")

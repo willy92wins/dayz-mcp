@@ -20,6 +20,7 @@ from tests._addon_paths import addon_root
 BRIDGE = addon_root() / "scripts/5_Mission/MCPClientBridge.c"
 BUILD = "protected MCPCamera BuildCameraResult(string mode)"
 READ_ERROR = "protected string CameraReadError()"
+LIVE_TRANSPORT = "protected Transport ResolveLiveSeatedTransport(PlayerBase player)"
 
 
 def _source() -> str:
@@ -49,11 +50,41 @@ def _body(source: str, signature: str) -> str:
 DENIED = (
     ("!IsClientInGame()", "client_not_in_game"),
     ("!cameraPlayer", "camera_unavailable_player"),
-    ("cameraPlayer.GetCommand_Vehicle()", "camera_unavailable_vehicle"),
+    ("ResolveLiveSeatedTransport(cameraPlayer)", "camera_unavailable_vehicle"),
     ("cameraPlayer.GetParent()", "camera_unavailable_parented_player"),
     ("!m_ActiveCam", "camera_unavailable_no_scripted_camera"),
     ("!m_ActiveCam.IsActive()", "camera_unavailable_inactive"),
 )
+
+
+def assert_live_vehicle_guard(source: str) -> None:
+    helper = _body(source, LIVE_TRANSPORT)
+    body = _body(source, READ_ERROR)
+    if "GetCommand_Vehicle" in helper or "cameraPlayer.GetCommand_Vehicle()" in body:
+        raise AssertionError("vehicle command cannot be the camera presence source")
+
+    helper_ordered = (
+        "Transport.Cast(player.GetParent())",
+        "if (!transport)",
+        "transport.CrewMemberIndex(player)",
+        "if (crewIndex < 0)",
+        "return transport;",
+    )
+    previous = -1
+    for token in helper_ordered:
+        index = helper.find(token)
+        if index < 0 or index <= previous:
+            raise AssertionError(f"live camera helper order/contract missing: {token}")
+        previous = index
+
+    fresh = body.index("PlayerBase cameraPlayer = PlayerBase.Cast(GetGame().GetPlayer())")
+    live = body.index("if (ResolveLiveSeatedTransport(cameraPlayer))")
+    parent = body.index("if (cameraPlayer.GetParent())")
+    active = body.index("if (!m_ActiveCam)")
+    if not fresh < live < parent < active:
+        raise AssertionError("fresh player/live transport/parent guards must precede camera natives")
+    if source.count('"camera_unavailable_vehicle"') != 1:
+        raise AssertionError("camera_unavailable_vehicle must have one production emitter")
 
 
 class CameraNativeCrashSourceTest(unittest.TestCase):
@@ -76,12 +107,26 @@ class CameraNativeCrashSourceTest(unittest.TestCase):
         self.assertTrue(body.rstrip().endswith('return "";'))
         self.assertNotRegex(body, r"(?:Camera\.|GetCurrentCamera|GetTransform|GetWorldPosition)")
 
-    def test_vehicle_guard_does_not_depend_only_on_the_vehicle_command(self) -> None:
-        body = _body(_source(), READ_ERROR)
-        # Independent parent evidence matters when a client command is missing.
-        parent = body.index("if (cameraPlayer.GetParent())")
-        self.assertLess(parent, body.index("m_ActiveCam.IsActive()"))
-        self.assertIn('return "camera_unavailable_parented_player";', body)
+    def test_camera_guard_resolves_fresh_player_and_live_membership_each_call(self) -> None:
+        source = _source()
+        assert_live_vehicle_guard(source)
+        body = _body(source, READ_ERROR)
+        self.assertEqual(body.count("GetGame().GetPlayer()"), 1)
+        self.assertNotRegex(source, r"protected\s+PlayerBase\s+m_.*(?:Camera|Player)")
+
+    def test_stale_vehicle_command_red_control(self) -> None:
+        source = _source()
+        assert_live_vehicle_guard(source)
+        camera_body = _body(source, READ_ERROR)
+        mutant_body = camera_body.replace(
+            "ResolveLiveSeatedTransport(cameraPlayer)",
+            "cameraPlayer.GetCommand_Vehicle()",
+            1,
+        )
+        self.assertNotEqual(mutant_body, camera_body)
+        mutant = source.replace(camera_body, mutant_body, 1)
+        with self.assertRaises(AssertionError):
+            assert_live_vehicle_guard(mutant)
 
     def test_camera_reference_is_checked_before_the_instance_native(self) -> None:
         body = _body(_source(), READ_ERROR)
