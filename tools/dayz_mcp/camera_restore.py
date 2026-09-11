@@ -11,19 +11,23 @@ RESTORE_CAMERA_PROBE_CMD = "camera_get"
 RESTORE_NOT_VERIFIED = ("controls", "hud", "simulation")
 RESTORE_CAMERA_VIEW_PLAYER = "player"
 RESTORE_CAMERA_VIEW_SCRIPTED = "scripted"
+RESTORE_CAMERA_VIEW_VEHICLE = "vehicle"
 
 
 def restore_camera_verdict(probe: dict[str, Any]) -> tuple[str, str]:
     """Classify a camera_get result as released | still_active | unverified.
 
     Liberation is a positive ``view=player`` (or the legacy
-    ``error=player_camera_active`` wire). A missing scripted camera, an
-    empty view, or ``ok=0`` is ``unverified``; absence is never success.
+    ``error=player_camera_active`` wire), or a readable ``view=vehicle``
+    while still seated. A missing scripted camera, an empty view, or
+    ``ok=0`` is ``unverified``; absence is never success.
     """
     camera = probe.get("camera") if isinstance(probe, dict) else None
     if not isinstance(camera, dict):
         return "unverified", "camera_get returned no camera block"
     view = camera.get("view")
+    if camera.get("ok") and view == RESTORE_CAMERA_VIEW_VEHICLE:
+        return "released", ""
     if camera.get("ok") and (
         view == RESTORE_CAMERA_VIEW_SCRIPTED or camera.get("viewport_moved")
     ):

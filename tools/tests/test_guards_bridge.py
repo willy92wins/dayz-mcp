@@ -233,6 +233,11 @@ class BridgeGuardsTest(unittest.TestCase):
         self.assertIn('camera.view = "player";', fill)
         self.assertNotIn('GetCurrentCamera(', fill)
         self.assertIn('CameraErrorIsMissingScripted(cameraError)', build)
+        self.assertIn('FillSeatedCameraView(camera, seatedPlayer)', build)
+        self.assertLess(
+            build.index('FillSeatedCameraView(camera, seatedPlayer)'),
+            build.index('CameraErrorIsMissingScripted(cameraError)'),
+        )
         self.assertIn('camera.view = "scripted";', build)
         self.assertIn('camera.error = "camera_illegible_player_transform";', build)
         self.assertNotIn('Camera.GetCurrentFOV()', build)

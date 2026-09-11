@@ -156,6 +156,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const int CAMERA_PHASE_APPLY = 0;
 	protected const int CAMERA_PHASE_SETTLE = 1;
 	protected const int CAMERA_PHASE_REPORT = 2;
+	// Seated apply is observed via GetCurrentCameraTransform, not m_ActiveCam.
+	// Cabin vs requested pose farther than this is an unmoved-cabin fail.
+	protected const float CAMERA_SEATED_POSE_EPS_M = 0.05;
 	protected const float DRIVE_CLIENT_TIMEOUT_S = 12.0;
 	protected const float DRIVE_CLIENT_PREP_TIMEOUT_S = 5.0;
 	protected const float DRIVE_CLIENT_DEFAULT_SAMPLE_S = 2.0;
@@ -2728,10 +2731,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			// walk the same native camera object as GetCurrentCamera (SUB_BRZ
 			// 2026-09-08) and have frozen the client render after camera_set
 			// (f47b). REPORT still snapshots m_ActiveCam or the player view.
+			// Seated apply/observe still needs the wall-time settle: the generic
+			// CameraReadError reject is not a settle abort (Sol APROBAR_CONTRATO).
 			if (CameraReadError() != "")
 			{
-				job.phase = CAMERA_PHASE_REPORT;
-				return true;
+				PlayerBase settlePlayer = PlayerBase.Cast(GetGame().GetPlayer());
+				if (!ResolveLiveSeatedTransport(settlePlayer))
+				{
+					job.phase = CAMERA_PHASE_REPORT;
+					return true;
+				}
 			}
 			float elapsed = m_JobRunner.GetElapsedS() - job.sample_start_s;
 			if (elapsed >= job.sample_s_target)
@@ -3494,6 +3503,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			result.tick_poll_callback = job.tick_poll_callback;
 			result.tick_dispatch = job.tick_dispatch;
 			result.camera = BuildCameraResult(job.args.cam_mode);
+			ObserveSeatedCameraApply(result.camera, job.args);
+			if (result.camera && result.camera.error == "camera_unmoved_cabin")
+			{
+				result.ok = false;
+				result.error = "camera_unmoved_cabin";
+			}
 			PostResult(result);
 		}
 
@@ -3803,8 +3818,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return "camera_unavailable_player";
 		}
 
-		// Vehicle view can override a scripted camera. Require both current
-		// Transport parentage and live crew membership; never trust a stale command.
+		// Generic scripted-camera reject while seated. Presence is live parent
+		// Transport + CrewMemberIndex, never GetCommand_Vehicle. BuildCameraResult
+		// takes the seated apply/observe branch before treating this as final.
 		if (ResolveLiveSeatedTransport(cameraPlayer))
 		{
 			return "camera_unavailable_vehicle";
@@ -3891,6 +3907,101 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return true;
 	}
 
+	// Observe-only seated view. Parent+crew is already established by
+	// CameraReadError → camera_unavailable_vehicle. GetCommand_Vehicle is
+	// never presence. A readable transform is view=vehicle, not scripted.
+	protected bool FillSeatedCameraView(MCPCamera camera, PlayerBase cameraPlayer)
+	{
+		if (!camera || !cameraPlayer)
+		{
+			return false;
+		}
+
+		if (!ResolveLiveSeatedTransport(cameraPlayer))
+		{
+			return false;
+		}
+
+		vector playerPos;
+		vector playerDir;
+		vector playerRot;
+		cameraPlayer.GetCurrentCameraTransform(playerPos, playerDir, playerRot);
+		if (!IsFiniteFloat(playerPos[0]) || !IsFiniteFloat(playerPos[1]) || !IsFiniteFloat(playerPos[2]))
+		{
+			return false;
+		}
+
+		if (!IsNonZeroFiniteVector(playerDir))
+		{
+			return false;
+		}
+
+		VectorToArray(playerPos, camera.pos);
+		VectorToArray(playerDir, camera.dir);
+		camera.ok = true;
+		camera.viewport_moved = false;
+		camera.view = "vehicle";
+		camera.error = "";
+		return true;
+	}
+
+	protected bool RequestedCameraPosition(MCPArgs args, out vector requested)
+	{
+		MCPCameraValidation validation = ValidateCameraArgs(args);
+		if (!validation || !validation.ok)
+		{
+			return false;
+		}
+
+		requested = validation.pos;
+		return IsFiniteFloat(requested[0]) && IsFiniteFloat(requested[1]) && IsFiniteFloat(requested[2]);
+	}
+
+	protected bool CameraPositionsMatch(vector observed, vector requested)
+	{
+		float dx = observed[0] - requested[0];
+		float dy = observed[1] - requested[1];
+		float dz = observed[2] - requested[2];
+		float eps = CAMERA_SEATED_POSE_EPS_M;
+		return (dx * dx) + (dy * dy) + (dz * dz) <= (eps * eps);
+	}
+
+	// Apply vs observe: after seated camera_set, compare the observed
+	// GetCurrentCameraTransform to the requested pose. Matching pose is the
+	// only scripted PASS. An unmoved cabin stays view=vehicle and fails.
+	protected void ObserveSeatedCameraApply(MCPCamera camera, MCPArgs args)
+	{
+		if (!camera || camera.view != "vehicle")
+		{
+			return;
+		}
+
+		vector requested;
+		if (!RequestedCameraPosition(args, requested) || !camera.pos || camera.pos.Count() < 3)
+		{
+			camera.ok = false;
+			camera.viewport_moved = false;
+			camera.view = "vehicle";
+			camera.error = "camera_unmoved_cabin";
+			return;
+		}
+
+		vector observed = Vector(camera.pos.Get(0), camera.pos.Get(1), camera.pos.Get(2));
+		if (CameraPositionsMatch(observed, requested))
+		{
+			camera.ok = true;
+			camera.view = "scripted";
+			camera.viewport_moved = true;
+			camera.error = "";
+			return;
+		}
+
+		camera.ok = false;
+		camera.viewport_moved = false;
+		camera.view = "vehicle";
+		camera.error = "camera_unmoved_cabin";
+	}
+
 	protected MCPCamera BuildCameraResult(string mode)
 	{
 		MCPCamera camera = new MCPCamera();
@@ -3899,6 +4010,21 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// Shared by camera_get and the camera_set report (outside Dispatch).
 		// Rejected snapshots keep pos/matrix/dir empty (ctor-initialized).
 		string cameraError = CameraReadError();
+		PlayerBase seatedPlayer = PlayerBase.Cast(GetGame().GetPlayer());
+		if (ResolveLiveSeatedTransport(seatedPlayer))
+		{
+			if (FillSeatedCameraView(camera, seatedPlayer))
+			{
+				return camera;
+			}
+
+			camera.ok = false;
+			camera.viewport_moved = false;
+			camera.view = "";
+			camera.error = cameraError;
+			return camera;
+		}
+
 		if (CameraErrorIsMissingScripted(cameraError))
 		{
 			PlayerBase liberatedPlayer = PlayerBase.Cast(GetGame().GetPlayer());

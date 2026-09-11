@@ -176,7 +176,9 @@ class CameraNativeCrashSourceTest(unittest.TestCase):
         body = _body(_source(), "override void MCP_PostJobSuccess(MCPJob job)")
         report = _body(body, 'if (job.kind == "camera_set")')
         self.assertIn("result.camera = BuildCameraResult(job.args.cam_mode);", report)
-        self.assertGreater(report.index("PostResult(result);"), report.index("BuildCameraResult("))
+        self.assertIn("ObserveSeatedCameraApply(result.camera, job.args);", report)
+        self.assertGreater(report.index("ObserveSeatedCameraApply("), report.index("BuildCameraResult("))
+        self.assertGreater(report.index("PostResult(result);"), report.index("ObserveSeatedCameraApply("))
 
     def test_settle_is_wall_time_only_and_never_queries_global_camera_natives(self) -> None:
         body = _body(_source(), "protected bool ProcessCameraSetJob(MCPJob job)")
