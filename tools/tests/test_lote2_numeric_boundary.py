@@ -1,4 +1,4 @@
-"""Numeric ingress regression matrix. All probes enter through FastMCP.call_tool.
+﻿"""Numeric ingress regression matrix. All probes enter through FastMCP.call_tool.
 
 Only the final registered function is replaced, never validation or metadata.
 This keeps all probes offline and proves invalid input cannot reach a handler.
@@ -77,12 +77,15 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
     def test_census_includes_alias_optional_vectors_and_conditional_tool(self):
         rows = set(self.rows)
-        self.assertEqual(len(rows), 119)
+        self.assertEqual(len(rows), 122)
         self.assertIn(("lease_acquire", "max_wait_s", "float"), rows)
         self.assertIn(("exec_enforce", "timeout_s", "float"), rows)
         self.assertIn(("object_anim", "phase", "float"), rows)
         self.assertIn(("scene_raycast", "from_pos", "vector"), rows)
         self.assertIn(("dayz_test_run", "client_start_budget_s", "float"), rows)
+        self.assertIn(("inventory_attach", "pos", "vector"), rows)
+        self.assertIn(("inventory_attach", "object_id", "int"), rows)
+        self.assertIn(("inventory_attach", "timeout_s", "float"), rows)
 
     async def test_every_numeric_parameter_rejects_both_booleans_before_handler(self):
         for name, param, shape in self.rows:
