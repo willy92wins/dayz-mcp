@@ -218,6 +218,27 @@ class RestoreGameplayPostconditionContractTest(unittest.IsolatedAsyncioTestCase)
         # restore, which is the class of lie the ficha reported.
         self.assertEqual(result["not_verified"], ["controls", "hud", "simulation"])
 
+    async def test_ok_accepts_a_readable_vehicle_view_while_still_seated(self) -> None:
+        app, runtime = self._app()
+        with patch.object(
+            runtime,
+            "call_bridge",
+            new=AsyncMock(
+                side_effect=[
+                    {"id": 7, "ok": 1, "error": ""},
+                    _camera_probe(view="vehicle", viewport_moved=0, error=""),
+                ]
+            ),
+        ) as call:
+            result = _content_json(
+                await app.call_tool("restore_gameplay", {"timeout_s": 1.0})
+            )
+
+        self.assertEqual(call.await_args_list[1].args[0], "camera_get")
+        self.assertTrue(result["ok"])
+        self.assertIs(result["camera_released"], True)
+        self.assertEqual(result["not_verified"], ["controls", "hud", "simulation"])
+
     async def test_a_camera_still_mounted_is_not_answered_as_ok(self) -> None:
         app, runtime = self._app()
         with patch.object(

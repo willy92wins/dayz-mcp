@@ -22,6 +22,7 @@ GRAB = Path(mcp_capture.GRAB_SCRIPT)
 class CameraGetViewContractTest(unittest.TestCase):
     def test_verdict_trichotomy_is_observable(self) -> None:
         player = {"camera": {"ok": 1, "view": "player", "viewport_moved": 0, "error": ""}}
+        vehicle = {"camera": {"ok": 1, "view": "vehicle", "viewport_moved": 0, "error": ""}}
         scripted = {"camera": {"ok": 1, "view": "scripted", "viewport_moved": 1, "error": ""}}
         illegible = {
             "camera": {
@@ -40,6 +41,7 @@ class CameraGetViewContractTest(unittest.TestCase):
             }
         }
         self.assertEqual(restore_camera_verdict(player), ("released", ""))
+        self.assertEqual(restore_camera_verdict(vehicle), ("released", ""))
         self.assertEqual(restore_camera_verdict(scripted)[0], "still_active")
         self.assertEqual(restore_camera_verdict(illegible)[0], "unverified")
         self.assertEqual(restore_camera_verdict(inferred)[0], "unverified")
@@ -60,6 +62,7 @@ class CameraGetRecipeTest(unittest.TestCase):
         for token in (
             "view='player'",
             "view='scripted'",
+            "view='vehicle'",
             "camera_illegible_player_transform",
             "does not poll",
             "client_not_polling",
@@ -72,6 +75,7 @@ class CameraGetRecipeTest(unittest.TestCase):
         start = source.index("release the camera. camera_set has no off mode.")
         description = source[start : source.index("async def restore_gameplay")]
         self.assertIn("camera.view='player'", description)
+        self.assertIn("camera.view='vehicle'", description)
         self.assertIn("restore_unverified", description)
         self.assertIn("Do not treat a missing scripted camera as liberation", description)
 
