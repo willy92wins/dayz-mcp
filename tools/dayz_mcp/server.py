@@ -787,8 +787,10 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     handler ran, which is a different diagnosis from one that ran and declined.
     The echo is whitelisted; requested_root and requested_path are echoed
     whenever the bridge sent the key (empty root included, ficha f4f2).
-    requested_text stays out on purpose, it would replay caller input
-    (possibly sensitive, unbounded) into an error message.
+    matched_path is filled only after a unique match, so an empty value is
+    omitted (it is not a request input). requested_text stays out on purpose,
+    it would replay caller input (possibly sensitive, unbounded) into an
+    error message.
     """
     if cmd not in _UI_ECHO_VERBS:
         return ""
@@ -801,11 +803,17 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
             parts.append(" ".join(fields))
     echo = result.get("ui_request")
     if isinstance(echo, dict):
-        pairs = [
-            f"{key}={echo[key]!r}"
-            for key in _UI_ECHO_KEYS
-            if key in echo and echo.get(key) is not None
-        ]
+        pairs = []
+        for key in _UI_ECHO_KEYS:
+            if key not in echo:
+                continue
+            value = echo[key]
+            if value is None:
+                continue
+            # Empty matched_path is unset resolution, not an echoed input.
+            if key == "matched_path" and value == "":
+                continue
+            pairs.append(f"{key}={value!r}")
         if pairs:
             parts.append(" ".join(pairs))
     return "; ".join(parts)
