@@ -72,6 +72,8 @@ def _assert_dayz_test_run_copy(test: unittest.TestCase, description: str) -> Non
     test.assertLess(release_at, run_at, description)
     test.assertLess(run_at, acquire_at, description)
     test.assertIn("later mutating tools", description)
+    test.assertIn("mode=all plus wait_for(players_at_least, 1)", description)
+    test.assertIn("viable night session", description)
 
 
 def _tool_description(app, name: str) -> str:
