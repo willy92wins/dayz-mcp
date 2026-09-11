@@ -245,7 +245,20 @@ class SteamFastPathTests(unittest.TestCase):
                 self.provider.active_user = value
                 result = self.run_repair()
                 self.assertEqual(self.host.write_attempts, [])
-                self.assert_fallback(result, "active_user_invalid")
+                # Live steam.exe + invalid ActiveUser: abort, never -silent race.
+                self.assertEqual(result.steam_pid_repair_reason, "active_user_invalid")
+                self.assertFalse(result.steam_restart_fallback)
+                self.assertEqual(result.steam_remediation_reason, "active_user_invalid_live_steam")
+                self.assertEqual(self.host.invocations, [])
+                self.assertEqual(result.error_code, sp.STEAM_SESSION_STALE)
+
+    def test_missing_active_user_without_live_steam_still_restarts(self):
+        self.provider.active_user = 0
+        self.provider.pids = ()
+        self.provider.existing.clear()
+        result = self.run_repair()
+        self.assertEqual(self.host.write_attempts, [])
+        self.assert_fallback(result, "active_user_invalid", [("-silent",)])
 
     def test_malformed_registered_pid_is_not_repaired_as_a_dword(self):
         for pid in (True, "99", -1, None, 2**32):
