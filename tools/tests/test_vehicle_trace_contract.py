@@ -215,6 +215,41 @@ class VehicleTraceEnforceSourceContractTest(unittest.TestCase):
         shutdown = _method_body(bridge, "void Shutdown()")
         self.assertIn('MCPVehicleTrace.Abort("shutdown");', shutdown)
 
+    def test_14de_trace_names_engine_ready_skip_without_faking_throttle(self) -> None:
+        source = CAR_SCRIPT.read_text(encoding="utf-8")
+        sample = _method_body(source, "class MCPVehicleTraceSample")
+        for token in (
+            "float engine_rpm;",
+            "float rpm_idle;",
+            "bool engine_ready;",
+            "bool throttle_set;",
+        ):
+            self.assertIn(token, sample)
+
+        on_input = _method_body(source, "override void OnInput(float dt)")
+        self.assertIn("MCPCarDrive.s_TickEngineReady = false;", on_input)
+        self.assertIn("MCPCarDrive.s_TickThrottleSet = false;", on_input)
+        self.assertIn("MCPCarDrive.s_TickEngineReady = engineReady;", on_input)
+        ready_latch = on_input.index("MCPCarDrive.s_TickEngineReady = engineReady;")
+        ready_branch = on_input.index("if (engineReady)")
+        set_throttle = on_input.index("SetThrottle(throttle);")
+        throttle_set = on_input.index("MCPCarDrive.s_TickThrottleSet = true;")
+        self.assertLess(ready_latch, ready_branch)
+        self.assertLess(ready_branch, set_throttle)
+        self.assertLess(set_throttle, throttle_set)
+        self.assertEqual(on_input.count("SetThrottle("), 1)
+
+        capture = _method_body(source, "protected static void CaptureNow(CarScript car, bool forced)")
+        self.assertIn("sample.throttle_applied = car.GetThrottle();", capture)
+        self.assertIn("sample.engine_rpm = car.EngineGetRPM();", capture)
+        self.assertIn("sample.rpm_idle = car.EngineGetRPMIdle();", capture)
+        self.assertIn("sample.engine_ready = MCPCarDrive.s_TickEngineReady;", capture)
+        self.assertIn("sample.throttle_set = MCPCarDrive.s_TickThrottleSet;", capture)
+        self.assertLess(
+            capture.index("sample.throttle_applied = car.GetThrottle();"),
+            capture.index("sample.engine_rpm = car.EngineGetRPM();"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

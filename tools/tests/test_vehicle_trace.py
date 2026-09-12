@@ -258,6 +258,21 @@ class VehicleTraceValidationTest(unittest.TestCase):
             with self.subTest(kind="sample", field=field):
                 self.assertEqual(vehicle_trace.validate_trace(broken)["status"], "STOP")
 
+    def test_14de_discriminator_fields_are_required_and_typed(self) -> None:
+        for field in ("engine_rpm", "rpm_idle", "engine_ready", "throttle_set"):
+            self.assertIn(field, vehicle_trace.REQUIRED_SAMPLE_FIELDS)
+        schema = _load_json(SCHEMA_PATH)
+        self.assertEqual(
+            set(schema["$defs"]["sample"]["required"]),
+            vehicle_trace.REQUIRED_SAMPLE_FIELDS,
+        )
+        self.assertIn("engine_ready", vehicle_trace._BOOL_SAMPLE_FIELDS)
+        self.assertIn("throttle_set", vehicle_trace._BOOL_SAMPLE_FIELDS)
+        self.assertEqual(schema["$defs"]["sample"]["properties"]["engine_rpm"]["type"], "number")
+        self.assertEqual(schema["$defs"]["sample"]["properties"]["rpm_idle"]["type"], "number")
+        self.assertEqual(schema["$defs"]["sample"]["properties"]["engine_ready"]["type"], "boolean")
+        self.assertEqual(schema["$defs"]["sample"]["properties"]["throttle_set"]["type"], "boolean")
+
     def test_named_negative_mutations_are_not_false_green(self) -> None:
         fixture = _load_json(FIXTURE_DIR / "negative_mutations.json")
         for mutation in fixture["mutations"]:
