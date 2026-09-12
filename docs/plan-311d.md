@@ -33,7 +33,7 @@ Campos extra (además de los actuales):
   - `multiplier_unconfirmed` (pedido, echo ausente; **no** implica `ok:0`)
   - `multiplier_mismatch` (echo numérico distinto)
 
-`applied.hour`/`applied.minute` en la respuesta MCP se reescriben al reloj normalizado cuando `minute` era int ≥60. Hour queda en 0–23 por carry de calendario (23:60 → 00:00 del día siguiente). El pedido no se consulta al normalizar: un eco same-day `day=12 hour=23 minute=60` publica `day=13 hour=0` y, si el pedido era 00:00 del día 12, `ok:0`. No se publica `hour=24`.
+`applied.hour`/`applied.minute` en la respuesta MCP se reescriben al reloj normalizado cuando `minute` era int o float integral ≥60 (`60` / `60.0`) o `hour` era `24` / `24.0`. Hour queda en 0–23 por carry de calendario (23:60 → 00:00 del día siguiente). El pedido no se consulta al normalizar: un eco same-day `day=12 hour=23 minute=60` (o `23.0`/`60.0`) publica `day=13 hour=0` y, si el pedido era 00:00 del día 12, `ok:0`. No se publica `hour=24` ni `24.0`.
 
 `ok`:
 

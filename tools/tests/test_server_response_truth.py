@@ -361,6 +361,41 @@ class WorldTimeSetResponseTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.get("ok"), 0)
         self.assertEqual(result.get("warnings"), ["date_not_applied"])
 
+    async def test_same_day_float_minute_sixty_echo_carries_to_next_day(self) -> None:
+        result, _calls = await _call_tool_with_bridge_result(
+            "world_time_set",
+            {
+                "year": 2026,
+                "month": 9,
+                "day": 12,
+                "hour": 0,
+                "minute": 0,
+            },
+            {
+                "ok": 1,
+                "applied": {
+                    "year": 2026,
+                    "month": 9,
+                    "day": 12,
+                    "hour": 23.0,
+                    "minute": 60.0,
+                },
+            },
+        )
+
+        # Today's skip: _is_int_clock_part rejects 60.0, so 23.0:60.0
+        # stays uncarried (day=12). Honest path matches int 23:60.
+        self.assertNotEqual(result["applied"]["hour"], 24)
+        self.assertNotEqual(result["applied"]["hour"], 24.0)
+        self.assertNotEqual(result["applied"]["minute"], 60.0)
+        self.assertEqual(result["applied"]["hour"], 0)
+        self.assertEqual(result["applied"]["minute"], 0)
+        self.assertEqual(result["applied"]["day"], 13)
+        self.assertNotEqual(result["applied"]["day"], 12)
+        self.assertIs(result.get("date_applied"), False)
+        self.assertEqual(result.get("ok"), 0)
+        self.assertEqual(result.get("warnings"), ["date_not_applied"])
+
     async def test_missing_applied_echo_does_not_rewrite_ok(self) -> None:
         result, _calls = await _call_tool_with_bridge_result(
             "world_time_set",
@@ -391,6 +426,31 @@ class NormalizeAppliedClockTest(unittest.TestCase):
         self.assertEqual(out["year"], 2026)
         self.assertGreaterEqual(out["hour"], 0)
         self.assertLess(out["hour"], 24)
+
+    def test_float_sixty_and_twenty_four_carry_like_ints(self) -> None:
+        # Pin: fails while _is_int_clock_part is type-is-int only, because
+        # 60.0/24.0 never enter _overflow_clock_parts.
+        minute_out = server._normalize_applied_clock(
+            {"hour": 8, "minute": 60.0, "year": 2026}
+        )
+        self.assertEqual(minute_out["hour"], 9)
+        self.assertEqual(minute_out["minute"], 0)
+        self.assertNotEqual(minute_out["minute"], 60.0)
+
+        hour_out = server._normalize_applied_clock(
+            {"year": 2026, "month": 9, "day": 12, "hour": 24.0, "minute": 0}
+        )
+        self.assertNotEqual(hour_out["hour"], 24.0)
+        self.assertEqual(hour_out["hour"], 0)
+        self.assertEqual(hour_out["minute"], 0)
+        self.assertEqual(hour_out["day"], 13)
+
+        midnight = server._normalize_applied_clock(
+            {"year": 2026, "month": 9, "day": 12, "hour": 23.0, "minute": 60.0}
+        )
+        self.assertEqual(midnight["hour"], 0)
+        self.assertEqual(midnight["minute"], 0)
+        self.assertEqual(midnight["day"], 13)
 
     def test_leaves_in_range_clocks_alone(self) -> None:
         src = {"hour": 9, "minute": 0}

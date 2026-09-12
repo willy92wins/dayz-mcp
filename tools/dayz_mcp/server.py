@@ -2098,7 +2098,14 @@ def _finite_float(value: float, error: str = "bad_args") -> float:
 
 
 def _is_int_clock_part(value: object) -> bool:
-    return type(value) is int and not isinstance(value, bool)
+    """True for int or finite integral float (60.0, 24.0). Never bool."""
+    if isinstance(value, bool):
+        return False
+    if type(value) is int:
+        return True
+    if type(value) is float:
+        return math.isfinite(value) and value == int(value)
+    return False
 
 
 def _add_applied_days(out: dict[str, Any], extra_days: int) -> None:
@@ -2107,17 +2114,19 @@ def _add_applied_days(out: dict[str, Any], extra_days: int) -> None:
     year, month, day = out.get("year"), out.get("month"), out.get("day")
     if all(_is_int_clock_part(part) for part in (year, month, day)):
         try:
-            shifted = datetime(year, month, day) + timedelta(days=extra_days)
+            shifted = datetime(int(year), int(month), int(day)) + timedelta(
+                days=extra_days
+            )
         except ValueError:
             if _is_int_clock_part(day):
-                out["day"] = day + extra_days
+                out["day"] = int(day) + extra_days
             return
         out["year"] = shifted.year
         out["month"] = shifted.month
         out["day"] = shifted.day
         return
     if _is_int_clock_part(day):
-        out["day"] = day + extra_days
+        out["day"] = int(day) + extra_days
 
 
 def _overflow_clock_parts(hour: int, minute: int) -> tuple[int, int, int]:
@@ -2130,7 +2139,8 @@ def _normalize_applied_clock(applied: dict[str, Any]) -> dict[str, Any]:
     """Carry minute>=60 into hour, then into the calendar day. Hour stays 0–23.
 
     GetDate can echo hour=8, minute=60 for a requested 9:00, or hour=23,
-    minute=60 for midnight (fb-20260911-230929-311d). Overflow always
+    minute=60 for midnight (fb-20260911-230929-311d). Integral floats
+    60.0 and 24.0 take the same carry path as int 60/24. Overflow always
     carries into the next calendar day so applied.hour is never 24. The
     request is not consulted; a same-day 23:60 echo becomes 00:00 the
     next day even if the client asked for 00:00 on the echoed day.
@@ -2140,6 +2150,8 @@ def _normalize_applied_clock(applied: dict[str, Any]) -> dict[str, Any]:
     minute = out.get("minute")
     if not _is_int_clock_part(hour) or not _is_int_clock_part(minute):
         return out
+    hour = int(hour)
+    minute = int(minute)
     if minute < 60 and 0 <= hour <= 23:
         return out
     extra_days, hour, minute = _overflow_clock_parts(hour, minute)
