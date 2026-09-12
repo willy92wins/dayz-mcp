@@ -5712,9 +5712,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     )
     async def pipeline_feedback(
         kind: Literal["bug", "request", "finding", "tool_contribution"],
-        title: str,
-        body: str,
-        project: str = "",
+        title: Annotated[
+            str,
+            Field(min_length=inbox.TITLE_MIN_CHARS, max_length=inbox.TITLE_MAX_CHARS),
+        ],
+        body: Annotated[
+            str,
+            Field(min_length=inbox.BODY_MIN_CHARS, max_length=inbox.BODY_MAX_CHARS),
+        ],
+        project: Annotated[str, Field(max_length=inbox.PROJECT_MAX_CHARS)] = "",
     ) -> dict[str, Any]:
         """File pipeline feedback from any agent session: a bug you hit, a request for a missing capability, a finding worth recording, or a tool/playbook you built (kind=tool_contribution). For contributions, reference artifacts at DURABLE paths (never session scratchpads). Enforced limits, in characters: title 1..120, body 1..8000, project 0..64; an over-length value is rejected naming its real count (title 125 > 120 chars). Appends to a local shared inbox; ids cannot collide. Works even when the game and daemon are down."""
         # The lock here only preserves the one-tool-at-a-time client invariant;
@@ -5775,7 +5781,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def pipeline_resolve(
         feedback_id: str,
         resolution: str,
-        evidence_ref: Annotated[str | None, Field(max_length=240)] = None,
+        evidence_ref: Annotated[
+            str | None, Field(max_length=inbox.EVIDENCE_REF_MAX_CHARS)
+        ] = None,
     ) -> dict[str, Any]:
         """Triage a feedback item by appending a resolution; deletes nothing, history is append-only. Enforced limits, in characters: resolution 1..2000, evidence_ref 1..240. evidence_ref is a path only -- relative to DayZ_MCP_dev, starting at reviews | gates | reports | research, ASCII, segments of [A-Za-z0-9._-], no repo prefix and nothing appended (note, parentheses, commit id, #anchor). An over-length value is rejected naming its real count (resolution 2087 > 2000 chars)."""
         # The lock here only preserves the one-tool-at-a-time client invariant;

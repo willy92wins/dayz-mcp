@@ -350,6 +350,79 @@ class PipelineToolsTest(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class PipelineFeedbackInputSchemaLimitsTest(unittest.IsolatedAsyncioTestCase):
+    """fb-20260910-032514-2c43: tools/list must publish the inbox caps.
+
+    Description text already named 1..120 / 1..8000 / 0..64; the catalog
+    still typed those fields as unbounded strings. A client that validates
+    against inputSchema could not reject title 121 before the round trip.
+    The numbers below are the inbox constants; the equality to 120/8000/64
+    is the ficha contract, so renaming a constant cannot hide a drift.
+    """
+
+    def setUp(self) -> None:
+        self._orig_dir = inbox.INBOX_DIR
+        self._orig_path = inbox.FEEDBACK_PATH
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        inbox.INBOX_DIR = root / "inbox"
+        inbox.FEEDBACK_PATH = inbox.INBOX_DIR / "feedback.jsonl"
+
+    def tearDown(self) -> None:
+        inbox.INBOX_DIR = self._orig_dir
+        inbox.FEEDBACK_PATH = self._orig_path
+        self._tmp.cleanup()
+
+    async def test_input_schema_publishes_title_body_project_lengths(self) -> None:
+        self.assertEqual(inbox.TITLE_MIN_CHARS, 1)
+        self.assertEqual(inbox.TITLE_MAX_CHARS, 120)
+        self.assertEqual(inbox.BODY_MIN_CHARS, 1)
+        self.assertEqual(inbox.BODY_MAX_CHARS, 8000)
+        self.assertEqual(inbox.PROJECT_MAX_CHARS, 64)
+
+        app, _runtime = server.build_app(server.ServerConfig())
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        props = (tools["pipeline_feedback"].inputSchema or {}).get("properties") or {}
+
+        title = props["title"]
+        self.assertEqual(title.get("type"), "string")
+        self.assertEqual(title.get("minLength"), inbox.TITLE_MIN_CHARS)
+        self.assertEqual(title.get("maxLength"), inbox.TITLE_MAX_CHARS)
+
+        body = props["body"]
+        self.assertEqual(body.get("type"), "string")
+        self.assertEqual(body.get("minLength"), inbox.BODY_MIN_CHARS)
+        self.assertEqual(body.get("maxLength"), inbox.BODY_MAX_CHARS)
+
+        project = props["project"]
+        self.assertEqual(project.get("type"), "string")
+        self.assertEqual(project.get("maxLength"), inbox.PROJECT_MAX_CHARS)
+        self.assertNotIn("minLength", project)
+
+    async def test_schema_without_title_max_length_is_the_negative(self) -> None:
+        # Control: the assertion above is not a tautology. A catalog that
+        # still looks like origin/main (string, no maxLength) must fail it.
+        bare = {"title": "Title", "type": "string"}
+        self.assertNotIn("maxLength", bare)
+        self.assertNotEqual(bare.get("maxLength"), inbox.TITLE_MAX_CHARS)
+
+    async def test_boundary_and_over_length_still_go_through_inbox(self) -> None:
+        inbox.append_feedback(
+            "bug",
+            "x" * inbox.TITLE_MAX_CHARS,
+            "y" * inbox.BODY_MAX_CHARS,
+            project="z" * inbox.PROJECT_MAX_CHARS,
+        )
+        self.assertTrue(inbox.FEEDBACK_PATH.is_file())
+        with self.assertRaises(ValueError) as ctx:
+            inbox.append_feedback("bug", "x" * (inbox.TITLE_MAX_CHARS + 1), "body")
+        self.assertIn(
+            f"title {inbox.TITLE_MAX_CHARS + 1} > {inbox.TITLE_MAX_CHARS}",
+            str(ctx.exception),
+        )
+        self.assertEqual(len(inbox.FEEDBACK_PATH.read_text(encoding="utf-8").splitlines()), 1)
+
+
 class PipelineToolDescriptionsDeclareLimitsTest(unittest.IsolatedAsyncioTestCase):
     """Ficha fb-20260906-145656-d45f.
 

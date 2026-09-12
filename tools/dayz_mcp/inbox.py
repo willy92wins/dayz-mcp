@@ -11,6 +11,15 @@ from pathlib import Path
 INBOX_DIR = Path(os.environ["LOCALAPPDATA"]) / "DayZ_MCP" / "inbox"
 FEEDBACK_PATH = INBOX_DIR / "feedback.jsonl"
 KINDS = frozenset({"bug", "request", "tool_contribution", "finding"})
+# Published on pipeline_feedback.inputSchema (fb-20260910-032514-2c43) and
+# enforced again in append_feedback. Keep the two in lockstep via these names.
+TITLE_MIN_CHARS = 1
+TITLE_MAX_CHARS = 120
+BODY_MIN_CHARS = 1
+BODY_MAX_CHARS = 8000
+PROJECT_MAX_CHARS = 64
+RESOLUTION_MAX_CHARS = 2000
+EVIDENCE_REF_MAX_CHARS = 240
 _FEEDBACK_ID_RE = re.compile(r"^fb-\d{8}-\d{6}-[0-9a-f]{4}$")
 _EVIDENCE_ROOTS = frozenset({"reviews", "gates", "reports", "research"})
 _EVIDENCE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -45,7 +54,7 @@ def _validate_evidence_ref(value: str | None) -> str | None:
     if value is None:
         return None
     value = _require_str(value, "evidence_ref")
-    _check_length(value, "evidence_ref", 240)
+    _check_length(value, "evidence_ref", EVIDENCE_REF_MAX_CHARS)
     try:
         value.encode("ascii")
     except UnicodeEncodeError as exc:
@@ -109,10 +118,12 @@ def append_feedback(
     platform = _require_str(platform, "platform")
     if kind not in KINDS:
         raise ValueError("bad_args: kind not in bug|request|tool_contribution|finding")
-    _check_length(title, "title", 120)
-    _check_length(body, "body", 8000)
-    if len(project) > 64:
-        raise ValueError(f"bad_args: project {len(project)} > 64 chars")
+    _check_length(title, "title", TITLE_MAX_CHARS)
+    _check_length(body, "body", BODY_MAX_CHARS)
+    if len(project) > PROJECT_MAX_CHARS:
+        raise ValueError(
+            f"bad_args: project {len(project)} > {PROJECT_MAX_CHARS} chars"
+        )
     stamp, ts = _utc_now()
     entry = {
         "id": f"fb-{stamp}-{secrets.token_hex(2)}",
@@ -141,7 +152,7 @@ def append_resolution(
     evidence_ref = _validate_evidence_ref(evidence_ref)
     if _FEEDBACK_ID_RE.fullmatch(feedback_id) is None:
         raise ValueError("bad_args: feedback_id must match fb-YYYYMMDD-HHMMSS-xxxx")
-    _check_length(resolution, "resolution", 2000)
+    _check_length(resolution, "resolution", RESOLUTION_MAX_CHARS)
     _stamp, ts = _utc_now()
     record = {
         "resolves": feedback_id,
