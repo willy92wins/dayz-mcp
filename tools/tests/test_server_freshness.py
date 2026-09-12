@@ -147,6 +147,8 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_bridge_status_is_live_but_registry_fingerprint_is_frozen(self) -> None:
         fresh = (await self.call("bridge_status", {})).structuredContent
+        self.assertIsNone(fresh["tool_registry_remediation"])
+        self.assertNotIsInstance(fresh["tool_registry_remediation"], str)
         self.assertIs(fresh["tool_registry_source_stale"], False)
         modules = fresh["server_modules"]
         self.assertGreater(modules["watched_count"], 1)
@@ -159,6 +161,9 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
             stale = (await self.call("bridge_status", {})).structuredContent
         capture.assert_not_called()
         self.assertIs(stale["tool_registry_source_stale"], True)
+        self.assertNotIsInstance(stale["tool_registry_remediation"], str)
+        self.assertEqual(stale["tool_registry_remediation"]["code"], "reopen_mcp_client")
+        self.assertEqual(stale["tool_registry_remediation"]["scope"], "tools")
         self.assertEqual(stale["server_modules"]["stale"], [_MODULE])
         self.assertEqual(stale["tool_registry_fingerprint"], fresh["tool_registry_fingerprint"])
         self.assertEqual(stale["tool_registry_captured_at"], fresh["tool_registry_captured_at"])

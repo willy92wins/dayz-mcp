@@ -173,3 +173,19 @@ These mailbox tools work with no game and no daemon.
 - `RUN_PREPRUNE_BACKUP_SLOTS_EXHAUSTED`: all ten `runs.json.bak-preprune*` slots are taken, so the load-time prune refuses to run and the manifest keeps growing. Retire the stale backups to restore pruning; the doctor still performs no cleanup.
 
 `telemetry_read` is exposed as-is. Known residual backlog: fixture line caps, radius/Inf hardening, and JSON-lines schema validation.
+
+## MCP overlay schema (a429)
+
+`bridge_status.tool_registry_remediation` changed at commit `80ed00b` (`fb-20260910-043740-a429`). There is no bridge-version bump: HTTP `/status` never published this field and still does not. Consumers that treated the value as the string `"reopen_mcp_client"` (Ornith9, Qwen native-v2, any `== "reopen_mcp_client"` check) will mis-read a **fresh** tools process as a crash or a daemon restart.
+
+| `tool_registry_schema_signal` | MCP `tool_registry_remediation` |
+|---|---|
+| `fresh` | JSON `null` — do not reopen the MCP client |
+| `stale_client` | `{ "code": "reopen_mcp_client", "scope": "tools", "applies_when": "tool_registry_schema_signal=stale_client" }` |
+| `unknown` | `{ "code": "reopen_mcp_client", "scope": "tools", "applies_when": "tool_registry_schema_signal=unknown; sources unverifiable, not a crash" }` |
+
+Read `code` only when the value is an object. `scope` is never `daemon` for this field. `daemon_source_remediation` is a separate `null | { "code": "none", "scope": "daemon", "applies_when": ... }` when `daemon_modules` are stale or unreadable; `code=none` is not a kill verb and `reopen_mcp_client` does not refresh the daemon.
+
+`fence.mutation_rejects_meta` (`kind=historical`, `blocks_now=false`) is MCP-only. Counter ints on `fence.mutation_rejects_by_code` stay ints.
+
+`session_status.box.available_for` (`new_launch` / `adopt`) is MCP-only. HTTP `/status` omits it. An ownerless `RUNNING_IDLE` run is adopt via `session_acquire_wait`, not the `dayz_test_run` launch FIFO.

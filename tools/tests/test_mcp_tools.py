@@ -743,10 +743,12 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             "tool_registry_schema_signal",
         ):
             self.assertIn(key, status)
+        self.assertNotIsInstance(status["tool_registry_remediation"], str)
         if status["server_modules"]["status"] == "fresh":
             self.assertIsNone(status["tool_registry_remediation"])
         else:
             remediation = status["tool_registry_remediation"]
+            self.assertIsInstance(remediation, dict)
             self.assertEqual(remediation["code"], "reopen_mcp_client")
             self.assertEqual(remediation["scope"], "tools")
         stale = status["tool_registry_source_stale"]
