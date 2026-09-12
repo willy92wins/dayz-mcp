@@ -413,9 +413,34 @@ class SessionCoordinator:
                     )
 
             if self._releasing is not None and self._releasing.client == client:
-                return 409, self._payload_with_degradation(
-                    {"error": "session_releasing"}, degraded
+                if not self._preferential_reacquire_locked(client):
+                    return 409, self._payload_with_degradation(
+                        {"error": "session_releasing"}, degraded
+                    )
+                # S1: former acquire during TTL cleanup is the same call as P1,
+                # not 409 session_releasing, while now < until and probe True.
+                grant_deadline = time.monotonic() + (
+                    self._cleanup_timeout_s + RELEASE_AUDIT_TIMEOUT_S
                 )
+                while self._preferential_reacquire_locked(client) and (
+                    self._active is not None
+                    or self._releasing is not None
+                    or self._grant_inflight is not None
+                    or self._wal_marker is not None
+                    or self._handoff_pending
+                    or self._lifecycle_recovery_fault is not None
+                ):
+                    remaining = grant_deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        break
+                    self._condition.wait(remaining)
+                if (
+                    self._releasing is not None
+                    and self._releasing.client == client
+                ):
+                    return 409, self._payload_with_degradation(
+                        {"error": "session_releasing"}, degraded
+                    )
 
             slot_idle = (
                 self._active is None

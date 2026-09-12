@@ -9,6 +9,7 @@ import inspect
 import json
 import sys
 import threading
+import time
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -213,35 +214,78 @@ class RaceR9Tests(unittest.TestCase):
     def test_concurrent_former_and_stranger_acquire_one_active(self) -> None:
         for _ in range(8):
             clock = FakeClock()
-            coordinator = _coord(clock, attached=True)
-            coordinator.acquire(self.a, "drive")
+            cleanup_entered = threading.Event()
+            allow_cleanup = threading.Event()
+            former_invoked = threading.Event()
+
+            def blocking_cleanup(
+                _session_id: str,
+                _lease_id: str,
+                _reason: str,
+                vehicle_active: bool,
+            ) -> dict[str, object]:
+                cleanup_entered.set()
+                allow_cleanup.wait(5.0)
+                return {"cancelled": 0, "vehicle_release": vehicle_active}
+
+            coordinator = _coord(clock, attached=True, cleanup=blocking_cleanup)
+            old = coordinator.acquire(self.a, "drive")[1]["lease_token"]
             clock.advance(MID)
-            coordinator.status(self.a)
             barrier = threading.Barrier(2)
             results: dict[str, tuple[int, dict]] = {}
             errors: dict[str, BaseException] = {}
 
-            def worker(name: str, client: ClientIdentity) -> None:
+            def worker_former() -> None:
                 try:
                     barrier.wait(timeout=2.0)
-                    results[name] = coordinator.acquire(client, "drive")
+                    self.assertTrue(
+                        cleanup_entered.wait(2.0),
+                        "expiry cleanup did not publish _releasing",
+                    )
+                    former_invoked.set()
+                    results["a"] = coordinator.acquire(self.a, "drive")
                 except BaseException as exc:  # noqa: BLE001 — capture for the parent
-                    errors[name] = exc
+                    errors["a"] = exc
+
+            def worker_stranger() -> None:
+                try:
+                    barrier.wait(timeout=2.0)
+                    results["b"] = coordinator.acquire(self.b, "drive")
+                except BaseException as exc:  # noqa: BLE001 — capture for the parent
+                    errors["b"] = exc
 
             threads = [
-                threading.Thread(target=worker, args=("a", self.a)),
-                threading.Thread(target=worker, args=("b", self.b)),
+                threading.Thread(target=worker_former),
+                threading.Thread(target=worker_stranger),
             ]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=5.0)
+            try:
+                for thread in threads:
+                    thread.start()
+                self.assertTrue(
+                    cleanup_entered.wait(2.0),
+                    "expiry cleanup did not start",
+                )
+                self.assertTrue(
+                    former_invoked.wait(2.0),
+                    "former acquire did not start during cleanup",
+                )
+                time.sleep(0.05)
+                allow_cleanup.set()
+            finally:
+                allow_cleanup.set()
+                for thread in threads:
+                    thread.join(timeout=5.0)
             self.assertEqual(errors, {})
+            for thread in threads:
+                self.assertFalse(thread.is_alive())
             self.assertEqual(results["a"][0], 200)
+            self.assertEqual(results["a"][1]["status"], "active")
+            self.assertNotEqual(results["a"][1]["lease_token"], old)
+            self.assertNotEqual(results["a"][1].get("error"), "session_releasing")
             self.assertEqual(results["b"][0], 202)
+            self.assertEqual(results["b"][1]["status"], "queued")
             statuses = {results["a"][1]["status"], results["b"][1]["status"]}
             self.assertEqual(statuses, {"active", "queued"})
-            self.assertEqual(results["a"][1]["status"], "active")
 
     def test_stranger_wait_loses_to_former_wait_claim(self) -> None:
         clock = FakeClock()
