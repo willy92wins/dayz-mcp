@@ -296,6 +296,68 @@ class WorldTimeSetResponseTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.get("ok"), 0)
         self.assertEqual(result.get("warnings"), ["date_not_applied"])
 
+    async def test_previous_day_minute_sixty_echo_matches_midnight_request(self) -> None:
+        result, _calls = await _call_tool_with_bridge_result(
+            "world_time_set",
+            {
+                "year": 2026,
+                "month": 9,
+                "day": 12,
+                "hour": 0,
+                "minute": 0,
+            },
+            {
+                "ok": 1,
+                "applied": {
+                    "year": 2026,
+                    "month": 9,
+                    "day": 11,
+                    "hour": 23,
+                    "minute": 60,
+                },
+            },
+        )
+
+        self.assertNotEqual(result["applied"]["hour"], 24)
+        self.assertEqual(result["applied"]["hour"], 0)
+        self.assertEqual(result["applied"]["minute"], 0)
+        self.assertEqual(result["applied"]["day"], 12)
+        self.assertEqual(result["applied"]["year"], 2026)
+        self.assertEqual(result["applied"]["month"], 9)
+        self.assertIs(result.get("date_applied"), True)
+        self.assertEqual(result.get("ok"), 1)
+        self.assertNotIn("date_not_applied", result.get("warnings", []))
+
+    async def test_midnight_minute_sixty_echo_matches_midnight_request(self) -> None:
+        result, _calls = await _call_tool_with_bridge_result(
+            "world_time_set",
+            {
+                "year": 2026,
+                "month": 9,
+                "day": 12,
+                "hour": 0,
+                "minute": 0,
+            },
+            {
+                "ok": 1,
+                "applied": {
+                    "year": 2026,
+                    "month": 9,
+                    "day": 12,
+                    "hour": 23,
+                    "minute": 60,
+                },
+            },
+        )
+
+        self.assertNotEqual(result["applied"]["hour"], 24)
+        self.assertEqual(result["applied"]["hour"], 0)
+        self.assertEqual(result["applied"]["minute"], 0)
+        self.assertEqual(result["applied"]["day"], 12)
+        self.assertIs(result.get("date_applied"), True)
+        self.assertEqual(result.get("ok"), 1)
+        self.assertNotIn("date_not_applied", result.get("warnings", []))
+
     async def test_missing_applied_echo_does_not_rewrite_ok(self) -> None:
         result, _calls = await _call_tool_with_bridge_result(
             "world_time_set",
@@ -314,11 +376,18 @@ class NormalizeAppliedClockTest(unittest.TestCase):
         self.assertEqual(out["minute"], 0)
         self.assertEqual(out["year"], 2026)
 
-    def test_does_not_invent_a_day_rollover(self) -> None:
-        out = server._normalize_applied_clock({"hour": 23, "minute": 60, "day": 12})
-        self.assertEqual(out["hour"], 24)
+    def test_minute_overflow_carries_into_the_next_day(self) -> None:
+        out = server._normalize_applied_clock(
+            {"year": 2026, "month": 9, "day": 12, "hour": 23, "minute": 60}
+        )
+        self.assertNotEqual(out["hour"], 24)
+        self.assertEqual(out["hour"], 0)
         self.assertEqual(out["minute"], 0)
-        self.assertEqual(out["day"], 12)
+        self.assertEqual(out["day"], 13)
+        self.assertEqual(out["month"], 9)
+        self.assertEqual(out["year"], 2026)
+        self.assertGreaterEqual(out["hour"], 0)
+        self.assertLess(out["hour"], 24)
 
     def test_leaves_in_range_clocks_alone(self) -> None:
         src = {"hour": 9, "minute": 0}

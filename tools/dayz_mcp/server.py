@@ -14,7 +14,7 @@ import traceback
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Awaitable, Callable, Iterator, Literal
 
@@ -2101,24 +2101,64 @@ def _is_int_clock_part(value: object) -> bool:
     return type(value) is int and not isinstance(value, bool)
 
 
-def _normalize_applied_clock(applied: dict[str, Any]) -> dict[str, Any]:
-    """Carry minute>=60 into hour on a copy. No calendar day rollover.
+def _clock_fields_match(applied: dict[str, Any], requested: dict[str, Any]) -> bool:
+    return all(applied.get(field) == value for field, value in requested.items())
 
-    GetDate can echo hour=8, minute=60 for a requested 9:00
-    (fb-20260911-230929-311d). Rewriting the echo and the comparison uses
-    the same carry so date_applied is not a false negative.
+
+def _add_applied_days(out: dict[str, Any], extra_days: int) -> None:
+    if extra_days == 0:
+        return
+    year, month, day = out.get("year"), out.get("month"), out.get("day")
+    if all(_is_int_clock_part(part) for part in (year, month, day)):
+        try:
+            shifted = datetime(year, month, day) + timedelta(days=extra_days)
+        except ValueError:
+            if _is_int_clock_part(day):
+                out["day"] = day + extra_days
+            return
+        out["year"] = shifted.year
+        out["month"] = shifted.month
+        out["day"] = shifted.day
+        return
+    if _is_int_clock_part(day):
+        out["day"] = day + extra_days
+
+
+def _overflow_clock_parts(hour: int, minute: int) -> tuple[int, int, int]:
+    extra_hours, minute = divmod(minute, 60)
+    extra_days, hour = divmod(hour + extra_hours, 24)
+    return extra_days, hour, minute
+
+
+def _normalize_applied_clock(
+    applied: dict[str, Any],
+    requested: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Carry minute>=60 into hour, then into the calendar day. Hour stays 0–23.
+
+    GetDate can echo hour=8, minute=60 for a requested 9:00, or hour=23,
+    minute=60 for midnight (fb-20260911-230929-311d). Day-carry is preferred
+    so applied.hour is never 24. A same-day 23:60 echo of a 00:00 request
+    matches by wrapping hour without inventing a later calendar day.
     """
     out = dict(applied)
     hour = out.get("hour")
     minute = out.get("minute")
     if not _is_int_clock_part(hour) or not _is_int_clock_part(minute):
         return out
-    if minute < 60:
+    if minute < 60 and 0 <= hour <= 23:
         return out
-    extra, minute = divmod(minute, 60)
-    out["hour"] = hour + extra
-    out["minute"] = minute
-    return out
+    extra_days, hour, minute = _overflow_clock_parts(hour, minute)
+    wrapped = dict(out)
+    wrapped["hour"] = hour
+    wrapped["minute"] = minute
+    carried = dict(wrapped)
+    _add_applied_days(carried, extra_days)
+    if requested is not None and _clock_fields_match(carried, requested):
+        return carried
+    if requested is not None and _clock_fields_match(wrapped, requested):
+        return wrapped
+    return carried
 
 
 def _optional_finite_float(
@@ -4945,7 +4985,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "date/time and optionally the time multiplier. This is a server "
             "world-effect: Python confirms the applied echo "
             "(date_applied / multiplier_applied). An applied minute of 60 is "
-            "normalized to hour+1. ok is 0 when the date does not match or "
+            "normalized to hour+1 (hour stays 0–23, carrying into the next "
+            "calendar day when needed). ok is 0 when the date does not match or "
             "the multiplier echo mismatches; multiplier_applied=null means "
             "the bridge did not echo time_multiplier (MCPApplied has no such "
             "field) and warnings includes multiplier_unconfirmed — that is "
@@ -4994,9 +5035,6 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "world_time_set", args, "server", _timeout(timeout_s)
             )
 
-        applied = result.get("applied")
-        if isinstance(applied, dict):
-            applied = _normalize_applied_clock(applied)
         requested_date = {
             "year": year_value,
             "month": month_value,
@@ -5004,6 +5042,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "hour": hour_value,
             "minute": minute_value,
         }
+        applied = result.get("applied")
+        if isinstance(applied, dict):
+            applied = _normalize_applied_clock(applied, requested_date)
         date_applied = isinstance(applied, dict) and all(
             applied.get(field) == value for field, value in requested_date.items()
         )
