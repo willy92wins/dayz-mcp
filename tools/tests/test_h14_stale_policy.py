@@ -1,10 +1,14 @@
 """H14: H3 reads and owned dayz_test_stop survive policy.revalidate() failure.
 
 R26 fixtures:
-- POS: exempted ControlClient lifecycle_status and credential 401 refresh send HTTP
-  when revalidate fails and the authority tuple is unchanged.
-- NEG: session_status / session_acquire_wait stay fail-closed with http_bytes_sent=0;
-  authority type/tuple change stays fail-closed even under the exemption.
+- POS: exempted ControlClient lifecycle_status and credential 401 retry send HTTP
+  when revalidate fails and the authority tuple is unchanged. The 401 retry
+  reuses the already-emitted credential; it must not pass by tautology if the
+  keyfile rotates.
+- NEG: session_status / MCP session_acquire_wait stay fail-closed with
+  http_bytes_sent=0 even inside stale_policy_exemption(); authority type/tuple
+  change stays fail-closed even under the exemption. Owned stop may lease
+  internally only under owned_stop_kill_exemption().
 - INCONCLUSO: in-game idle-timeout at ~20 min (c261). Not simulated here.
 """
 
@@ -15,6 +19,7 @@ import sys
 import tempfile
 import types
 import unittest
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -170,14 +175,70 @@ class H14ControlClientTests(unittest.IsolatedAsyncioTestCase):
                 "verified_daemon_http_request",
                 side_effect=request,
             ):
-                with self.assertRaises(control.ControlClientError) as raised:
-                    await client.session_acquire_wait("dayz-test", max_wait_s=0.5)
+                with client.stale_policy_exemption():
+                    with self.assertRaises(control.ControlClientError) as raised:
+                        await client.session_acquire_wait("dayz-test", max_wait_s=0.5)
 
         self.assertEqual(
             raised.exception.code, "client_policy_untrusted_open_new_session"
         )
+        self.assertEqual(raised.exception.request_stage, "pre_request")
         self.assertEqual(raised.exception.http_bytes_sent, 0)
         self.assertEqual(requests, 0)
+
+    async def test_owned_stop_kill_exemption_allows_internal_lease_only(self) -> None:
+        control = importlib.import_module("dayz_mcp.control_client")
+        requests: list[str] = []
+        operation_id = "11111111-1111-4111-8111-111111111111"
+
+        def request(**kwargs: object) -> tuple[int, bytes]:
+            path = str(kwargs["path"])
+            requests.append(path)
+            if path == "/session/enqueue":
+                return 200, (
+                    b'{"status":"queued","ticket":"ticket-h14","position":1,'
+                    b'"operation_id":"' + operation_id.encode("ascii") + b'"}'
+                )
+            if path == "/session/wait":
+                return 200, (
+                    b'{"status":"active","ticket":"ticket-h14","lease_token":"lease-h14",'
+                    b'"lease_id":"id-h14","operation_id":"'
+                    + operation_id.encode("ascii")
+                    + b'"}'
+                )
+            if path == "/session/status":
+                return 200, b'{"status":"ok"}'
+            return 200, b'{"runs":[]}'
+
+        with tempfile.TemporaryDirectory() as temporary:
+            keyfile = Path(temporary) / "daemon.key"
+            keyfile.write_text("fixture-key\n", encoding="utf-8")
+            policy = _policy(keyfile)
+            object.__setattr__(policy, "_revalidation_hook", _fail_after(3))
+            client = control.ControlClient(
+                policy=policy, identity=_identity(control, "h14-kill-lease")
+            )
+            with patch.object(
+                control.transport,
+                "verified_daemon_http_request",
+                side_effect=request,
+            ), patch.object(
+                control.uuid, "uuid4", return_value=uuid.UUID(operation_id)
+            ):
+                with client.owned_stop_kill_exemption():
+                    granted = await client.session_acquire_wait(
+                        "dayz-test", max_wait_s=0.5
+                    )
+                    with self.assertRaises(control.ControlClientError) as raised:
+                        await client.session_status()
+
+        self.assertEqual(granted["status"], "active")
+        self.assertEqual(granted["lease_token"], "lease-h14")
+        self.assertEqual(requests, ["/session/enqueue", "/session/wait"])
+        self.assertEqual(
+            raised.exception.code, "client_policy_untrusted_open_new_session"
+        )
+        self.assertEqual(raised.exception.http_bytes_sent, 0)
 
     async def test_authority_type_change_stays_fail_closed_under_exemption(self) -> None:
         control = importlib.import_module("dayz_mcp.control_client")
@@ -233,7 +294,10 @@ class H14ControlClientTests(unittest.IsolatedAsyncioTestCase):
 class H14DaemonCredentialTests(unittest.TestCase):
     def test_401_refresh_proceeds_when_stale_policy_allowed(self) -> None:
         credential_module = importlib.import_module("dayz_mcp.daemon_credential")
+        issued = "fixture-credential-a"
+        rotated = "fixture-credential-b"
         calls: list[dict[str, object]] = []
+        refresh_reads = 0
 
         def request(**kwargs: object) -> tuple[int, bytes]:
             calls.append(dict(kwargs))
@@ -243,27 +307,42 @@ class H14DaemonCredentialTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             keyfile = Path(temporary) / "daemon.key"
-            keyfile.write_text("fixture-credential-a\n", encoding="utf-8")
+            keyfile.write_text(issued + "\n", encoding="utf-8")
             policy = _policy(keyfile)
             object.__setattr__(policy, "_revalidation_hook", _fail_after(2))
             provider = credential_module.RefreshingDaemonCredential(
                 policy=policy,
                 request_fn=request,
             )
-            status, body = provider.request_with_refresh(
-                method="GET",
-                path="/enqueue",
-                query={},
-                body=None,
-                headers={},
-                deadline=1234.5,
-                allow_stale_policy=True,
-            )
+            keyfile.write_text(rotated + "\n", encoding="utf-8")
+            real_reader = credential_module.pinned_keyfile.read_pinned_keyfile
+
+            def counted_reader(path: str) -> str:
+                nonlocal refresh_reads
+                refresh_reads += 1
+                return real_reader(path)
+
+            with patch.object(
+                credential_module.pinned_keyfile,
+                "read_pinned_keyfile",
+                side_effect=counted_reader,
+            ):
+                status, body = provider.request_with_refresh(
+                    method="GET",
+                    path="/enqueue",
+                    query={},
+                    body=None,
+                    headers={},
+                    deadline=1234.5,
+                    allow_stale_policy=True,
+                )
 
         self.assertEqual((status, body), (200, b'{"ok":true}'))
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0]["key"], "fixture-credential-a")
-        self.assertEqual(calls[1]["key"], "fixture-credential-a")
+        self.assertEqual(calls[0]["key"], issued)
+        self.assertEqual(calls[1]["key"], issued)
+        self.assertNotEqual(calls[1]["key"], rotated)
+        self.assertEqual(refresh_reads, 0)
 
     def test_401_refresh_fail_closed_without_exemption(self) -> None:
         credential_module = importlib.import_module("dayz_mcp.daemon_credential")
@@ -366,6 +445,30 @@ class H14ClientRuntimeFlagTests(unittest.TestCase):
         self.assertEqual(recorded, [False, True])
 
 
+class _H14Control:
+    def __init__(self) -> None:
+        self.allow = False
+        self.kill = False
+
+    @contextmanager
+    def stale_policy_exemption(self):
+        previous = self.allow
+        self.allow = True
+        try:
+            yield
+        finally:
+            self.allow = previous
+
+    @contextmanager
+    def owned_stop_kill_exemption(self):
+        previous = self.kill
+        self.kill = True
+        try:
+            yield
+        finally:
+            self.kill = previous
+
+
 class H14OwnedStopWiringTests(unittest.IsolatedAsyncioTestCase):
     async def test_owned_stop_keeps_exemption_for_kill_path(self) -> None:
         lfv = _project_policy(
@@ -383,25 +486,13 @@ class H14OwnedStopWiringTests(unittest.IsolatedAsyncioTestCase):
         }
         runtime = _Runtime({"runs": [run]})
         runtime.identity = types.SimpleNamespace(session_id=_CALLER_SESSION)
-        recorded: list[bool] = []
-
-        class Control:
-            def __init__(self) -> None:
-                self.allow = False
-
-            @contextmanager
-            def stale_policy_exemption(self):
-                previous = self.allow
-                self.allow = True
-                try:
-                    yield
-                finally:
-                    self.allow = previous
-
-        runtime._control = Control()
+        generic: list[bool] = []
+        kill_path: list[bool] = []
+        runtime._control = _H14Control()
 
         async def launch(_raw_request: bytes, **kwargs: object) -> int:
-            recorded.append(runtime._control.allow)
+            generic.append(runtime._control.allow)
+            kill_path.append(runtime._control.kill)
             await kwargs["execution_started_cb"]()
             kwargs["output_sink"](
                 "stdout",
@@ -431,7 +522,11 @@ class H14OwnedStopWiringTests(unittest.IsolatedAsyncioTestCase):
             result = await dayz_test_tool.execute_dayz_test_stop(runtime, RUN_ID)
 
         self.assertEqual(result["status"], "succeeded")
-        self.assertEqual(recorded, [True])
+        # Instance-wide stale_policy_exemption must not wrap execute_request
+        # (that would also open MCP session_acquire_wait). The kill path keeps
+        # its own lease exemption.
+        self.assertEqual(generic, [False])
+        self.assertEqual(kill_path, [True])
 
     async def test_unowned_stop_does_not_keep_exemption_for_kill_path(self) -> None:
         lfv = _project_policy(
@@ -449,25 +544,13 @@ class H14OwnedStopWiringTests(unittest.IsolatedAsyncioTestCase):
         }
         runtime = _Runtime({"runs": [run]})
         runtime.identity = types.SimpleNamespace(session_id=_CALLER_SESSION)
-        recorded: list[bool] = []
-
-        class Control:
-            def __init__(self) -> None:
-                self.allow = False
-
-            @contextmanager
-            def stale_policy_exemption(self):
-                previous = self.allow
-                self.allow = True
-                try:
-                    yield
-                finally:
-                    self.allow = previous
-
-        runtime._control = Control()
+        generic: list[bool] = []
+        kill_path: list[bool] = []
+        runtime._control = _H14Control()
 
         async def launch(_raw_request: bytes, **kwargs: object) -> int:
-            recorded.append(runtime._control.allow)
+            generic.append(runtime._control.allow)
+            kill_path.append(runtime._control.kill)
             await kwargs["execution_started_cb"]()
             kwargs["output_sink"](
                 "stdout",
@@ -497,7 +580,8 @@ class H14OwnedStopWiringTests(unittest.IsolatedAsyncioTestCase):
             result = await dayz_test_tool.execute_dayz_test_stop(runtime, RUN_ID)
 
         self.assertEqual(result["status"], "succeeded")
-        self.assertEqual(recorded, [False])
+        self.assertEqual(generic, [False])
+        self.assertEqual(kill_path, [False])
 
 
 if __name__ == "__main__":

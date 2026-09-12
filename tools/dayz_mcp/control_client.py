@@ -19,6 +19,20 @@ from dayz_mcp.daemon_policy_contract import AccreditedDaemonPolicy
 
 _monotonic = time.monotonic
 
+# H14 skips policy.revalidate() by verb, not by wall-clock. The MCP tool
+# session_acquire_wait is never on these lists; owned dayz_test_stop may
+# lease internally through the kill-path set only.
+_H14_STALE_POLICY_PATHS = frozenset({"/lifecycle/status"})
+_H14_OWNED_STOP_LEASE_PATHS = frozenset(
+    {
+        "/lifecycle/status",
+        "/session/enqueue",
+        "/session/wait",
+        "/session/heartbeat",
+        "/session/release",
+    }
+)
+
 
 class ControlClientError(RuntimeError):
     def __init__(
@@ -127,6 +141,8 @@ class ControlClient:
     # object.__new__ -- which the authority regression tests do on purpose, wiring
     # nothing but _state_lock -- still has to answer for these.
     active_lease_id: str | None = None
+    _allow_stale_policy: bool = False
+    _allow_owned_stop_lease: bool = False
     # Set by the owner when this session can outlive its own process. Called outside
     # the state lock with (lease_token, lease_id), both None once the lease is gone.
     # A listener that raises is swallowed: see _announce_lease.
@@ -175,10 +191,11 @@ class ControlClient:
         self._state_lock = threading.Lock()
         self._transition_lock = asyncio.Lock()
         self._allow_stale_policy = False
+        self._allow_owned_stop_lease = False
 
     @contextmanager
     def stale_policy_exemption(self) -> Iterator[None]:
-        """H14: skip only policy.revalidate() fail-closed; authority stays closed."""
+        """H14: skip revalidate() only for /lifecycle/status; authority stays closed."""
         previous = self._allow_stale_policy
         self._allow_stale_policy = True
         try:
@@ -186,16 +203,38 @@ class ControlClient:
         finally:
             self._allow_stale_policy = previous
 
+    @contextmanager
+    def owned_stop_kill_exemption(self) -> Iterator[None]:
+        """H14: owned dayz_test_stop may lease internally on the kill path.
+
+        Does not wrap the MCP session_acquire_wait tool. That tool never
+        enters this manager, so it stays fail-closed with http_bytes_sent=0.
+        """
+        previous = self._allow_owned_stop_lease
+        self._allow_owned_stop_lease = True
+        try:
+            yield
+        finally:
+            self._allow_owned_stop_lease = previous
+
+    def _h14_stale_allowed(self, path: str) -> bool:
+        if self._allow_owned_stop_lease and path in _H14_OWNED_STOP_LEASE_PATHS:
+            return True
+        if self._allow_stale_policy and path in _H14_STALE_POLICY_PATHS:
+            return True
+        return False
+
     def _request_once(
         self,
         path: str,
         payload: dict[str, object],
         timeout_s: float,
     ) -> dict[str, object]:
+        allow_stale_policy = self._h14_stale_allowed(path)
         try:
             self.policy.revalidate()
         except Exception as exc:
-            if not self._allow_stale_policy:
+            if not allow_stale_policy:
                 policy_cause = _policy_revalidation_cause(exc)
                 raise ControlClientError(
                     "client_policy_untrusted_open_new_session",
@@ -216,7 +255,7 @@ class ControlClient:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         deadline = _monotonic() + timeout_s
         refresh_kwargs: dict[str, object] = {}
-        if self._allow_stale_policy:
+        if allow_stale_policy:
             refresh_kwargs["allow_stale_policy"] = True
         try:
             status, response_body = self._credential_provider.request_with_refresh(

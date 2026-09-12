@@ -1743,13 +1743,27 @@ def _h14_owned_stop(runtime: _Runtime, status: object, run_id: str) -> bool:
 
 
 @contextmanager
-def _h14_stale_policy(runtime: _Runtime) -> Iterator[None]:
+def _h14_exemption(runtime: _Runtime, name: str) -> Iterator[None]:
     control = getattr(runtime, "_control", None)
-    exemption = getattr(control, "stale_policy_exemption", None) if control is not None else None
+    exemption = getattr(control, name, None) if control is not None else None
     if not callable(exemption):
         yield
         return
     with exemption():
+        yield
+
+
+@contextmanager
+def _h14_stale_policy(runtime: _Runtime) -> Iterator[None]:
+    with _h14_exemption(runtime, "stale_policy_exemption"):
+        yield
+
+
+@contextmanager
+def _h14_owned_stop_kill(runtime: _Runtime) -> Iterator[None]:
+    # Internal lease for the owned-stop kill path only. The MCP tool
+    # session_acquire_wait never enters this manager.
+    with _h14_exemption(runtime, "owned_stop_kill_exemption"):
         yield
 
 
@@ -1795,7 +1809,7 @@ async def execute_dayz_test_stop(
                 kill=True,
             )
             rest = (
-                _h14_stale_policy(runtime)
+                _h14_owned_stop_kill(runtime)
                 if _h14_owned_stop(runtime, status_snapshot, run_id)
                 else nullcontext()
             )

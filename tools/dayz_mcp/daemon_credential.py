@@ -307,26 +307,27 @@ class RefreshingDaemonCredential:
                     http_bytes_sent=1,
                     allow_stale_policy=allow_stale_policy,
                 )
-                try:
-                    refreshed = pinned_keyfile.read_pinned_keyfile(
-                        self._authority[3]
-                    )
-                except Exception:
-                    raise CredentialRefreshError(
-                        "stale_client_credential_refresh_failed",
+                if not allow_stale_policy:
+                    try:
+                        refreshed = pinned_keyfile.read_pinned_keyfile(
+                            self._authority[3]
+                        )
+                    except Exception:
+                        raise CredentialRefreshError(
+                            "stale_client_credential_refresh_failed",
+                            request_stage="post_request",
+                            http_bytes_sent=1,
+                        ) from None
+                    self._revalidate_authority(
                         request_stage="post_request",
                         http_bytes_sent=1,
-                    ) from None
-                self._revalidate_authority(
-                    request_stage="post_request",
-                    http_bytes_sent=1,
-                    allow_stale_policy=allow_stale_policy,
-                )
-                current = _CredentialSnapshot(
-                    secret=refreshed,
-                    epoch=current.epoch + 1,
-                )
-                self._snapshot = current
+                        allow_stale_policy=allow_stale_policy,
+                    )
+                    current = _CredentialSnapshot(
+                        secret=refreshed,
+                        epoch=current.epoch + 1,
+                    )
+                    self._snapshot = current
 
         retry_headers = dict(request_headers)
         retry_headers[RETRY_HEADER_NAME] = RETRY_HEADER_VALUE
