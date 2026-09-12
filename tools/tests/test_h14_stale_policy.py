@@ -5,16 +5,18 @@ R26 fixtures:
   when revalidate fails and the authority tuple is unchanged. The 401 retry
   reuses the already-emitted credential; it must not pass by tautology if the
   keyfile rotates.
-- NEG: session_status / MCP session_acquire_wait stay fail-closed with
-  http_bytes_sent=0 even inside stale_policy_exemption(); authority type/tuple
-  change stays fail-closed even under the exemption. Owned stop may lease
-  internally only under owned_stop_kill_exemption().
+- NEG: MCP session_acquire_wait stays fail-closed with http_bytes_sent=0 even
+  inside stale_policy_exemption(); generic exemption does not open
+  /session/status. Authority type/tuple change stays fail-closed. Owned stop
+  may lease internally under owned_stop_kill_exemption(), including the
+  post-kill protected_release_and_verify hop.
 - INCONCLUSO: in-game idle-timeout at ~20 min (c261). Not simulated here.
 """
 
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 import tempfile
 import types
@@ -28,7 +30,7 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from dayz_mcp import accredited_daemon_transport, dayz_test_tool
+from dayz_mcp import accredited_daemon_transport, dayz_test_tool, native_launcher_transaction
 from dayz_mcp.session_coordination import command_requires_lease
 from tests.test_bug046_lease_queue_liveness import parse_dpf_table
 from tests.test_control_client import _policy
@@ -45,6 +47,9 @@ from tests.test_dayz_test_tool import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CALLER_SESSION = "12345678-1234-4234-8234-1234567890ab"
+_TERMINAL_SESSION_STATUS = (
+    b'{"self":{"state":"none","position":null},"pending_commands":0}'
+)
 
 
 def _identity(control, label: str):
@@ -68,6 +73,26 @@ def _fail_after(limit: int):
             raise ValueError("daemon_provenance_conflict")
 
     return revalidate
+
+
+def _h14_stop_workspace(root: Path):
+    request_module = importlib.import_module("dayz_mcp.dayz_test_request")
+    authority = importlib.import_module("dayz_mcp.request_path_authority")
+    project = root / "ExampleMod_Suite"
+    source = project / "source"
+    missions = project / "_server" / "mpmissions"
+    mods = root / "Mods"
+    for path in (source, missions, mods / "@CF"):
+        path.mkdir(parents=True, exist_ok=True)
+    policy = request_module.RequestProjectPolicy(
+        mod="ExampleMod",
+        dev_root=str(project),
+        default_source=str(source),
+        default_base_mods=("@CF",),
+        mission_roots=(str(missions),),
+        mod_roots=(str(mods),),
+    )
+    return authority._seal_project_policy_for_test(policy)
 
 
 class H14SpecContractTests(unittest.TestCase):
@@ -153,6 +178,41 @@ class H14ControlClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.http_bytes_sent, 0)
         self.assertEqual(requests, 0)
 
+    async def test_session_status_stays_fail_closed_under_stale_policy_exemption(
+        self,
+    ) -> None:
+        control = importlib.import_module("dayz_mcp.control_client")
+        requests = 0
+
+        def request(**_kwargs: object) -> tuple[int, bytes]:
+            nonlocal requests
+            requests += 1
+            return 200, _TERMINAL_SESSION_STATUS
+
+        with tempfile.TemporaryDirectory() as temporary:
+            keyfile = Path(temporary) / "daemon.key"
+            keyfile.write_text("fixture-key\n", encoding="utf-8")
+            policy = _policy(keyfile)
+            object.__setattr__(policy, "_revalidation_hook", _fail_after(3))
+            client = control.ControlClient(
+                policy=policy, identity=_identity(control, "h14-status-generic-neg")
+            )
+            with patch.object(
+                control.transport,
+                "verified_daemon_http_request",
+                side_effect=request,
+            ):
+                with client.stale_policy_exemption():
+                    with self.assertRaises(control.ControlClientError) as raised:
+                        await client.session_status()
+
+        self.assertEqual(
+            raised.exception.code, "client_policy_untrusted_open_new_session"
+        )
+        self.assertEqual(raised.exception.request_stage, "pre_request")
+        self.assertEqual(raised.exception.http_bytes_sent, 0)
+        self.assertEqual(requests, 0)
+
     async def test_session_acquire_wait_is_not_exempted(self) -> None:
         control = importlib.import_module("dayz_mcp.control_client")
         requests = 0
@@ -207,7 +267,7 @@ class H14ControlClientTests(unittest.IsolatedAsyncioTestCase):
                     + b'"}'
                 )
             if path == "/session/status":
-                return 200, b'{"status":"ok"}'
+                return 200, _TERMINAL_SESSION_STATUS
             return 200, b'{"runs":[]}'
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -229,16 +289,14 @@ class H14ControlClientTests(unittest.IsolatedAsyncioTestCase):
                     granted = await client.session_acquire_wait(
                         "dayz-test", max_wait_s=0.5
                     )
-                    with self.assertRaises(control.ControlClientError) as raised:
-                        await client.session_status()
+                    status = await client.session_status()
 
         self.assertEqual(granted["status"], "active")
         self.assertEqual(granted["lease_token"], "lease-h14")
-        self.assertEqual(requests, ["/session/enqueue", "/session/wait"])
         self.assertEqual(
-            raised.exception.code, "client_policy_untrusted_open_new_session"
+            requests, ["/session/enqueue", "/session/wait", "/session/status"]
         )
-        self.assertEqual(raised.exception.http_bytes_sent, 0)
+        self.assertEqual(status["self"]["state"], "none")
 
     async def test_authority_type_change_stays_fail_closed_under_exemption(self) -> None:
         control = importlib.import_module("dayz_mcp.control_client")
@@ -582,6 +640,111 @@ class H14OwnedStopWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(generic, [False])
         self.assertEqual(kill_path, [False])
+
+    async def test_owned_stop_post_kill_status_verify_does_not_reject_tool(
+        self,
+    ) -> None:
+        """H14-P1-03: post-kill /session/status must not turn a successful owned stop into ToolError."""
+        control = importlib.import_module("dayz_mcp.control_client")
+        requests: list[str] = []
+        operation_id = "11111111-1111-4111-8111-111111111111"
+
+        def request(**kwargs: object) -> tuple[int, bytes]:
+            path = str(kwargs["path"])
+            requests.append(path)
+            if path == "/session/enqueue":
+                return 200, json.dumps(
+                    {
+                        "status": "queued",
+                        "ticket": "ticket-h14",
+                        "position": 1,
+                        "operation_id": operation_id,
+                    }
+                ).encode("ascii")
+            if path == "/session/wait":
+                return 200, json.dumps(
+                    {
+                        "status": "active",
+                        "ticket": "ticket-h14",
+                        "lease_token": "lease-h14",
+                        "lease_id": "id-h14",
+                        "operation_id": operation_id,
+                    }
+                ).encode("ascii")
+            if path == "/session/release":
+                return 200, b'{"status":"released"}'
+            if path == "/session/status":
+                return 200, _TERMINAL_SESSION_STATUS
+            return 200, b'{"runs":[]}'
+
+        with tempfile.TemporaryDirectory() as temporary:
+            sealed = _h14_stop_workspace(Path(temporary))
+            run = {
+                "run_id": RUN_ID,
+                "state": "RUNNING_IDLE",
+                "mod": "@" + sealed.policy.mod,
+                "owner_session_id": _CALLER_SESSION,
+            }
+            keyfile = Path(temporary) / "daemon.key"
+            keyfile.write_text("fixture-key\n", encoding="utf-8")
+            policy = _policy(keyfile)
+            object.__setattr__(policy, "_revalidation_hook", _fail_after(3))
+            client = control.ControlClient(
+                policy=policy, identity=_identity(control, "h14-post-kill")
+            )
+            runtime = _Runtime({"runs": [run]})
+            runtime.identity = types.SimpleNamespace(session_id=_CALLER_SESSION)
+            runtime._control = client
+
+            async def launch(raw_request: bytes, **kwargs: object) -> int:
+                async def consumer(**_kwargs: object) -> int:
+                    await kwargs["execution_started_cb"]()
+                    kwargs["output_sink"](
+                        "stdout",
+                        _terminal(
+                            {
+                                "cleanup_degraded": False,
+                                "error_code": None,
+                                "exit_code": 0,
+                                "ok": True,
+                                "run_id": RUN_ID,
+                            }
+                        ),
+                    )
+                    return 0
+
+                return await native_launcher_transaction.execute_native_launcher_transaction(
+                    raw_request,
+                    sealed_policies=(sealed,),
+                    control_client=runtime._control,
+                    consumer=consumer,
+                )
+
+            with patch.object(
+                dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+            ), patch.object(
+                dayz_test_tool.secure_launcher,
+                "load_verified_bundle",
+                return_value=_Bundle((sealed,)),
+            ), patch.object(
+                dayz_test_tool.secure_launcher,
+                "execute_secure_launcher_request",
+                side_effect=launch,
+            ), patch.object(
+                control.transport,
+                "verified_daemon_http_request",
+                side_effect=request,
+            ), patch.object(
+                control.uuid, "uuid4", return_value=uuid.UUID(operation_id)
+            ):
+                result = await dayz_test_tool.execute_dayz_test_stop(
+                    runtime, RUN_ID
+                )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertIn("/session/release", requests)
+        self.assertIn("/session/status", requests)
+        self.assertNotIn("/session/acquire", requests)
 
 
 if __name__ == "__main__":

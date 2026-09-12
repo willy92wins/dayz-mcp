@@ -30,6 +30,8 @@ _H14_OWNED_STOP_LEASE_PATHS = frozenset(
         "/session/wait",
         "/session/heartbeat",
         "/session/release",
+        # protected_release_and_verify always reads this after release.
+        "/session/status",
     }
 )
 
@@ -207,8 +209,10 @@ class ControlClient:
     def owned_stop_kill_exemption(self) -> Iterator[None]:
         """H14: owned dayz_test_stop may lease internally on the kill path.
 
-        Does not wrap the MCP session_acquire_wait tool. That tool never
-        enters this manager, so it stays fail-closed with http_bytes_sent=0.
+        Covers acquire/wait/heartbeat/release and the post-kill
+        protected_release_and_verify hop (`/session/status`). Does not wrap
+        the MCP session_acquire_wait tool. That tool never enters this manager,
+        so it stays fail-closed with http_bytes_sent=0.
         """
         previous = self._allow_owned_stop_lease
         self._allow_owned_stop_lease = True
