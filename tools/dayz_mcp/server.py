@@ -59,7 +59,11 @@ from dayz_mcp.server_freshness import (
 from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import LoopbackServer, read_key
 from dayz_mcp.server_cli import CLIENT_PLATFORM_ALIASES, build_server_parser
-from dayz_mcp.process_lifecycle import empty_box, occupancy_error_fields
+from dayz_mcp.process_lifecycle import (
+    empty_box,
+    occupancy_error_fields,
+    takeover_target_run_id,
+)
 from dayz_mcp import session_handoff
 from dayz_mcp.mcp_supervisor import Supervisor
 from dayz_mcp.session_coordination import ClientIdentity
@@ -113,6 +117,7 @@ WAIT_FOR_CONDITIONS = frozenset({
 })
 TELEMETRY_READ_MODES = frozenset({"object_at", "fixture_jsonl"})
 LEASE_REQUIRED_RECIPE = "lease_required: call session_acquire_wait(purpose=...)"
+TAKEOVER_REQUIRED = "takeover_required"
 RETAIL_QUARANTINE_RECIPE = (
     "retail_quarantine: a DayZ retail process is running on this machine; "
     "mutations are blocked until no DayZ retail process is running"
@@ -2148,6 +2153,13 @@ AUTO_REMEDIATE_STEAM_DESCRIPTION = (
     "because it ends a session the caller may be using; when on, the result "
     "reports steam_remediated and how long it took."
 )
+TAKEOVER_DESCRIPTION = (
+    "Opt-in. Default false. When another session's RUNNING run or an "
+    "ownerless RUNNING_IDLE occupies the box, refuse with takeover_required "
+    "unless this is true. True stops that registered run through lifecycle "
+    "and then launches; the result names evicted_run_id. Does not kill "
+    "PIDs that are not on the run manifest."
+)
 EXTRA_MODS_DESCRIPTION = (
     "Additional mods for this run. Each entry must be a single folder name "
     "(for example '@DayZ_MCP') or an absolute path inside the project's "
@@ -2195,6 +2207,7 @@ def _describe_run_parameters(app: FastMCP, tool_name: str) -> None:
         ("extra_mods", EXTRA_MODS_DESCRIPTION),
         ("auto_remediate_steam", AUTO_REMEDIATE_STEAM_DESCRIPTION),
         ("client_start_budget_s", CLIENT_START_BUDGET_DESCRIPTION),
+        ("takeover", TAKEOVER_DESCRIPTION),
     ):
         prop = props.get(field)
         if not isinstance(prop, dict):
@@ -3236,6 +3249,25 @@ def _port_conflict_fields(box: object, port: int | None) -> dict[str, Any]:
     return {}
 
 
+def _apply_takeover_required(
+    payload: dict[str, Any],
+    box: object,
+    *,
+    caller_session: str | None = None,
+) -> dict[str, Any]:
+    if payload.get("reason") == "port_in_use_foreign":
+        return payload
+    target = takeover_target_run_id(box, caller_session=caller_session)
+    if target is None:
+        return payload
+    payload["error_code"] = TAKEOVER_REQUIRED
+    extra = occupancy_error_fields(box, caller_session=caller_session)
+    hint = extra.get("hint")
+    if isinstance(hint, str) and hint:
+        payload["hint"] = hint
+    return payload
+
+
 def _enrich_active_run_result(
     result: dict[str, Any],
     box: dict[str, Any],
@@ -3250,7 +3282,7 @@ def _enrich_active_run_result(
     payload["run_id"] = None
     payload["status"] = "failed"
     payload["error_code"] = "active_run_exists"
-    return payload
+    return _apply_takeover_required(payload, box, caller_session=caller_session)
 
 
 def _failed_active_run_result(
@@ -3264,20 +3296,24 @@ def _failed_active_run_result(
 ) -> dict[str, Any]:
     extra = occupancy_error_fields(box, caller_session=caller_session)
     extra.update(_port_conflict_fields(box, port))
-    return {
-        "status": "failed",
-        "project": project,
-        "mode": mode,
-        "run_id": None,
-        "phase": "executing",
-        "elapsed_s": round(time.monotonic() - started, 3),
-        "artifacts_paths": [],
-        "error_code": "active_run_exists",
-        "cleanup_degraded": False,
-        "server_alive": None,
-        "client_alive": None,
-        **extra,
-    }
+    return _apply_takeover_required(
+        {
+            "status": "failed",
+            "project": project,
+            "mode": mode,
+            "run_id": None,
+            "phase": "executing",
+            "elapsed_s": round(time.monotonic() - started, 3),
+            "artifacts_paths": [],
+            "error_code": "active_run_exists",
+            "cleanup_degraded": False,
+            "server_alive": None,
+            "client_alive": None,
+            **extra,
+        },
+        box,
+        caller_session=caller_session,
+    )
 
 
 async def _heartbeat_box_claim(
@@ -3782,6 +3818,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "(active_run_exists; reason port_in_use_foreign names the port) "
             "by a socket-table read repeated right before the launch; the "
             "only window left is between that read and DayZ's own bind. "
+            "A RUNNING run owned by another session, or an ownerless "
+            "RUNNING_IDLE, is takeover_required unless takeover=true "
+            "(evicts that registered run, then launches; names evicted_run_id). "
             "port_scan_unknown means the daemon could not read the socket "
             "table: fix the host, waiting does not help. "
             f"0 is the immediate reject. wait_for_box_s must be <= "
@@ -3815,6 +3854,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         server_wait_s: StrictInt = 60,
         wait_for_box_s: StrictFloat = 0.0,
         auto_remediate_steam: StrictBool = False,
+        takeover: StrictBool = False,
         client_start_budget_s: StrictFloat | StrictInt | None = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
@@ -3864,7 +3904,44 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
             execute_error: dayz_test_tool.DayzTestToolError | None = None
             result: dict[str, Any] | None = None
+            evicted_run_id: str | None = None
             async with client.tool_lock:
+                box: dict[str, Any] = {}
+                try:
+                    snapshot = await client.session_status()
+                except Exception:
+                    # Lifecycle still refuses a managed run; this peek
+                    # only names takeover_required before execute.
+                    snapshot = None
+                if isinstance(snapshot, dict):
+                    box = _box_from_status(snapshot)
+                target = takeover_target_run_id(
+                    box, caller_session=caller_session
+                )
+                if target is not None and not takeover:
+                    return _failed_active_run_result(
+                        project=project,
+                        mode=mode,
+                        box=box,
+                        started=started,
+                        caller_session=caller_session,
+                        port=port,
+                    )
+                if target is not None and takeover:
+                    try:
+                        stop_result = await dayz_test_tool.execute_dayz_test_stop(
+                            client,
+                            target,
+                            progress_cb=report,
+                        )
+                    except dayz_test_tool.DayzTestToolError as error:
+                        raise ToolError(error.code) from None
+                    if (
+                        isinstance(stop_result, dict)
+                        and stop_result.get("status") == "failed"
+                    ):
+                        return stop_result
+                    evicted_run_id = target
                 try:
                     with _typed_dayz_test_value_errors():
                         result = await dayz_test_tool.execute_dayz_test_run(
@@ -3926,6 +4003,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 )
             if result is None:
                 raise ToolError("dayz_test_failed:RuntimeError")
+            if evicted_run_id is not None:
+                result["evicted_run_id"] = evicted_run_id
             return result
         finally:
             if claim_task is not None:

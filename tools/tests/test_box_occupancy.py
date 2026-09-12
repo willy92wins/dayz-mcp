@@ -382,7 +382,7 @@ class OccupancyErrorFieldsTest(unittest.TestCase):
         self.assertFalse(fields["foreign"])
         self.assertEqual(fields["hint"], "retry with wait_for_box_s=<n>")
 
-    def test_stop_hint_only_for_owner_or_idle(self) -> None:
+    def test_stop_hint_only_for_owner_not_ownerless_idle(self) -> None:
         # RED if a foreign-owned RUNNING run tells the caller to dayz_test_stop.
         foreign_owner = occupancy_error_fields(
             {
@@ -399,7 +399,11 @@ class OccupancyErrorFieldsTest(unittest.TestCase):
             },
             caller_session="me",
         )
-        self.assertEqual(foreign_owner["hint"], "retry with wait_for_box_s=<n>")
+        self.assertEqual(
+            foreign_owner["hint"],
+            "pass takeover=true to evict occupied_by_run_id=abc; "
+            "do not dayz_test_stop a run you do not own",
+        )
         idle = occupancy_error_fields(
             {
                 "runs": [
@@ -415,7 +419,10 @@ class OccupancyErrorFieldsTest(unittest.TestCase):
             },
             caller_session="me",
         )
-        self.assertEqual(idle["hint"], "stop it with dayz_test_stop(run_id=abc)")
+        self.assertEqual(idle["hint"], (
+            "pass takeover=true to evict occupied_by_run_id=abc; "
+            "do not dayz_test_stop a run you do not own"
+        ))
         owner = occupancy_error_fields(
             {
                 "runs": [

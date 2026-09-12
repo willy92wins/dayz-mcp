@@ -461,10 +461,27 @@ def _activate_server_coordination(
             vehicle_active,
         )
 
+    def attached_run_probe(session_id: str, lease_id: str) -> bool:
+        lifecycle = lifecycle_holder.get("service")
+        if lifecycle is None or getattr(lifecycle, "manifest", None) is None:
+            return False
+        try:
+            for run in lifecycle.manifest.list_runs():
+                if (
+                    getattr(run, "owner_session_id", None) == session_id
+                    and getattr(run, "owner_lease_id", None) == lease_id
+                    and getattr(run, "state", None) == "RUNNING"
+                ):
+                    return True
+        except Exception:
+            return False
+        return False
+
     coordinator = bounded_io(
         SessionCoordinator,
         audit=audit_writer.write,
         cleanup=cleanup,
+        attached_run_probe=attached_run_probe,
         recovered_audit_fault=recovered_audit_fault,
         recovered_lifecycle_fault=recovered_lifecycle_fault,
         daemon_generation=daemon_generation,

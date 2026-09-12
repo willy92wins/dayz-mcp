@@ -19,6 +19,8 @@ from dayz_mcp.session_coordination import (
     MAX_SESSION_QUEUE,
     READ_ONLY_COMMANDS,
     SESSION_TTL_S,
+    LEASE_GRACE_S,
+    MAX_PREF_RENEWALS,
     WAIT_MAX_S,
     AuthorizationDecision,
     CleanupDisposition,
@@ -57,6 +59,8 @@ class IdentityAndClassificationTest(unittest.TestCase):
 
     def test_constants_and_read_only_set_are_exact(self) -> None:
         self.assertEqual(SESSION_TTL_S, 120.0)
+        self.assertEqual(LEASE_GRACE_S, 90.0)
+        self.assertEqual(MAX_PREF_RENEWALS, 1)
         self.assertEqual(WAIT_MAX_S, 30.0)
         self.assertEqual(MAX_SESSION_QUEUE, 64)
         self.assertEqual(MAX_OPERATION_PIN_S, 300.0)

@@ -313,14 +313,16 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
             await started.wait()
+            peek_count = session_status.await_count
+            self.assertGreaterEqual(peek_count, 1)
             status = asyncio.create_task(app.call_tool("session_status", {}))
             await asyncio.sleep(0)
-            session_status.assert_not_awaited()
+            self.assertEqual(session_status.await_count, peek_count)
             finish.set()
             await running
             await status
 
-        session_status.assert_awaited_once()
+        self.assertEqual(session_status.await_count, peek_count + 1)
 
     async def test_dayz_test_launcher_backend_code_travels_without_its_detail(self) -> None:
         # Ficha ae65: build=true died as dayz_test_failed:NativeLauncherBackendError

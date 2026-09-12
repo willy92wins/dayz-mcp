@@ -63,6 +63,10 @@ _PORT_SCAN_UNKNOWN_HINT = (
 _ACTIVITY_STALE_S = 900.0
 _ACTIVE_RUN_STOP_HINT = "stop it with dayz_test_stop(run_id={run_id})"
 _ACTIVE_RUN_WAIT_HINT = "retry with wait_for_box_s=<n>"
+_ACTIVE_RUN_TAKEOVER_HINT = (
+    "pass takeover=true to evict occupied_by_run_id={run_id}; "
+    "do not dayz_test_stop a run you do not own"
+)
 
 
 def _valid_uuid4(value: object) -> bool:
@@ -548,8 +552,6 @@ def _wait_hint(box: object) -> str:
 
 
 def _caller_owns_run(item: dict[str, object], caller_session: str | None) -> bool:
-    if item.get("state") == "RUNNING_IDLE":
-        return True
     owner = item.get("owner_session")
     if not isinstance(owner, str) or not owner:
         return False
@@ -608,6 +610,8 @@ def occupancy_error_fields(
                 "RUNNING_IDLE",
             }:
                 payload["hint"] = _ACTIVE_RUN_STOP_HINT.format(run_id=run_id)
+            elif state in {"RUNNING", "RUNNING_IDLE"}:
+                payload["hint"] = _ACTIVE_RUN_TAKEOVER_HINT.format(run_id=run_id)
             else:
                 payload["hint"] = _wait_hint(box)
             return payload
@@ -639,6 +643,31 @@ def occupancy_error_fields(
     if box.get("occupied") is True:
         payload["foreign"] = True
     return payload
+
+
+def takeover_target_run_id(
+    box: object, *, caller_session: str | None = None
+) -> str | None:
+    """Run id that dayz_test_run must not launch over without takeover=true."""
+
+    if not isinstance(box, dict):
+        return None
+    runs = box.get("runs")
+    if not isinstance(runs, list):
+        return None
+    for item in runs:
+        if not isinstance(item, dict):
+            continue
+        run_id = item.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            continue
+        state = item.get("state")
+        if state not in {"RUNNING", "RUNNING_IDLE"}:
+            continue
+        if _caller_owns_run(item, caller_session):
+            continue
+        return run_id
+    return None
 
 
 @dataclass(frozen=True)

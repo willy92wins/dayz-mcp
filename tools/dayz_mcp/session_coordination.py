@@ -13,6 +13,8 @@ from typing import Callable
 
 
 SESSION_TTL_S = 120.0
+LEASE_GRACE_S = 90.0
+MAX_PREF_RENEWALS = 1
 BOX_CLAIM_TTL_S = 600.0
 WAIT_MAX_S = 30.0
 MAX_SESSION_QUEUE = 64
@@ -174,8 +176,16 @@ class _GrantInFlight:
     ticket: _Ticket | None
 
 
+@dataclass
+class _ExpiryGrace:
+    former: ClientIdentity
+    until: float
+    attached_at_expiry: bool
+
+
 AuditCallback = Callable[[dict[str, object]], object]
 CleanupCallback = Callable[..., object]
+AttachedRunProbe = Callable[[str, str], bool]
 FaultArmCallback = Callable[[dict[str, object]], str]
 FaultTransitionCallback = Callable[..., str]
 FaultClearCallback = Callable[[str, str], bool]
@@ -201,6 +211,7 @@ class SessionCoordinator:
         fault_transition: FaultTransitionCallback | None = None,
         fault_clear: FaultClearCallback | None = None,
         persist_snapshot: PersistSnapshotCallback | None = None,
+        attached_run_probe: AttachedRunProbe | None = None,
     ) -> None:
         self._time_fn = time_fn
         self._token_fn = token_fn or (lambda: secrets.token_urlsafe(32))
@@ -225,6 +236,7 @@ class SessionCoordinator:
         self._cleanup = cleanup or (
             lambda _session_id, _lease_id, _reason, _vehicle_active: {}
         )
+        self._attached_run_probe = attached_run_probe
         if (
             isinstance(cleanup_timeout_s, bool)
             or not isinstance(cleanup_timeout_s, (int, float))
@@ -265,6 +277,8 @@ class SessionCoordinator:
             MAX_RELEASE_AUDIT_WORKERS
         )
         self._audit_gate = threading.Lock()
+        self._expiry_grace: _ExpiryGrace | None = None
+        self._pref_used: dict[str, int] = {}
 
     def acquire(
         self,
@@ -403,15 +417,22 @@ class SessionCoordinator:
                     {"error": "session_releasing"}, degraded
                 )
 
-            if (
+            slot_idle = (
                 self._active is None
                 and self._releasing is None
                 and self._grant_inflight is None
                 and self._wal_marker is None
                 and not self._handoff_pending
-                and not self._queue
-                and not self._queue_reservations
                 and self._lifecycle_recovery_fault is None
+            )
+            queue_empty = not self._queue and not self._queue_reservations
+            preferential = self._preferential_reacquire_locked(client)
+            if slot_idle and (
+                preferential
+                or (
+                    queue_empty
+                    and not self._grace_blocks_stranger_locked(client)
+                )
             ):
                 lease = self._new_lease_locked(
                     client,
@@ -600,6 +621,7 @@ class SessionCoordinator:
                     self._grant_inflight = None
                     self._bump_revision_locked()
                     self._condition.notify_all()
+                    self._consume_expiry_grace_locked(client)
                     payload = self._active_payload_locked(lease)
                     if degraded:
                         payload["cleanup_degraded"] = degraded
@@ -1015,17 +1037,29 @@ class SessionCoordinator:
                         body["cleanup_degraded"] = self._unique(degraded)
                     return 410, body
 
-                if (
-                    self._queue
-                    and self._queue[0] is ticket
-                    and self._active is None
+                slot_idle = (
+                    self._active is None
                     and self._releasing is None
                     and self._grant_inflight is None
                     and self._wal_marker is None
                     and not self._handoff_pending
                     and not self._grant_audit_failed
                     and self._lifecycle_recovery_fault is None
-                ):
+                )
+                at_head = bool(self._queue) and self._queue[0] is ticket
+                preferential = (
+                    ticket in self._queue
+                    and self._preferential_reacquire_locked(ticket.client)
+                )
+                can_claim = slot_idle and (
+                    (at_head and not self._grace_blocks_stranger_locked(ticket.client))
+                    or preferential
+                )
+                if can_claim:
+                    if self._queue[0] is not ticket:
+                        self._queue.remove(ticket)
+                        self._queue.insert(0, ticket)
+                        self._bump_revision_locked()
                     claim_outcome, claim_payload = self._claim_head_from_wait_locked(
                         ticket
                     )
@@ -1089,6 +1123,8 @@ class SessionCoordinator:
                 owner_remaining = real_remaining
                 if self._active is not None:
                     owner_remaining = max(0.0, self._active.effective_expiry() - now)
+                elif self._grace_blocks_stranger_locked(ticket.client):
+                    owner_remaining = self._grace_remaining_locked()
                 wait_for = min(real_remaining, ticket_remaining, owner_remaining)
                 if wait_for <= 0.0:
                     continue
@@ -1810,6 +1846,7 @@ class SessionCoordinator:
                 ),
                 "operation_tombstones": self._operation_tombstone_status_locked(),
                 "cleanup_degraded": self._unique(degraded),
+                "grace": self._public_grace_locked(),
             }
 
     def box_queue_public(self) -> list[dict[str, object]]:
@@ -2090,9 +2127,108 @@ class SessionCoordinator:
             self._condition.notify_all()
             return True
 
+    def _purge_expiry_grace_locked(self) -> None:
+        grace = self._expiry_grace
+        if grace is None:
+            return
+        if self._time_fn() >= grace.until:
+            self._expiry_grace = None
+            self._condition.notify_all()
+
+    def _grace_remaining_locked(self) -> float:
+        self._purge_expiry_grace_locked()
+        grace = self._expiry_grace
+        if grace is None:
+            return 0.0
+        return max(0.0, grace.until - self._time_fn())
+
+    def _preferential_reacquire_locked(self, client: ClientIdentity) -> bool:
+        self._purge_expiry_grace_locked()
+        grace = self._expiry_grace
+        if grace is None:
+            return False
+        if client != grace.former:
+            return False
+        if grace.attached_at_expiry is not True:
+            return False
+        queue_busy = bool(self._queue) or bool(self._queue_reservations)
+        used = self._pref_used.get(client.session_id, 0)
+        if queue_busy and used >= MAX_PREF_RENEWALS:
+            return False
+        return True
+
+    def _grace_blocks_stranger_locked(self, client: ClientIdentity) -> bool:
+        self._purge_expiry_grace_locked()
+        grace = self._expiry_grace
+        if grace is None:
+            return False
+        return client != grace.former
+
+    def _probe_attached_run_locked(self, lease: _Lease) -> bool:
+        probe = self._attached_run_probe
+        if probe is None:
+            return False
+        try:
+            return bool(probe(lease.client.session_id, lease.lease_id))
+        except Exception:
+            return False
+
+    def _arm_expiry_grace_locked(self, lease: _Lease, attached_at_expiry: bool) -> None:
+        if not attached_at_expiry:
+            return
+        queue_busy = bool(self._queue) or bool(self._queue_reservations)
+        used = self._pref_used.get(lease.client.session_id, 0)
+        if queue_busy and used >= MAX_PREF_RENEWALS:
+            return
+        self._expiry_grace = _ExpiryGrace(
+            former=lease.client,
+            until=lease.effective_expiry() + LEASE_GRACE_S,
+            attached_at_expiry=True,
+        )
+        self._condition.notify_all()
+
+    def _consume_expiry_grace_locked(self, client: ClientIdentity) -> None:
+        self._purge_expiry_grace_locked()
+        grace = self._expiry_grace
+        if grace is None or client != grace.former:
+            # A non-preferential grant ends the consecutive M=1 streak.
+            self._pref_used.clear()
+            if grace is not None:
+                self._expiry_grace = None
+                self._condition.notify_all()
+            return
+        others_waiting = any(ticket.client != client for ticket in self._queue)
+        if not others_waiting:
+            others_waiting = any(
+                ticket.client != client for ticket in self._queue_reservations
+            )
+        if others_waiting:
+            session_id = client.session_id
+            self._pref_used[session_id] = self._pref_used.get(session_id, 0) + 1
+        else:
+            self._pref_used.pop(client.session_id, None)
+        self._expiry_grace = None
+        self._condition.notify_all()
+
+    def _public_grace_locked(self) -> dict[str, object] | None:
+        self._purge_expiry_grace_locked()
+        grace = self._expiry_grace
+        if grace is None:
+            return None
+        used = self._pref_used.get(grace.former.session_id, 0)
+        remaining = MAX_PREF_RENEWALS - used
+        if remaining < 0:
+            remaining = 0
+        return {
+            "remaining_s": max(0.0, grace.until - self._time_fn()),
+            "pref_remaining": remaining,
+            "attached_required": True,
+        }
+
     def _expire_due(self, protect_ticket_id: str | None = None) -> list[str]:
         self._purge_operation_tombstones_locked()
         self._purge_box_locked()
+        self._purge_expiry_grace_locked()
         degraded = self._cancel_expired_tickets_locked(protect_ticket_id)
         if (
             self._active is not None
@@ -2151,12 +2287,17 @@ class SessionCoordinator:
             reason="lease_ttl" if reason == "lease_expired" else reason,
         ):
             return {}, ["audit_failed", "wal_arm_failed"]
+        attached_at_expiry = False
+        if reason == "lease_expired":
+            attached_at_expiry = self._probe_attached_run_locked(lease)
         self._active = None
         self._releasing = lease
         self._bump_revision_locked()
         self._remember_invalid_token_locked(
             lease, "lease_expired" if reason == "lease_expired" else "lease_invalid"
         )
+        if reason == "lease_expired":
+            self._arm_expiry_grace_locked(lease, attached_at_expiry)
         degraded: list[str] = []
         audit_reason = "lease_ttl" if reason == "lease_expired" else reason
         started_event = "session_expired" if reason == "lease_expired" else "session_release_started"
@@ -2746,6 +2887,7 @@ class SessionCoordinator:
             self._grant_inflight = None
             self._bump_revision_locked()
             self._condition.notify_all()
+            self._consume_expiry_grace_locked(lease.client)
             return "granted", self._active_payload_locked(lease)
         finally:
             self._audit_gate.release()
@@ -2782,6 +2924,8 @@ class SessionCoordinator:
             identities.append(self._releasing.client)
         if self._grant_inflight is not None:
             identities.append(self._grant_inflight.lease.client)
+        if self._expiry_grace is not None:
+            identities.append(self._expiry_grace.former)
         return any(
             existing.session_id == client.session_id and existing != client
             for existing in identities
