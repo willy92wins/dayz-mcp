@@ -148,7 +148,6 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
     async def test_bridge_status_is_live_but_registry_fingerprint_is_frozen(self) -> None:
         fresh = (await self.call("bridge_status", {})).structuredContent
         self.assertIsNone(fresh["tool_registry_remediation"])
-        self.assertNotIsInstance(fresh["tool_registry_remediation"], str)
         self.assertIs(fresh["tool_registry_source_stale"], False)
         modules = fresh["server_modules"]
         self.assertGreater(modules["watched_count"], 1)

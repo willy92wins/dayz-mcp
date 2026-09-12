@@ -160,7 +160,6 @@ class A429ClientOverlayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["tool_registry_schema_signal"], "fresh")
         self.assertIs(status["tool_registry_source_stale"], False)
         self.assertIsNone(status["tool_registry_remediation"])
-        self.assertNotIsInstance(status["tool_registry_remediation"], str)
         self.assertNotEqual(status["tool_registry_remediation"], "reopen_mcp_client")
         self.assertIsNone(status["daemon_source_remediation"])
         self.assertIn("ready", status)
@@ -201,7 +200,6 @@ class A429ClientOverlayTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(server._SERVER_SOURCES, "snapshot", return_value=dict(_FRESH_MODULES)):
             status = await self._bridge_status()
         self.assertIsNone(status["tool_registry_remediation"])
-        self.assertNotIsInstance(status["tool_registry_remediation"], str)
         daemon_fix = status["daemon_source_remediation"]
         self.assertEqual(daemon_fix["scope"], "daemon")
         self.assertEqual(daemon_fix["code"], "none")

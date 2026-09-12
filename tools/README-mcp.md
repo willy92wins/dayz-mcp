@@ -176,7 +176,7 @@ These mailbox tools work with no game and no daemon.
 
 ## MCP overlay schema (a429)
 
-`bridge_status.tool_registry_remediation` changed at commit `80ed00b` (`fb-20260910-043740-a429`). There is no bridge-version bump: HTTP `/status` never published this field and still does not. Consumers that treated the value as the string `"reopen_mcp_client"` (Ornith9, Qwen native-v2, any `== "reopen_mcp_client"` check) will mis-read a **fresh** tools process as a crash or a daemon restart.
+`bridge_status.tool_registry_remediation` changed at commit `80ed00b` (`fb-20260910-043740-a429`). There is no bridge-version bump: HTTP `/status` never published this field and still does not. Before `80ed00b` the value was a string. After that commit, `tool_registry_remediation == "reopen_mcp_client"` is False for **all** states, including `stale_client` (`null` and `{code, scope, applies_when}` are not a string). A leftover string check therefore never fires, so the MCP client is never reopened. Migrate to `isinstance(v, dict) and v.get("code") == "reopen_mcp_client"`.
 
 | `tool_registry_schema_signal` | MCP `tool_registry_remediation` |
 |---|---|
