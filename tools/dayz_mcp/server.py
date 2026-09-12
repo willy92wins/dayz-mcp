@@ -2097,6 +2097,30 @@ def _finite_float(value: float, error: str = "bad_args") -> float:
     return converted
 
 
+def _is_int_clock_part(value: object) -> bool:
+    return type(value) is int and not isinstance(value, bool)
+
+
+def _normalize_applied_clock(applied: dict[str, Any]) -> dict[str, Any]:
+    """Carry minute>=60 into hour on a copy. No calendar day rollover.
+
+    GetDate can echo hour=8, minute=60 for a requested 9:00
+    (fb-20260911-230929-311d). Rewriting the echo and the comparison uses
+    the same carry so date_applied is not a false negative.
+    """
+    out = dict(applied)
+    hour = out.get("hour")
+    minute = out.get("minute")
+    if not _is_int_clock_part(hour) or not _is_int_clock_part(minute):
+        return out
+    if minute < 60:
+        return out
+    extra, minute = divmod(minute, 60)
+    out["hour"] = hour + extra
+    out["minute"] = minute
+    return out
+
+
 def _optional_finite_float(
     value: float | None, error: str = "bad_args"
 ) -> float | None:
@@ -4920,7 +4944,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Requires a lease (session_acquire_wait). Set server world "
             "date/time and optionally the time multiplier. This is a server "
             "world-effect: Python confirms the applied echo "
-            "(date_applied / multiplier_applied). Visual/particle confirmation "
+            "(date_applied / multiplier_applied). An applied minute of 60 is "
+            "normalized to hour+1. ok is 0 when the date does not match or "
+            "the multiplier echo mismatches; multiplier_applied=null means "
+            "the bridge did not echo time_multiplier (MCPApplied has no such "
+            "field) and warnings includes multiplier_unconfirmed — that is "
+            "not confirmation it was applied. Visual/particle confirmation "
             "is in_game_required, not a wire guarantee."
         )
     )
@@ -4966,6 +4995,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
 
         applied = result.get("applied")
+        if isinstance(applied, dict):
+            applied = _normalize_applied_clock(applied)
         requested_date = {
             "year": year_value,
             "month": month_value,
@@ -4985,8 +5016,24 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 multiplier_applied = float(applied_multiplier) == multiplier
 
         response = dict(result)
+        if isinstance(applied, dict):
+            response["applied"] = applied
         response["date_applied"] = date_applied
         response["multiplier_applied"] = multiplier_applied
+        warnings: list[str] = []
+        comparable_date = isinstance(applied, dict) and all(
+            field in applied for field in requested_date
+        )
+        if comparable_date and not date_applied:
+            response["ok"] = 0
+            warnings.append("date_not_applied")
+        if time_multiplier is not None and multiplier_applied is False:
+            response["ok"] = 0
+            warnings.append("multiplier_mismatch")
+        elif time_multiplier is not None and multiplier_applied is None:
+            warnings.append("multiplier_unconfirmed")
+        if warnings:
+            response["warnings"] = warnings
         return response
 
     @app.tool(
