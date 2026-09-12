@@ -79,8 +79,8 @@ class Bug046DpfContractTests(unittest.TestCase):
         self.assertEqual(
             rows["H4"],
             {
-                "criterion": "Cola FIFO estricta, `acquire` idempotente, TTL exacto 120 s y promoción sólo con `session_wait` vivo",
-                "verification": "A→B→C, ticket duplicado no duplica posición, reloj inyectable 119/120/121 s; release/expiry sin `session_wait` vivo no conceden leases",
+                "criterion": "Cola FIFO estricta salvo ventana de gracia post-TTL de 90 s en la que solo la identidad titular a t=TTL puede acquire/wait-claim si a t=TTL tenía un RUNNING propio (snapshot antes de release_owner); el token sigue inválido a 120 s; extraños solo promocionan con session_wait vivo después de la gracia; como máximo 1 reacquire preferente consecutivo cuando la cola no está vacía; `acquire` idempotente",
+                "verification": "A→B→C, ticket duplicado no duplica posición, reloj inyectable 119/120/121 s; release/expiry sin `session_wait` vivo no conceden leases; gracia 90 s con probe de RUNNING; B no 200 durante la ventana",
                 "state": "✓ offline",
             },
         )

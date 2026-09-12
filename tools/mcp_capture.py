@@ -60,7 +60,6 @@ def resolve_request_budget(requested: object = None) -> int:
 DEFAULT_MAX_TOKENS = default_max_tokens()
 DEFAULT_FRAME_COUNT = 4
 DEFAULT_FRAME_INTERVAL_S = 0.12
-DEFAULT_STABILITY_THRESHOLD = 0.03
 
 # Delivery encoding for the inline ImageContent. The ~25k-token MCP-output ceiling (CONFLICT-1,
 # Claude Code issue #9152) is a constraint on the base64 PAYLOAD, not on pixels. A photographic

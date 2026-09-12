@@ -1,4 +1,4 @@
-﻿"""Offline guards for B2 cards 2edd-2 and dae1-3.
+"""Offline guards for B2 cards 2edd-2 and dae1-3.
 
 2edd-2: dayz_test_stop / stop_run must say forced kill and that exit metrics
 are not valid (Leaked / Destroying game lines were never flushed).
