@@ -3,24 +3,27 @@
 <!-- LIVE-STATE:START -->
 # DayZ-MCP — Estado vivo · snapshot 2026-09-12
 
-**Última verificación real:** 2026-09-12 — campaña tres-bloques (tramo jugable) cerrada in-game; release **v1.2** y PBO live hasheados. Producto en **pausa**. No hay plan MCP en vuelo.
+**Última verificación real:** 2026-09-12 — plan de olas W1–WF despachado. Mapa: Context `docs/mcp-end-to-end-plan.md` (no está en este repo). Esta rama cierra W1 (docs).
+Publicado v1.2 `9f0343e`. PBO live `F82CFA8C4E557FFF…` @ `a9fe673` (PR #23), 258424 B, mtime 12-sep 01:04, Workshop + `P:\Mods\@DayZ_MCP`. Tip `main` = `edc7bb3` (0ab2) encima de `80ed00b` (a429).
 
 bugs: (no hay `bugs.md` vivo en `DayZ_MCP_dev`) · tracker = buzón `pipeline_inbox` · ~95 sin resolver (heurística 2026-09-12 sobre `feedback.jsonl`) · toque 2026-09-12
-ciclos_en_este_objetivo: 0 (pausa de producto; no hay objetivo de implementación activo)
+ciclos_en_este_objetivo: 1 (W1 docs)
 
 ## Estado actual
 
-Publicado y jugable. Tip de producto `6b6dd9e` (merge PR **#25**, barrier 84c4); este HANDOFF va encima en `main`. Release [v1.2](https://github.com/willy92wins/dayz-mcp/releases/tag/v1.2) @ `9f0343e`. PBO live `F82CFA8C4E557FFF…` @ `a9fe673` (PR #23), 258424 B, mtime 12-sep 01:04, Workshop + `P:\Mods\@DayZ_MCP` según el cierre de esa noche.
+Plan de olas W1–WF despachado en vuelo. Publicado y jugable v1.2 `9f0343e`. Tip de producto `main` = `edc7bb3` (0ab2) encima de `80ed00b` (a429). PBO live `F82CFA8C4E557FFF…` @ `a9fe673` (PR #23).
 
-Cola restante **PARK / PARO**, no en ejecución. Este HANDOFF describe **DayZ-MCP**. LFPowerGrid no es el trabajo actual de este producto: si el dueño está en otro mod, eso no abre un plan MCP.
+PARK leftover (no reimplementar): `a429` y `0ab2` ya están en `main`; `546d` = PR #26 abierta (esta ola NO la toca, no mergea).
+PARO `3fc1` y `1025` siguen PARO. No reabrir sin ángulo nuevo.
+LFPowerGrid no es el trabajo actual de este producto.
 
 ## Tickets
 
-GitHub `willy92wins/dayz-mcp`: **0 issues**, **0 PRs abiertas**. El tracker real es el buzón (`pipeline_inbox` / `pipeline_feedback` / `pipeline_resolve`) en `%LOCALAPPDATA%\DayZ_MCP\inbox\feedback.jsonl`. Identificadores `fb-AAAAMMDD-HHMMSS-xxxx`, citados por sufijo (`0de3`, `3fc1`, `1025`, …).
+GitHub `willy92wins/dayz-mcp`: PR #26 abierta (`546d`, W1 no la edita). El tracker real es el buzón (`pipeline_inbox` / `pipeline_feedback` / `pipeline_resolve`) en `%LOCALAPPDATA%\DayZ_MCP\inbox\feedback.jsonl`. Identificadores `fb-AAAAMMDD-HHMMSS-xxxx`, citados por sufijo (`0de3`, `3fc1`, `1025`, …).
 
 ## Próxima acción
 
-Nada que implementar. No inventar un plan vivo. Retomar solo si el dueño despacha una ficha concreta. Si se retoma producto: working tree en **`main`**, no en la rama inbox.
+Próxima acción tras aterrizar W1 (esta rama): W2 C-resolve JSONL (otro escritor) y W3 tests; occupancy = W5 (needs grill). No in-game en W1.
 
 ## Invariantes CERRADAS — NO retocar / NO reabrir sin ángulo nuevo
 
@@ -31,12 +34,13 @@ Nada que implementar. No inventar un plan vivo. Retomar solo si el dueño despac
 
 ## Punteros (detalle)
 
+- Mapa de olas W1–WF: Context `C:\cursor\stores\bc-79bb298c-84d6-46ba-865a-2bf73355a742\docs\mcp-end-to-end-plan.md` (no está en este repo)
 - `C:\Users\guill\ObsidianVault\AI\30_Sessions\2026-09-12-dayzmcp-noche-b3-v11.md`
 - Plan tres bloques (histórico; tramo jugable cerrado): `ObsidianVault\AI\10_Projects\DayZ_MCP\plans\2026-09-10-tres-bloques-backlog.md`
 - Histórico pre-v1.2: [`HANDOFF-ARCHIVE.md`](HANDOFF-ARCHIVE.md)
 - `NEXT-SESSION-PROMPT.txt` es de **22-ago** y está **obsoleto**. No usarlo.
 
-**Gate de arranque:** `Retomo DayZ-MCP desde: pausa de producto / cola PARK-PARO · próxima acción: ninguna, salvo despacho explícito del dueño`
+**Gate de arranque:** `Retomo DayZ-MCP desde: plan de olas W1–WF en vuelo · próxima acción: W1 docs (esta rama) luego W2/W3`
 <!-- LIVE-STATE:END -->
 
 ---
@@ -65,17 +69,21 @@ Ninguna de estas fichas está en implementación.
 | **LEAVE_UNTRACKED** | `d50e` (`fb-20260907-232253-d50e`) | Juicio Sol 12-sep. La auditoría original no se promociona. |
 | **fuera de main** | `fichas/hands-watchdog` | Local, 13 commits, no mergear por inercia. |
 
-El buzón sigue con ~95 ítems sin resolución (15 request / 52 finding / 26 bug / 2 tool_contribution, heurística `id` sin `resolves`). Eso es backlog del tracker, **no** un plan en curso. `GATES.md` raíz del cierre integral 30-ago sigue con ROOT-* en `[ ]`: ledger no actualizado a v1.2.
+El buzón sigue con ~95 ítems sin resolución (15 request / 52 finding / 26 bug / 2 tool_contribution, heurística `id` sin `resolves`). Eso es backlog del tracker. El plan de olas W1–WF **sí** está en vuelo (W1 = esta rama). `GATES.md` raíz del cierre integral 30-ago sigue con ROOT-* en `[ ]`: ledger no actualizado a v1.2.
 
 ## Planes
 
-**Ningún plan MCP está en vuelo.**
+**Plan MCP en vuelo: olas W1–WF despachadas.**
 
-- `2026-09-10-tres-bloques-backlog.md` (v2.1): ataque de aquella noche. Tramo jugable **cerrado**. El resto de su universo (PARK/PARO + fichas del buzón no despachadas) está **aparcado**.
-- `plans/` del `_dev` (fases 0–5, broker, UI dialog, `inbox-20260830`, steam 08-sep): históricos o absorbidos.
+- **W1 (esta rama):** documentación, tablas de cadencias, banners STALE y D1–D4.
+- **W2:** C-resolve JSONL (otro escritor).
+- **W3:** tests.
+- **W5:** occupancy (needs grill).
+- Mapa general: Context `docs/mcp-end-to-end-plan.md` (no está en este repo).
+- `2026-09-10-tres-bloques-backlog.md` (v2.1): tramo jugable **cerrado**. El resto de su universo está aparcado o encauzado.
 - Playbooks en repo: `place_safely`, `lease_spawn_prepare_trace`, `box_is_mine`, `run_really_started`.
 
-No hay Issues/PRs GitHub que sustituyan esa cola. Linear no existe para este producto.
+El buzón no se sustituye por Issues GitHub. PR #26 es leftover `546d` (W1 no la toca). Linear no existe para este producto.
 
 ## Superficie (no recontar a ciegas)
 
