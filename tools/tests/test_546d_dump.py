@@ -59,6 +59,13 @@ def _dump_header(rows: int) -> dict[str, object]:
     }
 
 
+def _wire_bools(sample: dict) -> dict:
+    converted = dict(sample)
+    for field in vehicle_trace._BOOL_SAMPLE_FIELDS:
+        converted[field] = 1 if sample[field] else 0
+    return converted
+
+
 def _write_jsonl(path: Path, header: dict[str, object], samples: list[dict]) -> None:
     lines = [json.dumps(header, separators=(",", ":"))]
     for sample in samples:
@@ -72,6 +79,10 @@ class DumpRequestTests(unittest.TestCase):
         got = vehicle_trace.normalize_request("dump", TID, 0, 64, 20, 4096)
         self.assertEqual(got["mode"], "dump")
         self.assertEqual(got["trace_id"], TID)
+        self.assertEqual(
+            vehicle_trace.dump_profile_path(TID),
+            "$profile:dayz_mcp_trace_" + TID + ".jsonl",
+        )
 
     def test_n1_wrong_case_still_bad_mode(self) -> None:
         with self.assertRaises(ValueError) as caught:
@@ -101,7 +112,7 @@ class DumpJsonlTests(unittest.TestCase):
         self.assertEqual(len(samples), 2)
         with tempfile.TemporaryDirectory() as raw_temp:
             path = Path(raw_temp) / "dump.jsonl"
-            _write_jsonl(path, _dump_header(2), samples)
+            _write_jsonl(path, _dump_header(2), [_wire_bools(sample) for sample in samples])
             loaded = vehicle_trace.load_dump_jsonl(path)
         self.assertEqual(loaded["rows"], 2)
         self.assertEqual(loaded["schema"], vehicle_trace.TRACE_SCHEMA)
@@ -109,6 +120,12 @@ class DumpJsonlTests(unittest.TestCase):
         self.assertIsInstance(trace, dict)
         self.assertEqual(trace["mode"], "read")
         self.assertEqual(len(trace["samples"]), 2)
+        self.assertIs(trace["active"], False)
+        self.assertIs(trace["complete"], True)
+        self.assertIs(trace["overflow"], False)
+        self.assertIs(trace["eof"], True)
+        for field in vehicle_trace._BOOL_SAMPLE_FIELDS:
+            self.assertIsInstance(trace["samples"][0][field], bool)
         report = vehicle_trace.validate_trace(trace)
         self.assertFalse(
             any(
@@ -117,6 +134,25 @@ class DumpJsonlTests(unittest.TestCase):
             ),
             report,
         )
+        self.assertFalse(
+            any(
+                str(item.get("id", "")).endswith("_type") and item.get("status") == "STOP"
+                for item in report["checks"]
+            ),
+            report,
+        )
+
+    def test_load_empty_dump_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            path = Path(raw_temp) / "dump.jsonl"
+            _write_jsonl(path, _dump_header(0), [])
+            loaded = vehicle_trace.load_dump_jsonl(path)
+        self.assertEqual(loaded["rows"], 0)
+        trace = loaded["trace"]
+        self.assertIsInstance(trace, dict)
+        self.assertEqual(trace["mode"], "read")
+        self.assertEqual(trace["samples"], [])
+        self.assertIs(trace["complete"], True)
 
     def test_n4_count_mismatch(self) -> None:
         source = _positive_trace(sample_count=2)
@@ -126,6 +162,38 @@ class DumpJsonlTests(unittest.TestCase):
             with self.assertRaises(ValueError) as caught:
                 vehicle_trace.load_dump_jsonl(path)
         self.assertEqual(str(caught.exception), "dump_count_mismatch")
+
+    def test_dump_invalid_broken_json_and_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            broken = Path(raw_temp) / "broken.jsonl"
+            broken.write_text("{not json\n", encoding="utf-8")
+            with self.assertRaises(ValueError) as caught:
+                vehicle_trace.load_dump_jsonl(broken)
+            self.assertEqual(str(caught.exception), "dump_invalid")
+
+            header = _dump_header(0)
+            header["schema"] = "dayz-mcp-vehicle-trace-v0"
+            schema_path = Path(raw_temp) / "schema.jsonl"
+            _write_jsonl(schema_path, header, [])
+            with self.assertRaises(ValueError) as caught:
+                vehicle_trace.load_dump_jsonl(schema_path)
+            self.assertEqual(str(caught.exception), "dump_invalid")
+
+            header = _dump_header(0)
+            header["mode"] = "read"
+            mode_path = Path(raw_temp) / "mode.jsonl"
+            _write_jsonl(mode_path, header, [])
+            with self.assertRaises(ValueError) as caught:
+                vehicle_trace.load_dump_jsonl(mode_path)
+            self.assertEqual(str(caught.exception), "dump_invalid")
+
+            header = _dump_header(0)
+            header["path"] = "$profile:../secret.jsonl"
+            path_file = Path(raw_temp) / "path.jsonl"
+            _write_jsonl(path_file, header, [])
+            with self.assertRaises(ValueError) as caught:
+                vehicle_trace.load_dump_jsonl(path_file)
+            self.assertEqual(str(caught.exception), "dump_invalid")
 
 
 class DumpBridgeResultTests(unittest.TestCase):
@@ -175,6 +243,11 @@ class DumpBridgeResultTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), "bad_bridge_trace_dump")
         base["trace"]["path"] = vehicle_trace.dump_profile_path(TID)
         base["trace"]["rows"] = -1
+        with self.assertRaises(ValueError) as caught:
+            vehicle_trace.normalize_bridge_result(base)
+        self.assertEqual(str(caught.exception), "bad_bridge_trace_dump")
+        base["trace"]["rows"] = 1
+        base["trace"]["samples"] = [{}]
         with self.assertRaises(ValueError) as caught:
             vehicle_trace.normalize_bridge_result(base)
         self.assertEqual(str(caught.exception), "bad_bridge_trace_dump")
@@ -231,12 +304,18 @@ class DumpSourceContractTests(unittest.TestCase):
         dispatch = _method_body(bridge, "protected bool DispatchVehicleTrace(")
         stop = _method_body(car, "static bool Stop(string traceId)")
         dump = _method_body(car, "static bool Dump(string traceId)")
+        abort = _method_body(car, "static void Abort(string reason)")
+        clear = _method_body(car, "static bool Clear(string traceId)")
         self.assertIn('args.mode != "dump"', dispatch)
         self.assertIn("MCPVehicleTrace.Dump(", dispatch)
         self.assertIn("Dump(traceId)", stop)
+        self.assertNotIn("Dump(", abort)
+        self.assertNotIn("Dump(", clear)
         self.assertIn("$profile:dayz_mcp_trace_", dump)
         self.assertIn("FileMode.WRITE", dump)
         self.assertIn("WriteToString(header, false, line)", dump)
+        self.assertIn("WriteToString(s_Samples.Get(index), false, line)", dump)
+        self.assertNotIn("JsonSaveFile", dump)
         self.assertNotIn("args.path", dump)
 
 
