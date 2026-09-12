@@ -25,7 +25,7 @@ from dayz_mcp.process_lifecycle import (
     occupancy_error_fields,
     parse_dayz_launch_argv,
 )
-from dayz_mcp.server import BOX_WAIT_MAX_S, ServerConfig
+from dayz_mcp.server import BOX_WAIT_MAX_S, ServerConfig, TAKEOVER_REQUIRED
 from dayz_mcp.session_coordination import (
     BOX_CLAIM_TTL_S,
     MAX_SESSION_QUEUE,
@@ -296,7 +296,14 @@ class BoxOccupancyTest(unittest.TestCase):
             self.lifecycle.box_occupancy(), caller_session="other"
         )
         self.assertEqual(fields["occupied_by_run_id"], "run-existing")
-        self.assertEqual(fields["hint"], "retry with wait_for_box_s=<n>")
+        # occupancy_error_fields does not emit error_code; takeover_required
+        # is the MCP path. A non-owner of this RUNNING run gets the takeover
+        # hint (0ab2), not wait_for_box_s.
+        self.assertEqual(
+            fields["hint"],
+            "pass takeover=true to evict occupied_by_run_id=run-existing; "
+            "do not dayz_test_stop a run you do not own",
+        )
 
     def test_start_rejection_wire_is_only_error_for_foreign_diag(self) -> None:
         # RED if foreign occupancy is stuffed into the lifecycle start body.
@@ -2100,6 +2107,81 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload.get("label"), "heli")
         self.assertFalse(payload.get("foreign"))
         self.assertEqual(payload.get("hint"), "retry with wait_for_box_s=<n>")
+
+    async def test_timeout_returns_takeover_required_for_foreign_running_run(
+        self,
+    ) -> None:
+        # Sibling of test_timeout_returns_enriched_active_run_exists: without
+        # state, takeover_target_run_id is None and the MCP code stays
+        # active_run_exists. With RUNNING + a foreign owner, wait already
+        # expired; the recipe is takeover_required, not another wait.
+        from tests.test_client_mode import _fixture_client_runtime
+
+        config = ServerConfig(
+            mode="client",
+            key="k",
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _message: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        box = {
+            "occupied": True,
+            "runs": [
+                {
+                    "run_id": "run-live",
+                    "mod": "@LFHeli",
+                    "label": "heli",
+                    "age_s": 44.0,
+                    "state": "RUNNING",
+                    "owner_session": "other",
+                }
+            ],
+            "foreign": [],
+            "ports_in_use": [2302],
+            "queue": [],
+        }
+
+        async def wait_box(*_args: object, **_kwargs: object) -> dict[str, object]:
+            return {"ok": False, "ticket": "box-ticket", "box": box}
+
+        execute = AsyncMock(side_effect=AssertionError("must not launch"))
+        with patch.object(server_module, "ClientRuntime", return_value=runtime):
+            app, _built = server_module.build_app(config)
+        with (
+            patch.object(
+                server_module.dayz_test_tool, "execute_dayz_test_run", execute
+            ),
+            patch.object(
+                server_module, "execute_wait_for_box", side_effect=wait_box
+            ),
+            patch.object(
+                runtime, "session_box_status", new=AsyncMock(return_value={})
+            ),
+        ):
+            payload = _content_json(
+                await app.call_tool(
+                    "dayz_test_run",
+                    {
+                        "project": "ExampleMod",
+                        "mode": "server",
+                        "wait_for_box_s": 5.0,
+                    },
+                )
+            )
+        execute.assert_not_awaited()
+        self.assertEqual(payload.get("error_code"), TAKEOVER_REQUIRED)
+        self.assertIsNone(payload.get("run_id"))
+        self.assertEqual(payload.get("occupied_by_run_id"), "run-live")
+        self.assertEqual(payload.get("mod"), "@LFHeli")
+        self.assertEqual(payload.get("label"), "heli")
+        self.assertFalse(payload.get("foreign"))
+        self.assertEqual(
+            payload.get("hint"),
+            "pass takeover=true to evict occupied_by_run_id=run-live; "
+            "do not dayz_test_stop a run you do not own",
+        )
+        self.assertNotIn("wait_for_box_s", str(payload.get("hint") or ""))
 
     async def test_zero_wait_enriches_execute_active_run_exists(self) -> None:
         from tests.test_client_mode import _fixture_client_runtime
