@@ -79,7 +79,7 @@ No hay Issues/PRs GitHub que sustituyan esa cola. Linear no existe para este pro
 
 ## Superficie (no recontar a ciegas)
 
-README público: **62 tools**. `CLAUDE.md` del `_dev` aún dice 58 / bridge v10. `CHANGELOG` «Unreleased» habla de 54 tools y Group G pendiente — **desfasado** respecto al cierre in-game. Corregir docs es deuda aparcada, no un plan abierto.
+README / architecture / `build_app`: **62 tools** (+ `exec_enforce` opt-in). `CLAUDE.md` local alineado a 62 (sigue untracked). `CHANGELOG` [Unreleased] vacío; la superficie vive en [1.2]. Group G en `product-spec.md` sigue ❓ — parked, no es un plan abierto.
 
 ## Gotchas que siguen vigentes
 
