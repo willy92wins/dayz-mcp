@@ -741,7 +741,12 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             "tool_registry_schema_signal",
         ):
             self.assertIn(key, status)
-        self.assertEqual(status["tool_registry_remediation"], "reopen_mcp_client")
+        if status["server_modules"]["status"] == "fresh":
+            self.assertIsNone(status["tool_registry_remediation"])
+        else:
+            remediation = status["tool_registry_remediation"]
+            self.assertEqual(remediation["code"], "reopen_mcp_client")
+            self.assertEqual(remediation["scope"], "tools")
         stale = status["tool_registry_source_stale"]
         self.assertIs(type(stale), bool)
         self.assertIs(stale, status["server_modules"]["status"] != "fresh")
@@ -794,6 +799,9 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             "tool_registry_source_stale",
             "tool_registry_remediation",
             "tool_registry_schema_signal",
+            "daemon_source_remediation",
+            "mutation_rejects_meta",
+            "available_for",
         ):
             self.assertNotIn(key, raw)
             self.assertNotIn(key, encoded)

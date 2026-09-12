@@ -108,6 +108,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"stale={','.join(marker['stale']) or 'none'};", text)
         for name, reason in {**marker["unreadable_reasons"], **marker["observation_errors"]}.items():
             self.assertIn(f"{name}={reason}", text)
+        self.assertIn("scope=tools", text)
         self.assertIn("remediation=reopen_mcp_client", text)
         with self.assertRaises(json.JSONDecodeError):
             json.loads(text)

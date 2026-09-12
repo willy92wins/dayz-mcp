@@ -212,7 +212,8 @@ def marker_text(marker: dict[str, Any]) -> str:
     return (
         f"SERVER_CODE_FRESHNESS {marker['status']}: "
         f"stale={','.join(marker['stale']) or 'none'}; "
-        f"unverifiable={detail or 'none'}; remediation={REMEDIATION}"
+        f"unverifiable={detail or 'none'}; scope=tools; "
+        f"remediation={REMEDIATION}"
     )
 
 

@@ -730,7 +730,6 @@ def _frozen_tool_registry_overlay(app: FastMCP, config: ServerConfig) -> dict[st
     return {
         "tool_registry_fingerprint": snapshot.fingerprint,
         "tool_registry_captured_at": snapshot.captured_at_utc,
-        "tool_registry_remediation": _TOOL_REGISTRY_REMEDIATION,
     }
 
 
@@ -3384,6 +3383,101 @@ async def execute_wait_for_box(
         raise
 
 
+ADOPT_BLOCKED_ON = (
+    "DayZ test box has an ownerless RUNNING_IDLE run; next: call "
+    "session_acquire_wait(purpose=...) to adopt it. dayz_test_run wait_for_box_s "
+    "is for a new launch, not this box."
+)
+_TOOLS_REMEDIATION_STALE = "tool_registry_schema_signal=stale_client"
+_TOOLS_REMEDIATION_UNKNOWN = (
+    "tool_registry_schema_signal=unknown; sources unverifiable, not a crash"
+)
+_DAEMON_REMEDIATION_WHEN = (
+    "daemon_modules.stale or unreadable is non-empty; not a crash; do not kill; "
+    "reopen_mcp_client does not refresh the daemon"
+)
+_MUTATION_REJECTS_META = {
+    "kind": "historical",
+    "window": "since_daemon_start",
+    "origin": "loopback_enqueue_fence",
+    "blocks_now": False,
+}
+
+
+def _ownerless_idle_runs(box: dict[str, Any]) -> list[dict[str, Any]]:
+    runs = box.get("runs")
+    if not isinstance(runs, list):
+        return []
+    idle: list[dict[str, Any]] = []
+    for item in runs:
+        if not isinstance(item, dict):
+            continue
+        if item.get("state") != "RUNNING_IDLE":
+            continue
+        owner = item.get("owner_session")
+        if owner is None or owner == "":
+            idle.append(item)
+    return idle
+
+
+def box_available_for(box: object) -> dict[str, bool]:
+    """MCP-only: whether the box is free for a new launch or an idle adopt."""
+
+    unavailable = {"new_launch": False, "adopt": False}
+    if not isinstance(box, dict):
+        return unavailable
+    if box.get("port_scan_known") is False:
+        return unavailable
+    if box.get("occupied") is not True:
+        return {"new_launch": True, "adopt": False}
+    foreign = box.get("foreign")
+    if not isinstance(foreign, list) or foreign:
+        return unavailable
+    idle = _ownerless_idle_runs(box)
+    if len(idle) == 1:
+        return {"new_launch": False, "adopt": True}
+    return unavailable
+
+
+def _tool_registry_remediation_for(signal: str) -> dict[str, str] | None:
+    if signal == "fresh":
+        return None
+    if signal == "stale_client":
+        applies_when = _TOOLS_REMEDIATION_STALE
+    else:
+        applies_when = _TOOLS_REMEDIATION_UNKNOWN
+    return {
+        "code": _TOOL_REGISTRY_REMEDIATION,
+        "scope": "tools",
+        "applies_when": applies_when,
+    }
+
+
+def _daemon_source_remediation(daemon_modules: object) -> dict[str, str] | None:
+    if not isinstance(daemon_modules, dict):
+        return None
+    stale = daemon_modules.get("stale")
+    unreadable = daemon_modules.get("unreadable")
+    stale_list = stale if isinstance(stale, list) else []
+    unread_list = unreadable if isinstance(unreadable, list) else []
+    if not stale_list and not unread_list:
+        return None
+    return {
+        "code": "none",
+        "scope": "daemon",
+        "applies_when": _DAEMON_REMEDIATION_WHEN,
+    }
+
+
+def _annotate_mcp_fence(overlay: dict[str, Any]) -> None:
+    fence = overlay.get("fence")
+    if not isinstance(fence, dict):
+        return
+    annotated = dict(fence)
+    annotated["mutation_rejects_meta"] = dict(_MUTATION_REJECTS_META)
+    overlay["fence"] = annotated
+
+
 def _session_status_blocked_on(status: dict[str, Any]) -> str | None:
     """Return the next queue a caller should join, if a resource is busy."""
 
@@ -3403,6 +3497,8 @@ def _session_status_blocked_on(status: dict[str, Any]) -> str | None:
             "host UDP socket table (psutil/netstat, process attribution) -- "
             "wait_for_box_s does not help"
         )
+    if isinstance(box, dict) and box_available_for(box)["adopt"] is True:
+        return ADOPT_BLOCKED_ON
     if isinstance(box, dict) and box.get("occupied") is True:
         return (
             "DayZ test box; next: call dayz_test_run(..., wait_for_box_s=<n>) "
@@ -3429,7 +3525,12 @@ def _bridge_status_description() -> str:
         "distinguishes fresh/stale/unknown; unreadable_reasons and "
         "observation_errors explain unknown, including a detached result hook. "
         "Sources use stat(mtime_ns,size,file_id) then hash on change; edits/ACL "
-        "denies preserving that triple can be missed. A separate non-JSON "
+        "denies preserving that triple can be missed. tool_registry_remediation "
+        "is null when server_modules.status is fresh; otherwise "
+        "{code, scope:tools, applies_when}. fence.mutation_rejects_meta marks "
+        "historical counters that do not block ready. daemon_source_remediation "
+        "is informational (code none) when daemon_modules are stale or unreadable; "
+        "it is not reopen_mcp_client. A separate non-JSON "
         "SERVER_CODE_FRESHNESS text block and result _meta mark responses "
         "observed as stale/unknown. Read the original payload separately, "
         "not by concatenating text blocks. Reopen the MCP client to load new "
@@ -3504,7 +3605,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         modules = await asyncio.to_thread(observe_server_sources)
         overlay["server_modules"] = modules
         overlay["tool_registry_source_stale"] = source_stale(modules)
-        overlay["tool_registry_schema_signal"] = schema_signal(modules)
+        signal = schema_signal(modules)
+        overlay["tool_registry_schema_signal"] = signal
+        overlay["tool_registry_remediation"] = _tool_registry_remediation_for(signal)
+        overlay["daemon_source_remediation"] = _daemon_source_remediation(
+            overlay.get("daemon_modules")
+        )
+        _annotate_mcp_fence(overlay)
         return overlay
 
     async def _bridge_tool_names() -> frozenset[str]:
@@ -3610,8 +3717,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "box occupancy (managed runs; foreign DayZ processes seen by image "
             "or by a held UDP port, even without a run record; ports_in_use "
             "from the socket table; "
-            "and the box wait FIFO). blocked_on names the resource and next "
-            "queue, or is null when neither lease nor box is busy. Lease TTL "
+            "and the box wait FIFO). box.available_for distinguishes new_launch "
+            "from adopt of an ownerless RUNNING_IDLE run; blocked_on then names "
+            "session_acquire_wait, not the launch FIFO. blocked_on names the "
+            "resource and next queue, or is null when neither lease nor box is busy. "
+            "Lease TTL "
             f"is {config.session_ttl_s:g} s; renewal is internal."
         )
     )
@@ -3619,6 +3729,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         client = _client_runtime()
         async with client.tool_lock:
             status = await client.session_status()
+            box = status.get("box")
+            if isinstance(box, dict):
+                box = dict(box)
+                box["available_for"] = box_available_for(box)
+                status["box"] = box
             status["blocked_on"] = _session_status_blocked_on(status)
             return status
 
