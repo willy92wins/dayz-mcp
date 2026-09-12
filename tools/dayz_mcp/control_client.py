@@ -8,8 +8,9 @@ import math
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Iterator
 
 from dayz_mcp import accredited_daemon_transport as transport
 from dayz_mcp import daemon_credential
@@ -173,6 +174,17 @@ class ControlClient:
         self.state = "NEW"
         self._state_lock = threading.Lock()
         self._transition_lock = asyncio.Lock()
+        self._allow_stale_policy = False
+
+    @contextmanager
+    def stale_policy_exemption(self) -> Iterator[None]:
+        """H14: skip only policy.revalidate() fail-closed; authority stays closed."""
+        previous = self._allow_stale_policy
+        self._allow_stale_policy = True
+        try:
+            yield
+        finally:
+            self._allow_stale_policy = previous
 
     def _request_once(
         self,
@@ -183,25 +195,29 @@ class ControlClient:
         try:
             self.policy.revalidate()
         except Exception as exc:
-            policy_cause = _policy_revalidation_cause(exc)
-            raise ControlClientError(
-                "client_policy_untrusted_open_new_session",
-                request_stage="pre_request",
-                http_bytes_sent=0,
-                policy_cause=policy_cause,
-                hint=(
-                    # The MCP adapter publishes code/hint, not exception metadata.
-                    f"policy_cause={policy_cause}. "
-                    "If the tool list includes server_reload, call it: it replaces "
-                    "the serving process, which re-reads the registration and "
-                    "re-accredits. Otherwise report this policy rejection to the "
-                    "host/operator for registration verification and MCP-client "
-                    "reconnection after repair. This client cannot open a new host "
-                    "session by itself."
-                ),
-            ) from None
+            if not self._allow_stale_policy:
+                policy_cause = _policy_revalidation_cause(exc)
+                raise ControlClientError(
+                    "client_policy_untrusted_open_new_session",
+                    request_stage="pre_request",
+                    http_bytes_sent=0,
+                    policy_cause=policy_cause,
+                    hint=(
+                        # The MCP adapter publishes code/hint, not exception metadata.
+                        f"policy_cause={policy_cause}. "
+                        "If the tool list includes server_reload, call it: it replaces "
+                        "the serving process, which re-reads the registration and "
+                        "re-accredits. Otherwise report this policy rejection to the "
+                        "host/operator for registration verification and MCP-client "
+                        "reconnection after repair. This client cannot open a new host "
+                        "session by itself."
+                    ),
+                ) from None
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         deadline = _monotonic() + timeout_s
+        refresh_kwargs: dict[str, object] = {}
+        if self._allow_stale_policy:
+            refresh_kwargs["allow_stale_policy"] = True
         try:
             status, response_body = self._credential_provider.request_with_refresh(
                 method="POST",
@@ -210,6 +226,7 @@ class ControlClient:
                 body=body,
                 headers={"Content-Type": "application/json"},
                 deadline=deadline,
+                **refresh_kwargs,
             )
         except daemon_credential.CredentialRefreshError as error:
             raise ControlClientError(

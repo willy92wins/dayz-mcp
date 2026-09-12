@@ -6,14 +6,16 @@ import ntpath
 import os
 import time
 import uuid
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Awaitable, Callable, Protocol
+from typing import Awaitable, Callable, Iterator, Protocol
 
 from dayz_mcp import (
     dayz_test_modes,
     dayz_test_request,
     dayz_test_worker,
+    process_lifecycle,
     secure_launcher,
 )
 from dayz_mcp.launcher_registry import open_approved_launcher
@@ -1720,6 +1722,37 @@ def _failed_stop_envelope(
     }
 
 
+def _h14_caller_session(runtime: _Runtime) -> str | None:
+    identity = getattr(runtime, "identity", None)
+    if identity is None:
+        control = getattr(runtime, "_control", None)
+        identity = getattr(control, "identity", None) if control is not None else None
+    session = getattr(identity, "session_id", None)
+    return session if isinstance(session, str) else None
+
+
+def _h14_owned_stop(runtime: _Runtime, status: object, run_id: str) -> bool:
+    row = _run_row(status, run_id)
+    if row is None:
+        return False
+    owner = row.get("owner_session")
+    if not isinstance(owner, str) or not owner:
+        owner = row.get("owner_session_id")
+    item = {"owner_session": owner if isinstance(owner, str) else None}
+    return process_lifecycle._caller_owns_run(item, _h14_caller_session(runtime))
+
+
+@contextmanager
+def _h14_stale_policy(runtime: _Runtime) -> Iterator[None]:
+    control = getattr(runtime, "_control", None)
+    exemption = getattr(control, "stale_policy_exemption", None) if control is not None else None
+    if not callable(exemption):
+        yield
+        return
+    with exemption():
+        yield
+
+
 async def execute_dayz_test_stop(
     runtime: _Runtime,
     run_id: str,
@@ -1733,7 +1766,8 @@ async def execute_dayz_test_stop(
     with open_approved_launcher("dayz-test-v1") as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
-            status_snapshot = await runtime.lifecycle_status()
+            with _h14_stale_policy(runtime):
+                status_snapshot = await runtime.lifecycle_status()
             try:
                 policy, run = resolve_stop_run(
                     status_snapshot, bundle.sealed_policies, run_id
@@ -1760,35 +1794,41 @@ async def execute_dayz_test_stop(
                 run_id=run_id,
                 kill=True,
             )
-            result = await _execute_request(
-                runtime,
-                opened_launcher=opened,
-                verified_bundle=bundle,
-                raw_request=raw_request,
-                policy=policy,
-                public_mode="stop",
-                artifacts_paths=_stop_artifacts(policy, run),
-                started_at=started_at,
-                preflight=False,
-                expected_run_id=run_id,
-                progress_cb=progress_cb,
+            rest = (
+                _h14_stale_policy(runtime)
+                if _h14_owned_stop(runtime, status_snapshot, run_id)
+                else nullcontext()
             )
-            if (
-                result.get("status") == "failed"
-                and result.get("error_code") == "run_stop_failed"
-                and result.get("run_id") == run_id
-            ):
-                try:
-                    stopped = _exact_run(await runtime.lifecycle_status(), run_id)
-                except Exception:
-                    return result
-                if stopped.get("state") == "EXITED":
-                    result.update(
-                        status="succeeded",
-                        phase="completed",
-                        error_code=None,
-                        cleanup_degraded=False,
-                    )
+            with rest:
+                result = await _execute_request(
+                    runtime,
+                    opened_launcher=opened,
+                    verified_bundle=bundle,
+                    raw_request=raw_request,
+                    policy=policy,
+                    public_mode="stop",
+                    artifacts_paths=_stop_artifacts(policy, run),
+                    started_at=started_at,
+                    preflight=False,
+                    expected_run_id=run_id,
+                    progress_cb=progress_cb,
+                )
+                if (
+                    result.get("status") == "failed"
+                    and result.get("error_code") == "run_stop_failed"
+                    and result.get("run_id") == run_id
+                ):
+                    try:
+                        stopped = _exact_run(await runtime.lifecycle_status(), run_id)
+                    except Exception:
+                        return result
+                    if stopped.get("state") == "EXITED":
+                        result.update(
+                            status="succeeded",
+                            phase="completed",
+                            error_code=None,
+                            cleanup_degraded=False,
+                        )
             # 2edd-2: dayz_test_stop always drives the kill path today. Surface
             # that on the MCP envelope so "succeeded" is not read as "exit
             # metrics were collected" (Leaked lines, Destroying game, etc.).

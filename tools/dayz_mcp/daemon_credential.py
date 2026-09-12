@@ -124,6 +124,7 @@ class RefreshingDaemonCredential:
         *,
         request_stage: str,
         http_bytes_sent: int,
+        allow_stale_policy: bool = False,
     ) -> None:
         self._assert_authority_unchanged(
             request_stage=request_stage,
@@ -132,11 +133,12 @@ class RefreshingDaemonCredential:
         try:
             self.policy.revalidate()
         except Exception:
-            raise CredentialRefreshError(
-                "client_policy_untrusted_open_new_session",
-                request_stage=request_stage,
-                http_bytes_sent=http_bytes_sent,
-            ) from None
+            if not allow_stale_policy:
+                raise CredentialRefreshError(
+                    "client_policy_untrusted_open_new_session",
+                    request_stage=request_stage,
+                    http_bytes_sent=http_bytes_sent,
+                ) from None
         self._assert_authority_unchanged(
             request_stage=request_stage,
             http_bytes_sent=http_bytes_sent,
@@ -193,6 +195,7 @@ class RefreshingDaemonCredential:
         body: bytes | None,
         headers: dict[str, str],
         deadline: float,
+        allow_stale_policy: bool = False,
     ) -> tuple[int, bytes]:
         with self._refresh_lock:
             self._assert_authority_unchanged(
@@ -203,6 +206,7 @@ class RefreshingDaemonCredential:
                 self._revalidate_authority(
                     request_stage="pre_request",
                     http_bytes_sent=0,
+                    allow_stale_policy=allow_stale_policy,
                 )
                 self._reaccredit_epoch += 1
             current = self._snapshot
@@ -248,6 +252,7 @@ class RefreshingDaemonCredential:
         body: bytes | None,
         headers: dict[str, str],
         deadline: float,
+        allow_stale_policy: bool = False,
     ) -> tuple[int, bytes]:
         self._assert_authority_unchanged(
             request_stage="pre_request",
@@ -285,6 +290,7 @@ class RefreshingDaemonCredential:
                 body=request_body,
                 headers=request_headers,
                 deadline=deadline,
+                allow_stale_policy=allow_stale_policy,
             )
         if status != 401:
             return status, response_body
@@ -299,6 +305,7 @@ class RefreshingDaemonCredential:
                 self._revalidate_authority(
                     request_stage="post_request",
                     http_bytes_sent=1,
+                    allow_stale_policy=allow_stale_policy,
                 )
                 try:
                     refreshed = pinned_keyfile.read_pinned_keyfile(
@@ -313,6 +320,7 @@ class RefreshingDaemonCredential:
                 self._revalidate_authority(
                     request_stage="post_request",
                     http_bytes_sent=1,
+                    allow_stale_policy=allow_stale_policy,
                 )
                 current = _CredentialSnapshot(
                     secret=refreshed,
