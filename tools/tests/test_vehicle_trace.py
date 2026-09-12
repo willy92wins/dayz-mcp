@@ -309,6 +309,8 @@ class VehicleTraceValidationTest(unittest.TestCase):
             ("read", "a" * 32, 0, 65, 20, 4096),
             ("start", "", 0, 64, 19, 4096),
             ("start", "", 0, 64, 20, 8193),
+            ("DUMP", "a" * 32, 0, 64, 20, 4096),
+            ("dump", "", 0, 64, 20, 4096),
         ]:
             with self.subTest(args=args):
                 with self.assertRaises(ValueError):

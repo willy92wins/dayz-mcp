@@ -511,7 +511,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "max_samples",
             ),
             validators={
-                "mode": _one_of("start", "status", "stop", "read", "clear"),
+                "mode": _one_of("start", "status", "stop", "read", "clear", "dump"),
                 "trace_id": _lower_hex(32),
                 "cursor": _integer_in_range(minimum=0),
                 "limit": _integer_in_range(minimum=1, maximum=64),

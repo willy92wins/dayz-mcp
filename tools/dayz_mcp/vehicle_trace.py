@@ -15,8 +15,11 @@ COURSE_SCHEMA = "dayz-mcp-vehicle-trace-course-v1"
 CONTROL_COURSE_ID = "civilian-sedan-control-v1"
 CONTROL_VEHICLE_TYPE = "CivilianSedan"
 CONTROL_SAMPLE_HZ = 20
-TRACE_MODES = frozenset({"start", "status", "stop", "read", "clear"})
+TRACE_MODES = frozenset({"start", "status", "stop", "read", "clear", "dump"})
 TRACE_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+DUMP_FILENAME_PREFIX = "dayz_mcp_trace_"
+DUMP_FILENAME_SUFFIX = ".jsonl"
+DUMP_PROFILE_PREFIX = "$profile:"
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 TIME_EPS_S = 1e-6
 REQUIRED_CONTROL_OBSERVATIONS = frozenset(
@@ -209,6 +212,95 @@ def _normalize_bridge_boolean(value: object) -> bool:
     raise ValueError("bad_bridge_trace_boolean")
 
 
+def _coerce_trace_booleans(trace: dict[str, object]) -> None:
+    for field in _BOOL_TRACE_FIELDS:
+        if field not in trace:
+            raise ValueError("bad_bridge_trace_boolean")
+        trace[field] = _normalize_bridge_boolean(trace[field])
+    samples = trace.get("samples")
+    if not isinstance(samples, list):
+        raise ValueError("bad_bridge_trace_result")
+    for sample in samples:
+        if not isinstance(sample, dict):
+            raise ValueError("bad_bridge_trace_result")
+        for field in _BOOL_SAMPLE_FIELDS:
+            if field not in sample:
+                raise ValueError("bad_bridge_trace_boolean")
+            sample[field] = _normalize_bridge_boolean(sample[field])
+
+
+def dump_relpath(trace_id: str) -> str:
+    if not isinstance(trace_id, str) or TRACE_ID_PATTERN.fullmatch(trace_id) is None:
+        raise ValueError("bad_trace_id")
+    return DUMP_FILENAME_PREFIX + trace_id + DUMP_FILENAME_SUFFIX
+
+
+def dump_profile_path(trace_id: str) -> str:
+    return DUMP_PROFILE_PREFIX + dump_relpath(trace_id)
+
+
+def _is_canonical_dump_path(path: object, trace_id: object) -> bool:
+    if not isinstance(path, str) or not isinstance(trace_id, str):
+        return False
+    try:
+        expected = dump_profile_path(trace_id)
+    except ValueError:
+        return False
+    return path == expected
+
+
+def load_dump_jsonl(path: Path) -> dict[str, object]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError("dump_invalid") from exc
+    lines = [line for line in raw.splitlines() if line.strip() != ""]
+    if not lines:
+        raise ValueError("dump_invalid")
+    try:
+        header = json.loads(lines[0])
+    except json.JSONDecodeError as exc:
+        raise ValueError("dump_invalid") from exc
+    if not isinstance(header, dict):
+        raise ValueError("dump_invalid")
+    if header.get("schema") != TRACE_SCHEMA or header.get("mode") != "dump":
+        raise ValueError("dump_invalid")
+    trace_id = header.get("trace_id")
+    rows = header.get("rows")
+    count = header.get("count")
+    if not _is_canonical_dump_path(header.get("path"), trace_id):
+        raise ValueError("dump_invalid")
+    samples: list[object] = []
+    for line in lines[1:]:
+        try:
+            sample = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError("dump_invalid") from exc
+        if not isinstance(sample, dict):
+            raise ValueError("dump_invalid")
+        samples.append(sample)
+    if not _is_int(rows) or not _is_int(count) or rows != count or rows != len(samples):
+        raise ValueError("dump_count_mismatch")
+    if rows < 0 or rows > 8192:
+        raise ValueError("dump_invalid")
+    trace = dict(header)
+    trace["mode"] = "read"
+    trace["samples"] = samples
+    trace["cursor"] = 0
+    trace["next_cursor"] = rows
+    try:
+        _coerce_trace_booleans(trace)
+    except ValueError as exc:
+        raise ValueError("dump_invalid") from exc
+    trace["eof"] = True
+    return {
+        "path": str(path),
+        "rows": rows,
+        "schema": TRACE_SCHEMA,
+        "trace": trace,
+    }
+
+
 def normalize_bridge_result(result: object) -> dict[str, object]:
     if not isinstance(result, dict):
         raise ValueError("bad_bridge_trace_result")
@@ -218,18 +310,16 @@ def normalize_bridge_result(result: object) -> dict[str, object]:
     samples = trace.get("samples")
     if not isinstance(samples, list):
         raise ValueError("bad_bridge_trace_result")
-
-    for field in _BOOL_TRACE_FIELDS:
-        if field not in trace:
-            raise ValueError("bad_bridge_trace_boolean")
-        trace[field] = _normalize_bridge_boolean(trace[field])
-    for sample in samples:
-        if not isinstance(sample, dict):
-            raise ValueError("bad_bridge_trace_result")
-        for field in _BOOL_SAMPLE_FIELDS:
-            if field not in sample:
-                raise ValueError("bad_bridge_trace_boolean")
-            sample[field] = _normalize_bridge_boolean(sample[field])
+    if trace.get("mode") == "dump":
+        if samples:
+            raise ValueError("bad_bridge_trace_dump")
+        path = trace.get("path")
+        rows = trace.get("rows")
+        if not _is_canonical_dump_path(path, trace.get("trace_id")):
+            raise ValueError("bad_bridge_trace_dump")
+        if not _is_int(rows) or rows < 0 or rows > 8192:
+            raise ValueError("bad_bridge_trace_dump")
+    _coerce_trace_booleans(trace)
     return result
 
 

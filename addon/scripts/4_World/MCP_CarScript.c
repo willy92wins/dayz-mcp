@@ -104,6 +104,8 @@ class MCPVehicleTraceRead
 	int cursor;
 	int next_cursor;
 	bool eof;
+	string path;
+	int rows;
 	ref array<ref MCPVehicleTraceSample> samples;
 
 	void MCPVehicleTraceRead()
@@ -133,6 +135,8 @@ class MCPVehicleTrace
 	static string s_CarType;
 	static int s_NetIdLow;
 	static int s_NetIdHigh;
+	static string s_DumpPath;
+	static int s_DumpRows;
 	static int s_PreviousWheelsPresent;
 	static int s_WheelLossCount;
 	static int s_PendingContactCount;
@@ -303,6 +307,10 @@ class MCPVehicleTrace
 		s_Active = false;
 		s_Complete = true;
 		s_StopReason = "requested";
+		if (!Dump(traceId))
+		{
+			return false;
+		}
 		return true;
 	}
 
@@ -365,6 +373,66 @@ class MCPVehicleTrace
 		return s_LastError;
 	}
 
+	static bool Dump(string traceId)
+	{
+		s_LastError = "";
+		if (!Matches(traceId))
+		{
+			s_LastError = "trace_not_found";
+			return false;
+		}
+
+		string filePath = "$profile:dayz_mcp_trace_" + traceId + ".jsonl";
+		FileHandle handle = OpenFile(filePath, FileMode.WRITE);
+		if (handle == 0)
+		{
+			s_LastError = "dump_failed";
+			return false;
+		}
+
+		MCPVehicleTraceRead header = View("dump", traceId, 0, 1);
+		if (!header)
+		{
+			CloseFile(handle);
+			s_LastError = "dump_failed";
+			return false;
+		}
+		header.path = filePath;
+		header.rows = s_Count;
+		header.samples.Clear();
+
+		JsonSerializer serializer = new JsonSerializer();
+		string line;
+		bool wrote = serializer.WriteToString(header, false, line);
+		if (!wrote)
+		{
+			CloseFile(handle);
+			s_LastError = "dump_failed";
+			return false;
+		}
+		FPrintln(handle, line);
+
+		int index = 0;
+		while (index < s_Count)
+		{
+			line = "";
+			wrote = serializer.WriteToString(s_Samples.Get(index), false, line);
+			if (!wrote)
+			{
+				CloseFile(handle);
+				s_LastError = "dump_failed";
+				return false;
+			}
+			FPrintln(handle, line);
+			index = index + 1;
+		}
+
+		CloseFile(handle);
+		s_DumpPath = filePath;
+		s_DumpRows = s_Count;
+		return true;
+	}
+
 	static MCPVehicleTraceRead View(string mode, string traceId, int cursor, int limit)
 	{
 		s_LastError = "";
@@ -396,6 +464,8 @@ class MCPVehicleTrace
 		view.net_id_low = s_NetIdLow;
 		view.net_id_high = s_NetIdHigh;
 		view.cursor = cursor;
+		view.path = s_DumpPath;
+		view.rows = s_DumpRows;
 
 		int end = cursor;
 		if (mode == "read")
@@ -587,6 +657,8 @@ class MCPVehicleTrace
 		s_CarType = "";
 		s_NetIdLow = 0;
 		s_NetIdHigh = 0;
+		s_DumpPath = "";
+		s_DumpRows = 0;
 		s_PreviousWheelsPresent = 0;
 		s_WheelLossCount = 0;
 		ResetPendingContact();

@@ -1297,7 +1297,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		MCPArgs args = command.args;
-		if (args.mode != "start" && args.mode != "status" && args.mode != "stop" && args.mode != "read" && args.mode != "clear")
+		if (args.mode != "start" && args.mode != "status" && args.mode != "stop" && args.mode != "read" && args.mode != "clear" && args.mode != "dump")
 		{
 			result.ok = false;
 			result.error = "bad_mode";
@@ -1409,6 +1409,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				return true;
 			}
 			result.trace = clearView;
+		}
+		else if (args.mode == "dump")
+		{
+			if (!MCPVehicleTrace.Dump(args.trace_id))
+			{
+				result.ok = false;
+				result.error = MCPVehicleTrace.GetLastError();
+				return true;
+			}
+			result.trace = MCPVehicleTrace.View("dump", args.trace_id, 0, 1);
 		}
 		else
 		{

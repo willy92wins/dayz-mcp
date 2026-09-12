@@ -80,6 +80,31 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             },
             (False, "bad_args"),
         ),
+        (
+            "valid_dump",
+            {
+                "mode": "dump",
+                "trace_id": "0123456789abcdef0123456789abcdef",
+                "cursor": 0,
+                "limit": 64,
+                "sample_hz": 20,
+                "max_samples": 8192,
+            },
+            (True, None),
+        ),
+        (
+            "dump_caller_path",
+            {
+                "mode": "dump",
+                "trace_id": "0123456789abcdef0123456789abcdef",
+                "cursor": 0,
+                "limit": 64,
+                "sample_hz": 20,
+                "max_samples": 8192,
+                "path": r"C:\Windows\x.jsonl",
+            },
+            (False, "bad_args"),
+        ),
     ),
     "vehicle_prepare_fixture": (
         (
