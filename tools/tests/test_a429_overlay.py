@@ -168,9 +168,26 @@ class A429ClientOverlayTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(server._SERVER_SOURCES, "snapshot", return_value=dict(_STALE_MODULES)):
             status = await self._bridge_status()
         remediation = status["tool_registry_remediation"]
+        self.assertNotIsInstance(remediation, str)
         self.assertEqual(remediation["code"], "reopen_mcp_client")
         self.assertEqual(remediation["scope"], "tools")
         self.assertIn("stale_client", remediation["applies_when"])
+        self.assertIsNone(status["daemon_source_remediation"])
+
+    async def test_unknown_signal_is_object_not_legacy_string(self) -> None:
+        unknown = {
+            **_FRESH_MODULES,
+            "unreadable": ["fixture"],
+            "unreadable_reasons": {"fixture": "source_unreadable_now"},
+        }
+        with patch.object(server._SERVER_SOURCES, "snapshot", return_value=dict(unknown)):
+            status = await self._bridge_status()
+        self.assertEqual(status["tool_registry_schema_signal"], "unknown")
+        remediation = status["tool_registry_remediation"]
+        self.assertNotIsInstance(remediation, str)
+        self.assertEqual(remediation["code"], "reopen_mcp_client")
+        self.assertEqual(remediation["scope"], "tools")
+        self.assertIn("unknown", remediation["applies_when"])
         self.assertIsNone(status["daemon_source_remediation"])
 
     async def test_n2_daemon_stale_does_not_use_reopen_mcp_client(self) -> None:
