@@ -55,7 +55,7 @@ Mutating work uses the request-bound high-level queue by default:
 
 1. `session_status()` first: `owner`/`queue`/`claimable` describe the **lease**. `box` describes the **game box** (managed `runs`, unmanaged `foreign` DayZ processes, seen by image or by a held UDP port even without a run record, `ports_in_use` from the socket table, and the box wait FIFO). A free lease does not mean a free box.
 2. `session_acquire_wait(purpose, max_wait_s)` remains queued until it returns an active lease or fails. It never returns `queued`.
-3. Run only the required mutating operations. The lease/ticket TTL is 120 seconds; heartbeat is for active exclusive work only.
+3. Run only the required mutating operations. The lease/ticket TTL is 120 seconds; the exclusive-work heartbeat is 45 s (lease_supervisor), not the other way around.
 4. `session_release(lease_token)` as soon as exclusive work ends.
 5. `session_status()` before handoff; confirm the caller has no lease/ticket and no pending commands. Report any degraded cleanup.
 
@@ -70,6 +70,22 @@ Requires a lease (these mutate the game): `world_spawn`, `object_delete`, `playe
 No lease (read-only): `query_all_players`, `query_player_state`, `entities_query`, `surface_query`, `scene_raycast`, `object_inspect`, `telemetry_read`, `vehicle_telemetry`, `camera_get`, `logs_since`, `ui_tree`, `query_get_in_condition`, `bridge_status`, `session_status`, `capture_screenshot`, `pipeline_*`.
 
 A mutation without a lease returns `lease_required`. Call `session_acquire_wait` first.
+
+## Lease cadences
+
+| Propósito | Valor | Fuente |
+|---|---:|---|
+| Heartbeat de lease durante trabajo exclusivo | 45 s | `tools/dayz_mcp/lease_supervisor.py:12` `HEARTBEAT_INTERVAL_S` |
+| TTL de lease y waiter de sesión | 120 s | `tools/dayz_mcp/session_coordination.py:15` `SESSION_TTL_S`; contrato H4 `product-spec.md:139` |
+| Gracia post-TTL (0ab2) | 90 s | `tools/dayz_mcp/session_coordination.py:16` `LEASE_GRACE_S` |
+| Heartbeat del claim de caja durante launch | 30 s | `tools/dayz_mcp/server.py:110` `BOX_CLAIM_HEARTBEAT_S` |
+| TTL del claim de caja ya concedido | 600 s | `tools/dayz_mcp/session_coordination.py:18` `BOX_CLAIM_TTL_S` |
+| Presupuesto máximo wait_for / wait_for_box | 600 s | `tools/dayz_mcp/server.py:106` `WAIT_FOR_MAX_TIMEOUT_S` y `:107` `BOX_WAIT_MAX_S` |
+| Poll interno genérico / mínimo wait_for / poll box | 0,05 / 0,5 / 1 s | `tools/dayz_mcp/server.py:105` `POLL_INTERVAL_S` / `:111` `WAIT_FOR_MIN_POLL_INTERVAL_S` / `:108` `BOX_WAIT_POLL_S` |
+| Pin máximo de una operación | 300 s | `tools/dayz_mcp/session_coordination.py:42` `MAX_OPERATION_PIN_S` |
+| Timeout sondeo netstat TCP / UDP | 10 / 3 s | `tools/dayz_mcp/orphan_guard.py:380` y `:473`; no son TTL |
+
+Nota: el heartbeat de 45 s es cadencia de refresco, NO un TTL. 120 s es el TTL. La gracia de 90 s (`LEASE_GRACE_S`) es posterior al TTL y no persiste tras un restart del host. No se requiere heartbeat manual durante `dayz_test_run` (el launcher gestiona su propio lease internamente).
 
 ## Managed lifecycle and administration
 

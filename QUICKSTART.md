@@ -45,6 +45,8 @@ under a second or two means the tools are live — try `query_all_players`, then
 `server_poll_stale` (mod loaded but not polling — check `dayz_mcp.json` landed in the
 profiles folder the server actually uses), or `version_mismatch` (repack the PBO).
 
+For lease cadences (heartbeat 45 s vs TTL 120 s) and coordination details, see [tools/README-mcp.md#lease-cadences](tools/README-mcp.md#lease-cadences).
+
 Not needed for any of this: the native launcher, `dayz_test_run`, and the launcher
 registry — those let the agent *start* the game itself. [README.md](README.md) covers
 them, the run modes, the security model, and what this project cannot do.
