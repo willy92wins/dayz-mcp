@@ -21,8 +21,8 @@ Lane única: el `tools/list` de `edc7bb3` ya se midió — `title`/`body`/`proje
 | Sitio | Cambio |
 |---|---|
 | `tools/dayz_mcp/inbox.py` | Constantes nombradas; `_check_length` las usa. |
-| `tools/dayz_mcp/server.py` | `Annotated[..., Field(min_length, max_length)]` en title/body/project. Validación servidor intacta. `evidence_ref` Field usa la misma constante. |
-| `tools/tests/test_pipeline_feedback.py` | Schema pos/neg. |
+| `tools/dayz_mcp/server.py` | `Annotated[..., Field(min_length, max_length)]` en title/body/project. `pipeline_resolve.resolution` Field `max_length=RESOLUTION_MAX_CHARS` (2000). Validación servidor intacta. `evidence_ref` Field usa la misma constante. |
+| `tools/tests/test_pipeline_feedback.py` | Schema pos/neg. N2 muta el catálogo real de `list_tools`. |
 
 ## Schema [EXACT]
 
@@ -31,6 +31,8 @@ Lane única: el `tools/list` de `edc7bb3` ya se midió — `title`/`body`/`proje
 - `title`: `{type:string, minLength:1, maxLength:120}`
 - `body`: `{type:string, minLength:1, maxLength:8000}`
 - `project`: `{type:string, maxLength:64, default:""}` (vacío legal; no `minLength`)
+
+`tools/list` → `pipeline_resolve.inputSchema.properties.resolution.maxLength == 2000` (constante `RESOLUTION_MAX_CHARS`).
 
 Números leídos de las constantes, no del texto de la ficha al assert.
 
@@ -44,7 +46,7 @@ Números leídos de las constantes, no del texto de la ficha al assert.
 | N2 | schema **sin** `maxLength` en title | el test de P1 **rojo** | 1 |
 | I1 | interpreter `.venv-mcp` ausente | INCONCLUSO | — |
 
-`call_tool` con 121 (incluido `title` of 120 x's plus a trailing newline) muere en Pydantic `string_too_long` **antes** de inbox. Eso es el contrato publicado; la descripción nombra ese type, no `title 125 > 120 chars`. El mensaje con recuento queda en `append_feedback` (mismo que hoy).
+`call_tool` con 121 (incluido un title de 120 caracteres más un salto de línea) muere en Pydantic `string_too_long` **antes** de inbox. Overlay de `server.py` de `e2b645b` deja esos pines verdes; quien discrimina el padre es la descripción (`string_too_long`, no `title 125 > 120 chars`) y el pin strip vs schema: `list_tools` `minLength: 1` cuenta espacios y `call_tool(title=" ")` muere `bad_args: title empty`. El mensaje con recuento queda en `append_feedback` (mismo que hoy).
 
 ## Hecho cuando
 

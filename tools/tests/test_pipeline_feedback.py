@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import copy
 import inspect
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -373,17 +375,7 @@ class PipelineFeedbackInputSchemaLimitsTest(unittest.IsolatedAsyncioTestCase):
         inbox.FEEDBACK_PATH = self._orig_path
         self._tmp.cleanup()
 
-    async def test_input_schema_publishes_title_body_project_lengths(self) -> None:
-        self.assertEqual(inbox.TITLE_MIN_CHARS, 1)
-        self.assertEqual(inbox.TITLE_MAX_CHARS, 120)
-        self.assertEqual(inbox.BODY_MIN_CHARS, 1)
-        self.assertEqual(inbox.BODY_MAX_CHARS, 8000)
-        self.assertEqual(inbox.PROJECT_MAX_CHARS, 64)
-
-        app, _runtime = server.build_app(server.ServerConfig())
-        tools = {tool.name: tool for tool in await app.list_tools()}
-        props = (tools["pipeline_feedback"].inputSchema or {}).get("properties") or {}
-
+    def _assert_feedback_input_schema(self, props: dict) -> None:
         title = props["title"]
         self.assertEqual(title.get("type"), "string")
         self.assertEqual(title.get("minLength"), inbox.TITLE_MIN_CHARS)
@@ -399,12 +391,28 @@ class PipelineFeedbackInputSchemaLimitsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(project.get("maxLength"), inbox.PROJECT_MAX_CHARS)
         self.assertNotIn("minLength", project)
 
+    async def _listed_feedback_props(self) -> dict:
+        app, _runtime = server.build_app(server.ServerConfig())
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        return (tools["pipeline_feedback"].inputSchema or {}).get("properties") or {}
+
+    async def test_input_schema_publishes_title_body_project_lengths(self) -> None:
+        self.assertEqual(inbox.TITLE_MIN_CHARS, 1)
+        self.assertEqual(inbox.TITLE_MAX_CHARS, 120)
+        self.assertEqual(inbox.BODY_MIN_CHARS, 1)
+        self.assertEqual(inbox.BODY_MAX_CHARS, 8000)
+        self.assertEqual(inbox.PROJECT_MAX_CHARS, 64)
+        self._assert_feedback_input_schema(await self._listed_feedback_props())
+
     async def test_schema_without_title_max_length_is_the_negative(self) -> None:
-        # Control: the assertion above is not a tautology. A catalog that
-        # still looks like origin/main (string, no maxLength) must fail it.
-        bare = {"title": "Title", "type": "string"}
-        self.assertNotIn("maxLength", bare)
-        self.assertNotEqual(bare.get("maxLength"), inbox.TITLE_MAX_CHARS)
+        # N2: P1 must go red if the real catalog loses title maxLength.
+        # A local dict never reads build_app().list_tools and cannot fail
+        # when Annotated is dropped.
+        props = copy.deepcopy(await self._listed_feedback_props())
+        self.assertEqual(props["title"].get("maxLength"), inbox.TITLE_MAX_CHARS)
+        props["title"].pop("maxLength")
+        with self.assertRaises(AssertionError):
+            self._assert_feedback_input_schema(props)
 
     async def test_boundary_and_over_length_still_go_through_inbox(self) -> None:
         inbox.append_feedback(
@@ -448,6 +456,44 @@ class PipelineFeedbackInputSchemaLimitsTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("bad_args", message)
         self.assertFalse(inbox.FEEDBACK_PATH.is_file())
 
+    async def test_call_tool_whitespace_title_is_schema_legal_then_empty(
+        self,
+    ) -> None:
+        # P32-P2-3: Field minLength counts raw spaces; inbox strips first.
+        # Overlay of e2b645b server.py keeps this runtime path; HEAD
+        # description must name it so the parent prose goes red.
+        app, _runtime = server.build_app(server.ServerConfig())
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        title_schema = (
+            (tools["pipeline_feedback"].inputSchema or {}).get("properties") or {}
+        )["title"]
+        self.assertEqual(title_schema.get("minLength"), inbox.TITLE_MIN_CHARS)
+        self.assertEqual(title_schema.get("maxLength"), inbox.TITLE_MAX_CHARS)
+        for title in (" ", "   "):
+            with self.subTest(title=repr(title)):
+                self.assertGreaterEqual(len(title), title_schema["minLength"])
+                self.assertLessEqual(len(title), title_schema["maxLength"])
+                with self.assertRaises(Exception) as ctx:
+                    await app.call_tool(
+                        "pipeline_feedback",
+                        {"kind": "bug", "title": title, "body": "b"},
+                    )
+                self.assertEqual(type(ctx.exception).__name__, "ToolError")
+                message = str(ctx.exception)
+                self.assertIn("bad_args: title empty", message)
+                self.assertNotIn("string_too_short", message)
+                self.assertNotIn("string_too_long", message)
+        self.assertFalse(inbox.FEEDBACK_PATH.is_file())
+
+    async def test_resolve_schema_publishes_resolution_max_length(self) -> None:
+        self.assertEqual(inbox.RESOLUTION_MAX_CHARS, 2000)
+        app, _runtime = server.build_app(server.ServerConfig())
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        props = (tools["pipeline_resolve"].inputSchema or {}).get("properties") or {}
+        resolution = props["resolution"]
+        self.assertEqual(resolution.get("type"), "string")
+        self.assertEqual(resolution.get("maxLength"), inbox.RESOLUTION_MAX_CHARS)
+
 
 class PipelineToolDescriptionsDeclareLimitsTest(unittest.IsolatedAsyncioTestCase):
     """Ficha fb-20260906-145656-d45f.
@@ -473,6 +519,27 @@ class PipelineToolDescriptionsDeclareLimitsTest(unittest.IsolatedAsyncioTestCase
         self.assertIn("string_too_long", text)
         self.assertNotIn("125 > 120", text)
         self.assertNotIn("naming its real count", text)
+        # P32-P2-3 discriminator vs e2b645b: parent prose never named
+        # the strip vs minLength whitespace path.
+        self.assertIn("title empty", text)
+        self.assertIn("schema-legal", text)
+
+    def test_e2b645b_server_overlay_fails_head_description_pins(self) -> None:
+        # R26 overlay: HEAD description pins vs leftover parent server.py.
+        repo = Path(__file__).resolve().parents[2]
+        parent = subprocess.check_output(
+            ["git", "-C", str(repo), "show", "e2b645b:tools/dayz_mcp/server.py"],
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertIn("title 125 > 120 chars", parent)
+        self.assertNotIn("string_too_long", parent)
+        self.assertNotIn("title empty", parent)
+        self.assertNotIn("schema-legal", parent)
+        self.assertNotIn(
+            "resolution: Annotated[str, Field(max_length=inbox.RESOLUTION_MAX_CHARS)]",
+            parent,
+        )
 
     async def test_resolve_declares_the_evidence_ref_shape_and_both_caps(self) -> None:
         text = (await self._tool_descriptions())["pipeline_resolve"]
@@ -495,6 +562,9 @@ class PipelineToolDescriptionsDeclareLimitsTest(unittest.IsolatedAsyncioTestCase
         # and a path with a note glued onto it, so both must be named.
         self.assertIn("relative", lowered)
         self.assertIn("path only", lowered)
+        self.assertIn("string_too_long", text)
+        self.assertNotIn("2087 > 2000", text)
+        self.assertNotIn("naming its real count", text)
 
 
 if __name__ == "__main__":
