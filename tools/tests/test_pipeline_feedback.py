@@ -422,6 +422,32 @@ class PipelineFeedbackInputSchemaLimitsTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(inbox.FEEDBACK_PATH.read_text(encoding="utf-8").splitlines()), 1)
 
+    async def test_call_tool_over_length_title_is_pydantic_string_too_long(self) -> None:
+        # P32-P2-2 / P32-P2-3: call_tool never reaches the counted
+        # `title N > 120 chars` inbox path. Raw length is the schema
+        # contract, including a trailing newline that inbox would strip.
+        app, _runtime = server.build_app(server.ServerConfig())
+        cases = (
+            "x" * (inbox.TITLE_MAX_CHARS + 1),
+            "x" * inbox.TITLE_MAX_CHARS + "\n",
+        )
+        for title in cases:
+            with self.subTest(title_len=len(title), tail=repr(title[-1])):
+                self.assertEqual(len(title), inbox.TITLE_MAX_CHARS + 1)
+                with self.assertRaises(Exception) as ctx:
+                    await app.call_tool(
+                        "pipeline_feedback",
+                        {"kind": "bug", "title": title, "body": "b"},
+                    )
+                self.assertEqual(type(ctx.exception).__name__, "ToolError")
+                message = str(ctx.exception)
+                self.assertIn("string_too_long", message)
+                self.assertIn("at most 120", message)
+                self.assertNotIn("title 121 > 120", message)
+                self.assertNotIn("title 125 > 120", message)
+                self.assertNotIn("bad_args", message)
+        self.assertFalse(inbox.FEEDBACK_PATH.is_file())
+
 
 class PipelineToolDescriptionsDeclareLimitsTest(unittest.IsolatedAsyncioTestCase):
     """Ficha fb-20260906-145656-d45f.
@@ -442,6 +468,11 @@ class PipelineToolDescriptionsDeclareLimitsTest(unittest.IsolatedAsyncioTestCase
         # inbox.append_feedback: title 1..120, body 1..8000, project <= 64.
         for fragment in ("title", "120", "body", "8000", "project", "64"):
             self.assertIn(fragment, text)
+        # P32-P2-2: call_tool dies as Pydantic string_too_long, not the
+        # counted inbox form the description used to promise.
+        self.assertIn("string_too_long", text)
+        self.assertNotIn("125 > 120", text)
+        self.assertNotIn("naming its real count", text)
 
     async def test_resolve_declares_the_evidence_ref_shape_and_both_caps(self) -> None:
         text = (await self._tool_descriptions())["pipeline_resolve"]

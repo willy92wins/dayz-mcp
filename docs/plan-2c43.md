@@ -44,7 +44,7 @@ Números leídos de las constantes, no del texto de la ficha al assert.
 | N2 | schema **sin** `maxLength` en title | el test de P1 **rojo** | 1 |
 | I1 | interpreter `.venv-mcp` ausente | INCONCLUSO | — |
 
-`call_tool` con 121 puede morir en Pydantic (schema) **antes** de inbox. Eso es el contrato publicado. El mensaje con recuento queda en `append_feedback` (mismo que hoy).
+`call_tool` con 121 (incluido `title` of 120 x's plus a trailing newline) muere en Pydantic `string_too_long` **antes** de inbox. Eso es el contrato publicado; la descripción nombra ese type, no `title 125 > 120 chars`. El mensaje con recuento queda en `append_feedback` (mismo que hoy).
 
 ## Hecho cuando
 

@@ -5704,8 +5704,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "tool, args, error, repro. For contributions, reference "
             "artifacts at DURABLE paths (never session scratchpads). "
             "Enforced limits, in characters: title 1..120, body 1..8000, "
-            "project 0..64; an over-length value is rejected naming its real "
-            "count (title 125 > 120 chars), so trim without guessing. "
+            "project 0..64. An over-length value is rejected by the published "
+            "inputSchema (Pydantic type=string_too_long) before inbox; trim "
+            "to those caps without guessing. "
             "Appends to a local shared inbox; ids cannot collide. Works "
             "even when the game and daemon are down."
         )
@@ -5722,7 +5723,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         ],
         project: Annotated[str, Field(max_length=inbox.PROJECT_MAX_CHARS)] = "",
     ) -> dict[str, Any]:
-        """File pipeline feedback from any agent session: a bug you hit, a request for a missing capability, a finding worth recording, or a tool/playbook you built (kind=tool_contribution). For contributions, reference artifacts at DURABLE paths (never session scratchpads). Enforced limits, in characters: title 1..120, body 1..8000, project 0..64; an over-length value is rejected naming its real count (title 125 > 120 chars). Appends to a local shared inbox; ids cannot collide. Works even when the game and daemon are down."""
+        """File pipeline feedback from any agent session: a bug you hit, a request for a missing capability, a finding worth recording, or a tool/playbook you built (kind=tool_contribution). For contributions, reference artifacts at DURABLE paths (never session scratchpads). Enforced limits, in characters: title 1..120, body 1..8000, project 0..64. An over-length value is rejected by the published inputSchema (Pydantic type=string_too_long) before inbox; trim to those caps without guessing. Appends to a local shared inbox; ids cannot collide. Works even when the game and daemon are down."""
         # The lock here only preserves the one-tool-at-a-time client invariant;
         # these tools do not call the bridge.
         async with runtime.tool_lock:
