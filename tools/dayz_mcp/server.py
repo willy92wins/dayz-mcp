@@ -2125,14 +2125,20 @@ def _add_applied_days(out: dict[str, Any], extra_days: int) -> None:
         out["month"] = shifted.month
         out["day"] = shifted.day
         return
-    if _is_int_clock_part(day):
-        out["day"] = int(day) + extra_days
+    # Incomplete calendar (day without year/month) must not invent a date.
 
 
 def _overflow_clock_parts(hour: int, minute: int) -> tuple[int, int, int]:
     extra_hours, minute = divmod(minute, 60)
     extra_days, hour = divmod(hour + extra_hours, 24)
     return extra_days, hour, minute
+
+
+def _clock_was_normalized(raw: dict[str, Any], normalized: dict[str, Any]) -> bool:
+    return any(
+        raw.get(field) != normalized.get(field)
+        for field in ("year", "month", "day", "hour", "minute")
+    )
 
 
 def _normalize_applied_clock(applied: dict[str, Any]) -> dict[str, Any]:
@@ -4984,14 +4990,18 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Requires a lease (session_acquire_wait). Set server world "
             "date/time and optionally the time multiplier. This is a server "
             "world-effect: Python confirms the applied echo "
-            "(date_applied / multiplier_applied). An applied minute of 60 is "
-            "normalized to hour+1 (hour stays 0–23, carrying into the next "
-            "calendar day when needed). ok is 0 when the date does not match or "
-            "the multiplier echo mismatches; multiplier_applied=null means "
-            "the bridge did not echo time_multiplier (MCPApplied has no such "
-            "field) and warnings includes multiplier_unconfirmed — that is "
-            "not confirmation it was applied. Visual/particle confirmation "
-            "is in_game_required, not a wire guarantee."
+            "(date_applied / multiplier_applied). Clock overflow uses divmod: "
+            "minute>=60 (60, 120, 60.0, 120.0) carries into hour, then into "
+            "the calendar day (hour stays 0–23; minute=120 is hour+2). "
+            "applied is the normalized clock; applied_echo keeps the raw "
+            "GetDate echo; clock_normalized is true when they differ. ok is 0 "
+            "when the date does not match, the echo is an incomplete calendar, "
+            "or the multiplier echo mismatches; multiplier_applied=null "
+            "means the echo had no numeric time_multiplier (World has "
+            "SetTimeMultiplier and no GetTimeMultiplier; MCPApplied does "
+            "not echo one) and warnings includes multiplier_unconfirmed — "
+            "that is not confirmation it was applied. Visual/particle "
+            "confirmation is in_game_required, not a wire guarantee."
         )
     )
     async def world_time_set(
@@ -5043,6 +5053,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "minute": minute_value,
         }
         applied = result.get("applied")
+        applied_echo = dict(applied) if isinstance(applied, dict) else None
         if isinstance(applied, dict):
             applied = _normalize_applied_clock(applied)
         date_applied = isinstance(applied, dict) and all(
@@ -5057,15 +5068,25 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 multiplier_applied = float(applied_multiplier) == multiplier
 
         response = dict(result)
-        if isinstance(applied, dict):
+        if isinstance(applied, dict) and applied_echo is not None:
             response["applied"] = applied
+            response["applied_echo"] = applied_echo
+            response["clock_normalized"] = _clock_was_normalized(
+                applied_echo, applied
+            )
         response["date_applied"] = date_applied
         response["multiplier_applied"] = multiplier_applied
         warnings: list[str] = []
-        comparable_date = isinstance(applied, dict) and all(
-            field in applied for field in requested_date
+        present_clock = (
+            [field for field in requested_date if field in applied]
+            if isinstance(applied, dict)
+            else []
         )
-        if comparable_date and not date_applied:
+        incomplete_date = bool(present_clock) and len(present_clock) < len(
+            requested_date
+        )
+        comparable_date = len(present_clock) == len(requested_date)
+        if (incomplete_date or (comparable_date and not date_applied)):
             response["ok"] = 0
             warnings.append("date_not_applied")
         if time_multiplier is not None and multiplier_applied is False:
