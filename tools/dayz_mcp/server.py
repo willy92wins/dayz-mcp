@@ -5326,7 +5326,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             f"{LEASE_TOOL_LINE} Capture and read an atomic owner-client vehicle "
             "trace. mode=start requires the local player seated in the vehicle; "
             "otherwise the bridge returns not_seated. mode=start while a trace "
-            "already exists returns trace_exists; call mode=clear before reuse."
+            "already exists returns trace_exists; call mode=clear before reuse. "
+            "mode=dump writes JSONL to $profile:dayz_mcp_trace_<trace_id>.jsonl "
+            "and stop autodumps the same file."
         )
     )
     async def vehicle_trace(
