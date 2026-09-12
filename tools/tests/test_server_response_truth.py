@@ -328,7 +328,7 @@ class WorldTimeSetResponseTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.get("ok"), 1)
         self.assertNotIn("date_not_applied", result.get("warnings", []))
 
-    async def test_midnight_minute_sixty_echo_matches_midnight_request(self) -> None:
+    async def test_same_day_minute_sixty_echo_carries_to_next_day(self) -> None:
         result, _calls = await _call_tool_with_bridge_result(
             "world_time_set",
             {
@@ -350,13 +350,16 @@ class WorldTimeSetResponseTest(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+        # Today's lie wrapped this echo to day=12 hour=0 ok=1. Honest
+        # calendar carry is 13 Sep 00:00, which does not match the request.
         self.assertNotEqual(result["applied"]["hour"], 24)
         self.assertEqual(result["applied"]["hour"], 0)
         self.assertEqual(result["applied"]["minute"], 0)
-        self.assertEqual(result["applied"]["day"], 12)
-        self.assertIs(result.get("date_applied"), True)
-        self.assertEqual(result.get("ok"), 1)
-        self.assertNotIn("date_not_applied", result.get("warnings", []))
+        self.assertEqual(result["applied"]["day"], 13)
+        self.assertNotEqual(result["applied"]["day"], 12)
+        self.assertIs(result.get("date_applied"), False)
+        self.assertEqual(result.get("ok"), 0)
+        self.assertEqual(result.get("warnings"), ["date_not_applied"])
 
     async def test_missing_applied_echo_does_not_rewrite_ok(self) -> None:
         result, _calls = await _call_tool_with_bridge_result(

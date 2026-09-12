@@ -2101,10 +2101,6 @@ def _is_int_clock_part(value: object) -> bool:
     return type(value) is int and not isinstance(value, bool)
 
 
-def _clock_fields_match(applied: dict[str, Any], requested: dict[str, Any]) -> bool:
-    return all(applied.get(field) == value for field, value in requested.items())
-
-
 def _add_applied_days(out: dict[str, Any], extra_days: int) -> None:
     if extra_days == 0:
         return
@@ -2130,16 +2126,14 @@ def _overflow_clock_parts(hour: int, minute: int) -> tuple[int, int, int]:
     return extra_days, hour, minute
 
 
-def _normalize_applied_clock(
-    applied: dict[str, Any],
-    requested: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+def _normalize_applied_clock(applied: dict[str, Any]) -> dict[str, Any]:
     """Carry minute>=60 into hour, then into the calendar day. Hour stays 0–23.
 
     GetDate can echo hour=8, minute=60 for a requested 9:00, or hour=23,
-    minute=60 for midnight (fb-20260911-230929-311d). Day-carry is preferred
-    so applied.hour is never 24. A same-day 23:60 echo of a 00:00 request
-    matches by wrapping hour without inventing a later calendar day.
+    minute=60 for midnight (fb-20260911-230929-311d). Overflow always
+    carries into the next calendar day so applied.hour is never 24. The
+    request is not consulted; a same-day 23:60 echo becomes 00:00 the
+    next day even if the client asked for 00:00 on the echoed day.
     """
     out = dict(applied)
     hour = out.get("hour")
@@ -2149,16 +2143,10 @@ def _normalize_applied_clock(
     if minute < 60 and 0 <= hour <= 23:
         return out
     extra_days, hour, minute = _overflow_clock_parts(hour, minute)
-    wrapped = dict(out)
-    wrapped["hour"] = hour
-    wrapped["minute"] = minute
-    carried = dict(wrapped)
-    _add_applied_days(carried, extra_days)
-    if requested is not None and _clock_fields_match(carried, requested):
-        return carried
-    if requested is not None and _clock_fields_match(wrapped, requested):
-        return wrapped
-    return carried
+    out["hour"] = hour
+    out["minute"] = minute
+    _add_applied_days(out, extra_days)
+    return out
 
 
 def _optional_finite_float(
@@ -5044,7 +5032,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         }
         applied = result.get("applied")
         if isinstance(applied, dict):
-            applied = _normalize_applied_clock(applied, requested_date)
+            applied = _normalize_applied_clock(applied)
         date_applied = isinstance(applied, dict) and all(
             applied.get(field) == value for field, value in requested_date.items()
         )

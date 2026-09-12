@@ -33,7 +33,7 @@ Campos extra (además de los actuales):
   - `multiplier_unconfirmed` (pedido, echo ausente; **no** implica `ok:0`)
   - `multiplier_mismatch` (echo numérico distinto)
 
-`applied.hour`/`applied.minute` en la respuesta MCP se reescriben al reloj normalizado cuando `minute` era int ≥60. Hour queda en 0–23: se prefiere carry de día (23:60 → 00:00 del día siguiente). Un eco 23:60 el mismo día que un pedido 00:00 también coincide (hour=0, mismo día). No se publica `hour=24`.
+`applied.hour`/`applied.minute` en la respuesta MCP se reescriben al reloj normalizado cuando `minute` era int ≥60. Hour queda en 0–23 por carry de calendario (23:60 → 00:00 del día siguiente). El pedido no se consulta al normalizar: un eco same-day `day=12 hour=23 minute=60` publica `day=13 hour=0` y, si el pedido era 00:00 del día 12, `ok:0`. No se publica `hour=24`.
 
 `ok`:
 
@@ -48,7 +48,7 @@ Campos extra (además de los actuales):
 | P1 | hour=9 minute=0, sin multiplier | 2026-09-12 9:00 | `date_applied true`, sin warnings de date | 0 |
 | P2 | hour=8 minute=60 | 9:00 | `date_applied true`; echo hour=9 minute=0 | 0 |
 | P2-midnight-prev | day=11 hour=23 minute=60 | 2026-09-12 00:00 | `date_applied true`; echo hour=0 minute=0 day=12; `ok:1`; no `hour=24` | 0 |
-| P2-midnight-same | day=12 hour=23 minute=60 | 00:00 | `date_applied true`; echo hour=0 minute=0 day=12; `ok:1`; no `hour=24` | 0 |
+| P2-midnight-same | day=12 hour=23 minute=60 | 00:00 | echo hour=0 minute=0 **day=13**; `date_applied false`, `ok:0`, `date_not_applied`; no `hour=24` | 0 |
 | N1 | hour=10 minute=0 | 9:00 | `date_applied false`, `ok:0`, warning `date_not_applied` | 0 |
 | N2 | sin `time_multiplier` en applied; pedido multiplier=1 | — | `multiplier_applied null`, warning `multiplier_unconfirmed`, no se afirma ok por el multiplier | 0 |
 | N3 | `time_multiplier: 3` vs pedido 4 | — | `multiplier_applied false`, `ok:0`, `multiplier_mismatch` | 0 |
