@@ -4,7 +4,7 @@ Ficha `fb-20260909-213002-0ab2`. Spec: **H4** (FIFO + TTL 120 s; esta ficha lo e
 
 Lane **única**: mecanismo citado a `path:line`. Grill del dueño **aceptado 2026-09-12**. Contrato **[EXACT]** abajo.
 
-**Estado:** implementado en código (`DayZ_MCP_dev` `main`). Unittest del plan exit 0. R9/H8 **no** se fingen; quedan leftover de la sesión de día.
+**Estado:** implementado en código (`DayZ_MCP_dev` `main`). Unittest del plan exit 0. **W7a R9 offline** en `tests.test_0ab2_r9` (no finge H8). H8 in-game sigue leftover (W7b).
 
 ---
 
@@ -148,7 +148,7 @@ Lifecycle `_start_run_reserved` **sigue** devolviendo `active_run_exists`. El MC
 Unittest: `tools/.venv-mcp/Scripts/python.exe`, cwd `DayZ_MCP_dev/tools`. Reloj inyectable. Los tests `:416-435` (119/120/121) siguen verdes.
 
 ```
-.\.venv-mcp\Scripts\python.exe -B -m unittest tests.test_session_coordination tests.test_0ab2_grace tests.test_session_status_blocked_on tests.test_box_occupancy.OccupancyErrorFieldsTest -v
+.\.venv-mcp\Scripts\python.exe -B -m unittest tests.test_session_coordination tests.test_0ab2_grace tests.test_session_status_blocked_on tests.test_box_occupancy.OccupancyErrorFieldsTest tests.test_0ab2_r9 -v
 ```
 
 (más el módulo de takeover en el mismo `test_0ab2_grace` o tests de occupancy/dayz_test_run tocados). Exit **0**.
@@ -201,9 +201,9 @@ H9: P2 vía `session_acquire_wait` no puede devolver `status=queued` al MCP; el 
 
 ## Sesión de día + DZ-R9 (leftover; no este turno)
 
-1. Unittest exit 0 (comando arriba) **antes** de R9.
+1. Unittest exit 0 (comando arriba) **antes** de R9. **W7a (offline):** `tests.test_0ab2_r9` cubre state-machine, race, identity y data-loss (probe antes de cleanup; gracia no en snapshot; restart invalida). No finge H8.
 2. **DZ-R9** (`rigorous-data-audit`) **antes** de release-safe. Ángulos: **state-machine**, **race**, **admin/identity**; **data-loss** (B=sí). CRITICAL con repro ejecutable, tope 2 rondas.
-3. In-game H8-shaped: dos clientes MCP; A deja tools >120 s con run vivo; B `session_acquire_wait`; A vuelve dentro de 90 s y readquiere; B sigue FIFO. C con lease no lanza encima sin `takeover=true`. H5: procesos de A vivos tras expiry.
+3. In-game H8-shaped (**W7b**, no esta PR): dos clientes MCP; A deja tools >120 s con run vivo; B `session_acquire_wait`; A vuelve dentro de 90 s y readquiere; B sigue FIFO. C con lease no lanza encima sin `takeover=true`. H5: procesos de A vivos tras expiry. Reloj de pared, caja exclusiva, de día, no under the map.
 4. Owner/integrador: HANDOFF LIVE-STATE y H4. Este worker no reescribe LIVE-STATE.
 
 Invariante que R9 cita: “el token muere a 120 s; A puede acquire/wait-claim hasta `until=TTL+90` si había RUNNING propio; nadie más 200 en esa ventana; con cola, como máximo un reacquire preferente.”
