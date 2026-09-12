@@ -90,6 +90,30 @@ def _http(
             exc.close()
 
 
+def _wait_until_lease_claimable(coordinator, *, timeout_s: float = 2.0) -> dict:
+    """Barrier after own-release: HTTP 200 can return while handoff_pending is still true.
+
+    Release only waits RELEASE_AUDIT_TIMEOUT_S (50ms) for the audit worker. Under
+    suite load that worker can still be writing when the next acquire runs, which
+    then queues (202). Wait on the coordinator condition until the lease is
+    claimable and handoff is clear; dump a snapshot if the deadline expires.
+    """
+    with coordinator._condition:
+        ready = coordinator._condition.wait_for(
+            lambda: (
+                not coordinator._handoff_pending
+                and coordinator._claimable_locked()
+            ),
+            timeout=timeout_s,
+        )
+    snapshot = coordinator.snapshot_payload()
+    if not ready:
+        raise AssertionError(
+            f"post-release lease not claimable within {timeout_s}s: {snapshot!r}"
+        )
+    return snapshot
+
+
 def _free_port() -> int:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -704,6 +728,7 @@ class DaemonEndpointTest(unittest.TestCase):
             {"identity": IDENTITY, "lease_token": token},
         )
         self.assertEqual(rel_status, 200, rel)
+        _wait_until_lease_claimable(srv.state.coordination)
         status_b, acquired_b = _http(
             srv.base,
             "POST",
