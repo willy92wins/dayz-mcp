@@ -3,11 +3,11 @@
 <!-- LIVE-STATE:START -->
 # DayZ-MCP — Estado vivo · snapshot 2026-09-12
 
-**Última verificación real:** 2026-09-12 — plan de olas W1–WF despachado. Mapa: Context `docs/mcp-end-to-end-plan.md` (no está en este repo). Esta rama cierra W1 (docs).
+**Última verificación real:** 2026-09-12 — plan de olas W1–WF despachado. Mapa: Context `docs/mcp-end-to-end-plan.md` (no está en este repo). Esta rama cierra W1 (docs), incluido W1-P1-01 (banners STALE en raíz).
 Publicado v1.2 `9f0343e`. PBO live `F82CFA8C4E557FFF…` @ `a9fe673` (PR #23), 258424 B, mtime 12-sep 01:04, Workshop + `P:\Mods\@DayZ_MCP`. Tip `main` = `edc7bb3` (0ab2) encima de `80ed00b` (a429).
 
-bugs: (no hay `bugs.md` vivo en `DayZ_MCP_dev`) · tracker = buzón `pipeline_inbox` · ~95 sin resolver (heurística 2026-09-12 sobre `feedback.jsonl`) · toque 2026-09-12
-ciclos_en_este_objetivo: 1 (W1 docs)
+bugs: (no hay `bugs.md` vivo en `DayZ_MCP_dev`) · tracker = buzón `pipeline_inbox` · **66** abiertas (W2 2026-09-12: 29 `resolves`, baseline 95→66). No recontar ni re-resolver esas 29. · toque 2026-09-12
+ciclos_en_este_objetivo: 2 (W1 docs + W1-P1-01)
 
 ## Estado actual
 
@@ -23,7 +23,7 @@ GitHub `willy92wins/dayz-mcp`: PR #26 abierta (`546d`, W1 no la edita). El track
 
 ## Próxima acción
 
-Próxima acción tras aterrizar W1 (esta rama): W2 C-resolve JSONL (otro escritor) y W3 tests; occupancy = W5 (needs grill). No in-game en W1.
+W2 C-resolve **ya está hecho** (2026-09-12, 29 ids, 95→66). **No** relanzar W2 ni re-resolver el lote C. Tras aterrizar W1: W3 tests; W4 grill + re-enrute de las 20 aún abiertas (otro escritor JSONL, no es un segundo W2). Occupancy = W5 (needs grill). No in-game en W1.
 
 ## Invariantes CERRADAS — NO retocar / NO reabrir sin ángulo nuevo
 
@@ -40,7 +40,7 @@ Próxima acción tras aterrizar W1 (esta rama): W2 C-resolve JSONL (otro escrito
 - Histórico pre-v1.2: [`HANDOFF-ARCHIVE.md`](HANDOFF-ARCHIVE.md)
 - `NEXT-SESSION-PROMPT.txt` es de **22-ago** y está **obsoleto**. No usarlo.
 
-**Gate de arranque:** `Retomo DayZ-MCP desde: plan de olas W1–WF en vuelo · próxima acción: W1 docs (esta rama) luego W2/W3`
+**Gate de arranque:** `Retomo DayZ-MCP desde: plan de olas W1–WF en vuelo · W2 C-resolve ya aplicado (95→66, no re-resolver) · próxima acción: aterrizar W1 (banners STALE raíz) luego W3/W4; occupancy=W5`
 <!-- LIVE-STATE:END -->
 
 ---
@@ -69,15 +69,16 @@ Ninguna de estas fichas está en implementación.
 | **LEAVE_UNTRACKED** | `d50e` (`fb-20260907-232253-d50e`) | Juicio Sol 12-sep. La auditoría original no se promociona. |
 | **fuera de main** | `fichas/hands-watchdog` | Local, 13 commits, no mergear por inercia. |
 
-El buzón sigue con ~95 ítems sin resolución (15 request / 52 finding / 26 bug / 2 tool_contribution, heurística `id` sin `resolves`). Eso es backlog del tracker. El plan de olas W1–WF **sí** está en vuelo (W1 = esta rama). `GATES.md` raíz del cierre integral 30-ago sigue con ROOT-* en `[ ]`: ledger no actualizado a v1.2.
+El buzón quedó en **66** abiertas tras W2 (2026-09-12). Esa cifra **no** es un encargo para re-resolver 95. Desglose de las 66: 20 re-enrute (W4, aún ABIERTAS), PARK/PARO intactos, residuales W9/W10. El plan de olas W1–WF **sí** está en vuelo (W1 = esta rama). `GATES.md` raíz del cierre integral 30-ago sigue con ROOT-* en `[ ]`: ledger no actualizado a v1.2.
 
 ## Planes
 
 **Plan MCP en vuelo: olas W1–WF despachadas.**
 
-- **W1 (esta rama):** documentación, tablas de cadencias, banners STALE y D1–D4.
-- **W2:** C-resolve JSONL (otro escritor).
+- **W1 (esta rama):** documentación, tablas de cadencias, banners STALE **en raíz** (cuatro `AUDITORIA_*.md` de agosto) y D1–D4.
+- **W2:** C-resolve JSONL **hecho** 2026-09-12 (29 ids; 95→66). No repetir.
 - **W3:** tests.
+- **W4:** grill `050e`/`0d65` + re-enrute de 20 fichas ajenas (no es W2).
 - **W5:** occupancy (needs grill).
 - Mapa general: Context `docs/mcp-end-to-end-plan.md` (no está en este repo).
 - `2026-09-10-tres-bloques-backlog.md` (v2.1): tramo jugable **cerrado**. El resto de su universo está aparcado o encauzado.
