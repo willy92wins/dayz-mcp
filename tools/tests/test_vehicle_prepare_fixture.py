@@ -166,5 +166,86 @@ class VehiclePrepareFixtureAppToolTest(unittest.IsolatedAsyncioTestCase):
         )
 
 
+NOT_READY = {
+    "ok": 0,
+    "error": "fixture_not_ready",
+    "vehicle_fixture_ready": False,
+    "telemetry": {
+        "wheel_count": 2,
+        "fuel_fraction": 1.0,
+        "attachment_count": 8,
+        "attachment_items": ["CarRadiator", "SparkPlug"],
+        "future_key": "do-not-leak",
+    },
+    "handler": "SomeHandler",
+    "user_id": 99,
+    "clicked": True,
+}
+
+
+class FixtureNotReadyDiagnosticsTest(unittest.TestCase):
+    """fb-20260911-230927-b1ff: fixture_not_ready keeps observed telemetry."""
+
+    def test_observed_scalars_ride_after_the_code(self) -> None:
+        message = str(server._bridge_error(dict(NOT_READY), "vehicle_prepare_fixture"))
+        self.assertEqual(
+            message,
+            "fixture_not_ready; wheel_count=2 fuel_fraction=1.0 "
+            "attachment_count=8 vehicle_fixture_ready=False",
+        )
+
+    def test_allowlist_drops_item_lists_and_unknown_keys(self) -> None:
+        message = str(server._bridge_error(dict(NOT_READY), "vehicle_prepare_fixture"))
+        self.assertNotIn("attachment_items", message)
+        self.assertNotIn("CarRadiator", message)
+        self.assertNotIn("future_key", message)
+        self.assertNotIn("do-not-leak", message)
+        self.assertNotIn("expected", message)
+
+    def test_other_fixture_errors_stay_bare_even_with_telemetry(self) -> None:
+        payload = {
+            **NOT_READY,
+            "error": "fixture_not_found",
+        }
+        self.assertEqual(
+            str(server._bridge_error(payload, "vehicle_prepare_fixture")),
+            "fixture_not_found",
+        )
+
+    def test_missing_telemetry_stays_bare(self) -> None:
+        self.assertEqual(
+            str(
+                server._bridge_error(
+                    {"ok": 0, "error": "fixture_not_ready"},
+                    "vehicle_prepare_fixture",
+                )
+            ),
+            "fixture_not_ready",
+        )
+
+    def test_verb_gate_does_not_leak_into_world_spawn(self) -> None:
+        self.assertEqual(
+            str(server._bridge_error(dict(NOT_READY), "world_spawn")),
+            "fixture_not_ready",
+        )
+
+
+class FixtureNotReadyWireTest(unittest.IsolatedAsyncioTestCase):
+    async def test_client_sees_wheel_count(self) -> None:
+        from tests.test_ui_error_diagnostics import _wire_error_text
+
+        text = await _wire_error_text(
+            "vehicle_prepare_fixture",
+            {"type": "Arma2Quad_Test_AWD", "pos": [13157.8, 5.7975, 6876.2134]},
+            NOT_READY,
+        )
+        self.assertEqual(
+            text,
+            "Error executing tool vehicle_prepare_fixture: fixture_not_ready; "
+            "wheel_count=2 fuel_fraction=1.0 attachment_count=8 "
+            "vehicle_fixture_ready=False",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
