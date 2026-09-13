@@ -262,6 +262,9 @@ class VehicleTraceValidationTest(unittest.TestCase):
         for field in ("engine_rpm", "rpm_idle", "engine_ready", "throttle_set"):
             self.assertIn(field, vehicle_trace.REQUIRED_SAMPLE_FIELDS)
         schema = _load_json(SCHEMA_PATH)
+        self.assertEqual(schema["$id"], "dayz-mcp-vehicle-trace-v1")
+        self.assertEqual(vehicle_trace.TRACE_SCHEMA, "dayz-mcp-vehicle-trace-v1")
+        self.assertEqual(schema["$id"], vehicle_trace.TRACE_SCHEMA)
         self.assertEqual(
             set(schema["$defs"]["sample"]["required"]),
             vehicle_trace.REQUIRED_SAMPLE_FIELDS,
@@ -272,6 +275,71 @@ class VehicleTraceValidationTest(unittest.TestCase):
         self.assertEqual(schema["$defs"]["sample"]["properties"]["rpm_idle"]["type"], "number")
         self.assertEqual(schema["$defs"]["sample"]["properties"]["engine_ready"]["type"], "boolean")
         self.assertEqual(schema["$defs"]["sample"]["properties"]["throttle_set"]["type"], "boolean")
+
+        missing = _wire_result()
+        del missing["trace"]["samples"][0]["engine_ready"]
+        with self.assertRaisesRegex(ValueError, "bad_bridge_trace_boolean"):
+            vehicle_trace.normalize_bridge_result(missing)
+
+    def test_14de_classifier_splits_skip_from_setter_lag(self) -> None:
+        skip_shaped = _positive_trace()
+        skip_shaped["samples"][5]["engine_ready"] = False
+        skip_shaped["samples"][5]["throttle_set"] = False
+        skip_shaped["samples"][5]["engine_rpm"] = 400.0
+        skip_shaped["samples"][5]["rpm_idle"] = 700.0
+        skip_shaped["samples"][5]["throttle_requested"] = 1.0
+        skip_shaped["samples"][5]["throttle_applied"] = 0.0
+
+        setter_lag = _positive_trace()
+        setter_lag["samples"][5]["engine_ready"] = True
+        setter_lag["samples"][5]["throttle_set"] = True
+        setter_lag["samples"][5]["engine_rpm"] = 800.0
+        setter_lag["samples"][5]["rpm_idle"] = 700.0
+        setter_lag["samples"][5]["throttle_requested"] = 1.0
+        setter_lag["samples"][5]["throttle_applied"] = 0.0
+
+        inconsistent = _positive_trace()
+        inconsistent["samples"][5]["engine_ready"] = False
+        inconsistent["samples"][5]["throttle_set"] = True
+        inconsistent["samples"][5]["throttle_requested"] = 0.5
+        inconsistent["samples"][5]["throttle_applied"] = 0.5
+
+        self.assertEqual(
+            vehicle_trace.classify_14de_throttle_sample(skip_shaped["samples"][5]),
+            "h4_skip",
+        )
+        self.assertEqual(
+            vehicle_trace.classify_14de_throttle_sample(setter_lag["samples"][5]),
+            "setter_lag",
+        )
+        self.assertEqual(
+            vehicle_trace.classify_14de_throttle_sample(inconsistent["samples"][5]),
+            "inconsistent",
+        )
+        self.assertNotEqual(
+            vehicle_trace.classify_14de_throttle_sample(skip_shaped["samples"][5]),
+            vehicle_trace.classify_14de_throttle_sample(setter_lag["samples"][5]),
+        )
+
+        skip_report = vehicle_trace.validate_trace(skip_shaped)
+        lag_report = vehicle_trace.validate_trace(setter_lag)
+        self.assertEqual(skip_report["status"], "STOP")
+        self.assertEqual(lag_report["status"], "STOP")
+        self.assertTrue(
+            any(item["id"] == "sample_5_throttle_readback" for item in skip_report["checks"] if item["status"] == "STOP")
+        )
+        self.assertTrue(
+            any(item["id"] == "sample_5_throttle_readback" for item in lag_report["checks"] if item["status"] == "STOP")
+        )
+
+        inconsistent_report = vehicle_trace.validate_trace(inconsistent)
+        self.assertEqual(inconsistent_report["status"], "STOP")
+        self.assertTrue(
+            any(
+                item["id"] == "sample_5_14de_throttle_set_without_ready" and item["status"] == "STOP"
+                for item in inconsistent_report["checks"]
+            )
+        )
 
     def test_named_negative_mutations_are_not_false_green(self) -> None:
         fixture = _load_json(FIXTURE_DIR / "negative_mutations.json")

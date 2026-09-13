@@ -375,6 +375,25 @@ def _final_status(checks: list[dict[str, object]]) -> str:
     return "PASS"
 
 
+def classify_14de_throttle_sample(sample: dict[str, object]) -> str:
+    """Name H4 skip vs setter-lag from 14de fields. Not a validate_trace substitute."""
+    ready = sample["engine_ready"] is True
+    throttle_set = sample["throttle_set"] is True
+    rpm = float(sample["engine_rpm"])
+    idle = float(sample["rpm_idle"])
+    requested = float(sample["throttle_requested"])
+    applied = float(sample["throttle_applied"])
+    if throttle_set and not ready:
+        return "inconsistent"
+    if (not ready) and (not throttle_set) and rpm < idle:
+        return "h4_skip"
+    if throttle_set and abs(requested - applied) > 0.001:
+        return "setter_lag"
+    if throttle_set:
+        return "applied"
+    return "other"
+
+
 def validate_trace(trace: object) -> dict[str, object]:
     checks: list[dict[str, object]] = []
     derived = _empty_derived()
@@ -623,6 +642,15 @@ def validate_trace(trace: object) -> dict[str, object]:
                         applied,
                         requested,
                     )
+
+        if sample["throttle_set"] and not sample["engine_ready"]:
+            _check(
+                checks,
+                f"sample_{index}_14de_throttle_set_without_ready",
+                "STOP",
+                [sample["engine_ready"], sample["throttle_set"]],
+                "engine_ready or !throttle_set",
+            )
 
         wheel_count = sample["wheel_count"]
         wheels_present = sample["wheels_present"]

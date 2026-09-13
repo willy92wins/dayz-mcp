@@ -571,7 +571,9 @@ class MCPVehicleTrace
 		sample.handbrake_applied = car.GetHandbrake();
 		sample.engine_rpm = car.EngineGetRPM();
 		sample.rpm_idle = car.EngineGetRPMIdle();
-		if (sample.control_active)
+		// OnInput latches are this-tick only. Stop() flushes with forced=true
+		// outside OnInput; copying them there publishes a previous tick.
+		if (sample.control_active && !forced)
 		{
 			sample.engine_ready = MCPCarDrive.s_TickEngineReady;
 			sample.throttle_set = MCPCarDrive.s_TickThrottleSet;
