@@ -14,7 +14,7 @@ import traceback
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Awaitable, Callable, Iterator, Literal
 
@@ -2095,6 +2095,76 @@ def _finite_float(value: float, error: str = "bad_args") -> float:
     if not math.isfinite(converted):
         raise ToolError(resolved_error)
     return converted
+
+
+def _is_int_clock_part(value: object) -> bool:
+    """True for int or finite integral float (60.0, 24.0). Never bool."""
+    if isinstance(value, bool):
+        return False
+    if type(value) is int:
+        return True
+    if type(value) is float:
+        return math.isfinite(value) and value == int(value)
+    return False
+
+
+def _add_applied_days(out: dict[str, Any], extra_days: int) -> None:
+    if extra_days == 0:
+        return
+    year, month, day = out.get("year"), out.get("month"), out.get("day")
+    if all(_is_int_clock_part(part) for part in (year, month, day)):
+        try:
+            shifted = datetime(int(year), int(month), int(day)) + timedelta(
+                days=extra_days
+            )
+        except ValueError:
+            if _is_int_clock_part(day):
+                out["day"] = int(day) + extra_days
+            return
+        out["year"] = shifted.year
+        out["month"] = shifted.month
+        out["day"] = shifted.day
+        return
+    # Incomplete calendar (day without year/month) must not invent a date.
+
+
+def _overflow_clock_parts(hour: int, minute: int) -> tuple[int, int, int]:
+    extra_hours, minute = divmod(minute, 60)
+    extra_days, hour = divmod(hour + extra_hours, 24)
+    return extra_days, hour, minute
+
+
+def _clock_was_normalized(raw: dict[str, Any], normalized: dict[str, Any]) -> bool:
+    return any(
+        raw.get(field) != normalized.get(field)
+        for field in ("year", "month", "day", "hour", "minute")
+    )
+
+
+def _normalize_applied_clock(applied: dict[str, Any]) -> dict[str, Any]:
+    """Carry minute>=60 into hour, then into the calendar day. Hour stays 0–23.
+
+    GetDate can echo hour=8, minute=60 for a requested 9:00, or hour=23,
+    minute=60 for midnight (fb-20260911-230929-311d). Integral floats
+    60.0 and 24.0 take the same carry path as int 60/24. Overflow always
+    carries into the next calendar day so applied.hour is never 24. The
+    request is not consulted; a same-day 23:60 echo becomes 00:00 the
+    next day even if the client asked for 00:00 on the echoed day.
+    """
+    out = dict(applied)
+    hour = out.get("hour")
+    minute = out.get("minute")
+    if not _is_int_clock_part(hour) or not _is_int_clock_part(minute):
+        return out
+    hour = int(hour)
+    minute = int(minute)
+    if minute < 60 and 0 <= hour <= 23:
+        return out
+    extra_days, hour, minute = _overflow_clock_parts(hour, minute)
+    out["hour"] = hour
+    out["minute"] = minute
+    _add_applied_days(out, extra_days)
+    return out
 
 
 def _optional_finite_float(
@@ -4920,8 +4990,18 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Requires a lease (session_acquire_wait). Set server world "
             "date/time and optionally the time multiplier. This is a server "
             "world-effect: Python confirms the applied echo "
-            "(date_applied / multiplier_applied). Visual/particle confirmation "
-            "is in_game_required, not a wire guarantee."
+            "(date_applied / multiplier_applied). Clock overflow uses divmod: "
+            "minute>=60 (60, 120, 60.0, 120.0) carries into hour, then into "
+            "the calendar day (hour stays 0–23; minute=120 is hour+2). "
+            "applied is the normalized clock; applied_echo keeps the raw "
+            "GetDate echo; clock_normalized is true when they differ. ok is 0 "
+            "when the date does not match, the echo is an incomplete calendar, "
+            "or the multiplier echo mismatches; multiplier_applied=null "
+            "means the echo had no numeric time_multiplier (World has "
+            "SetTimeMultiplier and no GetTimeMultiplier; MCPApplied does "
+            "not echo one) and warnings includes multiplier_unconfirmed — "
+            "that is not confirmation it was applied. Visual/particle "
+            "confirmation is in_game_required, not a wire guarantee."
         )
     )
     async def world_time_set(
@@ -4965,7 +5045,6 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "world_time_set", args, "server", _timeout(timeout_s)
             )
 
-        applied = result.get("applied")
         requested_date = {
             "year": year_value,
             "month": month_value,
@@ -4973,6 +5052,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "hour": hour_value,
             "minute": minute_value,
         }
+        applied = result.get("applied")
+        applied_echo = dict(applied) if isinstance(applied, dict) else None
+        if isinstance(applied, dict):
+            applied = _normalize_applied_clock(applied)
         date_applied = isinstance(applied, dict) and all(
             applied.get(field) == value for field, value in requested_date.items()
         )
@@ -4985,8 +5068,34 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 multiplier_applied = float(applied_multiplier) == multiplier
 
         response = dict(result)
+        if isinstance(applied, dict) and applied_echo is not None:
+            response["applied"] = applied
+            response["applied_echo"] = applied_echo
+            response["clock_normalized"] = _clock_was_normalized(
+                applied_echo, applied
+            )
         response["date_applied"] = date_applied
         response["multiplier_applied"] = multiplier_applied
+        warnings: list[str] = []
+        present_clock = (
+            [field for field in requested_date if field in applied]
+            if isinstance(applied, dict)
+            else []
+        )
+        incomplete_date = bool(present_clock) and len(present_clock) < len(
+            requested_date
+        )
+        comparable_date = len(present_clock) == len(requested_date)
+        if (incomplete_date or (comparable_date and not date_applied)):
+            response["ok"] = 0
+            warnings.append("date_not_applied")
+        if time_multiplier is not None and multiplier_applied is False:
+            response["ok"] = 0
+            warnings.append("multiplier_mismatch")
+        elif time_multiplier is not None and multiplier_applied is None:
+            warnings.append("multiplier_unconfirmed")
+        if warnings:
+            response["warnings"] = warnings
         return response
 
     @app.tool(

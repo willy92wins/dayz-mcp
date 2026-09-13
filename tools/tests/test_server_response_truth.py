@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import unittest
+from pathlib import Path
 from typing import Any
 
 from dayz_mcp import control_client, server
 from dayz_mcp.server import ServerConfig, build_app
+from tests._addon_paths import addon_root
 from tests.test_mcp_tools import _content_json
 
 
@@ -169,6 +172,8 @@ class WorldTimeSetResponseTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result.get("date_applied"), True)
         self.assertIs(result.get("multiplier_applied"), False)
         self.assertEqual(result["sent"], 1)
+        self.assertEqual(result.get("ok"), 0)
+        self.assertEqual(result.get("warnings"), ["multiplier_mismatch"])
         self.assertEqual(calls[0][0], "world_time_set")
 
     async def test_matching_multiplier_is_confirmed_when_readback_exists(self) -> None:
@@ -238,8 +243,293 @@ class WorldTimeSetResponseTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("multiplier_applied", requested)
         self.assertIsNone(requested.get("multiplier_applied"))
+        self.assertEqual(requested.get("ok"), 1)
+        self.assertEqual(requested.get("warnings"), ["multiplier_unconfirmed"])
         self.assertIn("multiplier_applied", unrequested)
         self.assertIsNone(unrequested.get("multiplier_applied"))
+        self.assertNotIn("warnings", unrequested)
+
+    async def test_minute_sixty_echo_matches_the_requested_hour(self) -> None:
+        result, _calls = await _call_tool_with_bridge_result(
+            "world_time_set",
+            {
+                "year": 2026,
+                "month": 9,
+                "day": 12,
+                "hour": 9,
+                "minute": 0,
+                "time_multiplier": 1.0,
+            },
+            {
+                "ok": 1,
+                "applied": {
+                    "year": 2026,
+                    "month": 9,
+                    "day": 12,
+                    "hour": 8,
+                    "minute": 60,
+                },
+            },
+        )
+
+        self.assertIs(result.get("date_applied"), True)
+        self.assertEqual(result["applied"]["hour"], 9)
+        self.assertEqual(result["applied"]["minute"], 0)
+        self.assertEqual(result.get("ok"), 1)
+        self.assertIsNone(result.get("multiplier_applied"))
+        self.assertEqual(result.get("warnings"), ["multiplier_unconfirmed"])
+        self.assertEqual(result["applied_echo"]["hour"], 8)
+        self.assertEqual(result["applied_echo"]["minute"], 60)
+        self.assertIs(result.get("clock_normalized"), True)
+
+    async def test_true_date_mismatch_clears_ok(self) -> None:
+        result, _calls = await _call_tool_with_bridge_result(
+            "world_time_set",
+            {"year": 2026, "month": 9, "day": 12, "hour": 9, "minute": 0},
+            {
+                "ok": 1,
+                "applied": {
+                    "year": 2026,
+                    "month": 9,
+                    "day": 12,
+                    "hour": 10,
+                    "minute": 0,
+                },
+            },
+        )
+
+        self.assertIs(result.get("date_applied"), False)
+        self.assertEqual(result.get("ok"), 0)
+        self.assertEqual(result.get("warnings"), ["date_not_applied"])
+
+    async def test_previous_day_minute_sixty_echo_matches_midnight_request(self) -> None:
+        result, _calls = await _call_tool_with_bridge_result(
+            "world_time_set",
+            {
+                "year": 2026,
+                "month": 9,
+                "day": 12,
+                "hour": 0,
+                "minute": 0,
+            },
+            {
+                "ok": 1,
+                "applied": {
+                    "year": 2026,
+                    "month": 9,
+                    "day": 11,
+                    "hour": 23,
+                    "minute": 60,
+                },
+            },
+        )
+
+        self.assertNotEqual(result["applied"]["hour"], 24)
+        self.assertEqual(result["applied"]["hour"], 0)
+        self.assertEqual(result["applied"]["minute"], 0)
+        self.assertEqual(result["applied"]["day"], 12)
+        self.assertEqual(result["applied"]["year"], 2026)
+        self.assertEqual(result["applied"]["month"], 9)
+        self.assertIs(result.get("date_applied"), True)
+        self.assertEqual(result.get("ok"), 1)
+        self.assertNotIn("date_not_applied", result.get("warnings", []))
+
+    async def test_same_day_minute_sixty_echo_carries_to_next_day(self) -> None:
+        result, _calls = await _call_tool_with_bridge_result(
+            "world_time_set",
+            {
+                "year": 2026,
+                "month": 9,
+                "day": 12,
+                "hour": 0,
+                "minute": 0,
+            },
+            {
+                "ok": 1,
+                "applied": {
+                    "year": 2026,
+                    "month": 9,
+                    "day": 12,
+                    "hour": 23,
+                    "minute": 60,
+                },
+            },
+        )
+
+        # Today's lie wrapped this echo to day=12 hour=0 ok=1. Honest
+        # calendar carry is 13 Sep 00:00, which does not match the request.
+        self.assertNotEqual(result["applied"]["hour"], 24)
+        self.assertEqual(result["applied"]["hour"], 0)
+        self.assertEqual(result["applied"]["minute"], 0)
+        self.assertEqual(result["applied"]["day"], 13)
+        self.assertNotEqual(result["applied"]["day"], 12)
+        self.assertIs(result.get("date_applied"), False)
+        self.assertEqual(result.get("ok"), 0)
+        self.assertEqual(result.get("warnings"), ["date_not_applied"])
+
+    async def test_same_day_float_minute_sixty_echo_carries_to_next_day(self) -> None:
+        result, _calls = await _call_tool_with_bridge_result(
+            "world_time_set",
+            {
+                "year": 2026,
+                "month": 9,
+                "day": 12,
+                "hour": 0,
+                "minute": 0,
+            },
+            {
+                "ok": 1,
+                "applied": {
+                    "year": 2026,
+                    "month": 9,
+                    "day": 12,
+                    "hour": 23.0,
+                    "minute": 60.0,
+                },
+            },
+        )
+
+        # Today's skip: _is_int_clock_part rejects 60.0, so 23.0:60.0
+        # stays uncarried (day=12). Honest path matches int 23:60.
+        self.assertNotEqual(result["applied"]["hour"], 24)
+        self.assertNotEqual(result["applied"]["hour"], 24.0)
+        self.assertNotEqual(result["applied"]["minute"], 60.0)
+        self.assertEqual(result["applied"]["hour"], 0)
+        self.assertEqual(result["applied"]["minute"], 0)
+        self.assertEqual(result["applied"]["day"], 13)
+        self.assertNotEqual(result["applied"]["day"], 12)
+        self.assertIs(result.get("date_applied"), False)
+        self.assertEqual(result.get("ok"), 0)
+        self.assertEqual(result.get("warnings"), ["date_not_applied"])
+
+    async def test_missing_applied_echo_does_not_rewrite_ok(self) -> None:
+        result, _calls = await _call_tool_with_bridge_result(
+            "world_time_set",
+            {"year": 2026, "month": 9, "day": 12, "hour": 9, "minute": 0},
+            {"ok": 1},
+        )
+        self.assertIs(result.get("date_applied"), False)
+        self.assertEqual(result.get("ok"), 1)
+        self.assertNotIn("warnings", result)
+
+    async def test_raw_eight_sixty_echo_is_recoverable_and_marked_normalized(self) -> None:
+        result, _calls = await _call_tool_with_bridge_result(
+            "world_time_set",
+            {"year": 2026, "month": 9, "day": 12, "hour": 9, "minute": 0},
+            {
+                "ok": 1,
+                "applied": {
+                    "year": 2026,
+                    "month": 9,
+                    "day": 12,
+                    "hour": 8,
+                    "minute": 60,
+                },
+            },
+        )
+
+        # Silent overwrite of applied would lose 8:60. Both the raw echo
+        # and the 9:00 interpretation have to be present.
+        self.assertEqual(result["applied_echo"]["hour"], 8)
+        self.assertEqual(result["applied_echo"]["minute"], 60)
+        self.assertEqual(result["applied"]["hour"], 9)
+        self.assertEqual(result["applied"]["minute"], 0)
+        self.assertIs(result.get("clock_normalized"), True)
+        self.assertNotEqual(result["applied_echo"], result["applied"])
+
+    async def test_partial_day_echo_does_not_publish_day_thirty_two_as_ok(self) -> None:
+        result, _calls = await _call_tool_with_bridge_result(
+            "world_time_set",
+            {
+                "year": 2026,
+                "month": 9,
+                "day": 12,
+                "hour": 0,
+                "minute": 0,
+            },
+            {
+                "ok": 1,
+                "applied": {"day": 31, "hour": 23, "minute": 60},
+            },
+        )
+
+        self.assertNotEqual(result.get("ok"), 1)
+        self.assertEqual(result.get("ok"), 0)
+        self.assertNotEqual(result["applied"].get("day"), 32)
+        self.assertEqual(result["applied"]["day"], 31)
+        self.assertEqual(result["applied"]["hour"], 0)
+        self.assertEqual(result["applied"]["minute"], 0)
+        self.assertEqual(result["applied_echo"]["hour"], 23)
+        self.assertEqual(result["applied_echo"]["minute"], 60)
+        self.assertIs(result.get("date_applied"), False)
+        self.assertEqual(result.get("warnings"), ["date_not_applied"])
+
+
+class NormalizeAppliedClockTest(unittest.TestCase):
+    def test_minute_sixty_carries_into_hour(self) -> None:
+        out = server._normalize_applied_clock({"hour": 8, "minute": 60, "year": 2026})
+        self.assertEqual(out["hour"], 9)
+        self.assertEqual(out["minute"], 0)
+        self.assertEqual(out["year"], 2026)
+
+    def test_minute_overflow_carries_into_the_next_day(self) -> None:
+        out = server._normalize_applied_clock(
+            {"year": 2026, "month": 9, "day": 12, "hour": 23, "minute": 60}
+        )
+        self.assertNotEqual(out["hour"], 24)
+        self.assertEqual(out["hour"], 0)
+        self.assertEqual(out["minute"], 0)
+        self.assertEqual(out["day"], 13)
+        self.assertEqual(out["month"], 9)
+        self.assertEqual(out["year"], 2026)
+        self.assertGreaterEqual(out["hour"], 0)
+        self.assertLess(out["hour"], 24)
+
+    def test_float_sixty_and_twenty_four_carry_like_ints(self) -> None:
+        # Pin: fails while _is_int_clock_part is type-is-int only, because
+        # 60.0/24.0 never enter _overflow_clock_parts.
+        minute_out = server._normalize_applied_clock(
+            {"hour": 8, "minute": 60.0, "year": 2026}
+        )
+        self.assertEqual(minute_out["hour"], 9)
+        self.assertEqual(minute_out["minute"], 0)
+        self.assertNotEqual(minute_out["minute"], 60.0)
+
+        hour_out = server._normalize_applied_clock(
+            {"year": 2026, "month": 9, "day": 12, "hour": 24.0, "minute": 0}
+        )
+        self.assertNotEqual(hour_out["hour"], 24.0)
+        self.assertEqual(hour_out["hour"], 0)
+        self.assertEqual(hour_out["minute"], 0)
+        self.assertEqual(hour_out["day"], 13)
+
+        midnight = server._normalize_applied_clock(
+            {"year": 2026, "month": 9, "day": 12, "hour": 23.0, "minute": 60.0}
+        )
+        self.assertEqual(midnight["hour"], 0)
+        self.assertEqual(midnight["minute"], 0)
+        self.assertEqual(midnight["day"], 13)
+
+    def test_minute_one_twenty_carries_two_hours(self) -> None:
+        out = server._normalize_applied_clock({"hour": 8, "minute": 120})
+        self.assertEqual(out["hour"], 10)
+        self.assertEqual(out["minute"], 0)
+        float_out = server._normalize_applied_clock({"hour": 8, "minute": 120.0})
+        self.assertEqual(float_out["hour"], 10)
+        self.assertEqual(float_out["minute"], 0)
+
+    def test_partial_calendar_does_not_invent_a_day(self) -> None:
+        out = server._normalize_applied_clock(
+            {"day": 31, "hour": 23, "minute": 60}
+        )
+        self.assertEqual(out["hour"], 0)
+        self.assertEqual(out["minute"], 0)
+        self.assertEqual(out["day"], 31)
+        self.assertNotEqual(out["day"], 32)
+
+    def test_leaves_in_range_clocks_alone(self) -> None:
+        src = {"hour": 9, "minute": 0}
+        self.assertEqual(server._normalize_applied_clock(src), src)
 
 
 class ToolDescriptionTruthTest(unittest.IsolatedAsyncioTestCase):
@@ -297,6 +587,51 @@ class ToolDescriptionTruthTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("does not place the player in the server crew", description)
         self.assertIn("ActionSwitchLights", description)
         self.assertIn("until vehicle_enter", description)
+
+    async def test_world_time_set_description_matches_divmod_overflow(self) -> None:
+        description = self.tools["world_time_set"].description or ""
+        self.assertNotIn(
+            "An applied minute of 60 is normalized to hour+1", description
+        )
+        self.assertIn("divmod", description)
+        self.assertIn("120", description)
+        self.assertIn("applied_echo", description)
+        self.assertIn("clock_normalized", description)
+
+
+class TimeMultiplierProducerContractTest(unittest.TestCase):
+    def test_mcp_applied_does_not_echo_time_multiplier(self) -> None:
+        messages = (
+            addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
+        ).read_text(encoding="utf-8")
+        match = re.search(r"class MCPApplied\s*\{(.*?)\n\};", messages, re.S)
+        self.assertIsNotNone(match)
+        self.assertNotRegex(match.group(1), r"\btime_multiplier\b")
+
+        bridge = (
+            addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
+        ).read_text(encoding="utf-8")
+        start = bridge.index("protected bool DispatchWorldTimeSet")
+        brace = bridge.index("{", start)
+        depth = 0
+        body = ""
+        for index in range(brace, len(bridge)):
+            if bridge[index] == "{":
+                depth += 1
+            elif bridge[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    body = bridge[brace + 1 : index]
+                    break
+        self.assertIn("SetTimeMultiplier", body)
+        self.assertNotIn("GetTimeMultiplier", body)
+
+        world = Path(r"P:\scripts\3_Game\global\world.c")
+        if not world.is_file():
+            self.skipTest("vanilla World.c not mounted")
+        world_src = world.read_text(encoding="utf-8")
+        self.assertIn("proto native void SetTimeMultiplier", world_src)
+        self.assertNotIn("GetTimeMultiplier", world_src)
 
 
 if __name__ == "__main__":
