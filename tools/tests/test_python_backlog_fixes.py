@@ -81,6 +81,50 @@ def _unreachable_client_runtime(clock: _FakeClock) -> server.ClientRuntime:
     return runtime
 
 
+def _pre_request_zero_bytes() -> AccreditedTransportError:
+    return AccreditedTransportError(
+        "daemon_transport_failure",
+        request_stage="pre_request",
+        http_bytes_sent=0,
+    )
+
+
+def _connection_aborted() -> ConnectionAbortedError:
+    return ConnectionAbortedError(
+        10053, "An established connection was aborted"
+    )
+
+
+def _scripted_await_runtime(
+    clock: _FakeClock,
+    await_errors: list[BaseException],
+    *,
+    ensure_daemon: bool | None = None,
+) -> server.ClientRuntime:
+    runtime = _unreachable_client_runtime(clock)
+    pending = list(await_errors)
+
+    def request_once(
+        method: str,
+        path: str,
+        payload: object = None,
+        query: object = None,
+        timeout: float = 5.0,
+    ) -> tuple[int, dict[str, object]]:
+        if path == "/enqueue":
+            return 200, {"id": 7}
+        if path == "/await":
+            if not pending:
+                raise AssertionError("unexpected extra /await hop")
+            raise pending.pop(0)
+        return 200, {}
+
+    runtime._request_once = request_once
+    if ensure_daemon is not None:
+        runtime._ensure_daemon = lambda *_args, **_kwargs: ensure_daemon
+    return runtime
+
+
 class PythonBacklogFixesTest(unittest.IsolatedAsyncioTestCase):
     async def test_bug037_tool_timeout_caps_daemon_startup_poll(self) -> None:
         for tool_timeout in (0.4, 2.0):
@@ -102,6 +146,146 @@ class PythonBacklogFixesTest(unittest.IsolatedAsyncioTestCase):
                     tool_timeout + 1e-9,
                     "the daemon startup poll consumed time beyond the tool deadline",
                 )
+
+    async def test_inflight_await_connection_abort_is_timeout_not_daemon_unavailable(
+        self,
+    ) -> None:
+        # Names _CallBudgetExpired: an /await hop that starts with remaining>0
+        # and dies in-flight (ConnectionAbortedError) must not become
+        # daemon_unavailable. The sentinel is what _await_result turns into
+        # "timeout waiting for".
+        self.assertEqual(server._CallBudgetExpired.__name__, "_CallBudgetExpired")
+        clock = _FakeClock()
+        runtime = _unreachable_client_runtime(clock)
+
+        def request_once(
+            method: str,
+            path: str,
+            payload: object = None,
+            query: object = None,
+            timeout: float = 5.0,
+        ) -> tuple[int, dict[str, object]]:
+            if path == "/enqueue":
+                return 200, {"id": 7}
+            if path == "/await":
+                raise ConnectionAbortedError(
+                    10053, "An established connection was aborted"
+                )
+            return 200, {}
+
+        runtime._request_once = request_once
+
+        with self.assertRaises(server._CallBudgetExpired):
+            runtime._call(
+                "GET",
+                "/await",
+                None,
+                {"id": "7", "remove": "1"},
+                0.4,
+                clock.now() + 0.4,
+            )
+
+        with self.assertRaises(ToolError) as err:
+            await runtime.call_bridge(
+                "query_player_state",
+                {},
+                "server",
+                0.4,
+            )
+        message = str(err.exception)
+        self.assertIn("timeout waiting for", message)
+        self.assertNotIn("daemon_unavailable", message)
+
+    async def test_inflight_await_ensure_daemon_false_is_timeout_not_daemon_unavailable(
+        self,
+    ) -> None:
+        # First /await is retryable AccreditedTransportError; _ensure_daemon
+        # False must raise _CallBudgetExpired (:1762-1763), not daemon_unavailable.
+        clock = _FakeClock()
+        runtime = _scripted_await_runtime(
+            clock, [_pre_request_zero_bytes()], ensure_daemon=False
+        )
+        with self.assertRaises(server._CallBudgetExpired):
+            runtime._call(
+                "GET",
+                "/await",
+                None,
+                {"id": "7", "remove": "1"},
+                0.4,
+                clock.now() + 0.4,
+            )
+        runtime = _scripted_await_runtime(
+            _FakeClock(), [_pre_request_zero_bytes()], ensure_daemon=False
+        )
+        with self.assertRaises(ToolError) as err:
+            await runtime.call_bridge("query_player_state", {}, "server", 0.4)
+        message = str(err.exception)
+        self.assertIn("timeout waiting for", message)
+        self.assertNotIn("daemon_unavailable", message)
+
+    async def test_inflight_await_retry_safe_is_timeout_not_daemon_unavailable(
+        self,
+    ) -> None:
+        # Retryable miss, spawn succeeds, second hop is again retryable
+        # pre_request/0 bytes. retry_safe /await must raise _CallBudgetExpired
+        # (:1780-1781), not daemon_unavailable.
+        clock = _FakeClock()
+        runtime = _scripted_await_runtime(
+            clock,
+            [_pre_request_zero_bytes(), _pre_request_zero_bytes()],
+            ensure_daemon=True,
+        )
+        with self.assertRaises(server._CallBudgetExpired):
+            runtime._call(
+                "GET",
+                "/await",
+                None,
+                {"id": "7", "remove": "1"},
+                0.4,
+                clock.now() + 0.4,
+            )
+        runtime = _scripted_await_runtime(
+            _FakeClock(),
+            [_pre_request_zero_bytes(), _pre_request_zero_bytes()],
+            ensure_daemon=True,
+        )
+        with self.assertRaises(ToolError) as err:
+            await runtime.call_bridge("query_player_state", {}, "server", 0.4)
+        message = str(err.exception)
+        self.assertIn("timeout waiting for", message)
+        self.assertNotIn("daemon_unavailable", message)
+
+    async def test_inflight_await_inner_oserror_is_timeout_not_daemon_unavailable(
+        self,
+    ) -> None:
+        # Retryable miss, spawn succeeds, second hop ConnectionAbortedError.
+        # Inner except (ConnectionError, OSError) /await must raise
+        # _CallBudgetExpired (:1784-1785). A first-hop abort only hits outer.
+        clock = _FakeClock()
+        runtime = _scripted_await_runtime(
+            clock,
+            [_pre_request_zero_bytes(), _connection_aborted()],
+            ensure_daemon=True,
+        )
+        with self.assertRaises(server._CallBudgetExpired):
+            runtime._call(
+                "GET",
+                "/await",
+                None,
+                {"id": "7", "remove": "1"},
+                0.4,
+                clock.now() + 0.4,
+            )
+        runtime = _scripted_await_runtime(
+            _FakeClock(),
+            [_pre_request_zero_bytes(), _connection_aborted()],
+            ensure_daemon=True,
+        )
+        with self.assertRaises(ToolError) as err:
+            await runtime.call_bridge("query_player_state", {}, "server", 0.4)
+        message = str(err.exception)
+        self.assertIn("timeout waiting for", message)
+        self.assertNotIn("daemon_unavailable", message)
 
     async def test_bug024_timeout_reaps_state_and_never_delivers_zombie(self) -> None:
         state = loopback.ServerState("fixture-key")

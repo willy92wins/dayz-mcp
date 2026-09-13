@@ -1219,6 +1219,10 @@ class Runtime:
         return core.load_exec_allowlist(path)
 
 
+class _CallBudgetExpired(Exception):
+    """``ClientRuntime._call`` had no time left to start this HTTP hop."""
+
+
 class ClientRuntime:
     """Client-mode runtime: proxies bridge calls over HTTP to the broker daemon.
 
@@ -1234,6 +1238,10 @@ class ClientRuntime:
     """
 
     _time_fn = staticmethod(time.monotonic)
+    # Declared on the class, not only in __init__: a bare instance built with
+    # object.__new__ (BUG-037 timeout cap, H14 stale-policy) still has to
+    # answer for the closed default.
+    _allow_stale_policy: bool = False
 
     def __init__(
         self,
@@ -1728,6 +1736,10 @@ class ClientRuntime:
         def remaining_timeout() -> float:
             remaining = call_deadline - self._time_fn()
             if remaining <= 0.0:
+                # /await is waiting on an already-enqueued command: the
+                # caller-imposed deadline is a timeout, not a missing daemon.
+                if path == "/await":
+                    raise _CallBudgetExpired()
                 raise ToolError("daemon_unavailable")
             return remaining
 
@@ -1747,6 +1759,8 @@ class ClientRuntime:
             if not retryable:
                 raise ToolError("daemon_response_ambiguous") from None
             if not self._ensure_daemon(call_deadline):
+                if path == "/await":
+                    raise _CallBudgetExpired() from None
                 raise ToolError(self._daemon_missing_error()) from None
             try:
                 return self._request_once(
@@ -1761,14 +1775,18 @@ class ClientRuntime:
                     retry_error.request_stage == "pre_request"
                     and retry_error.http_bytes_sent == 0
                 )
-                raise ToolError(
-                    "daemon_unavailable"
-                    if retry_safe
-                    else "daemon_response_ambiguous"
-                ) from None
+                if not retry_safe:
+                    raise ToolError("daemon_response_ambiguous") from None
+                if path == "/await":
+                    raise _CallBudgetExpired() from None
+                raise ToolError("daemon_unavailable") from None
             except (ConnectionError, OSError):
+                if path == "/await":
+                    raise _CallBudgetExpired() from None
                 raise ToolError("daemon_unavailable") from None
         except (ConnectionError, OSError):
+            if path == "/await":
+                raise _CallBudgetExpired() from None
             raise ToolError("daemon_unavailable") from None
 
     async def call_bridge(self, cmd: str, args: dict[str, Any], peer: str, timeout_s: float) -> dict[str, Any]:
@@ -1840,15 +1858,18 @@ class ClientRuntime:
             remaining = deadline - self._time_fn()
             if remaining <= 0.0:
                 break
-            status, payload = await asyncio.to_thread(
-                self._call,
-                "GET",
-                "/await",
-                None,
-                {"id": str(command_id), "remove": "1"},
-                remaining,
-                deadline,
-            )
+            try:
+                status, payload = await asyncio.to_thread(
+                    self._call,
+                    "GET",
+                    "/await",
+                    None,
+                    {"id": str(command_id), "remove": "1"},
+                    remaining,
+                    deadline,
+                )
+            except _CallBudgetExpired:
+                break
             if status == 200 and payload.get("status") == "done":
                 result = payload.get("result") or {}
                 # Bridge serializes ok as int 0/1; treat any falsy ok as an error.
@@ -1916,15 +1937,21 @@ class ClientRuntime:
         self, cmd: str, command_id: int, peer: str
     ) -> dict[str, Any] | None:
         deadline = self._time_fn() + DEFAULT_TOOL_TIMEOUT_S
-        status, payload = await asyncio.to_thread(
-            self._call,
-            "GET",
-            "/await",
-            None,
-            {"id": str(command_id), "remove": "1"},
-            DEFAULT_TOOL_TIMEOUT_S,
-            deadline,
-        )
+        try:
+            status, payload = await asyncio.to_thread(
+                self._call,
+                "GET",
+                "/await",
+                None,
+                {"id": str(command_id), "remove": "1"},
+                DEFAULT_TOOL_TIMEOUT_S,
+                deadline,
+            )
+        except _CallBudgetExpired:
+            raise ToolError(
+                f"timeout waiting for {cmd} id={command_id}; "
+                f"{await self._liveness_message(peer)}"
+            ) from None
         if status != 200:
             raise ToolError(str(payload.get("error") or payload))
         if payload.get("status") == "done":

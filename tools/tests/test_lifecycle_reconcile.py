@@ -33,6 +33,7 @@ from dayz_mcp.process_lifecycle import (
 from dayz_mcp.runtime_state import JsonlAuditWriter
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import SessionCoordinator
+from tests._bundle_paths import requires_closure_manifest
 from tests.test_dayz_test_tool import (
     RUN_ID as TOOL_RUN_ID,
     _Bundle,
@@ -1219,6 +1220,7 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.assertIn("audit_row_dropped", payload.get("warnings", []))
         self.assertGreaterEqual(payload.get("audit_rows_dropped", 0), 1)
 
+    @requires_closure_manifest
     def test_the_witness_hint_names_the_bundle_and_daemon_versions(self) -> None:
         result = self._replacement(replace_if_not_polling_since=None)
         self._assert_nothing_was_touched(result, "replace_witness_missing")
@@ -1288,6 +1290,7 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.assertIn(str(root), hint)
         self.assertIn("approved", hint.casefold())
 
+    @requires_closure_manifest
     def test_both_request_parser_hashes_are_printed_in_the_same_case(self) -> None:
         result = self._replacement(replace_if_not_polling_since=None)
         hint = str(result.get("hint"))

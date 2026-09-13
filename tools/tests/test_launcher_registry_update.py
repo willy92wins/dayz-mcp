@@ -14,6 +14,7 @@ from unittest.mock import patch
 import build_native_launcher
 from dayz_mcp import launcher_registry
 from dayz_mcp import launcher_registry_update as updater
+from tests._bundle_paths import requires_built_bundle
 
 
 BASELINE = b'{\n  "format_version": 1,\n  "launchers": []\n}\n'
@@ -954,6 +955,7 @@ class AbortedPreparedRecoveryTest(unittest.TestCase):
                     registry_path=registry, lock_path=lock, receipts_path=receipts
                 )
 
+    @requires_built_bundle
     def test_checker_accepts_recoverable_stalled_residue(self) -> None:
         # Structured split: leftover aborted prepared after a successful retry
         # is stalled/recoverable. The checker must not treat that as the lost
