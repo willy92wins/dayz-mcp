@@ -1,15 +1,34 @@
 from __future__ import annotations
 
-import unittest
+import re
 import threading
+import unittest
 from pathlib import Path
 
-from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
-from tests.test_session_coordination import AuditSink, FakeClock, SequentialIds, _identity
+from dayz_mcp import session_coordination as session_coordination_mod
+from dayz_mcp.session_coordination import (
+    ClientIdentity,
+    LEASE_GRACE_S,
+    SESSION_TTL_S,
+    SessionCoordinator,
+)
+from tests.test_session_coordination import (
+    AuditSink,
+    CleanupSink,
+    FakeClock,
+    SequentialIds,
+    _identity,
+)
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PRODUCT_SPEC = _REPO_ROOT / "product-spec.md"
+_H4_HEADING = "### H — Coordinación segura de sesiones de agentes"
+# Literals from product-spec H4 ("gracia post-TTL de 90 s", "inválido a 120 s").
+# Do not alias LEASE_GRACE_S / SESSION_TTL_S here: a memory mutation of those
+# names must still turn the runtime pins red (W3-P2-01).
+_H4_SPEC_GRACE_S = 90.0
+_H4_SPEC_TTL_S = 120.0
 
 
 def parse_dpf_table(markdown: str, heading: str) -> dict[str, dict[str, str]]:
@@ -74,13 +93,13 @@ efectiva mixta 2 Claude + 2 Codex de H1 sigue sin verificación in-game."""
 class Bug046DpfContractTests(unittest.TestCase):
     def test_h4_h9_contract_and_h8_history_are_structurally_preserved(self) -> None:
         markdown = _PRODUCT_SPEC.read_text(encoding="utf-8")
-        rows = parse_dpf_table(markdown, "### H — Coordinación segura de sesiones de agentes")
+        rows = parse_dpf_table(markdown, _H4_HEADING)
 
         self.assertEqual(
             rows["H4"],
             {
-                "criterion": "Cola FIFO estricta, `acquire` idempotente, TTL exacto 120 s y promoción sólo con `session_wait` vivo",
-                "verification": "A→B→C, ticket duplicado no duplica posición, reloj inyectable 119/120/121 s; release/expiry sin `session_wait` vivo no conceden leases",
+                "criterion": "Cola FIFO estricta salvo ventana de gracia post-TTL de 90 s en la que solo la identidad titular a t=TTL puede acquire/wait-claim si a t=TTL tenía un RUNNING propio (snapshot antes de release_owner); el token sigue inválido a 120 s; extraños solo promocionan con session_wait vivo después de la gracia; como máximo 1 reacquire preferente consecutivo cuando la cola no está vacía; `acquire` idempotente",
+                "verification": "A→B→C, ticket duplicado no duplica posición, reloj inyectable 119/120/121 s; release/expiry sin `session_wait` vivo no conceden leases; gracia 90 s con probe de RUNNING; B no 200 durante la ventana",
                 "state": "✓ offline",
             },
         )
@@ -121,6 +140,77 @@ class Bug046DpfContractTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(AssertionError, "^duplicate DPF criterion: H4$"):
             parse_dpf_table(duplicate_table, "### Test")
+
+    def test_h4_spec_grace_and_ttl_bind_runtime_constants(self) -> None:
+        """Prose equality on rows['H4'] is not the runtime gate (W3-P2-01)."""
+
+        markdown = _PRODUCT_SPEC.read_text(encoding="utf-8")
+        rows = parse_dpf_table(markdown, _H4_HEADING)
+        criterion = rows["H4"]["criterion"]
+        verification = rows["H4"]["verification"]
+        grace_match = re.search(r"gracia post-TTL de (\d+) s", criterion)
+        ttl_match = re.search(r"inválido a (\d+) s", criterion)
+        self.assertIsNotNone(grace_match)
+        self.assertIsNotNone(ttl_match)
+        spec_grace = float(grace_match.group(1))
+        spec_ttl = float(ttl_match.group(1))
+        self.assertEqual(spec_grace, _H4_SPEC_GRACE_S)
+        self.assertEqual(spec_ttl, _H4_SPEC_TTL_S)
+        self.assertEqual(LEASE_GRACE_S, spec_grace)
+        self.assertEqual(SESSION_TTL_S, spec_ttl)
+        self.assertIn("90 s", verification)
+        self.assertEqual(session_coordination_mod.LEASE_GRACE_S, _H4_SPEC_GRACE_S)
+        self.assertEqual(session_coordination_mod.SESSION_TTL_S, _H4_SPEC_TTL_S)
+
+
+def _h4_grace_coordinator(clock: FakeClock) -> SessionCoordinator:
+    return SessionCoordinator(
+        time_fn=clock,
+        token_fn=SequentialIds("token"),
+        id_fn=SequentialIds("id"),
+        audit=AuditSink(),
+        cleanup=CleanupSink(),
+        attached_run_probe=lambda _session, _lease: True,
+    )
+
+
+class Bug046H4GraceRuntimeTests(unittest.TestCase):
+    """Coordinator window follows LEASE_GRACE_S, not the H4 markdown pin."""
+
+    def test_stranger_stays_queued_inside_spec_grace_window(self) -> None:
+        clock = FakeClock()
+        coordinator = _h4_grace_coordinator(clock)
+        holder, stranger = _identity("a"), _identity("b")
+        coordinator.acquire(holder, "drive")
+        clock.advance(_H4_SPEC_TTL_S + _H4_SPEC_GRACE_S - 0.001)
+        status, payload = coordinator.acquire(stranger, "drive")
+        self.assertEqual(status, 202)
+        self.assertEqual(payload["status"], "queued")
+
+    def test_stranger_grants_after_spec_grace_window(self) -> None:
+        clock = FakeClock()
+        coordinator = _h4_grace_coordinator(clock)
+        holder, stranger = _identity("a"), _identity("b")
+        coordinator.acquire(holder, "drive")
+        clock.advance(_H4_SPEC_TTL_S + _H4_SPEC_GRACE_S + 0.001)
+        status, payload = coordinator.acquire(stranger, "drive")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "active")
+
+    def test_mutating_lease_grace_s_keeps_stranger_queued_at_spec_90(self) -> None:
+        original = session_coordination_mod.LEASE_GRACE_S
+        clock = FakeClock()
+        holder, stranger = _identity("a"), _identity("b")
+        try:
+            session_coordination_mod.LEASE_GRACE_S = original + 1.0
+            coordinator = _h4_grace_coordinator(clock)
+            coordinator.acquire(holder, "drive")
+            clock.advance(_H4_SPEC_TTL_S + _H4_SPEC_GRACE_S + 0.001)
+            status, payload = coordinator.acquire(stranger, "drive")
+            self.assertEqual(status, 202)
+            self.assertEqual(payload["status"], "queued")
+        finally:
+            session_coordination_mod.LEASE_GRACE_S = original
 
 
 class Bug046QueueLivenessRedTests(unittest.TestCase):

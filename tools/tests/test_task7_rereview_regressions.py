@@ -844,6 +844,8 @@ class LifecycleRecoveryAndOutcomeTest(unittest.TestCase):
                     "run_id": "existing",
                     "state": "EXITED",
                     "terminated": 0,
+                    "stop_method": "no_live_owned",
+                    "exit_metrics_valid": False,
                 },
             )
             self.assertEqual(fixture.guard.terminate_calls, [])

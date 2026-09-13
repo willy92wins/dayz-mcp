@@ -1,4 +1,4 @@
-﻿"""Numeric ingress regression matrix. All probes enter through FastMCP.call_tool.
+"""Numeric ingress regression matrix. All probes enter through FastMCP.call_tool.
 
 Only the final registered function is replaced, never validation or metadata.
 This keeps all probes offline and proves invalid input cannot reach a handler.
