@@ -5719,19 +5719,28 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "tool, args, error, repro. For contributions, reference "
             "artifacts at DURABLE paths (never session scratchpads). "
             "Enforced limits, in characters: title 1..120, body 1..8000, "
-            "project 0..64; an over-length value is rejected naming its real "
-            "count (title 125 > 120 chars), so trim without guessing. "
+            "project 0..64. An over-length value is rejected by the published "
+            "inputSchema (Pydantic type=string_too_long) before inbox; trim "
+            "to those caps without guessing. Published minLength counts raw "
+            "characters, spaces included; inbox strips title, so a "
+            "whitespace-only title is schema-legal then bad_args: title empty. "
             "Appends to a local shared inbox; ids cannot collide. Works "
             "even when the game and daemon are down."
         )
     )
     async def pipeline_feedback(
         kind: Literal["bug", "request", "finding", "tool_contribution"],
-        title: str,
-        body: str,
-        project: str = "",
+        title: Annotated[
+            str,
+            Field(min_length=inbox.TITLE_MIN_CHARS, max_length=inbox.TITLE_MAX_CHARS),
+        ],
+        body: Annotated[
+            str,
+            Field(min_length=inbox.BODY_MIN_CHARS, max_length=inbox.BODY_MAX_CHARS),
+        ],
+        project: Annotated[str, Field(max_length=inbox.PROJECT_MAX_CHARS)] = "",
     ) -> dict[str, Any]:
-        """File pipeline feedback from any agent session: a bug you hit, a request for a missing capability, a finding worth recording, or a tool/playbook you built (kind=tool_contribution). For contributions, reference artifacts at DURABLE paths (never session scratchpads). Enforced limits, in characters: title 1..120, body 1..8000, project 0..64; an over-length value is rejected naming its real count (title 125 > 120 chars). Appends to a local shared inbox; ids cannot collide. Works even when the game and daemon are down."""
+        """File pipeline feedback from any agent session: a bug you hit, a request for a missing capability, a finding worth recording, or a tool/playbook you built (kind=tool_contribution). For contributions, reference artifacts at DURABLE paths (never session scratchpads). Enforced limits, in characters: title 1..120, body 1..8000, project 0..64. An over-length value is rejected by the published inputSchema (Pydantic type=string_too_long) before inbox; trim to those caps without guessing. Published minLength counts raw characters, spaces included; inbox strips title, so a whitespace-only title is schema-legal then bad_args: title empty. Appends to a local shared inbox; ids cannot collide. Works even when the game and daemon are down."""
         # The lock here only preserves the one-tool-at-a-time client invariant;
         # these tools do not call the bridge.
         async with runtime.tool_lock:
@@ -5782,17 +5791,19 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "reviews | gates | reports | research, ASCII, segments of "
             "[A-Za-z0-9._-]. No repo prefix (not DayZ_MCP_dev/reviews/...), and "
             "nothing appended to it: a note, parentheses, a commit id or a #anchor "
-            "make it an invalid path segment. An over-length value is rejected "
-            "naming its real count (resolution 2087 > 2000 chars), so trim "
-            "without guessing."
+            "make it an invalid path segment. An over-length resolution is "
+            "rejected by the published inputSchema (Pydantic "
+            "type=string_too_long) before inbox; trim to 2000 without guessing."
         )
     )
     async def pipeline_resolve(
         feedback_id: str,
-        resolution: str,
-        evidence_ref: Annotated[str | None, Field(max_length=240)] = None,
+        resolution: Annotated[str, Field(max_length=inbox.RESOLUTION_MAX_CHARS)],
+        evidence_ref: Annotated[
+            str | None, Field(max_length=inbox.EVIDENCE_REF_MAX_CHARS)
+        ] = None,
     ) -> dict[str, Any]:
-        """Triage a feedback item by appending a resolution; deletes nothing, history is append-only. Enforced limits, in characters: resolution 1..2000, evidence_ref 1..240. evidence_ref is a path only -- relative to DayZ_MCP_dev, starting at reviews | gates | reports | research, ASCII, segments of [A-Za-z0-9._-], no repo prefix and nothing appended (note, parentheses, commit id, #anchor). An over-length value is rejected naming its real count (resolution 2087 > 2000 chars)."""
+        """Triage a feedback item by appending a resolution; deletes nothing, history is append-only. Enforced limits, in characters: resolution 1..2000, evidence_ref 1..240. evidence_ref is a path only -- relative to DayZ_MCP_dev, starting at reviews | gates | reports | research, ASCII, segments of [A-Za-z0-9._-], no repo prefix and nothing appended (note, parentheses, commit id, #anchor). An over-length resolution is rejected by the published inputSchema (Pydantic type=string_too_long) before inbox; trim to 2000 without guessing."""
         # The lock here only preserves the one-tool-at-a-time client invariant;
         # these tools do not call the bridge.
         async with runtime.tool_lock:
