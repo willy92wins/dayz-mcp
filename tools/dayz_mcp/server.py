@@ -778,6 +778,62 @@ def _target_peer_down(
 _UI_ECHO_VERBS = frozenset({"ui_click", "ui_focus", "ui_set_text", "ui_tree"})
 _UI_CLICK_DIAGNOSTIC_KEYS = ("handler", "user_id", "clicked")
 _UI_ECHO_KEYS = ("requested_path", "requested_root", "matched_path")
+# vehicle_prepare_fixture fills these before fixture_not_ready
+# (MCPBridge.c PopulateTelemetryObject + vehicle_fixture_ready). The
+# expected WheelCount() is not on the wire; do not invent it (fb-b1ff).
+_FIXTURE_NOT_READY_TELEMETRY_KEYS = ("wheel_count", "fuel_fraction", "attachment_count")
+_FIXTURE_SCALAR_STR_MAX = 32
+
+
+def _format_fixture_scalar(value: object) -> str | None:
+    """Unquoted [EXACT] form for allowlisted fixture scalars.
+
+    int/float/bool match the published message (``wheel_count=2``). A JSON
+    string ``'2'`` must not become Python ``!r`` quotes (``wheel_count='2'``).
+    Non-numeric strings are omitted, not leaked.
+    """
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        return repr(value)
+    if isinstance(value, str) and 0 < len(value) <= _FIXTURE_SCALAR_STR_MAX:
+        negative = value.startswith("-") and len(value) > 1
+        text = value[1:] if negative else value
+        if text.isdigit():
+            parsed_int = int(text, 10)
+            return str(-parsed_int if negative else parsed_int)
+        left, sep, right = text.partition(".")
+        if sep and left.isdigit() and right.isdigit():
+            parsed = float(f"{'-' if negative else ''}{left}.{right}")
+            if math.isfinite(parsed):
+                return repr(parsed)
+    return None
+
+
+def _fixture_not_ready_detail(result: dict[str, Any]) -> str:
+    pairs: list[str] = []
+    telemetry = result.get("telemetry")
+    if isinstance(telemetry, dict):
+        for key in _FIXTURE_NOT_READY_TELEMETRY_KEYS:
+            if key not in telemetry:
+                continue
+            rendered = _format_fixture_scalar(telemetry[key])
+            if rendered is None:
+                continue
+            pairs.append(f"{key}={rendered}")
+    if "vehicle_fixture_ready" in result:
+        rendered = _format_fixture_scalar(result["vehicle_fixture_ready"])
+        if rendered is not None:
+            pairs.append(f"vehicle_fixture_ready={rendered}")
+    if not pairs:
+        return ""
+    # P34-P2-1: label the blob so a client does not read wheel_count= as the
+    # cause. expected (WheelCount()) is not on the wire; do not invent it.
+    return "observed=" + " ".join(pairs)
 
 
 def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
@@ -788,6 +844,12 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     (ui_request, MCPClientBridge.c:2199-2218). Only the message of a ToolError
     crosses the MCP wire, so a bare code threw away the two fields that
     discriminate the cause (fb-20260829-221423-b2c4).
+
+    vehicle_prepare_fixture is the same shape for fixture_not_ready
+    (fb-20260911-230927-b1ff): telemetry.wheel_count was already on the
+    result and the Python layer raised the bare code. Expected axle count
+    is not in the echo, so the allowlist is observed scalars only, published
+    under an ``observed=`` label (P34-P2-1). Do not invent ``expected``.
 
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
@@ -801,6 +863,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     it would replay caller input (possibly sensitive, unbounded) into an
     error message.
     """
+    if cmd == "vehicle_prepare_fixture" and str(result.get("error") or "") == "fixture_not_ready":
+        return _fixture_not_ready_detail(result)
     if cmd not in _UI_ECHO_VERBS:
         return ""
     parts: list[str] = []
@@ -834,7 +898,9 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # caller can clean up instead of duplicating, without the message carrying
     # host content across the MCP wire. For the core UI verbs the diagnostics
     # the bridge filled before the error follow the code after "; " -- see
-    # _bridge_error_detail; every other verb keeps the bare code.
+    # _bridge_error_detail; other verbs keep the bare code except
+    # vehicle_prepare_fixture/fixture_not_ready, which carries the
+    # observed= telemetry allowlist the bridge already filled.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
     if code == "binding_retired":
