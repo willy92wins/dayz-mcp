@@ -829,7 +829,11 @@ def _fixture_not_ready_detail(result: dict[str, Any]) -> str:
         rendered = _format_fixture_scalar(result["vehicle_fixture_ready"])
         if rendered is not None:
             pairs.append(f"vehicle_fixture_ready={rendered}")
-    return " ".join(pairs)
+    if not pairs:
+        return ""
+    # P34-P2-1: label the blob so a client does not read wheel_count= as the
+    # cause. expected (WheelCount()) is not on the wire; do not invent it.
+    return "observed=" + " ".join(pairs)
 
 
 def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
@@ -844,7 +848,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     vehicle_prepare_fixture is the same shape for fixture_not_ready
     (fb-20260911-230927-b1ff): telemetry.wheel_count was already on the
     result and the Python layer raised the bare code. Expected axle count
-    is not in the echo, so the allowlist is observed scalars only.
+    is not in the echo, so the allowlist is observed scalars only, published
+    under an ``observed=`` label (P34-P2-1). Do not invent ``expected``.
 
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
@@ -895,7 +900,7 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # the bridge filled before the error follow the code after "; " -- see
     # _bridge_error_detail; other verbs keep the bare code except
     # vehicle_prepare_fixture/fixture_not_ready, which carries the
-    # telemetry allowlist the bridge already filled.
+    # observed= telemetry allowlist the bridge already filled.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
     if code == "binding_retired":

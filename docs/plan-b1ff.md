@@ -29,10 +29,10 @@ La ficha pide `{reason, expected, observed}` **o al menos** la telemetría consu
 Cabeza = código fijo. Detalle after `"; "`:
 
 ```
-fixture_not_ready; wheel_count=2 fuel_fraction=1.0 attachment_count=8 vehicle_fixture_ready=False
+fixture_not_ready; observed=wheel_count=2 fuel_fraction=1.0 attachment_count=8 vehicle_fixture_ready=False
 ```
 
-Allowlist: `wheel_count`, `fuel_fraction`, `attachment_count` (dentro de `telemetry` si es dict) y `vehicle_fixture_ready` en el result. Ausente → se omite esa pareja. Sin telemetría y sin el flag → código desnudo `fixture_not_ready`.
+Allowlist: `wheel_count`, `fuel_fraction`, `attachment_count` (dentro de `telemetry` si es dict) y `vehicle_fixture_ready` en el result. Ausente → se omite esa pareja. Sin telemetría y sin el flag → código desnudo `fixture_not_ready`. Las parejas viajan bajo `observed=` (P34-P2-1); no se publica `expected` (no viaja en el wire).
 
 `world_spawn` timeout con payload cargado **sigue** `timeout` (N1 en este PR + control UI preexistente).
 
@@ -42,7 +42,7 @@ JSON puede entregar `wheel_count` como string `"2"`. El formateo publicado es el
 
 | ID | Entrada | EXPECT | Exit |
 |---|---|---|---|
-| P1 | `_bridge_error` fixture_not_ready + telemetry wheel_count=2 | mensaje contiene `fixture_not_ready` y `wheel_count=2` | 0 |
+| P1 | `_bridge_error` fixture_not_ready + telemetry wheel_count=2 | mensaje contiene `fixture_not_ready`, `observed=`, y `wheel_count=2`; no `expected` | 0 |
 | P2 | wire MCP `call_tool` (mismo arnés que UI) | el cliente ve esas parejas | 0 |
 | N1 | mismo payload, `cmd=world_spawn` / `error=timeout` | `timeout` desnudo | 0 |
 | N1b | mismo payload, `cmd=world_spawn` / `error=fixture_not_ready` | `fixture_not_ready` desnudo (gate de verbo) | 0 |
@@ -59,6 +59,6 @@ P1–N3 verdes. I1 declarado. No se afirma `expected=4`.
 
 | ID | Estado | Nota |
 |---|---|---|
-| P34-P2-1 | leftover | Observados sin etiqueta `observed=`. El [EXACT] es `key=value`. No se inventa `expected`. |
+| P34-P2-1 | cerrado | Observados bajo `observed=`. No se inventa `expected`. |
 | P34-P2-2 | cerrado | N1 (`world_spawn` + `timeout` + payload de fixture) además del gate de verbo. |
 | P34-P2-3 | cerrado | String JSON `"2"` → `wheel_count=2`. |

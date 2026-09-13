@@ -190,9 +190,19 @@ class FixtureNotReadyDiagnosticsTest(unittest.TestCase):
         message = str(server._bridge_error(dict(NOT_READY), "vehicle_prepare_fixture"))
         self.assertEqual(
             message,
-            "fixture_not_ready; wheel_count=2 fuel_fraction=1.0 "
+            "fixture_not_ready; observed=wheel_count=2 fuel_fraction=1.0 "
             "attachment_count=8 vehicle_fixture_ready=False",
         )
+        self.assertTrue(message.startswith("fixture_not_ready; observed="))
+        self.assertNotIn("fixture_not_ready; wheel_count=", message)
+
+    def test_observed_label_does_not_invent_expected(self) -> None:
+        # P34-P2-1: unlabeled HEAD form is not the published message.
+        # expected (WheelCount()) is not on the wire.
+        message = str(server._bridge_error(dict(NOT_READY), "vehicle_prepare_fixture"))
+        self.assertIn("; observed=", message)
+        self.assertNotIn("expected", message)
+        self.assertNotIn("WheelCount", message)
 
     def test_allowlist_drops_item_lists_and_unknown_keys(self) -> None:
         message = str(server._bridge_error(dict(NOT_READY), "vehicle_prepare_fixture"))
@@ -252,7 +262,7 @@ class FixtureNotReadyDiagnosticsTest(unittest.TestCase):
         message = str(server._bridge_error(payload, "vehicle_prepare_fixture"))
         self.assertEqual(
             message,
-            "fixture_not_ready; wheel_count=2 fuel_fraction=1.0 "
+            "fixture_not_ready; observed=wheel_count=2 fuel_fraction=1.0 "
             "attachment_count=8 vehicle_fixture_ready=False",
         )
         self.assertNotIn("'2'", message)
@@ -268,7 +278,7 @@ class FixtureNotReadyDiagnosticsTest(unittest.TestCase):
         message = str(server._bridge_error(payload, "vehicle_prepare_fixture"))
         self.assertEqual(
             message,
-            "fixture_not_ready; fuel_fraction=1.0 vehicle_fixture_ready=False",
+            "fixture_not_ready; observed=fuel_fraction=1.0 vehicle_fixture_ready=False",
         )
         self.assertNotIn("two", message)
         self.assertNotIn("'2'", message)
@@ -286,7 +296,7 @@ class FixtureNotReadyWireTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             text,
             "Error executing tool vehicle_prepare_fixture: fixture_not_ready; "
-            "wheel_count=2 fuel_fraction=1.0 attachment_count=8 "
+            "observed=wheel_count=2 fuel_fraction=1.0 attachment_count=8 "
             "vehicle_fixture_ready=False",
         )
 
