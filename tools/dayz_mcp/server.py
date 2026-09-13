@@ -782,6 +782,36 @@ _UI_ECHO_KEYS = ("requested_path", "requested_root", "matched_path")
 # (MCPBridge.c PopulateTelemetryObject + vehicle_fixture_ready). The
 # expected WheelCount() is not on the wire; do not invent it (fb-b1ff).
 _FIXTURE_NOT_READY_TELEMETRY_KEYS = ("wheel_count", "fuel_fraction", "attachment_count")
+_FIXTURE_SCALAR_STR_MAX = 32
+
+
+def _format_fixture_scalar(value: object) -> str | None:
+    """Unquoted [EXACT] form for allowlisted fixture scalars.
+
+    int/float/bool match the published message (``wheel_count=2``). A JSON
+    string ``'2'`` must not become Python ``!r`` quotes (``wheel_count='2'``).
+    Non-numeric strings are omitted, not leaked.
+    """
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        return repr(value)
+    if isinstance(value, str) and 0 < len(value) <= _FIXTURE_SCALAR_STR_MAX:
+        negative = value.startswith("-") and len(value) > 1
+        text = value[1:] if negative else value
+        if text.isdigit():
+            parsed_int = int(text, 10)
+            return str(-parsed_int if negative else parsed_int)
+        left, sep, right = text.partition(".")
+        if sep and left.isdigit() and right.isdigit():
+            parsed = float(f"{'-' if negative else ''}{left}.{right}")
+            if math.isfinite(parsed):
+                return repr(parsed)
+    return None
 
 
 def _fixture_not_ready_detail(result: dict[str, Any]) -> str:
@@ -791,12 +821,14 @@ def _fixture_not_ready_detail(result: dict[str, Any]) -> str:
         for key in _FIXTURE_NOT_READY_TELEMETRY_KEYS:
             if key not in telemetry:
                 continue
-            value = telemetry[key]
-            if value is None:
+            rendered = _format_fixture_scalar(telemetry[key])
+            if rendered is None:
                 continue
-            pairs.append(f"{key}={value!r}")
+            pairs.append(f"{key}={rendered}")
     if "vehicle_fixture_ready" in result:
-        pairs.append(f"vehicle_fixture_ready={result['vehicle_fixture_ready']!r}")
+        rendered = _format_fixture_scalar(result["vehicle_fixture_ready"])
+        if rendered is not None:
+            pairs.append(f"vehicle_fixture_ready={rendered}")
     return " ".join(pairs)
 
 

@@ -224,10 +224,54 @@ class FixtureNotReadyDiagnosticsTest(unittest.TestCase):
         )
 
     def test_verb_gate_does_not_leak_into_world_spawn(self) -> None:
+        # Stronger than plan N1: even fixture_not_ready on world_spawn stays
+        # the bare code. N1 (timeout + same telemetry payload) is the next test.
         self.assertEqual(
             str(server._bridge_error(dict(NOT_READY), "world_spawn")),
             "fixture_not_ready",
         )
+
+    def test_world_spawn_timeout_with_fixture_payload_stays_bare(self) -> None:
+        payload = {**NOT_READY, "error": "timeout"}
+        self.assertEqual(
+            str(server._bridge_error(payload, "world_spawn")),
+            "timeout",
+        )
+
+    def test_json_string_scalars_match_unquoted_exact_form(self) -> None:
+        payload = {
+            "ok": 0,
+            "error": "fixture_not_ready",
+            "vehicle_fixture_ready": False,
+            "telemetry": {
+                "wheel_count": "2",
+                "fuel_fraction": "1.0",
+                "attachment_count": "8",
+            },
+        }
+        message = str(server._bridge_error(payload, "vehicle_prepare_fixture"))
+        self.assertEqual(
+            message,
+            "fixture_not_ready; wheel_count=2 fuel_fraction=1.0 "
+            "attachment_count=8 vehicle_fixture_ready=False",
+        )
+        self.assertNotIn("'2'", message)
+        self.assertNotIn("'1.0'", message)
+
+    def test_non_numeric_string_scalars_are_omitted(self) -> None:
+        payload = {
+            "ok": 0,
+            "error": "fixture_not_ready",
+            "vehicle_fixture_ready": False,
+            "telemetry": {"wheel_count": "two", "fuel_fraction": 1.0},
+        }
+        message = str(server._bridge_error(payload, "vehicle_prepare_fixture"))
+        self.assertEqual(
+            message,
+            "fixture_not_ready; fuel_fraction=1.0 vehicle_fixture_ready=False",
+        )
+        self.assertNotIn("two", message)
+        self.assertNotIn("'2'", message)
 
 
 class FixtureNotReadyWireTest(unittest.IsolatedAsyncioTestCase):
@@ -245,6 +289,16 @@ class FixtureNotReadyWireTest(unittest.IsolatedAsyncioTestCase):
             "wheel_count=2 fuel_fraction=1.0 attachment_count=8 "
             "vehicle_fixture_ready=False",
         )
+
+    async def test_world_spawn_timeout_with_fixture_payload_stays_bare(self) -> None:
+        from tests.test_ui_error_diagnostics import _wire_error_text
+
+        text = await _wire_error_text(
+            "world_spawn",
+            {"type": "SurvivorM_Mirek", "pos": [7500.0, 0.0, 7500.0]},
+            {**NOT_READY, "error": "timeout"},
+        )
+        self.assertEqual(text, "Error executing tool world_spawn: timeout")
 
 
 if __name__ == "__main__":
