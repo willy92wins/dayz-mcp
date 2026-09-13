@@ -341,6 +341,55 @@ class VehicleTraceValidationTest(unittest.TestCase):
             )
         )
 
+    def test_14de_classifier_names_h4_skip_only_on_oninput_control(self) -> None:
+        skip_shaped = _positive_trace()["samples"][5]
+        skip_shaped["engine_ready"] = False
+        skip_shaped["throttle_set"] = False
+        skip_shaped["engine_rpm"] = 400.0
+        skip_shaped["rpm_idle"] = 700.0
+        skip_shaped["throttle_requested"] = 1.0
+        skip_shaped["throttle_applied"] = 0.0
+        skip_shaped["forced"] = False
+        skip_shaped["control_active"] = True
+        self.assertEqual(
+            vehicle_trace.classify_14de_throttle_sample(skip_shaped),
+            "h4_skip",
+        )
+
+        stop_flush = copy.deepcopy(skip_shaped)
+        stop_flush["forced"] = True
+        self.assertEqual(
+            vehicle_trace.classify_14de_throttle_sample(stop_flush),
+            "forced",
+        )
+        self.assertNotEqual(
+            vehicle_trace.classify_14de_throttle_sample(stop_flush),
+            "h4_skip",
+        )
+
+        no_control = copy.deepcopy(skip_shaped)
+        no_control["control_active"] = False
+        self.assertEqual(
+            vehicle_trace.classify_14de_throttle_sample(no_control),
+            "no_control",
+        )
+        self.assertNotEqual(
+            vehicle_trace.classify_14de_throttle_sample(no_control),
+            "h4_skip",
+        )
+
+        stop_without_control = copy.deepcopy(skip_shaped)
+        stop_without_control["forced"] = True
+        stop_without_control["control_active"] = False
+        self.assertEqual(
+            vehicle_trace.classify_14de_throttle_sample(stop_without_control),
+            "forced",
+        )
+        self.assertNotEqual(
+            vehicle_trace.classify_14de_throttle_sample(stop_without_control),
+            "h4_skip",
+        )
+
     def test_named_negative_mutations_are_not_false_green(self) -> None:
         fixture = _load_json(FIXTURE_DIR / "negative_mutations.json")
         for mutation in fixture["mutations"]:

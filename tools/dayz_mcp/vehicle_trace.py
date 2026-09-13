@@ -376,7 +376,14 @@ def _final_status(checks: list[dict[str, object]]) -> str:
 
 
 def classify_14de_throttle_sample(sample: dict[str, object]) -> str:
-    """Name H4 skip vs setter-lag from 14de fields. Not a validate_trace substitute."""
+    """Name H4 skip vs setter-lag from OnInput 14de fields. Not a validate_trace substitute.
+
+    Stop-flush (`forced`) and samples without MCP control are not an OnInput skip.
+    """
+    if sample["forced"] is True:
+        return "forced"
+    if sample["control_active"] is not True:
+        return "no_control"
     ready = sample["engine_ready"] is True
     throttle_set = sample["throttle_set"] is True
     rpm = float(sample["engine_rpm"])
