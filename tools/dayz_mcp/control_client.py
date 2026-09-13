@@ -8,8 +8,9 @@ import math
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Iterator
 
 from dayz_mcp import accredited_daemon_transport as transport
 from dayz_mcp import daemon_credential
@@ -17,6 +18,22 @@ from dayz_mcp.daemon_policy_contract import AccreditedDaemonPolicy
 
 
 _monotonic = time.monotonic
+
+# H14 skips policy.revalidate() by verb, not by wall-clock. The MCP tool
+# session_acquire_wait is never on these lists; owned dayz_test_stop may
+# lease internally through the kill-path set only.
+_H14_STALE_POLICY_PATHS = frozenset({"/lifecycle/status"})
+_H14_OWNED_STOP_LEASE_PATHS = frozenset(
+    {
+        "/lifecycle/status",
+        "/session/enqueue",
+        "/session/wait",
+        "/session/heartbeat",
+        "/session/release",
+        # protected_release_and_verify always reads this after release.
+        "/session/status",
+    }
+)
 
 
 class ControlClientError(RuntimeError):
@@ -126,6 +143,8 @@ class ControlClient:
     # object.__new__ -- which the authority regression tests do on purpose, wiring
     # nothing but _state_lock -- still has to answer for these.
     active_lease_id: str | None = None
+    _allow_stale_policy: bool = False
+    _allow_owned_stop_lease: bool = False
     # Set by the owner when this session can outlive its own process. Called outside
     # the state lock with (lease_token, lease_id), both None once the lease is gone.
     # A listener that raises is swallowed: see _announce_lease.
@@ -173,6 +192,41 @@ class ControlClient:
         self.state = "NEW"
         self._state_lock = threading.Lock()
         self._transition_lock = asyncio.Lock()
+        self._allow_stale_policy = False
+        self._allow_owned_stop_lease = False
+
+    @contextmanager
+    def stale_policy_exemption(self) -> Iterator[None]:
+        """H14: skip revalidate() only for /lifecycle/status; authority stays closed."""
+        previous = self._allow_stale_policy
+        self._allow_stale_policy = True
+        try:
+            yield
+        finally:
+            self._allow_stale_policy = previous
+
+    @contextmanager
+    def owned_stop_kill_exemption(self) -> Iterator[None]:
+        """H14: owned dayz_test_stop may lease internally on the kill path.
+
+        Covers acquire/wait/heartbeat/release and the post-kill
+        protected_release_and_verify hop (`/session/status`). Does not wrap
+        the MCP session_acquire_wait tool. That tool never enters this manager,
+        so it stays fail-closed with http_bytes_sent=0.
+        """
+        previous = self._allow_owned_stop_lease
+        self._allow_owned_stop_lease = True
+        try:
+            yield
+        finally:
+            self._allow_owned_stop_lease = previous
+
+    def _h14_stale_allowed(self, path: str) -> bool:
+        if self._allow_owned_stop_lease and path in _H14_OWNED_STOP_LEASE_PATHS:
+            return True
+        if self._allow_stale_policy and path in _H14_STALE_POLICY_PATHS:
+            return True
+        return False
 
     def _request_once(
         self,
@@ -180,28 +234,33 @@ class ControlClient:
         payload: dict[str, object],
         timeout_s: float,
     ) -> dict[str, object]:
+        allow_stale_policy = self._h14_stale_allowed(path)
         try:
             self.policy.revalidate()
         except Exception as exc:
-            policy_cause = _policy_revalidation_cause(exc)
-            raise ControlClientError(
-                "client_policy_untrusted_open_new_session",
-                request_stage="pre_request",
-                http_bytes_sent=0,
-                policy_cause=policy_cause,
-                hint=(
-                    # The MCP adapter publishes code/hint, not exception metadata.
-                    f"policy_cause={policy_cause}. "
-                    "If the tool list includes server_reload, call it: it replaces "
-                    "the serving process, which re-reads the registration and "
-                    "re-accredits. Otherwise report this policy rejection to the "
-                    "host/operator for registration verification and MCP-client "
-                    "reconnection after repair. This client cannot open a new host "
-                    "session by itself."
-                ),
-            ) from None
+            if not allow_stale_policy:
+                policy_cause = _policy_revalidation_cause(exc)
+                raise ControlClientError(
+                    "client_policy_untrusted_open_new_session",
+                    request_stage="pre_request",
+                    http_bytes_sent=0,
+                    policy_cause=policy_cause,
+                    hint=(
+                        # The MCP adapter publishes code/hint, not exception metadata.
+                        f"policy_cause={policy_cause}. "
+                        "If the tool list includes server_reload, call it: it replaces "
+                        "the serving process, which re-reads the registration and "
+                        "re-accredits. Otherwise report this policy rejection to the "
+                        "host/operator for registration verification and MCP-client "
+                        "reconnection after repair. This client cannot open a new host "
+                        "session by itself."
+                    ),
+                ) from None
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         deadline = _monotonic() + timeout_s
+        refresh_kwargs: dict[str, object] = {}
+        if allow_stale_policy:
+            refresh_kwargs["allow_stale_policy"] = True
         try:
             status, response_body = self._credential_provider.request_with_refresh(
                 method="POST",
@@ -210,6 +269,7 @@ class ControlClient:
                 body=body,
                 headers={"Content-Type": "application/json"},
                 deadline=deadline,
+                **refresh_kwargs,
             )
         except daemon_credential.CredentialRefreshError as error:
             raise ControlClientError(

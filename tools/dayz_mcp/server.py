@@ -66,7 +66,7 @@ from dayz_mcp.process_lifecycle import (
 )
 from dayz_mcp import session_handoff
 from dayz_mcp.mcp_supervisor import Supervisor
-from dayz_mcp.session_coordination import ClientIdentity
+from dayz_mcp.session_coordination import ClientIdentity, command_requires_lease
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
 
 # Import the production lazy closures before freezing their source baseline.
@@ -1181,6 +1181,7 @@ class ClientRuntime:
     ) -> None:
         self.config = config
         self.tool_lock = asyncio.Lock()
+        self._allow_stale_policy = False
         daemon_policy = load_normal_daemon_policy()
         provenance = host_config.resolve_daemon_provenance()
         if (
@@ -1627,6 +1628,9 @@ class ClientRuntime:
             data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             headers["Content-Type"] = "application/json"
         deadline = self._time_fn() + float(timeout)
+        refresh_kwargs: dict[str, object] = {}
+        if self._allow_stale_policy:
+            refresh_kwargs["allow_stale_policy"] = True
         status, response_body = self._credential_provider.request_with_refresh(
             method=method,
             path=path,
@@ -1634,6 +1638,7 @@ class ClientRuntime:
             body=data,
             headers=headers,
             deadline=deadline,
+            **refresh_kwargs,
         )
         body = response_body.decode("utf-8") or "{}"
         return status, self._decode_body(body)
@@ -1712,36 +1717,41 @@ class ClientRuntime:
         }
         if lease_token is not None:
             request_payload["lease_token"] = lease_token
-        status, payload = await asyncio.to_thread(
-            self._call,
-            "POST",
-            "/enqueue",
-            request_payload,
-            None,
-            timeout_s,
-            deadline,
-        )
-        if status != 200:
-            error = self._enqueue_error(payload)
-            if _remote_error_code(payload) in _STALE_LEASE_ERRORS and lease_token is not None:
-                self._control._clear_matching_lease(lease_token)
-            if _remote_error_code(payload) in {"version_blocked", "lease_required"}:
-                try:
-                    snapshot = await self.bridge_status_payload(
-                        timeout_s=LIVENESS_STATUS_TIMEOUT_S
+        previous = self._allow_stale_policy
+        self._allow_stale_policy = not command_requires_lease(cmd)
+        try:
+            status, payload = await asyncio.to_thread(
+                self._call,
+                "POST",
+                "/enqueue",
+                request_payload,
+                None,
+                timeout_s,
+                deadline,
+            )
+            if status != 200:
+                error = self._enqueue_error(payload)
+                if _remote_error_code(payload) in _STALE_LEASE_ERRORS and lease_token is not None:
+                    self._control._clear_matching_lease(lease_token)
+                if _remote_error_code(payload) in {"version_blocked", "lease_required"}:
+                    try:
+                        snapshot = await self.bridge_status_payload(
+                            timeout_s=LIVENESS_STATUS_TIMEOUT_S
+                        )
+                    except Exception:
+                        snapshot = None
+                    error = _public_enqueue_error(
+                        payload, status_snapshot=snapshot, peer=peer
                     )
-                except Exception:
-                    snapshot = None
-                error = _public_enqueue_error(
-                    payload, status_snapshot=snapshot, peer=peer
-                )
-            raise ToolError(error)
-        if "id" not in payload:
-            raise ToolError("daemon_bad_enqueue_response")
-        command_id = int(payload["id"])
-        return await self._await_result(
-            cmd, command_id, peer, timeout_s, deadline=deadline
-        )
+                raise ToolError(error)
+            if "id" not in payload:
+                raise ToolError("daemon_bad_enqueue_response")
+            command_id = int(payload["id"])
+            return await self._await_result(
+                cmd, command_id, peer, timeout_s, deadline=deadline
+            )
+        finally:
+            self._allow_stale_policy = previous
 
     async def call_exec_enforce(self, args: dict[str, Any], timeout_s: float) -> dict[str, Any]:
         return await self.call_bridge("exec_enforce", args, "server", timeout_s)
@@ -1803,33 +1813,38 @@ class ClientRuntime:
         }
         if lease_token is not None:
             request_payload["lease_token"] = lease_token
-        status, payload = await asyncio.to_thread(
-            self._call,
-            "POST",
-            "/enqueue",
-            request_payload,
-            None,
-            timeout_s,
-            deadline,
-        )
-        if status != 200:
-            error = self._enqueue_error(payload)
-            if _remote_error_code(payload) in _STALE_LEASE_ERRORS and lease_token is not None:
-                self._control._clear_matching_lease(lease_token)
-            if _remote_error_code(payload) in {"version_blocked", "lease_required"}:
-                try:
-                    snapshot = await self.bridge_status_payload(
-                        timeout_s=LIVENESS_STATUS_TIMEOUT_S
+        previous = self._allow_stale_policy
+        self._allow_stale_policy = not command_requires_lease(cmd)
+        try:
+            status, payload = await asyncio.to_thread(
+                self._call,
+                "POST",
+                "/enqueue",
+                request_payload,
+                None,
+                timeout_s,
+                deadline,
+            )
+            if status != 200:
+                error = self._enqueue_error(payload)
+                if _remote_error_code(payload) in _STALE_LEASE_ERRORS and lease_token is not None:
+                    self._control._clear_matching_lease(lease_token)
+                if _remote_error_code(payload) in {"version_blocked", "lease_required"}:
+                    try:
+                        snapshot = await self.bridge_status_payload(
+                            timeout_s=LIVENESS_STATUS_TIMEOUT_S
+                        )
+                    except Exception:
+                        snapshot = None
+                    error = _public_enqueue_error(
+                        payload, status_snapshot=snapshot, peer=peer
                     )
-                except Exception:
-                    snapshot = None
-                error = _public_enqueue_error(
-                    payload, status_snapshot=snapshot, peer=peer
-                )
-            raise ToolError(error)
-        if "id" not in payload:
-            raise ToolError("daemon_bad_enqueue_response")
-        return int(payload["id"])
+                raise ToolError(error)
+            if "id" not in payload:
+                raise ToolError("daemon_bad_enqueue_response")
+            return int(payload["id"])
+        finally:
+            self._allow_stale_policy = previous
 
     async def probe_bridge_result(
         self, cmd: str, command_id: int, peer: str
