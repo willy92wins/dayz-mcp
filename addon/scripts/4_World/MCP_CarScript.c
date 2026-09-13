@@ -7,6 +7,10 @@ class MCPCarDrive
 	static float s_Brake;
 	static float s_Handbrake;
 	static float s_DeadlineS;
+	// Written in the same OnInput that Capture reads. Distinguishes
+	// "SetThrottle was not called" from "GetThrottle still reads 0".
+	static bool s_TickEngineReady;
+	static bool s_TickThrottleSet;
 
 	static void Set(CarScript car, float throttle, float steer, float brake, float handbrake, float deadlineS)
 	{
@@ -23,6 +27,8 @@ class MCPCarDrive
 	{
 		s_Active = false;
 		s_Car = null;
+		s_TickEngineReady = false;
+		s_TickThrottleSet = false;
 	}
 }
 
@@ -53,6 +59,10 @@ class MCPVehicleTraceSample
 	float steer_applied;
 	float brake_applied;
 	float handbrake_applied;
+	float engine_rpm;
+	float rpm_idle;
+	bool engine_ready;
+	bool throttle_set;
 	bool wheel_contact_0;
 	bool wheel_contact_1;
 	bool wheel_contact_2;
@@ -559,6 +569,20 @@ class MCPVehicleTrace
 		sample.steer_applied = car.GetSteering();
 		sample.brake_applied = car.GetBrake();
 		sample.handbrake_applied = car.GetHandbrake();
+		sample.engine_rpm = car.EngineGetRPM();
+		sample.rpm_idle = car.EngineGetRPMIdle();
+		// OnInput latches are this-tick only. Stop() flushes with forced=true
+		// outside OnInput; copying them there publishes a previous tick.
+		if (sample.control_active && !forced)
+		{
+			sample.engine_ready = MCPCarDrive.s_TickEngineReady;
+			sample.throttle_set = MCPCarDrive.s_TickThrottleSet;
+		}
+		else
+		{
+			sample.engine_ready = false;
+			sample.throttle_set = false;
+		}
 
 		int wheelCount = car.WheelCount();
 		sample.wheel_count = wheelCount;
@@ -676,6 +700,9 @@ modded class CarScript
 	{
 		super.OnInput(dt);
 
+		MCPCarDrive.s_TickEngineReady = false;
+		MCPCarDrive.s_TickThrottleSet = false;
+
 		bool applyControl = MCPCarDrive.s_Active && MCPCarDrive.s_Car == this;
 		if (applyControl && GetGame().GetTickTime() > MCPCarDrive.s_DeadlineS)
 		{
@@ -703,6 +730,7 @@ modded class CarScript
 				engineReady = false;
 			}
 
+			MCPCarDrive.s_TickEngineReady = engineReady;
 			if (engineReady)
 			{
 				float throttle = MCPCarDrive.s_Throttle;
@@ -724,7 +752,9 @@ modded class CarScript
 					}
 				}
 
+				// SetThrottle is future; GetThrottle is actual (car.c).
 				SetThrottle(throttle);
+				MCPCarDrive.s_TickThrottleSet = true;
 				SetSteering(MCPCarDrive.s_Steer);
 				SetBrake(MCPCarDrive.s_Brake);
 				SetHandbrake(MCPCarDrive.s_Handbrake);

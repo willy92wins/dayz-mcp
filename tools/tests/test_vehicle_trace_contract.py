@@ -215,6 +215,79 @@ class VehicleTraceEnforceSourceContractTest(unittest.TestCase):
         shutdown = _method_body(bridge, "void Shutdown()")
         self.assertIn('MCPVehicleTrace.Abort("shutdown");', shutdown)
 
+    def _assert_on_input_throttle_latch(self, on_input: str) -> None:
+        self.assertIn("MCPCarDrive.s_TickEngineReady = false;", on_input)
+        self.assertIn("MCPCarDrive.s_TickThrottleSet = false;", on_input)
+        self.assertIn("MCPCarDrive.s_TickEngineReady = engineReady;", on_input)
+        ready_latch = on_input.index("MCPCarDrive.s_TickEngineReady = engineReady;")
+        ready_branch = on_input.index("if (engineReady)")
+        self.assertLess(ready_latch, ready_branch)
+        ready_body = _method_body(on_input, "if (engineReady)")
+        self.assertIn("SetThrottle(throttle);", ready_body)
+        self.assertIn("MCPCarDrive.s_TickThrottleSet = true;", ready_body)
+        self.assertEqual(ready_body.count("SetThrottle("), 1)
+        self.assertEqual(on_input.count("SetThrottle("), 1)
+        self.assertEqual(on_input.count("MCPCarDrive.s_TickThrottleSet = true;"), 1)
+        set_throttle = ready_body.index("SetThrottle(throttle);")
+        throttle_set = ready_body.index("MCPCarDrive.s_TickThrottleSet = true;")
+        self.assertLess(set_throttle, throttle_set)
+
+    def test_14de_trace_names_engine_ready_skip_without_faking_throttle(self) -> None:
+        source = CAR_SCRIPT.read_text(encoding="utf-8")
+        sample = _method_body(source, "class MCPVehicleTraceSample")
+        for token in (
+            "float engine_rpm;",
+            "float rpm_idle;",
+            "bool engine_ready;",
+            "bool throttle_set;",
+        ):
+            self.assertIn(token, sample)
+
+        on_input = _method_body(source, "override void OnInput(float dt)")
+        skip = _method_body(on_input, "if (rpm < EngineGetRPMIdle())")
+        self.assertIn("engineReady = false;", skip)
+        self.assertNotIn("SetThrottle(", skip)
+        self._assert_on_input_throttle_latch(on_input)
+
+        capture = _method_body(source, "protected static void CaptureNow(CarScript car, bool forced)")
+        self.assertIn("sample.throttle_applied = car.GetThrottle();", capture)
+        self.assertIn("sample.engine_rpm = car.EngineGetRPM();", capture)
+        self.assertIn("sample.rpm_idle = car.EngineGetRPMIdle();", capture)
+        latch_if = _method_body(capture, "if (sample.control_active && !forced)")
+        self.assertIn("sample.engine_ready = MCPCarDrive.s_TickEngineReady;", latch_if)
+        self.assertIn("sample.throttle_set = MCPCarDrive.s_TickThrottleSet;", latch_if)
+        self.assertEqual(capture.count("sample.engine_ready = MCPCarDrive.s_TickEngineReady;"), 1)
+        self.assertEqual(capture.count("sample.throttle_set = MCPCarDrive.s_TickThrottleSet;"), 1)
+        self.assertLess(
+            capture.index("sample.throttle_applied = car.GetThrottle();"),
+            capture.index("sample.engine_rpm = car.EngineGetRPM();"),
+        )
+        stop = _method_body(source, "static bool Stop(string traceId)")
+        self.assertIn("CaptureNow(s_Car, true);", stop)
+
+    def test_14de_latch_outside_engine_ready_fails_brace_contract(self) -> None:
+        poisoned = """
+override void OnInput(float dt)
+{
+	MCPCarDrive.s_TickEngineReady = false;
+	MCPCarDrive.s_TickThrottleSet = false;
+	MCPCarDrive.s_TickEngineReady = engineReady;
+	if (engineReady)
+	{
+		SetThrottle(throttle);
+	}
+	MCPCarDrive.s_TickThrottleSet = true;
+}
+"""
+        on_input = _method_body(poisoned, "override void OnInput(float dt)")
+        ready_branch = on_input.index("if (engineReady)")
+        set_throttle = on_input.index("SetThrottle(throttle);")
+        throttle_set = on_input.index("MCPCarDrive.s_TickThrottleSet = true;")
+        self.assertLess(ready_branch, set_throttle)
+        self.assertLess(set_throttle, throttle_set)
+        with self.assertRaises(AssertionError):
+            self._assert_on_input_throttle_latch(on_input)
+
 
 if __name__ == "__main__":
     unittest.main()
