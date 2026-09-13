@@ -103,6 +103,55 @@ class PythonBacklogFixesTest(unittest.IsolatedAsyncioTestCase):
                     "the daemon startup poll consumed time beyond the tool deadline",
                 )
 
+    async def test_inflight_await_connection_abort_is_timeout_not_daemon_unavailable(
+        self,
+    ) -> None:
+        # Names _CallBudgetExpired: an /await hop that starts with remaining>0
+        # and dies in-flight (ConnectionAbortedError) must not become
+        # daemon_unavailable. The sentinel is what _await_result turns into
+        # "timeout waiting for".
+        self.assertEqual(server._CallBudgetExpired.__name__, "_CallBudgetExpired")
+        clock = _FakeClock()
+        runtime = _unreachable_client_runtime(clock)
+
+        def request_once(
+            method: str,
+            path: str,
+            payload: object = None,
+            query: object = None,
+            timeout: float = 5.0,
+        ) -> tuple[int, dict[str, object]]:
+            if path == "/enqueue":
+                return 200, {"id": 7}
+            if path == "/await":
+                raise ConnectionAbortedError(
+                    10053, "An established connection was aborted"
+                )
+            return 200, {}
+
+        runtime._request_once = request_once
+
+        with self.assertRaises(server._CallBudgetExpired):
+            runtime._call(
+                "GET",
+                "/await",
+                None,
+                {"id": "7", "remove": "1"},
+                0.4,
+                clock.now() + 0.4,
+            )
+
+        with self.assertRaises(ToolError) as err:
+            await runtime.call_bridge(
+                "query_player_state",
+                {},
+                "server",
+                0.4,
+            )
+        message = str(err.exception)
+        self.assertIn("timeout waiting for", message)
+        self.assertNotIn("daemon_unavailable", message)
+
     async def test_bug024_timeout_reaps_state_and_never_delivers_zombie(self) -> None:
         state = loopback.ServerState("fixture-key")
         runtime = server.Runtime(

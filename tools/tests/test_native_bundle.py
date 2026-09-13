@@ -11,7 +11,7 @@ from dayz_mcp.dayz_tools_paths import addon_helper_exes
 from dayz_mcp.native_broker_protocol import BrokerKind
 from dayz_mcp.native_child_announcement import ChildAnnouncement
 from dayz_mcp.request_path_authority import PathIdentity
-from tests._bundle_paths import requires_built_bundle
+from tests._bundle_paths import requires_built_bundle, requires_closure_manifest
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -73,7 +73,7 @@ class NativeBundleTest(unittest.TestCase):
             ):
                 native_bundle._canonical_json(raw, maximum=1024)
 
-    @requires_built_bundle
+    @requires_closure_manifest
     def test_manifest_schema_rejects_unknown_external_and_lowercase_hash(self) -> None:
         manifest = json.loads(
             (BUNDLE_DIR / "closure-manifest.json").read_text(encoding="utf-8")

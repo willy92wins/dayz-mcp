@@ -1759,6 +1759,8 @@ class ClientRuntime:
             if not retryable:
                 raise ToolError("daemon_response_ambiguous") from None
             if not self._ensure_daemon(call_deadline):
+                if path == "/await":
+                    raise _CallBudgetExpired() from None
                 raise ToolError(self._daemon_missing_error()) from None
             try:
                 return self._request_once(
@@ -1773,14 +1775,18 @@ class ClientRuntime:
                     retry_error.request_stage == "pre_request"
                     and retry_error.http_bytes_sent == 0
                 )
-                raise ToolError(
-                    "daemon_unavailable"
-                    if retry_safe
-                    else "daemon_response_ambiguous"
-                ) from None
+                if not retry_safe:
+                    raise ToolError("daemon_response_ambiguous") from None
+                if path == "/await":
+                    raise _CallBudgetExpired() from None
+                raise ToolError("daemon_unavailable") from None
             except (ConnectionError, OSError):
+                if path == "/await":
+                    raise _CallBudgetExpired() from None
                 raise ToolError("daemon_unavailable") from None
         except (ConnectionError, OSError):
+            if path == "/await":
+                raise _CallBudgetExpired() from None
             raise ToolError("daemon_unavailable") from None
 
     async def call_bridge(self, cmd: str, args: dict[str, Any], peer: str, timeout_s: float) -> dict[str, Any]:
