@@ -139,10 +139,11 @@ class Task9ProtocolDocsTests(unittest.TestCase):
             re.compile(r"holder[^\r\n]*@<Mod>[^\r\n]*profiles", re.IGNORECASE),
         )
         for path in (VERIFY_SKILL, INGAME_SKILL):
-            text = self.read_required(path)
-            for pattern in forbidden:
-                with self.subTest(path=str(path), pattern=pattern.pattern):
-                    self.assertIsNone(pattern.search(text))
+            with self.subTest(path=str(path)):
+                text = self.read_required(path)
+                for pattern in forbidden:
+                    with self.subTest(pattern=pattern.pattern):
+                        self.assertIsNone(pattern.search(text))
 
     def test_ingame_skill_does_not_offer_an_official_retail_launcher(self) -> None:
         text = self.read_required(INGAME_SKILL)
@@ -212,8 +213,8 @@ class Task9ProtocolDocsTests(unittest.TestCase):
             ),
         )
         for path, pattern in cases:
-            text = self.read_required(path)
             with self.subTest(path=str(path), pattern=pattern.pattern):
+                text = self.read_required(path)
                 self.assertIsNone(pattern.search(text))
 
     def test_execution_matrix_separates_diag_server_dedicated_and_retail(self) -> None:
@@ -233,10 +234,11 @@ class Task9ProtocolDocsTests(unittest.TestCase):
             ),
         )
         for path in sources:
-            text = self.read_required(path)
-            for pattern in required_rows:
-                with self.subTest(path=str(path), pattern=pattern.pattern):
-                    self.assertRegex(text, pattern)
+            with self.subTest(path=str(path)):
+                text = self.read_required(path)
+                for pattern in required_rows:
+                    with self.subTest(pattern=pattern.pattern):
+                        self.assertRegex(text, pattern)
 
 
 if __name__ == "__main__":

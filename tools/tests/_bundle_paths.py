@@ -18,6 +18,7 @@ from pathlib import Path
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 BUNDLE = TOOLS_DIR / "native-launchers" / "dayz-test-v1"
 LAUNCHER_PE = BUNDLE / "dayz-test-launcher.exe"
+CLOSURE_MANIFEST = BUNDLE / "closure-manifest.json"
 REGISTRY = TOOLS_DIR / "approved-launchers.json"
 
 # Keyed on a build output, not on BUNDLE.is_dir(): the directory is present in
@@ -26,6 +27,14 @@ REGISTRY = TOOLS_DIR / "approved-launchers.json"
 requires_built_bundle = unittest.skipUnless(
     LAUNCHER_PE.is_file(),
     f"native launcher bundle not built at {BUNDLE}; "
+    "run build_native_launcher.py --offline first",
+)
+
+# Witness tests read the sealed JSON, not the PE. A tree with one and not
+# the other must skip or fail on the artifact it actually needs.
+requires_closure_manifest = unittest.skipUnless(
+    CLOSURE_MANIFEST.is_file(),
+    f"closure-manifest.json not present at {CLOSURE_MANIFEST}; "
     "run build_native_launcher.py --offline first",
 )
 
