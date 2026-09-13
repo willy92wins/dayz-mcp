@@ -1234,6 +1234,10 @@ class ClientRuntime:
     """
 
     _time_fn = staticmethod(time.monotonic)
+    # Declared on the class, not only in __init__: a bare instance built with
+    # object.__new__ (BUG-037 timeout cap, H14 stale-policy) still has to
+    # answer for the closed default.
+    _allow_stale_policy: bool = False
 
     def __init__(
         self,
