@@ -57,7 +57,7 @@ class Bug112InconclusoTests(unittest.TestCase):
 
     def test_plan_w3_keeps_bug112_inconcluso(self) -> None:
         text = _PLAN_W3.read_text(encoding="utf-8")
-        self.assertRegex(text, r"BUG-112\s*\|\s*\*\*INCONCLUSO\*\*")
-        self.assertIsNone(re.search(r"BUG-112\s*\|\s*\*\*PASS\*\*", text))
-        self.assertRegex(text, r"BUG-110\s*\|\s*\*\*PASS\*\*")
-        self.assertRegex(text, r"BUG-111\s*\|\s*\*\*PASS\*\*")
+        self.assertRegex(text, r"\*\*BUG-112\*\*\s*\|\s*\*\*INCONCLUSO\*\*")
+        self.assertIsNone(re.search(r"\*\*BUG-112\*\*\s*\|\s*\*\*PASS\*\*", text))
+        self.assertRegex(text, r"\*\*BUG-110\*\*\s*\|\s*\*\*PASS\*\*")
+        self.assertRegex(text, r"\*\*BUG-111\*\*\s*\|\s*\*\*PASS\*\*")
