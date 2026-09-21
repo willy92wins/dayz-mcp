@@ -1,0 +1,369 @@
+============ bridge_status ============
+{
+  "ready": {
+    "ready": false,
+    "reason": "no_run",
+    "next_step": "bridge_status",
+    "stale_threshold_s": 15.0,
+    "server_last_poll_age_s": null,
+    "client_last_poll_age_s": null,
+    "server_bound_last_poll_age_s": null,
+    "client_bound_last_poll_age_s": null
+  },
+  "server_peer": {
+    "last_poll_age_s": null,
+    "queue_depth": 0,
+    "capabilities": {
+      "state": "unknown",
+      "reason": "absent",
+      "announced_commands": [],
+      "registered_bridge_tools": [
+        "entities_query",
+        "infected_drive",
+        "inventory_attach",
+        "inventory_give",
+        "notify_players",
+        "object_anim",
+        "object_delete",
+        "object_inspect",
+        "player_teleport",
+        "query_all_players",
+        "query_get_in_condition",
+        "query_player_state",
+        "scene_raycast",
+        "surface_query",
+        "telemetry_read",
+        "vehicle_enter",
+        "vehicle_prepare_fixture",
+        "world_spawn",
+        "world_time_set",
+        "world_weather_set"
+      ],
+      "announced_without_registered_tool": [],
+      "registered_without_announced_command": [],
+      "unmapped_announced_commands": []
+    },
+    "version": null,
+    "version_state": "never_polled_this_generation",
+    "version_detail": "never_polled_this_generation",
+    "observed_this_generation": false,
+    "binding_state": "LEGACY_UNBOUND",
+    "instance_prefix": null,
+    "bound_last_poll_age_s": null
+  },
+  "client_peer": {
+    "last_poll_age_s": null,
+    "queue_depth": 0,
+    "capabilities": {
+      "state": "unknown",
+      "reason": "absent",
+      "announced_commands": [],
+      "registered_bridge_tools": [
+        "action_use",
+        "camera_get",
+        "camera_set",
+        "engine_set",
+        "key_press",
+        "player_respawn",
+        "restore_gameplay",
+        "ui_click",
+        "ui_dialog",
+        "ui_focus",
+        "ui_reload_layout",
+        "ui_set_text",
+        "ui_tree",
+        "vehicle_control",
+        "vehicle_get_in_client",
+        "vehicle_release",
+        "vehicle_telemetry",
+        "vehicle_trace"
+      ],
+      "announced_without_registered_tool": [],
+      "registered_without_announced_command": [],
+      "unmapped_announced_commands": []
+    },
+    "version": null,
+    "version_state": "never_polled_this_generation",
+    "version_detail": "never_polled_this_generation",
+    "observed_this_generation": false,
+    "binding_state": "LEGACY_UNBOUND",
+    "instance_prefix": null,
+    "bound_last_poll_age_s": null
+  },
+  "results_pending": 0,
+  "version_state": {
+    "server": "never_polled_this_generation",
+    "client": "never_polled_this_generation"
+  },
+  "server_version": "10",
+  "expected_game_version": null,
+  "require_version": true,
+  "fence": {
+    "mutation_rejects_by_code": {
+      "legacy_unbound": 0,
+      "instance_unknown": 0,
+      "instance_ambiguous": 0,
+      "instance_unattributed": 0,
+      "binding_retired": 0,
+      "instance_role_mismatch": 0,
+      "instance_peer_collision": 0,
+      "binding_not_ready": 0,
+      "creation_time_unreadable": 0
+    },
+    "unaccredited_mutation_enqueues": 0,
+    "unaccredited_polls_by_class": {},
+    "mutation_rejects_meta": {
+      "kind": "historical",
+      "window": "since_daemon_start",
+      "origin": "loopback_enqueue_fence",
+      "blocks_now": false
+    }
+  },
+  "daemon_generation": "205e2b2b537e44e891251b4edf233e45",
+  "coordination": {
+    "revision": 0,
+    "captured_at_monotonic": 78602.6333841,
+    "active": null,
+    "releasing": null,
+    "granting": null,
+    "handoff_pending": false,
+    "claimable": true,
+    "audit_fault": null,
+    "operation_tombstones": {
+      "count": 0,
+      "capacity": 128,
+      "saturated": false
+    },
+    "queue": [],
+    "cleanup_workers": {
+      "capacity": 4,
+      "active": 0,
+      "saturated": 0
+    }
+  },
+  "daemon_status": {
+    "schema": "dayz-mcp-daemon-status-v1",
+    "product": "dayz_mcp",
+    "mode": "daemon",
+    "daemon_generation": "205e2b2b537e44e891251b4edf233e45",
+    "coordination_revision": 0
+  },
+  "lifecycle": {
+    "runs": [],
+    "runs_retired": 28,
+    "retail_quarantine": false,
+    "retired_run_diagnostics": [],
+    "audit_rows_dropped": 0
+  },
+  "daemon_modules": {
+    "daemon_started_at": 1789918587.0129566,
+    "watched_count": 67,
+    "stale": [],
+    "unreadable": []
+  },
+  "credential_recovery": {
+    "recovered_count": 0,
+    "recent": false,
+    "last_recovered_age_s": null
+  },
+  "tool_registry_fingerprint": "77b0dc73c342f471f672923f12e95e55be6dac0dc5d1baf72c12c1423cc133e8",
+  "tool_registry_captured_at": "2026-09-20T15:46:56Z",
+  "server_modules": {
+    "server_started_at": 1789919216.5386622,
+    "server_pid": 39648,
+    "watched_count": 70,
+    "stale": [],
+    "unreadable": [],
+    "unreadable_reasons": {},
+    "status": "fresh",
+    "observation_errors": {}
+  },
+  "tool_registry_source_stale": false,
+  "tool_registry_schema_signal": "fresh",
+  "tool_registry_remediation": null,
+  "daemon_source_remediation": null
+}
+{
+  "ready": {
+    "ready": false,
+    "reason": "no_run",
+    "next_step": "bridge_status",
+    "stale_threshold_s": 15.0,
+    "server_last_poll_age_s": null,
+    "client_last_poll_age_s": null,
+    "server_bound_last_poll_age_s": null,
+    "client_bound_last_poll_age_s": null
+  },
+  "server_peer": {
+    "last_poll_age_s": null,
+    "queue_depth": 0,
+    "capabilities": {
+      "state": "unknown",
+      "reason": "absent",
+      "announced_commands": [],
+      "registered_bridge_tools": [
+        "entities_query",
+        "infected_drive",
+        "inventory_attach",
+        "inventory_give",
+        "notify_players",
+        "object_anim",
+        "object_delete",
+        "object_inspect",
+        "player_teleport",
+        "query_all_players",
+        "query_get_in_condition",
+        "query_player_state",
+        "scene_raycast",
+        "surface_query",
+        "telemetry_read",
+        "vehicle_enter",
+        "vehicle_prepare_fixture",
+        "world_spawn",
+        "world_time_set",
+        "world_weather_set"
+      ],
+      "announced_without_registered_tool": [],
+      "registered_without_announced_command": [],
+      "unmapped_announced_commands": []
+    },
+    "version": null,
+    "version_state": "never_polled_this_generation",
+    "version_detail": "never_polled_this_generation",
+    "observed_this_generation": false,
+    "binding_state": "LEGACY_UNBOUND",
+    "instance_prefix": null,
+    "bound_last_poll_age_s": null
+  },
+  "client_peer": {
+    "last_poll_age_s": null,
+    "queue_depth": 0,
+    "capabilities": {
+      "state": "unknown",
+      "reason": "absent",
+      "announced_commands": [],
+      "registered_bridge_tools": [
+        "action_use",
+        "camera_get",
+        "camera_set",
+        "engine_set",
+        "key_press",
+        "player_respawn",
+        "restore_gameplay",
+        "ui_click",
+        "ui_dialog",
+        "ui_focus",
+        "ui_reload_layout",
+        "ui_set_text",
+        "ui_tree",
+        "vehicle_control",
+        "vehicle_get_in_client",
+        "vehicle_release",
+        "vehicle_telemetry",
+        "vehicle_trace"
+      ],
+      "announced_without_registered_tool": [],
+      "registered_without_announced_command": [],
+      "unmapped_announced_commands": []
+    },
+    "version": null,
+    "version_state": "never_polled_this_generation",
+    "version_detail": "never_polled_this_generation",
+    "observed_this_generation": false,
+    "binding_state": "LEGACY_UNBOUND",
+    "instance_prefix": null,
+    "bound_last_poll_age_s": null
+  },
+  "results_pending": 0,
+  "version_state": {
+    "server": "never_polled_this_generation",
+    "client": "never_polled_this_generation"
+  },
+  "server_version": "10",
+  "expected_game_version": null,
+  "require_version": true,
+  "fence": {
+    "mutation_rejects_by_code": {
+      "legacy_unbound": 0,
+      "instance_unknown": 0,
+      "instance_ambiguous": 0,
+      "instance_unattributed": 0,
+      "binding_retired": 0,
+      "instance_role_mismatch": 0,
+      "instance_peer_collision": 0,
+      "binding_not_ready": 0,
+      "creation_time_unreadable": 0
+    },
+    "unaccredited_mutation_enqueues": 0,
+    "unaccredited_polls_by_class": {},
+    "mutation_rejects_meta": {
+      "kind": "historical",
+      "window": "since_daemon_start",
+      "origin": "loopback_enqueue_fence",
+      "blocks_now": false
+    }
+  },
+  "daemon_generation": "205e2b2b537e44e891251b4edf233e45",
+  "coordination": {
+    "revision": 0,
+    "captured_at_monotonic": 78602.6333841,
+    "active": null,
+    "releasing": null,
+    "granting": null,
+    "handoff_pending": false,
+    "claimable": true,
+    "audit_fault": null,
+    "operation_tombstones": {
+      "count": 0,
+      "capacity": 128,
+      "saturated": false
+    },
+    "queue": [],
+    "cleanup_workers": {
+      "capacity": 4,
+      "active": 0,
+      "saturated": 0
+    }
+  },
+  "daemon_status": {
+    "schema": "dayz-mcp-daemon-status-v1",
+    "product": "dayz_mcp",
+    "mode": "daemon",
+    "daemon_generation": "205e2b2b537e44e891251b4edf233e45",
+    "coordination_revision": 0
+  },
+  "lifecycle": {
+    "runs": [],
+    "runs_retired": 28,
+    "retail_quarantine": false,
+    "retired_run_diagnostics": [],
+    "audit_rows_dropped": 0
+  },
+  "daemon_modules": {
+    "daemon_started_at": 1789918587.0129566,
+    "watched_count": 67,
+    "stale": [],
+    "unreadable": []
+  },
+  "credential_recovery": {
+    "recovered_count": 0,
+    "recent": false,
+    "last_recovered_age_s": null
+  },
+  "tool_registry_fingerprint": "77b0dc73c342f471f672923f12e95e55be6dac0dc5d1baf72c12c1423cc133e8",
+  "tool_registry_captured_at": "2026-09-20T15:46:56Z",
+  "server_modules": {
+    "server_started_at": 1789919216.5386622,
+    "server_pid": 39648,
+    "watched_count": 70,
+    "stale": [],
+    "unreadable": [],
+    "unreadable_reasons": {},
+    "status": "fresh",
+    "observation_errors": {}
+  },
+  "tool_registry_source_stale": false,
+  "tool_registry_schema_signal": "fresh",
+  "tool_registry_remediation": null,
+  "daemon_source_remediation": null
+}
