@@ -4,6 +4,8 @@ B2: the decision is a set difference against a snapshot of the CLIENT profile
 roots taken before the launch, never a wall-clock window, and a server dump is
 never a candidate. B1: a client that dies after dayz_test_run returned
 succeeded is named in runs_retired_recently once the daemon retires the run.
+r3: the baseline and the later-launch ceiling live in the daemon's
+ClientDumpRegistry (cross-process cases: test_client_dumps_cross_process).
 """
 
 from __future__ import annotations
@@ -18,14 +20,17 @@ from unittest.mock import patch
 
 import mcp_capture
 from dayz_mcp import (
-    client_steam_bootstrap,
     dayz_test_request,
     dayz_test_tool,
     native_launcher_transaction,
     steam_preflight,
 )
+from dayz_mcp.client_dump_registry import ClientDumpRegistry
 from dayz_mcp.client_steam_bootstrap import (
-    bind_client_dumps,
+    ClientDumpBaseline,
+    MAX_WIRE_DUMPS_PER_ROOT,
+    baseline_from_wire,
+    baseline_to_wire,
     diagnose_client_steam_bootstrap,
     diagnose_retired_client_death,
     snapshot_client_dumps,
@@ -74,10 +79,17 @@ def _retired_row(run_id: str) -> dict[str, object]:
     }
 
 
+def _launch(registry: ClientDumpRegistry, roots: list[Path], run_id: str) -> None:
+    """dayz_test_tool's order: open with the snapshot, daemon start, bind."""
+    token = registry.open(baseline_to_wire(snapshot_client_dumps(roots)))
+    assert token is not None
+    registry.note_launch()
+    assert registry.bind(token, run_id)
+
+
 class _Isolated(unittest.TestCase):
     def setUp(self) -> None:
-        with client_steam_bootstrap._bindings_lock:
-            client_steam_bootstrap._bindings.clear()
+        self.registry = ClientDumpRegistry()
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
@@ -140,52 +152,180 @@ class SolR1ReproTests(_Isolated):
 
 
 class RetiredRunBindingTests(_Isolated):
+    def _diagnose(self, run_id: str) -> str | None:
+        return diagnose_retired_client_death(
+            run_id, self.registry.bindings_for([run_id])
+        )
+
+    def _rows(self, *run_ids: str) -> list[dict[str, object]]:
+        rows = dayz_test_tool._runs_retired_recently(
+            [_retired_row(run_id) for run_id in run_ids],
+            self.registry.bindings_for(list(run_ids)),
+        )
+        assert rows is not None
+        return rows
+
     def test_late_death_with_new_marked_dump_is_named_on_the_retired_row(self) -> None:
         run_id = str(uuid.uuid4())
-        bind_client_dumps(run_id, snapshot_client_dumps([self.client]))
+        _launch(self.registry, [self.client], run_id)
         _dump(self.client, "03-04-46", _MARKED)
-        rows = dayz_test_tool._runs_retired_recently([_retired_row(run_id)])
-        self.assertEqual(rows[0]["client_death_diagnosis"], "steam_bootstrap")
+        self.assertEqual(
+            self._rows(run_id)[0]["client_death_diagnosis"], "steam_bootstrap"
+        )
 
     def test_late_death_without_new_dump_is_not_steam_bootstrap(self) -> None:
         _dump(self.client, "03-00-00", _MARKED)
         run_id = str(uuid.uuid4())
-        bind_client_dumps(run_id, snapshot_client_dumps([self.client]))
-        rows = dayz_test_tool._runs_retired_recently([_retired_row(run_id)])
-        self.assertIsNone(rows[0]["client_death_diagnosis"])
+        _launch(self.registry, [self.client], run_id)
+        self.assertIsNone(self._rows(run_id)[0]["client_death_diagnosis"])
 
     def test_unbound_run_publishes_null(self) -> None:
-        rows = dayz_test_tool._runs_retired_recently([_retired_row(str(uuid.uuid4()))])
+        _dump(self.client, "03-04-46", _MARKED)
+        rows = self._rows(str(uuid.uuid4()))
         self.assertIn("client_death_diagnosis", rows[0])
         self.assertIsNone(rows[0]["client_death_diagnosis"])
 
+    def test_no_bindings_from_the_daemon_publishes_null(self) -> None:
+        run_id = str(uuid.uuid4())
+        _launch(self.registry, [self.client], run_id)
+        _dump(self.client, "03-04-46", _MARKED)
+        for bindings in (None, {}, {run_id: None}, {run_id: {"baseline": {}}}):
+            rows = dayz_test_tool._runs_retired_recently(
+                [_retired_row(run_id)], bindings
+            )
+            self.assertIsNone(rows[0]["client_death_diagnosis"], bindings)
+
     def test_a_later_launch_on_the_same_roots_owns_the_dumps_after_it(self) -> None:
         first = str(uuid.uuid4())
-        bind_client_dumps(first, snapshot_client_dumps([self.client]))
+        _launch(self.registry, [self.client], first)
         second = str(uuid.uuid4())
-        bind_client_dumps(second, snapshot_client_dumps([self.client]))
+        _launch(self.registry, [self.client], second)
         _dump(self.client, "03-04-46", _MARKED)
-        self.assertIsNone(diagnose_retired_client_death(first))
-        self.assertEqual(diagnose_retired_client_death(second), "steam_bootstrap")
+        self.assertIsNone(self._diagnose(first))
+        self.assertEqual(self._diagnose(second), "steam_bootstrap")
 
     def test_a_dump_between_two_launches_stays_with_the_first(self) -> None:
         first = str(uuid.uuid4())
-        bind_client_dumps(first, snapshot_client_dumps([self.client]))
+        _launch(self.registry, [self.client], first)
         _dump(self.client, "03-04-46", _MARKED)
         second = str(uuid.uuid4())
-        bind_client_dumps(second, snapshot_client_dumps([self.client]))
-        self.assertEqual(diagnose_retired_client_death(first), "steam_bootstrap")
-        self.assertIsNone(diagnose_retired_client_death(second))
+        _launch(self.registry, [self.client], second)
+        self.assertEqual(self._diagnose(first), "steam_bootstrap")
+        self.assertIsNone(self._diagnose(second))
+
+
+class ClientDumpRegistryTests(_Isolated):
+    def _diagnose(self, run_id: str) -> str | None:
+        return diagnose_retired_client_death(
+            run_id, self.registry.bindings_for([run_id])
+        )
+
+    def _open(self) -> str | None:
+        return self.registry.open(
+            baseline_to_wire(snapshot_client_dumps([self.client]))
+        )
+
+    def test_a_launch_without_a_snapshot_closes_every_uncapped_run(self) -> None:
+        run_id = str(uuid.uuid4())
+        _launch(self.registry, [self.client], run_id)
+        _dump(self.client, "03-04-46", _MARKED)
+        self.registry.note_launch()
+        self.assertEqual(self.registry.bindings_for([run_id]), {})
+        self.assertIsNone(self._diagnose(run_id))
+
+    def test_a_capped_run_survives_later_launches(self) -> None:
+        first = str(uuid.uuid4())
+        _launch(self.registry, [self.client], first)
+        _dump(self.client, "03-04-46", _MARKED)
+        _launch(self.registry, [self.client], str(uuid.uuid4()))
+        self.registry.note_launch()
+        self.assertEqual(self._diagnose(first), "steam_bootstrap")
+
+    def test_the_launch_being_started_is_not_closed_by_its_own_start(self) -> None:
+        token = self._open()
+        self.registry.note_launch()
+        run_id = str(uuid.uuid4())
+        self.assertTrue(self.registry.bind(token, run_id))
+        self.assertIn(run_id, self.registry.bindings_for([run_id]))
+
+    def test_an_unbound_open_is_never_listed(self) -> None:
+        self._open()
+        self.assertEqual(self.registry.bindings_for([None, "", 7]), {})
+        self.assertEqual(self.registry.bindings_for("not-a-list"), {})
+
+    def test_an_evicted_run_is_null(self) -> None:
+        registry = ClientDumpRegistry(limit=2)
+        first = str(uuid.uuid4())
+        _launch(registry, [self.client], first)
+        _launch(registry, [self.root / "a"], str(uuid.uuid4()))
+        _launch(registry, [self.root / "b"], str(uuid.uuid4()))
+        self.assertEqual(registry.bindings_for([first]), {})
+
+    def test_a_run_id_bound_twice_is_not_attributable(self) -> None:
+        run_id = str(uuid.uuid4())
+        first, second = self._open(), self._open()
+        self.assertTrue(self.registry.bind(first, run_id))
+        self.assertTrue(self.registry.bind(second, run_id))
+        self.assertEqual(self.registry.bindings_for([run_id]), {})
+        self.assertFalse(self.registry.bind(second, str(uuid.uuid4())))
+        self.assertFalse(self.registry.bind("unknown", run_id))
+
+    def test_a_malformed_snapshot_records_and_caps_nothing(self) -> None:
+        run_id = str(uuid.uuid4())
+        _launch(self.registry, [self.client], run_id)
+        for bad in (
+            None,
+            {},
+            {"roots": [], "before": []},
+            {"roots": ["x"], "before": []},
+            {"roots": ["x"], "before": [[["notadump.txt", 1, 1, 1]]]},
+            {"roots": ["x"], "before": [[["ErrorMessage_a.mdmp", True, 1, 1]]]},
+            {"roots": [str(self.client)], "before": [None], "extra": 1},
+        ):
+            self.assertIsNone(self.registry.open(bad), bad)
+        _dump(self.client, "03-04-46", _MARKED)
+        self.assertEqual(self._diagnose(run_id), "steam_bootstrap")
+
+    def test_wire_round_trip_and_oversized_root(self) -> None:
+        _dump(self.client, "03-00-00", _UNMARKED)
+        baseline = snapshot_client_dumps([self.client, self.root / "missing"])
+        self.assertEqual(baseline_from_wire(baseline_to_wire(baseline)), baseline)
+        many = frozenset(
+            (f"ErrorMessage_{i}.mdmp", i, 1, 1)
+            for i in range(MAX_WIRE_DUMPS_PER_ROOT + 1)
+        )
+        wire = baseline_to_wire(ClientDumpBaseline(roots=("r",), before=(many,)))
+        self.assertEqual(wire, {"roots": ["r"], "before": [None]})
+
+
+class _DaemonBackedRuntime(_Runtime):
+    """The fake runtime plus the two daemon calls, on a real registry."""
+
+    def __init__(self, registry: ClientDumpRegistry, lifecycle: dict) -> None:
+        super().__init__(lifecycle)
+        self.registry = registry
+
+    async def client_dumps_open(self, baseline: dict) -> dict:
+        token = self.registry.open(baseline)
+        if token is None:
+            raise RuntimeError("invalid_baseline")
+        return {"token": token}
+
+    async def client_dumps_bind(self, token: str, run_id: str) -> dict:
+        return {"bound": self.registry.bind(token, run_id)}
 
 
 class LateDeathEndToEndTest(unittest.IsolatedAsyncioTestCase):
-    """dayz_test_run(mode=all) -> succeeded, client alive -> death -> reap."""
+    """dayz_test_run(mode=all) -> succeeded, client alive -> death -> reap.
+
+    The reap and the dumps are synthetic: the retired row is built here and
+    the dumps are written by the test, not by DayZ.
+    """
 
     RUN_ID = "12345678-1234-4234-8234-1234567890ab"
 
     def setUp(self) -> None:
-        with client_steam_bootstrap._bindings_lock:
-            client_steam_bootstrap._bindings.clear()
+        self.registry = ClientDumpRegistry()
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
@@ -232,11 +372,15 @@ class LateDeathEndToEndTest(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(patcher.stop)
 
     async def _run_all(
-        self, *, client_alive: bool, write_during_launch: list[tuple[Path, bytes]]
+        self,
+        *,
+        client_alive: bool,
+        write_during_launch: list[tuple[Path, bytes]],
+        write_while_queued: list[tuple[Path, bytes]] = (),  # type: ignore[assignment]
+        daemon_backed: bool = True,
     ) -> dict[str, object]:
         policy = _policy(dev_root=str(self.root))
-        runtime = _Runtime(
-            {
+        lifecycle = {
                 "runs": [
                     {
                         "run_id": self.RUN_ID,
@@ -247,6 +391,10 @@ class LateDeathEndToEndTest(unittest.IsolatedAsyncioTestCase):
                     }
                 ]
             }
+        runtime = (
+            _DaemonBackedRuntime(self.registry, lifecycle)
+            if daemon_backed
+            else _Runtime(lifecycle)
         )
 
         async def launch(raw_request: bytes, **kwargs: object) -> int:
@@ -254,6 +402,13 @@ class LateDeathEndToEndTest(unittest.IsolatedAsyncioTestCase):
                 raw_request, policies=(policy,)
             )
             self.assertEqual(parsed.payload["mode"], "all")
+            # Another client's run writes while this call waits in the queue.
+            for index, (root, body) in enumerate(write_while_queued):
+                _dump(root, f"03-03-{index:02d}", body)
+            # secure_launcher: the lease is granted, the launch executes, and
+            # the daemon's /lifecycle/start follows.
+            await kwargs["execution_started_cb"]()  # type: ignore[operator]
+            self.registry.note_launch()
             for index, (root, body) in enumerate(write_during_launch):
                 _dump(root, f"03-04-{index:02d}", body)
             kwargs["output_sink"](  # type: ignore[operator]
@@ -301,9 +456,36 @@ class LateDeathEndToEndTest(unittest.IsolatedAsyncioTestCase):
         # ~1 s later the client dies and writes its own marked dump; the
         # daemon reaps the run with all_processes_gone_or_foreign.
         _dump(self.client, "03-05-00", _MARKED)
-        rows = dayz_test_tool._runs_retired_recently([_retired_row(self.RUN_ID)])
+        rows = self._retired_rows()
         self.assertEqual(rows[0]["run_id"], self.RUN_ID)
         self.assertEqual(rows[0]["client_death_diagnosis"], "steam_bootstrap")
+
+    def _retired_rows(self) -> list[dict[str, object]]:
+        rows = dayz_test_tool._runs_retired_recently(
+            [_retired_row(self.RUN_ID)], self.registry.bindings_for([self.RUN_ID])
+        )
+        assert rows is not None
+        return rows
+
+    async def test_296b_late_death_without_a_daemon_record_is_null(self) -> None:
+        result = await self._run_all(
+            client_alive=True, write_during_launch=[], daemon_backed=False
+        )
+        self.assertEqual(result["status"], "succeeded")
+        _dump(self.client, "03-05-00", _MARKED)
+        self.assertIsNone(self._retired_rows()[0]["client_death_diagnosis"])
+
+    async def test_a_dump_written_while_queued_is_in_the_baseline(self) -> None:
+        # Taken when the launch leaves the queue: another run's marked dump
+        # written during the wait cannot name this run's death.
+        result = await self._run_all(
+            client_alive=False,
+            write_during_launch=[],
+            write_while_queued=[(self.client, _MARKED)],
+        )
+        self.assertEqual(result["error_code"], "client_dead_after_ack")
+        self.assertIsNone(result["client_death_diagnosis"])
+        self.assertIsNone(self._retired_rows()[0]["client_death_diagnosis"])
 
     async def test_296b_late_death_without_new_marked_dump_is_not_named(self) -> None:
         _dump(self.client, "02-00-00", _MARKED)
@@ -311,8 +493,7 @@ class LateDeathEndToEndTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "succeeded")
         _dump(self.server, "03-05-00", _MARKED)
         _dump(self.client, "03-05-01", _UNMARKED)
-        rows = dayz_test_tool._runs_retired_recently([_retired_row(self.RUN_ID)])
-        self.assertIsNone(rows[0]["client_death_diagnosis"])
+        self.assertIsNone(self._retired_rows()[0]["client_death_diagnosis"])
 
     async def test_death_before_return_reads_only_the_new_client_dump(self) -> None:
         result = await self._run_all(

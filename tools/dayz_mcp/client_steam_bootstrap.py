@@ -7,8 +7,6 @@ unit-tested on hosts that cannot bind kernel32.
 from __future__ import annotations
 
 import os
-import threading
-from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -156,47 +154,107 @@ def diagnose_client_steam_bootstrap(
 
 # Late death (296b): dayz_test_run returned succeeded with the client alive and
 # the client died about a second later; the daemon then reaped the run. The
-# baseline taken before that launch is kept here, keyed by run_id, so the
-# retired-run view can still name the death. In-process only: a restarted MCP
-# process has no binding and publishes null, never a guess.
-_BINDINGS_LIMIT = 32
-_bindings: OrderedDict[str, list[ClientDumpBaseline | None]] = OrderedDict()
-_bindings_lock = threading.Lock()
+# client profile is shared by every MCP process of a project, so the baseline
+# and the "a later launch caps it" ceiling live in the daemon
+# (client_dump_registry), not here. These helpers carry a baseline over the
+# loopback wire and read back what the daemon holds for a retired run.
+MAX_WIRE_ROOTS = 8
+MAX_WIRE_DUMPS_PER_ROOT = 1024
+_MAX_WIRE_ROOT_CHARS = 1024
+_MAX_WIRE_NAME_CHARS = 255
 
 
-def bind_client_dumps(run_id: str, baseline: ClientDumpBaseline) -> None:
-    """Bind a pre-launch baseline to run_id and close earlier bindings on its roots.
+def _is_wire_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
-    Every earlier run whose client used one of these roots gets this baseline
-    as its ceiling (if it has none yet): dumps that appear from now on belong
-    to this launch, not to them.
+
+def baseline_to_wire(baseline: ClientDumpBaseline) -> dict[str, object] | None:
+    """JSON form of a baseline, or None if it cannot travel intact.
+
+    A root with more dumps than the wire carries travels as null: an
+    unreadable "before" set, which never names a death.
     """
-    shared = set(baseline.roots)
-    with _bindings_lock:
-        for other_id, entry in _bindings.items():
-            if other_id == run_id or entry[1] is not None:
-                continue
-            if shared.intersection(entry[0].roots):
-                entry[1] = baseline
-        _bindings.pop(run_id, None)
-        _bindings[run_id] = [baseline, None]
-        while len(_bindings) > _BINDINGS_LIMIT:
-            _bindings.popitem(last=False)
+    if not baseline.roots or len(baseline.roots) > MAX_WIRE_ROOTS:
+        return None
+    before: list[object] = []
+    for keys in baseline.before:
+        if keys is None or len(keys) > MAX_WIRE_DUMPS_PER_ROOT:
+            before.append(None)
+            continue
+        before.append([list(key) for key in sorted(keys)])
+    return {"roots": list(baseline.roots), "before": before}
 
 
-def diagnose_retired_client_death(run_id: object) -> str | None:
+def _key_from_wire(value: object) -> _DumpKey | None:
+    if not isinstance(value, list) or len(value) != 4:
+        return None
+    name, ino, size, mtime_ns = value
+    if (
+        not isinstance(name, str)
+        or len(name) > _MAX_WIRE_NAME_CHARS
+        or not _is_error_mdmp(name)
+    ):
+        return None
+    if not all(_is_wire_int(number) for number in (ino, size, mtime_ns)):
+        return None
+    if ino < 0 or size < 0:
+        return None
+    return (name, ino, size, mtime_ns)
+
+
+def baseline_from_wire(value: object) -> ClientDumpBaseline | None:
+    """Strict inverse of baseline_to_wire; None for anything malformed."""
+    if not isinstance(value, dict) or set(value) != {"roots", "before"}:
+        return None
+    roots, before = value["roots"], value["before"]
+    if not isinstance(roots, list) or not isinstance(before, list):
+        return None
+    if not roots or len(roots) > MAX_WIRE_ROOTS or len(before) != len(roots):
+        return None
+    if any(
+        not isinstance(root, str) or not root or len(root) > _MAX_WIRE_ROOT_CHARS
+        for root in roots
+    ):
+        return None
+    sets: list[frozenset[_DumpKey] | None] = []
+    for keys in before:
+        if keys is None:
+            sets.append(None)
+            continue
+        if not isinstance(keys, list) or len(keys) > MAX_WIRE_DUMPS_PER_ROOT:
+            return None
+        parsed = [_key_from_wire(key) for key in keys]
+        if any(key is None for key in parsed):
+            return None
+        sets.append(frozenset(parsed))  # type: ignore[arg-type]
+    return ClientDumpBaseline(roots=tuple(roots), before=tuple(sets))
+
+
+def diagnose_retired_client_death(
+    run_id: object, bindings: object = None
+) -> str | None:
     """client_death_diagnosis for a retired run: steam_bootstrap or null.
 
-    Only the newest client dump that appeared between this run's pre-launch
-    baseline and the next launch on the same roots is read.
+    ``bindings`` is the daemon's client_dump_bindings map (run_id ->
+    {"baseline", "ceiling"}). The daemon lists a run only while it can prove
+    which launch came next on its roots; any gap (no record, evicted, daemon
+    restarted, malformed) is null. Only the newest client dump that appeared
+    between this run's pre-launch baseline and the next launch on the same
+    roots is read.
     """
-    if not isinstance(run_id, str):
+    if not isinstance(run_id, str) or not isinstance(bindings, dict):
         return None
-    with _bindings_lock:
-        entry = _bindings.get(run_id)
-        if entry is None:
+    entry = bindings.get(run_id)
+    if not isinstance(entry, dict) or set(entry) != {"baseline", "ceiling"}:
+        return None
+    baseline = baseline_from_wire(entry["baseline"])
+    if baseline is None:
+        return None
+    ceiling: ClientDumpBaseline | None = None
+    if entry["ceiling"] is not None:
+        ceiling = baseline_from_wire(entry["ceiling"])
+        if ceiling is None:
             return None
-        baseline, ceiling = entry[0], entry[1]
     if _new_dump_names_api_not_loaded(baseline, ceiling):
         return "steam_bootstrap"
     return None

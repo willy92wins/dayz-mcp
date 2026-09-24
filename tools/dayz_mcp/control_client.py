@@ -348,6 +348,21 @@ class ControlClient:
     async def session_status(self) -> dict[str, object]:
         return await self._session_call("/session/status")
 
+    async def client_dumps_open(self, baseline: dict[str, object]) -> dict[str, object]:
+        return await self._session_call(
+            "/client-dumps", {"op": "open", "baseline": baseline}
+        )
+
+    async def client_dumps_bind(self, token: str, run_id: str) -> dict[str, object]:
+        return await self._session_call(
+            "/client-dumps", {"op": "bind", "token": token, "run_id": run_id}
+        )
+
+    async def client_dumps_get(self, run_ids: list[str]) -> dict[str, object]:
+        return await self._session_call(
+            "/client-dumps", {"op": "get", "run_ids": list(run_ids)}
+        )
+
     async def lifecycle_status(self) -> dict[str, object]:
         return await self._session_call("/lifecycle/status")
 

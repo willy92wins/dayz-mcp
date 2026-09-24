@@ -20,6 +20,7 @@ from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 from dayz_mcp import daemon_credential, orphan_guard, pinned_keyfile, ui_dialog
+from dayz_mcp.client_dump_registry import ClientDumpRegistry
 from dayz_mcp.core import (
     BLOCKED_VERSION_STATES,
     EXPECTED_BRIDGE_VERSION,
@@ -147,6 +148,9 @@ LIFECYCLE_ROUTES = {
     "/lifecycle/reap": "reap",
     "/lifecycle/status": "status",
 }
+# 296b r3: the pre-launch client dump snapshot of a run (client_dump_registry).
+CLIENT_DUMPS_ROUTE = "/client-dumps"
+MAX_CLIENT_DUMP_RUN_IDS = 64
 ADMIN_ROUTES = {
     "/admin/release": "release",
     "/admin/reconcile": "reconcile",
@@ -951,6 +955,9 @@ class ServerState:
         self.lifecycle_recovery_fault_store: object | None = None
         self.audit_writer: object | None = None
         self.lifecycle: object | None = None
+        # 296b r3: which client launch owns which new ErrorMessage dump. Shared
+        # by every MCP process; in memory only.
+        self.client_dumps = ClientDumpRegistry()
         self.retail_probe: Callable[[], dict[str, object]] | None = None
         self.daemon_generation: str | None = None
         self._lock = threading.RLock()
@@ -3128,6 +3135,11 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_admin(admin_action)
             return
 
+        if parsed.path == CLIENT_DUMPS_ROUTE:
+            self.state.touch_client()
+            self._handle_client_dumps()
+            return
+
         if parsed.path == "/result":
             self._handle_result(qs)
             return
@@ -3502,6 +3514,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(403, {"error": "lease_invalid"})
             return
         if action == "start":
+            # 296b r3: from here on this launch can write client dumps; a run
+            # no pre-launch snapshot capped can no longer claim them.
+            self.state.client_dumps.note_launch()
             result = lifecycle.start_run(client, token, body.get("request"))
         elif action == "ack":
             result = lifecycle.ack_run(
@@ -3535,6 +3550,35 @@ class Handler(BaseHTTPRequestHandler):
         status = int(result.pop("_http_status", 200))
         result = self._persist_coordination(result)
         self._json(status, result)
+
+    def _handle_client_dumps(self) -> None:
+        body = self._read_json()
+        if body is None:
+            return
+        try:
+            ClientIdentity.from_payload(body.get("identity"))
+        except ValueError:
+            self._json(400, {"error": "invalid_identity"})
+            return
+        registry = self.state.client_dumps
+        op = body.get("op")
+        if op == "open":
+            token = registry.open(body.get("baseline"))
+            if token is None:
+                self._json(400, {"error": "invalid_baseline"})
+                return
+            self._json(200, {"token": token})
+        elif op == "bind":
+            bound = registry.bind(body.get("token"), body.get("run_id"))
+            self._json(200, {"bound": bound})
+        elif op == "get":
+            run_ids = body.get("run_ids")
+            if not isinstance(run_ids, list) or len(run_ids) > MAX_CLIENT_DUMP_RUN_IDS:
+                self._json(400, {"error": "invalid_run_ids"})
+                return
+            self._json(200, {"bindings": registry.bindings_for(run_ids)})
+        else:
+            self._json(400, {"error": "invalid_op"})
 
     def _handle_admin(self, action: str) -> None:
         body = self._read_json()

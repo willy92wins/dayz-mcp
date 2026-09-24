@@ -90,8 +90,8 @@ def _diagnostic(run_id: str, **overrides: object) -> dict[str, object]:
 
 
 def _published(item: dict[str, object]) -> dict[str, object]:
-    # runs_retired_recently adds client_death_diagnosis (296b); null when this
-    # process bound no client dump baseline to the run.
+    # runs_retired_recently adds client_death_diagnosis (296b); null when the
+    # daemon holds no client dump snapshot for the run (296b r3).
     return {**item, "client_death_diagnosis": None}
 
 
@@ -149,9 +149,15 @@ class PlenoLeaseAndOrphansTest(unittest.IsolatedAsyncioTestCase):
 
     async def _session_status(self, payload: dict[str, object]) -> dict:
         status = AsyncMock(return_value=copy.deepcopy(payload))
-        with patch.object(self.runtime, "session_status", new=status):
+        # 296b r3: the daemon holds no client dump snapshot for these runs.
+        dumps = AsyncMock(return_value={"bindings": {}})
+        with (
+            patch.object(self.runtime, "session_status", new=status),
+            patch.object(self.runtime, "client_dumps_get", new=dumps),
+        ):
             result = _content_json(await self.app.call_tool("session_status", {}))
         status.assert_awaited_once_with()
+        self.dumps_get = dumps
         return result
 
     async def test_t2_runs_retired_recently_keeps_a_valid_diagnostic(self) -> None:
@@ -162,6 +168,7 @@ class PlenoLeaseAndOrphansTest(unittest.IsolatedAsyncioTestCase):
             result["runs_retired_recently"], [_published(_diagnostic(_RUN_A))]
         )
         self.assertNotIn("retired_run_diagnostics", result)
+        self.dumps_get.assert_awaited_once_with([_RUN_A])
 
     async def test_t2_runs_retired_recently_drops_path_non_token_and_extra_field(
         self,
@@ -188,6 +195,7 @@ class PlenoLeaseAndOrphansTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kept, [_published(item) for item in newest_first[:16]])
         self.assertEqual(kept[0]["run_id"], _run_id(0))
         self.assertNotEqual(kept[-1]["run_id"], _run_id(16))
+        self.dumps_get.assert_awaited_once_with([_run_id(i) for i in range(17)])
 
     async def test_t2_runs_retired_recently_is_null_when_lifecycle_unread(
         self,
@@ -196,6 +204,7 @@ class PlenoLeaseAndOrphansTest(unittest.IsolatedAsyncioTestCase):
         result = await self._session_status(payload)
         self.assertIsNone(result["runs_retired_recently"])
         self.assertIn("runs_retired_recently", result)
+        self.dumps_get.assert_not_awaited()
 
     async def test_t2_r2_session_heartbeat_keeps_low_level_marker(self) -> None:
         tools = {tool.name: tool for tool in await self.app.list_tools()}

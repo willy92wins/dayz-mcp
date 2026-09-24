@@ -67,7 +67,7 @@ from dayz_mcp.server_freshness import (
     source_stale,
 )
 from dayz_mcp import log_tail, result_prune
-from dayz_mcp.loopback import LoopbackServer, read_key
+from dayz_mcp.loopback import MAX_CLIENT_DUMP_RUN_IDS, LoopbackServer, read_key
 from dayz_mcp.server_cli import CLIENT_PLATFORM_ALIASES, build_server_parser
 from dayz_mcp.process_lifecycle import (
     empty_box,
@@ -1868,6 +1868,18 @@ class ClientRuntime:
 
     async def session_status(self) -> dict[str, Any]:
         return await self._control_with_lazy_spawn(self._control.session_status)
+
+    # 296b r3: the daemon's client dump registry. Never spawns a daemon: a
+    # daemon that is not running holds no record, and the caller maps any
+    # error to a null diagnosis.
+    async def client_dumps_open(self, baseline: dict[str, object]) -> dict[str, Any]:
+        return await self._control.client_dumps_open(baseline)
+
+    async def client_dumps_bind(self, token: str, run_id: str) -> dict[str, Any]:
+        return await self._control.client_dumps_bind(token, run_id)
+
+    async def client_dumps_get(self, run_ids: list[str]) -> dict[str, Any]:
+        return await self._control.client_dumps_get(run_ids)
 
     async def session_box_status(
         self,
@@ -4492,12 +4504,40 @@ def _lease_renewal_contract(ttl_s: float) -> str:
     )
 
 
-def _attach_runs_retired_recently(status: dict[str, Any]) -> None:
+async def _client_dump_bindings(client: object, status: dict[str, Any]) -> object:
+    """296b r3: the daemon's dump snapshot of each retired run, or None.
+
+    An older daemon, a failed call or a malformed answer is None, and every
+    row's client_death_diagnosis is then null.
+    """
+    raw = status.get("retired_run_diagnostics")
+    if not isinstance(raw, list):
+        return None
+    run_ids = [
+        item["run_id"]
+        for item in raw
+        if isinstance(item, dict) and isinstance(item.get("run_id"), str)
+    ][:MAX_CLIENT_DUMP_RUN_IDS]
+    if not run_ids:
+        return None
+    try:
+        # Called directly, not through getattr (security_runtime_audit); a
+        # client without it raises AttributeError, which is null here too.
+        response = await client.client_dumps_get(run_ids)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+    bindings = response.get("bindings") if isinstance(response, dict) else None
+    return bindings if isinstance(bindings, dict) else None
+
+
+def _attach_runs_retired_recently(
+    status: dict[str, Any], bindings: object = None
+) -> None:
     if "retired_run_diagnostics" not in status:
         status["runs_retired_recently"] = None
         return
     status["runs_retired_recently"] = dayz_test_tool._runs_retired_recently(
-        status.pop("retired_run_diagnostics")
+        status.pop("retired_run_diagnostics"), bindings
     )
 
 
@@ -4812,7 +4852,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     box["queue_offer"] = None
                 status["box"] = box
             status["blocked_on"] = _session_status_blocked_on(status)
-            _attach_runs_retired_recently(status)
+            _attach_runs_retired_recently(
+                status, await _client_dump_bindings(client, status)
+            )
             return _with_ok_next_step(status, "session_status")
 
     async def report_dayz_progress(
