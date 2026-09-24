@@ -19,7 +19,7 @@ except ModuleNotFoundError:  # Python < 3.11
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 PYPROJECT = TOOLS_DIR / "pyproject.toml"
 REQUIREMENTS = TOOLS_DIR / "requirements-mcp.txt"
-_EXACT_PIN = r"^[A-Za-z0-9._-]+==[0-9][0-9A-Za-z.+!-]*$"
+_EXACT_PIN = r"^[A-Za-z0-9._-]+==[0-9][0-9A-Za-z.+!-]*(\s*;\s*.+)?$"
 
 
 def _pinned_requirements() -> list[str]:
