@@ -79,6 +79,76 @@ class ClientSteamBootstrapDiagnosisTests(unittest.TestCase):
             )
         )
 
+    def test_observed_with_mdmp_api_loaded_no_diagnoses_steam_bootstrap(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            profile_dir = Path(tmp_dir)
+            mdmp_file = profile_dir / "ErrorMessage_DayZDiag_x64_2026-09-24_03-04-46.mdmp"
+            mdmp_file.write_bytes(
+                b"header\x00data\x00SteamInternal_SetMinidumpSteamID ... [API loaded no]\x00trailer"
+            )
+
+            result = diagnose_client_steam_bootstrap(
+                error_code="client_dead_after_ack",
+                client_alive=False,
+                steam_startup="observed",
+                artifacts_paths=[str(profile_dir)],
+            )
+            self.assertEqual(result, "steam_bootstrap")
+
+    def test_observed_with_mdmp_without_marker_returns_none(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            profile_dir = Path(tmp_dir)
+            mdmp_file = profile_dir / "ErrorMessage_DayZDiag_x64_2026-09-24_03-04-46.mdmp"
+            mdmp_file.write_bytes(b"some other crash minidump without marker")
+
+            result = diagnose_client_steam_bootstrap(
+                error_code="client_dead_after_ack",
+                client_alive=False,
+                steam_startup="observed",
+                artifacts_paths=[str(profile_dir)],
+            )
+            self.assertIsNone(result)
+
+    def test_observed_with_no_mdmp_returns_none(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            profile_dir = Path(tmp_dir)
+            (profile_dir / "DayZDiag_x64.RPT").write_text("just rpt", encoding="utf-8")
+
+            result = diagnose_client_steam_bootstrap(
+                error_code="client_dead_after_ack",
+                client_alive=False,
+                steam_startup="observed",
+                artifacts_paths=[str(profile_dir)],
+            )
+            self.assertIsNone(result)
+
+    def test_mdmp_marker_ignored_if_client_alive(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            profile_dir = Path(tmp_dir)
+            mdmp_file = profile_dir / "ErrorMessage_DayZDiag_x64_2026-09-24_03-04-46.mdmp"
+            mdmp_file.write_bytes(b"[API loaded no]")
+
+            result = diagnose_client_steam_bootstrap(
+                error_code="client_dead_after_ack",
+                client_alive=True,
+                steam_startup="observed",
+                artifacts_paths=[str(profile_dir)],
+            )
+            self.assertIsNone(result)
+
+
 
 @unittest.skipUnless(_WINDOWS, "FastMCP server import binds Win32 kernel32")
 class PublicSurfaceWindowsTests(unittest.IsolatedAsyncioTestCase):

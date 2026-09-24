@@ -1169,6 +1169,7 @@ def _compact_result(
             error_code=terminal.error_code,
             client_alive=client_alive,
             steam_startup=startup,
+            artifacts_paths=artifacts_paths,
         ),
     }
 
