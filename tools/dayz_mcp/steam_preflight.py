@@ -22,6 +22,17 @@ from ctypes import wintypes
 
 STEAM_SESSION_STALE = "steam_session_stale"
 REMEDIATION = "restart_steam_and_wait_for_active_process_match"
+# fb-20260924-011620-678b: a Steam that is not running at all is its own refusal,
+# with the cause and the next step in words an agent can act on. It is named only
+# on a positive read of the process list with no steam.exe in it; a host that
+# cannot be read stays steam_session_stale, because unknown is not "closed".
+STEAM_NOT_RUNNING = "steam_not_running"
+REMEDIATION_STEAM_NOT_RUNNING = (
+    "Steam is not running: no steam.exe process was found, and the DayZ client "
+    "cannot start without it. Start Steam, wait until it has finished logging "
+    "in, then retry dayz_test_run; or retry with auto_remediate_steam=true to "
+    "let dayz-mcp start Steam before it launches the client."
+)
 _ACTIVE_PROCESS_KEY = r"Software\Valve\Steam\ActiveProcess"
 _STEAM_KEY = r"Software\Valve\Steam"
 _MAX_LIVE_PIDS = 8
@@ -297,6 +308,35 @@ def _stale(registered_pid: int | None, live_pids: tuple[int, ...]) -> SteamSessi
     )
 
 
+def _not_running(registered_pid: int | None) -> SteamSessionResult:
+    return SteamSessionResult(
+        error_code=STEAM_NOT_RUNNING,
+        steam_registered_pid=registered_pid,
+        steam_live_pids=(),
+        remediation=REMEDIATION_STEAM_NOT_RUNNING,
+    )
+
+
+def _registered_is_live_steam(
+    provider: SteamPreflightProvider, registered_pid: int | None
+) -> bool:
+    """Whether the registered pid is a live steam.exe right now.
+
+    Only used after the process list came back empty: a steam.exe that started
+    between the two reads must not be reported as a closed Steam. A pid that is
+    gone, reused by another program, or cannot be probed is not a live Steam.
+    """
+    if registered_pid is None:
+        return False
+    try:
+        if not provider.process_exists(registered_pid):
+            return False
+        image_path = provider.process_image_path(registered_pid)
+    except Exception:
+        return False
+    return isinstance(image_path, str) and ntpath.basename(image_path).casefold() == "steam.exe"
+
+
 def _read_stable_snapshot(provider: SteamPreflightProvider) -> SteamActiveProcessSnapshot | None:
     try:
         first = provider.read_active_process()
@@ -326,8 +366,21 @@ def evaluate_steam_session(
 ) -> SteamSessionResult:
     """Return PASS internally only for the exact registered Steam process.
 
-    Any inability to obtain two identical registry snapshots, enumerate processes,
-    or resolve the registered process image fails closed as ``steam_session_stale``.
+    A process list that was read and holds no steam.exe, while the registered
+    pid is not a live steam.exe either, fails closed as ``steam_not_running``
+    (fb-20260924-011620-678b). Any other refusal, including any inability to
+    obtain two identical registry snapshots, enumerate processes, or resolve
+    the registered process image, fails closed as ``steam_session_stale``.
+
+    The registry is read through this process's own view. The DayZ client is a
+    Popen child of the daemon (ProcessLifecycle._launch) and inherits that same
+    view, so the daemon-side gate judges the copy of ActiveProcess the client
+    will read. An app's registry virtualization (MSIX) can hold a different
+    copy from the user's real HKCU; judging that other copy lets the gate pass
+    while the client stops at Steam initialization, as on 2026-09-24. The early
+    check in dayz_test_tool runs in the MCP client process and reads that
+    client's view instead. ``steam_not_running`` rests on the process list,
+    which no registry view changes.
     """
 
     selected_provider = WindowsSteamPreflightProvider() if provider is None else provider
@@ -339,6 +392,8 @@ def evaluate_steam_session(
     live_pids = _safe_live_pids(selected_provider)
     if live_pids is None:
         return _stale(registered_pid, ())
+    if live_pids == () and not _registered_is_live_steam(selected_provider, registered_pid):
+        return _not_running(registered_pid)
     if registered_pid is None or not _is_int(snapshot.active_user) or snapshot.active_user == 0:
         return _stale(registered_pid, live_pids)
 
@@ -747,6 +802,8 @@ def _restart_steam_session(
 
 __all__ = [
     "REMEDIATION",
+    "REMEDIATION_STEAM_NOT_RUNNING",
+    "STEAM_NOT_RUNNING",
     "STEAM_SESSION_STALE",
     "SteamActiveProcessSnapshot",
     "SteamPreflightProvider",

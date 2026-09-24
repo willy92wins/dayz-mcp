@@ -2682,10 +2682,14 @@ RUN_ID_MATRIX_RUN_ID_DESCRIPTION = (
     "mode=server|all (bad_dayz_test_request otherwise)."
 )
 AUTO_REMEDIATE_STEAM_DESCRIPTION = (
-    "Opt-in. When the Steam preflight refuses, close the stale Steam session "
-    "and retry the preflight once instead of failing the run. Off by default "
-    "because it ends a session the caller may be using; when on, the result "
-    "reports steam_remediated and how long it took."
+    "Opt-in. Default false. When the Steam gate refuses (steam_not_running or "
+    "steam_session_stale), dayz-mcp prepares Steam once before it launches the "
+    "client: it rewrites Steam's registered pid when exactly one steam.exe runs "
+    "with a logged-in user, otherwise restarts Steam (only starts it when no "
+    "steam.exe runs), then waits for Steam's startup. A running Steam with no "
+    "logged-in user is left alone and the launch is refused. Off by default "
+    "because a restart ends a Steam session the caller may be using. On success "
+    "the result reports steam_pid_repair, steam_restarted and steam_startup."
 )
 TAKEOVER_DESCRIPTION = (
     "Opt-in. Default false. When another session's RUNNING run or an "

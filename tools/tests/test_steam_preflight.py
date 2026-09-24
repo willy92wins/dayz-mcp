@@ -135,8 +135,15 @@ class SteamPreflightTests(unittest.TestCase):
 
     def test_rejects_registry_access_denied_and_partial_or_changing_snapshots(self) -> None:
         denied = evaluate_steam_session(FakeSteamProvider([PermissionError("denied")]))
+        # A live Steam keeps this case about the partial snapshot: with no
+        # steam.exe at all it is steam_not_running (fb-20260924-011620-678b).
         partial = evaluate_steam_session(
-            FakeSteamProvider([active_process(41, None), active_process(41, None)])
+            FakeSteamProvider(
+                [active_process(41, None), active_process(41, None)],
+                existing={41},
+                images={41: r"C:\\Steam\\steam.exe"},
+                steam_pids=(41,),
+            )
         )
         changing = evaluate_steam_session(
             FakeSteamProvider([active_process(41), active_process(42)])

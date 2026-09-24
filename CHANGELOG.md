@@ -18,6 +18,7 @@ Merged to `main` after [v1.2](https://github.com/willy92wins/dayz-mcp/releases/t
 
 ### Changed
 
+- `dayz_test_run` refuses a closed Steam (no `steam.exe` running) with `error_code=steam_not_running` and a remediation that names the cause and the next step (start Steam and wait for its login, or retry with `auto_remediate_steam=true`), in validation, before any DayZ process starts. It used to be `steam_session_stale` with the generic `restart_steam_and_wait_for_active_process_match`. A running Steam with an invalid registration, and a host whose registry or process list cannot be read, still return `steam_session_stale`; the daemon-side gate keeps its codes (fb-20260924-011620-678b).
 - `world_time_set` carries minute overflow into the hour and day, sets `ok:0` when a complete date echo mismatches, and returns `multiplier_applied=null` with `warnings=["multiplier_unconfirmed"]` because the engine exposes no multiplier getter (#35).
 - `pipeline_feedback` publishes its title, body and project length limits in `inputSchema` (#32).
 - `fixture_not_ready` from `vehicle_prepare_fixture` carries the observed fixture telemetry under `observed=` (#34).
