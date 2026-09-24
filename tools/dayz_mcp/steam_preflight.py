@@ -35,6 +35,18 @@ REMEDIATION_STEAM_NOT_RUNNING = (
     "in, then retry dayz_test_run; or retry with auto_remediate_steam=true to "
     "let dayz-mcp start Steam before it launches the client."
 )
+# 296b: the early check reads the real HKCU through WMI (pywin32). Without pywin32
+# it falls back to this app's virtualized copy, which may be the stale one, and the
+# daemon it spawns falls back to Popen and inherits the same copy. A stale verdict
+# reached that way is still a refusal, but its cause is the installation, so the
+# remediation says so instead of sending the agent to restart a healthy Steam.
+REAL_REGISTRY_PYWIN32_MISSING = "pywin32_missing"
+REMEDIATION_PYWIN32_MISSING = (
+    "pywin32 is not installed in the dayz-mcp environment, so Steam's registration "
+    "could only be read through this app's private (possibly stale) registry copy. "
+    "Re-run the dayz-mcp installer (requirements-mcp.txt declares pywin32), restart "
+    "the MCP client, then retry dayz_test_run."
+)
 _ACTIVE_PROCESS_KEY = r"Software\Valve\Steam\ActiveProcess"
 _STEAM_KEY = r"Software\Valve\Steam"
 _MAX_LIVE_PIDS = 8
@@ -125,6 +137,9 @@ class WindowsSteamPreflightProvider:
     """
 
     _real_registry = False
+    # Why the last real-registry read fell back to winreg: None when it did not,
+    # REAL_REGISTRY_PYWIN32_MISSING, or "wmi_error".
+    real_registry_unavailable: str | None = None
 
     def __init__(self, *, real_registry: bool = False) -> None:
         self._real_registry = real_registry
@@ -151,11 +166,16 @@ class WindowsSteamPreflightProvider:
 
     def read_active_process(self) -> SteamActiveProcessSnapshot:
         if self._real_registry:
+            self.real_registry_unavailable = None
             try:
                 pid = wmi_host.read_hkcu_dword(_ACTIVE_PROCESS_KEY, "pid")
                 active_user = wmi_host.read_hkcu_dword(_ACTIVE_PROCESS_KEY, "ActiveUser")
+            except ImportError:
+                pid = active_user = None
+                self.real_registry_unavailable = REAL_REGISTRY_PYWIN32_MISSING
             except Exception:
                 pid = active_user = None
+                self.real_registry_unavailable = "wmi_error"
             if pid is not None and active_user is not None:
                 return SteamActiveProcessSnapshot(pid=pid, active_user=active_user)
         import winreg
@@ -416,11 +436,26 @@ def evaluate_steam_session(
     daemon-side gate still judges the inherited copy and refuses there.
     ``steam_not_running`` rests on the process list, which no registry view
     changes.
+
+    A stale verdict reached because pywin32 is missing (the real HKCU could not
+    be read) keeps its error code and carries REMEDIATION_PYWIN32_MISSING: the
+    refusal stands, and its cause is named (296b).
     """
 
     selected_provider = (
         WindowsSteamPreflightProvider(real_registry=True) if provider is None else provider
     )
+    result = _evaluate_with(selected_provider)
+    if (
+        result.error_code == STEAM_SESSION_STALE
+        and getattr(selected_provider, "real_registry_unavailable", None)
+        == REAL_REGISTRY_PYWIN32_MISSING
+    ):
+        return replace(result, remediation=REMEDIATION_PYWIN32_MISSING)
+    return result
+
+
+def _evaluate_with(selected_provider: SteamPreflightProvider) -> SteamSessionResult:
     snapshot = _read_stable_snapshot(selected_provider)
     if snapshot is None:
         return _stale(None, ())

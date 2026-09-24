@@ -24,6 +24,19 @@ _SW_HIDE = 0
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 
+def pywin32_available() -> bool:
+    """Whether pywin32's COM modules import here. Without them every call below
+    raises ImportError and its callers fall back to their virtualized view, so a
+    missing pywin32 must be named, not only absorbed (296b). The installer
+    probes the same two imports."""
+    try:
+        import pythoncom  # noqa: F401, PLC0415
+        import win32com.client  # noqa: F401, PLC0415
+    except ImportError:
+        return False
+    return True
+
+
 @contextmanager
 def _com() -> Iterator[Any]:
     """This thread's COM, initialized for the call when it was not. A thread already

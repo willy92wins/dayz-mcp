@@ -71,6 +71,17 @@ class SpawnOutsideAppTest(unittest.TestCase):
     def test_missing_pywin32_falls_back_to_popen(self) -> None:
         self._assert_falls_back(side_effect=ImportError("No module named 'win32com'"))
 
+    def test_missing_pywin32_is_named_in_the_spawn_log(self) -> None:
+        logs: list[str] = []
+        with patch.object(
+            daemon, "_wmi_create_process", side_effect=ImportError("No module named 'pythoncom'")
+        ), patch.object(daemon.subprocess, "Popen", return_value=_FakePopen(98)):
+            pid = daemon.spawn_detached(list(_ARGV), log=logs.append, cwd=None, outside_app=True)
+        self.assertEqual(pid, 98)
+        named = [line for line in logs if "pywin32 missing" in line]
+        self.assertEqual(len(named), 1, logs)
+        self.assertIn("installer", named[0])
+
     def test_com_failure_falls_back_to_popen(self) -> None:
         self._assert_falls_back(side_effect=RuntimeError("com_error -2147217405"))
 
@@ -235,6 +246,113 @@ class RealRegistryProviderTest(unittest.TestCase):
         # An empty process list is steam_not_running since fb-20260924-011620-678b.
         self.assertEqual(result.error_code, sp.STEAM_NOT_RUNNING)
         self.assertTrue(seen and all(kw == {"real_registry": True} for kw in seen), seen)
+
+
+class _StaleViewProvider(sp.WindowsSteamPreflightProvider):
+    """Real read_active_process over a stale winreg copy; the process side is scripted."""
+
+    def __init__(self, live_pids: tuple[int, ...]) -> None:
+        super().__init__(real_registry=True)
+        self._live = live_pids
+
+    def steam_process_pids(self) -> tuple[int, ...]:
+        return self._live
+
+    def process_exists(self, pid: int) -> bool:
+        return pid in self._live
+
+    def process_image_path(self, pid: int) -> str:
+        return "C:/Steam/steam.exe"
+
+
+class MissingPywin32IsSurfacedTest(unittest.TestCase):
+    """296b B1: without pywin32 the stdio check cannot read the real HKCU. The refusal
+    stays fail-closed, and its remediation names the installation, not Steam."""
+
+    def _evaluate(self, wmi_error: BaseException, winreg_double, live_pids):
+        provider = _StaleViewProvider(live_pids)
+        with patch.object(sp.wmi_host, "read_hkcu_dword", side_effect=wmi_error), patch.dict(
+            sys.modules, {"winreg": winreg_double}
+        ), patch.object(sp, "WindowsSteamPreflightProvider", lambda **_kw: provider):
+            return sp.evaluate_steam_session(), provider
+
+    def test_stale_copy_without_pywin32_names_pywin32(self) -> None:
+        result, provider = self._evaluate(ImportError("pythoncom"), _FakeWinreg(0, 0), (15544,))
+        self.assertEqual(result.error_code, sp.STEAM_SESSION_STALE)
+        self.assertEqual(result.remediation, sp.REMEDIATION_PYWIN32_MISSING)
+        self.assertEqual(provider.real_registry_unavailable, sp.REAL_REGISTRY_PYWIN32_MISSING)
+        self.assertEqual(result.steam_live_pids, (15544,))
+
+    def test_com_failure_keeps_the_steam_remediation(self) -> None:
+        result, provider = self._evaluate(RuntimeError("com_error"), _FakeWinreg(0, 0), (15544,))
+        self.assertEqual(result.error_code, sp.STEAM_SESSION_STALE)
+        self.assertEqual(result.remediation, sp.REMEDIATION)
+        self.assertEqual(provider.real_registry_unavailable, "wmi_error")
+
+    def test_steam_not_running_is_unchanged_without_pywin32(self) -> None:
+        result, _ = self._evaluate(ImportError("pythoncom"), _FakeWinreg(0, 0), ())
+        self.assertEqual(result.error_code, sp.STEAM_NOT_RUNNING)
+        self.assertEqual(result.remediation, sp.REMEDIATION_STEAM_NOT_RUNNING)
+
+    def test_consistent_fallback_copy_still_passes(self) -> None:
+        result, _ = self._evaluate(ImportError("pythoncom"), _FakeWinreg(15544, 5), (15544,))
+        self.assertIsNone(result.error_code)
+        self.assertEqual(result.remediation, sp.REMEDIATION)
+
+    def test_successful_wmi_read_clears_the_flag(self) -> None:
+        provider = sp.WindowsSteamPreflightProvider(real_registry=True)
+        provider.real_registry_unavailable = sp.REAL_REGISTRY_PYWIN32_MISSING
+        with patch.object(sp.wmi_host, "read_hkcu_dword", return_value=7), patch.dict(
+            sys.modules, {"winreg": _FakeWinreg(0, 0)}
+        ):
+            provider.read_active_process()
+        self.assertIsNone(provider.real_registry_unavailable)
+
+    def test_pywin32_available_reports_an_import_failure(self) -> None:
+        with patch.dict(sys.modules, {"pythoncom": None}):
+            self.assertFalse(wmi_host.pywin32_available())
+
+
+_WBEM_E_ACCESS_DENIED = -2147217405  # 0x80041003
+
+
+@unittest.skipUnless(sys.platform == "win32", _WINDOWS_ONLY)
+class LiveWmiTest(unittest.TestCase):
+    """Unmocked COM/WMI (296b S1). Skips when pywin32 is absent or WMI denies access;
+    proves the route works on this host, not the MSIX topology."""
+
+    def setUp(self) -> None:
+        if not wmi_host.pywin32_available():
+            self.skipTest("pywin32 not installed")
+
+    def _call(self, fn, *args):
+        import pythoncom  # noqa: PLC0415
+
+        try:
+            return fn(*args)
+        except pythoncom.com_error as exc:
+            # The code is the hresult itself, or excepinfo's scode under DISP_E_EXCEPTION.
+            excepinfo = exc.args[2] if len(exc.args) > 2 else None
+            codes = {exc.args[0] if exc.args else None, excepinfo[5] if excepinfo else None}
+            if _WBEM_E_ACCESS_DENIED in codes:
+                self.skipTest("WMI access denied (0x80041003)")
+            raise
+
+    def test_missing_value_reads_as_none(self) -> None:
+        value = self._call(
+            wmi_host.read_hkcu_dword, r"Software\dayz-mcp-296b-absent-key", "absent"
+        )
+        self.assertIsNone(value)
+
+    def test_real_registry_provider_reads_through_wmi(self) -> None:
+        provider = sp.WindowsSteamPreflightProvider(real_registry=True)
+        try:
+            self._call(provider.read_active_process)
+        except FileNotFoundError:
+            self.skipTest("no Steam ActiveProcess key on this host")
+        if provider.real_registry_unavailable == "wmi_error":
+            self.skipTest("WMI unavailable on this host")
+        self.assertIsNone(provider.real_registry_unavailable)
 
 
 class ClientSpawnAsksForOutsideAppTest(unittest.TestCase):

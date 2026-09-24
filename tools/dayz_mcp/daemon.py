@@ -1654,7 +1654,16 @@ def _spawn_outside_app(
     """Start ``argv`` through WMI, outside the app container; its pid, or None."""
     try:
         return_value, pid = _wmi_create_process(subprocess.list2cmdline(argv), cwd)
-    except Exception as exc:  # ImportError, com_error: fall back, never fail the spawn here
+    except ImportError as exc:
+        # A missing pywin32 is an installation defect, not a transient WMI failure:
+        # name it so the fallback's inherited registry view is attributable (296b).
+        log(
+            f"SPAWN: WMI launch impossible, pywin32 missing ({exc}); the daemon cannot "
+            "start outside this app's container and inherits its registry view. Re-run "
+            "the dayz-mcp installer (requirements-mcp.txt declares pywin32); launching directly"
+        )
+        return None
+    except Exception as exc:  # com_error and the like: fall back, never fail the spawn here
         log(f"SPAWN: WMI launch unavailable ({type(exc).__name__}: {exc}); launching directly")
         return None
     if return_value != 0 or pid <= 0:

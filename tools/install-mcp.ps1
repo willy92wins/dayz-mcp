@@ -422,7 +422,21 @@ if (-not (Test-Path -LiteralPath $VenvDir)) {
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 & $VenvPython -m pip install --upgrade pip
 & $VenvPython -m pip install -r $Requirements
+if ($LASTEXITCODE -ne 0) {
+  throw "pip install -r $Requirements failed"
+}
 & $VenvPython -m pip install -e $ToolsRoot
+if ($LASTEXITCODE -ne 0) {
+  throw "pip install -e $ToolsRoot failed"
+}
+# pywin32 (296b): the stdio Steam check reads the real HKCU and the daemon is
+# spawned outside the client's app container, both through WMI (wmi_host). Without
+# it both fall back to the app's virtualized registry view; refuse the install here
+# instead of letting that fallback happen at runtime.
+& $VenvPython -c "import pythoncom, win32com.client"
+if ($LASTEXITCODE -ne 0) {
+  throw "pywin32 is missing from $VenvDir (import pythoncom, win32com.client failed); install requirements-mcp.txt again"
+}
 
 if (-not $SkipKnowledgePack) {
   $knowledgePackArgs = @("-m", "dayz_mcp.knowledge_pack", "install")
