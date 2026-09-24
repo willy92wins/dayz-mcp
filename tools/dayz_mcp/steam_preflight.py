@@ -19,6 +19,8 @@ from collections.abc import Callable
 from typing import Protocol
 from ctypes import wintypes
 
+from dayz_mcp import wmi_host
+
 
 STEAM_SESSION_STALE = "steam_session_stale"
 REMEDIATION = "restart_steam_and_wait_for_active_process_match"
@@ -108,7 +110,24 @@ class SteamPreflightProvider(Protocol):
 
 
 class WindowsSteamPreflightProvider:
-    """Read Steam's ActiveProcess key, process identity and bounded startup log."""
+    """Read Steam's ActiveProcess key, process identity and bounded startup log.
+
+    ``real_registry`` reads the key through WMI (wmi_host.read_hkcu_dword): the user's
+    real HKCU. An MCP client runs inside its app's registry virtualization (Claude
+    Desktop and Codex are MSIX apps) and winreg there returns the app's private copy,
+    which went stale on 2026-09-23 (pid 0 while the real key held the live Steam) and
+    refused every launch. WMI failing, or the value missing there, falls back to
+    winreg. Only evaluate_steam_session's default provider, the stdio check that runs
+    in the MCP client, asks for it. The daemon side (steam_launch_guard,
+    steam_prepare_helper, remediation, which writes through winreg) keeps winreg: it
+    must judge the copy its Popen child, the DayZ client, inherits, and a daemon
+    spawned through WMI already inherits the real HKCU.
+    """
+
+    _real_registry = False
+
+    def __init__(self, *, real_registry: bool = False) -> None:
+        self._real_registry = real_registry
 
     def process_creation_ticks(self, pid: int) -> int:
         """FILETIME identity, checked on a live query-only process handle."""
@@ -131,6 +150,14 @@ class WindowsSteamPreflightProvider:
             kernel32.CloseHandle(handle)
 
     def read_active_process(self) -> SteamActiveProcessSnapshot:
+        if self._real_registry:
+            try:
+                pid = wmi_host.read_hkcu_dword(_ACTIVE_PROCESS_KEY, "pid")
+                active_user = wmi_host.read_hkcu_dword(_ACTIVE_PROCESS_KEY, "ActiveUser")
+            except Exception:
+                pid = active_user = None
+            if pid is not None and active_user is not None:
+                return SteamActiveProcessSnapshot(pid=pid, active_user=active_user)
         import winreg
 
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _ACTIVE_PROCESS_KEY) as key:
@@ -372,18 +399,28 @@ def evaluate_steam_session(
     obtain two identical registry snapshots, enumerate processes, or resolve
     the registered process image, fails closed as ``steam_session_stale``.
 
-    The registry is read through this process's own view. The DayZ client is a
-    Popen child of the daemon (ProcessLifecycle._launch) and inherits that same
-    view, so the daemon-side gate judges the copy of ActiveProcess the client
-    will read. An app's registry virtualization (MSIX) can hold a different
-    copy from the user's real HKCU; judging that other copy lets the gate pass
-    while the client stops at Steam initialization, as on 2026-09-24. The early
-    check in dayz_test_tool runs in the MCP client process and reads that
-    client's view instead. ``steam_not_running`` rests on the process list,
-    which no registry view changes.
+    Daemon-side callers pass a provider that reads the registry through the
+    daemon's own view. The DayZ client is a Popen child of the daemon
+    (ProcessLifecycle._launch) and inherits that same view, so the admission
+    gate judges the copy of ActiveProcess the client will read. An app's
+    registry virtualization (MSIX) can hold a different copy from the user's
+    real HKCU; judging that other copy lets the gate pass while the client
+    stops at Steam initialization, as on 2026-09-24.
+
+    The default provider (``provider=None``) reads the user's real HKCU
+    (``real_registry``). Its caller is the early check in dayz_test_tool, which
+    runs in the MCP client process, inside that client's virtualization; the
+    daemon is spawned through WMI outside it (daemon._spawn_outside_app), so the
+    real HKCU is the copy the daemon's client reads, and the app's stale copy
+    no longer refuses every launch. If that spawn fell back to Popen, the
+    daemon-side gate still judges the inherited copy and refuses there.
+    ``steam_not_running`` rests on the process list, which no registry view
+    changes.
     """
 
-    selected_provider = WindowsSteamPreflightProvider() if provider is None else provider
+    selected_provider = (
+        WindowsSteamPreflightProvider(real_registry=True) if provider is None else provider
+    )
     snapshot = _read_stable_snapshot(selected_provider)
     if snapshot is None:
         return _stale(None, ())

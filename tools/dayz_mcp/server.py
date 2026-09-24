@@ -1909,8 +1909,13 @@ class ClientRuntime:
         )
 
     def _default_spawn(self) -> int | None:
+        # outside_app: the daemon must not inherit the client app's registry
+        # virtualization (daemon._spawn_outside_app).
         return daemon.spawn_detached(
-            list(self._daemon_argv), log=self._log, cwd=self._daemon_cwd
+            list(self._daemon_argv),
+            log=self._log,
+            cwd=self._daemon_cwd,
+            outside_app=True,
         )
 
     def _daemon_healthy(self, deadline: float) -> bool:
