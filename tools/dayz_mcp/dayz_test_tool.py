@@ -24,7 +24,9 @@ from dayz_mcp.launcher_registry import open_approved_launcher
 from dayz_mcp.native_launcher_transaction import preflight_vpp_request
 from dayz_mcp.client_steam_bootstrap import (
     ClientDumpBaseline,
+    bind_client_dumps,
     diagnose_client_steam_bootstrap,
+    diagnose_retired_client_death,
     snapshot_client_dumps,
 )
 from dayz_mcp.steam_preflight import (
@@ -1318,6 +1320,10 @@ async def _execute_request(
     _validate_terminal_context(
         terminal, preflight=preflight, expected_run_id=expected_run_id
     )
+    if client_dump_baseline is not None and isinstance(terminal.run_id, str):
+        # 296b: the client can die after this call returns; the retired-run
+        # view reads the dumps bound here (runs_retired_recently).
+        bind_client_dumps(terminal.run_id, client_dump_baseline)
     if not terminal.ok and terminal.error_code == "worker_failed":
         try:
             failed_status = await runtime.lifecycle_status()
@@ -1845,6 +1851,9 @@ def _runs_retired_recently(raw: object) -> list[dict[str, object]] | None:
         validated = _validated_diagnostic(item, run_id)
         if validated is None:
             continue
+        # 296b: a client that died after dayz_test_run returned succeeded is
+        # only named here. Always present, null included.
+        validated["client_death_diagnosis"] = diagnose_retired_client_death(run_id)
         out.append(validated)
         if len(out) >= _RUNS_RETIRED_RECENTLY_LIMIT:
             break

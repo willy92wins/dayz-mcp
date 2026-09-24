@@ -7,6 +7,8 @@ unit-tested on hosts that cannot bind kernel32.
 from __future__ import annotations
 
 import os
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -151,3 +153,50 @@ def diagnose_client_steam_bootstrap(
         return "steam_bootstrap"
     return None
 
+
+# Late death (296b): dayz_test_run returned succeeded with the client alive and
+# the client died about a second later; the daemon then reaped the run. The
+# baseline taken before that launch is kept here, keyed by run_id, so the
+# retired-run view can still name the death. In-process only: a restarted MCP
+# process has no binding and publishes null, never a guess.
+_BINDINGS_LIMIT = 32
+_bindings: OrderedDict[str, list[ClientDumpBaseline | None]] = OrderedDict()
+_bindings_lock = threading.Lock()
+
+
+def bind_client_dumps(run_id: str, baseline: ClientDumpBaseline) -> None:
+    """Bind a pre-launch baseline to run_id and close earlier bindings on its roots.
+
+    Every earlier run whose client used one of these roots gets this baseline
+    as its ceiling (if it has none yet): dumps that appear from now on belong
+    to this launch, not to them.
+    """
+    shared = set(baseline.roots)
+    with _bindings_lock:
+        for other_id, entry in _bindings.items():
+            if other_id == run_id or entry[1] is not None:
+                continue
+            if shared.intersection(entry[0].roots):
+                entry[1] = baseline
+        _bindings.pop(run_id, None)
+        _bindings[run_id] = [baseline, None]
+        while len(_bindings) > _BINDINGS_LIMIT:
+            _bindings.popitem(last=False)
+
+
+def diagnose_retired_client_death(run_id: object) -> str | None:
+    """client_death_diagnosis for a retired run: steam_bootstrap or null.
+
+    Only the newest client dump that appeared between this run's pre-launch
+    baseline and the next launch on the same roots is read.
+    """
+    if not isinstance(run_id, str):
+        return None
+    with _bindings_lock:
+        entry = _bindings.get(run_id)
+        if entry is None:
+            return None
+        baseline, ceiling = entry[0], entry[1]
+    if _new_dump_names_api_not_loaded(baseline, ceiling):
+        return "steam_bootstrap"
+    return None

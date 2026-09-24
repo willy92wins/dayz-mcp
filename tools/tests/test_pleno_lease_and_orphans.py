@@ -89,6 +89,12 @@ def _diagnostic(run_id: str, **overrides: object) -> dict[str, object]:
     return item
 
 
+def _published(item: dict[str, object]) -> dict[str, object]:
+    # runs_retired_recently adds client_death_diagnosis (296b); null when this
+    # process bound no client dump baseline to the run.
+    return {**item, "client_death_diagnosis": None}
+
+
 class PlenoLeaseAndOrphansTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         config = ServerConfig(
@@ -152,7 +158,9 @@ class PlenoLeaseAndOrphansTest(unittest.IsolatedAsyncioTestCase):
         payload = _status_payload(claimable=True, occupied=False)
         payload["retired_run_diagnostics"] = [_diagnostic(_RUN_A)]
         result = await self._session_status(payload)
-        self.assertEqual(result["runs_retired_recently"], [_diagnostic(_RUN_A)])
+        self.assertEqual(
+            result["runs_retired_recently"], [_published(_diagnostic(_RUN_A))]
+        )
         self.assertNotIn("retired_run_diagnostics", result)
 
     async def test_t2_runs_retired_recently_drops_path_non_token_and_extra_field(
@@ -166,7 +174,9 @@ class PlenoLeaseAndOrphansTest(unittest.IsolatedAsyncioTestCase):
             _diagnostic(_RUN_A),
         ]
         result = await self._session_status(payload)
-        self.assertEqual(result["runs_retired_recently"], [_diagnostic(_RUN_A)])
+        self.assertEqual(
+            result["runs_retired_recently"], [_published(_diagnostic(_RUN_A))]
+        )
 
     async def test_t2_runs_retired_recently_caps_at_16_newest_first(self) -> None:
         newest_first = [_diagnostic(_run_id(i)) for i in range(17)]
@@ -175,7 +185,7 @@ class PlenoLeaseAndOrphansTest(unittest.IsolatedAsyncioTestCase):
         result = await self._session_status(payload)
         kept = result["runs_retired_recently"]
         self.assertEqual(len(kept), 16)
-        self.assertEqual(kept, newest_first[:16])
+        self.assertEqual(kept, [_published(item) for item in newest_first[:16]])
         self.assertEqual(kept[0]["run_id"], _run_id(0))
         self.assertNotEqual(kept[-1]["run_id"], _run_id(16))
 
@@ -289,7 +299,7 @@ class PlenoLeaseAndOrphansRound4Test(unittest.TestCase):
         self.assertNotIn(json.dumps(path_reason).strip('"'), serialized)
         self.assertNotIn(huge_event, serialized)
         self.assertNotIn(space_decision, serialized)
-        self.assertEqual(result, kept)
+        self.assertEqual(result, [_published(item) for item in kept])
 
     def test_t2_r4_retired_run_diagnostics_does_not_run_the_legacy_gate(self) -> None:
         temporary = TemporaryDirectory()
