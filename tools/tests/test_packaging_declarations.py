@@ -77,6 +77,14 @@ class Pywin32ProvisioningTest(unittest.TestCase):
         after_install = script[install:probe]
         self.assertIn("throw \"pip install -r $Requirements failed\"", after_install)
 
+    def test_installer_stops_when_the_pip_upgrade_fails(self) -> None:
+        script = (TOOLS_DIR / "install-mcp.ps1").read_text(encoding="utf-8")
+        upgrade = script.index("& $VenvPython -m pip install --upgrade pip")
+        install = script.index("& $VenvPython -m pip install -r $Requirements")
+        between = script[upgrade:install]
+        self.assertIn("if ($LASTEXITCODE -ne 0) {", between)
+        self.assertIn('throw "pip install --upgrade pip failed"', between)
+
     def test_installer_probe_matches_wmi_host_imports(self) -> None:
         source = (TOOLS_DIR / "dayz_mcp" / "wmi_host.py").read_text(encoding="utf-8")
         self.assertIn("import pythoncom", source)

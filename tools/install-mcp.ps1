@@ -421,6 +421,9 @@ if (-not (Test-Path -LiteralPath $VenvDir)) {
 
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 & $VenvPython -m pip install --upgrade pip
+if ($LASTEXITCODE -ne 0) {
+  throw "pip install --upgrade pip failed"
+}
 & $VenvPython -m pip install -r $Requirements
 if ($LASTEXITCODE -ne 0) {
   throw "pip install -r $Requirements failed"
