@@ -1170,6 +1170,8 @@ def _compact_result(
             client_alive=client_alive,
             steam_startup=startup,
             artifacts_paths=artifacts_paths,
+            # started_at is monotonic; the dump's mtime is wall clock.
+            not_before=time.time() - (time.monotonic() - started_at),
         ),
     }
 
