@@ -7,6 +7,7 @@ unit-tested on hosts that cannot bind kernel32.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -25,32 +26,100 @@ def _has_steam_api_not_loaded(path: Path) -> bool:
 
 # The profile roots persist across runs and a crashing client leaves one dump per
 # death: on 2026-09-24 27 of the 32 ErrorMessage_*.mdmp in the dev client profile
-# carried the marker. Only a dump written since this call started can speak for
-# this run's death; the slack absorbs filesystem timestamp granularity.
-_MDMP_MTIME_SLACK_S = 2.0
+# carried the marker. A dump speaks for a run only if it was NOT in the client
+# profile roots when that run's client was about to launch. The decision is a
+# set difference over file identities, so a wall-clock jump cannot move a dump
+# in or out of it, and a server-profile dump is never a candidate.
+_DumpKey = tuple[str, int, int, int]
 
 
 def _is_error_mdmp(name: str) -> bool:
     return name.startswith("ErrorMessage_") and name.endswith(".mdmp")
 
 
-def _find_newest_error_mdmp(directory: Path, not_before: float) -> Path | None:
+def _scan_error_mdmps(directory: str) -> dict[_DumpKey, Path] | None:
+    """Identity -> path of every ErrorMessage_*.mdmp; None if the root is unreadable.
+
+    A root that does not exist yet holds no dump: everything later found there
+    is new. An identity is (name, file id, size, mtime_ns): a file rewritten in
+    place under the same name is a different dump.
+    """
+    found: dict[_DumpKey, Path] = {}
     try:
-        newest_path: Path | None = None
-        newest_mtime = not_before - _MDMP_MTIME_SLACK_S
         with os.scandir(directory) as entries:
             for entry in entries:
-                if _is_error_mdmp(entry.name):
-                    try:
-                        stat = entry.stat()
-                        if stat.st_mtime >= newest_mtime:
-                            newest_mtime = stat.st_mtime
-                            newest_path = Path(entry.path)
-                    except OSError:
-                        continue
-        return newest_path
+                if not _is_error_mdmp(entry.name):
+                    continue
+                try:
+                    stat = os.stat(entry.path)
+                except OSError:
+                    continue
+                key = (entry.name, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+                found[key] = Path(entry.path)
+    except FileNotFoundError:
+        return {}
     except OSError:
         return None
+    return found
+
+
+@dataclass(frozen=True)
+class ClientDumpBaseline:
+    """The dumps already in the client profile roots before a client launch."""
+
+    roots: tuple[str, ...]
+    before: tuple[frozenset[_DumpKey] | None, ...]
+
+
+def snapshot_client_dumps(client_roots: Sequence[str | Path]) -> ClientDumpBaseline:
+    roots = tuple(str(root) for root in client_roots)
+    before: list[frozenset[_DumpKey] | None] = []
+    for root in roots:
+        scanned = _scan_error_mdmps(root)
+        before.append(None if scanned is None else frozenset(scanned))
+    return ClientDumpBaseline(roots=roots, before=tuple(before))
+
+
+def _newest_new_dump(
+    baseline: ClientDumpBaseline,
+    ceiling: ClientDumpBaseline | None = None,
+) -> Path | None:
+    """The most recent client dump absent from the baseline, or None.
+
+    ``ceiling`` is a later launch's snapshot of the same roots: a dump that
+    first appeared after it belongs to that later launch, not to this run.
+    A root unreadable at the baseline yields nothing: without the "before"
+    set there is no way to tell this run's dump from an older one.
+    """
+    limits: dict[str, frozenset[_DumpKey] | None] = {}
+    if ceiling is not None:
+        limits = dict(zip(ceiling.roots, ceiling.before))
+    newest: tuple[int, str] | None = None
+    newest_path: Path | None = None
+    for root, before in zip(baseline.roots, baseline.before):
+        if before is None:
+            continue
+        current = _scan_error_mdmps(root)
+        if current is None:
+            continue
+        limit = limits.get(root)
+        for key, path in current.items():
+            if key in before:
+                continue
+            if root in limits and (limit is None or key not in limit):
+                continue
+            rank = (key[3], key[0])
+            if newest is None or rank > newest:
+                newest = rank
+                newest_path = path
+    return newest_path
+
+
+def _new_dump_names_api_not_loaded(
+    baseline: ClientDumpBaseline, ceiling: ClientDumpBaseline | None = None
+) -> bool:
+    newest = _newest_new_dump(baseline, ceiling)
+    return newest is not None and _has_steam_api_not_loaded(newest)
 
 
 def diagnose_client_steam_bootstrap(
@@ -58,8 +127,7 @@ def diagnose_client_steam_bootstrap(
     error_code: object,
     client_alive: object,
     steam_startup: object,
-    artifacts_paths: Sequence[str | Path] | None = None,
-    not_before: float | None = None,
+    dump_baseline: ClientDumpBaseline | None = None,
 ) -> str | None:
     """Name a Steam-bootstrap death. Does not repair Steam (738a remains HOLD).
 
@@ -67,10 +135,11 @@ def diagnose_client_steam_bootstrap(
     limited old-process path without a startup marker, the death is
     steam_bootstrap.
 
-    When the client is dead after ack and the newest ErrorMessage_*.mdmp
-    written since ``not_before`` (epoch seconds, the call's start) records
-    '[API loaded no]', Steam bootstrap failed (ticket 296b). Without
-    ``not_before`` no dump is read: an older run's dump is not evidence.
+    When the client is dead after ack and the newest client-profile
+    ErrorMessage_*.mdmp that was not in ``dump_baseline`` (taken before the
+    client launched) records '[API loaded no]', Steam bootstrap failed
+    (ticket 296b). Without a baseline no dump is read: an older run's dump is
+    not evidence.
     """
     if error_code != "client_dead_after_ack":
         return None
@@ -78,12 +147,7 @@ def diagnose_client_steam_bootstrap(
         return None
     if steam_startup == "old_stable_unobserved":
         return "steam_bootstrap"
-
-    if artifacts_paths and not_before is not None:
-        for raw_path in artifacts_paths:
-            p = Path(raw_path)
-            if p.is_dir():
-                newest_mdmp = _find_newest_error_mdmp(p, not_before)
-                if newest_mdmp and _has_steam_api_not_loaded(newest_mdmp):
-                    return "steam_bootstrap"
+    if dump_baseline is not None and _new_dump_names_api_not_loaded(dump_baseline):
+        return "steam_bootstrap"
     return None
+

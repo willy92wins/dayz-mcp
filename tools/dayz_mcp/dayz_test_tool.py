@@ -22,7 +22,11 @@ from dayz_mcp import (
 )
 from dayz_mcp.launcher_registry import open_approved_launcher
 from dayz_mcp.native_launcher_transaction import preflight_vpp_request
-from dayz_mcp.client_steam_bootstrap import diagnose_client_steam_bootstrap
+from dayz_mcp.client_steam_bootstrap import (
+    ClientDumpBaseline,
+    diagnose_client_steam_bootstrap,
+    snapshot_client_dumps,
+)
 from dayz_mcp.steam_preflight import (
     REMEDIATION,
     STEAM_SESSION_STALE,
@@ -521,6 +525,23 @@ def _artifact_paths(
     return [
         ntpath.join(policy.dev_root, root, "profiles")
         for root in record.artifact_roots
+    ]
+
+
+def _client_profile_roots(
+    policy: dayz_test_request.RequestProjectPolicy, mode: str
+) -> list[str]:
+    """The profile roots this mode starts a client in; never a server root.
+
+    offline is the client-side process that also hosts the mission.
+    """
+    record = _mode_record(mode)
+    if record is None:
+        return []
+    return [
+        ntpath.join(policy.dev_root, step.root, "profiles")
+        for step in record.steps
+        if step.kind == "start" and step.role in {"client", "offline"} and step.root
     ]
 
 
@@ -1116,6 +1137,7 @@ def _compact_result(
     steam_startup: object = None,
     steam_pid_repair: object = None,
     steam_restarted: object = None,
+    client_dump_baseline: ClientDumpBaseline | None = None,
 ) -> dict[str, object]:
     projection = readiness or _NULL_READINESS
     startup = _steam_prep_token(steam_startup)
@@ -1169,9 +1191,7 @@ def _compact_result(
             error_code=terminal.error_code,
             client_alive=client_alive,
             steam_startup=startup,
-            artifacts_paths=artifacts_paths,
-            # started_at is monotonic; the dump's mtime is wall clock.
-            not_before=time.time() - (time.monotonic() - started_at),
+            dump_baseline=client_dump_baseline,
         ),
     }
 
@@ -1247,6 +1267,7 @@ async def _execute_request(
     replacement: ClientReplacementDecision | None = None,
     client_pids_before: tuple[int, ...] | None = None,
     vpp: object | None = None,
+    client_dump_baseline: ClientDumpBaseline | None = None,
 ) -> dict[str, object]:
     stdout = bytearray()
     stderr = bytearray()
@@ -1374,6 +1395,7 @@ async def _execute_request(
         steam_startup=steam_startup,
         steam_pid_repair=steam_pid_repair,
         steam_restarted=steam_restarted,
+        client_dump_baseline=client_dump_baseline,
     )
 
 
@@ -1680,6 +1702,13 @@ async def execute_dayz_test_run(
                     **request_arguments,
                     replace_if_not_polling_since=decided_at_ms,
                 )
+            # 296b: the dumps already in the CLIENT profile roots before this
+            # launch; only a dump absent from here can name its death.
+            client_dump_baseline = (
+                snapshot_client_dumps(_client_profile_roots(policy, mode))
+                if not preflight and _mode_starts_client(mode)
+                else None
+            )
             result = await _execute_request(
                 runtime,
                 opened_launcher=opened,
@@ -1695,6 +1724,7 @@ async def execute_dayz_test_run(
                 replacement=replacement,
                 client_pids_before=client_pids_before,
                 vpp=vpp,
+                client_dump_baseline=client_dump_baseline,
             )
             if preflight:
                 result["preflight_skipped_checks"] = preflight_skipped_checks

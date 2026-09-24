@@ -9,7 +9,10 @@ import time
 import unittest
 from pathlib import Path
 
-from dayz_mcp.client_steam_bootstrap import diagnose_client_steam_bootstrap
+from dayz_mcp.client_steam_bootstrap import (
+    diagnose_client_steam_bootstrap,
+    snapshot_client_dumps,
+)
 from dayz_mcp.server_freshness import schema_signal as freshness_schema_signal
 
 _WINDOWS = sys.platform == "win32"
@@ -83,51 +86,38 @@ class ClientSteamBootstrapDiagnosisTests(unittest.TestCase):
             )
         )
 
+    def _observed(self, baseline, *, client_alive: object = False) -> str | None:
+        return diagnose_client_steam_bootstrap(
+            error_code="client_dead_after_ack",
+            client_alive=client_alive,
+            steam_startup="observed",
+            dump_baseline=baseline,
+        )
+
     def test_observed_with_mdmp_api_loaded_no_diagnoses_steam_bootstrap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             profile_dir = Path(tmp_dir)
+            baseline = snapshot_client_dumps([profile_dir])
             mdmp_file = profile_dir / "ErrorMessage_DayZDiag_x64_2026-09-24_03-04-46.mdmp"
             mdmp_file.write_bytes(
                 b"header\x00data\x00SteamInternal_SetMinidumpSteamID ... [API loaded no]\x00trailer"
             )
-
-            result = diagnose_client_steam_bootstrap(
-                error_code="client_dead_after_ack",
-                client_alive=False,
-                steam_startup="observed",
-                artifacts_paths=[str(profile_dir)],
-                not_before=time.time() - 60,
-            )
-            self.assertEqual(result, "steam_bootstrap")
+            self.assertEqual(self._observed(baseline), "steam_bootstrap")
 
     def test_observed_with_mdmp_without_marker_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             profile_dir = Path(tmp_dir)
+            baseline = snapshot_client_dumps([profile_dir])
             mdmp_file = profile_dir / "ErrorMessage_DayZDiag_x64_2026-09-24_03-04-46.mdmp"
             mdmp_file.write_bytes(b"some other crash minidump without marker")
-
-            result = diagnose_client_steam_bootstrap(
-                error_code="client_dead_after_ack",
-                client_alive=False,
-                steam_startup="observed",
-                artifacts_paths=[str(profile_dir)],
-                not_before=time.time() - 60,
-            )
-            self.assertIsNone(result)
+            self.assertIsNone(self._observed(baseline))
 
     def test_observed_with_no_mdmp_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             profile_dir = Path(tmp_dir)
+            baseline = snapshot_client_dumps([profile_dir])
             (profile_dir / "DayZDiag_x64.RPT").write_text("just rpt", encoding="utf-8")
-
-            result = diagnose_client_steam_bootstrap(
-                error_code="client_dead_after_ack",
-                client_alive=False,
-                steam_startup="observed",
-                artifacts_paths=[str(profile_dir)],
-                not_before=time.time() - 60,
-            )
-            self.assertIsNone(result)
+            self.assertIsNone(self._observed(baseline))
 
     def _marker_dump(self, profile_dir: Path, *, age_s: float = 0.0) -> Path:
         dump = profile_dir / "ErrorMessage_DayZDiag_x64_2026-09-24_03-04-46.mdmp"
@@ -143,57 +133,30 @@ class ClientSteamBootstrapDiagnosisTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             profile_dir = Path(tmp_dir)
             self._marker_dump(profile_dir, age_s=3600)
-            result = diagnose_client_steam_bootstrap(
-                error_code="client_dead_after_ack",
-                client_alive=False,
-                steam_startup="observed",
-                artifacts_paths=[str(profile_dir)],
-                not_before=time.time() - 60,
-            )
-            self.assertIsNone(result)
+            baseline = snapshot_client_dumps([profile_dir])
+            self.assertIsNone(self._observed(baseline))
 
-    def test_no_time_bound_reads_no_dump(self) -> None:
+    def test_no_baseline_reads_no_dump(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             profile_dir = Path(tmp_dir)
             self._marker_dump(profile_dir)
-            result = diagnose_client_steam_bootstrap(
-                error_code="client_dead_after_ack",
-                client_alive=False,
-                steam_startup="observed",
-                artifacts_paths=[str(profile_dir)],
-            )
-            self.assertIsNone(result)
+            self.assertIsNone(self._observed(None))
 
-    def test_newest_fresh_dump_decides_over_an_older_fresh_one(self) -> None:
+    def test_newest_new_dump_decides_over_an_older_new_one(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             profile_dir = Path(tmp_dir)
+            baseline = snapshot_client_dumps([profile_dir])
             self._marker_dump(profile_dir, age_s=30)
             newer = profile_dir / "ErrorMessage_DayZDiag_x64_2026-09-24_03-05-10.mdmp"
             newer.write_bytes(b"MDMP\x00access violation, no steam line\x00")
-            result = diagnose_client_steam_bootstrap(
-                error_code="client_dead_after_ack",
-                client_alive=False,
-                steam_startup="observed",
-                artifacts_paths=[str(profile_dir)],
-                not_before=time.time() - 60,
-            )
-            self.assertIsNone(result)
+            self.assertIsNone(self._observed(baseline))
 
     def test_mdmp_marker_ignored_if_client_alive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             profile_dir = Path(tmp_dir)
-            mdmp_file = profile_dir / "ErrorMessage_DayZDiag_x64_2026-09-24_03-04-46.mdmp"
-            mdmp_file.write_bytes(b"[API loaded no]")
-
-            result = diagnose_client_steam_bootstrap(
-                error_code="client_dead_after_ack",
-                client_alive=True,
-                steam_startup="observed",
-                artifacts_paths=[str(profile_dir)],
-                not_before=time.time() - 60,
-            )
-            self.assertIsNone(result)
-
+            baseline = snapshot_client_dumps([profile_dir])
+            self._marker_dump(profile_dir)
+            self.assertIsNone(self._observed(baseline, client_alive=True))
 
 
 @unittest.skipUnless(_WINDOWS, "FastMCP server import binds Win32 kernel32")
@@ -272,7 +235,7 @@ class PublicSurfaceWindowsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["steam_startup"], "old_stable_unobserved")
         self.assertEqual(payload["error_code"], "client_dead_after_ack")
 
-    def _observed_death_payload(self, profile_dir: Path, started_at: float) -> dict:
+    def _observed_death_payload(self, baseline: object) -> dict:
         from dayz_mcp import dayz_test_tool
 
         terminal = dayz_test_tool.WorkerTerminal(
@@ -286,21 +249,22 @@ class PublicSurfaceWindowsTests(unittest.IsolatedAsyncioTestCase):
             terminal=terminal,
             project="ExampleMod",
             mode="client",
-            started_at=started_at,
-            artifacts_paths=[str(profile_dir)],
+            started_at=time.monotonic() - 5,
+            artifacts_paths=[],
             client_alive=False,
             steam_startup="observed",
+            client_dump_baseline=baseline,
         )
 
     def test_compact_result_names_api_loaded_no_from_this_calls_dump(self) -> None:
-        """296b: the measured case, steam_startup=observed plus a fresh marker dump."""
+        """296b: the measured case, steam_startup=observed plus a new marker dump."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             profile_dir = Path(tmp_dir)
-            started_at = time.monotonic() - 5
+            baseline = snapshot_client_dumps([profile_dir])
             (profile_dir / "ErrorMessage_DayZDiag_x64_2026-09-24_03-04-46.mdmp").write_bytes(
                 b"MDMP\x00SteamInternal_SetMinidumpSteamID:  Caching Steam ID:  1 [API loaded no]\x00"
             )
-            payload = self._observed_death_payload(profile_dir, started_at)
+            payload = self._observed_death_payload(baseline)
         self.assertEqual(payload["client_death_diagnosis"], "steam_bootstrap")
         self.assertEqual(payload["steam_startup"], "observed")
 
@@ -309,9 +273,8 @@ class PublicSurfaceWindowsTests(unittest.IsolatedAsyncioTestCase):
             profile_dir = Path(tmp_dir)
             dump = profile_dir / "ErrorMessage_DayZDiag_x64_2026-09-24_03-04-46.mdmp"
             dump.write_bytes(b"[API loaded no]")
-            stamp = time.time() - 3600
-            os.utime(dump, (stamp, stamp))
-            payload = self._observed_death_payload(profile_dir, time.monotonic() - 5)
+            baseline = snapshot_client_dumps([profile_dir])
+            payload = self._observed_death_payload(baseline)
         self.assertIsNone(payload["client_death_diagnosis"])
 
 
