@@ -200,6 +200,71 @@ class CrossProcessClientDumpTests(unittest.TestCase):
         self.lifecycle.retired = [_retired_row(run1)]
         self.assertIsNone(a.ask(op="project")[run1])
 
+    def test_r4_b1_late_bind_after_a_launch_without_snapshot_is_null(self) -> None:
+        # Astra r3 B1: A's bind follows the lease release, so B can launch
+        # without a snapshot (older MCP, failed open) before it. B's dump must
+        # not name A's run 1.
+        a, b = self._mcp("A"), self._mcp("B")
+        self.assertNotEqual(a.ask(op="pid"), b.ask(op="pid"))
+        started = a.ask(op="launch", root=self.client_root, bind=False)
+        run1, token = started["run_id"], started["token"]
+        self.assertIsInstance(token, str)
+        self.lifecycle.retired = [_retired_row(run1)]
+        b.ask(op="launch", root=self.client_root, open=False)
+        b.ask(op="dump", root=self.client_root, stamp="03-05-00", body=_MARKED)
+        a.ask(op="bind", token=token, run_id=run1)
+        for reader in (a, b):
+            self.assertIsNone(reader.ask(op="project")[run1])
+
+    def test_r4_b1_late_bind_after_its_own_start_alone_still_names(self) -> None:
+        # The run's own start is not a foreign launch: bound after the lease
+        # release with nothing in between, its dump still names it.
+        a, b = self._mcp("A"), self._mcp("B")
+        started = a.ask(op="launch", root=self.client_root, bind=False)
+        run1 = started["run_id"]
+        a.ask(op="dump", root=self.client_root, stamp="03-05-00", body=_MARKED)
+        a.ask(op="bind", token=started["token"], run_id=run1)
+        self.lifecycle.retired = [_retired_row(run1)]
+        self.assertEqual(b.ask(op="project")[run1], "steam_bootstrap")
+
+    def test_r4_b2_other_launch_between_get_and_scan_is_null(self) -> None:
+        # Astra r3 B2: A reads run 1's binding (no ceiling yet) and is paused
+        # before scanning the profile; B launches normally and writes a marked
+        # dump; A resumes. The binding A read is stale by then.
+        a, b = self._mcp("A"), self._mcp("B")
+        run1 = a.ask(op="launch", root=self.client_root)
+        self.lifecycle.retired = [_retired_row(run1)]
+        self.assertEqual(a.ask(op="project_paused"), "paused")
+        run2 = b.ask(op="launch", root=self.client_root)
+        b.ask(op="dump", root=self.client_root, stamp="03-05-00", body=_MARKED)
+        self.lifecycle.retired = [_retired_row(run2), _retired_row(run1)]
+        resumed = a.ask(op="resume")
+        self.assertIsNone(resumed[run1])
+        fresh = a.ask(op="project")
+        self.assertIsNone(fresh[run1])
+        self.assertEqual(fresh[run2], "steam_bootstrap")
+
+    def test_r4_b3_open_with_a_control_character_in_a_root_is_rejected(self) -> None:
+        identity = {
+            "platform": "claude",
+            "pid": 1,
+            "ppid": 1,
+            "started_at_utc": "2026-09-25T00:00:00Z",
+            "session_id": "nul",
+        }
+        for root in ("C:\\bad\u0000profile", "C:\\bad\u001fprofile", "\n"):
+            self.assertEqual(
+                self._post(
+                    "/client-dumps",
+                    {
+                        "identity": identity,
+                        "op": "open",
+                        "baseline": {"roots": [root], "before": [[]]},
+                    },
+                ),
+                (400, {"error": "invalid_baseline"}),
+            )
+
     def _post(self, path: str, payload: dict) -> tuple[int, dict]:
         url = self.base + path + "?" + urllib.parse.urlencode({"key": "key"})
         request = urllib.request.Request(
@@ -318,6 +383,131 @@ class SessionStatusBindingsTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await server._client_dump_bindings(_Client({}), status))
         self.assertIsNone(await server._client_dump_bindings(object(), rows))
         self.assertEqual(asked, [])
+
+    async def test_r4_b2_a_named_death_needs_the_same_revision_after_the_scan(
+        self,
+    ) -> None:
+        from dayz_mcp import server
+        from dayz_mcp.client_steam_bootstrap import (
+            baseline_to_wire,
+            snapshot_client_dumps,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = str(Path(tmp) / "profiles")
+            Path(root).mkdir()
+            binding = {
+                "baseline": baseline_to_wire(snapshot_client_dumps([root])),
+                "ceiling": None,
+            }
+            (Path(root) / "ErrorMessage_x.mdmp").write_bytes(_MARKED.encode("latin-1"))
+
+            class _Client:
+                def __init__(self, revisions: list) -> None:
+                    self.revisions = revisions
+                    self.asked = 0
+
+                async def client_dumps_get(self, run_ids):
+                    revision = self.revisions[min(self.asked, len(self.revisions) - 1)]
+                    self.asked += 1
+                    answer = {"bindings": {"r1": binding}}
+                    if revision is not None:
+                        answer["revision"] = revision
+                    return answer
+
+            async def project(client: _Client) -> object:
+                status = {"retired_run_diagnostics": [_retired_row("r1")]}
+                await server._attach_revalidated_runs_retired_recently(client, status)
+                self.assertNotIn("retired_run_diagnostics", status)
+                return status["runs_retired_recently"][0]["client_death_diagnosis"]
+
+            steady = _Client(["i:1"])
+            self.assertEqual(await project(steady), "steam_bootstrap")
+            self.assertEqual(steady.asked, 2)
+            # Moved once: one retry with fresh bindings, which held.
+            once = _Client(["i:1", "i:2", "i:2", "i:2"])
+            self.assertEqual(await project(once), "steam_bootstrap")
+            self.assertEqual(once.asked, 4)
+            # Moved on every read: bounded, then null.
+            moving = _Client(["i:1", "i:2", "i:3", "i:4", "i:5"])
+            self.assertIsNone(await project(moving))
+            self.assertEqual(moving.asked, 4)
+            # No revision (nothing to revalidate against): null.
+            unversioned = _Client([None])
+            self.assertIsNone(await project(unversioned))
+            self.assertEqual(unversioned.asked, 1)
+            # Nothing named: no second read.
+            (Path(root) / "ErrorMessage_x.mdmp").unlink()
+            quiet = _Client(["i:1", "i:2"])
+            self.assertIsNone(await project(quiet))
+            self.assertEqual(quiet.asked, 1)
+        status = {}
+        await server._attach_revalidated_runs_retired_recently(object(), status)
+        self.assertEqual(status, {"runs_retired_recently": None})
+
+    async def test_r4_b3_nul_root_in_a_binding_is_null_not_a_tool_error(self) -> None:
+        # Astra r3 B3, public contract: a daemon answer carrying a root the OS
+        # cannot name degrades that row to null; session_status still returns.
+        from unittest.mock import AsyncMock, patch
+
+        from dayz_mcp import server
+        from tests.test_client_mode import _fixture_client_runtime
+
+        config = server.ServerConfig(
+            mode="client",
+            key="fixture-key",
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _m: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        with patch.object(server, "ClientRuntime", return_value=runtime):
+            app, _ = server.build_app(config)
+        run_id = "12345678-1234-4234-8234-999999999999"
+        for root in ("C:\\bad\u0000profile", "C:\\bad\u0007profile"):
+            bindings = {
+                run_id: {"baseline": {"roots": [root], "before": [[]]}, "ceiling": None}
+            }
+            with patch.object(
+                runtime,
+                "session_status",
+                new=AsyncMock(return_value={"retired_run_diagnostics": [_retired_row(run_id)]}),
+            ), patch.object(
+                runtime,
+                "client_dumps_get",
+                new=AsyncMock(return_value={"bindings": bindings, "revision": "i:1"}),
+            ):
+                try:
+                    result = await app.call_tool("session_status", {})
+                except Exception as exc:  # the r3 ToolError is the defect
+                    self.fail(f"session_status raised {exc!r}")
+            if isinstance(result, tuple):
+                result = result[0]
+            payload = result if isinstance(result, dict) else json.loads(result[0].text)
+            rows = payload["runs_retired_recently"]
+            self.assertEqual([row["run_id"] for row in rows], [run_id])
+            self.assertIsNone(rows[0]["client_death_diagnosis"])
+
+    def test_r4_b3_parser_and_scan_refuse_control_characters(self) -> None:
+        from dayz_mcp.client_steam_bootstrap import (
+            _scan_error_mdmps,
+            baseline_from_wire,
+            diagnose_retired_client_death,
+            snapshot_client_dumps,
+        )
+
+        for root in ("C:\\bad\u0000profile", "a\u001fb", "\t"):
+            self.assertIsNone(baseline_from_wire({"roots": [root], "before": [[]]}))
+            binding = {"baseline": {"roots": [root], "before": [[]]}, "ceiling": None}
+            self.assertIsNone(diagnose_retired_client_death("r", {"r": binding}))
+            good = {"roots": ["C:\\ok"], "before": [[]]}
+            bad_ceiling = {"baseline": good, "ceiling": {"roots": [root], "before": [[]]}}
+            self.assertIsNone(diagnose_retired_client_death("r", {"r": bad_ceiling}))
+        self.assertIsNotNone(baseline_from_wire({"roots": ["C:\\ok"], "before": [[]]}))
+        # The OS raises ValueError, not OSError, on NUL: unreadable, not a crash.
+        nul = "C:\\bad\u0000profile"
+        self.assertIsNone(_scan_error_mdmps(nul))
+        self.assertEqual(snapshot_client_dumps([nul]).before, (None,))
 
 
 if __name__ == "__main__":

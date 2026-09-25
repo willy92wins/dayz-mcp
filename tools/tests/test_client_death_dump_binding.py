@@ -83,7 +83,7 @@ def _launch(registry: ClientDumpRegistry, roots: list[Path], run_id: str) -> Non
     """dayz_test_tool's order: open with the snapshot, daemon start, bind."""
     token = registry.open(baseline_to_wire(snapshot_client_dumps(roots)))
     assert token is not None
-    registry.note_launch()
+    registry.note_launch(run_id)
     assert registry.bind(token, run_id)
 
 
@@ -243,10 +243,69 @@ class ClientDumpRegistryTests(_Isolated):
 
     def test_the_launch_being_started_is_not_closed_by_its_own_start(self) -> None:
         token = self._open()
-        self.registry.note_launch()
         run_id = str(uuid.uuid4())
+        self.registry.note_launch(run_id)
         self.assertTrue(self.registry.bind(token, run_id))
         self.assertIn(run_id, self.registry.bindings_for([run_id]))
+
+    def test_r4_b1_a_second_launch_before_the_bind_makes_it_unattributable(
+        self,
+    ) -> None:
+        run_id = str(uuid.uuid4())
+        for foreign in (None, str(uuid.uuid4())):
+            token = self._open()
+            self.registry.note_launch(run_id)  # the run's own start
+            self.registry.note_launch(foreign)  # another launch before the bind
+            self.registry.bind(token, run_id)
+            self.assertEqual(self.registry.bindings_for([run_id]), {})
+
+    def test_r4_b1_every_start_of_the_own_run_keeps_it_attributable(self) -> None:
+        # One dayz_test_run starts the server, may replay it, then starts the
+        # client with the same run_id; the daemon may only learn the run_id
+        # from the start's answer.
+        token = self._open()
+        run_id = str(uuid.uuid4())
+        self.registry.note_launch(run_id)
+        self.registry.note_launch(run_id)
+        ticket = self.registry.note_launch()
+        self.registry.launch_started(ticket, run_id)
+        self.assertTrue(self.registry.bind(token, run_id))
+        self.assertIn(run_id, self.registry.bindings_for([run_id]))
+
+    def test_r4_b1_a_start_whose_run_stays_unknown_is_foreign(self) -> None:
+        token = self._open()
+        run_id = str(uuid.uuid4())
+        self.registry.note_launch(run_id)
+        ticket = self.registry.note_launch()
+        self.registry.launch_started(ticket, None)
+        self.registry.bind(token, run_id)
+        self.assertEqual(self.registry.bindings_for([run_id]), {})
+
+    def test_r4_b1_a_bind_with_no_launch_since_the_open_is_unattributable(
+        self,
+    ) -> None:
+        token = self._open()
+        run_id = str(uuid.uuid4())
+        self.registry.bind(token, run_id)
+        self.assertEqual(self.registry.bindings_for([run_id]), {})
+
+    def test_r4_b2_every_change_moves_the_revision(self) -> None:
+        seen = [self.registry.bindings_with_revision([])[1]]
+        token = self._open()
+        seen.append(self.registry.bindings_with_revision([])[1])
+        self.registry.note_launch()
+        seen.append(self.registry.bindings_with_revision([])[1])
+        self.registry.bind(token, str(uuid.uuid4()))
+        seen.append(self.registry.bindings_with_revision([])[1])
+        self.assertEqual(len(set(seen)), 4)
+        self.assertEqual(
+            self.registry.bindings_with_revision([])[1], seen[-1]
+        )
+        # A restarted daemon never repeats a revision of the previous one.
+        self.assertNotEqual(
+            ClientDumpRegistry().bindings_with_revision([])[1],
+            ClientDumpRegistry().bindings_with_revision([])[1],
+        )
 
     def test_an_unbound_open_is_never_listed(self) -> None:
         self._open()
@@ -408,7 +467,7 @@ class LateDeathEndToEndTest(unittest.IsolatedAsyncioTestCase):
             # secure_launcher: the lease is granted, the launch executes, and
             # the daemon's /lifecycle/start follows.
             await kwargs["execution_started_cb"]()  # type: ignore[operator]
-            self.registry.note_launch()
+            self.registry.note_launch(self.RUN_ID)
             for index, (root, body) in enumerate(write_during_launch):
                 _dump(root, f"03-04-{index:02d}", body)
             kwargs["output_sink"](  # type: ignore[operator]

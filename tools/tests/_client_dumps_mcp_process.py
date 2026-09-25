@@ -3,8 +3,8 @@
 Reads one JSON command per stdin line and answers one JSON line on stdout. It
 talks to the daemon's real loopback handler over HTTP with the same payloads
 ControlClient sends, and uses the production helpers of dayz_test_tool: the
-snapshot, _open_client_dumps, _bind_client_dumps, server._client_dump_bindings
-and _runs_retired_recently.
+snapshot, _open_client_dumps, _bind_client_dumps and the session_status
+projection server._attach_revalidated_runs_retired_recently (296b r4).
 Nothing is shared with another process except the daemon and the profile.
 """
 
@@ -66,9 +66,13 @@ class _HttpRuntime:
         return self.call("/client-dumps", {"op": "get", "run_ids": run_ids})
 
 
-async def _launch(runtime: _HttpRuntime, root: str, send_open: bool) -> str:
+async def _launch(
+    runtime: _HttpRuntime, root: str, send_open: bool, bind: bool = True
+) -> object:
     # The dayz_test_tool order: the snapshot and open when the launch leaves
     # the queue, then the daemon's /lifecycle/start, then bind to its run_id.
+    # bind=False stops before the bind (it follows the lease release) and
+    # returns the token too, for a later "bind" command.
     token = None
     if send_open:
         token = await dayz_test_tool._open_client_dumps(
@@ -76,15 +80,39 @@ async def _launch(runtime: _HttpRuntime, root: str, send_open: bool) -> str:
         )
     started = runtime.call("/lifecycle/start", {"lease_token": "token", "request": {}})
     run_id = started["run_id"]
+    if not bind:
+        return {"run_id": run_id, "token": token}
     await dayz_test_tool._bind_client_dumps(runtime, token, run_id)
     return run_id
 
 
-def _project(runtime: _HttpRuntime) -> dict:
+class _PausedAfterFirstGet:
+    """The runtime, stopped right after the first client-dumps get returns.
+
+    It tells the test it is paused and waits for one stdin line: the window
+    between reading the bindings and scanning the shared profile.
+    """
+
+    def __init__(self, runtime: _HttpRuntime) -> None:
+        self._runtime = runtime
+        self._paused = False
+
+    async def client_dumps_get(self, run_ids: list) -> dict:
+        answer = await self._runtime.client_dumps_get(run_ids)
+        if not self._paused:
+            self._paused = True
+            sys.stdout.write(json.dumps({"answer": "paused"}) + "\n")
+            sys.stdout.flush()
+            sys.stdin.readline()
+        return answer
+
+
+def _project(runtime: _HttpRuntime, client: object = None) -> dict:
     # What the session_status tool does with the daemon's answer.
     status = runtime.call("/session/status", {})
-    bindings = asyncio.run(server._client_dump_bindings(runtime, status))
-    server._attach_runs_retired_recently(status, bindings)
+    asyncio.run(
+        server._attach_revalidated_runs_retired_recently(client or runtime, status)
+    )
     rows = status["runs_retired_recently"]
     return {row["run_id"]: row["client_death_diagnosis"] for row in rows or []}
 
@@ -105,7 +133,16 @@ def main() -> None:
         op = command["op"]
         if op == "launch":
             answer: object = asyncio.run(
-                _launch(runtime, command["root"], command.get("open", True))
+                _launch(
+                    runtime,
+                    command["root"],
+                    command.get("open", True),
+                    command.get("bind", True),
+                )
+            )
+        elif op == "bind":
+            answer = asyncio.run(
+                runtime.client_dumps_bind(command["token"], command["run_id"])
             )
         elif op == "dump":
             root = Path(command["root"])
@@ -115,6 +152,8 @@ def main() -> None:
             answer = str(path)
         elif op == "project":
             answer = _project(runtime)
+        elif op == "project_paused":
+            answer = _project(runtime, _PausedAfterFirstGet(runtime))
         elif op == "pid":
             answer = os.getpid()
         else:

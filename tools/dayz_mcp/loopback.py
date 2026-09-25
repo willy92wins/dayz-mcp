@@ -3516,8 +3516,18 @@ class Handler(BaseHTTPRequestHandler):
         if action == "start":
             # 296b r3: from here on this launch can write client dumps; a run
             # no pre-launch snapshot capped can no longer claim them.
-            self.state.client_dumps.note_launch()
-            result = lifecycle.start_run(client, token, body.get("request"))
+            # 296b r4: the launch is recorded with the run it is for, so a
+            # pending bind can tell its own starts from anyone else's.
+            request = body.get("request")
+            claimed = None
+            if isinstance(request, dict):
+                claimed = request.get("run_id") or request.get("new_run_id")
+            launch_ticket = self.state.client_dumps.note_launch(claimed)
+            result = lifecycle.start_run(client, token, request)
+            if isinstance(result, dict):
+                self.state.client_dumps.launch_started(
+                    launch_ticket, result.get("run_id")
+                )
         elif action == "ack":
             result = lifecycle.ack_run(
                 client,
@@ -3576,7 +3586,8 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(run_ids, list) or len(run_ids) > MAX_CLIENT_DUMP_RUN_IDS:
                 self._json(400, {"error": "invalid_run_ids"})
                 return
-            self._json(200, {"bindings": registry.bindings_for(run_ids)})
+            bindings, revision = registry.bindings_with_revision(run_ids)
+            self._json(200, {"bindings": bindings, "revision": revision})
         else:
             self._json(400, {"error": "invalid_op"})
 

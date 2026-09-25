@@ -58,7 +58,8 @@ def _scan_error_mdmps(directory: str) -> dict[_DumpKey, Path] | None:
                 found[key] = Path(entry.path)
     except FileNotFoundError:
         return {}
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError: a path the OS cannot even name (embedded NUL, 296b r4).
         return None
     return found
 
@@ -168,6 +169,16 @@ def _is_wire_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _is_wire_root(value: object) -> bool:
+    # 296b r4: no control character (NUL included) can name a Windows path;
+    # os.scandir raises ValueError on NUL instead of OSError.
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= _MAX_WIRE_ROOT_CHARS
+        and not any(ord(char) < 32 for char in value)
+    )
+
+
 def baseline_to_wire(baseline: ClientDumpBaseline) -> dict[str, object] | None:
     """JSON form of a baseline, or None if it cannot travel intact.
 
@@ -211,10 +222,7 @@ def baseline_from_wire(value: object) -> ClientDumpBaseline | None:
         return None
     if not roots or len(roots) > MAX_WIRE_ROOTS or len(before) != len(roots):
         return None
-    if any(
-        not isinstance(root, str) or not root or len(root) > _MAX_WIRE_ROOT_CHARS
-        for root in roots
-    ):
+    if not all(_is_wire_root(root) for root in roots):
         return None
     sets: list[frozenset[_DumpKey] | None] = []
     for keys in before:
@@ -255,6 +263,10 @@ def diagnose_retired_client_death(
         ceiling = baseline_from_wire(entry["ceiling"])
         if ceiling is None:
             return None
-    if _new_dump_names_api_not_loaded(baseline, ceiling):
-        return "steam_bootstrap"
-    return None
+    try:
+        named = _new_dump_names_api_not_loaded(baseline, ceiling)
+    except Exception:
+        # 296b r4: one row's unreadable binding is that row's null, never an
+        # error of session_status.
+        return None
+    return "steam_bootstrap" if named else None
