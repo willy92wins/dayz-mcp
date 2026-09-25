@@ -65,3 +65,7 @@ README / architecture / `build_app`: **62 tools** (+ `exec_enforce` opt-in). `CL
 - `SetHeader` solo Content-Type â†’ API-key en query string.
 - `*_now` bloquea el tick.
 - `SetTimeMultiplier(0)` congela la sim.
+<!-- Asistente distill 2026-09-25 ~20:50 Madrid
+- RP noche: real `main` tip `72f6354` (PR #92 MERGED). LIVE-STATE header rewritten 2026-09-25 noche to tip `72f6354` (#92 MERGED). Local checkout may still lag.
+- RP note: local checkout still at `78cc50a` (dirty HANDOFF; no ff). LIVE-STATE header rewritten 2026-09-25 noche to tip `72f6354`; origin/main fetched = `72f6354`.
+-->
