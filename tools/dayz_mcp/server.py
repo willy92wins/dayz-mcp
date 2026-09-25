@@ -4189,11 +4189,10 @@ def _foreign_ports_contain(foreign_ports: object, port: int) -> bool:
     return any(_foreign_port_number(item) == port for item in foreign_ports)
 
 
-def _annotate_box_foreign_ports(box: dict[str, Any]) -> dict[str, Any]:
-    """Flag DayZ-relevant listeners so 8B callers can ignore DNS/IKE noise."""
-    ports = box.get("foreign_ports")
+def _annotate_foreign_port_list(ports: object) -> list[dict[str, Any]]:
+    """Normalize a foreign_ports* list to [{port, dayz_relevant}, ...]."""
     if not isinstance(ports, list):
-        return box
+        return []
     annotated: list[dict[str, Any]] = []
     for item in ports:
         port = _foreign_port_number(item)
@@ -4204,10 +4203,31 @@ def _annotate_box_foreign_ports(box: dict[str, Any]) -> dict[str, Any]:
         extra["port"] = port
         extra["dayz_relevant"] = _port_is_dayz_relevant(port)
         annotated.append(extra)
-    box["foreign_ports"] = annotated
+    return annotated
+
+
+def _annotate_box_foreign_ports(box: dict[str, Any]) -> dict[str, Any]:
+    """Flag DayZ-relevant listeners; keep full table under foreign_ports_all."""
+    ports = box.get("foreign_ports")
+    annotated: list[dict[str, Any]] = []
+    if isinstance(ports, list):
+        annotated = _annotate_foreign_port_list(ports)
+        box["foreign_ports"] = annotated
+
+    ports_all = box.get("foreign_ports_all")
+    annotated_all: list[dict[str, Any]] | None = None
+    if isinstance(ports_all, list):
+        annotated_all = _annotate_foreign_port_list(ports_all)
+        box["foreign_ports_all"] = annotated_all
+
     meta = dict(box.get("foreign_ports_meta") or {})
-    meta["count"] = len(annotated)
-    meta["dayz_relevant"] = sum(1 for item in annotated if item.get("dayz_relevant"))
+    if isinstance(ports, list):
+        meta["count"] = len(annotated)
+        meta["dayz_relevant"] = sum(
+            1 for item in annotated if item.get("dayz_relevant")
+        )
+    if annotated_all is not None:
+        meta["count_all"] = len(annotated_all)
     box["foreign_ports_meta"] = meta
     return box
 
@@ -4233,12 +4253,19 @@ def _port_conflict_fields(box: object, port: int | None) -> dict[str, Any]:
                 "(psutil/netstat): waiting does not help, restore that first"
             ),
         }
-    foreign_ports = box.get("foreign_ports")
+    # Prefer the full table when present (option A); fall back to the default
+    # DayZ-related list for older payloads that never emitted foreign_ports_all.
+    foreign_ports_all = box.get("foreign_ports_all")
+    foreign_ports = (
+        foreign_ports_all
+        if isinstance(foreign_ports_all, list)
+        else box.get("foreign_ports")
+    )
     runs = box.get("runs")
     if isinstance(port, int) and _foreign_ports_contain(foreign_ports, port):
-        # Any requested port, any image: foreign_ports is the socket table minus
-        # the managed runs. When a run also occupies the box, both blockers are
-        # named -- freeing the box does not free this port.
+        # Any requested port, any image: foreign_ports_all is the socket table
+        # minus managed runs. When a run also occupies the box, both blockers
+        # are named -- freeing the box does not free this port.
         if isinstance(runs, list) and runs:
             hint = (
                 f"the box is busy (see occupied_by_run_id) AND port {port} is held "
@@ -4249,7 +4276,7 @@ def _port_conflict_fields(box: object, port: int | None) -> dict[str, Any]:
         else:
             hint = (
                 f"port {port} is held by a process on this host that is not a "
-                "managed run (see session_status.box.foreign_ports): pass another "
+                "managed run (see session_status.box.foreign_ports_all): pass another "
                 "port= or wait for its holder to exit; wait_for_box_s does not "
                 "help while the box reads free"
             )
@@ -4997,11 +5024,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Read redacted daemon/queue/self coordination state, including "
             "box occupancy (managed runs; foreign DayZ processes seen by image "
             "or by a held UDP port, even without a run record; ports_in_use "
-            "from the socket table; foreign_ports is the complete socket "
-            "table minus managed runs, each entry {port, dayz_relevant} so "
-            "8B callers can ignore DNS/IKE listeners; foreign_ports_meta "
-            "summarizes count/dayz_relevant and neither field overrides "
-            "occupied/available_for; "
+            "from the socket table; foreign_ports is DayZ-related listeners "
+            "only (image or DayZ UDP range), each entry {port, dayz_relevant}; "
+            "foreign_ports_all is the complete socket table minus managed runs; "
+            "foreign_ports_meta summarizes count/count_all/dayz_relevant and "
+            "neither list overrides occupied/available_for; "
             "and the box wait FIFO). box.available_for distinguishes new_launch "
             "from adopt of an ownerless RUNNING_IDLE run; blocked_on then names "
             "session_acquire_wait, not the launch FIFO. blocked_on names the "

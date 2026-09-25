@@ -397,12 +397,14 @@ class PortOccupancyRound2Test(PortOccupancyTest):
         # A non-DayZ holder of a DayZ-range port is visible in ports_in_use so a
         # caller can pick another port, without occupying the box.
         self.assertEqual(box["ports_in_use"], [2402])
-        # foreign_ports is the socket table minus managed runs, any image, any port.
-        self.assertEqual(box["foreign_ports"], [53, 2402])
+        # Default foreign_ports is DayZ-related only; full table is foreign_ports_all.
+        self.assertEqual(box["foreign_ports"], [2402])
+        self.assertEqual(box["foreign_ports_all"], [53, 2402])
         self.assertEqual(
             box["foreign_ports_meta"],
             {
-                "count": 2,
+                "count": 1,
+                "count_all": 2,
                 "dayz_related": 1,
                 "kind": "os_socket_table_ignored_for_occupancy",
             },
@@ -410,7 +412,42 @@ class PortOccupancyRound2Test(PortOccupancyTest):
         self.assertEqual(
             box["foreign_ports_meta"]["count"], len(box["foreign_ports"])
         )
+        self.assertEqual(
+            box["foreign_ports_meta"]["count_all"], len(box["foreign_ports_all"])
+        )
         self.assertFalse(box["occupied"])
+
+    def test_foreign_ports_default_is_dayz_related_only(self) -> None:
+        self.port_holders = _holders(
+            (53, 4032, "svchost.exe"),
+            (2402, 5555, "python.exe"),
+            (500, 6084, "ike.exe"),
+        )
+        box = self.lifecycle.box_occupancy()
+        self.assertEqual(box["foreign_ports"], [2402])
+        self.assertEqual(box["foreign_ports_all"], [53, 500, 2402])
+        self.assertEqual(box["foreign_ports_meta"]["count"], 1)
+        self.assertEqual(
+            box["foreign_ports_meta"]["count_all"], len(box["foreign_ports_all"])
+        )
+        self.assertEqual(box["foreign_ports_meta"]["dayz_related"], 1)
+        self.assertFalse(box["occupied"])
+        self.assertTrue(box["port_scan_known"])
+
+    def test_foreign_ports_dayz_image_outside_range_still_in_default_list(self) -> None:
+        # DayZ image on a non-2302-2999 port still counts as dayz_related.
+        self.port_holders = _holders(
+            (53, 4032, "svchost.exe"),
+            (1234, 888, "DayZServer_x64.exe"),
+        )
+        box = self.lifecycle.box_occupancy()
+        self.assertEqual(box["foreign_ports"], [1234])
+        self.assertEqual(box["foreign_ports_all"], [53, 1234])
+        self.assertEqual(box["foreign_ports_meta"]["count"], 1)
+        self.assertEqual(box["foreign_ports_meta"]["count_all"], 2)
+        self.assertEqual(box["foreign_ports_meta"]["dayz_related"], 1)
+        # DayZ image occupies the box even outside the game port band.
+        self.assertTrue(box["occupied"])
 
     def test_unknown_scan_carries_its_reason(self) -> None:
         self.lifecycle.port_probe = lambda: {"known": False, "holders": []}

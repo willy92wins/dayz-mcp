@@ -124,8 +124,18 @@ class ActiveRunDiagnosisTest(unittest.TestCase):
         self.assertIn("does not free the port", failed["hint"])
 
     def test_any_requested_port_is_diagnosed_not_only_the_band(self) -> None:
-        # LOSS R2-B-1: the API accepts ports beyond 2302-2999; foreign_ports is complete.
-        box = {"occupied": False, "runs": [], "foreign": [], "ports_in_use": [], "foreign_ports": [3002, 65530], "queue": [], "port_scan_known": True}
+        # LOSS R2-B-1: the API accepts ports beyond 2302-2999; full table is
+        # foreign_ports_all (option A). DayZ-range default list would miss these.
+        box = {
+            "occupied": False,
+            "runs": [],
+            "foreign": [],
+            "ports_in_use": [],
+            "foreign_ports": [],
+            "foreign_ports_all": [3002, 65530],
+            "queue": [],
+            "port_scan_known": True,
+        }
         for port in (3002, 65530):
             with self.subTest(port):
                 failed = server._failed_active_run_result(
@@ -133,6 +143,23 @@ class ActiveRunDiagnosisTest(unittest.TestCase):
                 )
                 self.assertEqual(failed["reason"], "port_in_use_foreign")
                 self.assertEqual(failed["port"], port)
+
+    def test_conflict_beyond_dayz_range_still_diagnosed(self) -> None:
+        box = {
+            "occupied": False,
+            "runs": [],
+            "foreign": [],
+            "ports_in_use": [],
+            "foreign_ports": [2302],
+            "foreign_ports_all": [2302, 3002, 65530],
+            "queue": [],
+            "port_scan_known": True,
+        }
+        for port in (3002, 65530):
+            with self.subTest(port):
+                fields = server._port_conflict_fields(box, port)
+                self.assertEqual(fields["reason"], "port_in_use_foreign")
+                self.assertEqual(fields["port"], port)
 
 
 class BlockedOnTest(unittest.TestCase):
