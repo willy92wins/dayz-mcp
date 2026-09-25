@@ -621,14 +621,22 @@ def compute_bridge_ready(status: dict[str, Any]) -> dict[str, Any]:
                 or ach != EXPECTED_SERVER_ARG_CONTRACT_HASH
             ):
                 return {"ready": False, "reason": "arg_contract_mismatch"}
-        elif (
-            caps_state == "mismatch"
-            and s_caps.get("reason") == "arg_contract_mismatch"
-        ):
-            return {"ready": False, "reason": "arg_contract_mismatch"}
         elif caps_state == "mismatch":
-            # Name-census disagreement after comparison: keep historical ready
-            # behavior (only arg-contract mismatch fails closed among mismatches).
+            # Fail-closed on arg-contract hash independently of the primary
+            # compare reason. Census disagreement used to hide absent/wrong ach
+            # (B2 residual): missing census cmd + bad/absent ach must not
+            # green-wash ready=true. Matching ach + census-only mismatch keeps
+            # historical ready behavior.
+            if s_caps.get("reason") == "arg_contract_mismatch":
+                return {"ready": False, "reason": "arg_contract_mismatch"}
+            ach = s_caps.get("announced_arg_contract_hash")
+            if (
+                not isinstance(ach, str)
+                or ach == ""
+                or ach != EXPECTED_SERVER_ARG_CONTRACT_HASH
+            ):
+                return {"ready": False, "reason": "arg_contract_mismatch"}
+            # Name-census disagreement with matching ach: historical ready.
             pass
         else:
             return {"ready": False, "reason": "capabilities_unknown"}
@@ -1015,12 +1023,16 @@ def _compare_bridge_capabilities(
         elif announced_hash != expected_hash:
             arg_contract_ok = False
             arg_reason = "arg_contract_mismatch"
-    if not agrees:
-        state = "mismatch"
-        reason = "census_disagrees_with_registered_tools"
-    elif not arg_contract_ok:
+    # Prefer arg_contract_mismatch when both census and ach fail so the
+    # fail-closed gate is not hidden behind census_disagrees (B2 residual).
+    # Census-only disagreement keeps its historical reason; details remain in
+    # announced_without_registered_tool / registered_without_announced_command.
+    if not arg_contract_ok:
         state = "mismatch"
         reason = arg_reason
+    elif not agrees:
+        state = "mismatch"
+        reason = "census_disagrees_with_registered_tools"
     else:
         state = "match"
         reason = "ok"

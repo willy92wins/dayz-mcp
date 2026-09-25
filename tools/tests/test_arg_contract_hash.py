@@ -213,6 +213,24 @@ class ArgContractHashTest(unittest.TestCase):
             block["announced_arg_contract_hash"] = ach
         return block
 
+    def _announced_missing_command(self, ach: str | None, missing: str = "world_spawn") -> dict:
+        """Census lacking one registered command (B2 residual repro)."""
+        cmds = sorted(
+            c
+            for c in server_module._BRIDGE_COMMAND_TOOLS["server"]
+            if c != missing
+        )
+        self.assertTrue(cmds, "census should still list other commands")
+        self.assertNotIn(missing, cmds)
+        block: dict = {
+            "state": "announced",
+            "reason": "ok",
+            "announced_commands": cmds,
+        }
+        if ach is not None:
+            block["announced_arg_contract_hash"] = ach
+        return block
+
     def test_ready_false_when_capabilities_unknown(self) -> None:
         # B2: missing/malformed caps must not green-wash ready.
         status = self._live_peers(
@@ -293,6 +311,51 @@ class ArgContractHashTest(unittest.TestCase):
         ready = server_module.compute_bridge_ready(status)
         self.assertEqual(ready, {"ready": False, "reason": "arg_contract_mismatch"})
 
+    def test_bridge_status_missing_census_cmd_absent_ach_ready_false(self) -> None:
+        # B2 residual: missing census cmd must not hide absent ach => ready=false.
+        raw = self._live_peers(self._announced_missing_command(None))
+        compared = server_module._with_capability_comparison(
+            raw, self._server_registered()
+        )
+        caps = compared["server_peer"]["capabilities"]
+        self.assertEqual(caps["state"], "mismatch")
+        self.assertEqual(caps["reason"], "arg_contract_mismatch")
+        self.assertIn("world_spawn", caps.get("registered_without_announced_command", []))
+        payload = server_module._with_ready(compared)
+        self.assertFalse(payload["ready"]["ready"])
+        self.assertEqual(payload["ready"]["reason"], "arg_contract_mismatch")
+
+    def test_bridge_status_missing_census_cmd_wrong_ach_ready_false(self) -> None:
+        # B2 residual: missing census cmd must not hide wrong ach => ready=false.
+        raw = self._live_peers(self._announced_missing_command("deadbeefdeadbeef"))
+        compared = server_module._with_capability_comparison(
+            raw, self._server_registered()
+        )
+        caps = compared["server_peer"]["capabilities"]
+        self.assertEqual(caps["state"], "mismatch")
+        self.assertEqual(caps["reason"], "arg_contract_mismatch")
+        self.assertIn("world_spawn", caps.get("registered_without_announced_command", []))
+        payload = server_module._with_ready(compared)
+        self.assertFalse(payload["ready"]["ready"])
+        self.assertEqual(payload["ready"]["reason"], "arg_contract_mismatch")
+
+    def test_bridge_status_missing_census_cmd_correct_ach_keeps_census_reason(self) -> None:
+        # Census-only disagreement with matching ach: reason stays census;
+        # historical ready=true among mismatches is preserved.
+        raw = self._live_peers(
+            self._announced_missing_command(
+                server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH
+            )
+        )
+        compared = server_module._with_capability_comparison(
+            raw, self._server_registered()
+        )
+        caps = compared["server_peer"]["capabilities"]
+        self.assertEqual(caps["state"], "mismatch")
+        self.assertEqual(caps["reason"], "census_disagrees_with_registered_tools")
+        payload = server_module._with_ready(compared)
+        self.assertTrue(payload["ready"]["ready"])
+        self.assertEqual(payload["ready"]["reason"], "ready")
 
 
 if __name__ == "__main__":
