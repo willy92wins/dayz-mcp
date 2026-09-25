@@ -1,0 +1,15 @@
+{
+ "view": "L8B",
+ "sample": 2,
+ "finish": "stop",
+ "usage": {
+  "prompt_tokens": 5982,
+  "total_tokens": 6336,
+  "completion_tokens": 354,
+  "completion_tokens_details": {
+   "reasoning_tokens": 0
+  }
+ },
+ "content": "{\n\"T1\": {\n\"possible\": false,\n\"calls\": [],\n\"note\": \"Las herramientas disponibles (bridge verbs, probes) no incluyen comandos directos para 'spawnear un objeto' o 'mover jugador'. Solo hay dayz_test_run para iniciar el juego. La tarea de spawn y movimiento requiere tools de manipulación de entidades (spawn_object, move_player) que no están expuestas en esta lista.\"\n},\n\"T2\": {\n\"possible\": false,\n\"calls\": [],\n\"note\": \"No hay herramientas para spawnear objetos (spawn_object) ni para leer telemetría específica de velocidad/motor de un objeto (wait_for entity_state solo lee salud/cargo). Falta la tool para crear entidades.\"\n},\n\"T3\": {\n\"possible\": false,\n\"calls\": [],\n\"note\": \"No hay herramientas para teletransportar al jugador (move_player/teleport). Se puede esperar a que aparezca '[MiMod] ready' en el log usando wait_for(condition='log_matches'), pero no se puede ejecutar la acción de teletransporte previa con las tools actuales.\"\n},\n\"T4\": {\n\"possible\": false,\n\"calls\": [],\n\"note\": \"No hay ninguna herramienta para tomar capturas de pantalla (screenshot/take_screenshot).\"\n},\n\"T5\": {\n\"possible\": false,\n\"calls\": [],\n\"note\": \"La lista de tools proporcionada no incluye 'players_list', 'get_players' o 'probe_players'. Solo se menciona que existen probes 'players_*' en las instrucciones, pero no están definidas como tools invocables aquí.\"\n}\n}",
+ "elapsed_s": 10.2
+}

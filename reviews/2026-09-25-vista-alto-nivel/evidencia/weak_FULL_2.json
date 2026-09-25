@@ -1,0 +1,15 @@
+{
+ "view": "FULL",
+ "sample": 2,
+ "finish": "stop",
+ "usage": {
+  "prompt_tokens": 17534,
+  "total_tokens": 18140,
+  "completion_tokens": 606,
+  "completion_tokens_details": {
+   "reasoning_tokens": 0
+  }
+ },
+ "content": "{\"T1\": {\"possible\": true, \"calls\": [{\"tool\": \"dayz_test_run\", \"args\": {\"project\": \"MiMod\", \"mode\": \"all\", \"extra_mods\": [\"@DayZ_MCP\"]}}, {\"tool\": \"session_acquire_wait\", \"args\": {\"purpose\": \"DayZ session\"}}, {\"tool\": \"bridge_status\", \"args\": {}}], \"note\": \"Se lanza el run con el mod extra '@DayZ_MCP' (requerido si el proyecto no es DayZ_MCP). Luego se adquiere la sesión y se verifica el estado del puente para confirmar la preparación.\"}, \"T2\": {\"possible\": true, \"calls\": [{\"tool\": \"surface_query\", \"args\": {\"x\": 4500.0, \"z\": 10200.0}}, {\"tool\": \"world_spawn\", \"args\": {\"type\": \"CivilianSedan\", \"pos\": [4500.0, 0.0, 10200.0], \"flags\": 3108}}, {\"tool\": \"vehicle_telemetry\", \"args\": {}}], \"note\": \"Primero se consulta la superficie (aunque y=0 es válido, es buena práctica verificar Y si se usara un valor específico). Se spawnea el coche con los flags recomendados para IA/física (ECE_PLACE_ON_SURFACE|ECE_INITAI|ECE_CREATEPHYSICS). Finalmente se lee la telemetría del cliente.\"}, \"T3\": {\"possible\": true, \"calls\": [{\"tool\": \"player_teleport\", \"args\": {\"pos\": [4510.0, 0.0, 10210.0]}}, {\"tool\": \"wait_for\", \"args\": {\"condition\": \"log_matches\", \"pattern\": \"[MiMod] ready\", \"timeout_s\": 30.0, \"lookback_lines\": 200}}], \"note\": \"Teletransporta al jugador a la posición dada (y=0 fuerza superficie). Espera a que la cadena '[MiMod] ready' aparezca en los logs del servidor/cliente.\"}, \"T4\": {\"possible\": true, \"calls\": [{\"tool\": \"capture_screenshot\", \"args\": {\"scale\": \"small\", \"max_tokens\": 25000}}], \"note\": \"Toma una captura de pantalla de la ventana del cliente DayZ. Asume que la cámara del cliente está orientada hacia el coche spawneado; si no, se necesitaría ajustar la cámara con camera_set antes.\"}, \"T5\": {\"possible\": true, \"calls\": [{\"tool\": \"query_all_players\", \"args\": {}}], \"note\": \"Consulta el estado de todos los jugadores conectados, incluyendo sus posiciones, de forma puramente lectiva.\"}}",
+ "elapsed_s": 42.9
+}

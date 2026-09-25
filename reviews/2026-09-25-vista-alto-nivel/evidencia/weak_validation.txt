@@ -1,0 +1,59 @@
+view | sample | task | semantic | n_calls | n_problems | problems
+FULL | 1 | ALL | unparseable:JSONDecodeError | 0 | 0 | 
+FULL | 2 | T1 | ok | 3 | 0 | 
+FULL | 2 | T2 | lease_after_spawn | 3 | 0 | 
+FULL | 2 | T3 | lease_after_teleport | 2 | 0 | 
+FULL | 2 | T4 | ok | 1 | 0 | 
+FULL | 2 | T5 | ok | 1 | 0 | 
+L8B | 1 | T1 | ok | 3 | 0 | 
+L8B | 1 | T2 | declared_impossible | 0 | 0 | 
+L8B | 1 | T3 | declared_impossible | 0 | 0 | 
+L8B | 1 | T4 | declared_impossible | 0 | 0 | 
+L8B | 1 | T5 | declared_impossible | 0 | 0 | 
+L8B | 2 | T1 | declared_impossible | 0 | 0 | 
+L8B | 2 | T2 | declared_impossible | 0 | 0 | 
+L8B | 2 | T3 | declared_impossible | 0 | 0 | 
+L8B | 2 | T4 | declared_impossible | 0 | 0 | 
+L8B | 2 | T5 | declared_impossible | 0 | 0 | 
+PRE | 1 | T1 | declared_impossible | 0 | 0 | 
+PRE | 1 | T2 | missing:world_spawn | 3 | 1 | not_visible_in_view:playbook_run
+PRE | 1 | T3 | declared_impossible | 0 | 0 | 
+PRE | 1 | T4 | declared_impossible | 0 | 0 | 
+PRE | 1 | T5 | missing:query_all_players | 2 | 0 | 
+PRE | 2 | T1 | ok | 3 | 0 | 
+PRE | 2 | T2 | declared_impossible | 0 | 0 | 
+PRE | 2 | T3 | declared_impossible | 0 | 0 | 
+PRE | 2 | T4 | declared_impossible | 0 | 0 | 
+PRE | 2 | T5 | missing:query_all_players | 1 | 0 | 
+{
+ "FULL": {
+  "tasks": 6,
+  "ok_and_valid": 3,
+  "ok_semantic": 3,
+  "calls": 10,
+  "calls_with_problem": 0,
+  "hallucinated": 0,
+  "not_visible": 0,
+  "declared_impossible": 0
+ },
+ "L8B": {
+  "tasks": 10,
+  "ok_and_valid": 1,
+  "ok_semantic": 1,
+  "calls": 3,
+  "calls_with_problem": 0,
+  "hallucinated": 0,
+  "not_visible": 0,
+  "declared_impossible": 9
+ },
+ "PRE": {
+  "tasks": 10,
+  "ok_and_valid": 1,
+  "ok_semantic": 1,
+  "calls": 9,
+  "calls_with_problem": 1,
+  "hallucinated": 0,
+  "not_visible": 1,
+  "declared_impossible": 6
+ }
+}
