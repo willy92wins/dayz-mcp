@@ -2210,6 +2210,7 @@ class ServerState:
         source_pid: int | None = None,
         source_creation_time: str | None = None,
         caps: str | None = None,
+        ach: str | None = None,
     ) -> tuple[int, dict]:
         if peer not in VALID_PEERS:
             return 400, {"error": "bad_peer"}
@@ -2308,7 +2309,7 @@ class ServerState:
 
             # After the whole binding chain: the census belongs to THIS poll,
             # so it needs this poll's accreditation, not the previous one's.
-            self._record_poll_caps_locked(peer, caps, accredited)
+            self._record_poll_caps_locked(peer, caps, accredited, ach=ach)
 
             if not accredited:
                 self._unaccredited_poll_counts[bind_label] = (
@@ -2945,46 +2946,61 @@ class ServerState:
         }
 
     def _record_poll_caps_locked(
-        self, peer: str, raw: str | None, accredited: bool
+        self,
+        peer: str,
+        raw: str | None,
+        accredited: bool,
+        ach: str | None = None,
     ) -> None:
         """Keep only the last accredited announcement, tagged with its generation.
 
         An unaccredited poll may come from anyone, so its census is not stored
         AND it does not keep the previous one alive: the peer goes back to
         unknown. That is affordable here precisely because the census gates
-        nothing.
+        nothing. ``ach`` (arg-contract hash) is stored alongside when present.
         """
 
         if accredited:
             names, reason = parse_poll_caps(raw)
+            ach_value = ach if isinstance(ach, str) and ach else None
         else:
             names, reason = None, "unaccredited"
+            ach_value = None
         self._peer_caps[peer] = {
             "generation": self.daemon_generation,
             "commands": names,
             "reason": reason,
+            "arg_contract_hash": ach_value,
         }
 
     def _capabilities_view_locked(self, peer: str) -> dict:
         entry = self._peer_caps.get(peer)
         if entry is None:
-            return {"state": "unknown", "reason": "absent", "announced_commands": []}
+            return {
+                "state": "unknown",
+                "reason": "absent",
+                "announced_commands": [],
+                "announced_arg_contract_hash": None,
+            }
         if entry["commands"] is None:
             return {
                 "state": "unknown",
                 "reason": entry["reason"],
                 "announced_commands": [],
+                "announced_arg_contract_hash": None,
             }
         if entry["generation"] != self.daemon_generation:
             return {
                 "state": "unknown",
                 "reason": "stale_generation",
                 "announced_commands": [],
+                "announced_arg_contract_hash": None,
             }
         return {
             "state": "announced",
             "reason": entry["reason"],
             "announced_commands": list(entry["commands"]),
+            "announced_arg_contract_hash": entry.get("arg_contract_hash"),
         }
 
     def _peer_status_view(
@@ -3710,6 +3726,7 @@ class Handler(BaseHTTPRequestHandler):
         inst_raw = qs.get("inst", [""])[0]
         instance = inst_raw if inst_raw else None
         caps_raw = qs.get("caps", [""])[0]
+        ach_raw = qs.get("ach", [""])[0]
         source_pid = self.state.resolve_poll_pid(
             instance, getattr(self, "connection", None)
         )
@@ -3719,6 +3736,7 @@ class Handler(BaseHTTPRequestHandler):
             instance=instance,
             source_pid=source_pid,
             caps=caps_raw,
+            ach=ach_raw,
         )
         if status != 200:
             self._json(status, payload)

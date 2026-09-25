@@ -1403,8 +1403,19 @@ _CENSUS_FIXTURE = json.loads(
 )
 
 
-def _announced(commands: list[str]) -> dict[str, object]:
-    return {"state": "announced", "reason": "ok", "announced_commands": commands}
+def _announced(
+    commands: list[str],
+    *,
+    arg_contract_hash: str | None = None,
+) -> dict[str, object]:
+    block: dict[str, object] = {
+        "state": "announced",
+        "reason": "ok",
+        "announced_commands": commands,
+    }
+    if arg_contract_hash is not None:
+        block["announced_arg_contract_hash"] = arg_contract_hash
+    return block
 
 
 class BridgeCapabilityComparisonTest(unittest.IsolatedAsyncioTestCase):
@@ -1429,8 +1440,15 @@ class BridgeCapabilityComparisonTest(unittest.IsolatedAsyncioTestCase):
     def test_a_complete_census_matches(self) -> None:
         for peer in ("server", "client"):
             with self.subTest(peer):
+                ach = (
+                    server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH
+                    if peer == "server"
+                    else None
+                )
                 result = server_module._compare_bridge_capabilities(
-                    peer, _announced(self._census(peer)), self.registered
+                    peer,
+                    _announced(self._census(peer), arg_contract_hash=ach),
+                    self.registered,
                 )
                 self.assertEqual(result["state"], "match")
                 self.assertEqual(result["reason"], "ok")

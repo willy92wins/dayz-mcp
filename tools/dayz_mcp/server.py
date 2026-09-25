@@ -203,6 +203,8 @@ READY_REASONS = frozenset({
     "client_not_polling",
     "client_legacy_blocked",
     "version_mismatch",
+    "arg_contract_mismatch",
+    "capabilities_unknown",
     "binding_ambiguous",
     "unbound_after_restart",
     "binding_not_ready",
@@ -233,6 +235,8 @@ _READY_NEXT_TOOLS: dict[str, str] = {
     "creation_time_unreadable": "bridge_status",
     "binding_ambiguous": "session_status",
     "version_mismatch": "bridge_status",
+    "arg_contract_mismatch": "bridge_status",
+    "capabilities_unknown": "bridge_status",
     "client_legacy_blocked": "dayz_test_run",
 }
 WAIT_FOR_LOOKBACK_MAX = 2000
@@ -598,6 +602,44 @@ def compute_bridge_ready(status: dict[str, Any]) -> dict[str, Any]:
         return {"ready": False, "reason": "legacy_unbound"}
     if c_bind == "LEGACY_UNBOUND" and c_age is not None:
         return {"ready": False, "reason": "legacy_unbound"}
+    # 0878: name-only census can green-wash a stale PBO that rejects current
+    # tool args (vehicle_prepare_fixture mode/radius). Server ready requires an
+    # accredited caps census AND a matching ach. Capability comparison (B1)
+    # must run before this so published status sees mismatch/unknown, not raw
+    # announced. Raw announced (no comparison yet) still checks ach directly.
+    # Unknown / missing / malformed caps: ready=false (B2).
+    s_caps = server.get("capabilities") if isinstance(server.get("capabilities"), dict) else {}
+    if s_live:
+        caps_state = s_caps.get("state")
+        if caps_state == "match":
+            pass
+        elif caps_state == "announced":
+            ach = s_caps.get("announced_arg_contract_hash")
+            if (
+                not isinstance(ach, str)
+                or ach == ""
+                or ach != EXPECTED_SERVER_ARG_CONTRACT_HASH
+            ):
+                return {"ready": False, "reason": "arg_contract_mismatch"}
+        elif caps_state == "mismatch":
+            # Fail-closed on arg-contract hash independently of the primary
+            # compare reason. Census disagreement used to hide absent/wrong ach
+            # (B2 residual): missing census cmd + bad/absent ach must not
+            # green-wash ready=true. Matching ach + census-only mismatch keeps
+            # historical ready behavior.
+            if s_caps.get("reason") == "arg_contract_mismatch":
+                return {"ready": False, "reason": "arg_contract_mismatch"}
+            ach = s_caps.get("announced_arg_contract_hash")
+            if (
+                not isinstance(ach, str)
+                or ach == ""
+                or ach != EXPECTED_SERVER_ARG_CONTRACT_HASH
+            ):
+                return {"ready": False, "reason": "arg_contract_mismatch"}
+            # Name-census disagreement with matching ach: historical ready.
+            pass
+        else:
+            return {"ready": False, "reason": "capabilities_unknown"}
     if s_live and c_live and s_state == "ok" and c_state == "ok":
         return {"ready": True, "reason": "ready"}
     if s_bind == "BOUND" and not _finite_poll_age(server.get("bound_last_poll_age_s")):
@@ -824,6 +866,37 @@ def _with_ok_next_step(result: dict[str, Any], cmd: str) -> dict[str, Any]:
     return payload
 
 
+# Arg-contract fingerprint (fb-20260924-235528-0878). Command-name census alone
+# cannot see a PBO that still lists vehicle_prepare_fixture but rejects the
+# tool's mode=/radius= shape. Both sides ship the same 16-hex SHA-256 prefix of
+# the canonical form below; the PBO announces it as poll `ach=` and
+# `_compare_bridge_capabilities` fails closed on absent/wrong values for the
+# server peer. Client peer has no ach gate yet.
+SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
+    "vehicle_prepare_fixture": ("mode", "pos", "radius", "type"),
+}
+
+
+def server_arg_contract_canonical() -> str:
+    """Stable, newline-joined `cmd=k1,k2` lines (keys sorted, cmds sorted)."""
+
+    return "\n".join(
+        f"{cmd}={','.join(keys)}"
+        for cmd, keys in sorted(SERVER_ARG_CONTRACT.items())
+    )
+
+
+def server_arg_contract_hash() -> str:
+    """First 16 hex chars of sha256(canonical). Must match MCPBridge.c."""
+
+    import hashlib
+
+    return hashlib.sha256(server_arg_contract_canonical().encode("utf-8")).hexdigest()[:16]
+
+
+EXPECTED_SERVER_ARG_CONTRACT_HASH = server_arg_contract_hash()
+
+
 # peer + command -> the public tool that fronts it, or None when the command is
 # deliberately not exposed. Hand written from the two Enforce dispatchers
 # (MCPBridge.c SERVER_CAPABILITIES, MCPClientBridge.c CLIENT_POLL_CAPS).
@@ -918,6 +991,10 @@ def _compare_bridge_capabilities(
             "announced_without_registered_tool": [],
             "registered_without_announced_command": [],
             "unmapped_announced_commands": [],
+            "expected_arg_contract_hash": (
+                EXPECTED_SERVER_ARG_CONTRACT_HASH if peer == "server" else None
+            ),
+            "announced_arg_contract_hash": None,
         }
     announced_set = {item for item in announced if isinstance(item, str)}
     unmapped = sorted(item for item in announced_set if item not in mapping)
@@ -932,14 +1009,43 @@ def _compare_bridge_capabilities(
         tool for tool in registered_bridge_tools if tool not in announced_tools
     )
     agrees = not (unmapped or missing_tool or not_announced)
+    announced_hash = block.get("announced_arg_contract_hash")
+    expected_hash = (
+        EXPECTED_SERVER_ARG_CONTRACT_HASH if peer == "server" else None
+    )
+    arg_contract_ok = True
+    arg_reason = "ok"
+    if expected_hash is not None:
+        if not isinstance(announced_hash, str) or announced_hash == "":
+            arg_contract_ok = False
+            arg_reason = "arg_contract_mismatch"
+            announced_hash = None
+        elif announced_hash != expected_hash:
+            arg_contract_ok = False
+            arg_reason = "arg_contract_mismatch"
+    # Prefer arg_contract_mismatch when both census and ach fail so the
+    # fail-closed gate is not hidden behind census_disagrees (B2 residual).
+    # Census-only disagreement keeps its historical reason; details remain in
+    # announced_without_registered_tool / registered_without_announced_command.
+    if not arg_contract_ok:
+        state = "mismatch"
+        reason = arg_reason
+    elif not agrees:
+        state = "mismatch"
+        reason = "census_disagrees_with_registered_tools"
+    else:
+        state = "match"
+        reason = "ok"
     return {
-        "state": "match" if agrees else "mismatch",
-        "reason": "ok" if agrees else "census_disagrees_with_registered_tools",
+        "state": state,
+        "reason": reason,
         "announced_commands": sorted(announced_set),
         "registered_bridge_tools": registered_bridge_tools,
         "announced_without_registered_tool": missing_tool,
         "registered_without_announced_command": not_announced,
         "unmapped_announced_commands": unmapped,
+        "expected_arg_contract_hash": expected_hash,
+        "announced_arg_contract_hash": announced_hash if isinstance(announced_hash, str) else None,
     }
 
 
@@ -1402,10 +1508,28 @@ class Runtime:
             expected_game_version=self.config.expected_game_version,
         )
 
-    async def bridge_status_payload(self) -> dict[str, Any]:
+    async def bridge_status_payload(
+        self,
+        *,
+        registered_tools: frozenset[str] | None = None,
+        intended_tools: frozenset[str] | None = None,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
         """Async status accessor used by the bridge_status tool (uniform with
-        ClientRuntime, which fetches /status over HTTP)."""
-        return _with_ready(self.status())
+        ClientRuntime, which fetches /status over HTTP).
+
+        When ``registered_tools`` is provided, capability comparison (incl. ach)
+        runs BEFORE ``compute_bridge_ready`` so ready=false on mismatch/unknown.
+        ``timeout_s`` is accepted for duck-typing parity with ClientRuntime and
+        ignored in embedded mode.
+        """
+        del timeout_s  # embedded status is local; no HTTP budget
+        payload = self.status()
+        if registered_tools is not None:
+            payload = _with_capability_comparison(
+                payload, registered_tools, intended_tools
+            )
+        return _with_ready(payload)
 
     def ensure_peer_allowed(self, peer: str) -> None:
         snapshot = self.status()
@@ -2362,7 +2486,11 @@ class ClientRuntime:
             return f"{peer} peer status unavailable"
 
     async def bridge_status_payload(
-        self, *, timeout_s: float | None = None
+        self,
+        *,
+        timeout_s: float | None = None,
+        registered_tools: frozenset[str] | None = None,
+        intended_tools: frozenset[str] | None = None,
     ) -> dict[str, Any]:
         args = () if timeout_s is None else (None, None, float(timeout_s))
         status, payload = await asyncio.to_thread(
@@ -2370,6 +2498,11 @@ class ClientRuntime:
         )
         if status != 200:
             raise ToolError(str(payload.get("error") or payload))
+        # B1: compare capabilities (ach) before ready when tools are supplied.
+        if registered_tools is not None:
+            payload = _with_capability_comparison(
+                payload, registered_tools, intended_tools
+            )
         return _with_ready(payload)
 
 
@@ -6562,14 +6695,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(description=_bridge_status_description())
     async def bridge_status() -> dict[str, Any]:
         runtime.touch()
-        payload = await runtime.bridge_status_payload()
-        return await _with_tool_registry(
-            _with_capability_comparison(
-                payload,
-                await _bridge_tool_names(),
-                intended_tool_names,
-            )
+        # B1: capability comparison (incl. ach) MUST run before ready.
+        payload = await runtime.bridge_status_payload(
+            registered_tools=await _bridge_tool_names(),
+            intended_tools=intended_tool_names,
         )
+        return await _with_tool_registry(payload)
 
     @app.tool(
         description=(
