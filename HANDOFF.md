@@ -1,13 +1,14 @@
-# HANDOFF â€” DayZ-MCP
+﻿# HANDOFF â€” DayZ-MCP
 
 <!-- LIVE-STATE:START -->
-# DayZ-MCP - Estado vivo - 2026-09-25 (Madrid)
+# DayZ-MCP - Estado vivo - 2026-09-26 (Madrid)
 
-- **main** = `72f63549f2337764a73b34c6e6a935eed0697c3b` (#92 MERGED squash; lease recovery + stale launcher pin).
-- **#92 MERGED** ids `0c27`+`b1a7` lease +`99db`; `e7ef` still deferred; **NO** `pipeline_resolve` from #92.
-- Checkout: local clones may lag / dirty HANDOFF - do **not** reset --hard; ff when clean. Canonical tip is `72f6354`, not older #91 tip.
-- Abierto: buzon triage deferred (no Sol launch this hop). 296b=#91 cerrado; #92 tip canonico.
-- HOLD dueno: Workshop / push / tester - no tocar desde Orq.
+- **main** = `9af5cbfc31f3a1cfffc7db0e238dc2682b8c7214` (#94 MERGED squash; arg-contract hash fail-closed / 0878 detectability).
+- **#94 MERGED** tip pre-squash `01f1e2c` → main `9af5cbf`; Sol APROBAR r3 + Auditor LIMPIO. Ticket `fb-20260924-235528-0878` stays **OPEN** until Workshop re-pack OT (HOLD).
+- Prior: #92 `72f6354` wave1 resolve `0c27`+`b1a7`+`99db` CLOSED; `e7ef` deferred; unresolved mailbox **39**.
+- Checkout: ff `origin/main` when clean; do **not** reset --hard. Canonical tip is `9af5cbf`.
+- Abierto: triaje buzón continúa (FN/Flash/script; **NO Sol** en tickets). 0 PRs abiertos.
+- HOLD dueño: Workshop re-pack / heater / GATES / e7ef — no tocar desde Orq sin OT/GO.
 <!-- LIVE-STATE:END -->
 
 
