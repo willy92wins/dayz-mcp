@@ -506,15 +506,6 @@ class ControlClient:
                 existing_operation_id = self.active_operation_id
                 existing_ticket = self.active_ticket
             if has_existing_session:
-                if (
-                    not isinstance(existing_operation_id, str)
-                    or not existing_operation_id
-                ):
-                    raise ControlClientError(
-                        "session_transition_conflict",
-                        request_stage="pre_request",
-                        http_bytes_sent=0,
-                    )
                 authoritative = await self._session_call("/session/status")
                 own = authoritative.get("self")
                 if isinstance(own, dict) and own.get("state") == "none":
@@ -542,6 +533,12 @@ class ControlClient:
                         http_bytes_sent=1,
                     )
             if has_existing_session:
+                if not isinstance(existing_operation_id, str) or not existing_operation_id:
+                    raise ControlClientError(
+                        "session_transition_conflict",
+                        request_stage="post_request",
+                        http_bytes_sent=1,
+                    )
                 operation_id = existing_operation_id
             else:
                 await self._reconcile_idle_session_locked()
@@ -771,11 +768,23 @@ class ControlClient:
                 self.active_operation_id,
                 self.active_ticket,
                 self.active_lease_token,
+                self.active_lease_id,
             )
         operation_id = snapshot[1]
-        if all(value is None for value in snapshot[1:]):
+        if all(value is None for value in snapshot[1:4]):
             return {"reconciled": False}
-        if not isinstance(operation_id, str) or not operation_id:
+        # A replacement worker inherits only the identity and lease, not the
+        # operation that acquired it. Such a token may be forgotten locally only
+        # after the accredited daemon proves this identity idle. Never invent an
+        # operation id or send an unscoped cancellation on that path.
+        inherited_lease = (
+            operation_id is None
+            and snapshot[0] in {"NEW", "ACTIVE"}
+            and snapshot[2] is None
+            and isinstance(snapshot[3], str)
+            and bool(snapshot[3])
+        )
+        if not inherited_lease and (not isinstance(operation_id, str) or not operation_id):
             raise ControlClientError(
                 "session_transition_conflict",
                 request_stage="pre_request",
@@ -785,7 +794,8 @@ class ControlClient:
         if before is None:
             before = await self._session_call("/session/status")
         self._require_recovery_idle_status(before)
-        await self._cancel_operation_remote_until_resolved(operation_id)
+        if not inherited_lease:
+            await self._cancel_operation_remote_until_resolved(operation_id)
         after = await self._session_call("/session/status")
         # Generation equality is deliberately not required: a restarted accredited
         # daemon invalidates old authority, while this final clean status proves the
@@ -798,6 +808,7 @@ class ControlClient:
                 self.active_operation_id,
                 self.active_ticket,
                 self.active_lease_token,
+                self.active_lease_id,
             )
             if current != snapshot:
                 raise ControlClientError(
@@ -806,9 +817,11 @@ class ControlClient:
                     http_bytes_sent=1,
                 )
             self.active_lease_token = None
+            self.active_lease_id = None
             self.active_ticket = None
             self.active_operation_id = None
             self.state = "CLOSED"
+        self._announce_lease()
         return {"reconciled": True}
 
     async def reconcile_idle_session(self) -> dict[str, object]:

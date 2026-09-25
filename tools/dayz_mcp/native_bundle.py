@@ -295,6 +295,65 @@ def _invalid() -> None:
     raise ValueError("invalid_native_launcher_bundle")
 
 
+def _read_source_pins(
+    declared: dict[str, object], source_root: Path
+) -> tuple[dict[str, bytes], list[dict[str, str]]]:
+    sources: dict[str, bytes] = {}
+    failures: list[dict[str, str]] = []
+    for key, module in _HASHED_MODULES.items():
+        expected = declared.get(key)
+        if not isinstance(expected, str) or not _valid_hash(expected.upper()):
+            failures.append({"key": key, "file": module, "reason": "invalid_pin"})
+            continue
+        try:
+            raw = (source_root / module).read_bytes()
+        except OSError:
+            failures.append({"key": key, "file": module, "reason": "source_unreadable"})
+            continue
+        sources[module] = raw
+        if hashlib.sha256(raw).hexdigest().upper() != expected.upper():
+            failures.append({"key": key, "file": module, "reason": "sha256_mismatch"})
+    return sources, failures
+
+
+def source_pin_status(
+    manifest: dict[str, object], *, source_root: Path | None = None
+) -> dict[str, object]:
+    """Cheap diagnostic only: four source pins, never a full bundle attestation.
+
+    Compare working-tree bytes, as the builder does; do not rebuild or normalize
+    line endings. Digest case is immaterial. Missing pins/sources are failures.
+    """
+    _, failures = _read_source_pins(manifest, source_root or Path(__file__).resolve().parent)
+    return {"status": "stale" if failures else "fresh", "failures": failures}
+
+
+def installed_source_pin_status(launcher_id: str = "dayz-test-v1") -> dict[str, object]:
+    """Inspect the approved launcher's manifest without opening its whole closure."""
+    from dayz_mcp.launcher_registry import open_approved_launcher
+
+    try:
+        with open_approved_launcher(launcher_id) as opened:
+            with _open_pinned_read(opened.root / "closure-manifest.json") as stream:
+                manifest = _canonical_json(
+                    _read_bounded(stream, _MAX_MANIFEST_BYTES), maximum=_MAX_MANIFEST_BYTES
+                )
+            return source_pin_status(manifest)
+    except (OSError, ValueError, RuntimeError):
+        return {"status": "unavailable", "failures": [], "reason": "manifest_unreadable"}
+
+
+def _require_source_pins(declared: dict[str, object]) -> dict[str, bytes]:
+    sources, failures = _read_source_pins(declared, Path(__file__).resolve().parent)
+    if failures:
+        # The MCP adapter deliberately strips prose/path-bearing ValueErrors.
+        # Keep this an identifier made only from our constants so the failing
+        # key survives that boundary. Doctor/startup list every key and filename.
+        first = failures[0]
+        raise ValueError(f"invalid_native_launcher_bundle__{first['key']}")
+    return sources
+
+
 def _closed_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -629,6 +688,9 @@ def load_verified_bundle(opened_launcher: object) -> VerifiedNativeBundle:
         manifest_sha256 = hashlib.sha256(manifest_raw).hexdigest().upper()
         manifest = _canonical_json(manifest_raw, maximum=_MAX_MANIFEST_BYTES)
         entries, declared_hashes = _parse_manifest(manifest)
+        # Diagnose stale source seals before a missing/changed closure artifact can
+        # mask the actionable pin name. Full closure verification still follows.
+        source_bytes = _require_source_pins(declared_hashes)
 
         opened_by_relative: dict[str, BinaryIO] = {}
         bundle_hashes: dict[str, str] = {}
@@ -813,13 +875,6 @@ def load_verified_bundle(opened_launcher: object) -> VerifiedNativeBundle:
             ):
                 _invalid()
 
-        source_root = Path(__file__).resolve().parent
-        source_bytes: dict[str, bytes] = {}
-        for field, module in _HASHED_MODULES.items():
-            raw = (source_root / module).read_bytes()
-            if hashlib.sha256(raw).hexdigest().upper() != declared_hashes[field]:
-                _invalid()
-            source_bytes[module] = raw
         _verify_app(app_stream, source_bytes)
 
         marker = b"DAYZ_MCP_MANIFEST_SHA256=" + manifest_sha256.encode("ascii")

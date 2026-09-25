@@ -1678,12 +1678,12 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
             client = control.ControlClient(policy=_policy(keyfile), identity=identity)
             client.state = "ACTIVE"
             client.active_lease_token = "local-token-without-operation"
-            session_call = AsyncMock()
+            session_call = AsyncMock(return_value=pending)
             with patch.object(client, "_session_call", session_call):
                 with self.assertRaises(control.ControlClientError) as raised:
                     await client.reconcile_idle_session()
             self.assertEqual(raised.exception.code, "session_transition_conflict")
-            session_call.assert_not_awaited()
+            session_call.assert_awaited_once_with("/session/status")
             self.assertEqual(client.state, "ACTIVE")
             self.assertEqual(
                 client.active_lease_token, "local-token-without-operation"

@@ -6,6 +6,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -1261,6 +1262,14 @@ class ProcessLifecycle:
         # test can shorten it without patching the module.
         self._role_release_tries = _ROLE_RELEASE_TRIES
         self._role_release_interval_s = _ROLE_RELEASE_INTERVAL_S
+        # One diagnostic per lifecycle startup, before the first launch request.
+        # This warning grants no authority; load_verified_bundle remains the gate.
+        if os.name == "nt":
+            from dayz_mcp.native_bundle import installed_source_pin_status
+
+            seal = installed_source_pin_status()
+            if seal["status"] != "fresh":
+                logging.getLogger(__name__).warning("native_launcher_source_seal: %s", seal)
 
     def _prepare_instance(
         self,
