@@ -172,6 +172,128 @@ class ArgContractHashTest(unittest.TestCase):
         self.assertEqual(view2["state"], "unknown")
         self.assertIsNone(view2["announced_arg_contract_hash"])
 
+    def _live_peers(self, server_caps: dict) -> dict:
+        return {
+            "server_peer": {
+                "last_poll_age_s": 0.1,
+                "bound_last_poll_age_s": 0.1,
+                "binding_state": "BOUND",
+                "version_state": "ok",
+                "capabilities": server_caps,
+            },
+            "client_peer": {
+                "last_poll_age_s": 0.1,
+                "bound_last_poll_age_s": 0.1,
+                "binding_state": "BOUND",
+                "version_state": "ok",
+                "capabilities": {
+                    "state": "match",
+                    "reason": "ok",
+                    "announced_commands": [],
+                },
+            },
+        }
+
+    def _server_registered(self) -> frozenset[str]:
+        return frozenset(
+            tool
+            for tool in server_module._BRIDGE_COMMAND_TOOLS["server"].values()
+            if tool
+        )
+
+    def _full_announced(self, ach: str | None) -> dict:
+        block: dict = {
+            "state": "announced",
+            "reason": "ok",
+            "announced_commands": sorted(
+                server_module._BRIDGE_COMMAND_TOOLS["server"]
+            ),
+        }
+        if ach is not None:
+            block["announced_arg_contract_hash"] = ach
+        return block
+
+    def test_ready_false_when_capabilities_unknown(self) -> None:
+        # B2: missing/malformed caps must not green-wash ready.
+        status = self._live_peers(
+            {
+                "state": "unknown",
+                "reason": "absent",
+                "announced_commands": [],
+                "announced_arg_contract_hash": None,
+            }
+        )
+        ready = server_module.compute_bridge_ready(status)
+        self.assertEqual(ready, {"ready": False, "reason": "capabilities_unknown"})
+        self.assertIn("capabilities_unknown", server_module.READY_REASONS)
+
+    def test_ready_false_when_capabilities_block_missing(self) -> None:
+        status = self._live_peers({})
+        ready = server_module.compute_bridge_ready(status)
+        self.assertEqual(ready, {"ready": False, "reason": "capabilities_unknown"})
+
+    def test_bridge_status_path_compare_before_ready_correct_hash(self) -> None:
+        # B1: compare then ready ? correct ach => ready true + caps match.
+        raw = self._live_peers(
+            self._full_announced(server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH)
+        )
+        compared = server_module._with_capability_comparison(
+            raw, self._server_registered()
+        )
+        self.assertEqual(compared["server_peer"]["capabilities"]["state"], "match")
+        payload = server_module._with_ready(compared)
+        self.assertTrue(payload["ready"]["ready"])
+        self.assertEqual(payload["ready"]["reason"], "ready")
+        self.assertEqual(payload["server_peer"]["capabilities"]["state"], "match")
+
+    def test_bridge_status_path_compare_before_ready_absent_hash(self) -> None:
+        raw = self._live_peers(self._full_announced(None))
+        compared = server_module._with_capability_comparison(
+            raw, self._server_registered()
+        )
+        caps = compared["server_peer"]["capabilities"]
+        self.assertEqual(caps["state"], "mismatch")
+        self.assertEqual(caps["reason"], "arg_contract_mismatch")
+        payload = server_module._with_ready(compared)
+        self.assertFalse(payload["ready"]["ready"])
+        self.assertEqual(payload["ready"]["reason"], "arg_contract_mismatch")
+
+    def test_bridge_status_path_compare_before_ready_wrong_hash(self) -> None:
+        raw = self._live_peers(self._full_announced("deadbeefdeadbeef"))
+        compared = server_module._with_capability_comparison(
+            raw, self._server_registered()
+        )
+        caps = compared["server_peer"]["capabilities"]
+        self.assertEqual(caps["state"], "mismatch")
+        self.assertEqual(caps["reason"], "arg_contract_mismatch")
+        payload = server_module._with_ready(compared)
+        self.assertFalse(payload["ready"]["ready"])
+        self.assertEqual(payload["ready"]["reason"], "arg_contract_mismatch")
+
+    def test_bridge_status_path_unknown_caps_ready_false(self) -> None:
+        # B1+B2: unknown census after comparison => ready false.
+        raw = self._live_peers(
+            {
+                "state": "unknown",
+                "reason": "absent",
+                "announced_commands": [],
+            }
+        )
+        compared = server_module._with_capability_comparison(
+            raw, self._server_registered()
+        )
+        self.assertEqual(compared["server_peer"]["capabilities"]["state"], "unknown")
+        payload = server_module._with_ready(compared)
+        self.assertFalse(payload["ready"]["ready"])
+        self.assertEqual(payload["ready"]["reason"], "capabilities_unknown")
+
+    def test_ready_on_raw_announced_wrong_hash_without_comparison(self) -> None:
+        # Fail-closed even if a caller skips comparison (raw announced + bad ach).
+        status = self._live_peers(self._full_announced("deadbeefdeadbeef"))
+        ready = server_module.compute_bridge_ready(status)
+        self.assertEqual(ready, {"ready": False, "reason": "arg_contract_mismatch"})
+
+
 
 if __name__ == "__main__":
     unittest.main()
