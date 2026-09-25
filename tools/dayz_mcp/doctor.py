@@ -514,6 +514,7 @@ def _check_native_bundle_closure(
         return
     try:
         from dayz_mcp.launcher_registry import open_approved_launcher
+        from dayz_mcp.native_bundle import source_pin_status
 
         with open_approved_launcher(launcher_id) as opened:
             manifest_path = opened.root / "closure-manifest.json"
@@ -521,6 +522,15 @@ def _check_native_bundle_closure(
             entries = manifest.get("entries")
             if type(entries) is not list:
                 raise ValueError("invalid_closure_manifest_entries")
+            pins = source_pin_status(manifest)
+            findings.append(
+                _finding(
+                    "NATIVE_BUNDLE_SOURCE_PINS_OK" if pins["status"] == "fresh"
+                    else "NATIVE_BUNDLE_SOURCE_PIN_DRIFT",
+                    severity="INFO" if pins["status"] == "fresh" else "FAIL",
+                    **pins,
+                )
+            )
             findings.extend(
                 check_native_bundle_externals(
                     entries,
