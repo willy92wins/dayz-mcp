@@ -22,7 +22,13 @@ from dayz_mcp import (
 )
 from dayz_mcp.launcher_registry import open_approved_launcher
 from dayz_mcp.native_launcher_transaction import preflight_vpp_request
-from dayz_mcp.client_steam_bootstrap import diagnose_client_steam_bootstrap
+from dayz_mcp.client_steam_bootstrap import (
+    ClientDumpBaseline,
+    baseline_to_wire,
+    diagnose_client_steam_bootstrap,
+    diagnose_retired_client_death,
+    snapshot_client_dumps,
+)
 from dayz_mcp.steam_preflight import (
     REMEDIATION,
     STEAM_SESSION_STALE,
@@ -104,6 +110,40 @@ class _Runtime(Protocol):
 
 
 _ProgressCallback = Callable[[str, str | None], Awaitable[None]]
+
+
+async def _open_client_dumps(
+    runtime: object, baseline: ClientDumpBaseline | None
+) -> str | None:
+    """Record the pre-launch snapshot in the daemon (296b r3); its token or None.
+
+    Opening caps every earlier run on the same client roots, whichever MCP
+    process launched it. Any failure only costs the late-death diagnosis of
+    this run: it is never bound and publishes null. The runtime method is
+    called directly, not through getattr: security_runtime_audit flags a
+    dynamically resolved call as dynamic_http. A runtime without it raises
+    AttributeError, caught below.
+    """
+    if baseline is None:
+        return None
+    wire = baseline_to_wire(baseline)
+    if wire is None:
+        return None
+    try:
+        response = await runtime.client_dumps_open(wire)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+    token = response.get("token") if isinstance(response, dict) else None
+    return token if isinstance(token, str) and token else None
+
+
+async def _bind_client_dumps(runtime: object, token: str | None, run_id: object) -> None:
+    if token is None or not isinstance(run_id, str):
+        return
+    try:
+        await runtime.client_dumps_bind(token, run_id)  # type: ignore[attr-defined]
+    except Exception:
+        return
 
 
 def _fail(code: str) -> None:
@@ -521,6 +561,23 @@ def _artifact_paths(
     return [
         ntpath.join(policy.dev_root, root, "profiles")
         for root in record.artifact_roots
+    ]
+
+
+def _client_profile_roots(
+    policy: dayz_test_request.RequestProjectPolicy, mode: str
+) -> list[str]:
+    """The profile roots this mode starts a client in; never a server root.
+
+    offline is the client-side process that also hosts the mission.
+    """
+    record = _mode_record(mode)
+    if record is None:
+        return []
+    return [
+        ntpath.join(policy.dev_root, step.root, "profiles")
+        for step in record.steps
+        if step.kind == "start" and step.role in {"client", "offline"} and step.root
     ]
 
 
@@ -1116,6 +1173,7 @@ def _compact_result(
     steam_startup: object = None,
     steam_pid_repair: object = None,
     steam_restarted: object = None,
+    client_dump_baseline: ClientDumpBaseline | None = None,
 ) -> dict[str, object]:
     projection = readiness or _NULL_READINESS
     startup = _steam_prep_token(steam_startup)
@@ -1169,6 +1227,7 @@ def _compact_result(
             error_code=terminal.error_code,
             client_alive=client_alive,
             steam_startup=startup,
+            dump_baseline=client_dump_baseline,
         ),
     }
 
@@ -1244,10 +1303,13 @@ async def _execute_request(
     replacement: ClientReplacementDecision | None = None,
     client_pids_before: tuple[int, ...] | None = None,
     vpp: object | None = None,
+    client_dump_roots: list[str] | None = None,
 ) -> dict[str, object]:
     stdout = bytearray()
     stderr = bytearray()
     queued_reported = False
+    client_dump_baseline: ClientDumpBaseline | None = None
+    client_dump_token: str | None = None
 
     async def report(stage: str, message: str | None = None) -> None:
         if progress_cb is not None:
@@ -1261,10 +1323,19 @@ async def _execute_request(
         await report("queued", message)
 
     async def report_executing() -> None:
-        nonlocal queued_reported
+        nonlocal queued_reported, client_dump_baseline, client_dump_token
         if not queued_reported:
             queued_reported = True
             await report("queued", "En cola")
+        if client_dump_roots is not None and client_dump_baseline is None:
+            # 296b: the dumps already in the CLIENT profile roots when this
+            # launch leaves the queue; only a dump absent from here can name
+            # its death. Taken after the wait, not before it, so a dump another
+            # client's run writes while this call is queued is in the baseline.
+            client_dump_baseline = snapshot_client_dumps(client_dump_roots)
+            client_dump_token = await _open_client_dumps(
+                runtime, client_dump_baseline
+            )
         await report("executing", None)
 
     def capture(channel: str, chunk: bytes) -> None:
@@ -1294,6 +1365,9 @@ async def _execute_request(
     _validate_terminal_context(
         terminal, preflight=preflight, expected_run_id=expected_run_id
     )
+    # 296b: the client can die after this call returns; the retired-run view
+    # reads the snapshot the daemon now holds for this run_id.
+    await _bind_client_dumps(runtime, client_dump_token, terminal.run_id)
     if not terminal.ok and terminal.error_code == "worker_failed":
         try:
             failed_status = await runtime.lifecycle_status()
@@ -1371,6 +1445,7 @@ async def _execute_request(
         steam_startup=steam_startup,
         steam_pid_repair=steam_pid_repair,
         steam_restarted=steam_restarted,
+        client_dump_baseline=client_dump_baseline,
     )
 
 
@@ -1677,6 +1752,13 @@ async def execute_dayz_test_run(
                     **request_arguments,
                     replace_if_not_polling_since=decided_at_ms,
                 )
+            # 296b: the CLIENT profile roots whose dumps can name this
+            # launch's death; the snapshot is taken when the launch executes.
+            client_dump_roots = (
+                _client_profile_roots(policy, mode)
+                if not preflight and _mode_starts_client(mode)
+                else None
+            )
             result = await _execute_request(
                 runtime,
                 opened_launcher=opened,
@@ -1692,6 +1774,7 @@ async def execute_dayz_test_run(
                 replacement=replacement,
                 client_pids_before=client_pids_before,
                 vpp=vpp,
+                client_dump_roots=client_dump_roots,
             )
             if preflight:
                 result["preflight_skipped_checks"] = preflight_skipped_checks
@@ -1796,8 +1879,14 @@ def _validated_diagnostic(item: object, run_id: str) -> dict[str, object] | None
 _RUNS_RETIRED_RECENTLY_LIMIT = 16
 
 
-def _runs_retired_recently(raw: object) -> list[dict[str, object]] | None:
-    """Wire-safe retired-run list for session_status; None if unreadable."""
+def _runs_retired_recently(
+    raw: object, client_dump_bindings: object = None
+) -> list[dict[str, object]] | None:
+    """Wire-safe retired-run list for session_status; None if unreadable.
+
+    ``client_dump_bindings`` is the daemon's map from run_id to the client
+    dump snapshot of that launch and of the next one on the same roots.
+    """
     if raw is None:
         return None
     if not isinstance(raw, list):
@@ -1812,6 +1901,11 @@ def _runs_retired_recently(raw: object) -> list[dict[str, object]] | None:
         validated = _validated_diagnostic(item, run_id)
         if validated is None:
             continue
+        # 296b: a client that died after dayz_test_run returned succeeded is
+        # only named here. Always present, null included.
+        validated["client_death_diagnosis"] = diagnose_retired_client_death(
+            run_id, client_dump_bindings
+        )
         out.append(validated)
         if len(out) >= _RUNS_RETIRED_RECENTLY_LIMIT:
             break

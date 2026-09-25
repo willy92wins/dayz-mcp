@@ -30,7 +30,7 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, Callable
 
-from dayz_mcp import core, orphan_guard
+from dayz_mcp import core, orphan_guard, wmi_host
 from dayz_mcp.daemon_contract import build_daemon_argv, daemon_runtime_cwd
 from dayz_mcp.identity_migration import (
     RunsBackupGateError,
@@ -1617,8 +1617,74 @@ def run_daemon(config: Any, *, stop: threading.Event | None = None) -> int:
     return 0
 
 
-def spawn_detached(argv: list[str], *, log: Callable[[str], None] = _noop, cwd: str | None = None) -> int | None:
+# Spawning the daemon OUTSIDE the client's app container (2026-09-23). Claude Desktop
+# and Codex are MSIX apps, and every process they start -- this client included --
+# inherits the app's registry virtualization without having a package identity:
+# HKCU writes land in the app's private hive (%LOCALAPPDATA%\Packages\<app>\
+# SystemAppData\Helium\User.dat) and from then on shadow the real key for every
+# process of that app. A daemon started here with Popen inherits it too, and so do
+# the DayZ clients and the steam.exe it launches. Measured: Steam's ActiveProcess read
+# pid 0 in the Claude app's hive while the real key held the live Steam, so
+# evaluate_steam_session() returned steam_session_stale inside and passed outside;
+# DayZ quits on the same stale view (SteamAPI_IsSteamRunning false); and each Steam
+# restart or pid repair made from inside wrote into that hive, which is how the shadow
+# was born. WMI's Win32_Process.Create starts the process from WmiPrvSE: outside the
+# app's virtualization and outside any job of this session, in the same user and
+# interactive session, with the user's default environment (the Claude/Codex session
+# variables are not carried over). Its console is created hidden. No spawn marker is
+# planted: ProcessStartupInformation.EnvironmentVariables REPLACES the environment
+# block rather than extending it (measured), and through the venv redirector the
+# marker already reads unknown_stale_marker on every Popen spawn in the audit log.
+# The daemon's own identity checks look only at its immediate parent, the venv
+# redirector, which is unchanged. WMI is reached in-process through COM (wmi_host,
+# pywin32); no helper process runs. The console is hidden and the process gets its own
+# group, as in the Popen branches. Any failure falls back to the Popen branches below;
+# DAYZ_MCP_DAEMON_SPAWN_WMI=0 turns the WMI branch off.
+DAEMON_SPAWN_WMI_ENV = "DAYZ_MCP_DAEMON_SPAWN_WMI"
+
+
+def _wmi_create_process(command_line: str, cwd: str | None) -> tuple[int, int]:
+    """(ReturnValue, ProcessId) of Win32_Process.Create (wmi_host)."""
+    return wmi_host.create_process(command_line, cwd)
+
+
+def _spawn_outside_app(
+    argv: list[str], *, log: Callable[[str], None], cwd: str | None
+) -> int | None:
+    """Start ``argv`` through WMI, outside the app container; its pid, or None."""
+    try:
+        return_value, pid = _wmi_create_process(subprocess.list2cmdline(argv), cwd)
+    except ImportError as exc:
+        # A missing pywin32 is an installation defect, not a transient WMI failure:
+        # name it so the fallback's inherited registry view is attributable (296b).
+        log(
+            f"SPAWN: WMI launch impossible, pywin32 missing ({exc}); the daemon cannot "
+            "start outside this app's container and inherits its registry view. Re-run "
+            "the dayz-mcp installer (requirements-mcp.txt declares pywin32); launching directly"
+        )
+        return None
+    except Exception as exc:  # com_error and the like: fall back, never fail the spawn here
+        log(f"SPAWN: WMI launch unavailable ({type(exc).__name__}: {exc}); launching directly")
+        return None
+    if return_value != 0 or pid <= 0:
+        log(f"SPAWN: WMI launch failed (Win32_Process.Create returned {return_value}); launching directly")
+        return None
+    log(f"SPAWN: daemon pid={pid} created through WMI, outside this app's container and job")
+    return pid
+
+
+def spawn_detached(
+    argv: list[str],
+    *,
+    log: Callable[[str], None] = _noop,
+    cwd: str | None = None,
+    outside_app: bool = False,
+) -> int | None:
     """Launch ``argv`` as a detached background process that aims to survive this session.
+
+    ``outside_app`` (Windows): try WMI first so the child runs outside the client's
+    app container (see _spawn_outside_app's block comment); the Popen branches
+    below remain the fallback. The daemon spawn asks for it; nothing else does.
 
     Returns the child pid, or None on failure. On Windows the child gets its own
     windowless console and process group, and tries to break away from the parent
@@ -1660,6 +1726,11 @@ def spawn_detached(argv: list[str], *, log: Callable[[str], None] = _noop, cwd: 
         except OSError as exc:
             log(f"SPAWN: failed to launch daemon: {exc}")
             return None
+
+    if outside_app and os.environ.get(DAEMON_SPAWN_WMI_ENV, "1") != "0":
+        pid = _spawn_outside_app(argv, log=log, cwd=cwd)
+        if pid is not None:
+            return pid
 
     detached = _CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP
     try:
