@@ -1,0 +1,177 @@
+"""Arg-contract hash gate (fb-20260924-235528-0878).
+
+Name-only ``caps=`` census green-washed a stale @DayZ_MCP PBO that still
+listed ``vehicle_prepare_fixture`` but rejected the tool's ``mode``/``radius``
+shape (``bad_args``). The server peer now announces ``ach=`` (16-hex sha256
+prefix of the canonical arg contract) and ``_compare_bridge_capabilities``
+plus ``compute_bridge_ready`` fail closed on absent/wrong values.
+"""
+
+from __future__ import annotations
+
+import re
+import unittest
+from pathlib import Path
+
+from dayz_mcp import loopback, server as server_module
+from tests._addon_paths import addon_root
+
+
+BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
+_HASH_DECL = re.compile(
+    r'\bconst\s+string\s+SERVER_ARG_CONTRACT_HASH\s*=\s*"([0-9a-f]{16})"\s*;'
+)
+_ACH_WIRE = '"&ach=" + EncodeQueryValue(SERVER_ARG_CONTRACT_HASH)'
+
+
+class ArgContractHashTest(unittest.TestCase):
+    def test_python_hash_matches_canonical_fixture(self) -> None:
+        self.assertEqual(
+            server_module.server_arg_contract_canonical(),
+            "vehicle_prepare_fixture=mode,pos,radius,type",
+        )
+        self.assertEqual(
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3c77a99c95fd05a4"
+        )
+        self.assertEqual(
+            server_module.server_arg_contract_hash(),
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH,
+        )
+
+    def test_enforce_declares_and_wires_the_same_hash(self) -> None:
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        match = _HASH_DECL.search(source)
+        self.assertIsNotNone(match, "SERVER_ARG_CONTRACT_HASH declaration missing")
+        self.assertEqual(match.group(1), server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH)
+        self.assertIn(_ACH_WIRE, source)
+
+    def test_matching_hash_with_full_census_is_match(self) -> None:
+        census = sorted(server_module._BRIDGE_COMMAND_TOOLS["server"])
+        registered = frozenset(
+            tool for tool in server_module._BRIDGE_COMMAND_TOOLS["server"].values() if tool
+        )
+        result = server_module._compare_bridge_capabilities(
+            "server",
+            {
+                "state": "announced",
+                "reason": "ok",
+                "announced_commands": census,
+                "announced_arg_contract_hash": server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH,
+            },
+            registered,
+        )
+        self.assertEqual(result["state"], "match")
+        self.assertEqual(result["reason"], "ok")
+        self.assertEqual(
+            result["announced_arg_contract_hash"],
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH,
+        )
+
+    def test_absent_hash_on_announced_server_census_is_mismatch(self) -> None:
+        census = sorted(server_module._BRIDGE_COMMAND_TOOLS["server"])
+        registered = frozenset(
+            tool for tool in server_module._BRIDGE_COMMAND_TOOLS["server"].values() if tool
+        )
+        result = server_module._compare_bridge_capabilities(
+            "server",
+            {
+                "state": "announced",
+                "reason": "ok",
+                "announced_commands": census,
+            },
+            registered,
+        )
+        self.assertEqual(result["state"], "mismatch")
+        self.assertEqual(result["reason"], "arg_contract_mismatch")
+        self.assertIsNone(result["announced_arg_contract_hash"])
+        self.assertEqual(
+            result["expected_arg_contract_hash"],
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH,
+        )
+
+    def test_wrong_hash_is_mismatch(self) -> None:
+        census = sorted(server_module._BRIDGE_COMMAND_TOOLS["server"])
+        registered = frozenset(
+            tool for tool in server_module._BRIDGE_COMMAND_TOOLS["server"].values() if tool
+        )
+        result = server_module._compare_bridge_capabilities(
+            "server",
+            {
+                "state": "announced",
+                "reason": "ok",
+                "announced_commands": census,
+                "announced_arg_contract_hash": "deadbeefdeadbeef",
+            },
+            registered,
+        )
+        self.assertEqual(result["state"], "mismatch")
+        self.assertEqual(result["reason"], "arg_contract_mismatch")
+        self.assertEqual(result["announced_arg_contract_hash"], "deadbeefdeadbeef")
+
+    def test_client_peer_does_not_require_arg_contract_hash(self) -> None:
+        census = sorted(server_module._BRIDGE_COMMAND_TOOLS["client"])
+        registered = frozenset(
+            tool for tool in server_module._BRIDGE_COMMAND_TOOLS["client"].values() if tool
+        )
+        result = server_module._compare_bridge_capabilities(
+            "client",
+            {
+                "state": "announced",
+                "reason": "ok",
+                "announced_commands": census,
+            },
+            registered,
+        )
+        self.assertEqual(result["state"], "match")
+        self.assertIsNone(result["expected_arg_contract_hash"])
+
+    def test_ready_fails_closed_on_arg_contract_mismatch(self) -> None:
+        status = {
+            "server_peer": {
+                "last_poll_age_s": 0.1,
+                "bound_last_poll_age_s": 0.1,
+                "binding_state": "BOUND",
+                "version_state": "ok",
+                "capabilities": {
+                    "state": "mismatch",
+                    "reason": "arg_contract_mismatch",
+                    "announced_commands": [],
+                },
+            },
+            "client_peer": {
+                "last_poll_age_s": 0.1,
+                "bound_last_poll_age_s": 0.1,
+                "binding_state": "BOUND",
+                "version_state": "ok",
+                "capabilities": {"state": "match", "reason": "ok", "announced_commands": []},
+            },
+        }
+        # Force live peers: _peer_is_live checks binding + ages. BOUND + ages set.
+        ready = server_module.compute_bridge_ready(status)
+        self.assertEqual(ready, {"ready": False, "reason": "arg_contract_mismatch"})
+        self.assertIn("arg_contract_mismatch", server_module.READY_REASONS)
+
+    def test_loopback_stores_ach_on_accredited_poll_view(self) -> None:
+        # Minimal accredited path is heavy; unit-test the recorder + view.
+        state = loopback.ServerState(key="k")
+        state.daemon_generation = 1
+        state._record_poll_caps_locked(
+            "server",
+            "entities_query,vehicle_prepare_fixture",
+            True,
+            ach=server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH,
+        )
+        view = state._capabilities_view_locked("server")
+        self.assertEqual(view["state"], "announced")
+        self.assertEqual(
+            view["announced_arg_contract_hash"],
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH,
+        )
+        state._record_poll_caps_locked("server", "entities_query", False, ach="nope")
+        view2 = state._capabilities_view_locked("server")
+        self.assertEqual(view2["state"], "unknown")
+        self.assertIsNone(view2["announced_arg_contract_hash"])
+
+
+if __name__ == "__main__":
+    unittest.main()

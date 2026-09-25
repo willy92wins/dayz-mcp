@@ -24,6 +24,11 @@ class MCPBridge : Managed
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
 	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_inspect,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_enter,vehicle_prepare_fixture,world_spawn," + "world_time_set,world_weather_set";
+	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
+	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
+	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
+	// still lists the same command names fails the version/capability gate.
+	protected const string SERVER_ARG_CONTRACT_HASH = "3c77a99c95fd05a4";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -249,6 +254,7 @@ class MCPBridge : Managed
 		string request = "poll?key=" + m_Key;
 		request = request + "&ver=" + GetPollVersion();
 		request = request + "&caps=" + EncodeQueryValue(SERVER_CAPABILITIES);
+		request = request + "&ach=" + EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);
 		if (m_PeerInstance != "")
 		{
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
