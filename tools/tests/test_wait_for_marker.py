@@ -16,6 +16,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp import server
 from dayz_mcp.server import ServerConfig, build_app
+from tests.catalog_helpers import list_tools_after_lease
 from tests.test_client_mode import _fixture_client_runtime
 from tests.test_mcp_tools import _content_json
 
@@ -121,7 +122,10 @@ class WaitForMarkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("bad_marker", str(caught.exception))
 
     async def test_public_contract_declares_both_scan_modes_and_precedence(self) -> None:
-        tools = {tool.name: tool for tool in await self.app.list_tools()}
+        tools = {
+            tool.name: tool
+            for tool in await list_tools_after_lease(self.app, self.runtime)
+        }
         tool = tools["wait_for"]
         self.assertIn("marker", tool.inputSchema["properties"])
         description = tool.description or ""

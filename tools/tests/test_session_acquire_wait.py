@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
+
+_TOOLS_DIR = Path(__file__).resolve().parents[1]
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
 
 from dayz_mcp import server
 from dayz_mcp.server import ServerConfig
@@ -13,6 +19,7 @@ from dayz_mcp.session_coordination import (
     OPERATION_TOMBSTONE_TTL_S,
     SessionCoordinator,
 )
+from tests.catalog_helpers import list_tools_after_lease
 from tests.test_session_coordination import AuditSink, FakeClock, SequentialIds, _identity
 from tests.test_client_mode import _fixture_client_runtime
 
@@ -546,7 +553,7 @@ class ClientAcquireWaitTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(server, "ClientRuntime", return_value=runtime):
             app, built_runtime = server.build_app(config)
         self.assertIs(built_runtime, runtime)
-        tools = {tool.name: tool for tool in await app.list_tools()}
+        tools = {tool.name: tool for tool in await list_tools_after_lease(app, runtime)}
 
         acquire_schema = tools["session_acquire_wait"].inputSchema
         self.assertEqual(

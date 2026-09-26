@@ -14,6 +14,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp import server
 from dayz_mcp.server import ServerConfig, build_app
+from tests.catalog_helpers import list_tools_after_lease
 from tests.test_client_mode import _fixture_client_runtime
 from tests.test_mcp_tools import _content_json
 
@@ -113,7 +114,10 @@ class SessionStatusBlockedOnTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("session_acquire_wait", result["blocked_on"])
 
     async def test_lease_ttl_and_internal_renewal_are_in_both_descriptions(self) -> None:
-        tools = {tool.name: tool for tool in await self.app.list_tools()}
+        tools = {
+            tool.name: tool
+            for tool in await list_tools_after_lease(self.app, self.runtime)
+        }
 
         for name in ("session_acquire_wait", "session_status"):
             with self.subTest(tool=name):

@@ -13,11 +13,16 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+_TOOLS_DIR = Path(__file__).resolve().parents[1]
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
 from mcp import types
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from dayz_mcp import playbook_tool as adapter, server, server_freshness as freshness
+from tests.catalog_helpers import list_tools_after_lease
 from tests.test_client_mode import _fixture_client_runtime
 
 MODULE = "dayz_playbook_runner"
@@ -144,7 +149,10 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
         self.assert_preserved()
 
     async def test_wire_requires_exact_explicit_module(self):
-        tools = {tool.name: tool for tool in await self.app.list_tools()}
+        tools = {
+            tool.name: tool
+            for tool in await list_tools_after_lease(self.app, self.runtime)
+        }
         schema = tools["playbook_reload"].inputSchema
         self.assertIn("module", schema["required"])
         self.assertEqual(schema["properties"]["module"]["const"], MODULE)
