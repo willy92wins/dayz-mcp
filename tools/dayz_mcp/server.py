@@ -2284,12 +2284,18 @@ class ClientRuntime:
     async def call_bridge(self, cmd: str, args: dict[str, Any], peer: str, timeout_s: float) -> dict[str, Any]:
         deadline = self._time_fn() + timeout_s
         if cmd in _BRIDGE_WORLD_READ_COMMANDS:
-            try:
-                snapshot = await self.bridge_status_payload(
-                    timeout_s=LIVENESS_STATUS_TIMEOUT_S
-                )
-            except Exception:
-                snapshot = None
+            # BUG-037: the liveness probe must not outlive the caller's deadline.
+            probe_budget = min(
+                LIVENESS_STATUS_TIMEOUT_S, max(0.0, deadline - self._time_fn())
+            )
+            snapshot = None
+            if probe_budget > 0.0:
+                try:
+                    snapshot = await self.bridge_status_payload(
+                        timeout_s=probe_budget
+                    )
+                except Exception:
+                    snapshot = None
             if _has_ready_snapshot_shape(snapshot):
                 early = _world_read_not_ready(self, cmd, snapshot)
                 if early is not None:
