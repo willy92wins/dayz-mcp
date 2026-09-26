@@ -83,7 +83,7 @@ def location(path):
 # files. The sibling DayZ_MCP tree is not kept in sync with it
 # (fb-20260925-233932-aa11), so it no longer anchors the census.
 mod = repo / 'addon'
-scripts =[(p, s) for p, s in files(mod / 'scripts', recursive=True)
+scripts = [(p, s) for p, s in files(mod / 'scripts', recursive=True)
            if p.suffix.lower() == '.c']
 scripts.sort(key=lambda item: order(item[0]))
 

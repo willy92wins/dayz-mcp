@@ -3,12 +3,12 @@
 <!-- LIVE-STATE:START -->
 # DayZ-MCP - Estado vivo - 2026-09-26 (Madrid)
 
-- **main** = `e03282b30e17a9e1ce2130561d193291eb72ab77` (#95 MERGED squash; foreign_ports DayZ-related default / 1432).
-- **#95 MERGED** tip pre-squash `0515ad9` → main `e03282b`; Auditor LIMPIO. Ticket `fb-20260917-092743-1432` stays **OPEN**.
-- Prior: #94 `9af5cbf` arg-contract hash fail-closed / 0878 detectability; #92 `72f6354` wave1 resolve `0c27`+`b1a7`+`99db` CLOSED; `e7ef` deferred.
-- Checkout: ff `origin/main` when clean; do **not** reset --hard. Canonical tip is `e03282b`.
+- **main** = `41a3a78895cf8b19cae01aaa9a924456c8b40761` (#101 MERGED squash; sibling DayZ_MCP DESFASADO / aa11; census always reads addon/).
+- **#101 MERGED** tip pre-squash `6ccc924` → main `41a3a78`. Ticket `fb-20260925-233932-aa11` (DESFASADO landed; Option A).
+- Prior: #100 `8e6d0ad` tool-count SSOT 62→63; #98 `1785212` run_not_owned/session_acquire_wait / 9ccc; #97 `515fb94` camera_set RestoreGameplay / 9957; #95 `e03282b` foreign_ports / 1432; #94 `9af5cbf` arg-contract / 0878; #92 `72f6354` wave1.
+- Checkout: ff `origin/main` when clean; do **not** reset --hard. Canonical tip is `41a3a78`.
 - Abierto: triaje buzón continúa (FN/Flash/script; **NO Sol** en tickets). 0 PRs abiertos.
-- HOLD dueño: Workshop re-pack / heater / GATES / e7ef / 0878 — no tocar desde Orq sin OT/GO. Ticket `fb-20260924-235528-0878` stays **OPEN**.
+- HOLD dueño: Workshop re-pack / heater / GATES / e7ef / 0878 - no tocar desde Orq sin OT/GO. Ticket `fb-20260924-235528-0878` stays **OPEN**.
 <!-- LIVE-STATE:END -->
 
 
@@ -24,7 +24,7 @@
 | `â€¦\!Workshop\@DayZ_MCP\Addons\DayZ_MCP.pbo` | PBO desplegado | SHA-256 `1E79BF80EADE48C98BB318A96C7F4ECF73F8782EC3AD3DDD08045B7751F98C9B` (2026-09-16, desde `1737dc5`) |
 | `C:\Users\guill\Repos\dayz-mcp` | Otro clone | Rancio. No usarlo como checkout. Rama local `fichas/hands-watchdog` (**13c, no estÃ¡ en main**). |
 
-Empaquetar SOLO desde `DayZ_MCP_dev\addon` (`pack-addon.ps1` empaqueta por defecto el `addon/` de git en `-Ref`, `HEAD` si no se pasa; `-Source` cambia el arbol empaquetado y no debe apuntar a `DayZ_MCP`). `DayZ_MCP` no esta alineado con `main` (corregido 2026-09-25; ver la fila de arriba y `reviews/2026-09-25-vista-alto-nivel/INFORME.md` seccion 2.2 C1).
+Empaquetar SOLO desde `DayZ_MCP_dev\addon` (`pack-addon.ps1` empaqueta por defecto el `addon/` de git en `-Ref`, `HEAD` si no se pasa; `-Source` cambia el arbol empaquetado y no debe apuntar a `DayZ_MCP`). `DayZ_MCP` no esta alineado con `main` (corregido 2026-09-25; ficha `fb-20260925-233932-aa11`).
 
 Las ramas de trabajo ya fusionadas se retiraron el 2026-09-16: el remoto se queda solo con `main`, y en local sobreviven las que sujeta un worktree vivo y tres con commits sin fusionar. NingÃºn commit se pierde â€”todos siguen alcanzables desde `main` y desde sus PRâ€”, y el registro con nombre y sha de cada una queda fuera del repo, junto a la evidencia de la ola. El vault sigue con los D1-1/D1-4 del 10-sep; no son un plan activo.
 
@@ -58,7 +58,7 @@ El buzÃ³n no se sustituye por Issues GitHub. PR #26 es leftover `546d` (W1 no 
 
 ## Superficie (no recontar a ciegas)
 
-README / architecture / `build_app`: **63 tools** (+ `exec_enforce` opt-in; `build_app` offline sobre `57269d2`, 2026-09-25). `CLAUDE.md` local alineado a 63 (corregido 2026-09-25; sigue untracked). `CHANGELOG` [Unreleased] vacÃ­o; la superficie vive en [1.2]. Group G en `product-spec.md` sigue â“ â€” parked, no es un plan abierto.
+README / architecture / `build_app`: **63 tools** (+ `exec_enforce` opt-in). `CLAUDE.md` local alineado a 63 (sigue untracked). `CHANGELOG` [Unreleased] vacÃ­o; la superficie vive en [1.2]. Group G en `product-spec.md` sigue â“ â€” parked, no es un plan abierto.
 
 ## Gotchas que siguen vigentes
 
