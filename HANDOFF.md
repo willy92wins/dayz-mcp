@@ -19,12 +19,12 @@
 
 | Ãrbol | QuÃ© es | Estado 2026-09-12 |
 |---|---|---|
-| `P:\DayZ_MCP` | Addon compilable (`$PBOPREFIX$=DayZ_MCP`). **Sin `.git`.** | **DESFASADO (2026-09-25):** 5/10 ficheros difieren de `addon/` de `main` (lleva `vehicle_drive`/`drive_probe_client`, retirados en `5892014`) con la misma version `"10"`. No empaquetar desde aqui (ficha `fb-20260925-233932-aa11`). |
+| `P:\DayZ_MCP` | Addon compilable (`$PBOPREFIX$=DayZ_MCP`). **Sin `.git`.** | **DESFASADO (medido 2026-09-26 contra `main` `1785212`):** 5 de los 13 ficheros versionados de `addon/` difieren (`MCPBridge.c`, `MCPClientBridge.c`, `MCPDialogController.c`, `MCPMessages.c`, `MissionGameplay.c`) (lleva `vehicle_drive`/`drive_probe_client`, retirados en `5892014`) con la misma version `"10"`. No empaquetar desde aqui (ficha `fb-20260925-233932-aa11`). |
 | `P:\DayZ_MCP_dev` | Repo de producto (Python MCP, plans, reviews, este HANDOFF). `addon/` es la copia git del bridge. | Git `https://github.com/willy92wins/dayz-mcp.git`. HEAD local = `main` (tracking `origin/main`, ff desde inbox `6de5d98` = PR #17). **Inbox no mergeada.** `HANDOFF.md` entra en este commit. Untracked leftovers (backups, dumps de reviews, `NEXT-SESSION-PROMPT.txt`) se conservan y no se publican. |
 | `â€¦\!Workshop\@DayZ_MCP\Addons\DayZ_MCP.pbo` | PBO desplegado | SHA-256 `1E79BF80EADE48C98BB318A96C7F4ECF73F8782EC3AD3DDD08045B7751F98C9B` (2026-09-16, desde `1737dc5`) |
 | `C:\Users\guill\Repos\dayz-mcp` | Otro clone | Rancio. No usarlo como checkout. Rama local `fichas/hands-watchdog` (**13c, no estÃ¡ en main**). |
 
-Empaquetar SOLO desde `DayZ_MCP_dev\addon` (`pack-addon.ps1` empaqueta el `addon/` de git en `-Ref`, por defecto `HEAD`). `DayZ_MCP` no esta alineado con `main` (corregido 2026-09-25; ficha `fb-20260925-233932-aa11`).
+Empaquetar SOLO desde `DayZ_MCP_dev\addon` (`pack-addon.ps1` empaqueta por defecto el `addon/` de git en `-Ref`, `HEAD` si no se pasa; `-Source` cambia el arbol empaquetado y no debe apuntar a `DayZ_MCP`). `DayZ_MCP` no esta alineado con `main` (corregido 2026-09-25; ficha `fb-20260925-233932-aa11`).
 
 Las ramas de trabajo ya fusionadas se retiraron el 2026-09-16: el remoto se queda solo con `main`, y en local sobreviven las que sujeta un worktree vivo y tres con commits sin fusionar. NingÃºn commit se pierde â€”todos siguen alcanzables desde `main` y desde sus PRâ€”, y el registro con nombre y sha de cada una queda fuera del repo, junto a la evidencia de la ola. El vault sigue con los D1-1/D1-4 del 10-sep; no son un plan activo.
 

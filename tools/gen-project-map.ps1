@@ -78,9 +78,10 @@ def location(path):
     return f'`{path}`' + ('' if path.exists() else ' (ausente en este checkout)')
 
 
-# The census reads git's addon/, which is what pack-addon.ps1 packs. The
-# sibling DayZ_MCP tree is not kept in sync with it (fb-20260925-233932-aa11),
-# so it no longer anchors the census.
+# The census reads the checked-out addon/ tree. pack-addon.ps1 packs git's
+# addon/ at -Ref (HEAD by default), so on a clean checkout both see the same
+# files. The sibling DayZ_MCP tree is not kept in sync with it
+# (fb-20260925-233932-aa11), so it no longer anchors the census.
 mod = repo / 'addon'
 scripts = [(p, s) for p, s in files(mod / 'scripts', recursive=True)
            if p.suffix.lower() == '.c']

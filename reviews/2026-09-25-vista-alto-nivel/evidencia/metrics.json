@@ -1,0 +1,7743 @@
+{
+ "head": "57269d21ab23cef3a4c5e50919890529ea70fff4",
+ "n_pkg": 81,
+ "n_tests": 262,
+ "modules": {
+  "__init__": {
+   "path": "tools/dayz_mcp/__init__.py",
+   "loc": 3,
+   "n_funcs": 0,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [],
+   "classes": [],
+   "imports": [],
+   "doc": "DayZ MCP stdio wrapper package.",
+   "fan_in": 0
+  },
+  "__main__": {
+   "path": "tools/dayz_mcp/__main__.py",
+   "loc": 8,
+   "n_funcs": 0,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [],
+   "classes": [],
+   "imports": [
+    "server"
+   ],
+   "doc": "",
+   "fan_in": 0
+  },
+  "accredited_daemon_transport": {
+   "path": "tools/dayz_mcp/accredited_daemon_transport.py",
+   "loc": 308,
+   "n_funcs": 6,
+   "n_funcs_gt80": 2,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "verified_daemon_http_request",
+     204,
+     104
+    ],
+    [
+     "_connected_daemon_identity_verified",
+     115,
+     87
+    ],
+    [
+     "_connected_server_pid",
+     78,
+     35
+    ],
+    [
+     "_transport_error",
+     44,
+     16
+    ],
+    [
+     "_endpoint",
+     62,
+     14
+    ]
+   ],
+   "classes": [
+    "AccreditedTransportError"
+   ],
+   "imports": [
+    "daemon_contract",
+    "native_process_guard",
+    "native_process_snapshot"
+   ],
+   "doc": "Authenticated daemon HTTP after accrediting the owner of the exact socket.",
+   "fan_in": 8
+  },
+  "admin_cli": {
+   "path": "tools/dayz_mcp/admin_cli.py",
+   "loc": 240,
+   "n_funcs": 3,
+   "n_funcs_gt80": 1,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "main",
+     67,
+     169
+    ],
+    [
+     "_request",
+     14,
+     30
+    ],
+    [
+     "_parser",
+     46,
+     19
+    ]
+   ],
+   "classes": [],
+   "imports": [
+    "accredited_daemon_transport",
+    "daemon_policy",
+    "pinned_keyfile"
+   ],
+   "doc": "",
+   "fan_in": 0
+  },
+  "agent_loop": {
+   "path": "tools/dayz_mcp/agent_loop.py",
+   "loc": 75,
+   "n_funcs": 3,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "with_next_step",
+     66,
+     9
+    ],
+    [
+     "ok_next_step",
+     56,
+     8
+    ],
+    [
+     "next_step",
+     49,
+     5
+    ]
+   ],
+   "classes": [],
+   "imports": [],
+   "doc": "Small-model loop helpers: next_step may only name public MCP tools.",
+   "fan_in": 2
+  },
+  "bootstrap_parent": {
+   "path": "tools/dayz_mcp/bootstrap_parent.py",
+   "loc": 82,
+   "n_funcs": 2,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "accredit_registered_bootstrap_parent",
+     41,
+     41
+    ],
+    [
+     "_snapshot_matches",
+     21,
+     18
+    ]
+   ],
+   "classes": [],
+   "imports": [
+    "launcher_registry",
+    "native_process_guard",
+    "native_process_snapshot"
+   ],
+   "doc": "Accredit the sealed native PE that is allowed to spawn bootstrap callers.",
+   "fan_in": 1
+  },
+  "camera_restore": {
+   "path": "tools/dayz_mcp/camera_restore.py",
+   "loc": 44,
+   "n_funcs": 1,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "restore_camera_verdict",
+     17,
+     27
+    ]
+   ],
+   "classes": [],
+   "imports": [],
+   "doc": "Pure camera_get observer used by restore_gameplay.",
+   "fan_in": 1
+  },
+  "client_dump_registry": {
+   "path": "tools/dayz_mcp/client_dump_registry.py",
+   "loc": 183,
+   "n_funcs": 9,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "open",
+     74,
+     22
+    ],
+    [
+     "bind",
+     97,
+     22
+    ],
+    [
+     "note_launch",
+     120,
+     22
+    ],
+    [
+     "bindings_with_revision",
+     161,
+     22
+    ],
+    [
+     "launch_started",
+     143,
+     13
+    ]
+   ],
+   "classes": [
+    "_Entry",
+    "ClientDumpRegistry"
+   ],
+   "imports": [
+    "client_steam_bootstrap"
+   ],
+   "doc": "Daemon-side record of which client launch owns which new dumps (296b r3).",
+   "fan_in": 1
+  },
+  "client_steam_bootstrap": {
+   "path": "tools/dayz_mcp/client_steam_bootstrap.py",
+   "loc": 273,
+   "n_funcs": 13,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_newest_new_dump",
+     84,
+     33
+    ],
+    [
+     "diagnose_retired_client_death",
+     241,
+     32
+    ],
+    [
+     "diagnose_client_steam_bootstrap",
+     126,
+     28
+    ],
+    [
+     "_scan_error_mdmps",
+     40,
+     25
+    ],
+    [
+     "baseline_from_wire",
+     216,
+     23
+    ]
+   ],
+   "classes": [
+    "ClientDumpBaseline"
+   ],
+   "imports": [],
+   "doc": "Offline diagnosis when the client dies during Steam bootstrap (ficha 47c4).",
+   "fan_in": 2
+  },
+  "control_client": {
+   "path": "tools/dayz_mcp/control_client.py",
+   "loc": 970,
+   "n_funcs": 40,
+   "n_funcs_gt80": 3,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "session_acquire_wait",
+     853,
+     117
+    ],
+    [
+     "session_acquire",
+     491,
+     106
+    ],
+    [
+     "_request_once",
+     239,
+     94
+    ],
+    [
+     "_reconcile_idle_session_locked",
+     762,
+     64
+    ],
+    [
+     "__init__",
+     161,
+     44
+    ]
+   ],
+   "classes": [
+    "ControlClientError",
+    "ControlIdentity",
+    "ControlClient"
+   ],
+   "imports": [
+    "accredited_daemon_transport",
+    "daemon_credential",
+    "daemon_policy_contract"
+   ],
+   "doc": "Non-launching client for the DayZ MCP daemon session-control API.",
+   "fan_in": 2
+  },
+  "core": {
+   "path": "tools/dayz_mcp/core.py",
+   "loc": 320,
+   "n_funcs": 10,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_peer_status",
+     74,
+     45
+    ],
+    [
+     "read_process_cpu_times",
+     168,
+     43
+    ],
+    [
+     "build_status",
+     121,
+     41
+    ],
+    [
+     "attach_lifecycle_cpu_signals",
+     248,
+     40
+    ],
+    [
+     "_creation_matches",
+     220,
+     26
+    ]
+   ],
+   "classes": [],
+   "imports": [],
+   "doc": "Shared bridge policy helpers: version gate, status assembly, exec config.",
+   "fan_in": 3
+  },
+  "daemon": {
+   "path": "tools/dayz_mcp/daemon.py",
+   "loc": 1766,
+   "n_funcs": 50,
+   "n_funcs_gt80": 6,
+   "n_funcs_gt200": 2,
+   "longest": [
+    [
+     "_activate_server_coordination",
+     362,
+     255
+    ],
+    [
+     "run_daemon",
+     1411,
+     207
+    ],
+    [
+     "_job_object_raw",
+     1038,
+     96
+    ],
+    [
+     "spawn_detached",
+     1676,
+     90
+    ],
+    [
+     "_bind_with_reclaim",
+     788,
+     83
+    ]
+   ],
+   "classes": [],
+   "imports": [
+    "core",
+    "daemon_contract",
+    "identity_migration",
+    "loopback",
+    "native_process_guard",
+    "orphan_guard",
+    "process_lifecycle",
+    "runtime_state",
+    "session_coordination",
+    "wmi_host"
+   ],
+   "doc": "Standalone broker daemon: the single owner of 127.0.0.1:<port>.",
+   "fan_in": 1
+  },
+  "daemon_contract": {
+   "path": "tools/dayz_mcp/daemon_contract.py",
+   "loc": 105,
+   "n_funcs": 4,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "classify_dayz_argv",
+     66,
+     39
+    ],
+    [
+     "build_daemon_argv",
+     15,
+     31
+    ],
+    [
+     "argv_targets_port",
+     48,
+     16
+    ],
+    [
+     "daemon_runtime_cwd",
+     11,
+     2
+    ]
+   ],
+   "classes": [],
+   "imports": [],
+   "doc": "Pure construction contract for the standalone daemon process.",
+   "fan_in": 6
+  },
+  "daemon_credential": {
+   "path": "tools/dayz_mcp/daemon_credential.py",
+   "loc": 374,
+   "n_funcs": 7,
+   "n_funcs_gt80": 1,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "request_with_refresh",
+     246,
+     128
+    ],
+    [
+     "_retry_after_daemon_replacement",
+     188,
+     57
+    ],
+    [
+     "_send",
+     147,
+     40
+    ],
+    [
+     "_assert_authority_unchanged",
+     85,
+     36
+    ],
+    [
+     "__init__",
+     57,
+     27
+    ]
+   ],
+   "classes": [
+    "CredentialRefreshError",
+    "_CredentialSnapshot",
+    "RefreshingDaemonCredential"
+   ],
+   "imports": [
+    "accredited_daemon_transport",
+    "daemon_policy_contract",
+    "pinned_keyfile"
+   ],
+   "doc": "Recover one immutable client authority after an accredited daemon changes.",
+   "fan_in": 3
+  },
+  "daemon_policy": {
+   "path": "tools/dayz_mcp/daemon_policy.py",
+   "loc": 423,
+   "n_funcs": 19,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "load_daemon_policy",
+     369,
+     54
+    ],
+    [
+     "_parse_bootstrap_manifest",
+     167,
+     47
+    ],
+    [
+     "load_bootstrap_daemon_policy",
+     334,
+     33
+    ],
+    [
+     "_duplicate_inherited_manifest_handle",
+     216,
+     32
+    ],
+    [
+     "_normal_policy_from_provenance",
+     290,
+     27
+    ]
+   ],
+   "classes": [],
+   "imports": [
+    "bootstrap_parent",
+    "daemon_contract",
+    "daemon_policy_contract",
+    "host_config"
+   ],
+   "doc": "Explicit, immutable authority used to accredit the DayZ MCP daemon.",
+   "fan_in": 4
+  },
+  "daemon_policy_contract": {
+   "path": "tools/dayz_mcp/daemon_policy_contract.py",
+   "loc": 137,
+   "n_funcs": 6,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "__post_init__",
+     87,
+     44
+    ],
+    [
+     "authority_payload",
+     42,
+     21
+    ],
+    [
+     "valid_absolute_path",
+     28,
+     12
+    ],
+    [
+     "valid_text",
+     18,
+     8
+    ],
+    [
+     "authority_sha256",
+     65,
+     8
+    ]
+   ],
+   "classes": [
+    "AccreditedDaemonPolicy"
+   ],
+   "imports": [
+    "daemon_contract"
+   ],
+   "doc": "Non-launching immutable daemon authority value shared by all clients.",
+   "fan_in": 5
+  },
+  "dayz_test_modes": {
+   "path": "tools/dayz_mcp/dayz_test_modes.py",
+   "loc": 241,
+   "n_funcs": 18,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_validated_view",
+     152,
+     22
+    ],
+    [
+     "__post_init__",
+     28,
+     18
+    ],
+    [
+     "resolve_default_mode",
+     200,
+     13
+    ],
+    [
+     "resolve_mode",
+     186,
+     8
+    ],
+    [
+     "start",
+     89,
+     7
+    ]
+   ],
+   "classes": [
+    "ModeAuthorityError",
+    "ModeStep",
+    "ModeRecord"
+   ],
+   "imports": [],
+   "doc": "Single, dependency-free authority for DayZ test mode policy.",
+   "fan_in": 4
+  },
+  "dayz_test_readiness": {
+   "path": "tools/dayz_mcp/dayz_test_readiness.py",
+   "loc": 164,
+   "n_funcs": 6,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "wait_for_owned_udp",
+     106,
+     58
+    ],
+    [
+     "_server_pid",
+     64,
+     30
+    ],
+    [
+     "__post_init__",
+     35,
+     13
+    ],
+    [
+     "_valid_uuid4",
+     54,
+     8
+    ],
+    [
+     "_endpoint_port",
+     96,
+     8
+    ]
+   ],
+   "classes": [
+    "ReadinessResult",
+    "_Broker"
+   ],
+   "imports": [
+    "native_broker_protocol"
+   ],
+   "doc": "Exact managed-run UDP readiness check for the private dayz-test worker.",
+   "fan_in": 1
+  },
+  "dayz_test_request": {
+   "path": "tools/dayz_mcp/dayz_test_request.py",
+   "loc": 483,
+   "n_funcs": 16,
+   "n_funcs_gt80": 1,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "parse_dayz_test_request",
+     302,
+     181
+    ],
+    [
+     "_validate_policies",
+     254,
+     46
+    ],
+    [
+     "_valid_unicode_tree",
+     168,
+     18
+    ],
+    [
+     "_valid_local_absolute_path",
+     188,
+     13
+    ],
+    [
+     "_path_is_within",
+     203,
+     12
+    ]
+   ],
+   "classes": [
+    "RequestProjectPolicy",
+    "ParsedDayzTestRequest"
+   ],
+   "imports": [
+    "dayz_test_modes"
+   ],
+   "doc": "",
+   "fan_in": 5
+  },
+  "dayz_test_storage": {
+   "path": "tools/dayz_mcp/dayz_test_storage.py",
+   "loc": 676,
+   "n_funcs": 26,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "prepare_storage",
+     613,
+     63
+    ],
+    [
+     "rotate_storage",
+     538,
+     55
+    ],
+    [
+     "_reconcile_journal",
+     464,
+     46
+    ],
+    [
+     "_write_json_atomic",
+     262,
+     37
+    ],
+    [
+     "_valid_journal",
+     385,
+     33
+    ]
+   ],
+   "classes": [
+    "StorageError",
+    "MarkerRead",
+    "Decision",
+    "RotationResult"
+   ],
+   "imports": [],
+   "doc": "Rotate `<mission>\\storage_1` only when the mod set that wrote it changed.",
+   "fan_in": 2
+  },
+  "dayz_test_tool": {
+   "path": "tools/dayz_mcp/dayz_test_tool.py",
+   "loc": 2618,
+   "n_funcs": 94,
+   "n_funcs_gt80": 7,
+   "n_funcs_gt200": 2,
+   "longest": [
+    [
+     "execute_dayz_test_run",
+     1468,
+     314
+    ],
+    [
+     "execute_dayz_test_close",
+     2392,
+     225
+    ],
+    [
+     "_execute_request",
+     1290,
+     160
+    ],
+    [
+     "build_run_request",
+     259,
+     102
+    ],
+    [
+     "execute_dayz_test_stop",
+     2000,
+     101
+    ]
+   ],
+   "classes": [
+    "DayzTestToolError",
+    "WorkerTerminal",
+    "_Runtime",
+    "LaunchReadinessProjection",
+    "ClientRecordProjection",
+    "ClientReplacementDecision",
+    "_RptWatch"
+   ],
+   "imports": [
+    "client_steam_bootstrap",
+    "dayz_test_modes",
+    "dayz_test_request",
+    "dayz_test_worker",
+    "launcher_registry",
+    "native_launcher_transaction",
+    "process_lifecycle",
+    "secure_launcher",
+    "server",
+    "steam_preflight"
+   ],
+   "doc": "",
+   "fan_in": 1
+  },
+  "dayz_test_worker": {
+   "path": "tools/dayz_mcp/dayz_test_worker.py",
+   "loc": 821,
+   "n_funcs": 29,
+   "n_funcs_gt80": 3,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "execute_dayz_test_worker",
+     640,
+     181
+    ],
+    [
+     "_start",
+     533,
+     93
+    ],
+    [
+     "_start_core",
+     248,
+     92
+    ],
+    [
+     "_validate_runtime",
+     173,
+     27
+    ],
+    [
+     "_running_role_pids",
+     496,
+     27
+    ]
+   ],
+   "classes": [
+    "DayzTestWorkerError",
+    "Broker",
+    "WorkerRuntimePolicy",
+    "WorkerResult"
+   ],
+   "imports": [
+    "dayz_test_readiness",
+    "dayz_test_request",
+    "dayz_test_storage",
+    "native_broker_protocol"
+   ],
+   "doc": "Private, non-launching dayz-test worker driven only through the native broker.",
+   "fan_in": 1
+  },
+  "dayz_tools_paths": {
+   "path": "tools/dayz_mcp/dayz_tools_paths.py",
+   "loc": 282,
+   "n_funcs": 16,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "require_dayz_layout",
+     229,
+     33
+    ],
+    [
+     "read_registry_string",
+     113,
+     18
+    ],
+    [
+     "_registry_tools",
+     133,
+     15
+    ],
+    [
+     "_unique",
+     150,
+     14
+    ],
+    [
+     "tools_root_candidates",
+     176,
+     11
+    ]
+   ],
+   "classes": [
+    "DayZLayout"
+   ],
+   "imports": [],
+   "doc": "Resolve DayZ Tools, Steam, and DayZDiag roots without assuming C:\\Program Files.",
+   "fan_in": 2
+  },
+  "doctor": {
+   "path": "tools/dayz_mcp/doctor.py",
+   "loc": 1381,
+   "n_funcs": 39,
+   "n_funcs_gt80": 3,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_check_coordination",
+     643,
+     183
+    ],
+    [
+     "_diagnose",
+     1123,
+     176
+    ],
+    [
+     "_check_runs",
+     933,
+     108
+    ],
+    [
+     "_parse_registration",
+     383,
+     65
+    ],
+    [
+     "_check_knowledge_pack",
+     548,
+     52
+    ]
+   ],
+   "classes": [
+    "DoctorSources",
+    "_DaemonPolicy",
+    "_Registration",
+    "_ConfigProbeFailed",
+    "_DaemonStatusError"
+   ],
+   "imports": [
+    "accredited_daemon_transport",
+    "daemon_policy",
+    "knowledge_pack",
+    "launcher_registry",
+    "native_bundle",
+    "native_process_guard",
+    "orphan_guard",
+    "pinned_keyfile",
+    "process_lifecycle",
+    "runtime_state",
+    "session_coordination"
+   ],
+   "doc": "",
+   "fan_in": 0
+  },
+  "effective_schema": {
+   "path": "tools/dayz_mcp/effective_schema.py",
+   "loc": 325,
+   "n_funcs": 21,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_audit_desc_enum_mismatch",
+     283,
+     42
+    ],
+    [
+     "_collect_json_enums",
+     128,
+     30
+    ],
+    [
+     "_audit_param_name_divergence",
+     194,
+     29
+    ],
+    [
+     "_collect_json_types",
+     88,
+     26
+    ],
+    [
+     "audit_contracts",
+     165,
+     20
+    ]
+   ],
+   "classes": [],
+   "imports": [
+    "server"
+   ],
+   "doc": "Effective MCP tool schemas after build_app, and a contract auditor.",
+   "fan_in": 0
+  },
+  "effective_schema_catalog": {
+   "path": "tools/dayz_mcp/effective_schema_catalog.py",
+   "loc": 128,
+   "n_funcs": 4,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_record",
+     17,
+     24
+    ],
+    [
+     "validate_catalog",
+     101,
+     24
+    ],
+    [
+     "catalog_records",
+     93,
+     2
+    ],
+    [
+     "catalog_by_id",
+     97,
+     2
+    ]
+   ],
+   "classes": [],
+   "imports": [],
+   "doc": "Independent declarative catalog for M13 public constraints.",
+   "fan_in": 0
+  },
+  "effective_schema_core": {
+   "path": "tools/dayz_mcp/effective_schema_core.py",
+   "loc": 235,
+   "n_funcs": 11,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "build_payload",
+     129,
+     46
+    ],
+    [
+     "extract_tool_records",
+     72,
+     28
+    ],
+    [
+     "_tool_record",
+     102,
+     25
+    ],
+    [
+     "build_envelope",
+     177,
+     16
+    ],
+    [
+     "project_server_config_identity",
+     28,
+     14
+    ]
+   ],
+   "classes": [
+    "EffectiveSchemaError"
+   ],
+   "imports": [],
+   "doc": "Pure M13 constructor for the effective MCP schema.",
+   "fan_in": 2
+  },
+  "effective_schema_runtime_validators": {
+   "path": "tools/dayz_mcp/effective_schema_runtime_validators.py",
+   "loc": 86,
+   "n_funcs": 4,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "enumerate_constraints",
+     31,
+     46
+    ],
+    [
+     "_tool_schema",
+     22,
+     7
+    ],
+    [
+     "_value",
+     16,
+     4
+    ],
+    [
+     "build_runtime_view",
+     79,
+     4
+    ]
+   ],
+   "classes": [
+    "RuntimeValidatorError"
+   ],
+   "imports": [],
+   "doc": "Generic M13 runtime constraint enumerator.",
+   "fan_in": 0
+  },
+  "host_config": {
+   "path": "tools/dayz_mcp/host_config.py",
+   "loc": 1240,
+   "n_funcs": 50,
+   "n_funcs_gt80": 3,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "apply_host_timeouts",
+     1146,
+     94
+    ],
+    [
+     "resolve_daemon_provenance",
+     334,
+     88
+    ],
+    [
+     "_registration_from_entry",
+     217,
+     83
+    ],
+    [
+     "_recover_if_needed",
+     1073,
+     71
+    ],
+    [
+     "__init__",
+     710,
+     49
+    ]
+   ],
+   "classes": [
+    "HostConfigError",
+    "HostConfigCrash",
+    "DaemonProvenance",
+    "_ClientRegistration",
+    "_WinFile",
+    "_PinnedConfigMissing",
+    "_PinnedConfigFile"
+   ],
+   "imports": [
+    "daemon_contract",
+    "native_process_snapshot",
+    "server_cli"
+   ],
+   "doc": "",
+   "fan_in": 3
+  },
+  "identity_migration": {
+   "path": "tools/dayz_mcp/identity_migration.py",
+   "loc": 1429,
+   "n_funcs": 39,
+   "n_funcs_gt80": 4,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "ensure_runs_v1_backup",
+     1255,
+     174
+    ],
+    [
+     "_recover_backup_transaction",
+     1110,
+     143
+    ],
+    [
+     "_argv_targets_dayz_mcp",
+     475,
+     97
+    ],
+    [
+     "scan_dayz_mcp_processes",
+     680,
+     87
+    ],
+    [
+     "capture_launch_ancestor_identity",
+     598,
+     80
+    ]
+   ],
+   "classes": [
+    "RunsBackupGateError"
+   ],
+   "imports": [
+    "native_process_guard",
+    "orphan_guard",
+    "runtime_state",
+    "server_cli"
+   ],
+   "doc": "",
+   "fan_in": 1
+  },
+  "inbox": {
+   "path": "tools/dayz_mcp/inbox.py",
+   "loc": 239,
+   "n_funcs": 10,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_read_inbox",
+     169,
+     66
+    ],
+    [
+     "append_feedback",
+     107,
+     34
+    ],
+    [
+     "append_resolution",
+     143,
+     24
+    ],
+    [
+     "_age_fields",
+     71,
+     19
+    ],
+    [
+     "_validate_evidence_ref",
+     53,
+     16
+    ]
+   ],
+   "classes": [],
+   "imports": [],
+   "doc": "",
+   "fan_in": 1
+  },
+  "instance_fence": {
+   "path": "tools/dayz_mcp/instance_fence.py",
+   "loc": 198,
+   "n_funcs": 10,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "normalize_creation_time_utc",
+     93,
+     22
+    ],
+    [
+     "instance_prefix",
+     146,
+     10
+    ],
+    [
+     "fence_error",
+     179,
+     10
+    ],
+    [
+     "classify_instance_token",
+     191,
+     7
+    ],
+    [
+     "format_creation_time_utc",
+     87,
+     4
+    ]
+   ],
+   "classes": [
+    "BindingPrepareError",
+    "BindingRegistry",
+    "Binding"
+   ],
+   "imports": [],
+   "doc": "In-memory instance bindings for fencing commands away from a foreign game.",
+   "fan_in": 2
+  },
+  "knowledge": {
+   "path": "tools/dayz_mcp/knowledge.py",
+   "loc": 759,
+   "n_funcs": 34,
+   "n_funcs_gt80": 1,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "register_knowledge_tools",
+     650,
+     84
+    ],
+    [
+     "extract_pack",
+     333,
+     42
+    ],
+    [
+     "_exclusive_prepare_lock",
+     510,
+     40
+    ],
+    [
+     "_publish_index",
+     595,
+     38
+    ],
+    [
+     "_markdown_units",
+     168,
+     36
+    ]
+   ],
+   "classes": [
+    "KnowledgeIndexError",
+    "KnowledgePrepareConflict"
+   ],
+   "imports": [
+    "agent_loop",
+    "knowledge_pack"
+   ],
+   "doc": "Build and query the deterministic DayZ Knowledge Pack index.",
+   "fan_in": 1
+  },
+  "knowledge_pack": {
+   "path": "tools/dayz_mcp/knowledge_pack.py",
+   "loc": 320,
+   "n_funcs": 18,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "install_knowledge_pack",
+     238,
+     36
+    ],
+    [
+     "sync_skills",
+     181,
+     33
+    ],
+    [
+     "main",
+     286,
+     30
+    ],
+    [
+     "_load_manifest",
+     128,
+     22
+    ],
+    [
+     "ensure_pack",
+     86,
+     20
+    ]
+   ],
+   "classes": [
+    "KnowledgePackError",
+    "CommandRunner"
+   ],
+   "imports": [],
+   "doc": "",
+   "fan_in": 2
+  },
+  "launcher_registry": {
+   "path": "tools/dayz_mcp/launcher_registry.py",
+   "loc": 460,
+   "n_funcs": 27,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_read_canonical_registry",
+     259,
+     33
+    ],
+    [
+     "_open_validated_entry",
+     316,
+     31
+    ],
+    [
+     "require_unique_embedded_marker",
+     115,
+     30
+    ],
+    [
+     "_open_pinned_read",
+     181,
+     24
+    ],
+    [
+     "_validate_entry",
+     349,
+     23
+    ]
+   ],
+   "classes": [
+    "_FileIdentity",
+    "_OpenedLauncher"
+   ],
+   "imports": [
+    "native_pe",
+    "registry_lock",
+    "request_path_authority"
+   ],
+   "doc": "Read-only accreditation of registered native launcher executables.",
+   "fan_in": 8
+  },
+  "launcher_registry_update": {
+   "path": "tools/dayz_mcp/launcher_registry_update.py",
+   "loc": 827,
+   "n_funcs": 29,
+   "n_funcs_gt80": 3,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "describe_registry_provenance",
+     398,
+     108
+    ],
+    [
+     "_replace_transition",
+     298,
+     88
+    ],
+    [
+     "_install_transition",
+     202,
+     84
+    ],
+    [
+     "_rollback_transition",
+     732,
+     49
+    ],
+    [
+     "_recover_prepared",
+     688,
+     42
+    ]
+   ],
+   "classes": [],
+   "imports": [
+    "launcher_registry",
+    "native_bundle",
+    "registry_lock"
+   ],
+   "doc": "CAS install and one-link rollback for the canonical launcher registry.",
+   "fan_in": 0
+  },
+  "lease_supervisor": {
+   "path": "tools/dayz_mcp/lease_supervisor.py",
+   "loc": 214,
+   "n_funcs": 18,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_run",
+     103,
+     32
+    ],
+    [
+     "protected_release_and_verify",
+     185,
+     29
+    ],
+    [
+     "__init__",
+     45,
+     27
+    ],
+    [
+     "_release_and_verify",
+     167,
+     16
+    ],
+    [
+     "_validate_heartbeat",
+     87,
+     15
+    ]
+   ],
+   "classes": [
+    "_SessionClient",
+    "LeaseHeartbeatError",
+    "LeaseCleanupError",
+    "LeaseHeartbeatSupervisor"
+   ],
+   "imports": [],
+   "doc": "Fixed-cadence lease heartbeat and terminal cleanup for the native launcher.",
+   "fan_in": 1
+  },
+  "lifecycle_cli": {
+   "path": "tools/dayz_mcp/lifecycle_cli.py",
+   "loc": 177,
+   "n_funcs": 4,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "main",
+     121,
+     52
+    ],
+    [
+     "_read_start_request",
+     73,
+     46
+    ],
+    [
+     "_request",
+     23,
+     30
+    ],
+    [
+     "_parser",
+     55,
+     16
+    ]
+   ],
+   "classes": [],
+   "imports": [
+    "accredited_daemon_transport",
+    "daemon_policy",
+    "pinned_keyfile"
+   ],
+   "doc": "",
+   "fan_in": 0
+  },
+  "log_tail": {
+   "path": "tools/dayz_mcp/log_tail.py",
+   "loc": 215,
+   "n_funcs": 6,
+   "n_funcs_gt80": 1,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "read_since",
+     134,
+     81
+    ],
+    [
+     "decode_marker",
+     49,
+     27
+    ],
+    [
+     "is_allowed_profiles_dir",
+     98,
+     21
+    ],
+    [
+     "_file_identity",
+     78,
+     18
+    ],
+    [
+     "resolve_log_files",
+     121,
+     11
+    ]
+   ],
+   "classes": [
+    "LogTailError",
+    "TailMarker"
+   ],
+   "imports": [],
+   "doc": "Incremental tailing of DayZ RPT / script logs (F2.1).",
+   "fan_in": 1
+  },
+  "loopback": {
+   "path": "tools/dayz_mcp/loopback.py",
+   "loc": 4184,
+   "n_funcs": 142,
+   "n_funcs_gt80": 10,
+   "n_funcs_gt200": 1,
+   "longest": [
+    [
+     "record_poll",
+     2205,
+     248
+    ],
+    [
+     "enqueue_command",
+     1657,
+     157
+    ],
+    [
+     "_adopt_on_grant",
+     3243,
+     137
+    ],
+    [
+     "_enqueue_exec_enforce",
+     1958,
+     125
+    ],
+    [
+     "_repair_lifecycle_recovery_fault",
+     3780,
+     121
+    ]
+   ],
+   "classes": [
+    "TestIdentityOverride",
+    "_BoundPeerDispatchable",
+    "_BoundPeerRunning",
+    "ServerState",
+    "Handler",
+    "ExclusiveThreadingHTTPServer",
+    "LoopbackServer"
+   ],
+   "imports": [
+    "accredited_daemon_transport",
+    "client_dump_registry",
+    "core",
+    "daemon_credential",
+    "instance_fence",
+    "orphan_guard",
+    "peer_liveness",
+    "pinned_keyfile",
+    "process_lifecycle",
+    "runtime_state",
+    "session_coordination",
+    "ui_dialog"
+   ],
+   "doc": "",
+   "fan_in": 2
+  },
+  "mcp_supervisor": {
+   "path": "tools/dayz_mcp/mcp_supervisor.py",
+   "loc": 470,
+   "n_funcs": 22,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "recycle",
+     251,
+     55
+    ],
+    [
+     "handle_host_line",
+     409,
+     49
+    ],
+    [
+     "_pump_worker",
+     195,
+     37
+    ],
+    [
+     "__init__",
+     125,
+     30
+    ],
+    [
+     "_heartbeat",
+     317,
+     28
+    ]
+   ],
+   "classes": [
+    "WorkerProcess",
+    "_Generation",
+    "Supervisor"
+   ],
+   "imports": [],
+   "doc": "Own the host's stdio and forward it to a worker that can be replaced in place.",
+   "fan_in": 1
+  },
+  "native_broker_protocol": {
+   "path": "tools/dayz_mcp/native_broker_protocol.py",
+   "loc": 253,
+   "n_funcs": 11,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_validate_payload",
+     134,
+     44
+    ],
+    [
+     "decode_request",
+     221,
+     32
+    ],
+    [
+     "encode_request",
+     193,
+     26
+    ],
+    [
+     "_valid_unicode",
+     71,
+     19
+    ],
+    [
+     "_contains_secret_key",
+     92,
+     13
+    ]
+   ],
+   "classes": [
+    "BrokerProtocolError",
+    "BrokerKind",
+    "BrokerRequest"
+   ],
+   "imports": [],
+   "doc": "Closed, public-only framing for requests sent to the native launcher broker.",
+   "fan_in": 6
+  },
+  "native_bundle": {
+   "path": "tools/dayz_mcp/native_bundle.py",
+   "loc": 904,
+   "n_funcs": 35,
+   "n_funcs_gt80": 1,
+   "n_funcs_gt200": 1,
+   "longest": [
+    [
+     "load_verified_bundle",
+     669,
+     235
+    ],
+    [
+     "_parse_policy",
+     586,
+     60
+    ],
+    [
+     "_parse_manifest",
+     497,
+     52
+    ],
+    [
+     "_root_from_payload",
+     551,
+     33
+    ],
+    [
+     "approve_debug_image",
+     203,
+     31
+    ]
+   ],
+   "classes": [
+    "DebugProcessDescriptor",
+    "DebugAddonHelperDescriptor",
+    "DebugImageAuthority",
+    "VerifiedNativeBundle"
+   ],
+   "imports": [
+    "dayz_test_request",
+    "dayz_tools_paths",
+    "launcher_registry",
+    "native_broker_protocol",
+    "native_child_announcement",
+    "request_path_authority"
+   ],
+   "doc": "Pinned, fail-closed verification of a registered native launcher bundle.",
+   "fan_in": 5
+  },
+  "native_child_announcement": {
+   "path": "tools/dayz_mcp/native_child_announcement.py",
+   "loc": 125,
+   "n_funcs": 6,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "feed",
+     44,
+     68
+    ],
+    [
+     "__init__",
+     39,
+     4
+    ],
+    [
+     "_fail",
+     121,
+     4
+    ],
+    [
+     "finish",
+     113,
+     3
+    ],
+    [
+     "_invalid",
+     34,
+     2
+    ]
+   ],
+   "classes": [
+    "ChildAnnouncementError",
+    "ChildAnnouncement",
+    "ChildAnnouncementDecoder"
+   ],
+   "imports": [
+    "dayz_tools_paths",
+    "native_broker_protocol",
+    "request_path_authority"
+   ],
+   "doc": "Incremental, fail-closed decoder for PE child-image announcements.",
+   "fan_in": 2
+  },
+  "native_debug_state": {
+   "path": "tools/dayz_mcp/native_debug_state.py",
+   "loc": 298,
+   "n_funcs": 14,
+   "n_funcs_gt80": 1,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "begin_event",
+     134,
+     130
+    ],
+    [
+     "complete_continue",
+     275,
+     23
+    ],
+    [
+     "_failure",
+     114,
+     19
+    ],
+    [
+     "__init__",
+     45,
+     15
+    ],
+    [
+     "_set_pending",
+     102,
+     11
+    ]
+   ],
+   "classes": [
+    "NativeDebugStateError",
+    "NativeDebugEvent",
+    "NativeDebugDecision",
+    "_PendingEvent",
+    "NativeDebugState"
+   ],
+   "imports": [],
+   "doc": "",
+   "fan_in": 1
+  },
+  "native_launcher_backend": {
+   "path": "tools/dayz_mcp/native_launcher_backend.py",
+   "loc": 1784,
+   "n_funcs": 52,
+   "n_funcs_gt80": 3,
+   "n_funcs_gt200": 1,
+   "longest": [
+    [
+     "_supervise_created_launcher",
+     1228,
+     397
+    ],
+    [
+     "_create_registered_launcher",
+     551,
+     178
+    ],
+    [
+     "launch_registered_native",
+     1659,
+     113
+    ],
+    [
+     "_decode_debug_event",
+     824,
+     53
+    ],
+    [
+     "worker",
+     1692,
+     41
+    ]
+   ],
+   "classes": [
+    "STARTUPINFOW",
+    "STARTUPINFOEXW",
+    "PROCESS_INFORMATION",
+    "IO_COUNTERS",
+    "JOBOBJECT_BASIC_LIMIT_INFORMATION",
+    "JOBOBJECT_EXTENDED_LIMIT_INFORMATION",
+    "JOBOBJECT_ASSOCIATE_COMPLETION_PORT",
+    "_PinnedLauncher",
+    "_DebugImageAuthority",
+    "NativeLauncherBackendError",
+    "LauncherInheritedHandles",
+    "CreatedRegisteredLauncher"
+   ],
+   "imports": [
+    "native_broker_protocol",
+    "native_child_announcement",
+    "native_debug_state"
+   ],
+   "doc": "",
+   "fan_in": 3
+  },
+  "native_launcher_transaction": {
+   "path": "tools/dayz_mcp/native_launcher_transaction.py",
+   "loc": 804,
+   "n_funcs": 27,
+   "n_funcs_gt80": 2,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "execute_native_launcher_transaction",
+     677,
+     127
+    ],
+    [
+     "evaluate_vpp_preflight",
+     525,
+     81
+    ],
+    [
+     "_live_assignments",
+     321,
+     62
+    ],
+    [
+     "vpp_preflight_paths",
+     268,
+     31
+    ],
+    [
+     "_ambiguous_vpp_candidate_census",
+     435,
+     29
+    ]
+   ],
+   "classes": [
+    "NativeLauncherTransactionError",
+    "_ControlClient",
+    "HostVppFiles",
+    "VppPreflightResult",
+    "VppPreflightPaths"
+   ],
+   "imports": [
+    "dayz_test_modes",
+    "dayz_test_request",
+    "lease_supervisor",
+    "request_path_authority"
+   ],
+   "doc": "Request-bound native launcher transaction without any process creation surface.",
+   "fan_in": 2
+  },
+  "native_pe": {
+   "path": "tools/dayz_mcp/native_pe.py",
+   "loc": 77,
+   "n_funcs": 3,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "validate_pinned_pe",
+     30,
+     43
+    ],
+    [
+     "_invalid_pe",
+     26,
+     2
+    ],
+    [
+     "validate_x64_pe_stream",
+     75,
+     2
+    ]
+   ],
+   "classes": [
+    "NativePEError",
+    "NativePeInfo"
+   ],
+   "imports": [],
+   "doc": "",
+   "fan_in": 1
+  },
+  "native_process_guard": {
+   "path": "tools/dayz_mcp/native_process_guard.py",
+   "loc": 302,
+   "n_funcs": 13,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "discover",
+     229,
+     73
+    ],
+    [
+     "_snapshot_process",
+     104,
+     45
+    ],
+    [
+     "terminate",
+     194,
+     34
+    ],
+    [
+     "identity_hashes",
+     70,
+     24
+    ],
+    [
+     "_expected_is_valid",
+     162,
+     20
+    ]
+   ],
+   "classes": [
+    "NativeProcessGuard"
+   ],
+   "imports": [
+    "process_lifecycle"
+   ],
+   "doc": "",
+   "fan_in": 6
+  },
+  "native_process_snapshot": {
+   "path": "tools/dayz_mcp/native_process_snapshot.py",
+   "loc": 121,
+   "n_funcs": 4,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "command_argv_of",
+     76,
+     24
+    ],
+    [
+     "full_image_path_of",
+     36,
+     21
+    ],
+    [
+     "working_directory_of",
+     102,
+     19
+    ],
+    [
+     "same_path",
+     59,
+     15
+    ]
+   ],
+   "classes": [],
+   "imports": [],
+   "doc": "Read-only native process identity helpers for daemon accreditation.",
+   "fan_in": 5
+  },
+  "normal_daemon_policy": {
+   "path": "tools/dayz_mcp/normal_daemon_policy.py",
+   "loc": 167,
+   "n_funcs": 7,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "load_inherited_normal_daemon_policy",
+     79,
+     48
+    ],
+    [
+     "serialize_normal_daemon_policy",
+     49,
+     28
+    ],
+    [
+     "_from_provenance",
+     129,
+     27
+    ],
+    [
+     "_reject_duplicate_pairs",
+     34,
+     9
+    ],
+    [
+     "load_normal_daemon_policy",
+     158,
+     9
+    ]
+   ],
+   "classes": [],
+   "imports": [
+    "daemon_policy_contract",
+    "host_config"
+   ],
+   "doc": "Load only normal daemon authority without importing lifecycle-capable modules.",
+   "fan_in": 1
+  },
+  "occupant_seat": {
+   "path": "tools/dayz_mcp/occupant_seat.py",
+   "loc": 27,
+   "n_funcs": 2,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "occupant_client_seated",
+     20,
+     7
+    ],
+    [
+     "_wire_bool",
+     12,
+     6
+    ]
+   ],
+   "classes": [],
+   "imports": [],
+   "doc": "Client-owned seated occupant predicate for player_teleport.",
+   "fan_in": 1
+  },
+  "orphan_guard": {
+   "path": "tools/dayz_mcp/orphan_guard.py",
+   "loc": 1202,
+   "n_funcs": 37,
+   "n_funcs_gt80": 2,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "try_reclaim_port",
+     664,
+     168
+    ],
+    [
+     "try_reclaim_unresponsive_listener",
+     971,
+     166
+    ],
+    [
+     "install_parent_death_watchdog",
+     604,
+     54
+    ],
+    [
+     "probe_status_healthy",
+     892,
+     51
+    ],
+    [
+     "snapshot_udp_port_holders",
+     482,
+     41
+    ]
+   ],
+   "classes": [],
+   "imports": [
+    "accredited_daemon_transport",
+    "daemon_contract",
+    "native_process_guard",
+    "native_process_snapshot",
+    "process_lifecycle"
+   ],
+   "doc": "Orphan-proofing for the loopback bind: parent-death watchdog + port reclaim.",
+   "fan_in": 5
+  },
+  "pack_only": {
+   "path": "tools/dayz_mcp/pack_only.py",
+   "loc": 37,
+   "n_funcs": 3,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "has_binarizable_assets",
+     16,
+     7
+    ],
+    [
+     "addon_builder_packonly_args",
+     30,
+     7
+    ],
+    [
+     "should_pack_only",
+     25,
+     3
+    ]
+   ],
+   "classes": [],
+   "imports": [],
+   "doc": "Shared AddonBuilder ``-packonly`` predicate.",
+   "fan_in": 0
+  },
+  "peer_liveness": {
+   "path": "tools/dayz_mcp/peer_liveness.py",
+   "loc": 39,
+   "n_funcs": 2,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "peer_is_live",
+     14,
+     13
+    ],
+    [
+     "client_peer_probeable",
+     29,
+     10
+    ]
+   ],
+   "classes": [],
+   "imports": [],
+   "doc": "Host-safe peer liveness predicates.",
+   "fan_in": 2
+  },
+  "pinned_keyfile": {
+   "path": "tools/dayz_mcp/pinned_keyfile.py",
+   "loc": 186,
+   "n_funcs": 5,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "read_pinned_keyfile",
+     122,
+     64
+    ],
+    [
+     "_local_canonical_path",
+     52,
+     25
+    ],
+    [
+     "_read_bounded",
+     105,
+     15
+    ],
+    [
+     "_final_handle_path",
+     90,
+     13
+    ],
+    [
+     "_assert_no_reparse_parents",
+     79,
+     9
+    ]
+   ],
+   "classes": [
+    "_FILE_ATTRIBUTE_TAG_INFO"
+   ],
+   "imports": [
+    "win32_fileinfo"
+   ],
+   "doc": "Bounded, local-only reading of the daemon authentication key.",
+   "fan_in": 5
+  },
+  "playbook_tool": {
+   "path": "tools/dayz_mcp/playbook_tool.py",
+   "loc": 380,
+   "n_funcs": 18,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_load_runner_locked",
+     85,
+     47
+    ],
+    [
+     "execute_playbook_run",
+     339,
+     41
+    ],
+    [
+     "invoke_registered",
+     302,
+     35
+    ],
+    [
+     "resolve_playbook_path",
+     256,
+     20
+    ],
+    [
+     "attach_playbook_meta",
+     237,
+     17
+    ]
+   ],
+   "classes": [
+    "_RunnerSourceLoader"
+   ],
+   "imports": [],
+   "doc": "MCP adapter for the generic playbook runner.",
+   "fan_in": 2
+  },
+  "process_lifecycle": {
+   "path": "tools/dayz_mcp/process_lifecycle.py",
+   "loc": 4774,
+   "n_funcs": 157,
+   "n_funcs_gt80": 12,
+   "n_funcs_gt200": 2,
+   "longest": [
+    [
+     "_start_run_reserved",
+     2375,
+     472
+    ],
+    [
+     "stop_run",
+     3139,
+     272
+    ],
+    [
+     "adopt_run",
+     3553,
+     150
+    ],
+    [
+     "close_run",
+     3412,
+     140
+    ],
+    [
+     "admin_reconcile",
+     4641,
+     133
+    ]
+   ],
+   "classes": [
+    "_BoxSnapshot",
+    "_BoxProbes",
+    "ProcessRecord",
+    "RunRecord",
+    "RetiredRunDiagnostic",
+    "RunManifestStore",
+    "ProcessLifecycle"
+   ],
+   "imports": [
+    "dayz_test_storage",
+    "instance_fence",
+    "launcher_registry",
+    "native_bundle",
+    "native_process_snapshot",
+    "runtime_state",
+    "session_coordination",
+    "steam_launch_guard",
+    "steam_prepare_supervisor",
+    "window_close"
+   ],
+   "doc": "",
+   "fan_in": 7
+  },
+  "registry_lock": {
+   "path": "tools/dayz_mcp/registry_lock.py",
+   "loc": 128,
+   "n_funcs": 4,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "acquire_registry_lock",
+     80,
+     48
+    ],
+    [
+     "close",
+     63,
+     9
+    ],
+    [
+     "__enter__",
+     73,
+     2
+    ],
+    [
+     "__exit__",
+     76,
+     2
+    ]
+   ],
+   "classes": [
+    "RegistryLock"
+   ],
+   "imports": [
+    "launcher_registry"
+   ],
+   "doc": "Cross-process shared/exclusive lock for the native launcher registry.",
+   "fan_in": 3
+  },
+  "request_path_authority": {
+   "path": "tools/dayz_mcp/request_path_authority.py",
+   "loc": 586,
+   "n_funcs": 27,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "accredit_request_paths",
+     523,
+     63
+    ],
+    [
+     "_open_directory",
+     188,
+     51
+    ],
+    [
+     "_open_descendant",
+     414,
+     47
+    ],
+    [
+     "_capture_root_for_test",
+     316,
+     35
+    ],
+    [
+     "_seal_project_policy_for_test",
+     353,
+     31
+    ]
+   ],
+   "classes": [
+    "_FILE_ATTRIBUTE_TAG_INFO",
+    "_FILE_ID_INFO",
+    "PathIdentity",
+    "SealedPathRoot",
+    "SealedRequestProjectPolicy",
+    "_PinnedDirectory",
+    "AccreditedRequestPaths"
+   ],
+   "imports": [
+    "dayz_test_request",
+    "win32_fileinfo"
+   ],
+   "doc": "Pin and accredit filesystem objects selected by a canonical dayz-test request.",
+   "fan_in": 4
+  },
+  "result_prune": {
+   "path": "tools/dayz_mcp/result_prune.py",
+   "loc": 94,
+   "n_funcs": 2,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "prune_unfilled_fields",
+     76,
+     18
+    ],
+    [
+     "_is_empty_container",
+     68,
+     6
+    ]
+   ],
+   "classes": [],
+   "imports": [],
+   "doc": "Drop reference fields the bridge never filled in (F2.2).",
+   "fan_in": 1
+  },
+  "runtime_state": {
+   "path": "tools/dayz_mcp/runtime_state.py",
+   "loc": 2377,
+   "n_funcs": 100,
+   "n_funcs_gt80": 4,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "recover_coordination_startup",
+     1802,
+     145
+    ],
+    [
+     "_manifest_backup_retention_state",
+     1082,
+     123
+    ],
+    [
+     "_quarantine_incomplete_manifest_backup",
+     1397,
+     84
+    ],
+    [
+     "_atomic_write_text",
+     2267,
+     81
+    ],
+    [
+     "create_manifest_backup",
+     948,
+     77
+    ]
+   ],
+   "classes": [
+    "RuntimePaths",
+    "CoordinationStartupRecovery",
+    "_StartupSnapshotEvidence",
+    "JsonlAuditWriter",
+    "CoordinationFaultStore",
+    "LifecycleRecoveryFaultStore",
+    "CoordinationSnapshotStore"
+   ],
+   "imports": [],
+   "doc": "",
+   "fan_in": 5
+  },
+  "secure_launcher": {
+   "path": "tools/dayz_mcp/secure_launcher.py",
+   "loc": 278,
+   "n_funcs": 15,
+   "n_funcs_gt80": 1,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "execute_secure_launcher_request",
+     78,
+     91
+    ],
+    [
+     "consume_registered_launcher",
+     105,
+     55
+    ],
+    [
+     "run_secure_launcher",
+     171,
+     50
+    ],
+    [
+     "_consume",
+     42,
+     34
+    ],
+    [
+     "main",
+     258,
+     16
+    ]
+   ],
+   "classes": [
+    "_IncrementalRedactor",
+    "_GenericParser"
+   ],
+   "imports": [
+    "control_client",
+    "daemon_policy_contract",
+    "launcher_registry",
+    "native_broker_protocol",
+    "native_bundle",
+    "native_launcher_backend",
+    "native_launcher_transaction",
+    "normal_daemon_policy"
+   ],
+   "doc": "",
+   "fan_in": 1
+  },
+  "security_runtime_audit": {
+   "path": "tools/dayz_mcp/security_runtime_audit.py",
+   "loc": 1720,
+   "n_funcs": 108,
+   "n_funcs_gt80": 2,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_probe_violates_nominal_grammar",
+     812,
+     117
+    ],
+    [
+     "visit_Call",
+     930,
+     90
+    ],
+    [
+     "audit_process_creation",
+     1648,
+     72
+    ],
+    [
+     "_imported_modules",
+     1048,
+     68
+    ],
+    [
+     "_callable_alias_marker",
+     319,
+     51
+    ]
+   ],
+   "classes": [
+    "RuntimeHttpFinding",
+    "RuntimeHttpAllowance",
+    "ProcessCreationFinding",
+    "_HttpVisitor",
+    "_ProcessCreationVisitor"
+   ],
+   "imports": [],
+   "doc": "",
+   "fan_in": 0
+  },
+  "server": {
+   "path": "tools/dayz_mcp/server.py",
+   "loc": 7411,
+   "n_funcs": 286,
+   "n_funcs_gt80": 8,
+   "n_funcs_gt200": 3,
+   "longest": [
+    [
+     "build_app",
+     4655,
+     2617
+    ],
+    [
+     "execute_wait_for",
+     3406,
+     243
+    ],
+    [
+     "dayz_test_run",
+     4970,
+     232
+    ],
+    [
+     "__init__",
+     1576,
+     145
+    ],
+    [
+     "execute_wait_for_box",
+     4274,
+     122
+    ]
+   ],
+   "classes": [
+    "ServerConfig",
+    "Runtime",
+    "_CallBudgetExpired",
+    "ClientRuntime"
+   ],
+   "imports": [
+    "accredited_daemon_transport",
+    "agent_loop",
+    "camera_restore",
+    "control_client",
+    "core",
+    "daemon",
+    "daemon_credential",
+    "daemon_policy",
+    "dayz_test_modes",
+    "dayz_test_tool",
+    "effective_schema_core",
+    "host_config",
+    "inbox",
+    "knowledge",
+    "log_tail",
+    "loopback",
+    "mcp_supervisor",
+    "native_bundle",
+    "native_launcher_backend",
+    "occupant_seat",
+    "orphan_guard",
+    "peer_liveness",
+    "playbook_tool",
+    "process_lifecycle",
+    "registry_lock",
+    "result_prune",
+    "server_cli",
+    "server_freshness",
+    "session_coordination",
+    "session_handoff",
+    "tool_pack",
+    "tool_registry_fingerprint",
+    "ui_dialog",
+    "vehicle_trace"
+   ],
+   "doc": "",
+   "fan_in": 3
+  },
+  "server_cli": {
+   "path": "tools/dayz_mcp/server_cli.py",
+   "loc": 135,
+   "n_funcs": 8,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_configure_parser",
+     46,
+     64
+    ],
+    [
+     "parse_server_tail_silent",
+     121,
+     14
+    ],
+    [
+     "build_server_parser",
+     112,
+     7
+    ],
+    [
+     "exit",
+     39,
+     5
+    ],
+    [
+     "_print_message",
+     27,
+     2
+    ]
+   ],
+   "classes": [
+    "ServerCliParse",
+    "_SilentTerminal",
+    "_SilentInvalid",
+    "_SilentArgumentParser"
+   ],
+   "imports": [],
+   "doc": "",
+   "fan_in": 3
+  },
+  "server_freshness": {
+   "path": "tools/dayz_mcp/server_freshness.py",
+   "loc": 278,
+   "n_funcs": 14,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_snapshot",
+     91,
+     66
+    ],
+    [
+     "install_result_freshness",
+     220,
+     58
+    ],
+    [
+     "handler",
+     249,
+     24
+    ],
+    [
+     "_call_marker",
+     187,
+     19
+    ],
+    [
+     "loaded_source_files",
+     30,
+     13
+    ]
+   ],
+   "classes": [
+    "ServerSourceWatch"
+   ],
+   "imports": [
+    "playbook_tool"
+   ],
+   "doc": "Read-only source drift evidence for the process serving MCP tools.",
+   "fan_in": 1
+  },
+  "session_coordination": {
+   "path": "tools/dayz_mcp/session_coordination.py",
+   "loc": 3971,
+   "n_funcs": 122,
+   "n_funcs_gt80": 8,
+   "n_funcs_gt200": 3,
+   "longest": [
+    [
+     "acquire",
+     284,
+     464
+    ],
+    [
+     "_claim_head_from_wait_locked",
+     2665,
+     263
+    ],
+    [
+     "wait",
+     943,
+     215
+    ],
+    [
+     "_release_active_locked",
+     2313,
+     169
+    ],
+    [
+     "_write_release_audits_bounded_locked",
+     2542,
+     122
+    ]
+   ],
+   "classes": [
+    "ClientIdentity",
+    "AuthorizationDecision",
+    "CleanupDisposition",
+    "_Ticket",
+    "_PendingAuthorization",
+    "_Lease",
+    "_GrantInFlight",
+    "_ExpiryGrace",
+    "SessionCoordinator"
+   ],
+   "imports": [],
+   "doc": "",
+   "fan_in": 6
+  },
+  "session_handoff": {
+   "path": "tools/dayz_mcp/session_handoff.py",
+   "loc": 206,
+   "n_funcs": 5,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "consume_handoff",
+     129,
+     65
+    ],
+    [
+     "write_handoff",
+     81,
+     46
+    ],
+    [
+     "carrier_path",
+     69,
+     10
+    ],
+    [
+     "_unlink_quietly",
+     201,
+     5
+    ],
+    [
+     "clear_handoff",
+     196,
+     3
+    ]
+   ],
+   "classes": [
+    "SessionHandoff"
+   ],
+   "imports": [
+    "session_coordination"
+   ],
+   "doc": "Carry one session's identity and lease across a worker recycle.",
+   "fan_in": 1
+  },
+  "stdio_bridge": {
+   "path": "tools/dayz_mcp/stdio_bridge.py",
+   "loc": 482,
+   "n_funcs": 18,
+   "n_funcs_gt80": 2,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "classify_probe_error",
+     94,
+     111
+    ],
+    [
+     "main",
+     368,
+     110
+    ],
+    [
+     "list_tools_once",
+     237,
+     37
+    ],
+    [
+     "official_client_argv",
+     57,
+     29
+    ],
+    [
+     "retry_with_backoff",
+     207,
+     28
+    ]
+   ],
+   "classes": [
+    "StdioBridgeError"
+   ],
+   "imports": [],
+   "doc": "Print or probe the installer-registered DayZ-MCP stdio --client.",
+   "fan_in": 0
+  },
+  "steam_launch_guard": {
+   "path": "tools/dayz_mcp/steam_launch_guard.py",
+   "loc": 140,
+   "n_funcs": 8,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "prepare",
+     81,
+     54
+    ],
+    [
+     "wait_startup",
+     93,
+     29
+    ],
+    [
+     "live_identity",
+     48,
+     19
+    ],
+    [
+     "coherent_identity",
+     69,
+     10
+    ],
+    [
+     "final_check",
+     137,
+     3
+    ]
+   ],
+   "classes": [
+    "PreparationCancelled",
+    "SteamIdentity",
+    "Preparation"
+   ],
+   "imports": [
+    "steam_preflight"
+   ],
+   "doc": "Steam lifetime readiness policy, used only within admitted launch authority.",
+   "fan_in": 3
+  },
+  "steam_preflight": {
+   "path": "tools/dayz_mcp/steam_preflight.py",
+   "loc": 889,
+   "n_funcs": 46,
+   "n_funcs_gt80": 1,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_try_repair_steam_pid",
+     618,
+     90
+    ],
+    [
+     "_restart_steam_session",
+     815,
+     58
+    ],
+    [
+     "remediate_stale_steam_session",
+     710,
+     54
+    ],
+    [
+     "_wait_for_steam_startup",
+     766,
+     47
+    ],
+    [
+     "evaluate_steam_session",
+     411,
+     45
+    ]
+   ],
+   "classes": [
+    "SteamActiveProcessSnapshot",
+    "SteamSessionResult",
+    "SteamRemediationResult",
+    "SteamPreflightProvider",
+    "WindowsSteamPreflightProvider",
+    "_ProcessEntry32W",
+    "SteamRemediationHost",
+    "WindowsSteamRemediationHost"
+   ],
+   "imports": [
+    "wmi_host"
+   ],
+   "doc": "Fail-closed validation of Steam's registered active process.",
+   "fan_in": 3
+  },
+  "steam_prepare_helper": {
+   "path": "tools/dayz_mcp/steam_prepare_helper.py",
+   "loc": 167,
+   "n_funcs": 20,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "main",
+     142,
+     21
+    ],
+    [
+     "invoke_steam",
+     124,
+     16
+    ],
+    [
+     "_read",
+     29,
+     14
+    ],
+    [
+     "write_active_process_pid",
+     113,
+     10
+    ],
+    [
+     "permit",
+     103,
+     9
+    ]
+   ],
+   "classes": [
+    "Channel",
+    "GuardedProvider",
+    "GuardedHost"
+   ],
+   "imports": [
+    "steam_launch_guard",
+    "steam_preflight"
+   ],
+   "doc": "Private stdin/stdout helper. No host access before its supervisor's start.",
+   "fan_in": 1
+  },
+  "steam_prepare_supervisor": {
+   "path": "tools/dayz_mcp/steam_prepare_supervisor.py",
+   "loc": 252,
+   "n_funcs": 15,
+   "n_funcs_gt80": 1,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "prepare",
+     163,
+     85
+    ],
+    [
+     "__init__",
+     29,
+     26
+    ],
+    [
+     "__init__",
+     63,
+     20
+    ],
+    [
+     "drain",
+     110,
+     19
+    ],
+    [
+     "_read",
+     84,
+     15
+    ]
+   ],
+   "classes": [
+    "HelperJob",
+    "Helper",
+    "SteamPreparationGate"
+   ],
+   "imports": [
+    "native_launcher_backend",
+    "steam_launch_guard",
+    "steam_prepare_helper"
+   ],
+   "doc": "Daemon-owned exclusivity and bounded supervision of the Steam helper.",
+   "fan_in": 1
+  },
+  "tool_pack": {
+   "path": "tools/dayz_mcp/tool_pack.py",
+   "loc": 55,
+   "n_funcs": 2,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "apply_tool_pack",
+     46,
+     9
+    ],
+    [
+     "tool_names",
+     39,
+     5
+    ]
+   ],
+   "classes": [],
+   "imports": [],
+   "doc": "Opt-in MCP tool packs.",
+   "fan_in": 1
+  },
+  "tool_registry_fingerprint": {
+   "path": "tools/dayz_mcp/tool_registry_fingerprint.py",
+   "loc": 792,
+   "n_funcs": 30,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_read_authority_marker",
+     647,
+     52
+    ],
+    [
+     "_parse_verdict",
+     524,
+     44
+    ],
+    [
+     "_project_tool",
+     316,
+     40
+    ],
+    [
+     "_parse_producers_object",
+     570,
+     37
+    ],
+    [
+     "_parse_receipts",
+     609,
+     36
+    ]
+   ],
+   "classes": [
+    "RegistrySnapshot",
+    "AuthorityBundleBytes",
+    "AuthoritySnapshot"
+   ],
+   "imports": [
+    "effective_schema_core"
+   ],
+   "doc": "Pure M14 registry fingerprint, authority parser, and comparator.",
+   "fan_in": 1
+  },
+  "ui_dialog": {
+   "path": "tools/dayz_mcp/ui_dialog.py",
+   "loc": 391,
+   "n_funcs": 13,
+   "n_funcs_gt80": 1,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_interpret_dialog_result",
+     283,
+     83
+    ],
+    [
+     "parse_request",
+     82,
+     65
+    ],
+    [
+     "_parse_field",
+     149,
+     52
+    ],
+    [
+     "validate_command_args",
+     203,
+     24
+    ],
+    [
+     "bridge_args",
+     229,
+     23
+    ]
+   ],
+   "classes": [
+    "UiDialogError",
+    "FieldSpec",
+    "UiDialogRequest"
+   ],
+   "imports": [],
+   "doc": "ui_dialog tool/bridge contract (phase 1: Python validation only).",
+   "fan_in": 2
+  },
+  "vehicle_trace": {
+   "path": "tools/dayz_mcp/vehicle_trace.py",
+   "loc": 1275,
+   "n_funcs": 23,
+   "n_funcs_gt80": 2,
+   "n_funcs_gt200": 2,
+   "longest": [
+    [
+     "validate_trace",
+     419,
+     408
+    ],
+    [
+     "_validate_course",
+     932,
+     284
+    ],
+    [
+     "build_artifact",
+     1218,
+     57
+    ],
+    [
+     "_validate_lifecycle",
+     860,
+     53
+    ],
+    [
+     "load_dump_jsonl",
+     258,
+     50
+    ]
+   ],
+   "classes": [
+    "ArtifactInputError"
+   ],
+   "imports": [],
+   "doc": "",
+   "fan_in": 1
+  },
+  "win32_fileinfo": {
+   "path": "tools/dayz_mcp/win32_fileinfo.py",
+   "loc": 58,
+   "n_funcs": 1,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "bind_common_kernel32",
+     25,
+     33
+    ]
+   ],
+   "classes": [
+    "FILE_STANDARD_INFO"
+   ],
+   "imports": [],
+   "doc": "Shared Win32 FILE_STANDARD_INFO and the kernel32 prototypes both",
+   "fan_in": 2
+  },
+  "window_close": {
+   "path": "tools/dayz_mcp/window_close.py",
+   "loc": 150,
+   "n_funcs": 12,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "bind_real_win32",
+     33,
+     44
+    ],
+    [
+     "close_visible_windows",
+     119,
+     27
+    ],
+    [
+     "list_visible_top_level_windows",
+     86,
+     18
+    ],
+    [
+     "post_wm_close",
+     106,
+     11
+    ],
+    [
+     "enum_windows",
+     53,
+     6
+    ]
+   ],
+   "classes": [
+    "Win32WindowFns"
+   ],
+   "imports": [],
+   "doc": "Post WM_CLOSE to visible top-level windows of given PIDs.",
+   "fan_in": 1
+  },
+  "wmi_host": {
+   "path": "tools/dayz_mcp/wmi_host.py",
+   "loc": 106,
+   "n_funcs": 6,
+   "n_funcs_gt80": 0,
+   "n_funcs_gt200": 0,
+   "longest": [
+    [
+     "_com",
+     41,
+     18
+    ],
+    [
+     "_exec_create",
+     61,
+     17
+    ],
+    [
+     "pywin32_available",
+     27,
+     11
+    ],
+    [
+     "_exec_get_dword",
+     86,
+     11
+    ],
+    [
+     "read_hkcu_dword",
+     99,
+     7
+    ]
+   ],
+   "classes": [],
+   "imports": [],
+   "doc": "WMI through COM (pywin32): the real HKCU and process creation outside the caller's app container.",
+   "fan_in": 2
+  }
+ },
+ "tests": [
+  {
+   "path": "tools/tests/__init__.py",
+   "loc": 2,
+   "n_tests": 0,
+   "imports": [],
+   "classes": [],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/_addon_paths.py",
+   "loc": 35,
+   "n_tests": 0,
+   "imports": [],
+   "classes": [],
+   "doc": "Resolve the Enforce addon root, which ships inside this repository.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/_bundle_paths.py",
+   "loc": 46,
+   "n_tests": 0,
+   "imports": [],
+   "classes": [],
+   "doc": "Guards for tests that need a launcher a fresh clone will not have.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/_client_dumps_mcp_process.py",
+   "loc": 167,
+   "n_tests": 0,
+   "imports": [
+    "client_steam_bootstrap",
+    "dayz_test_tool",
+    "server"
+   ],
+   "classes": [
+    "_HttpRuntime",
+    "_PausedAfterFirstGet"
+   ],
+   "doc": "One MCP process for the 296b r3 cross-process tests (not a test module).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/_settlement_flake_probe.py",
+   "loc": 43,
+   "n_tests": 0,
+   "imports": [],
+   "classes": [],
+   "doc": "Load loop for FailedLaunchSettlementTest. Not itself a unittest.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/_tree_identity.py",
+   "loc": 181,
+   "n_tests": 0,
+   "imports": [],
+   "classes": [
+    "TreeIdentityError",
+    "PinnedDayzMcpFinder"
+   ],
+   "doc": "Compare the checkout a test was loaded from with the one a child imported.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/fence_helpers.py",
+   "loc": 185,
+   "n_tests": 0,
+   "imports": [
+    "process_lifecycle"
+   ],
+   "classes": [],
+   "doc": "Helpers so existing tests can enqueue mutations under instance fencing.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/fixtures/dayz_mcp/sitecustomize.py",
+   "loc": 188,
+   "n_tests": 0,
+   "imports": [
+    "daemon",
+    "identity_migration",
+    "native_process_guard"
+   ],
+   "classes": [],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/steam_helpers.py",
+   "loc": 32,
+   "n_tests": 0,
+   "imports": [
+    "steam_launch_guard"
+   ],
+   "classes": [
+    "FakeSteamGate"
+   ],
+   "doc": "Explicit host isolation for lifecycle tests unrelated to Steam readiness.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_000_path.py",
+   "loc": 10,
+   "n_tests": 0,
+   "imports": [],
+   "classes": [],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_0ab2_grace.py",
+   "loc": 375,
+   "n_tests": 17,
+   "imports": [
+    "process_lifecycle",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "GraceS1Tests",
+    "TakeoverBTests",
+    "DayzTestRunTakeoverTests"
+   ],
+   "doc": "fb-20260909-213002-0ab2: lease grace S1 + takeover_required.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_0ab2_r9.py",
+   "loc": 647,
+   "n_tests": 20,
+   "imports": [
+    "process_lifecycle",
+    "runtime_state",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "_AttachedRun",
+    "_DaemonShapedBox",
+    "StateMachineR9Tests",
+    "RaceR9Tests",
+    "IdentityR9Tests",
+    "DataLossR9Tests",
+    "DayzTestRunIdentityR9Tests"
+   ],
+   "doc": "W7a DZ-R9 offline for 0ab2 (state-machine, race, identity, data-loss).",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_546d_dump.py",
+   "loc": 325,
+   "n_tests": 14,
+   "imports": [
+    "loopback",
+    "server",
+    "vehicle_trace"
+   ],
+   "classes": [
+    "DumpRequestTests",
+    "DumpJsonlTests",
+    "DumpBridgeResultTests",
+    "DumpToolOnceTests",
+    "DumpSourceContractTests"
+   ],
+   "doc": "fb-20260909-190200-546d: vehicle_trace mode=dump JSONL.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_a429_overlay.py",
+   "loc": 375,
+   "n_tests": 11,
+   "imports": [
+    "daemon",
+    "dayz_test_tool",
+    "server"
+   ],
+   "classes": [
+    "A429ClientOverlayTest",
+    "A429EmbeddedOverlayTest"
+   ],
+   "doc": "fb-20260910-043740-a429: diagnostic overlay on status tools.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_accredited_daemon_transport.py",
+   "loc": 333,
+   "n_tests": 5,
+   "imports": [
+    "native_process_guard"
+   ],
+   "classes": [
+    "_FakeSocket",
+    "_FakeResponse",
+    "_FakeConnection",
+    "AccreditedDaemonTransportTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_action_use.py",
+   "loc": 90,
+   "n_tests": 3,
+   "imports": [
+    "loopback",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "ActionUseIngressTest",
+    "ActionUseHeldItemContractTest",
+    "ActionUseAppToolTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_addon_tree_has_no_write_artifacts.py",
+   "loc": 147,
+   "n_tests": 5,
+   "imports": [],
+   "classes": [
+    "WriteArtifactCriterionTest",
+    "AddonTreeHasNoWriteArtifactsTest"
+   ],
+   "doc": "Fail if the Enforce addon tree still holds write-artifact backups.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_admin_cli.py",
+   "loc": 639,
+   "n_tests": 7,
+   "imports": [
+    "admin_cli",
+    "daemon_policy",
+    "doctor",
+    "lifecycle_cli"
+   ],
+   "classes": [
+    "AuxiliaryVerifiedHttpRoutingTest",
+    "ExplicitDaemonPolicyRoutingTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_authority_invariants_are_gated.py",
+   "loc": 146,
+   "n_tests": 6,
+   "imports": [
+    "session_coordination"
+   ],
+   "classes": [
+    "AuthorityInvariantsAreGatedTest"
+   ],
+   "doc": "Two authority checks that nothing was defending.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_b2_2edd_dae1.py",
+   "loc": 93,
+   "n_tests": 5,
+   "imports": [
+    "dayz_test_request",
+    "dayz_test_tool",
+    "server"
+   ],
+   "classes": [
+    "StopArtifactsDae13Test",
+    "StopDocs2edd2Test"
+   ],
+   "doc": "Offline guards for B2 cards 2edd-2 and dae1-3.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_b3_4b_camera_contract.py",
+   "loc": 104,
+   "n_tests": 6,
+   "imports": [
+    "camera_restore"
+   ],
+   "classes": [
+    "CameraGetViewContractTest",
+    "CameraGetRecipeTest",
+    "CaptureFocusBanTest"
+   ],
+   "doc": "Focal offline gates for B3 #4b camera (decision 6 + paired fichas).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_b3_5872_seated_camera.py",
+   "loc": 258,
+   "n_tests": 12,
+   "imports": [
+    "camera_restore"
+   ],
+   "classes": [
+    "SeatedPresenceSourceTest",
+    "SeatedApplyObserveSourceTest",
+    "SeatedRestoreObserveTest",
+    "SeatedPresenceCaseTableTest"
+   ],
+   "doc": "Offline gates for B3 5872 seated apply/observe (Sol APROBAR_CONTRATO).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_bad_args_messages.py",
+   "loc": 220,
+   "n_tests": 7,
+   "imports": [
+    "control_client",
+    "server"
+   ],
+   "classes": [
+    "BadArgsMessagesTest",
+    "ToolDescriptionUnitsTest",
+    "RetailQuarantineReasonTest"
+   ],
+   "doc": "Caller-facing argument errors and numeric tool descriptions stay actionable.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_batch6.py",
+   "loc": 183,
+   "n_tests": 13,
+   "imports": [
+    "core",
+    "loopback",
+    "server"
+   ],
+   "classes": [
+    "Batch6Test"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_bootstrap_parent.py",
+   "loc": 116,
+   "n_tests": 3,
+   "imports": [],
+   "classes": [
+    "BootstrapParentAccreditationTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_boundary_values_are_pinned.py",
+   "loc": 221,
+   "n_tests": 21,
+   "imports": [
+    "daemon_contract",
+    "daemon_policy_contract",
+    "dayz_test_request",
+    "loopback",
+    "native_broker_protocol",
+    "playbook_tool",
+    "vehicle_trace"
+   ],
+   "classes": [
+    "SampleHzCeilingTests",
+    "LimitAndSampleCeilingTests",
+    "PortRangeTests",
+    "ValidTextTests",
+    "UnicodeTreeDepthTests",
+    "PlaybookToolLiteralTests"
+   ],
+   "doc": "Upper bounds a mutation run walked straight through on 2026-08-21.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_box_occupancy.py",
+   "loc": 2351,
+   "n_tests": 82,
+   "imports": [
+    "dayz_test_worker",
+    "loopback",
+    "process_lifecycle",
+    "runtime_state",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "ParseDayzLaunchArgvTest",
+    "BoxOccupancyTest",
+    "BoxHeadHelperTest",
+    "OccupancyErrorFieldsTest",
+    "RunCommandActivityTest",
+    "JsonlActivityLookupTest",
+    "BoxWaitQueueTest",
+    "FakeBoxClient"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_box_port_occupancy.py",
+   "loc": 446,
+   "n_tests": 22,
+   "imports": [
+    "process_lifecycle",
+    "runtime_state",
+    "session_coordination"
+   ],
+   "classes": [
+    "PortOccupancyTest",
+    "PortOccupancyRound2Test"
+   ],
+   "doc": "fb-20260904-114520-6927: the box is occupied by whoever holds a game port.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_box_port_wait.py",
+   "loc": 165,
+   "n_tests": 10,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "WaitFailsFastOnUnreadableTableTest",
+    "ActiveRunDiagnosisTest",
+    "BlockedOnTest"
+   ],
+   "doc": "fb-20260904-114520-6927, round 2: the caller learns WHY a launch was refused.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_bridge_client_capabilities.py",
+   "loc": 311,
+   "n_tests": 8,
+   "imports": [],
+   "classes": [
+    "BridgeClientCapabilitiesTest"
+   ],
+   "doc": "Client capability announcement (`caps=` on every poll) vs the Enforce dispatcher.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_bridge_server_capabilities.py",
+   "loc": 458,
+   "n_tests": 9,
+   "imports": [],
+   "classes": [
+    "BridgeServerCapabilitiesTest"
+   ],
+   "doc": "Server half of the capability announcement (ficha 8f8c BONUS, module M03).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_bridge_status_generation.py",
+   "loc": 132,
+   "n_tests": 4,
+   "imports": [
+    "core"
+   ],
+   "classes": [
+    "BridgeStatusGenerationTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_bug046_audit_fault_recovery.py",
+   "loc": 1788,
+   "n_tests": 45,
+   "imports": [
+    "admin_cli",
+    "daemon",
+    "loopback",
+    "runtime_state",
+    "session_coordination"
+   ],
+   "classes": [
+    "CoordinationFaultStoreTests",
+    "CoordinationFaultStartupRecoveryTests",
+    "DurableStartupRecoveryIntegrationTests",
+    "AuditWriteOnceTests",
+    "AuditFaultSnapshotTests",
+    "CoordinatorWalIntegrationTests",
+    "AuditRepairCliTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_bug046_authority_fence.py",
+   "loc": 228,
+   "n_tests": 3,
+   "imports": [
+    "session_coordination"
+   ],
+   "classes": [
+    "_BlockingWal",
+    "GrantAuthorityFenceTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_bug046_lease_queue_liveness.py",
+   "loc": 1228,
+   "n_tests": 28,
+   "imports": [
+    "session_coordination"
+   ],
+   "classes": [
+    "Bug046DpfContractTests",
+    "Bug046H4GraceRuntimeTests",
+    "Bug046QueueLivenessRedTests",
+    "_BlockingWalBoundary",
+    "Bug046GrantAuthorityFenceTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_bug046_startup_deadlock.py",
+   "loc": 1461,
+   "n_tests": 32,
+   "imports": [
+    "daemon",
+    "host_config",
+    "identity_migration",
+    "runtime_state"
+   ],
+   "classes": [
+    "SimulatedCrash",
+    "BackupTransactionAdversarialTest",
+    "DaemonStartupElectionProcessTest",
+    "TreeIdentityTest",
+    "FixturePythonGuardTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_bug104_reap_under_quarantine.py",
+   "loc": 385,
+   "n_tests": 10,
+   "imports": [
+    "process_lifecycle",
+    "runtime_state",
+    "session_coordination"
+   ],
+   "classes": [
+    "ReapDeadRunsLockedTerminateInvariantTest",
+    "ReapUnderQuarantineBehaviorTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_build_native_launcher_policy.py",
+   "loc": 452,
+   "n_tests": 30,
+   "imports": [
+    "dayz_test_request",
+    "dayz_test_tool",
+    "native_bundle",
+    "request_path_authority"
+   ],
+   "classes": [
+    "LauncherPolicySourceTest",
+    "SealedRootTest",
+    "FixturePolicyBehaviorTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_cambio_py_20260911.py",
+   "loc": 283,
+   "n_tests": 17,
+   "imports": [
+    "client_steam_bootstrap",
+    "dayz_test_tool",
+    "server",
+    "server_freshness"
+   ],
+   "classes": [
+    "SchemaSignalFreshnessTests",
+    "ClientSteamBootstrapDiagnosisTests",
+    "PublicSurfaceWindowsTests"
+   ],
+   "doc": "Offline pins for the 2026-09-11 CAMBIO Python batch + 47c4 diagnosis.",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_camera_native_crash.py",
+   "loc": 252,
+   "n_tests": 13,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "CameraNativeCrashSourceTest",
+    "CameraRestoreConsumerTest"
+   ],
+   "doc": "Offline regression for the native GetCurrentCamera null dereference.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_capture_error_never_carries_a_host_path.py",
+   "loc": 125,
+   "n_tests": 8,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "_SinkRuntime",
+    "CaptureErrorTest"
+   ],
+   "doc": "capture_screenshot must not put the host's filesystem on the MCP wire.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_capture_frame_stale.py",
+   "loc": 209,
+   "n_tests": 8,
+   "imports": [],
+   "classes": [
+    "FrameStaleTest"
+   ],
+   "doc": "Frozen-frame contract of capture_screenshot (fb-20260904-145230-6d22, fb-20260904-025027-8f76 a).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_client_credential_rotation_e2e.py",
+   "loc": 645,
+   "n_tests": 2,
+   "imports": [
+    "accredited_daemon_transport",
+    "control_client",
+    "daemon_contract",
+    "daemon_credential",
+    "daemon_policy",
+    "native_process_guard",
+    "native_process_snapshot",
+    "orphan_guard"
+   ],
+   "classes": [
+    "LiveClientCredentialRotationE2ETest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_client_death_dump_binding.py",
+   "loc": 576,
+   "n_tests": 31,
+   "imports": [
+    "client_dump_registry",
+    "client_steam_bootstrap",
+    "dayz_test_request",
+    "dayz_test_tool",
+    "native_launcher_transaction",
+    "steam_preflight"
+   ],
+   "classes": [
+    "_Isolated",
+    "SolR1ReproTests",
+    "RetiredRunBindingTests",
+    "ClientDumpRegistryTests",
+    "_DaemonBackedRuntime",
+    "LateDeathEndToEndTest"
+   ],
+   "doc": "296b r2: a client dump is bound to the run whose launch it follows.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_client_dumps_cross_process.py",
+   "loc": 515,
+   "n_tests": 16,
+   "imports": [
+    "client_steam_bootstrap",
+    "control_client",
+    "loopback",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "_Lifecycle",
+    "_McpProcess",
+    "CrossProcessClientDumpTests",
+    "ControlClientPayloadTests",
+    "SessionStatusBindingsTests"
+   ],
+   "doc": "296b r3 (Sol r2 B1): two MCP processes, one client profile, one daemon.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_client_mode.py",
+   "loc": 1654,
+   "n_tests": 53,
+   "imports": [
+    "control_client",
+    "core",
+    "host_config",
+    "server",
+    "server_cli"
+   ],
+   "classes": [
+    "GamePeer",
+    "ClientModeTest",
+    "ClientRuntimeProvenanceGateTest",
+    "ClientDaemonStartupBudgetTest",
+    "StrictParserTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_client_platform_alias.py",
+   "loc": 202,
+   "n_tests": 4,
+   "imports": [
+    "control_client",
+    "host_config",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "ClientPlatformAliasTest"
+   ],
+   "doc": "Verify client platform aliases stop at the CLI boundary.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_client_runtime_control_composition.py",
+   "loc": 749,
+   "n_tests": 9,
+   "imports": [],
+   "classes": [
+    "ClientRuntimeControlCompositionTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_command_validation_coverage.py",
+   "loc": 163,
+   "n_tests": 3,
+   "imports": [
+    "loopback"
+   ],
+   "classes": [
+    "CommandValidationCoverageTest"
+   ],
+   "doc": "Anti-regression: every whitelisted verb must survive validate_command_args.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_control_client.py",
+   "loc": 2033,
+   "n_tests": 36,
+   "imports": [
+    "daemon_policy"
+   ],
+   "classes": [
+    "ControlClientTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_d05_capture_targets_run_client.py",
+   "loc": 111,
+   "n_tests": 2,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "CaptureTargetsRunClientTest"
+   ],
+   "doc": "D05: capture_screenshot must aim at the active run's CLIENT window.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_d09_d10_spawn_timeout_object_id.py",
+   "loc": 74,
+   "n_tests": 2,
+   "imports": [
+    "loopback",
+    "server"
+   ],
+   "classes": [
+    "SpawnTimeoutObjectIdTest"
+   ],
+   "doc": "A failed bridge result must carry its object_id to the caller.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_d40_marker_rewound_reads_only_the_tail.py",
+   "loc": 112,
+   "n_tests": 4,
+   "imports": [
+    "log_tail",
+    "server"
+   ],
+   "classes": [
+    "MarkerRewoundReadsOnlyTheTailTest"
+   ],
+   "doc": "D40: rewinding a marker must read the file's tail, not the whole file.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_daemon.py",
+   "loc": 2416,
+   "n_tests": 79,
+   "imports": [
+    "core",
+    "daemon",
+    "loopback",
+    "native_process_guard",
+    "orphan_guard",
+    "process_lifecycle",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "DaemonHttpServer",
+    "DaemonEndpointTest",
+    "ProbeStatusHealthyTest",
+    "StrictDaemonProbeTest",
+    "StatusProviderMarkerTest",
+    "DaemonModuleStalenessTest",
+    "ConnectedSocketAuthenticationTest",
+    "IdleMetricTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_daemon_contract.py",
+   "loc": 179,
+   "n_tests": 4,
+   "imports": [],
+   "classes": [
+    "DaemonContractTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_daemon_credential.py",
+   "loc": 1025,
+   "n_tests": 20,
+   "imports": [
+    "accredited_daemon_transport",
+    "daemon_policy"
+   ],
+   "classes": [
+    "RefreshingDaemonCredentialTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_daemon_policy.py",
+   "loc": 450,
+   "n_tests": 10,
+   "imports": [],
+   "classes": [
+    "DaemonPolicyTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_daemon_query_all_players.py",
+   "loc": 147,
+   "n_tests": 5,
+   "imports": [
+    "loopback",
+    "server"
+   ],
+   "classes": [
+    "_ResultState",
+    "_BridgeRuntime",
+    "QueryAllPlayersWhitelistTest",
+    "QueryAllPlayersToolTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_daemon_security_gate.py",
+   "loc": 498,
+   "n_tests": 13,
+   "imports": [
+    "daemon",
+    "identity_migration"
+   ],
+   "classes": [
+    "DaemonIdentityMigrationGateTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_daemon_spawn_branch.py",
+   "loc": 765,
+   "n_tests": 36,
+   "imports": [
+    "daemon",
+    "runtime_state",
+    "server"
+   ],
+   "classes": [
+    "_FakePopen",
+    "_FakeHttpd",
+    "_InterruptingStop",
+    "SpawnMarkerTest",
+    "ReadSpawnBranchTest",
+    "JobObjectReadingTest",
+    "DaemonEventRecordTest",
+    "DaemonStartupWiringTest"
+   ],
+   "doc": "Startup observability of the daemon: which spawn branch it took, which Job",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_daemon_spawn_outside_app.py",
+   "loc": 378,
+   "n_tests": 24,
+   "imports": [
+    "daemon",
+    "server",
+    "steam_preflight",
+    "wmi_host"
+   ],
+   "classes": [
+    "_FakePopen",
+    "SpawnOutsideAppTest",
+    "_FakeWinreg",
+    "RealRegistryProviderTest",
+    "_StaleViewProvider",
+    "MissingPywin32IsSurfacedTest",
+    "LiveWmiTest",
+    "ClientSpawnAsksForOutsideAppTest"
+   ],
+   "doc": "The daemon is spawned through WMI, outside the client's app container (2026-09-23).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_dayz_test_app.py",
+   "loc": 235,
+   "n_tests": 4,
+   "imports": [
+    "accredited_daemon_transport",
+    "dayz_test_worker",
+    "native_broker_protocol",
+    "normal_daemon_policy",
+    "pinned_keyfile"
+   ],
+   "classes": [
+    "DayzTestAppTerminalTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_dayz_test_modes.py",
+   "loc": 216,
+   "n_tests": 8,
+   "imports": [],
+   "classes": [
+    "DayzTestModesTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_dayz_test_readiness.py",
+   "loc": 350,
+   "n_tests": 10,
+   "imports": [
+    "dayz_test_readiness",
+    "native_broker_protocol"
+   ],
+   "classes": [
+    "_Broker",
+    "_Psutil",
+    "DayzTestReadinessTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_dayz_test_request.py",
+   "loc": 822,
+   "n_tests": 17,
+   "imports": [],
+   "classes": [
+    "DayzTestRequestTests",
+    "RequestRejectionReasonsTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_dayz_test_storage.py",
+   "loc": 667,
+   "n_tests": 32,
+   "imports": [
+    "dayz_test_storage",
+    "dayz_test_worker"
+   ],
+   "classes": [
+    "NormalizationTest",
+    "ShouldRotateTest",
+    "PrepareStorageTest",
+    "CrashBetweenEveryPairOfIoTest",
+    "DiagnosticRuleTest"
+   ],
+   "doc": "Oracle for M15-min: rotate storage_1 only when the mod set changed.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_dayz_test_tool.py",
+   "loc": 2453,
+   "n_tests": 65,
+   "imports": [
+    "control_client",
+    "dayz_test_modes",
+    "dayz_test_request",
+    "dayz_test_tool",
+    "dayz_test_worker",
+    "native_launcher_transaction",
+    "server",
+    "steam_preflight"
+   ],
+   "classes": [
+    "DayzTestToolRequestTest",
+    "DayzTestTerminalTest",
+    "_Opened",
+    "_Bundle",
+    "_Runtime",
+    "DayzTestExecutionTest",
+    "LaunchReadinessProjectionTest",
+    "DayzTestStopEnvelopeTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_dayz_test_tool_modes.py",
+   "loc": 697,
+   "n_tests": 17,
+   "imports": [
+    "dayz_test_modes",
+    "dayz_test_request",
+    "dayz_test_tool",
+    "native_launcher_transaction",
+    "steam_preflight"
+   ],
+   "classes": [
+    "_Reached",
+    "ModeAuthorityDerivationTest",
+    "ModeAuthorityExecutionTest",
+    "ModeContractM19Test",
+    "ArtifactRootsTest",
+    "StopArtifactsTest"
+   ],
+   "doc": "The run modes dayz_test_tool gates on are read from the M12 authority.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_dayz_test_value_error_codes.py",
+   "loc": 155,
+   "n_tests": 8,
+   "imports": [
+    "dayz_test_tool",
+    "server"
+   ],
+   "classes": [
+    "DayzTestValueErrorCodesTest",
+    "TypedValueErrorWiringTest"
+   ],
+   "doc": "Every constant ValueError token on the dayz_test path must reach the caller named.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_dayz_test_worker.py",
+   "loc": 1137,
+   "n_tests": 37,
+   "imports": [
+    "dayz_test_readiness",
+    "dayz_test_request",
+    "dayz_test_storage",
+    "dayz_test_worker",
+    "native_broker_protocol"
+   ],
+   "classes": [
+    "_Broker",
+    "_LostExistingStartBroker",
+    "_RejectingStartBroker",
+    "DayzTestWorkerTests",
+    "StorageSealTests",
+    "ReplacementWitnessTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_dayz_tools_paths.py",
+   "loc": 325,
+   "n_tests": 16,
+   "imports": [
+    "dayz_tools_paths"
+   ],
+   "classes": [
+    "DayZToolsPathsTest",
+    "RegistryStepTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_db05_preflight_diagnostics.py",
+   "loc": 202,
+   "n_tests": 13,
+   "imports": [
+    "dayz_test_tool",
+    "steam_preflight"
+   ],
+   "classes": [
+    "Db05DiagnosticsTest"
+   ],
+   "doc": "db05: public diagnostics with an in-memory launcher, lifecycle and Steam.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_dependency_lock.py",
+   "loc": 327,
+   "n_tests": 8,
+   "imports": [],
+   "classes": [
+    "DependencyLockTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_docs_truth.py",
+   "loc": 660,
+   "n_tests": 20,
+   "imports": [
+    "loopback",
+    "session_coordination"
+   ],
+   "classes": [
+    "LeaseListDocsTest",
+    "CanopyCalibrationDocsTest",
+    "InstallerPythonDocsTest",
+    "SparseAddonDocsTest",
+    "LogsSinceTailCapDocsTest",
+    "FreshCloneGreenClaimDocsTest",
+    "ReadmePathLineCitesDocsTest",
+    "HandoffLineCiteDocsTest"
+   ],
+   "doc": "Docs truth watchdog: mechanical claims in the docs must match the tree.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_doctor.py",
+   "loc": 1912,
+   "n_tests": 71,
+   "imports": [
+    "daemon_policy",
+    "launcher_registry"
+   ],
+   "classes": [
+    "DoctorTest",
+    "NativeBundleExternalsTests",
+    "NativeBundleClosureWiringTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_doctor_pairing.py",
+   "loc": 198,
+   "n_tests": 4,
+   "imports": [
+    "doctor"
+   ],
+   "classes": [
+    "DoctorKnowledgePackPairingTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_effective_schema.py",
+   "loc": 218,
+   "n_tests": 14,
+   "imports": [
+    "effective_schema"
+   ],
+   "classes": [
+    "EffectiveSchemaTests"
+   ],
+   "doc": "Effective schemas are the post-build_app public contract, not the fn body.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_effective_schema_catalog.py",
+   "loc": 205,
+   "n_tests": 5,
+   "imports": [
+    "effective_schema_catalog"
+   ],
+   "classes": [
+    "EffectiveSchemaCatalogTests"
+   ],
+   "doc": "Independent M13 catalog and fixture contract tests.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_effective_schema_core.py",
+   "loc": 304,
+   "n_tests": 11,
+   "imports": [
+    "effective_schema_core"
+   ],
+   "classes": [
+    "EffectiveSchemaCoreTests",
+    "EffectiveSchemaIdentityProjectionTests"
+   ],
+   "doc": "Pure, synthetic contract tests for the M13 effective-schema core.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_effective_schema_promotion.py",
+   "loc": 60,
+   "n_tests": 3,
+   "imports": [],
+   "classes": [
+    "EffectiveSchemaPromotionTests"
+   ],
+   "doc": "ficha d366: v1 constraint ids promote onto the v5 concept list.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_effective_schema_runtime_validators.py",
+   "loc": 70,
+   "n_tests": 4,
+   "imports": [
+    "effective_schema_runtime_validators"
+   ],
+   "classes": [
+    "EffectiveSchemaRuntimeValidatorTests"
+   ],
+   "doc": "Synthetic runtime enumerator tests; no server or fixture imports are allowed.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_enqueue_refusal_reaches_the_caller.py",
+   "loc": 260,
+   "n_tests": 13,
+   "imports": [
+    "instance_fence",
+    "loopback",
+    "server"
+   ],
+   "classes": [
+    "EnqueueRefusalCodeTest",
+    "EnqueueCodeCensusTest",
+    "ClientModeIdleRunRefusalTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_entities_has_cargo.py",
+   "loc": 415,
+   "n_tests": 5,
+   "imports": [],
+   "classes": [
+    "EntitiesHasCargoStructuralTest"
+   ],
+   "doc": "Offline structural gate for ``entities_query.has_cargo`` (ficha 40e4, module M03).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_entities_query_cargo.py",
+   "loc": 240,
+   "n_tests": 12,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "NormalizeEntitiesCargoTest",
+    "EntitiesQueryCargoWireTest",
+    "EntitiesQueryDescriptionTest"
+   ],
+   "doc": "entities_query rows publish has_cargo as bool | None.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_extra_mods_name_form.py",
+   "loc": 104,
+   "n_tests": 4,
+   "imports": [
+    "dayz_test_request",
+    "dayz_test_tool"
+   ],
+   "classes": [
+    "ExtraModsNameFormErrorTest",
+    "ExtraModsNameFormDocsTest"
+   ],
+   "doc": "fb-20260909-213257-49a9: extra_mods name-form error and docs contract.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fase4b_loopback.py",
+   "loc": 84,
+   "n_tests": 3,
+   "imports": [
+    "loopback"
+   ],
+   "classes": [
+    "Fase4BLoopbackTest"
+   ],
+   "doc": "",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_fase4b_tools.py",
+   "loc": 135,
+   "n_tests": 4,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "Fase4BToolsTest"
+   ],
+   "doc": "",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_fb_00bb_1004.py",
+   "loc": 146,
+   "n_tests": 7,
+   "imports": [
+    "peer_liveness"
+   ],
+   "classes": [
+    "ClientPeerProbeablePredicateTest",
+    "Fb00bbSourceContractTest",
+    "Fb1004TeardownCopyTest"
+   ],
+   "doc": "fb-20260915-143332-00bb + fb-20260915-104637-1004.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_050e.py",
+   "loc": 350,
+   "n_tests": 10,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "Fb050eUntrustedHintTests",
+    "Fb050eDayzTestRunTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_1025_packaged_modules_lock.py",
+   "loc": 304,
+   "n_tests": 8,
+   "imports": [],
+   "classes": [
+    "PackagedModulesLockTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_160e.py",
+   "loc": 529,
+   "n_tests": 16,
+   "imports": [
+    "runtime_state"
+   ],
+   "classes": [
+    "Fb160eManifestBackupRetentionTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_1f21_steam_envelope.py",
+   "loc": 406,
+   "n_tests": 11,
+   "imports": [
+    "dayz_test_request",
+    "dayz_test_tool",
+    "native_launcher_transaction",
+    "steam_launch_guard",
+    "steam_preflight"
+   ],
+   "classes": [
+    "SteamPreparationDaemonEnvelopeTests",
+    "SteamPreparationToolEnvelopeTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_2223_box_queue_offer.py",
+   "loc": 1601,
+   "n_tests": 28,
+   "imports": [
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "_BoxHarness",
+    "Fb2223BoxQueueOfferTest"
+   ],
+   "doc": "Box FIFO offer: on_busy=queue, queue_offer, and session_status position.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_3bb4_esc_and_drive_retire.py",
+   "loc": 232,
+   "n_tests": 7,
+   "imports": [
+    "loopback",
+    "server"
+   ],
+   "classes": [
+    "Fb3bb4EscAndDriveRetireTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_3fc1_action_use_target.py",
+   "loc": 676,
+   "n_tests": 13,
+   "imports": [
+    "loopback",
+    "server"
+   ],
+   "classes": [
+    "Fb3fc1ActionUseToolTest",
+    "Fb3fc1ActionUseWireTest",
+    "Fb3fc1ActionUseCensusTest",
+    "Fb3fc1ActionUseEnforceContractTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_6d18.py",
+   "loc": 141,
+   "n_tests": 10,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "_SinkRuntime",
+    "Fb6d18CaptureSessionLockedTest",
+    "Fb6d18ProbeInputDesktopTest"
+   ],
+   "doc": "Locked Windows sessions fail capture as session_locked, not a generic backend error.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_7ad1.py",
+   "loc": 62,
+   "n_tests": 3,
+   "imports": [],
+   "classes": [
+    "TraceAbortAutodumpContractTest"
+   ],
+   "doc": "vehicle_release Abort must dump remaining samples before clearing the trace.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_7ef2.py",
+   "loc": 372,
+   "n_tests": 9,
+   "imports": [
+    "daemon",
+    "dayz_test_tool",
+    "process_lifecycle",
+    "runtime_state",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "Fb7ef2LifecycleTests",
+    "Fb7ef2StopTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_81f3.py",
+   "loc": 85,
+   "n_tests": 5,
+   "imports": [
+    "occupant_seat"
+   ],
+   "classes": [
+    "OccupantClientSeatedPredicateTest",
+    "OccupantClientSeatedSourceContractTest"
+   ],
+   "doc": "player_teleport must refuse a client-owned seated occupant.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_8604_orderly_close.py",
+   "loc": 1332,
+   "n_tests": 31,
+   "imports": [
+    "control_client",
+    "dayz_test_request",
+    "dayz_test_tool",
+    "loopback",
+    "process_lifecycle",
+    "runtime_state",
+    "server",
+    "session_coordination",
+    "window_close"
+   ],
+   "classes": [
+    "AuditSink",
+    "FakeGuard",
+    "FakeLauncher",
+    "FakeWin32",
+    "CloseRun8604Test",
+    "FakeLifecycleClose",
+    "Route8604Test",
+    "Client8604Test"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_88ef_305a_runtime_writes.py",
+   "loc": 608,
+   "n_tests": 18,
+   "imports": [
+    "process_lifecycle",
+    "runtime_state"
+   ],
+   "classes": [
+    "_FakeMonotonic",
+    "Fb88efAtomicReplaceTest",
+    "Fb305aManifestBackupQuarantineTest",
+    "Fb305aDoctorQuarantineTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_b0d9_restore_honest.py",
+   "loc": 290,
+   "n_tests": 10,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "RestoreHonestB0d9Test",
+    "CaptureFrozenSignalB0d9Test"
+   ],
+   "doc": "restore_gameplay names an unverified render; capture_screenshot names a freeze.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_ba70.py",
+   "loc": 125,
+   "n_tests": 5,
+   "imports": [],
+   "classes": [
+    "GrabPsModulePathTest"
+   ],
+   "doc": "capture grab must not inherit a poisoned Git Bash PSModulePath.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_deb9_07a1.py",
+   "loc": 265,
+   "n_tests": 5,
+   "imports": [],
+   "classes": [
+    "FbDeb907a1SourceContractTest"
+   ],
+   "doc": "Source contracts for manual-gearbox settle and nearest-vehicle get-in.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fb_f298_launch_focus.py",
+   "loc": 121,
+   "n_tests": 3,
+   "imports": [
+    "process_lifecycle",
+    "runtime_state",
+    "session_coordination"
+   ],
+   "classes": [
+    "FbF298LaunchStartupinfoTest",
+    "FbF298CaptureCreateNoWindowTest"
+   ],
+   "doc": "DayZ launch must not steal the foreground; grab must not open a console.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fence_canary_probe.py",
+   "loc": 389,
+   "n_tests": 24,
+   "imports": [
+    "core",
+    "instance_fence",
+    "loopback"
+   ],
+   "classes": [
+    "ClientPeerParserTest",
+    "EvaluateVerdictTest",
+    "ProbeOnServerStateTest",
+    "UrlAndProfileTest",
+    "NoLiveDaemonTest"
+   ],
+   "doc": "Offline tests for the synthetic fencing probe (replacement for launching a second DayZDiag).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fn_f1f5.py",
+   "loc": 389,
+   "n_tests": 16,
+   "imports": [
+    "server",
+    "server_cli"
+   ],
+   "classes": [
+    "ToolPackCliTest",
+    "Local8BToolPackTest",
+    "BridgeSuccessHintTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_fn_p0_small_model_loops.py",
+   "loc": 466,
+   "n_tests": 19,
+   "imports": [
+    "agent_loop",
+    "control_client",
+    "instance_fence",
+    "knowledge",
+    "knowledge_pack",
+    "loopback",
+    "peer_liveness",
+    "server"
+   ],
+   "classes": [
+    "FakeClock",
+    "HonestReadyAfterLaunchTest",
+    "RegistrySafeNextStepTest",
+    "LeaseExpiredOnSilentReleaseTest",
+    "KnowledgeDeadEndTest",
+    "WaitForBindingNotReadyTest",
+    "CatalogDoesNotExposeLifecycleStatus"
+   ],
+   "doc": "P0 Flash-Next / ~8B loop contract (2026-09-17 handoff).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_g0_abba_verdict.py",
+   "loc": 351,
+   "n_tests": 15,
+   "imports": [
+    "loopback"
+   ],
+   "classes": [
+    "G0AbbaPureLogicTest"
+   ],
+   "doc": "Pure-logic tests for the G0 ABBA in-game diagnostic driver.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_guards_bridge.py",
+   "loc": 268,
+   "n_tests": 10,
+   "imports": [],
+   "classes": [
+    "BridgeGuardsTest"
+   ],
+   "doc": "Offline source contracts for N1; GUARDS_SOURCE_DIR selects unmodified BEFOREs.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_h14_stale_policy.py",
+   "loc": 1232,
+   "n_tests": 26,
+   "imports": [
+    "accredited_daemon_transport",
+    "dayz_test_tool",
+    "native_launcher_backend",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "_H14ClientRuntime",
+    "H14SpecContractTests",
+    "H14ControlClientTests",
+    "H14DaemonCredentialTests",
+    "H14ClientRuntimeFlagTests",
+    "_H14Control",
+    "H14NestedToolLockAstTests",
+    "H14OwnedStopPredicateTests"
+   ],
+   "doc": "H14: H3 reads and owned dayz_test_stop survive policy.revalidate() failure.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_h8_distributed_gate.py",
+   "loc": 392,
+   "n_tests": 12,
+   "imports": [],
+   "classes": [
+    "H8DistributedGateTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_handler_socket_timeout.py",
+   "loc": 113,
+   "n_tests": 3,
+   "imports": [
+    "loopback"
+   ],
+   "classes": [
+    "HandlerSocketTimeoutTests"
+   ],
+   "doc": "Handler.timeout must stay strictly above the POST /wait long-poll ceiling.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_host_python_floor.py",
+   "loc": 273,
+   "n_tests": 10,
+   "imports": [],
+   "classes": [
+    "HostPythonFloorLockstepTest",
+    "HostPythonSelectorTest",
+    "HostPythonLiveInterpreterTest"
+   ],
+   "doc": "Host Python floor: packaging, both installers, and the selector agree.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_identity_migration.py",
+   "loc": 821,
+   "n_tests": 23,
+   "imports": [
+    "identity_migration",
+    "native_process_guard",
+    "runtime_state",
+    "server",
+    "server_cli"
+   ],
+   "classes": [
+    "RunsBackupGateTest",
+    "FakeProcess",
+    "FakeNoSuchProcess",
+    "FakeAccessDenied",
+    "FakePsutil",
+    "FakeGuard",
+    "RunsProcessScanTest",
+    "DaemonStartupElectionTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_idle_watchdog.py",
+   "loc": 183,
+   "n_tests": 12,
+   "imports": [
+    "loopback",
+    "orphan_guard",
+    "server"
+   ],
+   "classes": [
+    "ComputeIdleSecondsTest",
+    "InstallIdleWatchdogTest",
+    "_StubState",
+    "_StubLoopback",
+    "RuntimeIdleSecondsTest",
+    "IdleWatchdogReleaseIntegrationTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_install_mcp.py",
+   "loc": 1351,
+   "n_tests": 46,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "InstallerCliManifestTest",
+    "InstallerArgumentsTest",
+    "InstallerRuntimeTest",
+    "FakeRegistrationProvider",
+    "InstallerRegistrationTransactionTest",
+    "InstallerRegistrationParserTest",
+    "InstallerCliRegistrationProviderTest",
+    "InstallerOrchestrationTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_instance_fence.py",
+   "loc": 1748,
+   "n_tests": 64,
+   "imports": [
+    "core",
+    "daemon",
+    "instance_fence",
+    "loopback",
+    "native_process_guard",
+    "process_lifecycle",
+    "runtime_state",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "FakeClock",
+    "RecordPollFenceTest",
+    "EnqueueFenceTest",
+    "ResultFenceTest",
+    "EnforceBridgeFenceTest",
+    "LifecycleFenceTest",
+    "ExitedBindingInvariantTest",
+    "_IncrementingLauncher"
+   ],
+   "doc": "Unit tests for instance fencing.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_instance_lock.py",
+   "loc": 31,
+   "n_tests": 1,
+   "imports": [
+    "loopback"
+   ],
+   "classes": [
+    "InstanceLockTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_interpreter_guard.py",
+   "loc": 60,
+   "n_tests": 1,
+   "imports": [],
+   "classes": [
+    "InterpreterGuardTests"
+   ],
+   "doc": "Guard that the suite runs under the approved project interpreter.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_inventory_attach.py",
+   "loc": 296,
+   "n_tests": 11,
+   "imports": [
+    "loopback",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "InventoryAttachIngressTest",
+    "InventoryAttachEnforceContractTest",
+    "InventoryAttachAppToolTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_inventory_give.py",
+   "loc": 151,
+   "n_tests": 5,
+   "imports": [
+    "loopback",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "InventoryGiveIngressTest",
+    "InventoryGiveEnforceContractTest",
+    "InventoryGiveAppToolTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_key_press.py",
+   "loc": 124,
+   "n_tests": 6,
+   "imports": [
+    "loopback",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "KeyPressIngressContractTest",
+    "KeyPressFastMCPContractTest",
+    "KeyPressEnforceSourceContractTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_knowledge_extract.py",
+   "loc": 194,
+   "n_tests": 4,
+   "imports": [
+    "knowledge"
+   ],
+   "classes": [
+    "KnowledgeExtractTest"
+   ],
+   "doc": "Tests for the deterministic Knowledge Pack extractor.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_knowledge_pack_install.py",
+   "loc": 466,
+   "n_tests": 13,
+   "imports": [
+    "knowledge"
+   ],
+   "classes": [
+    "RecordingGitRunner",
+    "KnowledgePackInstallTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_knowledge_tools.py",
+   "loc": 594,
+   "n_tests": 19,
+   "imports": [
+    "knowledge",
+    "knowledge_pack",
+    "server"
+   ],
+   "classes": [
+    "KnowledgeQueryTest",
+    "KnowledgeMcpToolsTest",
+    "KnowledgeIndexValidationTest"
+   ],
+   "doc": "Tests for local read-only Knowledge Pack query tools.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_launcher_registry_update.py",
+   "loc": 1041,
+   "n_tests": 19,
+   "imports": [
+    "launcher_registry",
+    "launcher_registry_update"
+   ],
+   "classes": [
+    "LauncherRegistryUpdateTest",
+    "ReplaceTransitionTest",
+    "AbortedPreparedRecoveryTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_leak_callback_drain.py",
+   "loc": 185,
+   "n_tests": 8,
+   "imports": [],
+   "classes": [
+    "SourceDrain",
+    "CallbackDrainTest"
+   ],
+   "doc": "Source-linked admission/drain model, NOT an Enforce VM or a native leak test.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_leak_callback_lifetime.py",
+   "loc": 131,
+   "n_tests": 7,
+   "imports": [],
+   "classes": [
+    "CallbackLifetimeContractTest"
+   ],
+   "doc": "Offline ownership contracts. These do not execute Enforce or prove native deallocation.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_lease_supervisor.py",
+   "loc": 204,
+   "n_tests": 7,
+   "imports": [],
+   "classes": [
+    "_Clock",
+    "_StepWaiter",
+    "_Client",
+    "LeaseHeartbeatSupervisorTests",
+    "TerminalSessionStatusTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_lifecycle_cli.py",
+   "loc": 395,
+   "n_tests": 9,
+   "imports": [
+    "admin_cli",
+    "lifecycle_cli"
+   ],
+   "classes": [
+    "TtyInput",
+    "LifecycleCliTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_lifecycle_http.py",
+   "loc": 534,
+   "n_tests": 8,
+   "imports": [
+    "loopback",
+    "runtime_state",
+    "session_coordination"
+   ],
+   "classes": [
+    "FakeLifecycle",
+    "LifecycleHttpTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_lifecycle_reconcile.py",
+   "loc": 2112,
+   "n_tests": 94,
+   "imports": [
+    "daemon",
+    "dayz_test_request",
+    "dayz_test_tool",
+    "native_launcher_transaction",
+    "process_lifecycle",
+    "runtime_state",
+    "session_coordination",
+    "steam_preflight"
+   ],
+   "classes": [
+    "FakeBridgeBindings",
+    "LifecycleReconcileTest",
+    "ClientReplacementDecisionTest",
+    "ClientReplacementGateTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_lifecycle_request_fixture_parity.py",
+   "loc": 150,
+   "n_tests": 5,
+   "imports": [
+    "dayz_test_worker"
+   ],
+   "classes": [
+    "LifecycleRequestFixtureParityTest"
+   ],
+   "doc": "Parity of LifecycleReconcileTest.request() against dayz_test_worker._start_core.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_liveness_is_fail_closed.py",
+   "loc": 79,
+   "n_tests": 6,
+   "imports": [
+    "orphan_guard"
+   ],
+   "classes": [
+    "LivenessIsFailClosedTest"
+   ],
+   "doc": "`is_pid_alive` must never answer \"dead\" out of ignorance.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_log_tail.py",
+   "loc": 222,
+   "n_tests": 15,
+   "imports": [
+    "log_tail"
+   ],
+   "classes": [
+    "LogTailTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_logs_since_marker_roundtrip.py",
+   "loc": 153,
+   "n_tests": 5,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "LogsSinceMarkerRoundtripTest"
+   ],
+   "doc": "",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_loopback.py",
+   "loc": 1921,
+   "n_tests": 74,
+   "imports": [
+    "instance_fence",
+    "loopback",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "LoopbackTest",
+    "FakeClock",
+    "DelayedAuthorizationCoordinator",
+    "OwnerScopedQueueStateTest",
+    "FenceExemptionTest",
+    "StaleCommandHygieneTest",
+    "LoopbackHttpBodyTest",
+    "ResultCapTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_lote2_numeric_boundary.py",
+   "loc": 157,
+   "n_tests": 5,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "NumericBoundaryTests"
+   ],
+   "doc": "Numeric ingress regression matrix. All probes enter through FastMCP.call_tool.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_lote2_t2_steam.py",
+   "loc": 105,
+   "n_tests": 5,
+   "imports": [
+    "steam_preflight"
+   ],
+   "classes": [
+    "SteamWaitT2Tests",
+    "SteamEnvelopeT2Tests"
+   ],
+   "doc": "T2: bounded remediation; all process, registry, and clock operations are mocks.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_lote_b_products.py",
+   "loc": 57,
+   "n_tests": 1,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "LoteBWireDescriptionsTest"
+   ],
+   "doc": "Lote B products reach the client over the wire (Codex review B backlog).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_lote_m_products.py",
+   "loc": 256,
+   "n_tests": 18,
+   "imports": [
+    "dayz_test_modes",
+    "inbox",
+    "server"
+   ],
+   "classes": [
+    "LoteMProductsTest"
+   ],
+   "doc": "Lote M wire-surface tests: one positive and one negative per product.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_lote_msgs_f5a7.py",
+   "loc": 86,
+   "n_tests": 6,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "LoteMsgsF5a7DescriptionsTest",
+    "LoteMsgsF5a7ErrorDomainsTest"
+   ],
+   "doc": "fb-20260910-031716-f5a7 pts 1/2/4 + fb-20260910-102449-f47b pt 4.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_lote_v_products.py",
+   "loc": 303,
+   "n_tests": 14,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "BridgeStatusDescriptionTest",
+    "EntitiesQueryWireTest",
+    "WaitForWireTest",
+    "ActionUseDescriptionTest",
+    "RunIdMatrixDescriptionTest",
+    "PublishedExtraModsNameFormTest",
+    "ReachableCapabilityTest",
+    "ReachableCapabilityWireTest"
+   ],
+   "doc": "Lote V product coverage: bridge_status open reason set, entities_query wire,",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_lote_w_h9.py",
+   "loc": 78,
+   "n_tests": 2,
+   "imports": [
+    "native_launcher_backend"
+   ],
+   "classes": [
+    "H9NativeProbeTests"
+   ],
+   "doc": "Lote W regression tests for h9_native_probe.",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_make_release.py",
+   "loc": 205,
+   "n_tests": 9,
+   "imports": [
+    "core"
+   ],
+   "classes": [
+    "MakeReleaseTest"
+   ],
+   "doc": "Release staging contract for a prebuilt DayZ_MCP PBO.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_mcp_capture.py",
+   "loc": 831,
+   "n_tests": 22,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "MCPCaptureTest",
+    "CaptureDualCropSpaceTest",
+    "AllBlackFrameReportTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_mcp_host_timeouts.py",
+   "loc": 1147,
+   "n_tests": 39,
+   "imports": [
+    "daemon",
+    "host_config",
+    "server"
+   ],
+   "classes": [
+    "HostConfigRecoveryClassifierTest",
+    "DaemonProvenanceConfigTest",
+    "HostConfigTargetTest",
+    "HostConfigTransactionTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_mcp_server.py",
+   "loc": 133,
+   "n_tests": 5,
+   "imports": [
+    "loopback"
+   ],
+   "classes": [
+    "MCPServerTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_mcp_supervisor.py",
+   "loc": 454,
+   "n_tests": 17,
+   "imports": [
+    "mcp_supervisor"
+   ],
+   "classes": [
+    "_BlockingLines",
+    "_CapturingStdin",
+    "FakeWorker",
+    "_HostStream",
+    "SupervisorTestBase",
+    "ForwardingTest",
+    "ReservedIdTest",
+    "RecycleTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_mcp_tools.py",
+   "loc": 1659,
+   "n_tests": 57,
+   "imports": [
+    "core",
+    "dayz_test_request",
+    "dayz_test_tool",
+    "native_launcher_backend",
+    "server"
+   ],
+   "classes": [
+    "FakePeer",
+    "MCPToolsTest",
+    "UiPublicSurfaceTest",
+    "BridgeCapabilityComparisonTest",
+    "ClientRenderSignalTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_messages_contract.py",
+   "loc": 211,
+   "n_tests": 4,
+   "imports": [],
+   "classes": [
+    "MessagesContractTest"
+   ],
+   "doc": "Structural contract tests for the M02 wire DTOs.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_native_broker_protocol.py",
+   "loc": 146,
+   "n_tests": 4,
+   "imports": [
+    "native_broker_protocol"
+   ],
+   "classes": [
+    "NativeBrokerProtocolTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_native_bundle.py",
+   "loc": 279,
+   "n_tests": 7,
+   "imports": [
+    "dayz_tools_paths",
+    "launcher_registry",
+    "native_broker_protocol",
+    "native_bundle",
+    "native_child_announcement",
+    "request_path_authority"
+   ],
+   "classes": [
+    "NativeBundleTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_native_child_announcement.py",
+   "loc": 101,
+   "n_tests": 3,
+   "imports": [
+    "dayz_tools_paths",
+    "native_broker_protocol",
+    "native_child_announcement"
+   ],
+   "classes": [
+    "ChildAnnouncementDecoderTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_native_debug_state.py",
+   "loc": 257,
+   "n_tests": 6,
+   "imports": [],
+   "classes": [
+    "NativeDebugStateTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_native_launcher_backend.py",
+   "loc": 2537,
+   "n_tests": 46,
+   "imports": [
+    "dayz_tools_paths"
+   ],
+   "classes": [
+    "_ImageAuthority",
+    "_FakeKernel32",
+    "_OpenedLauncher",
+    "NativeLauncherBackendTests",
+    "NativeDebugReducerWiringTests",
+    "NativeDebugOwnershipTests",
+    "NativeLauncherThreadJoinTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_native_launcher_bundle.py",
+   "loc": 769,
+   "n_tests": 24,
+   "imports": [
+    "dayz_tools_paths",
+    "native_broker_protocol",
+    "native_bundle"
+   ],
+   "classes": [
+    "NativeLauncherBundleTest",
+    "PackagedModuleClosureTest",
+    "PackagedModuleListsAgreeTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_native_launcher_transaction.py",
+   "loc": 357,
+   "n_tests": 7,
+   "imports": [],
+   "classes": [
+    "_ControlClient",
+    "NativeLauncherTransactionTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_native_pe.py",
+   "loc": 60,
+   "n_tests": 3,
+   "imports": [
+    "native_pe"
+   ],
+   "classes": [
+    "NativePeTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_native_process_guard.py",
+   "loc": 409,
+   "n_tests": 16,
+   "imports": [
+    "native_process_guard"
+   ],
+   "classes": [
+    "FakeNoSuchProcess",
+    "FakeAccessDenied",
+    "FakeTimeoutExpired",
+    "FakeProcess",
+    "FakePsutil",
+    "ExpectedRecord",
+    "NativeProcessGuardSnapshotTest",
+    "NativeProcessGuardTerminateTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_native_process_snapshot.py",
+   "loc": 95,
+   "n_tests": 3,
+   "imports": [],
+   "classes": [
+    "NativeProcessSnapshotTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_native_source_seal.py",
+   "loc": 180,
+   "n_tests": 9,
+   "imports": [
+    "dayz_test_tool",
+    "doctor",
+    "launcher_registry",
+    "native_bundle",
+    "process_lifecycle",
+    "server"
+   ],
+   "classes": [
+    "NativeSourceSealTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_night0909_entity_wait.py",
+   "loc": 149,
+   "n_tests": 10,
+   "imports": [],
+   "classes": [
+    "Runtime",
+    "Clock",
+    "EntityWaitTest"
+   ],
+   "doc": "Offline tests of the delivered c82e candidate, NOT deployed wait_for.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_night0909_inventory_inspect.py",
+   "loc": 112,
+   "n_tests": 7,
+   "imports": [
+    "loopback",
+    "result_prune",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "InventoryInspectStructureTest",
+    "InventoryInspectPublicTest"
+   ],
+   "doc": "b256 offline structural/consumer contract; no Enforce execution is claimed.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_no_literal_drive_letters.py",
+   "loc": 190,
+   "n_tests": 5,
+   "imports": [],
+   "classes": [
+    "NoLiteralDriveLettersTest"
+   ],
+   "doc": "Fail if the published package hardcodes a Windows drive letter.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_object_anim.py",
+   "loc": 154,
+   "n_tests": 4,
+   "imports": [
+    "loopback",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "ObjectAnimIngressTest",
+    "ObjectAnimEnforceContractTest",
+    "ObjectAnimAppToolTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_object_inspect.py",
+   "loc": 156,
+   "n_tests": 5,
+   "imports": [
+    "loopback",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "ObjectInspectIngressTest",
+    "ObjectInspectEnforceContractTest",
+    "ObjectInspectAppToolTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_orphan_guard_udp.py",
+   "loc": 190,
+   "n_tests": 16,
+   "imports": [
+    "orphan_guard"
+   ],
+   "classes": [
+    "NetstatUdpParserTest",
+    "SnapshotUdpPortHoldersTest",
+    "NetstatUdpParserRound2Test",
+    "SnapshotUdpPortHoldersRound2Test"
+   ],
+   "doc": "fb-20260904-114520-6927: the UDP socket table as the second witness of the box (orphan_guard).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_orphan_native.py",
+   "loc": 344,
+   "n_tests": 10,
+   "imports": [
+    "loopback",
+    "native_process_guard",
+    "native_process_snapshot",
+    "orphan_guard"
+   ],
+   "classes": [
+    "FakeAccessDenied",
+    "FakeNoSuchProcess",
+    "FakeProcess",
+    "FakePsutil",
+    "NativeArgvTest",
+    "FakeGuard",
+    "NativeDaemonReclaimTest",
+    "NativeEmbeddedReclaimTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_p0s_gate.py",
+   "loc": 275,
+   "n_tests": 9,
+   "imports": [
+    "runtime_state"
+   ],
+   "classes": [
+    "InstallerCliManifestProducerTest",
+    "RunsBackupCliGateTest"
+   ],
+   "doc": "",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_p0s_test_runner.py",
+   "loc": 183,
+   "n_tests": 7,
+   "imports": [],
+   "classes": [
+    "DenyLaunchGuardTest"
+   ],
+   "doc": "",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_pack_addon_packonly.py",
+   "loc": 95,
+   "n_tests": 7,
+   "imports": [
+    "dayz_test_worker",
+    "pack_only"
+   ],
+   "classes": [
+    "PackOnlyPredicateTest",
+    "PackAddonScriptContractTest"
+   ],
+   "doc": "pack-addon.ps1 must pass -packonly when the source has no binarizable assets.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_pack_addon_staging.py",
+   "loc": 811,
+   "n_tests": 14,
+   "imports": [],
+   "classes": [
+    "PackAddonStagingTest"
+   ],
+   "doc": "pack-addon.ps1 stages git-tracked addon/ (or a filtered folder), not the live tree.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_packaging_declarations.py",
+   "loc": 96,
+   "n_tests": 8,
+   "imports": [],
+   "classes": [
+    "PackagingDeclarationsTest",
+    "Pywin32ProvisioningTest"
+   ],
+   "doc": "Gate the packaging metadata against what the tree actually ships.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_parent_watchdog.py",
+   "loc": 441,
+   "n_tests": 14,
+   "imports": [
+    "loopback",
+    "orphan_guard"
+   ],
+   "classes": [
+    "WatchdogDecisionTest",
+    "WatchdogInstallTest",
+    "WalkPastRedirectorsTest",
+    "WatchdogIntegrationTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_pinned_keyfile.py",
+   "loc": 59,
+   "n_tests": 3,
+   "imports": [],
+   "classes": [
+    "PinnedKeyfileTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_pipeline_feedback.py",
+   "loc": 572,
+   "n_tests": 26,
+   "imports": [
+    "inbox",
+    "server"
+   ],
+   "classes": [
+    "InboxTest",
+    "PipelineToolsTest",
+    "PipelineFeedbackInputSchemaLimitsTest",
+    "PipelineToolDescriptionsDeclareLimitsTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_playbook_reload.py",
+   "loc": 423,
+   "n_tests": 22,
+   "imports": [
+    "playbook_tool",
+    "server",
+    "server_freshness"
+   ],
+   "classes": [
+    "PlaybookReloadTest"
+   ],
+   "doc": "Offline consumer tests for the one-runner reload contract; no live services.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_playbook_runner.py",
+   "loc": 595,
+   "n_tests": 38,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "LocatePlaybooksTest",
+    "TomlParseTest",
+    "FixtureReplayTest",
+    "AllPlaybooksFixtureContractTest",
+    "SchemaBiteTest",
+    "NearTolRefTest",
+    "MinDistXzTest",
+    "UncalibratedDowngradeTest"
+   ],
+   "doc": "Offline tests for the generic playbook runner.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_playbook_tool.py",
+   "loc": 508,
+   "n_tests": 19,
+   "imports": [
+    "playbook_tool",
+    "server"
+   ],
+   "classes": [
+    "_FnMeta",
+    "_StubTool",
+    "_StubManager",
+    "_StubApp",
+    "PlaybookNameTest",
+    "PlaybookSchemaMapTest",
+    "PlaybookRunExecuteTest",
+    "PlaybookFixturesStillGreenTest"
+   ],
+   "doc": "Focal tests for the playbook_run MCP adapter.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_player_respawn.py",
+   "loc": 109,
+   "n_tests": 4,
+   "imports": [
+    "loopback",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "PlayerRespawnIngressContractTest",
+    "PlayerRespawnFastMCPContractTest",
+    "PlayerRespawnEnforceSourceContractTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_player_teleport.py",
+   "loc": 375,
+   "n_tests": 17,
+   "imports": [
+    "loopback",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "PlayerTeleportIngressTest",
+    "PlayerTeleportEnforceContractTest",
+    "PlayerTeleportAppToolTest",
+    "OccupantClientSeatedPredicateTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_pleno_lease_and_orphans.py",
+   "loc": 448,
+   "n_tests": 12,
+   "imports": [
+    "dayz_test_tool",
+    "loopback",
+    "process_lifecycle",
+    "runtime_state",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "PlenoLeaseAndOrphansTest",
+    "PlenoLeaseAndOrphansRound4Test",
+    "PlenoLeaseAndOrphansRound2Test"
+   ],
+   "doc": "Lease contract text, stale acquire annotation, and retired-run traces.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_poll_key_reload_contract.py",
+   "loc": 83,
+   "n_tests": 2,
+   "imports": [],
+   "classes": [
+    "PollKeyReloadContractTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_poll_watchdog_contract.py",
+   "loc": 470,
+   "n_tests": 8,
+   "imports": [],
+   "classes": [
+    "PollWatchdogContractTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_port_reclaim.py",
+   "loc": 695,
+   "n_tests": 33,
+   "imports": [
+    "loopback",
+    "native_process_guard",
+    "native_process_snapshot",
+    "orphan_guard"
+   ],
+   "classes": [
+    "_FakeGuard",
+    "ArgvPortMatchTest",
+    "ArgvModuleClassificationTest",
+    "ShouldReclaimDiscriminatorTest",
+    "TryReclaimPortDecisionTest",
+    "ReclaimAncestorWalkTest",
+    "NetstatParserTest",
+    "StructuredArgvSnapshotTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_precondition_docs.py",
+   "loc": 201,
+   "n_tests": 6,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "PreconditionDocsTest"
+   ],
+   "doc": "Tool descriptions name the real vehicle_trace / world_spawn preconditions.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_prerun_desktop_gate.py",
+   "loc": 623,
+   "n_tests": 25,
+   "imports": [
+    "dayz_test_tool",
+    "server",
+    "steam_preflight"
+   ],
+   "classes": [
+    "PrerunDesktopGateTest",
+    "PrerunDesktopDayzTestRunTest",
+    "PrerunDesktopDescriptionTest"
+   ],
+   "doc": "Pre-run desktop unlock + brightness gate (fb-20260918-134756-05a0 / c0e5).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_process_job_spike.py",
+   "loc": 561,
+   "n_tests": 17,
+   "imports": [],
+   "classes": [
+    "ProcessJobSpikePureHelpersTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_process_lifecycle.py",
+   "loc": 5160,
+   "n_tests": 186,
+   "imports": [
+    "dayz_test_storage",
+    "instance_fence",
+    "loopback",
+    "process_lifecycle",
+    "runtime_state",
+    "session_coordination"
+   ],
+   "classes": [
+    "AuditSink",
+    "FakeLauncher",
+    "FakeGuard",
+    "ProcessRecordIdentitySchemeTest",
+    "ProcessLifecycleStatusPruneTest",
+    "FakeBridgeBindings",
+    "ProcessLifecycleTest",
+    "RetiredRunDiagnosticsAndGenerationTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_progressive_disclosure.py",
+   "loc": 179,
+   "n_tests": 5,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "_FakeClientRuntime",
+    "ProgressiveDisclosureTest"
+   ],
+   "doc": "Progressive tools/list disclosure (fb-20260917-092908-2ad1).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_provenance_gate.py",
+   "loc": 349,
+   "n_tests": 9,
+   "imports": [
+    "control_client",
+    "daemon_policy",
+    "host_config"
+   ],
+   "classes": [
+    "ProvenanceGateTests",
+    "SupervisedFlagRegistrationTests"
+   ],
+   "doc": "L6: semantic provenance, fail-closed controls, and safe cause metadata.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_python_backlog_fixes.py",
+   "loc": 551,
+   "n_tests": 9,
+   "imports": [
+    "accredited_daemon_transport",
+    "daemon",
+    "host_config",
+    "loopback",
+    "server"
+   ],
+   "classes": [
+    "_FakeClock",
+    "PythonBacklogFixesTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_registry_lock.py",
+   "loc": 74,
+   "n_tests": 2,
+   "imports": [
+    "launcher_registry",
+    "registry_lock"
+   ],
+   "classes": [
+    "RegistryLockTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_reload_lease_recovery.py",
+   "loc": 203,
+   "n_tests": 6,
+   "imports": [
+    "control_client",
+    "dayz_test_tool",
+    "server",
+    "session_coordination",
+    "session_handoff"
+   ],
+   "classes": [
+    "ReloadLeaseRecoveryTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_relock_toolchain.py",
+   "loc": 91,
+   "n_tests": 3,
+   "imports": [],
+   "classes": [
+    "RelockToolchainTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_request_path_authority.py",
+   "loc": 394,
+   "n_tests": 13,
+   "imports": [],
+   "classes": [
+    "RequestPathAuthorityTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_restore_gameplay_contract.py",
+   "loc": 362,
+   "n_tests": 14,
+   "imports": [
+    "loopback",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "RestoreGameplayIngressContractTest",
+    "RestoreGameplayFastMCPContractTest",
+    "RestoreGameplayEnforceSourceContractTest",
+    "RestoreGameplayPostconditionContractTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_result_prune.py",
+   "loc": 209,
+   "n_tests": 10,
+   "imports": [
+    "loopback",
+    "result_prune"
+   ],
+   "classes": [
+    "ResultPruneTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_resultleak_pool.py",
+   "loc": 379,
+   "n_tests": 13,
+   "imports": [],
+   "classes": [
+    "Array",
+    "Rest",
+    "ResultPoolBehaviorTest",
+    "ResultPoolSourceTest"
+   ],
+   "doc": "Execute a restricted translation of the real result transport methods.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_retail_quarantine.py",
+   "loc": 196,
+   "n_tests": 7,
+   "imports": [
+    "loopback",
+    "orphan_guard",
+    "session_coordination"
+   ],
+   "classes": [
+    "RetailQuarantineTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_run_reaper.py",
+   "loc": 204,
+   "n_tests": 7,
+   "imports": [
+    "daemon",
+    "process_lifecycle",
+    "runtime_state",
+    "session_coordination"
+   ],
+   "classes": [
+    "InstallRunReaperTest",
+    "RunReaperCoordinatorWakeTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_run_start_epoch_is_per_launch.py",
+   "loc": 221,
+   "n_tests": 11,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "RunStartEpochTests",
+    "CurrentLaunchLogsTests"
+   ],
+   "doc": "`_run_start_epoch` and the launch-log floor it feeds.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_runloss_diagnostics.py",
+   "loc": 220,
+   "n_tests": 15,
+   "imports": [
+    "loopback",
+    "server"
+   ],
+   "classes": [
+    "RunlossRetirementTest",
+    "RunlossWaitBudgetTest"
+   ],
+   "doc": "Run-loss errors through real lifecycle/queue/runtime, with no host processes.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_runtime_state.py",
+   "loc": 1166,
+   "n_tests": 26,
+   "imports": [
+    "runtime_state",
+    "session_coordination"
+   ],
+   "classes": [
+    "FakeClock",
+    "SequentialIds",
+    "BlockingSnapshot",
+    "RuntimeStateTest",
+    "CoordinatorSnapshotTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_secure_launcher.py",
+   "loc": 716,
+   "n_tests": 21,
+   "imports": [
+    "launcher_registry",
+    "native_broker_protocol",
+    "native_launcher_backend",
+    "secure_launcher"
+   ],
+   "classes": [
+    "SecureLauncherRegistryTests",
+    "PrivateIncrementalRedactorTests",
+    "SecureLauncherRuntimeTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_security_runtime_audit.py",
+   "loc": 1983,
+   "n_tests": 56,
+   "imports": [],
+   "classes": [
+    "SecurityRuntimeAuditTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_server_freshness.py",
+   "loc": 563,
+   "n_tests": 39,
+   "imports": [
+    "server",
+    "server_freshness"
+   ],
+   "classes": [
+    "ServerFreshnessTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_server_response_truth.py",
+   "loc": 639,
+   "n_tests": 32,
+   "imports": [
+    "control_client",
+    "server"
+   ],
+   "classes": [
+    "RetailQuarantineErrorTest",
+    "VersionBlockedNoRunTest",
+    "EngineSetResponseTest",
+    "WorldTimeSetResponseTest",
+    "NormalizeAppliedClockTest",
+    "ToolDescriptionTruthTest",
+    "TimeMultiplierProducerContractTest"
+   ],
+   "doc": "Caller-facing server responses must distinguish dispatch from confirmed state.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_session_acquire_wait.py",
+   "loc": 618,
+   "n_tests": 20,
+   "imports": [
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "OperationQueueCoordinatorTests",
+    "ClientAcquireWaitTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_session_coordination.py",
+   "loc": 1147,
+   "n_tests": 49,
+   "imports": [
+    "session_coordination"
+   ],
+   "classes": [
+    "IdentityAndClassificationTest",
+    "FakeClock",
+    "SequentialIds",
+    "AuditSink",
+    "CleanupSink",
+    "SessionCoordinatorTest",
+    "BoxNoneReleaseTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_session_e2e.py",
+   "loc": 576,
+   "n_tests": 14,
+   "imports": [
+    "control_client",
+    "daemon",
+    "loopback",
+    "server"
+   ],
+   "classes": [
+    "IntegrationDaemon",
+    "GamePeer",
+    "SessionE2ETest",
+    "BinaryGateHelperTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_session_handoff.py",
+   "loc": 290,
+   "n_tests": 23,
+   "imports": [
+    "session_coordination",
+    "session_handoff"
+   ],
+   "classes": [
+    "HandoffRoundTripTest",
+    "HandoffRefusalTest",
+    "HandoffWriterContractTest",
+    "HandoffAgainstTheRealCoordinatorTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_session_http.py",
+   "loc": 789,
+   "n_tests": 22,
+   "imports": [
+    "loopback",
+    "runtime_state",
+    "session_coordination"
+   ],
+   "classes": [
+    "SnapshotStore",
+    "SessionHttpTest",
+    "ProductionCoordinationStorePersistSkipTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_session_status_blocked_on.py",
+   "loc": 133,
+   "n_tests": 4,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "SessionStatusBlockedOnTest"
+   ],
+   "doc": "Actionable next steps in the public session_status response.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_shareconflict_windows.py",
+   "loc": 315,
+   "n_tests": 6,
+   "imports": [
+    "control_client",
+    "daemon_policy",
+    "host_config",
+    "server"
+   ],
+   "classes": [
+    "ShareConflictWindowsTests"
+   ],
+   "doc": "Real Windows sharing failures, unchanged authority, and public diagnostics.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_sources_are_statically_analysable.py",
+   "loc": 76,
+   "n_tests": 2,
+   "imports": [],
+   "classes": [
+    "SourcesAreStaticallyAnalysableTest"
+   ],
+   "doc": "Every source the audits read must actually parse.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_startup_keyfile.py",
+   "loc": 59,
+   "n_tests": 4,
+   "imports": [
+    "daemon",
+    "loopback",
+    "server"
+   ],
+   "classes": [
+    "StartupKeyfileHardeningTest"
+   ],
+   "doc": "Startup keyfile reads must use the pinned local-disk contract.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_stdio_bridge.py",
+   "loc": 524,
+   "n_tests": 24,
+   "imports": [
+    "server",
+    "stdio_bridge"
+   ],
+   "classes": [
+    "HostStartupErrorTest",
+    "ClassifyProbeErrorTest",
+    "OfficialClientArgvTest",
+    "RetryWithBackoffTest",
+    "ProbeToolsListTest",
+    "ListToolsOnceTransportTest",
+    "PrintCommandCliTest",
+    "ProbeCliTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_steam_launch_guard.py",
+   "loc": 663,
+   "n_tests": 47,
+   "imports": [
+    "accredited_daemon_transport",
+    "dayz_test_request",
+    "normal_daemon_policy",
+    "pinned_keyfile",
+    "steam_launch_guard",
+    "steam_preflight",
+    "steam_prepare_helper",
+    "steam_prepare_supervisor"
+   ],
+   "classes": [
+    "Provider",
+    "Host",
+    "SteamLifetimeTests",
+    "ScriptedHelper",
+    "SupervisorTests",
+    "SteamAdmissionTests",
+    "ConsentTransportTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_steam_not_running_preflight.py",
+   "loc": 314,
+   "n_tests": 14,
+   "imports": [
+    "dayz_test_tool",
+    "steam_launch_guard",
+    "steam_preflight",
+    "steam_prepare_helper"
+   ],
+   "classes": [
+    "SteamNotRunningEvaluationTests",
+    "SteamNotRunningToolGateTests",
+    "_InheritedRegistryView",
+    "DaemonGateRegistryViewTests"
+   ],
+   "doc": "fb-20260924-011620-678b: a launch with Steam closed stops before DayZ and says so.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_steam_preflight.py",
+   "loc": 466,
+   "n_tests": 19,
+   "imports": [
+    "steam_preflight"
+   ],
+   "classes": [
+    "FakeSteamProvider",
+    "SteamPreflightTests",
+    "_MutableSteamProvider",
+    "_FakeRemediationHost",
+    "SteamRemediationHostTest",
+    "SteamInvokeFlagsTests"
+   ],
+   "doc": "Contrato focal de M16 para el preflight Steam sin tocar el host.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_steamfastpath_repair.py",
+   "loc": 498,
+   "n_tests": 32,
+   "imports": [
+    "steam_preflight"
+   ],
+   "classes": [
+    "MemoryProvider",
+    "MemoryHost",
+    "SteamFastPathTests",
+    "RestartShutdownSkipTests"
+   ],
+   "doc": "Offline behavior tests; STEAMFASTPATH_SOURCE can select the saved BEFORE.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_steampost_readiness.py",
+   "loc": 443,
+   "n_tests": 27,
+   "imports": [
+    "steam_preflight"
+   ],
+   "classes": [
+    "SteamStartupWaitTests",
+    "RecordingStream",
+    "WindowsSteamStartupTests",
+    "SteamBranchEnvelopeTests"
+   ],
+   "doc": "Offline Steam startup mitigation and public remediation branch diagnostics.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_surface_query.py",
+   "loc": 114,
+   "n_tests": 4,
+   "imports": [
+    "loopback",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "SurfaceQueryIngressTest",
+    "SurfaceQueryEnforceContractTest",
+    "SurfaceQueryAppToolTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_task7_final_authority_regressions.py",
+   "loc": 1852,
+   "n_tests": 35,
+   "imports": [
+    "loopback",
+    "runtime_state",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "ReleasingBudgetTest",
+    "CleanupWorkerCapacityTest",
+    "GrantLedgerLinearizationTest",
+    "StateLockIoBoundaryTest",
+    "ExecEnforceCapacityReservationTest",
+    "OwnerReadRevalidationTest"
+   ],
+   "doc": "",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_task7_final_lifecycle_regressions.py",
+   "loc": 345,
+   "n_tests": 8,
+   "imports": [
+    "admin_cli",
+    "process_lifecycle"
+   ],
+   "classes": [
+    "PostProvisionalRetailFenceTest",
+    "ReconcileExactSurvivorSetTest",
+    "AdminCliReconcileStateMatrixTest",
+    "StopPreflightReservationRollbackTest",
+    "AdoptPrecommitRollbackTest",
+    "RunRecordStateInvariantTest"
+   ],
+   "doc": "",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_task7_rereview_regressions.py",
+   "loc": 1219,
+   "n_tests": 37,
+   "imports": [
+    "loopback",
+    "native_process_guard",
+    "orphan_guard",
+    "process_lifecycle",
+    "runtime_state",
+    "session_coordination"
+   ],
+   "classes": [
+    "AuthorityIoBoundaryTest",
+    "CleanupBudgetAndFencingTest",
+    "DispatchAuditDegradationTest",
+    "FailedLaunchSettlementTest",
+    "SettlementFlakeProbeExitTest",
+    "LifecycleRecoveryAndOutcomeTest",
+    "GuardFailureNormalizationTest",
+    "GateEvidenceContractTest"
+   ],
+   "doc": "",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_task7_review_regressions.py",
+   "loc": 1422,
+   "n_tests": 37,
+   "imports": [
+    "daemon",
+    "loopback",
+    "process_lifecycle",
+    "runtime_state",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "ProcessGuardGateContractTest",
+    "Sequence",
+    "Clock",
+    "Audit",
+    "Handle",
+    "Launcher",
+    "Guard",
+    "LifecycleFixture"
+   ],
+   "doc": "",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_task9_launcher_migration.py",
+   "loc": 407,
+   "n_tests": 5,
+   "imports": [],
+   "classes": [
+    "LauncherMigrationContainmentTest"
+   ],
+   "doc": "",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_task9_protocol_docs.py",
+   "loc": 246,
+   "n_tests": 10,
+   "imports": [],
+   "classes": [
+    "Task9ProtocolDocsTests"
+   ],
+   "doc": "",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_task9_spawn_phase_markers.py",
+   "loc": 274,
+   "n_tests": 7,
+   "imports": [],
+   "classes": [
+    "Task9SpawnPhaseMarkerTests"
+   ],
+   "doc": "",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_telemetry_read_modes.py",
+   "loc": 195,
+   "n_tests": 7,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "TelemetryReadModesContractTest",
+    "TelemetryReadPublicErrorsAreToolErrorsTest"
+   ],
+   "doc": "telemetry_read publishes a closed mode enum and names each mode's contract.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_telemetry_read_names_the_bad_field.py",
+   "loc": 87,
+   "n_tests": 4,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "TelemetryReadNamesTheBadFieldTest"
+   ],
+   "doc": "telemetry_read must say WHICH argument is wrong.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_token_budget.py",
+   "loc": 76,
+   "n_tests": 9,
+   "imports": [],
+   "classes": [
+    "TokenBudgetTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_tool_registry_fingerprint.py",
+   "loc": 839,
+   "n_tests": 20,
+   "imports": [
+    "effective_schema_core",
+    "tool_registry_fingerprint"
+   ],
+   "classes": [
+    "OracleReproductionTests",
+    "RegistryCanonTests",
+    "SnapshotComparatorTests",
+    "AuthorityBundleTests"
+   ],
+   "doc": "Pure M14 registry fingerprint contract tests with frozen external oracles.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_ui_click_scriptview.py",
+   "loc": 129,
+   "n_tests": 6,
+   "imports": [],
+   "classes": [
+    "UiClickScriptViewSourceContractTest",
+    "UiClickDirectModeContractTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_ui_dialog.py",
+   "loc": 803,
+   "n_tests": 42,
+   "imports": [
+    "loopback",
+    "result_prune",
+    "server",
+    "ui_dialog"
+   ],
+   "classes": [
+    "_FakeDialogRuntime",
+    "UiDialogValidationTest",
+    "UiDialogResultTest",
+    "UiDialogExecuteTest",
+    "UiDialogClientRuntimeTest",
+    "UiDialogWhitelistTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_ui_enforce_contract.py",
+   "loc": 718,
+   "n_tests": 15,
+   "imports": [],
+   "classes": [
+    "UiEnforceContractTest",
+    "CanonicalPathReferenceModelTest"
+   ],
+   "doc": "Source contract of the client UI verbs in MCPClientBridge.c (M05-UI-ENFORCE).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_ui_error_diagnostics.py",
+   "loc": 197,
+   "n_tests": 10,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "BridgeErrorDiagnosticsTest",
+    "UiClickWireTest"
+   ],
+   "doc": "fb-20260829-221423-b2c4: a bridge ok:0 keeps the diagnostics it filled before the error.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_ui_reload_layout.py",
+   "loc": 147,
+   "n_tests": 10,
+   "imports": [
+    "loopback",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "UiReloadLayoutRoutingTest",
+    "UiReloadLayoutArgsTest",
+    "UiReloadLayoutToolTest",
+    "UiReloadLayoutEnforceTest"
+   ],
+   "doc": "ui_reload_layout: reload a .layout into the client without repacking the mod.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_validate_command_args_table.py",
+   "loc": 700,
+   "n_tests": 3,
+   "imports": [
+    "loopback"
+   ],
+   "classes": [
+    "ValidateCommandArgsTableTest",
+    "ValidateCommandArgsFallbackTest"
+   ],
+   "doc": "Characterize command argument validation before its table refactor.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_vehicle_prepare_fixture.py",
+   "loc": 316,
+   "n_tests": 15,
+   "imports": [
+    "loopback",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "VehiclePrepareFixtureTest",
+    "VehiclePrepareFixtureAppToolTest",
+    "FixtureNotReadyDiagnosticsTest",
+    "FixtureNotReadyWireTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_vehicle_telemetry_contract.py",
+   "loc": 833,
+   "n_tests": 13,
+   "imports": [],
+   "classes": [
+    "TestVehicleTelemetryWireContract"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_vehicle_trace.py",
+   "loc": 744,
+   "n_tests": 16,
+   "imports": [
+    "vehicle_trace"
+   ],
+   "classes": [
+    "VehicleTracePresenceTest",
+    "VehicleTraceValidationTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_vehicle_trace_contract.py",
+   "loc": 300,
+   "n_tests": 9,
+   "imports": [
+    "loopback",
+    "server",
+    "session_coordination"
+   ],
+   "classes": [
+    "VehicleTraceIngressContractTest",
+    "VehicleTraceFastMCPContractTest",
+    "VehicleTraceEnforceSourceContractTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_visual_gate_resolution.py",
+   "loc": 118,
+   "n_tests": 9,
+   "imports": [],
+   "classes": [
+    "VisualGateResolutionTest",
+    "VisualGateNegativeTest"
+   ],
+   "doc": "Offline viability gate (R26) for the visual-capture resolution/zoom upgrade.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_vpp_preflight.py",
+   "loc": 1810,
+   "n_tests": 73,
+   "imports": [
+    "dayz_test_modes",
+    "dayz_test_request",
+    "dayz_test_tool",
+    "dayz_test_worker",
+    "native_launcher_transaction",
+    "steam_preflight"
+   ],
+   "classes": [
+    "FakeFiles",
+    "VppPreflightDecisionTest",
+    "VppPreflightEnforcementTest",
+    "_CountingControlClient",
+    "VppPreflightChokepointTest",
+    "VppPreflightInvariantTest",
+    "VppPreflightCallSiteTest",
+    "_Opened"
+   ],
+   "doc": "VPP admin-tools preflight on the secure_launcher route (ficha df93).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_w3_bug_verdicts.py",
+   "loc": 81,
+   "n_tests": 4,
+   "imports": [],
+   "classes": [
+    "Bug110CheckoutLoadTests",
+    "Bug111DeadConstantTests",
+    "Bug112InconclusoTests"
+   ],
+   "doc": "Versioned W3 verdicts for BUG-110 / 111 / 112 (W3-P2-02).",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_wait_for.py",
+   "loc": 827,
+   "n_tests": 34,
+   "imports": [
+    "loopback",
+    "server"
+   ],
+   "classes": [
+    "_FakeRuntime",
+    "_HttpClientNotPollingThenPlayers",
+    "WaitForTest",
+    "WaitForBug086EvidenceTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_wait_for_launch_and_contract.py",
+   "loc": 602,
+   "n_tests": 29,
+   "imports": [
+    "log_tail",
+    "server"
+   ],
+   "classes": [
+    "_FakeRuntime",
+    "PatternIsASubstringTest",
+    "LaunchScanReachesTheStartOfTheLaunchTest",
+    "LaunchScanIsBoundedTest",
+    "ScannedReportTest",
+    "ScanHelperTest",
+    "LookbackFromArgumentTest",
+    "_PlayerProbeRuntime"
+   ],
+   "doc": "wait_for(log_matches): the substring contract, the launch scan, the scan report.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_wait_for_marker.py",
+   "loc": 139,
+   "n_tests": 5,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "WaitForMarkerTest"
+   ],
+   "doc": "Exact log cursors for wait_for(log_matches).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_wait_for_requires_a_live_run.py",
+   "loc": 132,
+   "n_tests": 3,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "WaitForRequiresALiveRunTest"
+   ],
+   "doc": "wait_for(log_matches) must refuse when no run is live.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_wave_fixes_20260824.py",
+   "loc": 191,
+   "n_tests": 17,
+   "imports": [
+    "native_process_snapshot",
+    "server"
+   ],
+   "classes": [
+    "AnnotateEntitiesReliabilityTest",
+    "ObjectTargetArgsTest",
+    "CurrentLaunchLogsCrashExclusionTest",
+    "SamePathSubstTest",
+    "EntitiesQueryCompositeTest"
+   ],
+   "doc": "Coverage for the 2026-08-24 wave fixes: entities_query reliability annotation",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_weak_agent_consumer_ux.py",
+   "loc": 744,
+   "n_tests": 34,
+   "imports": [
+    "accredited_daemon_transport",
+    "agent_loop",
+    "inbox",
+    "server"
+   ],
+   "classes": [
+    "WeakAgentCatalogTest",
+    "WeakAgentWaitForTest",
+    "WeakAgentLeaseRequiredTest",
+    "WeakAgentReadyTest",
+    "WeakAgentWorldReadFailFastTest",
+    "WeakAgentClientModeEnqueueTest",
+    "WeakAgentLogsSinceTest",
+    "WeakAgentCaptureWebpTest"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_win32_fileinfo.py",
+   "loc": 91,
+   "n_tests": 3,
+   "imports": [],
+   "classes": [
+    "Win32FileStandardInfoTests"
+   ],
+   "doc": "",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_wire_coercion_census.py",
+   "loc": 826,
+   "n_tests": 27,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "ParamRecord",
+    "_WireIntMode",
+    "_WireStrMode",
+    "_MysteryType",
+    "AnnotationClassifierTests",
+    "RegistryCensusTests",
+    "WireCoercionTests"
+   ],
+   "doc": "Ratchet: a new wire-coercible tool parameter must be allowlisted.",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_world_spawn_flags.py",
+   "loc": 121,
+   "n_tests": 7,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "AllowedSpawnFlagsHelperTest",
+    "WorldSpawnFlagsToolTest"
+   ],
+   "doc": "world_spawn ECE flag mask: KEEPHEIGHT/NOLIFETIME stay excluded (fb-9195).",
+   "historical_name": false
+  },
+  {
+   "path": "tools/tests/test_world_spawn_ground_contract.py",
+   "loc": 58,
+   "n_tests": 2,
+   "imports": [],
+   "classes": [
+    "WorldSpawnGroundContractTest"
+   ],
+   "doc": "",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_x5_loopback.py",
+   "loc": 191,
+   "n_tests": 8,
+   "imports": [
+    "loopback"
+   ],
+   "classes": [
+    "X5LoopbackTest"
+   ],
+   "doc": "",
+   "historical_name": true
+  },
+  {
+   "path": "tools/tests/test_x5_tools.py",
+   "loc": 133,
+   "n_tests": 4,
+   "imports": [
+    "server"
+   ],
+   "classes": [
+    "X5ToolsTest"
+   ],
+   "doc": "",
+   "historical_name": true
+  }
+ ],
+ "churn_top": [
+  [
+   "tools/dayz_mcp/server.py",
+   115
+  ],
+  [
+   "tools/dayz_mcp/dayz_test_tool.py",
+   43
+  ],
+  [
+   "tools/dayz_mcp/loopback.py",
+   31
+  ],
+  [
+   "tools/README-mcp.md",
+   29
+  ],
+  [
+   "tools/dayz_mcp/process_lifecycle.py",
+   27
+  ],
+  [
+   "tools/tests/test_mcp_tools.py",
+   26
+  ],
+  [
+   "tools/tests/test_dayz_test_tool.py",
+   24
+  ],
+  [
+   "README.md",
+   23
+  ],
+  [
+   "addon/scripts/5_Mission/MCPClientBridge.c",
+   22
+  ],
+  [
+   "product-spec.md",
+   17
+  ],
+  [
+   "addon/scripts/5_Mission/MCPBridge.c",
+   16
+  ],
+  [
+   "tools/tests/test_loopback.py",
+   16
+  ],
+  [
+   "tools/tests/test_lifecycle_reconcile.py",
+   16
+  ],
+  [
+   "tools/dayz_mcp/daemon.py",
+   15
+  ],
+  [
+   "CHANGELOG.md",
+   15
+  ],
+  [
+   "tools/mcp_capture.py",
+   15
+  ],
+  [
+   "tools/dayz_mcp/control_client.py",
+   14
+  ],
+  [
+   "HANDOFF.md",
+   12
+  ],
+  [
+   "tools/dayz_mcp/steam_preflight.py",
+   12
+  ],
+  [
+   "tools/tests/test_weak_agent_consumer_ux.py",
+   12
+  ],
+  [
+   "tools/tests/test_wait_for.py",
+   12
+  ],
+  [
+   "tools/tests/test_daemon.py",
+   11
+  ],
+  [
+   "dayz-mcp-architecture.md",
+   11
+  ],
+  [
+   "tools/dayz_mcp/doctor.py",
+   10
+  ],
+  [
+   "tools/dayz_mcp/dayz_test_worker.py",
+   10
+  ],
+  [
+   "addon/scripts/5_Mission/MCPMessages.c",
+   10
+  ],
+  [
+   "tools/tests/test_task9_spawn_phase_markers.py",
+   10
+  ],
+  [
+   "tools/tests/test_process_lifecycle.py",
+   10
+  ],
+  [
+   "tools/dayz_mcp/core.py",
+   10
+  ],
+  [
+   "QUICKSTART.md",
+   9
+  ],
+  [
+   "tools/dayz_mcp/session_coordination.py",
+   9
+  ],
+  [
+   "tools/tests/test_server_response_truth.py",
+   9
+  ],
+  [
+   "tools/tests/test_dayz_test_worker.py",
+   8
+  ],
+  [
+   "tools/tests/test_restore_gameplay_contract.py",
+   8
+  ],
+  [
+   "tools/tests/test_vehicle_trace_contract.py",
+   8
+  ],
+  [
+   "tools/dayz_mcp/vehicle_trace.py",
+   8
+  ],
+  [
+   "tools/tests/test_instance_fence.py",
+   8
+  ],
+  [
+   "tools/dayz_mcp/client_steam_bootstrap.py",
+   7
+  ],
+  [
+   "tools/tests/test_client_mode.py",
+   7
+  ],
+  [
+   "addon/scripts/4_World/MCP_CarScript.c",
+   7
+  ]
+ ],
+ "fix_top": [
+  [
+   "tools/dayz_mcp/server.py",
+   50
+  ],
+  [
+   "tools/dayz_mcp/dayz_test_tool.py",
+   13
+  ],
+  [
+   "tools/dayz_mcp/process_lifecycle.py",
+   9
+  ],
+  [
+   "CHANGELOG.md",
+   8
+  ],
+  [
+   "tools/mcp_capture.py",
+   8
+  ],
+  [
+   "tools/dayz_mcp/control_client.py",
+   7
+  ],
+  [
+   "tools/README-mcp.md",
+   7
+  ],
+  [
+   "tools/tests/test_mcp_tools.py",
+   7
+  ],
+  [
+   "tools/dayz_mcp/vehicle_trace.py",
+   7
+  ],
+  [
+   "tools/dayz_mcp/doctor.py",
+   6
+  ],
+  [
+   "tools/dayz_mcp/loopback.py",
+   6
+  ],
+  [
+   "addon/scripts/4_World/MCP_CarScript.c",
+   6
+  ],
+  [
+   "addon/scripts/5_Mission/MCPClientBridge.c",
+   6
+  ],
+  [
+   "tools/tests/test_server_response_truth.py",
+   6
+  ],
+  [
+   "tools/tests/test_vehicle_trace.py",
+   6
+  ],
+  [
+   "tools/tests/test_weak_agent_consumer_ux.py",
+   5
+  ],
+  [
+   "docs/plan-311d.md",
+   5
+  ],
+  [
+   "tools/dayz_mcp/client_steam_bootstrap.py",
+   4
+  ],
+  [
+   "tools/dayz_mcp/daemon.py",
+   4
+  ],
+  [
+   "tools/dayz_mcp/steam_preflight.py",
+   4
+  ],
+  [
+   "tools/dayz_mcp/dayz_test_worker.py",
+   4
+  ],
+  [
+   "tools/tests/test_dayz_test_tool.py",
+   4
+  ],
+  [
+   "tools/dayz_mcp/agent_loop.py",
+   4
+  ],
+  [
+   "product-spec.md",
+   4
+  ],
+  [
+   "tools/tests/test_h14_stale_policy.py",
+   4
+  ]
+ ],
+ "commit_kinds": [
+  [
+   "other",
+   102
+  ],
+  [
+   "fix",
+   88
+  ],
+  [
+   "test",
+   26
+  ],
+  [
+   "the",
+   20
+  ],
+  [
+   "docs",
+   18
+  ],
+  [
+   "server",
+   14
+  ],
+  [
+   "feat",
+   8
+  ],
+  [
+   "launcher",
+   7
+  ],
+  [
+   "lifecycle",
+   7
+  ],
+  [
+   "a",
+   5
+  ],
+  [
+   "storage",
+   4
+  ],
+  [
+   "tests",
+   3
+  ]
+ ],
+ "n_commits": 332,
+ "first_commit": [
+  "2026-08-16"
+ ]
+}
