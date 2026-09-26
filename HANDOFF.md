@@ -58,7 +58,7 @@ El buzÃ³n no se sustituye por Issues GitHub. PR #26 es leftover `546d` (W1 no 
 
 ## Superficie (no recontar a ciegas)
 
-README / architecture / `build_app`: **62 tools** (+ `exec_enforce` opt-in). `CLAUDE.md` local alineado a 62 (sigue untracked). `CHANGELOG` [Unreleased] vacÃ­o; la superficie vive en [1.2]. Group G en `product-spec.md` sigue â“ â€” parked, no es un plan abierto.
+README / architecture / `build_app`: **63 tools** (+ `exec_enforce` opt-in). `CLAUDE.md` local alineado a 63 (sigue untracked). `CHANGELOG` [Unreleased] vacÃ­o; la superficie vive en [1.2]. Group G en `product-spec.md` sigue â“ â€” parked, no es un plan abierto.
 
 ## Gotchas que siguen vigentes
 
