@@ -78,13 +78,11 @@ def location(path):
     return f'`{path}`' + ('' if path.exists() else ' (ausente en este checkout)')
 
 
-# Preserve the development map's sibling mod anchor; clones fall back to addon/.
+# The census reads git's addon/, which is what pack-addon.ps1 packs. The
+# sibling DayZ_MCP tree is not kept in sync with it (fb-20260925-233932-aa11),
+# so it no longer anchors the census.
 mod = repo / 'addon'
-if repo.name.endswith('_dev'):
-    sibling = repo.with_name(repo.name[:-4])
-    if sibling.is_dir():
-        mod = sibling
-scripts = [(p, s) for p, s in files(mod / 'scripts', recursive=True)
+scripts =[(p, s) for p, s in files(mod / 'scripts', recursive=True)
            if p.suffix.lower() == '.c']
 scripts.sort(key=lambda item: order(item[0]))
 
