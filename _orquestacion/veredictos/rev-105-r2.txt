@@ -1,0 +1,9 @@
+APPROVE. No hay hallazgos bloqueantes.
+
+- `probe_budget` queda limitado al menor entre 1 s y el presupuesto restante; con presupuesto cero omite `/status` y `/enqueue` devuelve `daemon_unavailable` respetando el deadline ([server.py](<C:/Users/guill/AppData/Local/hermes/cache/scratch/r2-lane-105/tools/dayz_mcp/server.py:2284>)).
+- Los caminos normales `not_ready` y `ready → enqueue` siguen operativos. La lectura adicional de `_time_fn()` solo ocurre para world-read y en producción es `time.monotonic`.
+- Repro base: falla con `1.0 > 0.4`. En `da22937`, el test BUG-037 pasa para `0.4` y `2.0`.
+- El único archivo de producción modificado es `server.py` y `git diff --check` está limpio. El `--stat` completo también incluye el informe no productivo, pese a la redacción literal del criterio.
+- Limitación ambiental: la corrida de 9 dio 8 tests correctos y un error previo al test porque el sandbox impide `TemporaryDirectory`; `test_mcp_host_timeouts.py` quedó igualmente inconcluso por esa restricción, no por fallos funcionales.
+
+VEREDICTO: {"ticket":"105","verdict":"APPROVE","reasons":["El repro BUG-037 falla en el blob base con 1.0 s para un timeout de 0.4 s y pasa en da22937 para 0.4 s y 2.0 s","El probe queda acotado al presupuesto restante, se omite correctamente cuando este es cero y el camino de enqueue conserva el deadline absoluto y daemon_unavailable","Los caminos normales not_ready y ready-a-enqueue permanecen operativos y la lectura adicional de _time_fn solo afecta a world-read","No hay otros cambios de produccion y git diff --check esta limpio"],"blocking_findings":[],"nitpicks":["El stat completo incluye tambien _orquestacion/lane-105-claude-informe.md; solo el diff de produccion queda limitado a tools/dayz_mcp/server.py","El sandbox de solo lectura impidio confirmar literalmente las suites completas porque TemporaryDirectory no pudo crear archivos; el test focal BUG-037 si paso"]}
