@@ -3,12 +3,12 @@
 <!-- LIVE-STATE:START -->
 # DayZ-MCP - Estado vivo - 2026-09-26 (Madrid)
 
-- **main** = `9af5cbfc31f3a1cfffc7db0e238dc2682b8c7214` (#94 MERGED squash; arg-contract hash fail-closed / 0878 detectability).
-- **#94 MERGED** tip pre-squash `01f1e2c` → main `9af5cbf`; Sol APROBAR r3 + Auditor LIMPIO. Ticket `fb-20260924-235528-0878` stays **OPEN** until Workshop re-pack OT (HOLD).
-- Prior: #92 `72f6354` wave1 resolve `0c27`+`b1a7`+`99db` CLOSED; `e7ef` deferred; unresolved mailbox **39**.
-- Checkout: ff `origin/main` when clean; do **not** reset --hard. Canonical tip is `9af5cbf`.
+- **main** = `e03282b30e17a9e1ce2130561d193291eb72ab77` (#95 MERGED squash; foreign_ports DayZ-related default / 1432).
+- **#95 MERGED** tip pre-squash `0515ad9` → main `e03282b`; Auditor LIMPIO. Ticket `fb-20260917-092743-1432` stays **OPEN**.
+- Prior: #94 `9af5cbf` arg-contract hash fail-closed / 0878 detectability; #92 `72f6354` wave1 resolve `0c27`+`b1a7`+`99db` CLOSED; `e7ef` deferred.
+- Checkout: ff `origin/main` when clean; do **not** reset --hard. Canonical tip is `e03282b`.
 - Abierto: triaje buzón continúa (FN/Flash/script; **NO Sol** en tickets). 0 PRs abiertos.
-- HOLD dueño: Workshop re-pack / heater / GATES / e7ef — no tocar desde Orq sin OT/GO.
+- HOLD dueño: Workshop re-pack / heater / GATES / e7ef / 0878 — no tocar desde Orq sin OT/GO. Ticket `fb-20260924-235528-0878` stays **OPEN**.
 <!-- LIVE-STATE:END -->
 
 
