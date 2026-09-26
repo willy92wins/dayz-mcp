@@ -18,7 +18,7 @@ from unittest.mock import PropertyMock, patch
 
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from dayz_mcp import server
+from dayz_mcp import loopback, server
 from dayz_mcp.server import ServerConfig, build_app
 
 NOT_HANDLED: dict[str, Any] = {
@@ -144,7 +144,10 @@ class BridgeErrorDiagnosticsTest(unittest.TestCase):
 
 
 def _fake_state(result: dict[str, Any]) -> SimpleNamespace:
+    # e72ff5b: call_bridge reads Runtime.status() (state.status_snapshot())
+    # before enqueue for the world-read fail-fast gate; give it a real shape.
     return SimpleNamespace(
+        status_snapshot=loopback.ServerState("k").status_snapshot,
         enqueue_command=lambda *args, **kwargs: (200, {"id": 41}),
         take_result=lambda command_id, remove=False: dict(result),
         abandon_command=lambda *args, **kwargs: None,

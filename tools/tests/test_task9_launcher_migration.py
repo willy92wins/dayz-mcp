@@ -305,7 +305,13 @@ class LauncherMigrationContainmentTest(unittest.TestCase):
     @requires_installed_launcher
     def test_registry_contains_native_launcher_and_documentation_exposes_no_legacy_host(self) -> None:
         registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
-        documentation = README.read_text(encoding="utf-8").casefold()
+        # cfd73cb names the MCP installer (install-mcp.ps1) in the stdio plan B
+        # section. That is the client installer, not a legacy launcher host.
+        documentation = (
+            README.read_text(encoding="utf-8")
+            .casefold()
+            .replace("install-mcp.ps1", "install-mcp")
+        )
         forbidden = (
             "." + "ps1",
             "remote" + "signed",

@@ -759,7 +759,9 @@ class UiDialogClientRuntimeTest(unittest.IsolatedAsyncioTestCase):
         runtime._call = lambda *_a, **_k: (409, {"error": "lease_expired"})
         with self.assertRaises(server.ToolError) as ctx:
             await runtime.enqueue_bridge("ui_dialog", {"kind": "acknowledge"}, "client", 15.0)
-        self.assertEqual(str(ctx.exception), "lease_expired")
+        # 151f5f2: lease_expired carries the session_acquire_wait recipe.
+        self.assertEqual(str(ctx.exception), server.LEASE_EXPIRED_RECIPE)
+        self.assertTrue(str(ctx.exception).startswith("lease_expired"))
         self.assertIsNone(runtime.active_lease_token)
 
 

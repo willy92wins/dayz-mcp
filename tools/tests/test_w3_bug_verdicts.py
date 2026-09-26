@@ -36,7 +36,13 @@ def _checkout_mcp_capture():
     if spec is None or spec.loader is None:
         raise AssertionError(f"cannot load checkout mcp_capture: {_CAPTURE_PY}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # e62da64: mcp_capture now defines dataclasses, which resolve their
+    # module through sys.modules while the class body executes.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
     return module
 
 
