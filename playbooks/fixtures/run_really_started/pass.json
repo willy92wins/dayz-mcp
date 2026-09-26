@@ -93,7 +93,13 @@
         "version_detail": "version accepted",
         "binding_state": null,
         "instance_prefix": null,
-        "bound_last_poll_age_s": null
+        "bound_last_poll_age_s": null,
+        "capabilities": {
+          "state": "match",
+          "reason": "ok",
+          "expected_arg_contract_hash": "3c77a99c95fd05a4",
+          "announced_arg_contract_hash": "3c77a99c95fd05a4"
+        }
       },
       "client_peer": {
         "last_poll_age_s": 0.3,

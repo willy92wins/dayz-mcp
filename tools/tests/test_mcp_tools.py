@@ -15,10 +15,22 @@ from pathlib import Path
 from typing import Any, Callable
 from unittest.mock import AsyncMock, patch
 
+import sys
+
+# Make tools/ importable whether run via discover or by module name.
+_TOOLS_DIR = Path(__file__).resolve().parents[1]
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
 from dayz_mcp import core
 from dayz_mcp import server as server_module
 from dayz_mcp.server import EXPECTED_BRIDGE_VERSION, ServerConfig, Runtime, build_app
-from tests.fence_helpers import INST_CLIENT, INST_SERVER, bind_both_peers
+from tests.fence_helpers import (
+    INST_CLIENT,
+    INST_SERVER,
+    bind_both_peers,
+    poll_census_query,
+)
 
 
 _VALID_PEER_VERSION = f"{EXPECTED_BRIDGE_VERSION}~1.29.0"
@@ -106,6 +118,7 @@ class FakePeer:
         while not self.stop_event.is_set():
             query = {"peer": self.peer}
             query["inst"] = INST_SERVER if self.peer == "server" else INST_CLIENT
+            query.update(poll_census_query(self.peer))
             if self.version is not None:
                 query["ver"] = self.version
             try:

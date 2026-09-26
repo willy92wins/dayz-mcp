@@ -22,8 +22,13 @@ from dayz_mcp.server import ServerConfig, ToolError
 from _broker import e2e_daemon as broker_e2e
 from _session_coordination import e2e_agent_sessions as binary_e2e
 from tests.test_daemon import _free_port, _http
-from tests.test_client_mode import _fixture_client_runtime
-from tests.fence_helpers import INST_CLIENT, INST_SERVER, bind_both_peers
+from tests.test_client_mode import _VALID_PEER_VERSION, _fixture_client_runtime
+from tests.fence_helpers import (
+    INST_CLIENT,
+    INST_SERVER,
+    bind_both_peers,
+    poll_census_query,
+)
 
 
 class IntegrationDaemon:
@@ -123,6 +128,8 @@ class GamePeer:
             query={
                 "peer": self.peer,
                 "inst": INST_SERVER if self.peer == "server" else INST_CLIENT,
+                "ver": _VALID_PEER_VERSION,
+                **poll_census_query(self.peer),
             },
         )
         new_items: list[dict[str, object]] = []
@@ -265,8 +272,8 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
             runtime_a.call_bridge("query_player_state", {}, "server", 2.0),
             runtime_b.call_bridge("query_player_state", {}, "server", 2.0),
         )
-        self.assertTrue(read_a["ok"])
-        self.assertTrue(read_b["ok"])
+        self.assertTrue(read_a["ok"], read_a)
+        self.assertTrue(read_b["ok"], read_b)
 
         before_reject = list(server_peer.command_names())
         with self.assertRaisesRegex(ToolError, "lease_required"):
@@ -408,6 +415,8 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
     async def test_acquire_adopts_delivers_then_fifo_wait_adopts(self) -> None:
         runtime_a = self.client("codex")
         runtime_b = self.client("claude")
+        # camera_get is a world read: it fails fast unless BOTH peers poll.
+        self.peer("server")
         client_peer = self.peer("client")
 
         acquired_a = await runtime_a.session_acquire("drive")

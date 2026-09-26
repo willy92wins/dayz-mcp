@@ -168,6 +168,35 @@ def _seed_guard_snapshots(lifecycle: object, processes: list[object]) -> None:
         )
 
 
+def poll_census_query(peer: str) -> dict[str, str]:
+    """``caps=``/``ach=`` a real Enforce bridge sends on every GET /poll.
+
+    MCPBridge.c announces ``caps=`` + ``ach=``; MCPClientBridge.c only
+    ``caps=``. Fake pollers must do the same or the 0878 gate in
+    ``compute_bridge_ready`` stays ``capabilities_unknown`` forever (#102).
+    """
+    from dayz_mcp import server
+
+    query = {"caps": ",".join(sorted(server._BRIDGE_COMMAND_TOOLS[peer]))}
+    if peer == "server":
+        query["ach"] = server.EXPECTED_SERVER_ARG_CONTRACT_HASH
+    return query
+
+
+def announced_capabilities(peer: str) -> dict:
+    """The ``capabilities`` block loopback publishes after ``poll_census_query``.
+
+    For fakes that hand-build ``status_snapshot`` peers instead of polling.
+    """
+    query = poll_census_query(peer)
+    return {
+        "state": "announced",
+        "reason": "ok",
+        "announced_commands": query["caps"].split(","),
+        "announced_arg_contract_hash": query.get("ach"),
+    }
+
+
 def accredited_poll(
     state: object,
     peer: str,
