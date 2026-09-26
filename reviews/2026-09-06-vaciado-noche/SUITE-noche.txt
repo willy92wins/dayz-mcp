@@ -1,0 +1,154 @@
+start 17:24:53 HEAD 0873d53
+.....Executing <Task finished name='Task-2' coro=<ActionUseAppToolTest.test_app_tool_registered_and_forwards() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_action_use.py:64> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.103 seconds
+...........................Executing <Task finished name='Task-34' coro=<ToolDescriptionUnitsTest.test_numeric_parameters_name_units_and_flag_semantics() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_bad_args_messages.py:142> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.102 seconds
+............................................................Executing <Task pending name='Task-54' coro=<DayzTestRunWaitForBoxTest.test_wait_then_launch_when_box_already_free() running at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_box_occupancy.py:1973> wait_for=<Task cancelling name='Task-55' coro=<_heartbeat_box_claim() running at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\server.py:2860> cb=[Task.task_wakeup()] created at C:\Python314\Lib\asyncio\tasks.py:395> cb=[_run_until_complete_cb() at C:\Python314\Lib\asyncio\base_events.py:181] created at C:\Python314\Lib\asyncio\runners.py:109> took 0.134 seconds
+............................................................................................................................................................................................................s....................................................................................Executing <Task pending name='Task-115' coro=<ClientModeTest.test_bridge_status_is_proxied() running at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_client_mode.py:693> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\Python314\Lib\asyncio\futures.py:393, Task.task_wakeup()] created at C:\Python314\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Python314\Lib\asyncio\base_events.py:181] created at C:\Python314\Lib\asyncio\runners.py:109> took 0.104 seconds
+.Executing <Task pending name='Task-120' coro=<ClientModeTest.test_build_app_client_mode_routes_tools_through_daemon() running at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_client_mode.py:779> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\Python314\Lib\asyncio\futures.py:393, Task.task_wakeup()] created at C:\Python314\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Python314\Lib\asyncio\base_events.py:181] created at C:\Python314\Lib\asyncio\runners.py:109> took 0.171 seconds
+.Executing <Task pending name='Task-125' coro=<ClientModeTest.test_business_error_is_tool_error() running at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_client_mode.py:705> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\Python314\Lib\asyncio\futures.py:393, Task.task_wakeup()] created at C:\Python314\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Python314\Lib\asyncio\base_events.py:181] created at C:\Python314\Lib\asyncio\runners.py:109> took 0.101 seconds
+...Executing <Task pending name='Task-140' coro=<ClientModeTest.test_client_call_bridge_round_trip() running at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_client_mode.py:205> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\Python314\Lib\asyncio\futures.py:393, Task.task_wakeup()] created at C:\Python314\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Python314\Lib\asyncio\base_events.py:181] created at C:\Python314\Lib\asyncio\runners.py:109> took 0.105 seconds
+..Executing <Task pending name='Task-149' coro=<ClientModeTest.test_client_mode_session_tool_enables_existing_mutation() running at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_client_mode.py:799> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\Python314\Lib\asyncio\futures.py:393, Task.task_wakeup()] created at C:\Python314\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Python314\Lib\asyncio\base_events.py:181] created at C:\Python314\Lib\asyncio\runners.py:109> took 0.127 seconds
+......Executing <Task finished name='Task-180' coro=<ClientModeTest.test_logs_since_rejects_bad_input_and_reports_no_active_run() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_client_mode.py:947> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.190 seconds
+.Executing <Task finished name='Task-185' coro=<ClientModeTest.test_logs_since_streams_only_new_lines_and_needs_no_lease() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_client_mode.py:892> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.184 seconds
+..Executing <Task pending name='Task-195' coro=<ClientModeTest.test_malformed_status_never_replaces_the_timeout_error() running at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_client_mode.py:761> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\Python314\Lib\asyncio\futures.py:393, Task.task_wakeup()] created at C:\Python314\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Python314\Lib\asyncio\base_events.py:181] created at C:\Python314\Lib\asyncio\runners.py:109> took 0.105 seconds
+.....Executing <Task pending name='Task-219' coro=<ClientModeTest.test_pure_read_of_all_players_needs_no_lease_while_mutations_do() running at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_client_mode.py:847> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\Python314\Lib\asyncio\futures.py:393, Task.task_wakeup()] created at C:\Python314\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Python314\Lib\asyncio\base_events.py:181] created at C:\Python314\Lib\asyncio\runners.py:109> took 0.185 seconds
+.....Executing <Task pending name='Task-245' coro=<ClientModeTest.test_timeout_degrades_when_peer_status_is_unavailable() running at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_client_mode.py:735> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\Python314\Lib\asyncio\futures.py:393, Task.task_wakeup()] created at C:\Python314\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Python314\Lib\asyncio\base_events.py:181] created at C:\Python314\Lib\asyncio\runners.py:109> took 0.119 seconds
+.Executing <Task pending name='Task-250' coro=<ClientModeTest.test_timeout_includes_liveness() running at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_client_mode.py:715> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\Python314\Lib\asyncio\futures.py:393, Task.task_wakeup()] created at C:\Python314\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Python314\Lib\asyncio\base_events.py:181] created at C:\Python314\Lib\asyncio\runners.py:109> took 0.145 seconds
+..Executing <Task pending name='Task-259' coro=<ClientModeTest.test_two_clients_one_daemon_both_get_results() running at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_client_mode.py:667> wait_for=<_GatheringFuture pending cb=[Task.task_wakeup()] created at C:\Python314\Lib\asyncio\tasks.py:749> cb=[_run_until_complete_cb() at C:\Python314\Lib\asyncio\base_events.py:181] created at C:\Python314\Lib\asyncio\runners.py:109> took 0.147 seconds
+.Executing <Task pending name='Task-266' coro=<ClientModeTest.test_version_blocked_surfaces_tool_error() running at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_client_mode.py:680> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\Python314\Lib\asyncio\futures.py:393, Task.task_wakeup()] created at C:\Python314\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Python314\Lib\asyncio\base_events.py:181] created at C:\Python314\Lib\asyncio\runners.py:109> took 0.103 seconds
+...........usage: python.exe -m unittest [-h] [--port PORT] --keyfile KEYFILE
+                              [--expected-game-version EXPECTED_GAME_VERSION]
+                              [--require-version]
+                              [--idle-timeout IDLE_TIMEOUT]
+                              [--enable-exec-enforce]
+                              [--exec-allowlist EXEC_ALLOWLIST]
+                              [--exec-audit-path EXEC_AUDIT_PATH]
+                              [--client-platform {claude,codex,unknown,grok}]
+                              [--task-label TASK_LABEL]
+                              [--no-daemon-autospawn] [--client | --daemon |
+                              --embedded]
+python.exe -m unittest: error: the following arguments are required: --keyfile
+.........................................................................................................................................................................................................................................................................................................................................................................................ss..........................................................................................................Executing <Task finished name='Task-983' coro=<EntitiesQueryCargoWireTest.test_old_bridge_rows_reach_the_caller_as_null() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_entities_query_cargo.py:187> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.116 seconds
+.......................................................................................................................usage: python.exe -m unittest [-h] [--port PORT] [--keyfile KEYFILE]
+                              [--server-profiles SERVER_PROFILES]
+                              [--client-profiles CLIENT_PROFILES]
+                              [--mission-path MISSION_PATH]
+                              [--expected-game-version EXPECTED_GAME_VERSION]
+                              [--idle-timeout-seconds IDLE_TIMEOUT_SECONDS]
+                              [--allow-legacy] [--skip-knowledge-pack]
+                              [--register | --pin-clis]
+                              [--claude-exe CLAUDE_EXE]
+                              [--codex-exe CODEX_EXE]
+python.exe -m unittest: error: unrecognized arguments: --python C:\evil.exe
+........usage: python.exe -m unittest [-h] [--port PORT] [--keyfile KEYFILE]
+                              [--server-profiles SERVER_PROFILES]
+                              [--client-profiles CLIENT_PROFILES]
+                              [--mission-path MISSION_PATH]
+                              [--expected-game-version EXPECTED_GAME_VERSION]
+                              [--idle-timeout-seconds IDLE_TIMEOUT_SECONDS]
+                              [--allow-legacy] [--skip-knowledge-pack]
+                              [--register | --pin-clis]
+                              [--claude-exe CLAUDE_EXE]
+                              [--codex-exe CODEX_EXE]
+python.exe -m unittest: error: --claude-exe and --codex-exe require --pin-clis
+usage: python.exe -m unittest [-h] [--port PORT] [--keyfile KEYFILE]
+                              [--server-profiles SERVER_PROFILES]
+                              [--client-profiles CLIENT_PROFILES]
+                              [--mission-path MISSION_PATH]
+                              [--expected-game-version EXPECTED_GAME_VERSION]
+                              [--idle-timeout-seconds IDLE_TIMEOUT_SECONDS]
+                              [--allow-legacy] [--skip-knowledge-pack]
+                              [--register | --pin-clis]
+                              [--claude-exe CLAUDE_EXE]
+                              [--codex-exe CODEX_EXE]
+python.exe -m unittest: error: --claude-exe and --codex-exe require --pin-clis
+usage: python.exe -m unittest [-h] [--port PORT] [--keyfile KEYFILE]
+                              [--server-profiles SERVER_PROFILES]
+                              [--client-profiles CLIENT_PROFILES]
+                              [--mission-path MISSION_PATH]
+                              [--expected-game-version EXPECTED_GAME_VERSION]
+                              [--idle-timeout-seconds IDLE_TIMEOUT_SECONDS]
+                              [--allow-legacy] [--skip-knowledge-pack]
+                              [--register | --pin-clis]
+                              [--claude-exe CLAUDE_EXE]
+                              [--codex-exe CODEX_EXE]
+python.exe -m unittest: error: --claude-exe and --codex-exe require --pin-clis
+...usage: python.exe -m unittest [-h] [--port PORT] [--keyfile KEYFILE]
+                              [--server-profiles SERVER_PROFILES]
+                              [--client-profiles CLIENT_PROFILES]
+                              [--mission-path MISSION_PATH]
+                              [--expected-game-version EXPECTED_GAME_VERSION]
+                              [--idle-timeout-seconds IDLE_TIMEOUT_SECONDS]
+                              [--allow-legacy] [--skip-knowledge-pack]
+                              [--register | --pin-clis]
+                              [--claude-exe CLAUDE_EXE]
+                              [--codex-exe CODEX_EXE]
+python.exe -m unittest: error: argument --register: not allowed with argument --pin-clis
+..........................................................................................................Executing <Task finished name='Task-1030' coro=<KeyPressFastMCPContractTest.test_public_tool_rejects_bool_and_negative_dik_before_bridge() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_key_press.py:78> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.124 seconds
+.........................................................interactive_tty_required
+confirmation_mismatch
+....usage: python.exe -m unittest start [-h] --request-stdin
+python.exe -m unittest start: error: the following arguments are required: --request-stdin
+......................................................................................Executing <Task finished name='Task-1235' coro=<LogsSinceMarkerRoundtripTest.asyncSetUp() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_logs_since_marker_roundtrip.py:30> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.130 seconds
+..............................................................................Processing request of type ListToolsRequest
+.Executing <Task finished name='Task-1260' coro=<LoteMProductsTest.asyncSetUp() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_lote_m_products.py:29> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.136 seconds
+.Processing request of type CallToolRequest
+......Executing <Task finished name='Task-1295' coro=<LoteMProductsTest.asyncSetUp() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_lote_m_products.py:29> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.117 seconds
+.....Executing <Task finished name='Task-1320' coro=<LoteMProductsTest.asyncSetUp() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_lote_m_products.py:29> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.139 seconds
+.....Executing <Task finished name='Task-1331' coro=<EntitiesQueryWireTest.test_empty_players_probe_names_reason() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_lote_v_products.py:60> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.113 seconds
+..Executing <Task finished name='Task-1336' coro=<WaitForWireTest.test_rejects_601_via_public_tool() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_lote_v_products.py:84> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.106 seconds
+.....................................s........................................Executing <Task finished name='Task-1355' coro=<BridgeCapabilityComparisonTest.asyncSetUp() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_mcp_tools.py:1099> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.123 seconds
+...............Executing <Task finished name='Task-1438' coro=<MCPToolsTest.test_dayz_test_untyped_failure_carries_the_exception_type() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_mcp_tools.py:373> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.126 seconds
+..............Executing <Task pending name='Task-1523' coro=<MCPToolsTest.test_version_state_legacy_and_legacy_blocked() running at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_mcp_tools.py:547> wait_for=<Future pending cb=[Task.task_wakeup()] created at C:\Python314\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Python314\Lib\asyncio\base_events.py:181] created at C:\Python314\Lib\asyncio\runners.py:109> took 0.119 seconds
+..Executing <Task finished name='Task-1543' coro=<UiPublicSurfaceTest.test_existing_path_and_button_guards_still_reject() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_mcp_tools.py:1063> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.174 seconds
+.Executing <Task finished name='Task-1548' coro=<UiPublicSurfaceTest.test_fail_closed_rejects_before_enqueue() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_mcp_tools.py:1019> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.657 seconds
+..Executing <Task finished name='Task-1558' coro=<UiPublicSurfaceTest.test_registered_schema_declares_root_on_all_four_ui_tools() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_mcp_tools.py:972> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.133 seconds
+.Executing <Task finished name='Task-1563' coro=<UiPublicSurfaceTest.test_root_does_not_travel_when_omitted() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_mcp_tools.py:995> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.330 seconds
+.Executing <Task finished name='Task-1568' coro=<UiPublicSurfaceTest.test_root_reaches_the_bridge_when_the_caller_sends_it() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_mcp_tools.py:987> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.337 seconds
+..Executing <Task finished name='Task-1578' coro=<UiPublicSurfaceTest.test_ui_click_forwards_complete_mode_and_true_bubble() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_mcp_tools.py:1010> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.110 seconds
+.................................................................................................................................................................................................Exception in thread Thread-2 (serve_forever):
+...s......................step S1 field ok: unknown operator 'nope'
+.usage: python.exe -m unittest [-h] (--fixtures PATH | --live) [--param K=V]
+                              [--json-out FILE]
+                              playbook
+python.exe -m unittest: error: the following arguments are required: playbook
+................................Executing <Task finished name='Task-1876' coro=<PlaybookRunExecuteTest.test_happy_path_uses_registered_tools_and_releases_lock() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_playbook_tool.py:408> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.107 seconds
+...................................................................................................................................................................................................................................................................................................s.................................................................................................................................................................Executing <Task finished name='Task-2030' coro=<WorldTimeSetResponseTest.test_matching_multiplier_is_confirmed_when_readback_exists() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_server_response_truth.py:174> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.197 seconds
+.Executing <Task finished name='Task-2035' coro=<WorldTimeSetResponseTest.test_requested_multiplier_without_readback_is_unconfirmed() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_server_response_truth.py:201> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.155 seconds
+..Executing <Task finished name='Task-2047' coro=<ClientAcquireWaitTests.test_fastmcp_schema_hides_context_and_registers_cancel() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_session_acquire_wait.py:541> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.108 seconds
+..............................................................................................................................................................................................................................................................F...F.....Executing <Task finished name='Task-2182' coro=<TelemetryReadNamesTheBadFieldTest.asyncSetUp() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_telemetry_read_names_the_bad_field.py:33> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.118 seconds
+....................................................................................................Processing request of type CallToolRequest
+.Processing request of type CallToolRequest
+.Processing request of type CallToolRequest
+................................................................................Executing <Task finished name='Task-2306' coro=<WaitForBug086EvidenceTest.test_the_public_tool_default_also_sees_the_earlier_response() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_wait_for.py:426> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.120 seconds
+...................................................................Executing <Task finished name='Task-2529' coro=<WeakAgentCaptureWebpTest.test_capture_webp_uses_webp_mime() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_weak_agent_consumer_ux.py:462> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 0.100 seconds
+..................................Executing <Task pending name='Task-2582' coro=<X5ToolsTest.test_exec_audit_entries_include_main_fn_and_bom_allowlist_loads() running at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_x5_tools.py:85> wait_for=<Future pending cb=[Task.task_wakeup()] created at C:\Python314\Lib\asyncio\base_events.py:459> cb=[_run_until_complete_cb() at C:\Python314\Lib\asyncio\base_events.py:181] created at C:\Python314\Lib\asyncio\runners.py:109> took 0.115 seconds
+....
+======================================================================
+FAIL: test_full_source_hash_is_frozen (tests.test_task9_spawn_phase_markers.Task9SpawnPhaseMarkerTests.test_full_source_hash_is_frozen)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_task9_spawn_phase_markers.py", line 192, in test_full_source_hash_is_frozen
+    self.assertEqual(hashlib.sha256(self.bridge_bytes).hexdigest().upper(), BRIDGE_SHA256)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: '3A86E09D9B9694BFB06BDFE8B9DCCE950920F93771FBC3C01C900D9421537D8D' != '6A7AC297E4F48C1E186C5C83E8D7177CFD9825686E6193F356ADC22780E7361C'
+- 3A86E09D9B9694BFB06BDFE8B9DCCE950920F93771FBC3C01C900D9421537D8D
++ 6A7AC297E4F48C1E186C5C83E8D7177CFD9825686E6193F356ADC22780E7361C
+
+
+======================================================================
+FAIL: test_removing_only_marker_lines_restores_frozen_source_hash (tests.test_task9_spawn_phase_markers.Task9SpawnPhaseMarkerTests.test_removing_only_marker_lines_restores_frozen_source_hash)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_task9_spawn_phase_markers.py", line 245, in test_removing_only_marker_lines_restores_frozen_source_hash
+    self.assertEqual(hashlib.sha256(stripped).hexdigest().upper(), BASE_BRIDGE_SHA256)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: '257E5AF3877C685411A6B5D4D7FFEFD7E216935F4FFD03BEC7C8D001002D7370' != 'FBA9515D11BA135876E2D11329F8C807777E9CDD508AE32CE1BF977C2981761F'
+- 257E5AF3877C685411A6B5D4D7FFEFD7E216935F4FFD03BEC7C8D001002D7370
++ FBA9515D11BA135876E2D11329F8C807777E9CDD508AE32CE1BF977C2981761F
+
+
+----------------------------------------------------------------------
+Ran 2763 tests in 287.269s
+
+FAILED (failures=2, skipped=6)
+end 17:29:42 rc=1

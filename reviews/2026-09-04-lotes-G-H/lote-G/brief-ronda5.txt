@@ -1,0 +1,144 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+RONDA 5, y la de cierre. El sustrato de la ronda 3 y la atribución por binding de la ronda 4
+aguantaron las dos revisiones. Lo que queda es la **coherencia de la caja**, más tres arreglos
+acotados.
+
+===============================================================================
+§0. EL PRODUCTO
+===============================================================================
+
+  P1. **La actividad no se cachea.** Se cachea lo caro —sondas de proceso y decodificación de
+      argv— y `activity_state` / `last_activity_age_s` se recalculan en CADA lectura desde la
+      memoria viva. Ninguna respuesta puede llevar una actividad que ya no es cierta, ni
+      siquiera la de quien perdió una carrera contra una mutación.
+  P2. **El contador de revisión se incrementa en TODA mutación que cambie la caja**, no sólo
+      en las de actividad: alta del provisional en `STARTING`, `stop_run`, `adopt_run`,
+      `begin_release_owner`, `admin_reconcile`, `repair_recovery_fault`. El reaper ya lo hace
+      y tiene test propio: es la mitad que falta del par.
+  P3. **Sin binding acreditado no se acredita frescura a nadie**, y tampoco se deja envejecer:
+      se publica `unknown`.
+  P4. **La frescura no retrocede.** Una escritura tardía con un epoch más viejo no puede
+      sustituir a una más reciente.
+
+Sigue en pie todo lo anterior: actividad en memoria por `(daemon_generation, run_id)`; el
+audit registra pero **no manda**; sticky que una escritura buena no limpia; atribución por el
+`run_id` del binding; la basal sella el proceso que este daemon lanzó; nada de actividad en un
+rechazo ni en un enqueue interno; fail-closed a `unknown`/null; y **la actividad es
+diagnóstico, no autoridad**.
+
+LO QUE NO ES EL PRODUCTO: el gate, el oráculo, el ledger, este brief (defecto ahí →
+`DISPUTAS`); el sobre de `dayz_test_stop`; `runtime_state.py`; `README-mcp.md`; refactors.
+
+===============================================================================
+§1. LOS CUATRO ROJOS DEL GATE
+===============================================================================
+
+**N9-FRESCA** — `box_occupancy` (`process_lifecycle.py:2547-2563`) hace bien en no
+**recachear** cuando la revisión cambió, pero termina con `return _copy_box(snapshot)`
+**incondicional**: la petición que perdió la carrera se lleva el snapshot ya falso. Con la
+actividad recalculada en cada lectura (P1) esto se cae solo; si eliges otro camino, tiene que
+cerrarse igual.
+
+**N11-SIN-BINDING** — sin binding acreditado, `record_box_command_activity` acredita al único
+run activo por cardinalidad, sin prueba del destino. Y `self._legacy_queues[peer]`
+(`loopback.py:1904-1916`) es una ruta de entrega **real**, así que es alcanzable.
+Decisión del orquestador, y va escrita: **sin binding se publica `unknown`.** Ni acreditar por
+cardinalidad (falsea a quién pertenece la frescura) ni callar (publica un `stale` falso sobre
+una sesión viva, que es el P1 que costó la ronda 3). `unknown` es lo único fail-closed.
+
+**N12-MONOTONA** — `_write_command_activity` (`:974-990`) hace
+`self._last_activity[key] = epoch` sin guarda. Dos escrituras buenas concurrentes pueden dejar
+la vieja, y el ingress **es** concurrente (`loopback.py` deriva de `ThreadingHTTPServer`).
+
+**N13-ESTRUCTURAL** — `stop_run` recorre cinco `manifest.replace` (`:1773, :1840, :1864,
+:1904, :1936`), incluido el terminal a `EXITED` con `processes = []`, y **no toca ni la caché
+ni la revisión**. Medido sin concurrencia ninguna: `antes=True`, stop OK, `cacheado=True`
+mientras `directo=False`. La sesión que acaba de parar su run ve su propia caja ocupada por un
+run que ya no existe, con el hint de pararlo otra vez.
+
+===============================================================================
+§2. DOS HALLAZGOS SIN CHECK EN EL GATE. Los cierro yo al recibir
+===============================================================================
+
+Te los paso con su cita porque son reales y están reproducidos, pero **no tienen check**: el
+mío no alcanzaba la ruta. Escribe tú el test y demuéstralo en `CONTROL POSITIVO`.
+
+**(A) P1 — el alta del provisional en `STARTING` no sube la revisión.**
+`process_lifecycle.py:1442-1447` hace `manifest.add(provisional)` con `state="STARTING"`, y el
+primer incremento del arranque no llega hasta `:1527`, o sea DESPUÉS de `self.launcher(...)`
+(`:1488`) y del `guard.snapshot(pid)`. Un lector que capturó la revisión antes del alta y
+sigue dentro de `_box_occupancy_uncached` encuentra la revisión intacta y publica su snapshot
+**pre-arranque**: `occupied: false`, `runs: []`, con DayZ arrancando. `STARTING` sí cuenta
+como ocupación (`_ACTIVE_STATES = RUN_STATES - {"EXITED"}`, `:29`).
+Aguas abajo: `server.py:2531 _box_ready_for` deja pasar al head de la FIFO, el waiter se lleva
+el claim, y el dueño legítimo se come `active_run_exists` hasta `BOX_CLAIM_TTL_S` = **600 s**.
+Ventana acotada con honestidad por el verificador: hace falta que la caja estuviera vacía y
+que el `diag_probe` del lector no llegue a ver el proceso (si lo ve, entra como `foreign` y da
+`occupied: true`).
+
+**(B) MAYOR — un `start_run` rechazado deja frescura en el run heredado que restaura.**
+`_capture_start_activity(completed, launched=record)` (`:1527`) siembra la basal, y si después
+falla, `_settle_failed_launch` (`:1228-1245`) restaura el `RunRecord` **pero no deshace la
+actividad**. El manifiesto vuelve atrás; la memoria no. Un run heredado que debía seguir
+`unknown` pasa a parecer fresco por un intento que fracasó.
+
+Y ya que tocas eso: **`adopt_run` (`:2029`), `admin_reconcile` (`:2818`),
+`begin_release_owner` (`:2105/:2130/:2145`) y `repair_recovery_fault` (`:2246`) tampoco suben
+la revisión.** Trázalo a todos (DZ-R7) y dilo en `HECHO`.
+
+===============================================================================
+§3. EL GATE
+===============================================================================
+
+    bash gate/run.sh      -> G1, el oráculo de producto
+    bash gate/suite.sh    -> G2, los tests de lifecycle, ocupación y loopback
+
+Ahora mismo: `PASS=21 FAIL=4 UNMET=0 de 25`. **Los 21 verdes son la línea que no se puede
+romper**, e incluyen `N4-SUSTRATO`, `R1-READONLY`, `R5-RASTRO`, `N1-ATRIBUCION`, `N2-INTERNO`,
+`N6-GENERACION`, `N7-CACHE-START` y `N8-CACHE-CARRERA`.
+
+Dos checks llevan **guarda anti-vacuidad**: si el fixture no deja el estado necesario, dan
+`UNMET` en vez de verde o rojo. Si ves un `UNMET`, no es tu código: es que el andamio no llegó.
+
+Terminas cuando `gate/run.sh` diga `ORACULO-VERDE` y `gate/suite.sh` diga `SUITE-ACOTADA OK`.
+
+`gate/` está sellado por hash y es de sólo lectura. Compruebo el sello al recibir.
+
+===============================================================================
+§4. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/process_lifecycle.py
+    tools/dayz_mcp/loopback.py
+    tools/tests/test_box_occupancy.py
+    tools/tests/test_process_lifecycle.py
+    tools/tests/test_run_reaper.py     (sólo si el par start/stop exige tocar su test)
+
+PROHIBIDO: `gate/`; `addon/`; `server.py`; `dayz_test_tool.py`; `runtime_state.py`; debilitar
+o borrar validaciones existentes; usar red; correr la suite completa.
+
+⚠ **Data-crítico**. Y cuidado con los locks: `start_run` va `_operation_lock → _activity_lock`;
+no introduzcas el orden inverso. Si necesitas subir la revisión desde dentro de
+`_operation_lock`, usa la variante que sólo toma `_activity_lock`.
+
+Escribe tests para lo que entregas, y córrelos ANTES de tu cambio para comprobar que fallan.
+
+===============================================================================
+§5. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — qué entregaste, con `path:line`. Incluye la lista COMPLETA de
+                          call-sites donde ahora sube la revisión, y el grep que lo prueba.
+    ## GATE             — la salida literal de los dos gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea que demuestra que fallaba antes.
+                          Los dos hallazgos del §2 van aquí obligatoriamente: no los cubre
+                          el gate, así que tu test es la única evidencia.
+                          Si un test cubre algo que ya funcionaba, dilo: es preservación.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si crees que un criterio del gate está mal, aquí, con el argumento.

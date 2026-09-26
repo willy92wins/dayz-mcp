@@ -1,0 +1,27 @@
+{
+  "module": "M13",
+  "measured_by": "orchestrator",
+  "measured_by_note": "medido por el orquestador (Claude Opus 5) el 2026-09-02T00:09:36.515904+00:00, no por la lane: Cursor rechaza shell en esta configuracion headless y la lane devolvio INCONCLUSIVE en vez de inventar cifras",
+  "generated_utc": "2026-09-02T00:09:36.515904+00:00",
+  "command": "tools\\.venv-mcp\\Scripts\\python.exe -m unittest tests.test_effective_schema tests.test_effective_schema_catalog tests.test_effective_schema_runtime_validators -v",
+  "cwd": "tools",
+  "interpreter": "native tools/.venv-mcp/Scripts/python.exe (Windows venv, python 3.14.3)",
+  "test_targets": [
+    "tests.test_effective_schema",
+    "tests.test_effective_schema_catalog",
+    "tests.test_effective_schema_runtime_validators"
+  ],
+  "results": {
+    "ran": 20,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "status": "OK",
+    "returncode": 0,
+    "duration_s": 0.149
+  },
+  "caveat": "un suite verde acredita que los tests que hay pasan, no que el plan este implementado: en M07 la suite verde era anterior al lote",
+  "evidence": {
+    "stdout_file": "reports/2026-08-30-inbox-implementation/M13/m13-test-output.txt"
+  }
+}

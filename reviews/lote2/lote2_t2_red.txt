@@ -1,0 +1,53 @@
+test_timeout_reason_and_false_are_exposed_without_launch (test_lote2_t2_steam.SteamEnvelopeT2Tests.test_timeout_reason_and_false_are_exposed_without_launch) ... Executing <Task finished name='Task-2' coro=<SteamEnvelopeT2Tests.test_timeout_reason_and_false_are_exposed_without_launch() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_lote2_t2_steam.py:79> exception=AssertionError("None != 'active_process_timeout'") created at C:\Python314\Lib\asyncio\runners.py:109> took 0.773 seconds
+FAIL
+test_does_not_recheck_after_timeout_and_promote_late_success (test_lote2_t2_steam.SteamWaitT2Tests.test_does_not_recheck_after_timeout_and_promote_late_success) ... FAIL
+test_failed_shutdown_cannot_be_reported_as_remediated (test_lote2_t2_steam.SteamWaitT2Tests.test_failed_shutdown_cannot_be_reported_as_remediated) ... FAIL
+test_timeout_is_stale_with_reason_and_bounded_clock (test_lote2_t2_steam.SteamWaitT2Tests.test_timeout_is_stale_with_reason_and_bounded_clock) ... FAIL
+test_waits_for_both_active_user_and_live_matching_image (test_lote2_t2_steam.SteamWaitT2Tests.test_waits_for_both_active_user_and_live_matching_image) ... ok
+
+======================================================================
+FAIL: test_timeout_reason_and_false_are_exposed_without_launch (test_lote2_t2_steam.SteamEnvelopeT2Tests.test_timeout_reason_and_false_are_exposed_without_launch)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Python314\Lib\asyncio\runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_lote2_t2_steam.py", line 99, in test_timeout_reason_and_false_are_exposed_without_launch
+    self.assertEqual(result.get("steam_remediation_reason"), "active_process_timeout")
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None != 'active_process_timeout'
+
+======================================================================
+FAIL: test_does_not_recheck_after_timeout_and_promote_late_success (test_lote2_t2_steam.SteamWaitT2Tests.test_does_not_recheck_after_timeout_and_promote_late_success)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_lote2_t2_steam.py", line 66, in test_does_not_recheck_after_timeout_and_promote_late_success
+    self.assertEqual(result.error_code, sp.STEAM_SESSION_STALE)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None != 'steam_session_stale'
+
+======================================================================
+FAIL: test_failed_shutdown_cannot_be_reported_as_remediated (test_lote2_t2_steam.SteamWaitT2Tests.test_failed_shutdown_cannot_be_reported_as_remediated)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_lote2_t2_steam.py", line 74, in test_failed_shutdown_cannot_be_reported_as_remediated
+    self.assertEqual(result.error_code, sp.STEAM_SESSION_STALE)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None != 'steam_session_stale'
+
+======================================================================
+FAIL: test_timeout_is_stale_with_reason_and_bounded_clock (test_lote2_t2_steam.SteamWaitT2Tests.test_timeout_is_stale_with_reason_and_bounded_clock)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_lote2_t2_steam.py", line 54, in test_timeout_is_stale_with_reason_and_bounded_clock
+    self.assertEqual(getattr(result, "steam_remediation_reason", None), "active_process_timeout")
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: None != 'active_process_timeout'
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.788s
+
+FAILED (failures=4)

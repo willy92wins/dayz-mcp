@@ -1,0 +1,117 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar. Tienes shell: úsalo.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+CIERRE 4 (lote H ronda 7 = lote G ronda 14). La segunda revisión delta de Codex sobre tu
+cierre 3 dio 1 MEDIA, continuación de P19': el rechazo `binding_retired_pending_reap` vive en
+`ServerState._retired_run_ids`, un `set` en memoria que empieza vacío en cada daemon. Tras un
+reinicio, el manifiesto dice RUNNING_IDLE, el guard dice `process_not_found` y `adopt_run`
+responde `ok` sobre un run sin un solo proceso vivo y sin binding; además la marca crece por
+run y nunca se limpia. Esta ronda sustituye la memoria por evidencia durable, y nada más.
+
+===============================================================================
+§0. EL PRODUCTO
+===============================================================================
+
+  P19''. **Adoptar exige un proceso vivo y propio.** En `adopt_run`, particiona los procesos
+         registrados del run con el guard (ya existe `_partition_registered_processes`:
+         owned / gone / foreign / unknown). `unknown` sigue rechazando como hoy. Si NO hay
+         ningún `owned` (todos gone/foreign, o ninguno registrado) → rechazo
+         `run_processes_gone` (409) con `hint` que dirija al reap (`reap_dead_runs`) o a la
+         recovery. Un run con procesos gone/foreign junto a uno owned SIGUE siendo adoptable
+         (`test_adopt_allows_absent_registered_process` se preserva).
+         Es durable: depende del manifiesto y del guard, no de nada en memoria.
+  P19''-b. **La marca volátil desaparece.** Retira `ServerState._retired_run_ids`,
+         `ServerState.run_bindings_retired`, `ProcessLifecycle._bindings_retired_pending_reap`,
+         el código `binding_retired_pending_reap` y `_BINDING_RETIRED_PENDING_REAP_HINT`. El test
+         `test_adopt_after_failed_terminal_persist_directs_to_reap` pasa a esperar
+         `run_processes_gone` (y su hint sigue nombrando el reap).
+  P19''-c. **Adoptar declara la despachabilidad.** Los bindings no sobreviven al daemon
+         (`loopback.py`: `unbound_after_restart`). Tras un reinicio, un run con proceso VIVO
+         sigue adoptable —parar exige adoptar (`run_not_adopted`)— pero no puede despachar una
+         sola mutación. La respuesta `ok` de `adopt_run` lleva `dispatchable: <bool>`,
+         calculado del `ServerState` PRESENTE bajo su lock (algún binding del run en estado
+         BOUND; `STARTING` no despacha). Con `False`, además un `hint` (str) que diga que los
+         bindings no sobreviven al reinicio del daemon y que el run admite `stop_run` y
+         relanzar. Con `bindings is None` → `dispatchable: False`. Nunca reconstruir bindings.
+         Los tests que comparan la respuesta de adopt con un dict exacto se actualizan.
+
+Sigue en pie todo lo anterior (G P1-P22', H H1-H5, D1-D4): N20 (release → adopt → despacha)
+tiene que seguir verde con `dispatchable: True`.
+
+LO QUE NO ES EL PRODUCTO: el gate, los oráculos, el ledger, este brief (defecto ahí →
+`DISPUTAS`); `server.py`; `daemon.py`; `dayz_test_tool.py`; refactors.
+
+===============================================================================
+§1. LOS DOS ROJOS DEL ORÁCULO DE G (51 checks) Y SU GUARDA
+===============================================================================
+
+**N41-ADOPCION-TRAS-REINICIO-NO-ENTREGA-UN-RUN-MUERTO** — persistencia terminal fallida
+(replace de EXITED con OSError), y después un REINICIO de verdad: `ProcessLifecycle` y
+`ServerState` nuevos sobre el MISMO manifiesto en disco y el MISMO guard (`recover_after_restart`
+incluido). `adopt_run` → `ok`. Tiene que rechazar: el guard dice `process_not_found`.
+**N42-ADOPCION-TRAS-REINICIO-DECLARA-DESPACHABILIDAD** — reinicio igual, pero con el proceso
+VIVO. `adopt_run` → `ok` liso y el siguiente `world_spawn` no es 200. O rechazo, o `ok` con
+`dispatchable: False`.
+**N43-ADOPTAR-PARA-PARAR-SOBREVIVE-AL-REINICIO** — verde hoy, preservación: tras el reinicio
+con proceso vivo, `adopt_run` → `ok` y `stop_run` → EXITED. Si decides rechazar en N42, N43 se
+pone rojo: la respuesta correcta es el `ok` declarado, no el rechazo.
+
+===============================================================================
+§2. LO QUE NO TIENE CHECK. Lo cierro yo al recibir
+===============================================================================
+
+  (A) `run_processes_gone` con todos los procesos `foreign` (pid reutilizado): test, rojo-antes.
+  (B) `dispatchable: True` en el flujo normal release → adopt (N20 mide el 200, no la
+      bandera), y `dispatchable: False` con `bindings is None`: tests, rojo-antes.
+  (C) La marca ha desaparecido: `grep -c "_retired_run_ids\|run_bindings_retired\|binding_retired_pending_reap"`
+      = 0 en `loopback.py` y `process_lifecycle.py` (el poll sigue usando `_retired_instances`,
+      que es otra cosa y se queda).
+  (D) Preservación: N20, N40, N34/N35, N30, N36, N37, N32; H 40/40; orden de locks
+      `_operation_lock → ServerState._lock` al calcular `dispatchable`.
+
+===============================================================================
+§3. EL GATE (doble)
+===============================================================================
+
+    bash gate/run.sh                                      -> oráculo del lote H (40): 40/40
+    (cd tools && PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 <python> ../../gate-extra/oracle_lote_g.py)
+                                                          -> oráculo de G (51): ORACULO-VERDE
+    bash gate/suite.sh                                    -> once módulos: SUITE-ACOTADA OK
+
+Ahora mismo: gate/run.sh (H): ORACULO: PASS=40 FAIL=0 UNMET=0 de 40 · gate-extra (G, 51 checks, SHA-256 461e315dda0ecf89…): ORACULO: PASS=49 FAIL=2 UNMET=0 de 51 — rojos N41, N42 · gate/suite.sh: SUITE-ACOTADA OK. **Los verdes son la línea que no se puede romper.**
+Guarda anti-vacuidad: un `UNMET` no es tu código; si tu diseño deja un check sin alcance,
+`DISPUTAS` con el motivo. `gate/` y `gate-extra/` están sellados por hash y son de sólo lectura.
+
+===============================================================================
+§4. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/process_lifecycle.py
+    tools/dayz_mcp/loopback.py
+    tools/tests/test_box_occupancy.py
+    tools/tests/test_process_lifecycle.py
+    tools/tests/test_loopback.py
+
+PROHIBIDO: `gate/`; `gate-extra/`; `addon/`; `server.py`; `daemon.py`; `dayz_test_tool.py`;
+`runtime_state.py`; debilitar o borrar validaciones existentes; usar red; correr la suite completa.
+
+⚠ **Data-crítico**. Locks: `_operation_lock → (ServerState._lock | _activity_lock)`; nunca el
+inverso; ninguna lectura toma `_operation_lock`.
+
+Escribe tests para lo que entregas y córrelos ANTES de tu cambio contra
+`../../ws-frozen-r6/tools/` (copia temporal tuya bajo /tmp).
+
+===============================================================================
+§5. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — P19'', P19''-b, P19''-c con `path:line`.
+    ## GATE             — la salida literal de los TRES gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea de FAIL contra `ws-frozen-r6`, o
+                          «preservación». Los de §2 (A)-(B) obligatorios.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si un criterio del gate está mal, aquí, con el argumento.

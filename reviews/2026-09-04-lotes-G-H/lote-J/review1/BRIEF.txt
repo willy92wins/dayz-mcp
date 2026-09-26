@@ -1,0 +1,102 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+REVISIÓN CIEGA DEL LOTE J (ronda 1) del daemon del MCP de DayZ. Sesión nueva: no arrastras
+nada. Producto en `../ws/tools/dayz_mcp/loopback.py` (SHA-256 3dd20a65a8e72a2d1300be3256d0fd9a20b91a0880cf6ee73b174ec8d4283aa9) y
+`../ws/tools/dayz_mcp/process_lifecycle.py` (SHA-256 6678ff9e992c73a148c2d3d86b7e8dabacc22bcda3103d1cbe77875bbd4227a1); el resto de `dayz_mcp/`
+está congelado por hash (`bash ../ws/gate/product_frozen.sh`). Tests entregados:
+`../ws/tools/tests/test_session_e2e.py` (SHA-256 484adde5fe238ac0a5b70e233d618a12c18188129075b77eec027d2368c8c39b), `../ws/tools/tests/test_process_lifecycle.py` (SHA-256 f3de27194f006dc8126e5ec9f3e45949f4beffa56feb70c33447a4c2255463f9), `../ws/tools/tests/test_daemon.py` (SHA-256 2878e32676082991625851366b3aa92b3eb998e72a1a261904bb04af482f68bc), `../ws/tools/tests/test_loopback.py` (SHA-256 ae6817cdfc31e41b03b3a01fdf63bd3eb9aceba00ef7285a3f8beeab27e88db4); `test_instance_fence.py` y `test_client_mode.py` estaban en el write-set y NO cambiaron. Versión anterior (baseline del diff): `../ws-frozen-r0/tools/`.
+El ledger con las dos decisiones, las tres fichas y los `path:line` de partida:
+`../ws/gate/GATES.md`. El STATE.md del implementador: `../ws/STATE.md` (léelo DESPUÉS de formarte
+tu propia opinión del diff; es la versión del implementador, no la verdad).
+
+===============================================================================
+§0. LAS DOS DECISIONES QUE SE IMPLEMENTAN (no se debaten aquí; se juzga su implementación)
+===============================================================================
+
+  P-J1. La limpieza interna del daemon (`vehicle_release` que `cleanup_owner` encola con
+        `internal=True` al liberar un lease con vehículo activo) está EXENTA del cerco de dueño: se
+        entrega al peer aunque el run esté RUNNING_IDLE/cercado; NO acredita actividad; NO saca al
+        run de RUNNING_IDLE. Todo lo demás se sigue drenando y rechazando (`run_not_owned`).
+  P-J2. La CONCESIÓN del lease de la caja (`/session/acquire` inmediato y `/session/wait` al llegar
+        el turno) adopta por `adopt_run` el único run RUNNING_IDLE sin dueño y lo declara en la
+        clave nueva `adopted_run` (`null` / `{ok:true,run_id,state,dispatchable[,hint]}` /
+        `{ok:false,run_id,error[,hint]}`); el lease se concede igual. `adopt_run` idempotente para el
+        mismo dueño (misma sesión y mismo lease). `server.py` y `control_client.py` no se tocan.
+
+===============================================================================
+§1. LO QUE QUIERO DE TI (ataca; no confirmes)
+===============================================================================
+
+  P-J1:
+  - ¿Por qué caminos puede una orden NO interna colarse por la exención? (un id reciclado en
+    `_fire_and_forget_ids`; un `exec_enforce`; un `/enqueue` que consiga `internal`; una orden
+    interna que sobreviva a un binding retirado o a un reinicio del daemon; la cola legacy).
+  - ¿La entrega/resultado del exento acredita actividad por alguna vía (`record_command_activity`,
+    `record_box_command_activity`, `_bound_last_poll_at`, el anillo)? ¿Puede sacar al run de
+    RUNNING_IDLE o revertir el tombstone?
+  - ¿Queda algún sitio de drenaje o de retención del poll que no use el MISMO predicado
+    (cuatro sitios: `_drain_run_locked`, dos del poll, `_enqueue_run_rejection`)? ¿Se mantiene
+    `run_state_unavailable` y `binding_retired` para el interno (P22')?
+  - Carrera: `cleanup_owner` encola bajo `_lock` y `fence_runs` drena bajo `_lock`; ¿hay una
+    ventana entre el commit de la reserva y el poll donde el exento se pierda o se entregue dos veces?
+  P-J2:
+  - ¿La adopción ocurre en TODAS las ramas que devuelven un lease activo y en ninguna otra
+    (status, heartbeat, enqueue de la FIFO)? ¿Se hace fuera del lock del coordinador y sin
+    inversión de locks con `_operation_lock` (adopt_run → coordinador)?
+  - ¿Qué pasa con dos runs RUNNING_IDLE sin dueño, con un run STARTING/RUNNING ajeno, con el
+    manifiesto ilegible, con el guard caído, con `retail_quarantine`? El lease debe concederse y la
+    respuesta decir por qué no adoptó; ¿alguna de esas ramas hace que el acquire FALLE o que un
+    error de adopción quede sin declarar?
+  - Idempotencia de `adopt_run`: ¿cierra la reserva del coordinador correctamente (commit o rechazo)
+    sin dejar reservas huérfanas ni audit incoherente? ¿Puede un ajeno con la SESIÓN del dueño pero
+    otro lease colarse por la rama idempotente? ¿Y el mismo dueño con un lease caducado?
+  - Flujos del lanzador: `dayz_test_worker.py:527-545` (kill: adopt → stop) y `:593-596` (mode=client:
+    adopt → start existing). Con el acquire interno del lanzador adoptando, ¿sigue funcionando
+    `stop_run` (exige dueño y RUNNING) y `start_run(existing)` (`run_not_adopted` si el dueño no
+    casa)? ¿Y `mode=server` con un run viejo vivo: `active_run_exists` como antes?
+  - `adopted_run` ¿pasa entero al tool por `_remember_acquire_or_wait`/`_with_own_identity` sin que
+    `_validate_request_bound_wait_response` lo rechace? (control_client.py:238-285, congelado).
+  Regresiones: aserciones cambiadas sin P-item; `skip`/`expectedFailure`; tests borrados; tests
+  nuevos tautológicos (que pasen también contra `../ws-frozen-r0/tools/`); `allowed_red.txt`
+  tocado; atributos privados leídos desde tests nuevos sin necesidad.
+
+Reglas duras: **enseña, no cuentes** (diff literal con `path:line`); **escribe el fallo concreto**
+(entrada → salida errónea); **la tolerancia no es un defecto**; cero hallazgos es una respuesta
+legítima. Ejecuta los tres gates (`bash ../ws/gate/product_frozen.sh`, `bash ../ws/gate/run_oracle_tests.sh`,
+`bash ../ws/gate/suite_full.sh`, desde `../ws`) y pega su última línea; si tu sandbox da los ERROR
+ambientales de path authority / launcher nativo / `psutil.AccessDenied`, dilo y no lo atribuyas al diff.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrar este producto?
+    ## HALLAZGOS      — por severidad (CRÍTICA/ALTA/MEDIA/BAJA): título, path:line, diff pegado,
+                        fallo concreto, y si tiene repro ejecutable (comando) o no.
+    ## ASERCIONES CAMBIADAS — tabla: test, antes, después, P-item (o «ninguno»).
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.
+
+===============================================================================
+§2. TRES COSAS QUE DEBES SABER ANTES DE DICTAMINAR
+===============================================================================
+
+  (a) DISPUTA del implementador, ACEPTADA por el orquestador: el brief pedía que
+      `_enqueue_run_rejection(internal=True)` no rechazara RUNNING_IDLE; el test sellado
+      `tests.test_box_occupancy.RunCommandActivityTest.test_internal_command_on_idle_run_is_run_not_owned`
+      (fuera del write-set) exige lo contrario. Implementado: exención de ENTREGA (drenaje + poll de
+      ids en `_fire_and_forget_ids`) y de ENCOLADO sólo con estado durable RUNNING/STARTING (la
+      ventana del release); un `internal=True` nuevo sobre un idle durable sigue `run_not_owned`.
+      Juzga la implementación de ESE recorte, no el recorte. Pregunta abierta que sí es tuya: la
+      carrera «cleanup_owner que pierde contra begin_release_owner» (¿puede la limpieza encolarse
+      DESPUÉS de persistir RUNNING_IDLE y perderse en silencio con `vehicle_release_failed` o sin
+      señal?). `cleanup_begin` (`daemon.py:77-108`) es secuencial; di si hay otro productor.
+  (b) El oráculo del orquestador (`../ws/gate/oracle_tests.py`, sellado) da 13/13 en la entrega; sus
+      controles negativos JA2/JA4/JA5/JB7 eran verdes ANTES del cambio y siguen verdes: no son
+      evidencia del arreglo, son la línea que no se rompió. JA2 fabrica el run sin dueño como
+      «dueño que liberó y nadie readoptó» + lectura SIN lease (caso 8 de f70b) y lleva control
+      positivo (con el cerco parcheado da 200). Si crees que algún check es tautológico tras el
+      cambio, dilo con el estado que ya no es construible.
+  (c) `test_instance_fence.py` y `test_client_mode.py` estaban en el write-set y no cambiaron:
+      los fixtures `DaemonHttpServer(adopt_fixture=False)` + acquire ahora adoptan por el acquire
+      HTTP y el implementador afirma que ninguna aserción existente miraba ese estado. Compruébalo:
+      un test que antes exigía RUNNING_IDLE tras un acquire y ahora pasa por casualidad es hallazgo.

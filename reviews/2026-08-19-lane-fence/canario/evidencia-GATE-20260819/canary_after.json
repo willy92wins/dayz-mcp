@@ -1,0 +1,49 @@
+{
+  "phase": "after",
+  "ts": "2026-08-19T22:49:25",
+  "capture_bound": {
+    "ok": false,
+    "error": "window_not_found_for_cmdline__profiles_P__DayZ_MCP_dev__client_profiles",
+    "method": "",
+    "window": null,
+    "stats": null,
+    "sha256": "",
+    "client": null,
+    "clientStats": null,
+    "path": "C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/reviews/2026-08-19-lane-fence/canario/evidencia-GATE-20260819\\B_bound.png",
+    "exists": false,
+    "bytes": 0
+  },
+  "capture_intruder": {
+    "ok": false,
+    "error": "window_not_found_for_cmdline__profiles_C__Users_guill_OneDrive_Documentos_DayZ_Projects_DayZ_MCP_dev_reviews_2026_08_19_lane_fence_canario_evidencia_GATE_20260819_intruder_profiles",
+    "method": "",
+    "window": null,
+    "stats": null,
+    "sha256": "",
+    "client": null,
+    "clientStats": null,
+    "path": "C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/reviews/2026-08-19-lane-fence/canario/evidencia-GATE-20260819\\B_intruder.png",
+    "exists": false,
+    "bytes": 0
+  },
+  "fence": {
+    "client_binding_state": "BOUND",
+    "client_instance_prefix": "5f5b9e7a",
+    "unaccredited_mutation_enqueues": 0,
+    "unaccredited_polls_by_class": {},
+    "mutation_rejects_by_code": {
+      "legacy_unbound": 0,
+      "instance_unknown": 0,
+      "instance_ambiguous": 0,
+      "instance_unattributed": 0,
+      "binding_retired": 0,
+      "instance_role_mismatch": 0,
+      "instance_peer_collision": 0,
+      "binding_not_ready": 0,
+      "creation_time_unreadable": 0
+    }
+  },
+  "killed_pid": 25892,
+  "killed_verified": true
+}

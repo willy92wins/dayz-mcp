@@ -1,0 +1,69 @@
+{
+  "phase": "after",
+  "ts": "2026-08-19T22:28:46",
+  "capture_bound": {
+    "ok": true,
+    "error": "",
+    "method": "printwindow",
+    "window": {
+      "pid": 43816,
+      "class": "DayZ",
+      "title": "DayZ",
+      "left": 909,
+      "top": 487,
+      "width": 1942,
+      "height": 1136
+    },
+    "stats": {
+      "meanBrightness": 109.20920138888906,
+      "nonBlackRatio": 1
+    },
+    "sha256": "E47E79AA31AC1C3242B4F4E88B6A44B23EEAB82DAF128C12C4F601C2AE4EBC31",
+    "client": {
+      "left": 11,
+      "top": 45,
+      "width": 1920,
+      "height": 1080
+    },
+    "clientStats": {
+      "meanBrightness": 105.66530859375008,
+      "nonBlackRatio": 1
+    },
+    "path": "C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/reviews/2026-08-19-lane-fence/canario/evidencia-20260819\\B_bound.png",
+    "exists": true,
+    "bytes": 4552311
+  },
+  "capture_intruder": {
+    "ok": false,
+    "error": "window_not_found_for_cmdline__profiles_C__Users_guill_OneDrive_Documentos_DayZ_Projects_DayZ_MCP_dev_reviews_2026_08_19_lane_fence_canario_evidencia_20260819_intruder_profiles",
+    "method": "",
+    "window": null,
+    "stats": null,
+    "sha256": "",
+    "client": null,
+    "clientStats": null,
+    "path": "C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/reviews/2026-08-19-lane-fence/canario/evidencia-20260819\\B_intruder.png",
+    "exists": false,
+    "bytes": 0
+  },
+  "fence": {
+    "client_binding_state": null,
+    "client_instance_prefix": null,
+    "unaccredited_mutation_enqueues": 0,
+    "unaccredited_polls_by_class": {
+      "LEGACY_UNBOUND": 17947
+    },
+    "mutation_rejects_by_code": {
+      "legacy_unbound": 0,
+      "instance_unknown": 0,
+      "instance_ambiguous": 0,
+      "instance_unattributed": 0,
+      "binding_retired": 3,
+      "instance_role_mismatch": 0,
+      "instance_peer_collision": 0,
+      "binding_not_ready": 0,
+      "creation_time_unreadable": 0
+    }
+  },
+  "killed_pid": 31092
+}

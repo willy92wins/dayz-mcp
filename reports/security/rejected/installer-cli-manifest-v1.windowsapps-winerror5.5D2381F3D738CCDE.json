@@ -1,0 +1,16 @@
+{
+  "entries": {
+    "CLAUDE": {
+      "bytes": 231359136,
+      "path": "C:\\Users\\guill\\.local\\bin\\claude.exe",
+      "sha256": "FFEA22269BF66CE778CE845EA0C15CB5B21D39BE82601A065C3ECA6F7368DA3E"
+    },
+    "CODEX": {
+      "bytes": 350497072,
+      "path": "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.715.7063.0_x64__2p2nqsd0c76g0\\app\\resources\\codex.exe",
+      "sha256": "20D611EF1C9851F4DA1CB4609BEB6763904F72275CB91517B2400639CA1C28C4"
+    }
+  },
+  "kind": "dayz-mcp-installer-clis-v1",
+  "schema_version": 1
+}

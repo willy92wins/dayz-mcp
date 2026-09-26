@@ -1,0 +1,162 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+RONDA 6, la de cierre. Cinco rondas han dejado el sustrato (actividad en memoria por
+generación), la atribución por binding y el contador de revisión. La cuarta revisión dio seis
+hallazgos, ninguno de familia nueva: `box_occupancy` deriva una vista sobre DOS almacenes
+mutables (manifiesto y mapas de actividad) con E/S cara en medio y sin foto coherente. Esta
+ronda cambia la FORMA, no añade parches: la caja se deriva de una sola foto, y así la familia
+entera de hallazgos deja de existir. Diseña para que dure, no para que pase el gate.
+
+===============================================================================
+§0. EL PRODUCTO
+===============================================================================
+
+  P1. **La caja publicada no mezcla instantes.** `box_occupancy` toma UNA foto coherente y
+      deriva de ella `runs`, `activity_state`, `last_activity_age_s` y `occupied`. La foto es:
+      `manifest.list_runs()` —que ya clona bajo el `_lock` del store— y, pegada a ella y sin
+      E/S entre medias, `_last_activity` + `_activity_unknown` + revisión bajo
+      `_activity_lock`. Después SUELTA, hace las sondas caras (diag, argv) FUERA del lock, y
+      deriva. Nunca vuelve a leer la memoria viva después de la foto. `_with_live_activity`
+      desaparece: era el mecanismo de la mezcla.
+      **No tomes `_operation_lock` en la ruta de lectura**: `stop_run` lo sostiene mientras
+      termina procesos y pondrías la lectura caliente del loopback detrás de cada stop.
+  P2. **Las filas no se cachean.** Sólo se cachea el resultado de las sondas (`foreign`,
+      `ports_in_use`, `scan_known`) con su TTL de 1,5 s. `runs`, la actividad y `occupied` se
+      derivan de una foto NUEVA en cada lectura. El contador de revisión deja de ser el
+      mecanismo de coherencia de las filas; queda como guarda del caché de sondas. Los ~20
+      call-sites que lo suben pueden quedarse: ya no son load-bearing para `runs`.
+  P3. **Una observación sin binding no borra un sello posterior.** High-water mark en la rama
+      sin `run_id` de `record_box_command_activity`: sólo olvida sellos cuyo epoch sea ≤ el
+      epoch de la observación. Una observación POSTERIOR al sello sigue mandando (`unknown`).
+  P4. **Ningún binding despachable sobrevive a la salida durable de RUNNING.** La retirada
+      de bindings (`_retire_run_bindings` / `_retire_minted`) va ANTES de la transición durable
+      en `stop_run` —ya en `STOPPING`, no sólo en `EXITED`— y en el mismo orden en
+      `begin_release_owner`, `repair_recovery_fault`, `repair_manifest_recovery`,
+      `_reap_run_locked` y `admin_reconcile`. Un run sin binding es la degradación segura.
+  P5. **La actividad acreditada durante un intento de arranque que no llega a durable no
+      sobrevive al rollback.** `_settle_failed_launch` olvida los sellos del run restaurado
+      cuyo epoch sea ≥ el inicio del intento; el run restaurado publica `unknown`.
+      (Decisión del orquestador: compensación, NO retrasar la publicación del `BOUND`.)
+
+Sigue en pie todo lo anterior: actividad en memoria por `(daemon_generation, run_id)`; el
+audit registra pero **no manda**; sticky que una escritura buena no limpia; atribución por el
+`run_id` del binding; la basal sella el proceso que este daemon lanzó; nada de actividad en un
+rechazo ni en un enqueue interno; fail-closed a `unknown`/null; frescura monótona; y **la
+actividad es diagnóstico, no autoridad** (`occupied`, stop y reap no la miran).
+
+[DESIGN] Forma que dura: una estructura inmutable para la foto (p. ej. un dataclass
+`_BoxSnapshot` con `clock`, `runs`, `activity`, `unknown`, `revision`) y una función PURA que
+deriva la caja de `(foto, sondas)`. Así la coherencia es un invariante del tipo, no una
+disciplina de quien edite la función el mes que viene, y el derivador se prueba sin hilos.
+Documenta la invariante en la cabecera de `box_occupancy` (tono vanilla, sin primera persona):
+«The box is derived from one snapshot; live state is never re-read after it.»
+
+LO QUE NO ES EL PRODUCTO: el gate, el oráculo, el ledger, este brief (defecto ahí →
+`DISPUTAS`); el sobre de `dayz_test_stop`; `runtime_state.py`; `README-mcp.md`; refactors
+fuera de `box_occupancy` y su derivación.
+
+===============================================================================
+§1. LOS CUATRO ROJOS DEL GATE
+===============================================================================
+
+**N14-MEZCLA** — `_box_occupancy_uncached` (`process_lifecycle.py:2607-2680`) calcula
+`active` del manifiesto en T0, sondea argv por PID y el diag (E/S), y `_with_live_activity`
+(`:1010-1024`) superpone la actividad en T2. Medido con un lector bloqueado en `argv_of`
+mientras se hace `stop_run` + fallo de escritor: la fila devuelta es `state=RUNNING` con
+`activity_state=unknown` — un collage de dos instantes. El check acepta cualquiera de las dos
+fotos coherentes (`RUNNING`+`recent`, o fila ausente); nunca la mezcla.
+
+**N15-RETROCESO** — `record_box_command_activity` sin `run_id` (`:940-966`) captura `epoch` y
+luego hace `self._last_activity.pop(...)` sin compararlo. Una observación sin binding con
+`now=t1-60` borra un sello acreditado en `t1`. Choca con la guarda monótona de
+`_write_command_activity` (`:978-985`).
+
+**N17-BINDING-MUERE-CON-SU-RUN** — `stop_run` (`:1959-1991`) hace `manifest.replace(run)` con
+`EXITED` y `_retire_run_bindings(run_id, "stopped")` DESPUÉS. El check envuelve
+`manifest.replace` y, en cuanto el `EXITED` es durable, encola `camera_get` por el binding de
+`run-1`: hoy devuelve 200. La misma ventana empieza ya en `STOPPING`.
+
+**N18-SIN-CACHE-DE-MANIFIESTO** — el check muta el manifiesto POR DEBAJO del lifecycle
+(`manifest.replace` directo, sin incremento) y lee dentro del TTL: publica `RUNNING` con el
+manifiesto en `UNRECONCILED`. Es la forma general de H5 (`repair_manifest_recovery`, `:2320`)
+y H6 (`quarantine_legacy_active` vía `status()`, `:1025-1030`): con P2 se cae solo.
+
+===============================================================================
+§2. LO QUE NO TIENE CHECK EN EL GATE. Lo cierro yo al recibir
+===============================================================================
+
+**(A) P5 — H3 del revisor, reproducido por él.** Tras `_confirm_instance` el binding ya está
+`BOUND` para `run-existing` (`loopback.py:989-994`); antes del `manifest.replace(completed)`
+(`process_lifecycle.py:1534-1563`) un `query_all_players` entra con 200 y acredita actividad;
+el replace falla; `_settle_failed_launch` (`:1235-1265`) restaura el run heredado de un solo
+proceso… y queda `recent`. Escribe el test que lo reproduce (adoptar-y-extender + fallo
+inyectado en el replace + enqueue en la ventana) y demuestra el rojo-antes.
+
+**(B) P4 fuera de `stop_run`.** N17 sólo mide el stop. `begin_release_owner`
+(`:2074-2190`), `repair_recovery_fault` (`:2290`), `repair_manifest_recovery` (`:2378`),
+`_reap_run_locked` (`:2450`) y `admin_reconcile` (`:2865`) retiran bindings DESPUÉS de la
+transición durable. Trázalo a todos (DZ-R7), un test por camino, y la lista en `HECHO` con el
+grep que lo prueba.
+
+**(C) P3, el lado que ya funciona.** `N16-SIN-BINDING-MANDA` está verde HOY y tiene que seguir
+verde: una observación sin binding posterior al sello sigue publicando `unknown`. Si tu
+arreglo de N15 lo pone rojo, has desactivado P3.
+
+===============================================================================
+§3. EL GATE
+===============================================================================
+
+    bash gate/run.sh      -> G1, el oráculo de producto
+    bash gate/suite.sh    -> G2, los tests de lifecycle, ocupación y loopback
+
+Ahora mismo: `PASS=25 FAIL=4 UNMET=0 de 29`. **Los 25 verdes son la línea que no se puede
+romper**, e incluyen `N3-CACHE`, `N8-CACHE-CARRERA`, `N13-ESTRUCTURAL`, `N16-SIN-BINDING-MANDA`,
+`N4-SUSTRATO`, `R1-READONLY`, `N1-ATRIBUCION`, `N2-INTERNO`, `N11-SIN-BINDING` y `N12-MONOTONA`.
+
+Los checks concurrentes llevan **guarda anti-vacuidad**: si el fixture no deja el estado
+necesario dan `UNMET`, no verde ni rojo. Un `UNMET` no es tu código: es que el andamio no
+llegó — y si crees que tu diseño lo ha dejado sin alcance, dilo en `DISPUTAS` con el motivo.
+
+Terminas cuando `gate/run.sh` diga `ORACULO-VERDE` y `gate/suite.sh` diga `SUITE-ACOTADA OK`.
+
+`gate/` está sellado por hash y es de sólo lectura. Compruebo el sello al recibir.
+
+===============================================================================
+§4. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/process_lifecycle.py
+    tools/dayz_mcp/loopback.py
+    tools/tests/test_box_occupancy.py
+    tools/tests/test_process_lifecycle.py
+    tools/tests/test_loopback.py
+    tools/tests/test_run_reaper.py     (sólo si el trazado de P4 exige tocar su test)
+
+PROHIBIDO: `gate/`; `addon/`; `server.py`; `dayz_test_tool.py`; `runtime_state.py`; debilitar
+o borrar validaciones existentes; usar red; correr la suite completa.
+
+⚠ **Data-crítico**. Locks: el orden es `_operation_lock → _activity_lock`; no introduzcas el
+inverso, y `box_occupancy` NO toma `_operation_lock`. Si necesitas subir la revisión desde
+dentro de `_operation_lock`, usa la variante que sólo toma `_activity_lock`.
+
+Escribe tests para lo que entregas, y córrelos ANTES de tu cambio para comprobar que fallan.
+
+===============================================================================
+§5. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — qué entregaste, con `path:line`. Incluye la forma de la foto, el
+                          derivador, y la lista COMPLETA de caminos donde la retirada del
+                          binding precede a la transición durable, con el grep que lo prueba.
+    ## GATE             — la salida literal de los dos gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea que demuestra que fallaba antes.
+                          Los de §2 (A) y (B) van aquí obligatoriamente: no los cubre el
+                          gate, así que tu test es la única evidencia.
+                          Si un test cubre algo que ya funcionaba, dilo: es preservación.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si crees que un criterio del gate está mal, aquí, con el argumento.

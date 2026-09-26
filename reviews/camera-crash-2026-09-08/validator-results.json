@@ -1,0 +1,38 @@
+[
+  {
+    "label": "before",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B C:\\Users\\guill\\DayZ-Modding-Knowledge-Pack\\tools\\dayz-script-validator\\scripts\\script_validator.py \"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\camera-crash-2026-09-08\\validator-before\\MCPClientBridge.c\"",
+    "exit_code": 2,
+    "summary": {
+      "status": "WARN",
+      "files_checked": null,
+      "elapsed_ms": null,
+      "errors": 0,
+      "warnings": 2
+    }
+  },
+  {
+    "label": "after",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B C:\\Users\\guill\\DayZ-Modding-Knowledge-Pack\\tools\\dayz-script-validator\\scripts\\script_validator.py \"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\addon\\scripts\\5_Mission\\MCPClientBridge.c\"",
+    "exit_code": 2,
+    "summary": {
+      "status": "WARN",
+      "files_checked": null,
+      "elapsed_ms": null,
+      "errors": 0,
+      "warnings": 2
+    }
+  },
+  {
+    "label": "addon",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B C:\\Users\\guill\\DayZ-Modding-Knowledge-Pack\\tools\\dayz-script-validator\\scripts\\script_validator.py \"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\addon\"",
+    "exit_code": 1,
+    "summary": {
+      "status": "FAIL",
+      "files_checked": null,
+      "elapsed_ms": null,
+      "errors": 2,
+      "warnings": 5
+    }
+  }
+]

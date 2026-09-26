@@ -1,0 +1,36 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. Trabaja hasta emitir el informe y escríbelo en disco.
+Si algo te bloquea, dilo en el informe y sigue con el resto.
+
+§0. TU PAPEL: VERIFICACIÓN DE OPERACIÓN (admin / reinicio / recuperación / máquina de estados), RONDA 2, del lote D. Eres
+una sesión nueva. Lee COMUN.txt, COMUN-R2.txt y el informe de tu predecesor AUDIT-ADMIN.md (H-01..H-04). La ronda 2 aplicó
+H-02, H-03 y H-04; H-01 (verbo de reconciliación por puerto) queda como backlog documentado y NO es bloqueante repetirlo.
+
+§1. QUÉ COMPROBAR (desde tools/, intérprete obligatorio, PYTHONPATH=., unittest)
+B-1 H-02: repite tu repro `B2_ADMIN_EMPTY` (incluida la variante `port_scan_known=false`) contra el árbol actual:
+    `admin_reconcile(..., empty=True)` con un `DayZServer_x64.exe` ajeno sosteniendo 2402 debe devolver
+    `manual_cleanup_required`, y con sondeo desconocido `port_scan_unknown`; con un holder sin nombre
+    `port_attribution_unknown`. Comprueba que el run NO pasa a EXITED en esos casos y que con la tabla limpia (solo
+    servicios nombrados no-DayZ) sigue reconciliando como antes.
+B-2 H-03: repite `B45_PORT_SCAN_UNKNOWN` por la ruta pública: con un cliente en memoria (mira tests/test_box_port_wait.py y
+    tests/test_box_occupancy.py `FakeBoxClient`) `execute_wait_for_box` devuelve en el acto `error: port_scan_unknown`;
+    `_failed_active_run_result(..., port=)` publica `reason` y un `hint` que NO manda esperar. Comprueba también
+    `_session_status_blocked_on` (server.py): ¿qué dice `blocked_on` cuando `port_scan_known` es false? Si sigue diciendo
+    «box» sin matiz, propón texto (MAJOR solo si induce una acción errónea).
+B-3 H-04: repite tu repro de la ronda 1 (holder `(2402, pid=777)` sin nombre, launch en 2302): ahora debe rechazarse con
+    audit `port_attribution_unknown` y `launcher_calls=0`; y con el nombre resuelto a `svchost.exe` debe lanzar. Comprueba
+    el reintento por PID de `snapshot_udp_port_holders` (`_toolhelp_lookup`) con un fake que falle la primera lectura.
+B-4 Estado durable tras el rechazo pre-launch (nuevo en la ronda 2): `start_run` puede rechazar DESPUÉS de persistir el run
+    provisional (`_settle_failed_launch` con `active_run_exists`). Recorre: ¿queda el run en EXITED sin dueño?, ¿se retira
+    el minted binding?, ¿la reserva del lease se libera?, ¿`box_occupancy()` vuelve a libre?, ¿un reinicio del daemon con ese
+    run EXITED en runs.json lo trata bien (`recover_unacknowledged_before_listen`)? Repro con fakes; si algo queda colgado,
+    MAJOR con secuencia; CRITICAL solo con repro que deje la caja bloqueada.
+B-5 `lifecycle_cli.py` y cualquier otro constructor productivo de `ProcessLifecycle`: ¿pasan `port_probe`? Si el CLI de
+    admin reconstruye un lifecycle sin sondeo de puertos y toma decisiones de reconcile con `port_probe=None` (que hoy
+    significa «feature ausente», es decir, tabla vacía conocida), di si eso reabre H-02 desde el CLI: MAJOR con path:line.
+
+§2. ENTREGABLE — escribe C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-D\AUDIT-ADMIN-R2.md con:
+## VEREDICTO
+CRITICAL=N (con repro ejecutable) · MAJOR=N · BACKLOG=N
+## B-1 … B-5
+## HALLAZGOS
+## LO QUE NO PUDE VERIFICAR

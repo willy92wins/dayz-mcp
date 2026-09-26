@@ -1,0 +1,93 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+RONDA 8: el cierre de la ronda 7. La ronda 7 entregó P6-P8 y el oráculo del gate salió
+33/33 VERDE corrido por el orquestador, pero (1) el implementador no pudo ejecutar ningún
+shell (un hook del entorno lo bloqueaba; ya está resuelto: en esta ronda el shell FUNCIONA y
+tienes que usarlo), y (2) la suite acotada tiene UN rojo, consecuencia correcta del contrato
+nuevo sobre un test anterior. Esta ronda no añade producto: deja la suite en verde con el
+contrato P6 tal como está y demuestra los gates de verdad.
+
+===============================================================================
+§0. EL PRODUCTO (sin cambios respecto a la ronda 7)
+===============================================================================
+
+  P6. Sin dueño no se despachan MUTACIONES: con el run en `RUNNING_IDLE` el enqueue de una
+      mutación no interna por su binding se rechaza con `run_not_owned` (409); las LECTURAS
+      (`camera_get`, etc.) siguen despachando —son diagnóstico, y N1-ATRIBUCION lo exige—;
+      la cola pendiente del antiguo dueño se vacía en el release; `adopt_run` rehabilita el
+      mismo binding; `STARTING` sigue despachando. (Refinamiento de la ronda 7 aceptado por el
+      orquestador y escrito en el ledger: el cerco es de autoridad, y la autoridad está en
+      las mutaciones.)
+  P7. Todo borrado deja tumba; ninguna escritura con `epoch <= tumba` aterriza; la
+      compensación de P5 corre tras el rollback durable y acotada a `[inicio, rollback]`.
+  P8. El sello del caché de sondas se muestrea antes que el dato.
+  Y P1-P5 y todo lo anterior, intactos.
+
+===============================================================================
+§1. EL ÚNICO ROJO, y por qué es correcto que esté rojo
+===============================================================================
+
+`tests/test_box_occupancy.py::RunCommandActivityTest::
+test_accepted_enqueue_attributes_activity_to_binding_run_among_several` — su SEGUNDA mitad
+encola `exec_enforce` (una mutación: ejecución arbitraria de Enforce) sobre `run-2`, que en
+ese fixture es `RUNNING_IDLE` sin dueño, y espera 200. Con P6 recibe:
+
+    AssertionError: 409 != 200 : {'error': 'run_not_owned', 'hint': 'This run has no owner
+    (RUNNING_IDLE). Adopt it with dayz_test_run mode=client run_id=... before dispatching
+    mutations.'}
+
+Ese rechazo es exactamente lo que P6 manda. El test tiene que conservar su PROPÓSITO —la
+actividad de un `exec_enforce` aceptado se acredita al run del BINDING entre varios— y
+adaptarse al contrato: dale dueño a `run-2` para esa mitad (o adóptalo primero), no
+conviertas la mutación en lectura ni relajes el cerco. Su primera mitad (`camera_get`, una
+lectura) sigue válida tal cual.
+
+===============================================================================
+§2. LO QUE TIENES QUE DEMOSTRAR, y que la ronda 7 no pudo
+===============================================================================
+
+  (A) `bash gate/run.sh` → `ORACULO-VERDE` (33/33) y `bash gate/suite.sh` →
+      `SUITE-ACOTADA OK`, pegados LITERALES en `## GATE`.
+  (B) Rojo-antes REAL de los tests nuevos de la ronda 7 (`test_process_lifecycle.py:2165`
+      y siguientes; `test_box_occupancy.py:1194` y siguientes): corre cada uno contra el
+      árbol anterior. El árbol anterior está congelado en
+      `../ws-frozen-r6/tools/` (hermano de este workspace, sólo lectura): copia tus ficheros
+      de test allí en una copia temporal TUYA bajo `/tmp` y ejecútalos con
+      `PYTHONPATH=. python -m unittest tests.<modulo> -k <nombre>`; pega la línea del FAIL
+      en `## CONTROL POSITIVO`. Un test que también pase en el árbol viejo es preservación
+      y se declara como tal.
+  (C) Que N1-ATRIBUCION y N2-INTERNO siguen verdes (ya lo están en el oráculo: 33/33), y que
+      `test_failed_extend_discards_activity_credited_in_the_confirm_window` sigue verde con
+      la compensación movida tras el rollback (está en la suite: demuéstralo con la salida).
+
+===============================================================================
+§3. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/tests/test_box_occupancy.py       (SÓLO el test del §1; nada más)
+    tools/tests/test_process_lifecycle.py   (SÓLO si un test tuyo de la ronda 7 resulta
+                                             estar mal escrito al correrlo por primera vez)
+
+PROHIBIDO: tocar `process_lifecycle.py` o `loopback.py` (el producto está entregado y
+verificado; si crees que un test tuyo destapa un defecto real del producto, NO lo arregles:
+`DISPUTAS` con el traceback, y yo decido); `gate/`; `addon/`; `server.py`; debilitar o
+borrar validaciones o asserts; usar red; correr la suite completa.
+
+`gate/` está sellado por hash y es de sólo lectura.
+
+===============================================================================
+§4. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — el cambio exacto del test, con `path:line`, y por qué conserva
+                          su propósito.
+    ## GATE             — la salida literal de los dos gates, pegada, no resumida.
+    ## CONTROL POSITIVO — la línea de FAIL de cada test de la ronda 7 contra el árbol viejo,
+                          o «preservación» donde corresponda.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si algo del producto te parece mal, aquí con el traceback.

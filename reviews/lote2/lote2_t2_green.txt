@@ -1,0 +1,11 @@
+test_timeout_reason_and_false_are_exposed_without_launch (test_lote2_t2_steam.SteamEnvelopeT2Tests.test_timeout_reason_and_false_are_exposed_without_launch) ... Executing <Task finished name='Task-2' coro=<SteamEnvelopeT2Tests.test_timeout_reason_and_false_are_exposed_without_launch() done, defined at C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_lote2_t2_steam.py:79> result=None created at C:\Python314\Lib\asyncio\runners.py:109> took 1.105 seconds
+ok
+test_does_not_recheck_after_timeout_and_promote_late_success (test_lote2_t2_steam.SteamWaitT2Tests.test_does_not_recheck_after_timeout_and_promote_late_success) ... ok
+test_failed_shutdown_cannot_be_reported_as_remediated (test_lote2_t2_steam.SteamWaitT2Tests.test_failed_shutdown_cannot_be_reported_as_remediated) ... ok
+test_timeout_is_stale_with_reason_and_bounded_clock (test_lote2_t2_steam.SteamWaitT2Tests.test_timeout_is_stale_with_reason_and_bounded_clock) ... ok
+test_waits_for_both_active_user_and_live_matching_image (test_lote2_t2_steam.SteamWaitT2Tests.test_waits_for_both_active_user_and_live_matching_image) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 1.120s
+
+OK

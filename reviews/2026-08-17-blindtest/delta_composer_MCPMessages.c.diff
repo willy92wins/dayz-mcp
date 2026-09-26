@@ -1,0 +1,22 @@
+--- base/MCPMessages.c
++++ composer/MCPMessages.c
+@@ -76,6 +76,8 @@
+ 	// F3.5 inventory_give
+ 	string classname;
+ 	string dest;
++	// action_use — action registry name (e.g. LFPG_ActionOpenBTCAtm)
++	string action;
+ 	// F3.6 object_inspect — memory-point / bounding_center names
+ 	ref array<string> want;
+ 	// Optional player identity (GetPlainId). Empty = first human / broadcast.
+@@ -417,6 +419,10 @@
+ 	bool clicked;
+ 	string handler;
+ 	int user_id;
++	// action_use — resolved action name, target diagnostics, local dispatch ack.
++	string action;
++	float distance;
++	bool started;
+ };
+ 
+ class MCPJob

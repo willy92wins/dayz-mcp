@@ -1,0 +1,18 @@
+{
+  "verdict": "PASS",
+  "reasons": [],
+  "before": {
+    "client_binding_state": "BOUND",
+    "instance_ambiguous": 0,
+    "unaccredited_mutation_enqueues": 0
+  },
+  "after": {
+    "client_binding_state": "AMBIGUOUS",
+    "instance_ambiguous": 1,
+    "unaccredited_mutation_enqueues": 0
+  },
+  "mutation_status": 409,
+  "mutation_error": "instance_ambiguous",
+  "source_pid": 47508,
+  "instance_prefix": "a6aa844d"
+}

@@ -1,0 +1,425 @@
+commit 44de5ff221133ebe3fb90f1e645e1f29a2359778
+Author:     willy92wins <guillermo_92@msn.com>
+AuthorDate: Sun Sep 6 22:27:15 2026 +0200
+Commit:     willy92wins <guillermo_92@msn.com>
+CommitDate: Sun Sep 6 22:27:15 2026 +0200
+
+    server: a daemon enqueue refusal reaches the caller with its code and hint instead of a bare remote_error (ficha f45d)
+    
+    After dayz_test_run releases the owner lease the run is RUNNING_IDLE, and the daemon refuses every
+    /enqueue on it, reads included, with 409 {"error": "run_not_owned", "hint": "This run has no owner
+    (RUNNING_IDLE). Adopt the existing run before dispatching."} (loopback._enqueue_run_rejection,
+    _fence_reject_response). The MCP client only lets whitelisted codes through (_REMOTE_ERROR_CODES) and
+    _public_enqueue_error never looked at the hint, so wait_for(players_at_least) right after a client
+    launch surfaced "remote_error" and nothing else. Measured 2026-09-06 21:07 (audit: the read-only
+    query_all_players authorized at 19:07:25Z with no enqueue_accepted row behind it; the session's
+    bridge_status counter fence.mutation_rejects_by_code.run_not_owned went 6 -> 7).
+    
+    - _REMOTE_ERROR_CODES gains run_not_owned, run_state_unavailable and enqueue_cancelled, the run-fence
+      refusals loopback can emit on /enqueue.
+    - _public_enqueue_error carries the daemon hint beside a whitelisted code ("<code>: <hint>"), bounded
+      by _carriable_hint (str, 1..240 chars, stripped, single line). An unknown code stays the bare
+      remote_error token even when a hint is present; the three recipe branches are unchanged.
+    - ClientRuntime.call_bridge / enqueue_bridge compare the raw code with _STALE_LEASE_ERRORS, so a
+      hinted lease_invalid still clears the local lease.
+    - The wait_for description names the run_not_owned abort and its recipe (session_acquire_wait).
+    - execute_wait_for is unchanged: its else-raise already relays the text; pinned by test.
+    
+    Tests: test_enqueue_refusal_reaches_the_caller.py (new: code + hint mapping, bounded hint, unknown code
+    keeps dropping its hint, recipes untouched, AST census of every code the enqueue route can emit
+    against the whitelist, client-mode fake daemon 409, wait_for description) and
+    test_wait_for.py (an ownership refusal aborts the first probe with its hint). Red first, then green;
+    three mutants each killed by a named test (STATE.md in the receipt).
+    
+    Implemented by Grok (Cursor, cursor-grok-4.6-xhigh) on a faithful copy of this branch; reviewed by
+    the Anthropic family (SEGURO INTEGRAR, four PUEDE findings). Applied at integration, verbatim to the
+    reviewer's diffs: H1 session_granting (emitted by session_coordination.authorize on /enqueue during a
+    grant in flight, invisible to the AST census by construction) joins the whitelist and the census;
+    H2 _carriable_hint rejects every non-printable character, not only newlines; H3 the wait_for
+    description says that the grant adopts the single ownerless RUNNING_IDLE run and reports it in
+    adopted_run. Three over-long lines re-wrapped by the integrator. Receipt:
+    reviews/2026-09-06-vaciado-noche/f45d/.
+    
+    Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+
+diff --git a/tools/dayz_mcp/server.py b/tools/dayz_mcp/server.py
+index 460af85..43f26d3 100644
+--- a/tools/dayz_mcp/server.py
++++ b/tools/dayz_mcp/server.py
+@@ -194,9 +194,35 @@ _REMOTE_ERROR_CODES = frozenset({
+     "instance_config_missing",
+     "instance_config_mismatch",
+     "creation_time_unreadable",
++    # run-fence refusals emitted by loopback._enqueue_run_rejection and loopback._enqueue_command.
++    "run_not_owned",
++    "run_state_unavailable",
++    "enqueue_cancelled",
++    # lease-grant race surfaced by session_coordination._validate_token_locked on /enqueue.
++    "session_granting",
+ })
+ _STALE_TICKET_ERRORS = frozenset({"ticket_expired", "ticket_invalid"})
+ _STALE_LEASE_ERRORS = frozenset({"lease_expired", "lease_invalid"})
++_ENQUEUE_HINT_MAX_CHARS = 240
++
++
++def _carriable_hint(payload: object) -> str | None:
++    """Accredited-daemon prose travels only beside a whitelist code, bounded; it
++    never replaces the code."""
++    if not isinstance(payload, dict):
++        return None
++    hint = payload.get("hint")
++    if type(hint) is not str:
++        return None
++    if not 0 < len(hint) <= _ENQUEUE_HINT_MAX_CHARS:
++        return None
++    if hint != hint.strip():
++        return None
++    if not hint.isprintable():
++        return None
++    return hint
++
++
+ # Constant ValueError tokens raised along the dayz_test request path, mapped to
+ # caller-facing codes. The tokens are fixed strings that carry no host paths, so
+ # translating them keeps host paths off the wire while replacing a bare
+@@ -731,7 +757,12 @@ def _public_enqueue_error(
+     status_snapshot: dict[str, Any] | None = None,
+     peer: str | None = None,
+ ) -> str:
+-    """Map a remote enqueue payload to the caller-facing ToolError string."""
++    """Map a remote enqueue payload to the caller-facing ToolError string.
++
++    A known code with a valid hint travels as "<code>: <hint>"; a known code
++    without a hint stays bare; an unknown code stays the bare token remote_error
++    even when a hint is present.
++    """
+     code = _remote_error_code(payload)
+     if code == "retail_quarantine":
+         return _retail_quarantine_recipe(payload.get("reason"))
+@@ -757,6 +788,9 @@ def _public_enqueue_error(
+         if isinstance(expected, str):
+             return f"version_blocked:bridge {got!r} != {expected!r}"
+         return "version_blocked"
++    hint = _carriable_hint(payload)
++    if code != "remote_error" and hint is not None:
++        return f"{code}: {hint}"
+     return code
+ 
+ 
+@@ -1524,7 +1558,7 @@ class ClientRuntime:
+         )
+         if status != 200:
+             error = self._enqueue_error(payload)
+-            if error in _STALE_LEASE_ERRORS and lease_token is not None:
++            if _remote_error_code(payload) in _STALE_LEASE_ERRORS and lease_token is not None:
+                 self._control._clear_matching_lease(lease_token)
+             if _remote_error_code(payload) in {"version_blocked", "lease_required"}:
+                 try:
+@@ -1615,7 +1649,7 @@ class ClientRuntime:
+         )
+         if status != 200:
+             error = self._enqueue_error(payload)
+-            if error in _STALE_LEASE_ERRORS and lease_token is not None:
++            if _remote_error_code(payload) in _STALE_LEASE_ERRORS and lease_token is not None:
+                 self._control._clear_matching_lease(lease_token)
+             if _remote_error_code(payload) in {"version_blocked", "lease_required"}:
+                 try:
+@@ -4854,6 +4888,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
+             "game_not_ready:reason=server_poll_stale is retried until "
+             "timeout_s (not_ready_probes, last_error in the response); any "
+             "other not-ready reason aborts on the first probe. "
++            "A probe refused with run_not_owned (the run has no owner) aborts on "
++            "the first probe with the daemon's hint: adopt the run first with "
++            "session_acquire_wait, whose grant adopts the single ownerless "
++            "RUNNING_IDLE run and reports it in adopted_run (with several idle "
++            "runs it reports multiple_idle_runs and adopts none). "
+             "scanned reports which log files were read and how many "
+             "lines each gave, so a no-match is visible as a no-match."
+         )
+diff --git a/tools/tests/test_enqueue_refusal_reaches_the_caller.py b/tools/tests/test_enqueue_refusal_reaches_the_caller.py
+new file mode 100644
+index 0000000..575adc5
+--- /dev/null
++++ b/tools/tests/test_enqueue_refusal_reaches_the_caller.py
+@@ -0,0 +1,251 @@
++from __future__ import annotations
++
++import ast
++import sys
++import unittest
++from pathlib import Path
++
++# Make tools/ importable whether run via discover or by module name.
++_TOOLS_DIR = Path(__file__).resolve().parents[1]
++if str(_TOOLS_DIR) not in sys.path:
++    sys.path.insert(0, str(_TOOLS_DIR))
++
++from dayz_mcp import instance_fence, loopback, server
++from dayz_mcp.server import ServerConfig, build_app
++from tests.test_client_mode import _fixture_client_runtime
++
++_ENQUEUE_ROUTE_FNS = frozenset(
++    {
++        "enqueue_command",
++        "_enqueue_command",
++        "_enqueue_fence_target",
++        "_enqueue_run_rejection",
++        "_fence_reject_response",
++        "_enqueue_exec_enforce",
++    }
++)
++_REQUIRED_RUN_FENCE_CODES = (
++    "run_not_owned",
++    "run_state_unavailable",
++    "enqueue_cancelled",
++)
++
++
++def _codes_from_function(fn: ast.FunctionDef) -> set[str]:
++    codes: set[str] = set()
++    for node in ast.walk(fn):
++        if isinstance(node, ast.Dict):
++            for key, value in zip(node.keys, node.values):
++                if (
++                    isinstance(key, ast.Constant)
++                    and key.value == "error"
++                    and isinstance(value, ast.Constant)
++                    and isinstance(value.value, str)
++                ):
++                    codes.add(value.value)
++        if isinstance(node, ast.Return) and node.value is not None:
++            returned = node.value
++            if isinstance(returned, ast.Constant) and isinstance(returned.value, str):
++                codes.add(returned.value)
++            elif isinstance(returned, ast.Tuple) and returned.elts:
++                first = returned.elts[0]
++                if isinstance(first, ast.Constant) and isinstance(first.value, str):
++                    codes.add(first.value)
++    return codes
++
++
++def _enqueue_route_census() -> set[str]:
++    source = Path(loopback.__file__).read_text(encoding="utf-8")
++    tree = ast.parse(source)
++    codes: set[str] = set()
++    for node in tree.body:
++        if not isinstance(node, ast.ClassDef) or node.name != "ServerState":
++            continue
++        for item in node.body:
++            if isinstance(item, ast.FunctionDef) and item.name in _ENQUEUE_ROUTE_FNS:
++                codes.update(_codes_from_function(item))
++    codes = {code for code in codes if server._is_safe_error_token(code)}
++    codes |= set(instance_fence.FENCE_ENQUEUE_CODES)
++    codes.add(loopback._DURABLE_UNREADABLE)
++    # Emitted by session_coordination.authorize, outside the walked functions.
++    codes.add("session_granting")
++    return codes
++
++
++class EnqueueRefusalCodeTest(unittest.TestCase):
++    def test_the_idle_run_refusal_keeps_its_code_and_hint(self) -> None:
++        self.assertEqual(
++            server._public_enqueue_error(
++                {"error": "run_not_owned", "hint": loopback._RUN_NOT_OWNED_HINT}
++            ),
++            "run_not_owned: " + loopback._RUN_NOT_OWNED_HINT,
++        )
++
++    def test_every_run_fence_code_is_whitelisted(self) -> None:
++        for code in _REQUIRED_RUN_FENCE_CODES:
++            self.assertEqual(server._public_enqueue_error({"error": code}), code)
++            self.assertIn(code, server._REMOTE_ERROR_CODES)
++
++    def test_the_lease_grant_race_code_is_whitelisted(self) -> None:
++        self.assertEqual(
++            server._public_enqueue_error({"error": "session_granting"}),
++            "session_granting",
++        )
++
++    def test_a_whitelisted_code_without_hint_stays_bare(self) -> None:
++        self.assertEqual(
++            server._public_enqueue_error({"error": "binding_not_ready"}),
++            "binding_not_ready",
++        )
++        self.assertEqual(
++            server._public_enqueue_error({"error": "queue_full", "hint": ""}),
++            "queue_full",
++        )
++
++    def test_a_fence_hint_travels_with_its_code(self) -> None:
++        hinted = [
++            code
++            for code in instance_fence.FENCE_HINTS
++            if code in server._REMOTE_ERROR_CODES
++        ]
++        self.assertTrue(
++            hinted,
++            "FENCE_HINTS ∩ _REMOTE_ERROR_CODES is empty",
++        )
++        for code in hinted:
++            payload = instance_fence.fence_error(code)[1]
++            self.assertEqual(
++                server._public_enqueue_error(payload),
++                f"{code}: {instance_fence.FENCE_HINTS[code]}",
++            )
++
++    def test_an_unknown_code_drops_its_hint(self) -> None:
++        cases = (
++            {"error": "arbitrary_remote_text", "hint": "sensitive-test-value"},
++            {"error": {"lease_token": "x"}, "hint": "sensitive-test-value"},
++            {"error": "run_not_owned" + "x"},
++        )
++        for payload in cases:
++            with self.subTest(payload=payload):
++                text = server._public_enqueue_error(payload)
++                self.assertEqual(text, "remote_error")
++                self.assertNotIn("sensitive", text)
++
++    def test_an_oversized_or_malformed_hint_is_dropped(self) -> None:
++        code = "run_not_owned"
++        self.assertEqual(
++            server._public_enqueue_error({"error": code, "hint": "a" * 241}),
++            code,
++        )
++        self.assertEqual(
++            server._public_enqueue_error({"error": code, "hint": "a" * 240}),
++            f"{code}: {'a' * 240}",
++        )
++        self.assertEqual(
++            server._public_enqueue_error({"error": code, "hint": 123}),
++            code,
++        )
++        self.assertEqual(
++            server._public_enqueue_error({"error": code, "hint": " padded "}),
++            code,
++        )
++        self.assertEqual(
++            server._public_enqueue_error({"error": code, "hint": "a\nb"}),
++            code,
++        )
++        self.assertEqual(
++            server._public_enqueue_error({"error": code, "hint": "a\tb"}),
++            code,
++        )
++        self.assertEqual(
++            server._public_enqueue_error({"error": code, "hint": "a\x1bb"}),
++            code,
++        )
++
++    def test_the_recipes_keep_their_own_text(self) -> None:
++        self.assertEqual(
++            server._public_enqueue_error({"error": "lease_required", "hint": "x"}),
++            server.LEASE_REQUIRED_RECIPE,
++        )
++        self.assertEqual(
++            server._public_enqueue_error({"error": "retail_quarantine", "hint": "x"}),
++            server.RETAIL_QUARANTINE_RECIPE,
++        )
++        text = server._public_enqueue_error(
++            {"error": "version_blocked", "expected": "7", "got": "6", "hint": "x"}
++        )
++        self.assertTrue(text.startswith("version_blocked"), text)
++        self.assertNotIn(": x", text)
++
++
++class EnqueueCodeCensusTest(unittest.TestCase):
++    def test_every_code_the_enqueue_route_can_emit_is_whitelisted(self) -> None:
++        census = _enqueue_route_census()
++        self.assertTrue(census, "enqueue-route census is empty")
++        missing_required = [
++            code for code in _REQUIRED_RUN_FENCE_CODES if code not in census
++        ]
++        self.assertFalse(
++            missing_required,
++            f"AST census missed required enqueue codes: {missing_required}",
++        )
++        missing_from_whitelist = sorted(census - set(server._REMOTE_ERROR_CODES))
++        self.assertFalse(
++            missing_from_whitelist,
++            "enqueue codes not in _REMOTE_ERROR_CODES: "
++            + ", ".join(missing_from_whitelist),
++        )
++
++
++class ClientModeIdleRunRefusalTest(unittest.IsolatedAsyncioTestCase):
++    def _runtime(self) -> server.ClientRuntime:
++        return _fixture_client_runtime(
++            ServerConfig(mode="client", key="k", port=12345, log_sink=lambda _m: None)
++        )
++
++    async def test_call_bridge_surfaces_the_idle_run_refusal_with_its_hint(self) -> None:
++        runtime = self._runtime()
++        payload = {
++            "error": "run_not_owned",
++            "hint": loopback._RUN_NOT_OWNED_HINT,
++        }
++        runtime._call = lambda *_a, **_k: (409, payload)
++        with self.assertRaises(server.ToolError) as ctx:
++            await runtime.call_bridge("query_all_players", {}, "server", 1.0)
++        self.assertEqual(
++            str(ctx.exception),
++            "run_not_owned: " + loopback._RUN_NOT_OWNED_HINT,
++        )
++
++    async def test_enqueue_bridge_surfaces_the_same_text(self) -> None:
++        runtime = self._runtime()
++        payload = {
++            "error": "run_not_owned",
++            "hint": loopback._RUN_NOT_OWNED_HINT,
++        }
++        runtime._call = lambda *_a, **_k: (409, payload)
++        with self.assertRaises(server.ToolError) as ctx:
++            await runtime.enqueue_bridge("query_all_players", {}, "server", 1.0)
++        self.assertEqual(
++            str(ctx.exception),
++            "run_not_owned: " + loopback._RUN_NOT_OWNED_HINT,
++        )
++
++    async def test_a_hinted_stale_lease_still_clears_the_local_lease(self) -> None:
++        runtime = self._runtime()
++        runtime.active_lease_token = "token-shaped-test-value"
++        runtime._call = lambda *_a, **_k: (
++            409,
++            {"error": "lease_invalid", "hint": "x"},
++        )
++        with self.assertRaises(server.ToolError) as ctx:
++            await runtime.call_bridge("query_all_players", {}, "server", 1.0)
++        self.assertTrue(str(ctx.exception).startswith("lease_invalid"))
++        self.assertIsNone(runtime.active_lease_token)
++
++    async def test_the_wait_for_description_names_the_ownership_refusal(self) -> None:
++        app, _runtime = build_app(ServerConfig(log_sink=lambda _m: None))
++        tools = {tool.name: tool for tool in await app.list_tools()}
++        description = tools["wait_for"].description or ""
++        self.assertIn("run_not_owned", description)
++        self.assertIn("session_acquire_wait", description)
+diff --git a/tools/tests/test_wait_for.py b/tools/tests/test_wait_for.py
+index 52b02b0..c9c9a92 100644
+--- a/tools/tests/test_wait_for.py
++++ b/tools/tests/test_wait_for.py
+@@ -17,7 +17,7 @@ if str(_TOOLS_DIR) not in sys.path:
+ 
+ from unittest.mock import AsyncMock, patch
+ 
+-from dayz_mcp import server
++from dayz_mcp import loopback, server
+ from dayz_mcp.server import ServerConfig, build_app
+ from tests.test_client_mode import _fixture_client_runtime
+ from tests.test_mcp_tools import _content_json
+@@ -167,6 +167,16 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
+         self.assertIn("game_not_ready:reason=no_run", str(ctx.exception))
+         self.assertEqual(runtime.bridge_calls, 1)
+ 
++    async def test_an_ownership_refusal_aborts_the_first_probe_with_its_hint(self) -> None:
++        message = "run_not_owned: " + loopback._RUN_NOT_OWNED_HINT
++        runtime = _FakeRuntime(player_counts=[message, 1])
++        with self.assertRaises(server.ToolError) as ctx:
++            await server.execute_wait_for(
++                runtime, "players_at_least", value=1, timeout_s=5.0, poll_interval_s=0.2
++            )
++        self.assertEqual(str(ctx.exception), message)
++        self.assertEqual(runtime.bridge_calls, 1)
++
+     async def test_deadline_bounds_the_sleep(self) -> None:
+         # A poll interval longer than the remaining budget must not extend the
+         # call past timeout_s: the single deadline governs the sleep too (Codex B-02).

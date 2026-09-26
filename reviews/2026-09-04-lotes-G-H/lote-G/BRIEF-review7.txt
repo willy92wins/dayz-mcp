@@ -1,0 +1,84 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+Sexta revisión de este lote. Tu quinta dio 2 hallazgos (release deja despachable un run
+`RUNNING_IDLE`; ventana tras la compensación de P5); otro revisor ciego de otra familia dio 3
+(sello del caché de sondas muestreado después del manifiesto; el escritor acreditado muestrea
+`epoch` antes de la E/S del audit y resucita un sello borrado por P3 o por el rollback).
+**Los cinco los verifiqué** y se cerraron con tres invariantes nuevas, no con parches.
+Dictamen sobre el producto que hay: `../ws/tools/dayz_mcp/process_lifecycle.py` (SHA-256
+6eab79a98c55101a8942195a7f96a50f7ddeb0223a920f70f77735ff92143a86) y `../ws/tools/dayz_mcp/loopback.py` (SHA-256 91cb695ccb4681949dd83db263856cea33890624f914134ce8ac035ac8e82bcb).
+
+===============================================================================
+§0. QUÉ SE REVISA. Sólo esto.
+===============================================================================
+
+  P6. **Sin dueño no se despacha, pero el binding sobrevive.** Con el run en `RUNNING_IDLE`
+      (release reconocido por `release_owner` y `begin_release_owner`; `admin_reconcile` con
+      supervivientes) el enqueue por su binding se rechaza con un código propio distinto de
+      `binding_retired`; la cola pendiente del antiguo dueño se vacía; el bridge sigue
+      haciendo poll sin comandos; `adopt_run` rehabilita el MISMO binding sin relanzar.
+      `STARTING` sigue despachando. La retirada física queda para stop/reap/repair/
+      reconcile-sin-supervivientes (P4).
+  P7. **Todo borrado deja tumba.** Cada borrado de sello registra su época por
+      `(generación, run_id)` —la observación sin binding con la suya; la compensación del
+      rollback con el instante del rollback— y ninguna escritura con `epoch ≤ tumba`
+      aterriza, sea crédito de comando o basal. La compensación de P5 corre DESPUÉS del
+      rollback durable y olvida sólo sellos con época en `[inicio del intento, rollback]`.
+      El sticky `unknown` sigue mandando sobre todo.
+  P8. **El sello del caché de sondas es cota inferior del dato**: la revisión se muestrea
+      ANTES de `list_runs()` y de la foto de actividad; una mutación en vuelo deja la lectura
+      sin cachear y el lector siguiente vuelve a sondear.
+
+Sigue en pie P1-P5 de la ronda 6 (una foto, sondas fuera, derivación pura, sin
+`_operation_lock` en la lectura; filas sin caché; high-water; retirada antes de la transición
+durable en seis caminos; compensación) y todo lo anterior (memoria por generación; el audit
+no manda; sticky; atribución por binding; fail-closed; frescura monótona; la actividad es
+diagnóstico, no autoridad).
+
+**LO QUE NO ES EL PRODUCTO**, y va a `BACKLOG`: el gate, el oráculo, el ledger, este brief;
+el sobre de `dayz_test_stop`; `runtime_state.py`; refactors, estilo, tipado.
+**Prohibido justificar alcance con «es donde han salido cosas antes».**
+
+===============================================================================
+§1. LO QUE YA SÉ
+===============================================================================
+
+  - Tu H1 → P6 por CERCO, no por retirada: retirar el binding en el release rompería el
+    reattach de la ficha 17 (decisión escrita). Tu H2 y los H2/H3 del otro revisor → P7 con
+    una sola tumba. El H1 del otro → P8.
+  - Residuos declarados y que siguen: ventana de nanosegundos sin E/S dentro de la foto;
+    `occupied` puede combinar `runs` fresco con `foreign` ≤1,5 s, fail-closed aguas abajo.
+
+===============================================================================
+§2. LO QUE QUIERO DE TI
+===============================================================================
+
+  - **P6**: el predicado de despacho, ¿cubre las DOS ramas del enqueue (normal y
+    `exec_enforce`) y la cola legacy? ¿Un run `RUNNING_IDLE` por `recover_after_restart`
+    (sin binding persistido) puede despachar por alguna vía? ¿`adopt_run` rehabilita sin
+    resucitar la cola vieja? ¿Algún camino a `RUNNING_IDLE` sin cerco?
+  - **P7**: ¿hay algún escritor de sellos que no consulte la tumba (basal de start, crédito
+    de comando, cualquier otro)? ¿La tumba respeta la generación? ¿Puede una tumba borrar un
+    crédito legítimo POSTERIOR al rollback? ¿Y la ventana `[inicio, rollback]` está bien
+    acotada por las dos puntas (época del intento y época del rollback durable)?
+  - **P8**: el orden de la foto y la guarda del caché; ¿queda alguna ruta donde las sondas
+    guardadas se calcularon contra un manifiesto distinto del que certifica su sello?
+  - **Regresiones sobre P1-P5**: la ronda tocó `box_occupancy`, el enqueue y
+    `_settle_failed_launch`. ¿Algo de la ronda 6 dejó de cumplirse?
+  - **¿Ha debilitado el implementador alguna validación existente para pasar el gate?**
+
+Y la pregunta de proceso, en su sección: **¿lo que encuentres es de familia NUEVA o de las
+visitadas (coherencia de caché, identidad/autoridad del destino, frontera de generación,
+sello-vs-dato, borrado-sin-tumba)?**
+
+Reglas duras: **enseña, no cuentes** (código literal con `path:line`); **escribe el fallo
+concreto**; **la tolerancia no es un defecto**; cero hallazgos es una respuesta legítima.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrarlo?
+    ## HALLAZGOS      — por severidad: título, path:line, código pegado, fallo concreto.
+    ## FAMILIAS       — la pregunta de proceso del §2.
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.

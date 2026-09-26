@@ -1,0 +1,75 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+TERCERA REVISIÓN DELTA DEL LOTE I (ronda 4). Tu segunda delta dio 3 ALTA y ORCHESTRATOR_NEEDED
+(F-08 sesión pública truncada como dueño; F-09 match por prefijo; F-10 `break` tratado como
+caída). El orquestador CAMBIÓ LAS DOS PREGUNTAS (LL-421: tres rondas cayendo a ataques distintos):
+  P-I10. El fixture NUNCA escribe un dueño: `bind_both_peers` ya no tiene `owner=` ni inferencia;
+         con manifiesto real deja el run RUNNING_IDLE con procesos `owned`; la propiedad sólo se
+         obtiene por `adopt_run`/`start_run` con un lease real, así la identidad del manifiesto es
+         la que el lifecycle autorizó (completa, infalsificable). Los fixtures que necesitan
+         despacho adquieren un lease con identidad real y adoptan (P6 estricto: sin dueño nada
+         despacha, lecturas incluidas).
+  P-I11. El detector estático ABANDONA «todos los caminos»: enumera el conjunto exacto de funciones
+         que asignan EXITED (`RETIREMENT_TESTED_EXITED_SITES`) y exige que cada una tenga un test de
+         orden EN TIEMPO DE EJECUCIÓN nombrado que exista en `test_process_lifecycle.py`; conserva
+         la comprobación textual de orden en `_commit_retirement` como heurística; se retiran los
+         mutantes de camino; docstring que declara lo que no prueba.
+Dictamen sobre el DELTA (`../ws-frozen-r3/tools/tests/` → `../ws/tools/tests/`).
+
+Producto: `../ws/tools/tests/fence_helpers.py` (SHA-256 a198dbaec4e954307778401cf26a292b52ee6e0fb9c625de4f8a2be8f5eecd17),
+`../ws/tools/tests/test_instance_fence.py` (SHA-256 98e15102cad8dd1d1d3a5fb4a93cc4aa46138a43772c587d9bfe5d3e025d88d2), `../ws/tools/tests/test_daemon.py`
+(SHA-256 11f8eec5940c176da11637de01cb369bd7f2610735cdd1c406805930d8b97e29), `../ws/tools/tests/test_client_mode.py` (SHA-256 6eb705d303f0b44bfb0ef12b5eb6f3fc800f3014672c224368c937b63a27c1bc),
+`../ws/tools/tests/test_session_e2e.py` (SHA-256 b3ec185c8c7d9f91da2caee31fc0c548d8c4c76a0a07e868c823df774b76c0e0, sin trackear, no se commitea). El
+código sigue congelado: `bash ../ws/gate/product_frozen.sh`.
+
+===============================================================================
+§1. LO QUE QUIERO DE TI
+===============================================================================
+
+  - P-I10: ¿queda alguna vía por la que un fixture escriba un dueño (manifiesto a mano, `RunRecord`
+    con owner, `owner=` por otro nombre)? ¿Cada fixture que adopta lo hace con una identidad y un
+    lease REALES del coordinador y por `adopt_run`/`/lifecycle/adopt`? ¿Las aserciones que
+    cambian por «ahora hay un titular de fixture» (colas, `lease_required`, elección de daemon,
+    lecturas sin lease) están cada una con su C-item y reflejan producción, o alguna quedó
+    tautológica (p. ej. un test de «lease_required» que ahora ya no puede fallar)?
+  - P-I11: ¿el mapa declarado coincide con los sitios reales y cada test nombrado observa de
+    verdad retirar-antes-de-persistir en tiempo de ejecución (mira el cuerpo de esos cinco tests)?
+    ¿La docstring dice lo que NO prueba? Un mutante de camino ya NO es hallazgo (dimensión
+    abandonada, declarada): si crees que la decisión es incorrecta, dilo en BACKLOG con el
+    argumento, no como ALTA.
+  - Regresiones: aserciones cambiadas sin C-item; `skip`/`expectedFailure`; tests borrados o
+    renombrados fuera de P-I11; `allowed_red.txt` tocado; atributos privados del coordinador.
+
+Reglas duras: **enseña, no cuentes** (diff literal con `path:line`); **escribe el fallo
+concreto**; **la tolerancia no es un defecto**; cero hallazgos es una respuesta legítima. Ejecuta
+los tres gates y pega su última línea; si tu sandbox vuelve a dar los ERROR ambientales de path
+authority / launcher nativo / `psutil.AccessDenied`, dilo y no lo atribuyas al diff.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrar estos tests?
+    ## HALLAZGOS      — por severidad: título, path:line, diff pegado, fallo concreto.
+    ## ASERCIONES CAMBIADAS — tabla: test, antes, después, C-item (o «ninguno»).
+    ## BACKLOG        — lo que viste y no es de este lote (incluida tu opinión sobre P-I11).
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.
+
+===============================================================================
+§2. DOS COSAS QUE DEBES SABER ANTES DE DICTAMINAR
+===============================================================================
+
+  (a) CAMBIO DEL ORQUESTADOR tras la recepción, incluido en los hashes de arriba y revisable como
+      el resto: el enumerador de sitios EXITED del test (`_exited_assignment_sites`) y el del
+      oráculo contaban sólo `ast.Constant`; `admin_reconcile` asigna
+      `run.state = "RUNNING_IDLE" if survivors else "EXITED"` (`process_lifecycle.py:3428`) y no
+      se contaba. Ahora un sitio es cualquier `.state = ...` cuyo valor PUEDE ser "EXITED"
+      (Constant o IfExp recursivo), y `admin_reconcile` entra en `RETIREMENT_TESTED_EXITED_SITES`
+      con su test runtime ya existente (`test_persist_failure_on_admin_reconcile_...`). ¿Queda
+      alguna otra forma de asignar EXITED que ese enumerador no cuente (asignación aumentada,
+      `setattr`, tupla, variable intermedia, `dataclasses.replace`)?
+  (b) El worker conservó `test_every_exited_path_retires_bindings` como ALIAS que llama al test
+      nuevo, porque el check sellado T2b lo invoca por ese id. Un alias no cambia lo que se prueba;
+      si crees que debe desaparecer, dilo en BACKLOG.
+  (c) `tests.test_wait_for_marker.WaitForMarkerTest.test_lookback_can_match_a_line_written_before_the_action`
+      dio rojo UNA vez en la suite completa de la recepción (Ran 2525) y verde 5/5 en solitario:
+      intermitente por carga, ajeno al diff. No lo atribuyas al lote.

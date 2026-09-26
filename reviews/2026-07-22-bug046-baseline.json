@@ -1,0 +1,312 @@
+{
+  "format_version": 1,
+  "captured_at_utc": "2026-07-22T04:40:52.451561Z",
+  "source_hashes": {
+    "../LF_VStorage_dev/tools/dayz-test.ps1": "AEC0623180D5A8F517E6EBEE81D35703F5EDF770612072AC9A9E5AAA92E01C16",
+    "product-spec.md": "45C199C1B2BDC3FA5328B6E4D67BB843B86C58459E10F10F6EE591EF3AE51AC5",
+    "tools/README-mcp.md": "6B2889565193C8CCEBFF281CA12129D4C16CD7DFB56A06D4D7EB875E0F9613B6",
+    "tools/dayz_mcp/admin_cli.py": "FE7CE0F2905C48050672CF089C1316A5545E8FBC58E80B562164E5B94FED090E",
+    "tools/dayz_mcp/daemon.py": "F5294F1E8B4139A23A633D5F9795D267445629B1C5708E9CC22BADA14091094C",
+    "tools/dayz_mcp/doctor.py": "1B8EED077E434FF01657A5B036AD809C674F7DF012C4139729C3FC6926C0F1E6",
+    "tools/dayz_mcp/loopback.py": "D4606E128C2EE15F6422314EFD1E91A9E906BF0A9A3F52A8A5F92E18AADA4425",
+    "tools/dayz_mcp/runtime_state.py": "E956141C63B99586A27A9F236B57A8616595E1BA91F8DDF9BA9326F84DE09364",
+    "tools/dayz_mcp/server.py": "82686585B5047CC05BAB4D439302B807C62225DF33A96493E23D4FE1C53E8ABB",
+    "tools/dayz_mcp/session_coordination.py": "9568092E1E48ED600708D1EBCB75852F43118E56CF1DC1990FF5FD8A6EC9C1B3",
+    "tools/install_mcp.py": "93A329FE314F283BDC071BE2449630C27D73975A563F92DAFCBE73C1EE9849F8",
+    "tools/tests/test_client_mode.py": "308B8B74A461F09CD02954FEDA63BAAE8A3F28C17ADE38462EB564BBE6C6D2D8",
+    "tools/tests/test_doctor.py": "4A6A27B842887E58FEF2A446B2C08C1D04F5EF5DF3B57710D95E21BCD0FA3CFD",
+    "tools/tests/test_install_mcp.py": "1B88C54B5DE5861C4AC82C3CDA75887948B7918D2AC6BF9BC8189066C35758FF",
+    "tools/tests/test_lifecycle_http.py": "FC3477302405B5C95A095BE154543E628BAC0B9A88F3A84D3BBE32462FC6FB9B",
+    "tools/tests/test_runtime_state.py": "D1EB112D64E7BEF92FDFCEFF5406CF752DE313EA4EE2C08F6DDBD930B24EBF7B",
+    "tools/tests/test_session_coordination.py": "149E22494D90D70AD7782D18A597864DAB60F2715711F7A6B4AD7FF2D6B54903",
+    "tools/tests/test_session_e2e.py": "26B2132C2E5C898A9A502164F8735E4D58F9F19278BD990ABCA17409EAC98B33",
+    "tools/tests/test_session_http.py": "703EE9DE232352900AF71B10C685B32BECC2BEDF7AD9EB32ADB8194CB8E640FC",
+    "tools/tests/test_task7_final_authority_regressions.py": "D475B84B5E6A748CEEB8C6B450A4013A6C033C95574C24B59A49568090DD1E68",
+    "tools/tests/test_task9_launcher_migration.py": "D5FA8BE38A8605D8EEAC9F1A9E64D1A500AC05AF0A0EE3C28971A34C1835540D",
+    "tools/tests/test_task9_protocol_docs.py": "33FEF160BEDAD76357E38903F7064DA48C2B2EF66B2703937A8AD0202EDD8FA7"
+  },
+  "discovered_test_count": 654,
+  "non_green": [
+    {
+      "test_id": "tests.test_port_reclaim.CmdlineModuleMatchTest.test_exact_module_token_matches",
+      "kind": "error",
+      "message_fingerprint": "3ED771F27CE047EDE486ECA8C3D8524E3E67BC09D455B0C6171A34B8BBB5AFB7"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.CmdlineModuleMatchTest.test_module_equals_form_matches",
+      "kind": "error",
+      "message_fingerprint": "3ED771F27CE047EDE486ECA8C3D8524E3E67BC09D455B0C6171A34B8BBB5AFB7"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.CmdlineModuleMatchTest.test_path_substring_does_not_match",
+      "kind": "error",
+      "message_fingerprint": "3ED771F27CE047EDE486ECA8C3D8524E3E67BC09D455B0C6171A34B8BBB5AFB7"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.CmdlineModuleMatchTest.test_prefix_collision_does_not_match",
+      "kind": "error",
+      "message_fingerprint": "3ED771F27CE047EDE486ECA8C3D8524E3E67BC09D455B0C6171A34B8BBB5AFB7"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.CmdlinePortMatchTest.test_equals_separated_port_matches",
+      "kind": "error",
+      "message_fingerprint": "288D8960627A2341A98BDB638B2607CA58455D87266520196C3AD616E6D0EDBD"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.CmdlinePortMatchTest.test_missing_port_does_not_match",
+      "kind": "error",
+      "message_fingerprint": "288D8960627A2341A98BDB638B2607CA58455D87266520196C3AD616E6D0EDBD"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.CmdlinePortMatchTest.test_other_port_does_not_match",
+      "kind": "error",
+      "message_fingerprint": "288D8960627A2341A98BDB638B2607CA58455D87266520196C3AD616E6D0EDBD"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.CmdlinePortMatchTest.test_prefix_collision_does_not_match",
+      "kind": "error",
+      "message_fingerprint": "288D8960627A2341A98BDB638B2607CA58455D87266520196C3AD616E6D0EDBD"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.CmdlinePortMatchTest.test_space_separated_port_matches",
+      "kind": "error",
+      "message_fingerprint": "288D8960627A2341A98BDB638B2607CA58455D87266520196C3AD616E6D0EDBD"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.ReclaimAncestorWalkTest.test_dead_real_ancestor_behind_launcher_is_reclaimed",
+      "kind": "error",
+      "message_fingerprint": "F81C67C763E6DC962313A3FC74F49C03A70BD4A890835587AA246CDAE9B581E7"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.ReclaimAncestorWalkTest.test_live_real_ancestor_behind_launcher_preserves_e4",
+      "kind": "error",
+      "message_fingerprint": "F81C67C763E6DC962313A3FC74F49C03A70BD4A890835587AA246CDAE9B581E7"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.ReclaimAncestorWalkTest.test_unresolved_ancestor_chain_preserves_e4",
+      "kind": "error",
+      "message_fingerprint": "F81C67C763E6DC962313A3FC74F49C03A70BD4A890835587AA246CDAE9B581E7"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.ReclaimIntegrationTest.test_dead_parent_orphan_is_reclaimed_end_to_end",
+      "kind": "error",
+      "message_fingerprint": "20E2CDAC59554BF5313C09732A1E825707A4598178C20ACF1296BCDB04AA37A0"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.ShouldReclaimDiscriminatorTest.test_foreign_process_is_not_reclaimed",
+      "kind": "error",
+      "message_fingerprint": "85D52CC02936B3CF5ACFAB2FD6D1CA9C71E1ADBCDDF59D4AC94FE5D2D5D304C1"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.ShouldReclaimDiscriminatorTest.test_non_python_listener_is_not_reclaimed",
+      "kind": "error",
+      "message_fingerprint": "85D52CC02936B3CF5ACFAB2FD6D1CA9C71E1ADBCDDF59D4AC94FE5D2D5D304C1"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.ShouldReclaimDiscriminatorTest.test_our_instance_with_live_parent_is_not_reclaimed",
+      "kind": "error",
+      "message_fingerprint": "85D52CC02936B3CF5ACFAB2FD6D1CA9C71E1ADBCDDF59D4AC94FE5D2D5D304C1"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.ShouldReclaimDiscriminatorTest.test_our_orphan_with_dead_parent_is_reclaimed",
+      "kind": "error",
+      "message_fingerprint": "85D52CC02936B3CF5ACFAB2FD6D1CA9C71E1ADBCDDF59D4AC94FE5D2D5D304C1"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.ShouldReclaimDiscriminatorTest.test_same_module_different_port_is_not_reclaimed",
+      "kind": "error",
+      "message_fingerprint": "85D52CC02936B3CF5ACFAB2FD6D1CA9C71E1ADBCDDF59D4AC94FE5D2D5D304C1"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.TryReclaimPortDecisionTest.test_current_process_is_never_killed",
+      "kind": "error",
+      "message_fingerprint": "F81C67C763E6DC962313A3FC74F49C03A70BD4A890835587AA246CDAE9B581E7"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.TryReclaimPortDecisionTest.test_kill_failure_returns_false",
+      "kind": "error",
+      "message_fingerprint": "F81C67C763E6DC962313A3FC74F49C03A70BD4A890835587AA246CDAE9B581E7"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.TryReclaimPortDecisionTest.test_live_instance_is_not_killed",
+      "kind": "error",
+      "message_fingerprint": "F81C67C763E6DC962313A3FC74F49C03A70BD4A890835587AA246CDAE9B581E7"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.TryReclaimPortDecisionTest.test_no_listener_found_is_no_op",
+      "kind": "error",
+      "message_fingerprint": "F81C67C763E6DC962313A3FC74F49C03A70BD4A890835587AA246CDAE9B581E7"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.TryReclaimPortDecisionTest.test_orphan_is_killed_and_port_freed",
+      "kind": "error",
+      "message_fingerprint": "F81C67C763E6DC962313A3FC74F49C03A70BD4A890835587AA246CDAE9B581E7"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.TryReclaimPortDecisionTest.test_unavailable_cmdline_logs_identity_uncertain",
+      "kind": "error",
+      "message_fingerprint": "F81C67C763E6DC962313A3FC74F49C03A70BD4A890835587AA246CDAE9B581E7"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.TryReclaimPortDecisionTest.test_unknown_parent_is_not_killed",
+      "kind": "error",
+      "message_fingerprint": "F81C67C763E6DC962313A3FC74F49C03A70BD4A890835587AA246CDAE9B581E7"
+    },
+    {
+      "test_id": "tests.test_port_reclaim.WmicCommandLineTest.test_multiline_command_line_is_accumulated_until_next_key",
+      "kind": "error",
+      "message_fingerprint": "48AD81DF14F89F6E5DE5D3FF98230819EEF597ACA8702AD0AB29A4526C3FFFCC"
+    },
+    {
+      "test_id": "tests.test_runtime_state.CoordinatorSnapshotTest.test_audit_reconstructs_every_exact_event_with_common_evidence",
+      "kind": "error",
+      "message_fingerprint": "C6AB4E05A817F4D240783CBEB05725C61FCB609594DFBB8918A862E6C1F91E30"
+    },
+    {
+      "test_id": "tests.test_task7_final_lifecycle_regressions.AdoptPrecommitRollbackTest.test_guard_exception_rejects_exact_reservation_without_manifest_change",
+      "kind": "failure",
+      "message_fingerprint": "A9DEEDFD50AA94F336AED199765C3295B9DE8C87F23563A2FB474C616A8D33CB"
+    },
+    {
+      "test_id": "tests.test_task7_final_lifecycle_regressions.PostProvisionalRetailFenceTest.test_extension_rechecks_retail_and_restores_previous_bytes_before_launch",
+      "kind": "failure",
+      "message_fingerprint": "920A0D45BEE788FDDE3AF6D3613473BF506F3081B3FBDF9406FDAE981633A5E1"
+    },
+    {
+      "test_id": "tests.test_task7_final_lifecycle_regressions.ReconcileExactSurvivorSetTest.test_reused_pruned_pid_is_extra_diag_and_preserves_manifest_bytes",
+      "kind": "failure",
+      "message_fingerprint": "DCBF2A2F0D1DDFEF85174929C49DF39446D29A6867B47CD618F5B44F47B443BC"
+    },
+    {
+      "test_id": "tests.test_task7_final_lifecycle_regressions.ReconcileExactSurvivorSetTest.test_survivor_disappearing_before_second_diag_preserves_manifest_bytes",
+      "kind": "failure",
+      "message_fingerprint": "717706E62FC9DA5F2AA128EB223F7109C60841B9A903E6E4F41094A51F70BBF3"
+    },
+    {
+      "test_id": "tests.test_task7_final_lifecycle_regressions.StopPreflightReservationRollbackTest.test_manifest_failure_aborts_exact_reservation_and_surfaces_audit_failure",
+      "kind": "failure",
+      "message_fingerprint": "B23CA1BE191751B2CD7490B4DA328A2BD6EBCC420E2D11A8B46A923D1A1BF15A"
+    },
+    {
+      "test_id": "tests.test_task7_rereview_regressions.AuthorityIoBoundaryTest.test_concurrent_fifo_grant_cannot_pop_or_overwrite_a_granted_ticket",
+      "kind": "failure",
+      "message_fingerprint": "DEB6E8E954ED89C9B79B1B5D81E0DB49717DDA935CD5464F342D01590ADBABA6"
+    },
+    {
+      "test_id": "tests.test_task7_rereview_regressions.AuthorityIoBoundaryTest.test_stale_admin_release_cannot_release_the_next_lease",
+      "kind": "error",
+      "message_fingerprint": "73F5183555014AA47DCDB2B159606A9649DC0AA832DED3858104D39C7B272003"
+    },
+    {
+      "test_id": "tests.test_task7_rereview_regressions.AuthorityIoBoundaryTest.test_stale_heartbeat_cannot_report_renewal_after_release_wins",
+      "kind": "error",
+      "message_fingerprint": "73F5183555014AA47DCDB2B159606A9649DC0AA832DED3858104D39C7B272003"
+    },
+    {
+      "test_id": "tests.test_task7_rereview_regressions.CleanupBudgetAndFencingTest.test_late_l1_cleanup_is_fenced_from_same_identity_l2_queue_and_run",
+      "kind": "failure",
+      "message_fingerprint": "C0D87D4C2E0FF07E0F74F30865BC01DC848A06D60FD3827147F27CC8DCDDC120"
+    },
+    {
+      "test_id": "tests.test_task7_rereview_regressions.CleanupBudgetAndFencingTest.test_releasing_has_injectable_budget_timeout_audit_and_fifo_progress",
+      "kind": "error",
+      "message_fingerprint": "73F5183555014AA47DCDB2B159606A9649DC0AA832DED3858104D39C7B272003"
+    },
+    {
+      "test_id": "tests.test_task7_rereview_regressions.FailedLaunchSettlementTest.test_extension_final_write_failure_and_confirmed_exit_restores_exact_previous_run",
+      "kind": "failure",
+      "message_fingerprint": "459573EE27290A56988A4675E1D1498738F7A76AF09566AFB8B306BB9D0A00F1"
+    },
+    {
+      "test_id": "tests.test_task7_rereview_regressions.FailedLaunchSettlementTest.test_failed_extension_with_confirmed_exit_restores_previous_bytes_and_processes",
+      "kind": "failure",
+      "message_fingerprint": "1C84BDB693A41A332227EC234B3603A1BABB787ECE733BEF43103D4877F26308"
+    },
+    {
+      "test_id": "tests.test_task7_rereview_regressions.FailedLaunchSettlementTest.test_final_new_run_write_failure_with_strong_identity_keeps_recoverable_record",
+      "kind": "failure",
+      "message_fingerprint": "0749966831244B990C19DBC0B9726945B0C5946CA11C13862C44458EDEDD4C31"
+    },
+    {
+      "test_id": "tests.test_task7_rereview_regressions.LifecycleRecoveryAndOutcomeTest.test_nonempty_reconcile_rejects_unregistered_diag_pid_without_manifest_change",
+      "kind": "failure",
+      "message_fingerprint": "717706E62FC9DA5F2AA128EB223F7109C60841B9A903E6E4F41094A51F70BBF3"
+    },
+    {
+      "test_id": "tests.test_task7_rereview_regressions.LifecycleRecoveryAndOutcomeTest.test_stop_guard_exception_becomes_unreconciled_and_audited",
+      "kind": "failure",
+      "message_fingerprint": "E700E7B2889367EBF3B7A8C0ABE446231E4DB2808C59E8EF49258CF3C8E136FB"
+    },
+    {
+      "test_id": "tests.test_task7_rereview_regressions.LifecycleRecoveryAndOutcomeTest.test_stop_preflight_process_not_found_becomes_reconcilable_without_terminate",
+      "kind": "failure",
+      "message_fingerprint": "3AE85F19C33281D8D687BCFE5CAA0B2D5724BD7270664D44156455BC15874966"
+    },
+    {
+      "test_id": "tests.test_task7_rereview_regressions.LifecycleRecoveryAndOutcomeTest.test_stopping_after_final_write_failure_remains_admin_reconcilable",
+      "kind": "failure",
+      "message_fingerprint": "E700E7B2889367EBF3B7A8C0ABE446231E4DB2808C59E8EF49258CF3C8E136FB"
+    },
+    {
+      "test_id": "tests.test_task7_review_regressions.ExactLeaseBarrierTest.test_stale_l1_adopt_cannot_snapshot_or_persist_under_l2",
+      "kind": "failure",
+      "message_fingerprint": "3F4DC8D55FC356F318FD3A64BA9AE9D3A69F5AA0216BC155457BF50E3797C4A3"
+    },
+    {
+      "test_id": "tests.test_task7_review_regressions.ExactLeaseBarrierTest.test_stale_l1_stop_cannot_snapshot_or_terminate_under_l2",
+      "kind": "failure",
+      "message_fingerprint": "ECEB7F78B3E683D38A951BDC452525B78ED109C3209EE95716953C2197D6DF85"
+    },
+    {
+      "test_id": "tests.test_task7_review_regressions.LifecyclePostAuditQuarantineTest.test_retail_appearing_during_admin_audit_blocks_manifest",
+      "kind": "failure",
+      "message_fingerprint": "4556EF5C5A32396F262A535D1A35D7AF08454E981752E06D675CF70841CB0A83"
+    },
+    {
+      "test_id": "tests.test_task7_review_regressions.LifecyclePostAuditQuarantineTest.test_retail_appearing_during_adopt_audit_blocks_manifest",
+      "kind": "failure",
+      "message_fingerprint": "1A2F44B0B0D3B316CFCC82411056709A7DF2BEEEFD99A5DFA0EAAD98DE0CF2E5"
+    },
+    {
+      "test_id": "tests.test_task7_review_regressions.LifecyclePostAuditQuarantineTest.test_retail_appearing_during_stop_audit_blocks_manifest_and_guard",
+      "kind": "failure",
+      "message_fingerprint": "C8B09611BE133446A5F4A8E0706D843D725A6C1CF5EA7BB6A5E4E9110D56B8AB"
+    },
+    {
+      "test_id": "tests.test_task7_review_regressions.RealLifecycleHttpQuarantineTest.test_real_lifecycle_clean_routes_cover_start_stop_adopt_reconcile_and_empty",
+      "kind": "failure",
+      "message_fingerprint": "EA09042F1CBCDF7F72ABDE11E3AA090518D96EDBBABE2AFE2E28555116E8A4FF"
+    },
+    {
+      "test_id": "tests.test_task7_review_regressions.RestartAndManifestTest.test_activation_releases_previous_generation_running_owner_without_guard",
+      "kind": "failure",
+      "message_fingerprint": "3F4DC8D55FC356F318FD3A64BA9AE9D3A69F5AA0216BC155457BF50E3797C4A3"
+    },
+    {
+      "test_id": "tests.test_task7_review_regressions.RestartAndManifestTest.test_restart_release_audit_failure_aborts_activation_without_manifest_change",
+      "kind": "failure",
+      "message_fingerprint": "CEBB837F03B0DC6C78DAB80B6474759C50263D4D51331860E09B7D6F3F4B4D28"
+    },
+    {
+      "test_id": "tests.test_task7_review_regressions.RunStateRecoveryTest.test_partial_stop_persists_only_survivors",
+      "kind": "failure",
+      "message_fingerprint": "E700E7B2889367EBF3B7A8C0ABE446231E4DB2808C59E8EF49258CF3C8E136FB"
+    },
+    {
+      "test_id": "tests.test_task7_review_regressions.RunStateRecoveryTest.test_reconcile_prunes_only_process_not_found_and_keeps_exact_survivor",
+      "kind": "error",
+      "message_fingerprint": "960855F2092150DB169229C97C83D9C04011DF53413A4730C2B9977067DE1A9F"
+    },
+    {
+      "test_id": "tests.test_task9_launcher_migration.LifecycleWalkthroughTest.test_a_acquire_start_release_leaves_running_idle",
+      "kind": "failure",
+      "message_fingerprint": "779E59B9DDD305F7ECFE836CCE59DEEB8E89DF95CE3EE770ADE4DCA56882D874"
+    },
+    {
+      "test_id": "tests.test_task9_launcher_migration.LifecycleWalkthroughTest.test_b_acquire_adopt_stop_targets_the_exact_run",
+      "kind": "failure",
+      "message_fingerprint": "CA38FAFDBF1C9292725E5F5DA82A1DD8AA467AE426B5DB6D040BF7FB73B59F19"
+    }
+  ],
+  "focal_green": false
+}

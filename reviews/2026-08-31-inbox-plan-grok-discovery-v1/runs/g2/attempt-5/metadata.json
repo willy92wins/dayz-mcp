@@ -1,0 +1,22 @@
+{
+  "attempt": "attempt-5",
+  "errors": [
+    "assistant result is not strict JSON",
+    "result is not one JSON object"
+  ],
+  "group": "G2",
+  "group_verdict": null,
+  "is_error": false,
+  "open_findings": null,
+  "process_rc": 0,
+  "prompt_sha256": "57bb5e4b81dcf08b089b29cca470b673e96e817833b54bf992ed57e92a890561",
+  "requested_model": "cursor-grok-4.6-medium",
+  "result_subtype": "success",
+  "route": "cursor-agent",
+  "schema_version": 1,
+  "served_model": "Cursor Grok 4.6 Medium",
+  "session_id": "403a6c76-730e-4efd-9d9e-22f1ac080c42",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stream_sha256": "83b4a740136da99f478e178e942f1ffc0402ff68a5db41af06933892c9ad748a",
+  "valid_transport_and_schema": false
+}

@@ -1,0 +1,122 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+===============================================================================
+§0. EL PRODUCTO — una sola cosa
+===============================================================================
+
+En `tools/dayz_mcp/server.py`, las cuatro tools públicas de UI aceptan `root`, y `ui_click`
+acepta además `mode` y `bubble`:
+
+    ui_tree(path="", limit=256, root=..., timeout_s=...)
+    ui_set_text(path, text, root=..., timeout_s=...)
+    ui_click(path, button=0, root=..., mode="direct", bubble=False, timeout_s=...)
+    ui_focus(path, root=..., timeout_s=...)
+
+Es un CABLEADO, no una capacidad nueva. Las tres capas de abajo ya hablan el contrato; la
+superficie de la tool es el único eslabón que corta.
+
+LO QUE NO ES EL PRODUCTO, y no es tu trabajo aunque tengas razón:
+  - El oráculo, el gate, el ledger, los mutantes, la calibración, el workspace, este brief.
+    Si ves un defecto ahí, va a `DISPUTAS` en STATE.md. NO lo edites.
+  - **Implementar el modo `complete`.** El bridge lo rechaza a propósito con
+    `mode_not_implemented` (`MCPClientBridge.c:1449-1453`) y la ficha lo declara
+    INCONCLUSIVE. La tool debe ACEPTARLO como valor válido del enum y transmitirlo. Punto.
+  - `addon/`, el bridge Enforce, `loopback.py`: ya están hechos. No los toques.
+  - Refactorizar, renombrar o mejorar de paso nada.
+
+===============================================================================
+§1. ENTORNO — medido hoy
+===============================================================================
+
+  - Intérprete, exacto y sin alternativa:
+      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+  - **Esa venv NO tiene pytest.** La suite es `unittest`:
+      cd tools && PYTHONPATH=. "<intérprete>" -m unittest tests.test_mcp_tools
+  - Sin red, sin juego, sin PBO.
+
+===============================================================================
+§2. HECHOS VERIFICADOS — los abrí yo
+===============================================================================
+
+Ya está hecho, y por eso esto es cableado y no diseño:
+  - `addon/scripts/5_Mission/MCPMessages.c:63,69-71` declara `string mode; string path;
+    string root; bool bubble;`
+  - `addon/scripts/5_Mission/MCPClientBridge.c:1436-1461` resuelve vía `ResolveUiRoot`,
+    normaliza `mode==""` a `"direct"`, rechaza `complete` con `mode_not_implemented` y
+    cualquier otro valor con `bad_args`. El modo `direct` nunca lee `bubble`.
+  - `tools/dayz_mcp/loopback.py:665-676` ya acepta
+    `optional=("button","mode","bubble","root")`, con `_one_of("direct","complete")` y
+    `_is_strict_bool`. Es del commit `08e707a`.
+
+Lo que falta, medido: `server.py:4189` (`ui_tree`), `:4208` (`ui_set_text`), `:4225`
+(`ui_click`), `:4285` (`ui_focus`) — ninguna declara `root`, y `ui_click` no declara
+`mode` ni `bubble`.
+
+**Dato que cambia cómo tienes que validar, y lo medí hoy**: un argumento que la firma no
+declara NO se rechaza — FastMCP lo **descarta en silencio** y la llamada sigue. Así que hoy
+`ui_click(path="X", mode="basura")` tiene éxito ignorando el `mode`. Por eso la validación
+tiene que ser tuya y explícita, y tiene que lanzar ANTES de encolar el comando.
+
+===============================================================================
+§3. EL CONTRATO, punto por punto
+===============================================================================
+
+(a) `root` es OPCIONAL y **conserva su presencia**: si el llamante no lo manda, `root` NO
+    debe aparecer en el dict `args` que va al puente. Ponerle un defecto `""` y mandarlo
+    siempre cambia el alcance de resolución de todo llamante que hoy no manda root, y el
+    gate lo caza. Cuando sí lo manda, viaja con su valor.
+(b) `mode` y `bubble` viajan **SIEMPRE** en `args` de `ui_click`, incluso con sus valores
+    por defecto (`"direct"` y `False`). Sí, es asimétrico respecto a `root`: es lo que la
+    ficha pide, y tiene sentido — un enum con defecto explícito no es lo mismo que un
+    acotador opcional.
+(c) Validación fail-closed, y lanza ToolError ANTES de encolar:
+      - `mode`: cadena, y una de `{"direct", "complete"}`.
+      - `bubble`: bool ESTRICTO. Un `1` o un `"true"` se rechazan.
+      - `root`: cuando está presente, cadena no vacía.
+(d) Las guardas que ya existen siguen vivas: `path` no vacío donde ya lo era, `button` entero
+    de 0 a 2. El gate tiene un check para cada una porque una edición ancha se las lleva por
+    delante con facilidad.
+
+===============================================================================
+§4. EL GATE
+===============================================================================
+
+    bash gate/run.sh      -> G1, el oráculo de producto
+    bash gate/suite.sh    -> G2, los tests de la superficie UI
+
+Ahora mismo: `PASS=6 FAIL=18 UNMET=0 de 24`. Los 18 FAIL son tu trabajo.
+
+**Los 6 PASS son la línea que no puedes romper**: los cuatro `F3-*` (sin root, root no
+viaja) y los dos `F6-*` (las guardas de `path` y `button`).
+
+Terminas cuando `gate/run.sh` diga `ORACULO-VERDE` y `gate/suite.sh` diga `SUITE-ACOTADA OK`.
+
+`gate/` está sellado por hash y es de sólo lectura. Compruebo el sello al recibir.
+
+===============================================================================
+§5. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/server.py
+    tools/tests/test_mcp_tools.py
+
+PROHIBIDO: `gate/`; `addon/`; `loopback.py`; `MCPMessages.c`; `MCPClientBridge.c`;
+debilitar o borrar cualquier validación existente; borrar tests; usar red; correr la suite
+completa.
+
+Escribe tests para lo que entregas, y córrelos ANTES de tu cambio para comprobar que fallan.
+
+===============================================================================
+§6. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — qué entregaste, con `path:line`.
+    ## GATE             — la salida literal de los dos gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea que demuestra que fallaba antes.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si crees que un criterio del gate está mal, aquí, con el argumento.

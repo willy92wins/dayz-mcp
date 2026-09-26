@@ -1,0 +1,18 @@
+{
+  "PROJECT-MAP.md": {
+    "bytes": 3669,
+    "sha256": "158f270b82d0d086674bbd21f5d6f67200731f3d749b4d8b5ca20efd57325993"
+  },
+  "tools/gen-project-map.ps1": {
+    "bytes": 0,
+    "sha256": null
+  },
+  "tools/tests/test_docs_truth.py": {
+    "bytes": 30518,
+    "sha256": "3c4c21cb65e7c647be49551b0b513343c0ac5cca590676b1b910a1a14028181c"
+  },
+  "HANDOFF.md": {
+    "bytes": 8316,
+    "sha256": "a49d541f76cb810b92810c9096ad23697364614e177d75b24e94db34228d30a6"
+  }
+}

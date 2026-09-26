@@ -1,0 +1,49 @@
+{
+  "ticket": "fb-20260829-133459-a396",
+  "module": "M16-STEAM-PREFLIGHT",
+  "packet": "inbox-20260831-v6",
+  "plan": "plans/inbox-20260830/21-fb-20260829-133459-a396.md",
+  "gate_file": "gates/inbox-21-133459-a396.md (read only; no box flipped)",
+  "ownership_addendum": "plans/inbox-20260830/physical-ownership-addendum-v1.md:65",
+  "scope": "M16 half of plan points 1-2 only (injectable provider + typed verdict). M19 points 3-6, execute_dayz_test_run, app.call_tool and phase=validating envelope NOT implemented this hop.",
+  "owns": {
+    "tools/dayz_mcp/steam_preflight.py": {
+      "sha256": "1c41f4245e1a1a5a3cfe20522938fcfebafd05338320bb35b76ef73074938fa5",
+      "mtime_utc": "2026-08-31T22:21:09.110087",
+      "size_bytes": 8472
+    },
+    "tools/tests/test_steam_preflight.py": {
+      "sha256": "0e3cee7dafef791af1cc6ddbcee94a4ce34e68be6f4d6930e89767c748d60671",
+      "mtime_utc": "2026-09-01T08:49:42.084802",
+      "size_bytes": 10255
+    }
+  },
+  "plan_points": {
+    "1_injectable_provider": {
+      "plan_citation": "plans/inbox-20260830/21-fb-20260829-133459-a396.md:27",
+      "implemented": "tools/dayz_mcp/steam_preflight.py:41-50 (SteamPreflightProvider Protocol seam: read_active_process/process_exists/process_image_path/steam_process_pids), steam_preflight.py:53-145 (WindowsSteamPreflightProvider reads exactly HKCU\\Software\\Valve\\Steam\\ActiveProcess values pid and ActiveUser)",
+      "discriminator": "steam_preflight.py:189-224 (evaluate_steam_session: pid int >0, ActiveUser int !=0, registered PID exists, image basename steam.exe case-insensitive; absent/permission/PID-gone/wrong-image/enum-failure all fail closed to steam_session_stale; a live steam.exe with another PID is never accepted)",
+      "helpers": "steam_preflight.py:165-183 (_read_stable_snapshot demands two identical snapshots; _safe_live_pids rejects exceptions and malformed PIDs, sorts+dedups, caps at _MAX_LIVE_PIDS=8 line 20)"
+    },
+    "2_typed_verdict": {
+      "plan_citation": "plans/inbox-20260830/21-fb-20260829-133459-a396.md:28",
+      "implemented": "tools/dayz_mcp/steam_preflight.py:32-39 (SteamSessionResult: error_code/steam_registered_pid/steam_live_pids/remediation), steam_preflight.py:156-161 (_stale builder sets error_code=steam_session_stale (line 17) and remediation=restart_steam_and_wait_for_active_process_match (line 18))",
+      "no_secrets": "steam_preflight.py:32-39 (result contract has exactly four safe fields; ActiveUser/username/image path never stored), steam_preflight.py:209-224 (image path used only for basename comparison, never returned)",
+      "seam_for_m19": "steam_preflight.py:41-50 + evaluate_steam_session(provider=None) default constructs WindowsSteamPreflightProvider only when caller omits the provider; M19 injects fakes. No _fail, no envelope, no phase logic in M16 scope."
+    }
+  },
+  "tests_added_this_hop": {
+    "scope": "5 test methods appended to tools/tests/test_steam_preflight.py closing fail-closed gaps; module bytes steam_preflight.py NOT modified (mtime 2026-08-31T22:21:09Z pre-existing)",
+    "tests": "tools/tests/test_steam_preflight.py:172-190 (enumeration raises or returns 0/negative/string/None PIDs), :193-220 (process_exists/process_image_path raise), :222-233 (non-string image), :235-247 (pid 0/-3/None -> steam_registered_pid null), :249-268 (PASS with empty/foreign enumeration keeps live_pids shape)"
+  },
+  "not_touched": [
+    "tools/dayz_mcp/inbox.py",
+    "tools/dayz_mcp/knowledge.py",
+    "tools/dayz_mcp/server.py",
+    "tools/dayz_mcp/dayz_test_tool.py",
+    "tools/dayz_mcp/dayz_test_readiness.py",
+    "tools/dayz_mcp/dayz_test_worker.py",
+    "GATES.md boxes (copies for read)",
+    "product-spec.md"
+  ]
+}

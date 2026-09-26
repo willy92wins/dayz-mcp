@@ -1,0 +1,47 @@
+===============================================================================
+CONTEXTO COMÚN — lote D: la caja se ocupa por quien sostiene un puerto de juego (fb-20260904-114520-6927)
+===============================================================================
+
+Árbol vivo: C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev (rama work/inbox-20260830-modules,
+HEAD cdae732 = 7670703 + un commit ajeno de loopback.py y test_daemon.py), cambios SIN commitear. Diff completo en DIFF-D.patch junto a este brief (5 ficheros de producto
++ 2 tests nuevos). Intérprete OBLIGATORIO:
+C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+Desde tools/: $env:PYTHONPATH='.'; $env:PYTHONDONTWRITEBYTECODE='1'. Sin pytest: unittest.
+
+LA FICHA. `dayz_test_run(project=DayZ_MCP, mode=all, port=2302, wait_for_box_s=600)` volvió `succeeded` en 13 s sin
+esperar; a las 13:42:40 un servidor AJENO (pid 22740, 6 min arriba) que sostenía el 2302 cayó y a las 13:43:00 apareció el
+del reportero. `session_status.box` decía libre (`foreign=[]`). Causa medida: el sondeo de la caja enumeraba SOLO
+`DayZDiag_x64.exe` por nombre (daemon.py `diag_probe`) y sacaba `ports_in_use` del argv de esos procesos, no de la tabla
+de puertos del sistema: un servidor con otra imagen, o cuyo argv no describía el puerto, era invisible. El MCP no mata
+PIDs no registrados; lo que hizo fue LANZAR ENCIMA de un puerto ocupado.
+
+EL CAMBIO (léelo en DIFF-D.patch; cita path:line de lo que compruebes):
+- `tools/dayz_mcp/orphan_guard.py`: `snapshot_udp_port_holders()` lee la tabla de sockets UDP del SISTEMA (psutil
+  `net_connections(kind="udp")`; respaldo `netstat -ano -p UDP` parseado por `_udp_holders_from_netstat_output`), nombra
+  cada PID desde UN snapshot ToolHelp (`_snapshot_all_process_entries`), devuelve `{"known": bool, "holders":
+  [{"port","pid","name"}]}`; `known=False` si ninguna fuente contestó. `is_dayz_image_name`.
+- `tools/dayz_mcp/process_lifecycle.py`: `ProcessLifecycle(port_probe=None)` (opcional: sin probe = comportamiento
+  anterior); `_port_holders()` valida la forma (cualquier anomalía → `port_scan_unknown`); `_collect_probes` añade a
+  `foreign` una fila por PID no registrado cuya IMAGEN sea DayZ (`{"port","mods":[],"profiles":None,"image","source":"port"}`,
+  sin pid) y mete en `ports_in_use` los puertos del SO de procesos registrados o con imagen DayZ (los servicios ajenos, DNS
+  etc., no tocan la caja); `_BoxProbes.port_scan_known` (default True) y `_derive_box`: sondeo de puertos desconocido →
+  `occupied=True` + `port_scan_known:false` en el payload; `start_run` llama a `_foreign_port_reason(registered_pids,
+  _requested_port(argv))` con sondeo FRESCO (no la caché de 1,5 s): rechaza `active_run_exists` con audit
+  `port_in_use_foreign` si un holder no registrado (o no atribuible, pid None) es imagen DayZ en cualquier puerto o
+  sostiene el puerto pedido; `port_scan_unknown` si el sondeo falla.
+- `tools/dayz_mcp/daemon.py`: cablea `port_probe=orphan_guard.snapshot_udp_port_holders`.
+- `tools/dayz_mcp/server.py` (dos descripciones) y `tools/README-mcp.md`: documentan el contrato.
+- Tests: `tools/tests/test_box_port_occupancy.py` (fixture como test_box_occupancy; 15 tests: ocupación por servidor
+  ajeno de otra imagen, servicios ignorados, puertos de runs registrados desde el SO, un proceso visto por nombre Y por
+  puerto = una fila, tabla ilegible = ocupada, sin probe = legado, `_derive_box`, rechazos de `start_run` por puerto
+  pedido / imagen DayZ en otro puerto / holder no atribuible, lanzamiento permitido con holders ajenos irrelevantes,
+  sondeo fresco frente a caché, `port_scan_unknown` bloquea) y `tools/tests/test_orphan_guard_udp.py` (parser netstat
+  con IPv6/OEM/no atribuible, psutil con nombres desde un snapshot, respaldo netstat, sin fuente = unknown, control vivo
+  en Windows). Control positivo medido por el orquestador en este host: la tabla ve UDP 2302/2304 sostenidos por el pid
+  45428 = `DayZDiag_x64.exe` (run registrado de otra sesión). Suite completa: ver `SUITE-D.txt` junto al brief.
+
+FRONTERAS (todas las sesiones): NO ejecutes DayZ ni el daemon ni nada de red salvo LEER la tabla de sockets local
+(`netstat -ano`, psutil) que es solo lectura. NO commitees. NO edites el árbol vivo salvo mutantes que RESTAURES a mano
+(nunca git checkout/restore: hay trabajo ajeno sin commitear en el árbol) demostrando sha256 antes/después. No toques
+loopback.py, dayz_test_tool.py ni sus tests. Evidencia = comandos ejecutados con su salida; lectura sin ejecutar se
+etiqueta como tal. Un hallazgo CRITICAL exige repro EJECUTABLE (test o script que falle hoy); sin repro va a BACKLOG.

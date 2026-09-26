@@ -1,0 +1,143 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+RONDA 4 del lote G. **El sustrato de la ronda 3 aguantó y no se toca.** El audit dejó de ser
+autoridad, la actividad no decide `occupied`/stop/reap, y los cinco defectos del lector siguen
+disueltos. Lo que falla ahora es más fino y está acotado a dos familias.
+
+===============================================================================
+§0. EL PRODUCTO
+===============================================================================
+
+  P1. **La actividad se acredita al run que el comando realmente comanda.** El enqueue ya
+      conoce el `run_id` exacto: está en el binding. Ese, y no otro, es el destino.
+  P2. **La generación nueva no hereda sellos viejos.** Extender un run heredado no puede
+      importar el timestamp de un proceso anterior a este daemon.
+  P3. **La caché nunca publica un estado que ya no es cierto.** Ni tras sembrar la basal en
+      un arranque, ni tras una mutación de actividad que ocurrió mientras alguien leía.
+
+Sigue en pie: la actividad vive en memoria por `(daemon_generation, run_id)`; el audit
+registra pero no manda; sticky que una escritura buena no limpia; nada de actividad en un
+rechazo ni en un enqueue interno; fail-closed a `unknown`/null; y **la actividad es
+diagnóstico, no autoridad**.
+
+LO QUE NO ES EL PRODUCTO: el gate, el oráculo, el ledger, este brief (defecto ahí →
+`DISPUTAS`); el sobre de `dayz_test_stop` y compañía; `runtime_state.py`; `README-mcp.md`
+(la hago yo); refactors de paso.
+
+===============================================================================
+§1. LOS CINCO ROJOS
+===============================================================================
+
+**N1-ATRIBUCION y N5-REINICIO — el enqueue tira la identidad que ya tiene.**
+
+`loopback.py:1557-1559` obtiene el binding exacto del comando, y el binding lleva el `run_id`
+desde que se acuña (`loopback.py:954-965`, campo `run_id=run_id`). Pero al registrar sólo
+viaja la identidad del **cliente** (`_note_run_command_activity`, `:1691-1702`), y
+`record_box_command_activity` (`process_lifecycle.py:935-947`) reconstruye el destino por
+dueño o por cardinalidad.
+
+Consecuencias medidas, las dos:
+  - Comando sellado y encolado para `run-2`, frescura acreditada a **`run-1`**.
+  - Con varios runs activos y el comandado **sin dueño**: **cero** eventos. Mi parche de la
+    ronda 3 (`if not targets and len(active) == 1`) no cubre ese caso, y ampliarlo no es el
+    arreglo: **el arreglo es no tirar la identidad exacta**.
+
+Lo que se pide: capturar `binding.run_id` bajo el lock de `ServerState` y pasarlo explícito
+hasta `record_command_activity(run_id)`, **en las dos ramas** (normal y `_enqueue_exec_enforce`,
+`:1634-1686`). El respaldo por dueño/cardinalidad, si sobrevive, sólo para una cola legacy que
+de verdad carezca de binding — nunca sustituyendo a una identidad exacta disponible.
+
+**N6-GENERACION — la basal importa un sello anterior a este daemon.**
+
+`_capture_start_activity` (`process_lifecycle.py:906-919`) hace `min(stamps)` sobre **todos**
+los procesos del run. Al extender un run heredado, `start_run` añade el proceso nuevo y llama
+a la captura (`:1501-1506`), así que la clave de la generación nueva se queda con el
+`creation_time_utc` de un proceso que arrancó el daemon **anterior**. Medido: el sello de
+`gen-B` coincidía con un proceso de 2026-06-01.
+
+Es la grieta del argumento que sostiene todo el sustrato. «El daemon arrancó este run en esta
+generación y lo recuerda» deja de ser cierto en cuanto un sello cruza la frontera.
+
+**N7-CACHE-START — sembrar la basal no invalida la caché.**
+
+Medido: `box_occupancy()` siembra la caja vacía; `start_run` devuelve `ok=True`; la lectura
+cacheada **sigue diciendo `occupied=False, runs=[]`** durante el TTL. No autoriza un segundo
+arranque (`start_run` consulta el manifiesto), pero publica una caja vacía que no lo está.
+
+**N8-CACHE-CARRERA — un lector lento republica lo viejo después de invalidar.**
+
+`_write_command_activity` (`:951-966`) actualiza el sticky y **luego** invalida; pero
+`box_occupancy` (`:2523-2531`) calcula sin revisión y publica **incondicionalmente** al final.
+Secuencia medida: un lector empieza, otro hilo recibe fallo de escritor e invalida, el lector
+termina y **pisa** la invalidación con el snapshot viejo. Verdad `unknown`, caché `stale`.
+
+Sugerencia del revisor, y me parece la buena: **contador de revisión**. La mutación lo
+incrementa bajo `_activity_lock`; el lector lo captura antes de calcular y **sólo publica si
+no cambió**. Un lock que cubra todo `_box_occupancy_uncached` también cerraría la carrera pero
+mantendría bloqueado durante sondas de proceso y argv. ⚠ No introduzcas orden inverso entre
+`_activity_lock` y `_operation_lock`: `start_run` va `_operation_lock → _activity_lock`.
+
+===============================================================================
+§2. EL GATE
+===============================================================================
+
+    bash gate/run.sh      -> G1, el oráculo de producto
+    bash gate/suite.sh    -> G2, los tests de lifecycle, ocupación y loopback
+
+Ahora mismo: `PASS=16 FAIL=5 UNMET=0 de 21`. Tus cinco rojos son los de arriba.
+
+**Los 16 verdes son la línea que no se puede romper**, e incluyen `N4-SUSTRATO` (corromper o
+borrar `events.jsonl` no mueve la respuesta), `R1-READONLY`, `R5-RASTRO` (un comando aceptado
+sigue dejando **un** evento) y `N2-INTERNO`, que arreglaste en la ronda 3.
+
+**Aviso sobre los checks nuevos**: N1, N2 y N5 ya **no** llaman al registrador directamente.
+Conducen el enqueue de verdad, con dos runs activos y el binding apuntando al que no tiene
+dueño. Los de la ronda 3 verificaban el registrador y no el cableado, y por ahí se coló todo
+esto. **Tus tests tienen el mismo hueco**: `fence_helpers.bind_both_peers` ata
+`run_id="test-run"` por defecto y `RunCommandActivityTest._bind_state` lo llama sin el real
+(`test_box_occupancy.py:670-674`), así que
+`test_accepted_enqueue_records_activity_on_both_branches` comandaba un binding de otro run y
+aceptaba la atribución por cardinalidad. Arréglalo pasando el `run_id` real.
+
+**Está probado que N6, N7 y N8 son alcanzables**: los prototipé por ser los que tocan verdes
+existentes y dieron **19/21 sin romper ninguno**; después reverti. N1 y N5 no los prototipé
+—es fontanería y no toca verdes— y te lo digo en vez de dejar que el 19/21 parezca completo.
+
+Terminas cuando `gate/run.sh` diga `ORACULO-VERDE` y `gate/suite.sh` diga `SUITE-ACOTADA OK`.
+
+`gate/` está sellado por hash y es de sólo lectura. Compruebo el sello al recibir.
+
+===============================================================================
+§3. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/process_lifecycle.py
+    tools/dayz_mcp/loopback.py
+    tools/tests/test_box_occupancy.py
+    tools/tests/test_process_lifecycle.py
+    tools/tests/fence_helpers.py      (sólo para que los llamantes pasen el run_id real)
+
+PROHIBIDO: `gate/`; `addon/`; `server.py`; `dayz_test_tool.py`; `runtime_state.py`; debilitar
+o borrar validaciones existentes; usar red; correr la suite completa.
+
+⚠ **Data-crítico**: no cambies el formato de un evento, no toques la rotación, y que un fallo
+de escritura no tumbe una operación: el audit informa, no autoriza.
+
+Escribe tests para lo que entregas, y córrelos ANTES de tu cambio para comprobar que fallan.
+
+===============================================================================
+§4. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — qué entregaste, con `path:line`.
+    ## GATE             — la salida literal de los dos gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea que demuestra que fallaba antes.
+                          Si un test no puede tener rojo-antes porque cubre algo que ya
+                          funcionaba, dilo así: es preservación, no evidencia del arreglo.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si crees que un criterio del gate está mal, aquí, con el argumento.

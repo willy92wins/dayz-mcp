@@ -1,0 +1,1138 @@
+{
+  "summary": {
+    "run_id": "20260925-gcal",
+    "when": "2026-09-25 11:15:59 Europe/Madrid",
+    "checkout": "78cc50a",
+    "repo": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "sheets_total": 35,
+    "owns_total": 22,
+    "descensos": 0,
+    "ascensos": 5,
+    "matches": 17,
+    "expect_descensos": 0,
+    "gcal_pass": true,
+    "clase_tally": {
+      "C2": 6,
+      "C3": 10,
+      "C4": 6
+    },
+    "floor_tally": {
+      "C2": 4,
+      "C3": 8,
+      "C1": 4,
+      "C4": 6
+    },
+    "descensos_list": [],
+    "ascensos_list": [
+      {
+        "id": "fb-20260829-024747-55dd",
+        "sheet": "06-fb-20260829-024747-55dd.md",
+        "clase_mecanica": "C3",
+        "oracle_floor": "C1"
+      },
+      {
+        "id": "fb-20260829-025502-251d",
+        "sheet": "10-fb-20260829-025502-251d.md",
+        "clase_mecanica": "C2",
+        "oracle_floor": "C1"
+      },
+      {
+        "id": "fb-20260829-030056-d73b",
+        "sheet": "12-fb-20260829-030056-d73b.md",
+        "clase_mecanica": "C2",
+        "oracle_floor": "C1"
+      },
+      {
+        "id": "fb-20260829-111016-344d",
+        "sheet": "19-fb-20260829-111016-344d.md",
+        "clase_mecanica": "C3",
+        "oracle_floor": "C2"
+      },
+      {
+        "id": "fb-20260829-135408-cc2d",
+        "sheet": "22-fb-20260829-135408-cc2d.md",
+        "clase_mecanica": "C2",
+        "oracle_floor": "C1"
+      }
+    ]
+  },
+  "rows": [
+    {
+      "id": "fb-20260828-211445-3bb4",
+      "sheet": "01-fb-20260828-211445-3bb4.md",
+      "disposicion": "EVIDENCIA",
+      "has_owns": false,
+      "owns_paths": [],
+      "owns_resolved": [],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": null,
+      "delta": null,
+      "compare": null,
+      "evidence_only": false,
+      "primary_symbol": "matched_path"
+    },
+    {
+      "id": "fb-20260828-212912-f6ac",
+      "sheet": "02-fb-20260828-212912-f6ac.md",
+      "disposicion": "EVIDENCIA",
+      "has_owns": false,
+      "owns_paths": [],
+      "owns_resolved": [],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": null,
+      "delta": null,
+      "compare": null,
+      "evidence_only": false,
+      "primary_symbol": "f4f2"
+    },
+    {
+      "id": "fb-20260828-224835-268a",
+      "sheet": "03-fb-20260828-224835-268a.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/mcp_capture.py",
+        "tools/tests/test_mcp_capture.py",
+        "tools/dayz_mcp/server.py"
+      ],
+      "owns_resolved": [
+        "tools/mcp_capture.py",
+        "tools/tests/test_mcp_capture.py",
+        "tools/dayz_mcp/server.py"
+      ],
+      "senales": {
+        "D1": 2,
+        "D2": 0,
+        "D3": false,
+        "D4": true,
+        "D5": "default",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "oracle_floor": "C2",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-022838-7743",
+      "sheet": "04-fb-20260829-022838-7743.md",
+      "disposicion": "CAMBIO",
+      "has_owns": false,
+      "owns_paths": [],
+      "owns_resolved": [],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": null,
+      "delta": null,
+      "compare": null,
+      "evidence_only": false,
+      "primary_symbol": "compuesta"
+    },
+    {
+      "id": "fb-20260829-023649-8f8c",
+      "sheet": "05-fb-20260829-023649-8f8c.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/dayz_mcp/dayz_test_request.py",
+        "tools/tests/test_dayz_test_request.py",
+        "tools/dayz_mcp/dayz_test_tool.py",
+        "tools/dayz_mcp/dayz_test_readiness.py",
+        "tools/tests/test_dayz_test_tool.py",
+        "tools/tests/test_dayz_test_readiness.py",
+        "tools/dayz_mcp/server.py"
+      ],
+      "owns_resolved": [
+        "tools/dayz_mcp/dayz_test_request.py",
+        "tools/tests/test_dayz_test_request.py",
+        "tools/dayz_mcp/dayz_test_tool.py",
+        "tools/dayz_mcp/dayz_test_readiness.py",
+        "tools/tests/test_dayz_test_tool.py",
+        "tools/tests/test_dayz_test_readiness.py",
+        "tools/dayz_mcp/server.py"
+      ],
+      "senales": {
+        "D1": 4,
+        "D2": 27,
+        "D3": false,
+        "D4": true,
+        "D5": "default",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": "C3",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "wait_for"
+    },
+    {
+      "id": "fb-20260829-024747-55dd",
+      "sheet": "06-fb-20260829-024747-55dd.md",
+      "disposicion": "EVIDENCIA",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/tests/test_weak_agent_consumer_ux.py",
+        "tools/dayz_mcp/server.py"
+      ],
+      "owns_resolved": [
+        "tools/tests/test_weak_agent_consumer_ux.py",
+        "tools/dayz_mcp/server.py"
+      ],
+      "senales": {
+        "D1": 1,
+        "D2": 0,
+        "D3": false,
+        "D4": true,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": "C1",
+      "delta": 2,
+      "compare": "ASCENSO",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-024827-9b7b",
+      "sheet": "07-fb-20260829-024827-9b7b.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/dayz_mcp/tool_registry_fingerprint.py",
+        "tools/tests/test_tool_registry_fingerprint.py",
+        "tools/dayz_mcp/server.py",
+        "tools/tests/test_mcp_tools.py"
+      ],
+      "owns_resolved": [
+        "tools/dayz_mcp/tool_registry_fingerprint.py",
+        "tools/tests/test_tool_registry_fingerprint.py",
+        "tools/dayz_mcp/server.py",
+        "tools/tests/test_mcp_tools.py"
+      ],
+      "senales": {
+        "D1": 2,
+        "D2": 0,
+        "D3": false,
+        "D4": true,
+        "D5": "default",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": "C3",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-024848-c7ca",
+      "sheet": "08-fb-20260829-024848-c7ca.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/dayz_mcp/inbox.py",
+        "tools/tests/test_pipeline_feedback.py",
+        "tools/dayz_mcp/server.py"
+      ],
+      "owns_resolved": [
+        "tools/dayz_mcp/inbox.py",
+        "tools/tests/test_pipeline_feedback.py",
+        "tools/dayz_mcp/server.py"
+      ],
+      "senales": {
+        "D1": 2,
+        "D2": 0,
+        "D3": true,
+        "D4": false,
+        "D5": "formato",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C4",
+      "oracle_floor": "C4",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-025012-103f",
+      "sheet": "09-fb-20260829-025012-103f.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/dayz_mcp/tool_registry_fingerprint.py",
+        "tools/tests/test_tool_registry_fingerprint.py",
+        "tools/dayz_mcp/server.py",
+        "tools/tests/test_mcp_tools.py"
+      ],
+      "owns_resolved": [
+        "tools/dayz_mcp/tool_registry_fingerprint.py",
+        "tools/tests/test_tool_registry_fingerprint.py",
+        "tools/dayz_mcp/server.py",
+        "tools/tests/test_mcp_tools.py"
+      ],
+      "senales": {
+        "D1": 2,
+        "D2": 0,
+        "D3": false,
+        "D4": true,
+        "D5": "default",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": "C3",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-025502-251d",
+      "sheet": "10-fb-20260829-025502-251d.md",
+      "disposicion": "EVIDENCIA",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/tests/test_wait_for.py"
+      ],
+      "owns_resolved": [
+        "tools/tests/test_wait_for.py"
+      ],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "oracle_floor": "C1",
+      "delta": 1,
+      "compare": "ASCENSO",
+      "evidence_only": true,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-025754-f201",
+      "sheet": "11-fb-20260829-025754-f201.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/dayz_mcp/effective_schema.py"
+      ],
+      "owns_resolved": [
+        "tools/dayz_mcp/effective_schema.py"
+      ],
+      "senales": {
+        "D1": 1,
+        "D2": 0,
+        "D3": true,
+        "D4": true,
+        "D5": "formato",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C4",
+      "oracle_floor": "C4",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-030056-d73b",
+      "sheet": "12-fb-20260829-030056-d73b.md",
+      "disposicion": "EVIDENCIA",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/tests/test_wait_for.py"
+      ],
+      "owns_resolved": [
+        "tools/tests/test_wait_for.py"
+      ],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "oracle_floor": "C1",
+      "delta": 1,
+      "compare": "ASCENSO",
+      "evidence_only": true,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-032121-fc6e",
+      "sheet": "13-fb-20260829-032121-fc6e.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/dayz_mcp/server.py",
+        "tools/tests/test_world_spawn_ground_contract.py"
+      ],
+      "owns_resolved": [
+        "tools/dayz_mcp/server.py",
+        "tools/tests/test_world_spawn_ground_contract.py"
+      ],
+      "senales": {
+        "D1": 1,
+        "D2": 13,
+        "D3": false,
+        "D4": true,
+        "D5": "default",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": "C3",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "world_spawn"
+    },
+    {
+      "id": "fb-20260829-103347-243b",
+      "sheet": "14-fb-20260829-103347-243b.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/dayz_mcp/server.py",
+        "tools/tests/test_mcp_tools.py",
+        "tools/tests/test_weak_agent_consumer_ux.py"
+      ],
+      "owns_resolved": [
+        "tools/dayz_mcp/server.py",
+        "tools/tests/test_mcp_tools.py",
+        "tools/tests/test_weak_agent_consumer_ux.py"
+      ],
+      "senales": {
+        "D1": 1,
+        "D2": 0,
+        "D3": false,
+        "D4": true,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": "C3",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-104543-47c9",
+      "sheet": "15-fb-20260829-104543-47c9.md",
+      "disposicion": "CAMBIO",
+      "has_owns": false,
+      "owns_paths": [],
+      "owns_resolved": [],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": null,
+      "delta": null,
+      "compare": null,
+      "evidence_only": false,
+      "primary_symbol": "prioridad"
+    },
+    {
+      "id": "fb-20260829-104608-4d66",
+      "sheet": "16-fb-20260829-104608-4d66.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/dayz_mcp/process_lifecycle.py",
+        "tools/dayz_mcp/daemon.py",
+        "tools/tests/test_process_lifecycle.py",
+        "tools/tests/test_lifecycle_http.py",
+        "tools/dayz_mcp/dayz_test_tool.py"
+      ],
+      "owns_resolved": [
+        "tools/dayz_mcp/process_lifecycle.py",
+        "tools/dayz_mcp/daemon.py",
+        "tools/tests/test_process_lifecycle.py",
+        "tools/tests/test_lifecycle_http.py",
+        "tools/dayz_mcp/dayz_test_tool.py"
+      ],
+      "senales": {
+        "D1": 3,
+        "D2": 0,
+        "D3": false,
+        "D4": true,
+        "D5": "default",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "oracle_floor": "C2",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-104625-7c88",
+      "sheet": "17-fb-20260829-104625-7c88.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/dayz_mcp/dayz_test_tool.py:172-177",
+        "tools/dayz_mcp/dayz_test_worker.py",
+        "tools/native-launchers/dayz-test-v1/src/app_main.py",
+        "tools/build_native_launcher.py",
+        "tools/dayz_mcp/native_bundle.py",
+        "tools/dayz_mcp/server.py",
+        "tools/dayz_mcp/dayz_test_tool.py"
+      ],
+      "owns_resolved": [
+        "tools/dayz_mcp/dayz_test_worker.py",
+        "tools/native-launchers/dayz-test-v1/src/app_main.py",
+        "tools/build_native_launcher.py",
+        "tools/dayz_mcp/native_bundle.py",
+        "tools/dayz_mcp/server.py",
+        "tools/dayz_mcp/dayz_test_tool.py"
+      ],
+      "senales": {
+        "D1": 6,
+        "D2": 275,
+        "D3": false,
+        "D4": false,
+        "D5": "default",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": "C3",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "run_id"
+    },
+    {
+      "id": "fb-20260829-104630-141e",
+      "sheet": "18-fb-20260829-104630-141e.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [],
+      "owns_resolved": [],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": "C3",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-111016-344d",
+      "sheet": "19-fb-20260829-111016-344d.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/build_guarded.py",
+        "tools/verify_corrective.py"
+      ],
+      "owns_resolved": [],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": "C2",
+      "delta": 1,
+      "compare": "ASCENSO",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-115147-4407",
+      "sheet": "20-fb-20260829-115147-4407.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/dayz_mcp/dayz_test_storage.py",
+        "tools/tests/test_dayz_test_storage.py",
+        "tools/dayz_mcp/dayz_test_worker.py",
+        "tools/build_native_launcher.py",
+        "tools/dayz_mcp/native_bundle.py",
+        "tools/native-launchers/dayz-test-v1/",
+        "tools/approved-launchers.json",
+        "tools/approved-launchers.receipts/",
+        "tools/tests/test_dayz_test_worker.py",
+        "tools/tests/test_native_launcher_bundle.py",
+        "tools/tests/test_launcher_registry_update.py",
+        "tools/dayz_mcp/dayz_test_tool.py",
+        "tools/tests/test_dayz_test_tool.py",
+        "tools/dayz_mcp/launcher_registry.py",
+        "tools/dayz_mcp/launcher_registry_update.py"
+      ],
+      "owns_resolved": [
+        "tools/dayz_mcp/dayz_test_storage.py",
+        "tools/tests/test_dayz_test_storage.py",
+        "tools/dayz_mcp/dayz_test_worker.py",
+        "tools/build_native_launcher.py",
+        "tools/dayz_mcp/native_bundle.py",
+        "tools/approved-launchers.json",
+        "tools/tests/test_dayz_test_worker.py",
+        "tools/tests/test_native_launcher_bundle.py",
+        "tools/tests/test_launcher_registry_update.py",
+        "tools/dayz_mcp/dayz_test_tool.py",
+        "tools/tests/test_dayz_test_tool.py",
+        "tools/dayz_mcp/launcher_registry.py",
+        "tools/dayz_mcp/launcher_registry_update.py"
+      ],
+      "senales": {
+        "D1": 8,
+        "D2": 9,
+        "D3": true,
+        "D4": false,
+        "D5": "formato",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C4",
+      "oracle_floor": "C4",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "storage_1"
+    },
+    {
+      "id": "fb-20260829-133459-a396",
+      "sheet": "21-fb-20260829-133459-a396.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/dayz_mcp/steam_preflight.py",
+        "tools/tests/test_steam_preflight.py",
+        "tools/dayz_mcp/dayz_test_tool.py",
+        "tools/dayz_mcp/dayz_test_readiness.py",
+        "tools/tests/test_dayz_test_tool.py",
+        "tools/tests/test_dayz_test_readiness.py",
+        "tools/tests/test_dayz_test_value_error_codes.py",
+        "tools/dayz_mcp/dayz_test_request.py"
+      ],
+      "owns_resolved": [
+        "tools/dayz_mcp/steam_preflight.py",
+        "tools/tests/test_steam_preflight.py",
+        "tools/dayz_mcp/dayz_test_tool.py",
+        "tools/dayz_mcp/dayz_test_readiness.py",
+        "tools/tests/test_dayz_test_tool.py",
+        "tools/tests/test_dayz_test_readiness.py",
+        "tools/tests/test_dayz_test_value_error_codes.py",
+        "tools/dayz_mcp/dayz_test_request.py"
+      ],
+      "senales": {
+        "D1": 4,
+        "D2": 0,
+        "D3": false,
+        "D4": true,
+        "D5": "default",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": "C3",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-135408-cc2d",
+      "sheet": "22-fb-20260829-135408-cc2d.md",
+      "disposicion": "EVIDENCIA",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/tests/test_process_lifecycle.py",
+        "tools/tests/test_lifecycle_http.py",
+        "tools/dayz_mcp/process_lifecycle.py"
+      ],
+      "owns_resolved": [
+        "tools/tests/test_process_lifecycle.py",
+        "tools/tests/test_lifecycle_http.py",
+        "tools/dayz_mcp/process_lifecycle.py"
+      ],
+      "senales": {
+        "D1": 1,
+        "D2": 0,
+        "D3": false,
+        "D4": true,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "oracle_floor": "C1",
+      "delta": 1,
+      "compare": "ASCENSO",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-135727-782b",
+      "sheet": "23-fb-20260829-135727-782b.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/dayz_mcp/knowledge.py",
+        "tools/tests/test_knowledge_tools.py",
+        "tools/tests/test_knowledge_pack_install.py",
+        "tools/dayz_mcp/server.py",
+        "tools/tests/test_mcp_tools.py"
+      ],
+      "owns_resolved": [
+        "tools/dayz_mcp/knowledge.py",
+        "tools/tests/test_knowledge_tools.py",
+        "tools/tests/test_knowledge_pack_install.py",
+        "tools/dayz_mcp/server.py",
+        "tools/tests/test_mcp_tools.py"
+      ],
+      "senales": {
+        "D1": 2,
+        "D2": 0,
+        "D3": false,
+        "D4": true,
+        "D5": "default",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "oracle_floor": "C2",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-184906-21f5",
+      "sheet": "24-fb-20260829-184906-21f5.md",
+      "disposicion": "EVIDENCIA",
+      "has_owns": false,
+      "owns_paths": [],
+      "owns_resolved": [],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": null,
+      "delta": null,
+      "compare": null,
+      "evidence_only": false,
+      "primary_symbol": "not_handled"
+    },
+    {
+      "id": "fb-20260829-184952-20be",
+      "sheet": "25-fb-20260829-184952-20be.md",
+      "disposicion": "CAMBIO",
+      "has_owns": false,
+      "owns_paths": [],
+      "owns_resolved": [],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": null,
+      "delta": null,
+      "compare": null,
+      "evidence_only": false,
+      "primary_symbol": "secuencia"
+    },
+    {
+      "id": "fb-20260829-194752-d366",
+      "sheet": "26-fb-20260829-194752-d366.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/promote_effective_schema.py",
+        "tools/tests/test_effective_schema_promotion.py",
+        "tools/tests/fixtures/effective_schema_v1/required_constraint_ids.json"
+      ],
+      "owns_resolved": [
+        "tools/promote_effective_schema.py",
+        "tools/tests/test_effective_schema_promotion.py",
+        "tools/tests/fixtures/effective_schema_v1/required_constraint_ids.json"
+      ],
+      "senales": {
+        "D1": 1,
+        "D2": 0,
+        "D3": true,
+        "D4": false,
+        "D5": "formato",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C4",
+      "oracle_floor": "C4",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-194823-ffc7",
+      "sheet": "27-fb-20260829-194823-ffc7.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/dayz_mcp/dayz_test_modes.py",
+        "tools/tests/test_dayz_test_modes.py",
+        "tools/dayz_mcp/dayz_test_request.py",
+        "tools/tests/test_dayz_test_request.py",
+        "tools/dayz_mcp/dayz_test_tool.py",
+        "tools/dayz_mcp/dayz_test_readiness.py",
+        "tools/tests/test_dayz_test_tool.py",
+        "tools/tests/test_dayz_test_readiness.py",
+        "tools/tests/test_dayz_test_value_error_codes.py",
+        "tools/dayz_mcp/dayz_test_worker.py",
+        "tools/build_native_launcher.py",
+        "tools/dayz_mcp/native_bundle.py",
+        "tools/native-launchers/dayz-test-v1/",
+        "tools/approved-launchers.json",
+        "tools/approved-launchers.receipts/",
+        "tools/tests/test_dayz_test_worker.py",
+        "tools/tests/test_native_launcher_bundle.py",
+        "tools/tests/test_launcher_registry_update.py",
+        "tools/dayz_mcp/server.py",
+        "tools/tests/test_effective_schema_integration.py",
+        "tools/dayz_mcp/result_prune.py",
+        "tools/tests/test_mcp_tools.py",
+        "tools/tests/test_result_prune.py",
+        "tools/tests/test_wait_for.py",
+        "tools/tests/test_weak_agent_consumer_ux.py",
+        "tools/tests/test_world_spawn_ground_contract.py",
+        "tools/tests/test_pipeline_feedback.py",
+        "tools/tests/fixtures/bridge_capabilities_v1.json",
+        "tools/promote_effective_schema.py"
+      ],
+      "owns_resolved": [
+        "tools/dayz_mcp/dayz_test_modes.py",
+        "tools/tests/test_dayz_test_modes.py",
+        "tools/dayz_mcp/dayz_test_request.py",
+        "tools/tests/test_dayz_test_request.py",
+        "tools/dayz_mcp/dayz_test_tool.py",
+        "tools/dayz_mcp/dayz_test_readiness.py",
+        "tools/tests/test_dayz_test_tool.py",
+        "tools/tests/test_dayz_test_readiness.py",
+        "tools/tests/test_dayz_test_value_error_codes.py",
+        "tools/dayz_mcp/dayz_test_worker.py",
+        "tools/build_native_launcher.py",
+        "tools/dayz_mcp/native_bundle.py",
+        "tools/approved-launchers.json",
+        "tools/tests/test_dayz_test_worker.py",
+        "tools/tests/test_native_launcher_bundle.py",
+        "tools/tests/test_launcher_registry_update.py",
+        "tools/dayz_mcp/server.py",
+        "tools/dayz_mcp/result_prune.py",
+        "tools/tests/test_mcp_tools.py",
+        "tools/tests/test_result_prune.py",
+        "tools/tests/test_wait_for.py",
+        "tools/tests/test_weak_agent_consumer_ux.py",
+        "tools/tests/test_world_spawn_ground_contract.py",
+        "tools/tests/test_pipeline_feedback.py",
+        "tools/tests/fixtures/bridge_capabilities_v1.json",
+        "tools/promote_effective_schema.py"
+      ],
+      "senales": {
+        "D1": 11,
+        "D2": 0,
+        "D3": true,
+        "D4": false,
+        "D5": "formato",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C4",
+      "oracle_floor": "C4",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-221423-b2c4",
+      "sheet": "28-fb-20260829-221423-b2c4.md",
+      "disposicion": "CAMBIO",
+      "has_owns": false,
+      "owns_paths": [],
+      "owns_resolved": [],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": null,
+      "delta": null,
+      "compare": null,
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260829-230535-f4f2",
+      "sheet": "29-fb-20260829-230535-f4f2.md",
+      "disposicion": "CAMBIO",
+      "has_owns": false,
+      "owns_paths": [],
+      "owns_resolved": [],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": null,
+      "delta": null,
+      "compare": null,
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260830-002237-0de3",
+      "sheet": "30-fb-20260830-002237-0de3.md",
+      "disposicion": "CAMBIO",
+      "has_owns": false,
+      "owns_paths": [],
+      "owns_resolved": [],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": null,
+      "delta": null,
+      "compare": null,
+      "evidence_only": false,
+      "primary_symbol": "vehicle_telemetry"
+    },
+    {
+      "id": "fb-20260830-010517-9d46",
+      "sheet": "31-fb-20260830-010517-9d46.md",
+      "disposicion": "CAMBIO",
+      "has_owns": true,
+      "owns_paths": [
+        "tools/dayz_mcp/dayz_test_modes.py",
+        "tools/tests/test_dayz_test_modes.py",
+        "tools/dayz_mcp/dayz_test_worker.py",
+        "tools/build_native_launcher.py",
+        "tools/dayz_mcp/native_bundle.py",
+        "tools/native-launchers/dayz-test-v1/",
+        "tools/approved-launchers.json",
+        "tools/approved-launchers.receipts/",
+        "tools/tests/test_dayz_test_worker.py",
+        "tools/tests/test_native_launcher_bundle.py",
+        "tools/tests/test_launcher_registry_update.py",
+        "tools/dayz_mcp/server.py",
+        "tools/tests/test_effective_schema_integration.py"
+      ],
+      "owns_resolved": [
+        "tools/dayz_mcp/dayz_test_modes.py",
+        "tools/tests/test_dayz_test_modes.py",
+        "tools/dayz_mcp/dayz_test_worker.py",
+        "tools/build_native_launcher.py",
+        "tools/dayz_mcp/native_bundle.py",
+        "tools/approved-launchers.json",
+        "tools/tests/test_dayz_test_worker.py",
+        "tools/tests/test_native_launcher_bundle.py",
+        "tools/tests/test_launcher_registry_update.py",
+        "tools/dayz_mcp/server.py"
+      ],
+      "senales": {
+        "D1": 6,
+        "D2": 0,
+        "D3": true,
+        "D4": false,
+        "D5": "formato",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C4",
+      "oracle_floor": "C4",
+      "delta": 0,
+      "compare": "MATCH",
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260830-011217-668f",
+      "sheet": "32-fb-20260830-011217-668f.md",
+      "disposicion": "AISLADO",
+      "has_owns": false,
+      "owns_paths": [],
+      "owns_resolved": [],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "oracle_floor": null,
+      "delta": null,
+      "compare": null,
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260830-112422-2762",
+      "sheet": "33-fb-20260830-112422-2762.md",
+      "disposicion": "CAMBIO",
+      "has_owns": false,
+      "owns_paths": [],
+      "owns_resolved": [],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": null,
+      "delta": null,
+      "compare": null,
+      "evidence_only": false,
+      "primary_symbol": "RESOLVED"
+    },
+    {
+      "id": "fb-20260830-112438-40e4",
+      "sheet": "34-fb-20260830-112438-40e4.md",
+      "disposicion": "CAMBIO",
+      "has_owns": false,
+      "owns_paths": [],
+      "owns_resolved": [],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": null,
+      "delta": null,
+      "compare": null,
+      "evidence_only": false,
+      "primary_symbol": "has_cargo"
+    },
+    {
+      "id": "fb-20260830-112522-1082",
+      "sheet": "35-fb-20260830-112522-1082.md",
+      "disposicion": "EVIDENCIA",
+      "has_owns": false,
+      "owns_paths": [],
+      "owns_resolved": [],
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "oracle_floor": null,
+      "delta": null,
+      "compare": null,
+      "evidence_only": false,
+      "primary_symbol": "matched_path"
+    }
+  ]
+}

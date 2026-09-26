@@ -1,0 +1,14 @@
+{
+  "tools/dayz_mcp/host_config.py": {
+    "bytes": 45806,
+    "sha256": "655d30273fd09291a809817dca51e6a117143b6bb663dfc73c124fd77dc88dc4"
+  },
+  "tools/dayz_mcp/daemon_policy.py": {
+    "bytes": 13400,
+    "sha256": "4e70e065e677b95c80e914cad7776aab14001d02ff529f38109e328e1afacc32"
+  },
+  "tools/dayz_mcp/control_client.py": {
+    "bytes": 30452,
+    "sha256": "1237a9f41a3d2e021fb4923a0f6ce16cce8c50f28e475739999e6a07177bc842"
+  }
+}

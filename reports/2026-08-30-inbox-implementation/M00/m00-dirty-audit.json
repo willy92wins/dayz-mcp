@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "module": "M00-DIRTY-AUDIT",
+  "generation": "20260901-ola0-refresh",
+  "graph_version": "inbox-20260831-v6",
+  "workspace": "orq-mut-mcp-ola0-20260901b (mutating; reports\\ and plans\\ junctions to DayZ_MCP_dev)",
+  "started_at_utc": "2026-09-01T05:54:05+00:00",
+  "completed_at_utc": "2026-09-01T05:57:10+00:00",
+  "commands": {
+    "git_status": "git --no-optional-locks status --porcelain=v2 -z --untracked-files=all",
+    "inventory": "per status path: os.stat(size, mtime_utc); identity = sha256(LF-joined sorted casefold(absolute_path)+NUL+git_state, final LF)",
+    "hashes": "hashlib.sha256 over full file bytes"
+  },
+  "quiet_protocol": {
+    "capture_a_at_utc": "2026-09-01T05:54:05+00:00",
+    "capture_a_sha256": "af0d61093eca58ffe4a2da42d2f32daa3f3144d90cf1cb8d8de406a5ce29da50",
+    "capture_a_entries": 35308,
+    "capture_b_at_utc": "2026-09-01T05:56:05+00:00",
+    "capture_b_sha256": "af0d61093eca58ffe4a2da42d2f32daa3f3144d90cf1cb8d8de406a5ce29da50",
+    "capture_b_entries": 35308,
+    "inventory_identity_sha256_a": "95b8e211742fd029968ad9b042770d0c972ab2d919fe500fa1165b60250e35aa",
+    "inventory_identity_sha256_b": "95b8e211742fd029968ad9b042770d0c972ab2d919fe500fa1165b60250e35aa",
+    "status_equal": true,
+    "inventory_identity_equal": true,
+    "captures_equal": true,
+    "freeze_rule": "baseline frozen only because A == B (status bytes and inventory identity)"
+  },
+  "artifacts": {
+    "\\mnt\\c\\Users\\guill\\AppData\\Local\\Temp\\orq-mut-mcp-ola0-20260901b\\reports\\2026-08-30-inbox-implementation\\M00\\m00-git-status-v2.raw": {
+      "sha256": "af0d61093eca58ffe4a2da42d2f32daa3f3144d90cf1cb8d8de406a5ce29da50",
+      "size": 3721461
+    },
+    "\\mnt\\c\\Users\\guill\\AppData\\Local\\Temp\\orq-mut-mcp-ola0-20260901b\\reports\\2026-08-30-inbox-implementation\\M00\\m00-git-inventory-v2.jsonl": {
+      "sha256": "269a9046386bb0d0334519ef887dbdf7b34efde2918573361bb824bc6c28ca49",
+      "size": 13787007
+    },
+    "\\mnt\\c\\Users\\guill\\AppData\\Local\\Temp\\orq-mut-mcp-ola0-20260901b\\reports\\2026-08-30-inbox-implementation\\M00\\m00-owns-baseline.sha256": {
+      "sha256": "90d7d8ade92e0edaea9f0e18e0f90902810ccf73830daf5a83b6624c90bbc9ae",
+      "size": 5083
+    }
+  },
+  "inventory_record_count": 35308,
+  "git_status_entry_count": 35308,
+  "authority_bundle_sha256": "9a0679809c30831d353838165abbfdffef461c6f8531a83ca4b906026fba0b49",
+  "plan_manifest_sha256": "ce42f14db8a7d7985d17e12f77a7cb8cfdb29bdc7c49ce197cf8b544cbbe3d0b",
+  "m01_contract_freeze": {
+    "receipts_dir": "\\mnt\\c\\Users\\guill\\AppData\\Local\\Temp\\orq-mut-mcp-ola0-20260901b\\reports\\2026-08-30-inbox-implementation\\M01",
+    "receipts": [
+      "m01-contract-freeze.sha256",
+      "m01-contract-freeze.json"
+    ],
+    "entries": 41,
+    "verified": 38,
+    "failed": 0,
+    "verdict": "FREEZE-OK"
+  },
+  "baseline_entry_count": 45,
+  "receipts": [
+    "m00-git-status-v2.raw",
+    "m00-git-inventory-v2.jsonl",
+    "m00-owns-baseline.sha256",
+    "m00-dirty-audit.json"
+  ],
+  "unresolved": [],
+  "exit_code": 0,
+  "verdict": "adopted"
+}

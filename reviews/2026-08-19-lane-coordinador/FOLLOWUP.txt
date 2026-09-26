@@ -1,0 +1,101 @@
+RONDA DE CORRECCION. He verificado tu entrega y la mayor parte esta bien: 1709 tests
+con los 2 centinelas rojos (corrida mia, no tu log), el hook del agujero 3 esta donde
+el spec manda, `note_run_reaped` no toca `_active` (D-48 respetado) y auditas fuera del
+lock. No toques nada de eso.
+
+He corrido DOS mutaciones que tu bateria no hizo. Las tuyas atacaban los CUERPOS que
+escribiste; estas atacan el CABLEADO - los call-sites y los accesores del lado de
+produccion. Ahi es donde han vivido los tres ultimos bugs de este proyecto.
+
+Dos han SOBREVIVIDO. Una rama que sobrevive a su mutacion es una rama sin test.
+
+=====================================================================
+HALLAZGO 1 (el serio) - el skip del agujero 2 esta anclado al DOBLE, no a produccion
+=====================================================================
+
+`_persist_coordination` llega al store por
+    getattr(store, "persisted_revision", None)
+
+y el doble `SnapshotStore` de tests\test_session_http.py:68 define SU PROPIO
+`persisted_revision`. Resultado: tus tres tests del agujero 2 ejercitan el skip contra
+el doble y NUNCA tocan `CoordinationSnapshotStore.persisted_revision`
+(dayz_mcp\runtime_state.py:1189).
+
+MEDIDO POR MUTACION, no supuesto. Renombrando el metodo de PRODUCCION a
+`persisted_revision_RENAMED_BY_MUTATION`:
+
+  tests.test_session_http                       VERDE
+  tests.test_session_acquire_wait               VERDE
+  tests.test_bug046_audit_fault_recovery        VERDE
+  tests.test_task7_final_authority_regressions  VERDE
+
+Los cuatro en verde. Y grep confirma que ningun test del arbol nombra
+`persisted_revision` fuera de la definicion del propio doble.
+
+POR QUE IMPORTA: con el `getattr`, si ese metodo desaparece o se renombra, la llamada
+devuelve None, `callable(...)` es False, el skip deja de aplicarse y VUELVE el bug que
+acabas de arreglar - cada /session/* persistiendo a disco otra vez. En silencio y con
+la suite entera en verde. El arreglo estaria anclado a un fichero de test, no al codigo
+que corre en produccion.
+
+QUE QUIERO: un test que ate el skip al `CoordinationSnapshotStore` REAL. Que use el
+store de verdad (con `RuntimePaths` sobre un directorio temporal, como ya hacen otros
+tests de runtime_state) y compruebe que dos snapshots con la misma revision producen UNA
+sola escritura a disco. Debe ponerse ROJO si renombras el metodo de produccion -
+demuestramelo con esa mutacion.
+
+=====================================================================
+HALLAZGO 2 (menor pero real) - `self._box_cache = None` no lo prueba nadie
+=====================================================================
+
+En `_reap_run_locked` añadiste `self._box_cache = None` justo antes de
+`note_run_reaped`. Quitando esa linea:
+
+  tests.test_run_reaper, tests.test_process_lifecycle, tests.test_session_http,
+  tests.test_session_acquire_wait  ->  las cuatro VERDES
+
+La linea es correcta y la quiero: sin ella la ocupacion de la caja arrastra la cache
+de ~1,5 s despues del reap, que es justo parte de la demora que el agujero 3 venia a
+quitar (spec, Agujero 3 §2 punto 4). Pero hoy es codigo que nadie defiende.
+
+QUE QUIERO: o un test que se ponga rojo al quitarla, o - si de verdad no se puede
+observar - lo dices con argumento y la dejamos documentada como no cubierta. No la
+borres sin mas.
+
+=====================================================================
+LO QUE SI ESTA CUBIERTO (no lo toques, es para que sepas donde NO buscar)
+=====================================================================
+
+- Quitar la llamada `note_run_reaped` del reap  -> roja por
+  test_reap_drops_box_claim_of_owner_session
+- `durable_revision` devolviendo 0              -> roja por
+  test_acquire_that_grants_lease_writes_coordination y por
+  test_snapshot_exception_preserves_applied_acquire_and_enqueue
+
+=====================================================================
+REGLAS DE ESTA RONDA
+=====================================================================
+
+- Mismas fronteras que antes: solo el workspace, nada bajo OneDrive ni P:\, sin
+  procesos DayZ, sin subagentes, sin tocar los centinelas.
+- No reescribas lo que ya funciona. Solo estos dos puntos.
+- Suite completa al final: 1709 + tus tests nuevos, failures=2.
+- Guarda las mutaciones nuevas en
+  C:\Users\guill\AppData\Local\Temp\mcp-laneCOORD-20260819\mutations_r2.log
+  y la suite en
+  C:\Users\guill\AppData\Local\Temp\mcp-laneCOORD-20260819\suite_r2.log
+
+Si crees que alguno de los dos hallazgos esta mal planteado, este es el momento de
+rebatirlo con cita fichero:linea. Sin cita, queda cerrado como lo he descrito.
+
+## RECEIPT
+```json
+{
+  "status": "ok|failed",
+  "hallazgo_1": {"fixed": true, "test": "...", "mutation_proof": "..."},
+  "hallazgo_2": {"fixed": true, "test": "...", "mutation_proof": "..."},
+  "rebuttals": ["si rebates algo, con cita fichero:linea"],
+  "suite_final": {"ran": 0, "failures": 0},
+  "not_verified": ["..."]
+}
+```

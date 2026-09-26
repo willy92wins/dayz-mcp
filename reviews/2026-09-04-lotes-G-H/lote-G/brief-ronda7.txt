@@ -1,0 +1,148 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+RONDA 7, de cierre. La ronda 6 (foto coherente, filas sin caché, high-water, binding que muere
+con su run, compensación) pasó su gate y dos revisiones ciegas entre sí encontraron cinco
+intercalaciones reales, todas verificadas por el orquestador. Tres son el mismo defecto por
+tres puertas y se cierran con UN mecanismo. Esta ronda añade tres invariantes y no toca la
+forma de la ronda 6.
+
+===============================================================================
+§0. EL PRODUCTO
+===============================================================================
+
+  P6. **Sin dueño no se despacha, pero el binding sobrevive.** Mientras el run está en
+      `RUNNING_IDLE` (release reconocido por `release_owner` y por `begin_release_owner`,
+      `admin_reconcile` con supervivientes), el enqueue por su binding se RECHAZA con un código
+      propio, distinto de `binding_retired` (p. ej. `run_not_owned`, con hint que apunte a
+      adoptarlo por `dayz_test_run mode=client run_id=...`), la cola pendiente del antiguo
+      dueño se vacía en el release, el bridge sigue haciendo poll sin recibir comandos, y
+      `adopt_run` rehabilita el MISMO binding sin relanzar nada (reattach, ficha 17).
+      `STARTING` sigue despachando (un intento de extensión en vuelo comanda al servidor).
+      La retirada física sigue reservada a stop/reap/repair/reconcile-sin-supervivientes (P4).
+  P7. **Todo borrado deja tumba.** `_write_command_activity` muestrea `epoch` antes de la
+      E/S del audit y sella después: un borrado que caiga en medio hoy queda anulado. Cada
+      borrado registra su época por `(generación, run_id)` —la observación sin binding (P3)
+      con la suya; la compensación del rollback (P5) con el instante del rollback— y NINGUNA
+      escritura con `epoch <= tumba` aterriza, sea crédito de comando o basal. La compensación
+      de P5 se ejecuta DESPUÉS del rollback durable (`manifest.replace(target)` en
+      `_settle_failed_launch`) y olvida sólo sellos con época en `[inicio del intento,
+      rollback]`: un crédito posterior al rollback es del run restaurado y se conserva. El
+      sticky `unknown` sigue mandando sobre todo.
+  P8. **El sello del caché de sondas es cota INFERIOR del dato.** En `_take_box_snapshot`
+      la revisión se muestrea ANTES de `manifest.list_runs()` y de la foto de actividad; la
+      guarda de escritura del caché compara contra ese sello. Una mutación en vuelo durante
+      una lectura deja esa lectura sin cachear, y el lector siguiente vuelve a sondear.
+
+Sigue en pie todo lo de la ronda 6: P1 la caja no mezcla instantes (una foto, sondas fuera,
+derivación pura; sin `_operation_lock` en la lectura); P2 las filas no se cachean; P3
+high-water en la rama sin binding; P4 retirada antes de la transición durable en los seis
+caminos; P5 compensación. Y lo anterior: actividad en memoria por generación; el audit no
+manda; sticky que una escritura buena no limpia; atribución por binding; fail-closed;
+frescura monótona; la actividad es diagnóstico, no autoridad.
+
+[DESIGN] Forma que dura: un solo predicado `_run_is_dispatchable(run_id)` en el loopback,
+derivado del estado durable del run (RUNNING o STARTING → sí; RUNNING_IDLE → no; el resto →
+retirado), usado por las dos ramas del enqueue; un solo mapa `_activity_tombstone` bajo
+`_activity_lock` consultado por el ÚNICO punto que escribe sellos; y en la foto el orden
+`revisión → manifiesto → actividad` con un comentario que diga por qué («the seal must be a
+lower bound of the data it certifies»).
+
+LO QUE NO ES EL PRODUCTO: el gate, el oráculo, el ledger, este brief (defecto ahí →
+`DISPUTAS`); el sobre de `dayz_test_stop`; `runtime_state.py`; `README-mcp.md`; refactors.
+
+===============================================================================
+§1. LOS TRES ROJOS DEL GATE
+===============================================================================
+
+**N19-SIN-DUENO-NO-DESPACHA** — `release_owner` (`process_lifecycle.py:2135-2140`) y la rama
+reconocida de `begin_release_owner` (`:2159-2166`) llevan el run a `RUNNING_IDLE` por
+`RunManifestStore.release_owner` (`:765-780`) sin tocar el binding, y
+`_bound_run_has_left_running` (`loopback.py:1097-1101`) sólo cuenta `EXITED|STOPPING|
+UNRECONCILED`. Medido: tras el release, `world_spawn` por el binding del servidor → 200.
+
+**N21-TUMBA** — `_write_command_activity` (`:1036-1053`) sella con un `epoch` tomado antes
+del `self._audit(...)`; `record_box_command_activity` (`:1012-1034`) hace `pop` sin dejar
+rastro y `_forget_attempt_activity` (`:1076-1082`) igual, y además corre ANTES del rollback
+durable (`_settle_failed_launch` `:1308-1327`, con `launched.wait(timeout=5.0)` en medio).
+Medido con el escritor bloqueado en el audit: la observación sin binding posterior borra, el
+escritor aterriza después → `recent`.
+
+**N22-SELLO-ANTES-DEL-DATO** — `_take_box_snapshot` (`:2668-2686`) lee `list_runs()` en t0 y
+`_box_revision` en t1; `_collect_probes` filtra `registered_pids` con ese manifiesto viejo y
+el caché se guarda bajo la revisión nueva (`:2766-2770`). Medido: tras una mutación en vuelo,
+el lector siguiente reutiliza las sondas (2 → 2 llamadas a `diag_probe`).
+
+===============================================================================
+§2. LO QUE NO TIENE CHECK EN EL GATE. Lo cierro yo al recibir
+===============================================================================
+
+  (A) La rama reconocida de `begin_release_owner` (N19 sólo ejercita `release_owner`).
+      Test con rojo-antes: release reconocido → `world_spawn` rechazado con el código nuevo.
+  (B) `admin_reconcile` con supervivientes publica `RUNNING_IDLE` (`:2947-2951`): mismo cerco.
+  (C) El release vacía la cola pendiente del antiguo dueño; el binding sigue BOUND; el poll
+      del bridge devuelve `commands: []`; `adopt_run` vuelve a despachar (rojo-antes en la
+      parte del vaciado).
+  (D) La ventana exacta de Codex: crédito legítimo al servidor heredado DESPUÉS de la
+      compensación y ANTES del rollback durable (p. ej. dentro de `launched.wait`) → el run
+      restaurado publica `unknown`. Y su simétrico de preservación: un crédito DESPUÉS del
+      rollback durable se conserva (`recent`).
+  (E) La basal (`_capture_start_activity`) respeta la tumba: no aterriza si su época es ≤.
+
+===============================================================================
+§3. EL GATE
+===============================================================================
+
+    bash gate/run.sh      -> G1, el oráculo de producto (33 checks)
+    bash gate/suite.sh    -> G2, los tests de lifecycle, ocupación y loopback
+
+Ahora mismo: `PASS=30 FAIL=3 UNMET=0 de 33`. **Los 30 verdes son la línea que no se puede
+romper**, e incluyen `N20-ADOPCION-REHABILITA` (tras `adopt_run` el MISMO binding vuelve a
+despachar: si tu arreglo de N19 lo pone rojo, has retirado el binding en el release),
+`N14-MEZCLA`, `N17-BINDING-MUERE-CON-SU-RUN`, `N18-SIN-CACHE-DE-MANIFIESTO`, `N15/N16`.
+
+Los checks concurrentes llevan guarda anti-vacuidad: si el fixture no deja el estado
+necesario dan `UNMET`. Un `UNMET` al final no es tu código: es que el andamio no llegó, y
+va a `DISPUTAS` con el motivo si crees que tu diseño lo dejó sin alcance.
+
+Terminas cuando `gate/run.sh` diga `ORACULO-VERDE` y `gate/suite.sh` diga `SUITE-ACOTADA OK`.
+`gate/` está sellado por hash y es de sólo lectura. Compruebo el sello al recibir.
+
+===============================================================================
+§4. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/process_lifecycle.py
+    tools/dayz_mcp/loopback.py
+    tools/tests/test_box_occupancy.py
+    tools/tests/test_process_lifecycle.py
+    tools/tests/test_loopback.py
+    tools/tests/test_instance_fence.py   (sólo si su gate AST de EXITED exige el cerco nuevo)
+
+PROHIBIDO: `gate/`; `addon/`; `server.py`; `dayz_test_tool.py`; `runtime_state.py`;
+debilitar o borrar validaciones existentes; usar red; correr la suite completa.
+
+⚠ **Data-crítico**. Locks: `_operation_lock → _activity_lock`; nunca el inverso; la lectura
+no toma `_operation_lock`. El loopback tiene su propio lock: no lo anides dentro de
+`_activity_lock`.
+
+Escribe tests para lo que entregas, y córrelos ANTES de tu cambio para comprobar que fallan.
+
+===============================================================================
+§5. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — qué entregaste, con `path:line`: el predicado de despacho y las
+                          dos ramas que lo usan, el mapa de tumbas y el único punto de
+                          escritura de sellos que lo consulta, el orden de la foto, y el
+                          código de rechazo nuevo con su hint.
+    ## GATE             — la salida literal de los dos gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea que demuestra que fallaba antes.
+                          Los de §2 (A)-(E) van aquí obligatoriamente.
+                          Si un test cubre algo que ya funcionaba, dilo: es preservación.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si crees que un criterio del gate está mal, aquí, con el argumento.

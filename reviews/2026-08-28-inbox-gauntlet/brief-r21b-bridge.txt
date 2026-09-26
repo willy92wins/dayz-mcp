@@ -1,0 +1,17 @@
+RE-VERIFICACION ACOTADA (R21 ronda 2, read-only). En la ronda 1 emitiste REQUEST-CHANGES con 2 P1 sobre el fix del pool de callbacks (MCPClientBridge.c). El implementador ha REDISENADO. Tu trabajo AHORA: verificar SOLO si el rediseno mata tus dos P1 sin abrir agujeros nuevos en el flujo del poll. No re-audites el fichero entero ni repitas findings preexistentes (el Print de :3812 ya esta arbitrado fuera de alcance).
+
+CARGA: MCPClientBridge.c (editado, ronda 2), INFORME.md (prueba de no-regresion de 4 casos con lineas), _review\MCPClientBridge_ORIGINAL.c (pre-fix, por contexto).
+
+EL REDISENO (claims a verificar contra el codigo):
+- Generacion por slot: 0=idle, >0=bound, -1=retirado. IsCurrentPollGeneration rechaza <=0 (:657).
+- SOLO OnSuccess devuelve un slot a idle (0), incluso desde -1 — es el unico evento terminal del GET. OnError/OnTimeout retiran (-1) y solo despachan si eran generacion activa. AbandonInFlightPoll retira + bump de m_PollGeneration.
+- StartPoll: AcquireIdle (==0) -> si no hay, ReplenishPollCallback (new :507, techo POLL_CALLBACK_POOL_MAX=8) -> si techo, OnPollFail("poll_callback_pool_exhausted") con backoff y log rate-limited 5 s (sin stall permanente, sin log por tick).
+- new MCPClientPollCallback: exactamente 2 hits (:485 init/regeneracion, :507 reposicion en camino frio).
+
+VERIFICA (cada uno: limpio o finding P1/P2/P3 con linea):
+V1. Tu P1-retries: recorre los 4 casos del INFORME (retry-error doble; error->success del mismo GET; abandono con evento tardio; pool agotado->techo->recuperacion) contra el CODIGO. ¿Algun camino donde una instancia con eventos del engine potencialmente pendientes pueda re-adquirirse y despachar datos viejos como actuales?
+V2. Tu P1-stall: con N slots retirados y techo alcanzado, ¿el poleo se recupera de forma determinista cuando un GET termina en OnSuccess? ¿Queda algun camino a stall permanente o a log por tick? Revisa tambien que OnPollFail("poll_callback_pool_exhausted") no deje m_PollInFlight huerfano ni rompa el backoff.
+V3. Regresion del camino verde: en el 5 Hz sin errores, ¿el flujo poll->OnSuccess->idle->reuso es correcto (sin new, sin crecimiento del pool, contadores del watchdog coherentes)?
+V4. El residuo declarado: el informe admite que si el engine disparara OnError DESPUES de OnSuccess del mismo GET, el idle-en-success reabriria el agujero, y que vanilla solo documenta retries de OnError. ¿Estas de acuerdo en que es residuo aceptable-declarado, o ves evidencia en restapi.c de ese orden (success->error) que lo convierta en finding?
+
+FORMATO (ultimo mensaje): VEREDICTO: APPROVE | REQUEST-CHANGES. Luego V1..V4: limpio o finding "P1|P2|P3 - titulo - linea - que pasa - fix minimo". Nada mas.

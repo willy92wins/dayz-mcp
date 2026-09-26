@@ -1,0 +1,39 @@
+ENCARGO: 5 fichas del buzon del pipeline DayZ-MCP — daemon Python. Implementas 4 fixes acotados y 1 diagnostico. Trabajas SOLO dentro de este workspace (copia aislada del arbol vivo). Un receptor verificara por hashes que no tocaste nada fuera del alcance.
+
+WORKSPACE
+- tools\dayz_mcp\  -> el paquete del daemon (EDITABLE, tu objetivo)
+- tools\tests\     -> suite unittest (EDITABLE solo para anadir/ajustar tests de lo que toques)
+- _ref\launcher_src\  -> READ-ONLY (app_main.py, launcher.cpp, worker-runtime.json). PROHIBIDO editarlos.
+
+HECHOS VERIFICADOS POR EL ORQUESTADOR (no re-derives, cita estos anclajes)
+- session_transition_conflict se lanza en 7 sitios de tools\dayz_mcp\control_client.py (:314, :344, :370, :453, :578, :598, :622) y se mapea en server.py:309.
+- bad_dayz_test_request: dayz_test_tool.py:162 llama _fail("bad_dayz_test_request"); el enum real de mode vive en la validacion de dayz_test_tool.py (la ficha cita ~:327-332: {server, all, else=client}). Verifica la linea exacta antes de editar.
+- ui_focus docstring: server.py:4022-4023 dice "widget that cannot take focus (plain TextWidget, NoFocus, disabled) returns found=true and error=focus_not_taken". La afirmacion "plain TextWidget" es FALSA a nivel de motor (medido in-game: SetFocus SI acepta TextWidget plano; lo que decide es NoFocus/disabled).
+- bridge_status / generaciones: loopback.py:1038 devuelve "unbound_after_restart"; :1261 payload["version_state"]; :1709-1793 construyen version_state y tratan legacy_blocked/version_mismatch.
+- width/height del cliente: dayz_test_tool.py:112-142 los mete en el request. El CONSUMO es del launcher (_ref\launcher_src\app_main.py — el bundle desplegado se genera de ese source). Medido in-game: pedir 1280x720 arranco el cliente con viewport 846x461; SetWindowPos host-side posterior funciona.
+- La suite es unittest (sin pytest). Python del gate: "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" (3.14.3).
+
+TAREAS (una por ficha, en este orden)
+
+T1 (ficha fb-20260827-154455-0f12) — dayz_test_run con lease de sesion del llamante devuelve session_transition_conflict pelado (3/3 repro; soltar el lease y repetir funciona a la primera). FIX MINIMO: en el camino que recorre dayz_test_run cuando el llamante tiene lease de sesion activo, el error debe nombrar la causa y la salida, p.ej. "session_transition_conflict: release your session lease first - dayz_test_run manages its own lease internally". Identifica CUAL de los 7 raise-sites de control_client.py dispara en ese flujo (o si el texto se decide en server.py/dayz_test_tool.py) y enriquece SOLO ese camino. PROHIBIDO tocar la maquina de estados/lease: solo mensaje. Anade tambien la frase al docstring de la tool dayz_test_run en server.py ("release any held session lease before calling"). Test unit: el mensaje enriquecido aparece en ese camino.
+
+T2 (ficha fb-20260828-160423-91ed) — bad_dayz_test_request sin campo. FIX: cuando la validacion rechaza mode, el error debe ser autoexplicativo: "bad_dayz_test_request:mode expected server|all|client" (respeta el formato de _fail existente; si _fail no admite sufijo, usa el patron de detalle que ya use el modulo — mira como server.py:185 mapea invalid_dayz_test_request). En el docstring de dayz_test_run (server.py) lista el enum de mode. Si hay otros campos validados con rechazo mudo en el mismo bloque, aplicales el mismo patron campo:esperado. Test unit: mode invalido produce el mensaje con campo y valores.
+
+T3 (ficha fb-20260827-154519-6b10) — docstring de ui_focus (server.py:4022-4023): elimina "plain TextWidget" de la lista de no-focusables; deja claro que lo que decide es el flag NoFocus o disabled, y que un TextWidget plano SI recibe foco (ok=1). Es solo doc: no toques logica.
+
+T4 (ficha fb-20260827-202324-8ab3, parte 2) — bridge_status devuelve veredictos de version PERSISTIDOS de generaciones anteriores: un peer que no ha poleado NUNCA en la generacion actual del daemon mostro version_state=legacy_blocked ("poll did not include ver=") de una epoca vieja, mandando al operador a cazar un PBO que ya no existe. FIX ACOTADO: en el payload de bridge_status, cuando el peer no tiene ningun poll observado en la generacion actual, el veredicto de version debe decir "never_polled_this_generation" (o el campo equivalente que distinga observado-esta-generacion vs persistido) en vez de servir el stale como si fuera actual. NO redisenes la acreditacion ni la persistencia: solo el etiquetado del veredicto en el payload. Usa :1038/:1261/:1709-1793 como mapa. Test unit: peer sin polls en la generacion actual -> payload lleva la etiqueta nueva y NO el version_state persistido a secas.
+
+T5 (ficha fb-20260828-160429-2899) — DIAGNOSTICO, sin editar _ref: lee _ref\launcher_src\app_main.py (y launcher.cpp si hace falta): por que width/height del request no fijan la resolucion del cliente (el server puede que los use y el cliente no, o no se traducen a flags de linea de comandos del exe, o el perfil del cliente los pisa). Entregables: (a) seccion DIAGNOSTICO en el informe con la causa citada por linea; (b) fichero patch_launcher_width_height.diff en la raiz del workspace con el parche PROPUESTO sobre app_main.py (formato diff unificado; NO lo apliques — el bundle esta sellado y lo re-sella otro flujo); (c) en el docstring de dayz_test_run (server.py), una linea honesta sobre el estado real de width/height para el cliente y el workaround (SetWindowPos host-side + ui_reload_layout re-mide sin reboot).
+
+GATE MECANICO (obligatorio, en este orden)
+1. Control de import ANTES de correr nada: cwd=tools del workspace, PYTHONPATH=ese mismo tools, y ejecuta: python -c "import dayz_mcp; print(dayz_mcp.__file__)". Si la ruta impresa NO esta dentro del workspace, PARA: no corras la suite y declaralo en el informe.
+2. Tests nuevos: escribelos primero y VE el fallo (rojo) antes del fix cuando el fix sea de comportamiento (T1, T2, T4). Pega el rojo y el verde en el informe.
+3. Corre los modulos de test afectados (python -m unittest tests.test_dayz_test_tool tests.test_control_client <los que toques> -v) y ademas cualquier test existente de los modulos editados. Si la suite entera tarda <2 min, correla entera y di el total.
+
+FRONTERAS
+- PROHIBIDO: editar _ref\, borrar ficheros, tocar tests no relacionados, reformatear ficheros enteros, renombrar simbolos publicos, tocar acreditacion/lease/maquina de estados, escribir fuera del workspace, subagentes, git.
+- Cambios = diffs minimos. El receptor comparara hash a hash contra baseline: todo fichero cambiado fuera de {dayz_mcp\*.py editados a proposito, tests\*.py tocados a proposito, INFORME.md, patch_launcher_width_height.diff} sera rechazado.
+- Techo: 40 turnos. Si una tarea no cabe, prioriza T1>T2>T3>T4>T5 y declara la que quede.
+
+ENTREGA
+Escribe INFORME.md en la raiz del workspace con: RESUMEN por tarea (que cambiaste, fichero:linea), GATES (import-control, rojo->verde por test, salida de unittest pegada), DIAGNOSTICO de T5, y LO QUE NO PUDE VERIFICAR (obligatorio; p.ej. comportamiento in-game, el parche del launcher sin aplicar). Tu ultima respuesta: solo "DONE" + ruta del informe.

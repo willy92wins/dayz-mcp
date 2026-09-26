@@ -1,0 +1,34 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. Trabaja hasta emitir el informe y escríbelo en disco.
+Si algo te bloquea, dilo en el informe y sigue con el resto.
+
+§0. TU PAPEL: VERIFICACIÓN DE CONCURRENCIA Y COSTE, RONDA 2, del lote D (cambio de ingeniería en un daemon local de
+pruebas de DayZ). Eres una sesión nueva. Lee COMUN.txt, COMUN-R2.txt y el informe de tu predecesor AUDIT-RACE.md
+(H-01 CRITICAL: holder que aparece tras el sondeo y antes del launcher; H-02: netstat bajo el lock). Solo se lee la tabla
+de sockets local y se ejecutan tests del repositorio con fakes.
+
+§1. QUÉ COMPROBAR (desde tools/, intérprete obligatorio, PYTHONPATH=., unittest)
+A-1 H-01: la ronda 2 añade una re-lectura de la tabla justo antes de `self.launcher(...)` (busca `pre_launch_reason` en
+    process_lifecycle.py). Repite `audit_race_repro.py:124-156` de tu predecesor si sigue en el directorio (o reconstrúyelo):
+    ¿qué parte de la secuencia queda cubierta y cuál no? Mide la ventana restante: instrumenta con fakes cuánto código corre
+    entre la re-lectura y `launcher` (debe ser solo la llamada). Dictamen: ¿es CRITICAL con repro un holder que aparece
+    DENTRO del launcher (es decir, en el propio bind)? Ten en cuenta que la documentación ya declara esa ventana y que no
+    existe reserva de puerto: un hallazgo que solo repita eso va a BACKLOG, salvo que encuentres código entre la re-lectura y
+    el bind que alargue la ventana.
+A-2 Coste añadido: ahora hay DOS sondeos por lanzamiento (admisión y pre-launch) y cada uno puede hacer `_toolhelp_lookup`
+    por PID sin nombre. Mide 20 repeticiones de `snapshot_udp_port_holders()` en este host y estima el coste de un `start_run`
+    con la tabla real. ¿Cabe en el presupuesto de `_operation_lock` frente a `session_status` que sondea cada 0,5-1 s?
+A-3 H-02: `netstat` bajo el lock baja a 3 s. Confirma el literal (orphan_guard.py) y que al vencer el resultado es
+    `known=False` → `port_scan_unknown` (fail-closed), nunca vacío. Repro con `subprocess.run` parcheado que lance
+    `TimeoutExpired`.
+A-4 Dos lanzadores concurrentes con la re-lectura: repite tu caso A-3 de la ronda 1 (hilos, lanzador lento con Event): el
+    segundo debe seguir rechazándose y el primero completar; comprueba que la re-lectura no introduce un interbloqueo
+    (`_operation_lock` → `_activity_lock`, orden documentado en `_bump_box_revision_locked`).
+A-5 `_diag_snapshot_empty` llama ahora al sondeo de puertos DOS veces en `admin_reconcile --empty` (antes y después del
+    audit): ¿alguna carrera entre ambas lecturas produce un estado inconsistente? Razona con path:line; repro si puedes.
+
+§2. ENTREGABLE — escribe C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-D\AUDIT-RACE-R2.md con:
+## VEREDICTO
+CRITICAL=N (con repro ejecutable) · MAJOR=N · BACKLOG=N
+## A-1 … A-5
+## HALLAZGOS
+## LO QUE NO PUDE VERIFICAR

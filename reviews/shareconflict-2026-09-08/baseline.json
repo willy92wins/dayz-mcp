@@ -1,0 +1,29 @@
+{
+  "tools/dayz_mcp/host_config.py": {
+    "bytes": 46471,
+    "sha256": "f0c100c63c16fcf8f19cf22f0aadec122e143bdcb90c8635e6e4d12df4dbaf34"
+  },
+  "tools/dayz_mcp/control_client.py": {
+    "bytes": 31868,
+    "sha256": "3599e1dfd2694695151a1fb7adb0d6cf1fba11f108a17268c2a20c30cd6dd59a"
+  },
+  "tools/tests/test_provenance_gate.py": {
+    "bytes": 12711,
+    "sha256": "a6e5697338cc947f8ae22c8a71b484beacdff06aef8dd18a4cfb7de4c3371411"
+  },
+  "tools/tests/test_mcp_host_timeouts.py": {
+    "bytes": 44085,
+    "sha256": "83d82021a51d3d3b7ef397273caa6779eb48be64162aa553f19c31cf5d3bfc74"
+  },
+  "tools/dayz_mcp/server.py": {
+    "bytes": 226274,
+    "sha256": "79a902ba2778b08b348cc04f3e257dac166a23afe4962dea9af32a0bd905aef3"
+  },
+  "tools/build_native_launcher.py": {
+    "bytes": 47468,
+    "sha256": "e1a8b657c7c223700ced4f628375764b7b3459b81750aa6646561d9902bc100c"
+  },
+  "head": "4e34bda128fee203f0056fe5e2fa56ce0b941763",
+  "index_diff_sha256": "b5f5cdc69e3f3dbce701d47602368b717b4df0f036c6e02ada364dae802da1a4",
+  "started_utc": "2026-09-08T08:58:11.077073+00:00"
+}

@@ -1,0 +1,72 @@
+{
+  "G1": {
+    "MCPBridge.c": [
+      [
+        "\tprotected bool m_InitFailureLogged;\n",
+        "\tprotected bool m_InitFailureLogged;\n\tprotected bool m_ResultDropLogged;\n"
+      ],
+      [
+        "\t\tm_InitFailureLogged = false;\n",
+        "\t\tm_InitFailureLogged = false;\n\t\tm_ResultDropLogged = false;\n"
+      ],
+      [
+        "\tprotected void PostResult(MCPResult result)\n\t{\n\t\tif (!m_Configured || !m_Ctx)\n\t\t{\n\t\t\treturn;",
+        "\tprotected void PostResult(MCPResult result)\n\t{\n\t\tif (!m_Configured || !m_Ctx)\n\t\t{\n\t\t\tif (!m_ResultDropLogged)\n\t\t\t{\n\t\t\t\tm_ResultDropLogged = true;\n\t\t\t\tLog(\"result dropped transport unavailable id=\" + result.id);\n\t\t\t}\n\t\t\treturn;"
+      ]
+    ]
+  },
+  "G2": {
+    "MCPBridge.c": [
+      [
+        "\tprotected const int PENDING_POLL_THRESHOLD = 8;\n",
+        "\tprotected const int PENDING_POLL_THRESHOLD = 8;\n\tprotected const int MAX_CALLBACK_REFS = 128;\n\t// Reserve the existing daemon ingress cap (loopback.py MAX_QUEUE) per poll.\n\tprotected const int MAX_POLL_RESULTS = 64;\n"
+      ],
+      [
+        "\tprotected void StartPoll()\n\t{\n",
+        "\tprotected void StartPoll()\n\t{\n\t\t// Count accepted work too: jobs/pending each still owe one result.\n\t\t// Pause admission only; draining and terminal POSTs must keep running.\n\t\tif (m_CallbackRefs.Count() + m_Pending.Count() + m_Jobs.Count() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS)\n\t\t{\n\t\t\treturn;\n\t\t}\n\n"
+      ]
+    ]
+  },
+  "G3": {
+    "MCPBridge.c": [
+      [
+        "\t\t\tm_PollHz = cfg.pollHz;\n",
+        "\t\t\tm_PollHz = cfg.pollHz;\n\t\t\tif (m_PollHz > 60.0)\n\t\t\t{\n\t\t\t\tm_PollHz = 60.0;\n\t\t\t}\n"
+      ]
+    ],
+    "MCPClientBridge.c": [
+      [
+        "\t\t\tm_PollHz = cfg.pollHz;\n",
+        "\t\t\tm_PollHz = cfg.pollHz;\n\t\t\tif (m_PollHz > 60.0)\n\t\t\t{\n\t\t\t\tm_PollHz = 60.0;\n\t\t\t}\n"
+      ]
+    ]
+  },
+  "G4": {
+    "MCPClientBridge.c": [
+      [
+        "\tprotected void RestoreGameplay()\n\t{\n",
+        "\tprotected void RestoreGameplay()\n\t{\n\t\t// Destructor cleanup can outlive CGame, whose destructor nulls g_Game.\n\t\tif (!GetGame())\n\t\t{\n\t\t\treturn;\n\t\t}\n\n"
+      ]
+    ]
+  },
+  "G5": {
+    "MCPClientBridge.c": [
+      [
+        "\tprotected bool m_InitFailureLogged;\n",
+        "\tprotected bool m_InitFailureLogged;\n\tprotected bool m_Shutdown;\n"
+      ],
+      [
+        "\t\tm_InitFailureLogged = false;\n",
+        "\t\tm_InitFailureLogged = false;\n\t\tm_Shutdown = false;\n"
+      ],
+      [
+        "\tvoid Shutdown()\n\t{\n\t\tbool postedTerminal = false;\n",
+        "\tvoid Shutdown()\n\t{\n\t\tbool postedTerminal = false;\n\t\t// ShutdownInstance calls here, then releasing m_Instance runs our destructor.\n\t\tif (m_Shutdown)\n\t\t{\n\t\t\treturn;\n\t\t}\n\t\tm_Shutdown = true;\n"
+      ],
+      [
+        "\t\t// Shutdown is only reached from ~MissionGameplay / ~MCPClientBridge, so\n\t\t// no later OnTick exists on this mission. reset() clears pending REST\n",
+        "\t\t// MissionGameplay.c only shuts down from its destructor; OnMissionStart /\n\t\t// OnUpdate own the ticks. Our destructor may call Shutdown again (guard above).\n\t\t// Keep m_Configured until the first terminal POST. reset() clears pending REST\n"
+      ]
+    ]
+  }
+}

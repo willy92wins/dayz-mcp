@@ -1,0 +1,112 @@
+RONDA 2 — la revision ciega encontro dos huecos MAYORES. Tu codigo de produccion
+esta bien; lo que falla es que dos de sus cuatro ramas no las mide nadie.
+
+El criterio de esta casa: un test que no se pone ROJO cuando rompes el codigo que
+dice proteger, no es un test. El revisor rompio tu produccion en 12 sitios. Diez
+mutaciones tumbaron el test correcto. Dos no tumbaron NADA: la suite entera
+siguió en `Ran 1626 / OK` con el codigo roto.
+
+===============================================================================
+MAYOR-1 — el privilegio en `cancel_operation` no lo mide nadie
+===============================================================================
+
+Mutacion que no tumbo nada: quitar `and not self._admission_privileged_locked(client)`
+de `session_coordination.py:801`.
+
+No es codigo inerte, y por eso importa: con el privilegio puesto, un cliente
+privilegiado con un `operation_id` unseen a capacidad recibe 200 y acuña el
+129.º tombstone; sin el, recibe 503. O sea, hay una diferencia de conducta
+observable que ningun test observa.
+
+ESCRIBE el test que la observa. Nombre:
+
+    test_box_claimer_cancel_of_unseen_operation_is_not_fenced_when_saturated
+
+Requisito: los 128 tombstones se acuñan con `cancel_operation` de un extraño, el
+claim con `box_wait_touch(..., claim=True)`, y se entra por `cancel_operation`
+publico. Nada inyectado a mano.
+
+===============================================================================
+MAYOR-2 — la mitad "lease activo" de la invariante no la mide nadie
+===============================================================================
+
+Mutacion que no tumbo nada: borrar las dos lineas del lease en el helper,
+`session_coordination.py:2753-2754`:
+
+    if self._active is not None and self._active.client == client:
+        return True
+
+Tu propio informe §7 ya lo declaraba, y tenias razon. La invariante que se
+compro dice "claim de la caja **O el lease activo**" y solo la primera mitad
+esta pinada.
+
+Es portante, no decorativa: con la mutacion puesta, el holder del lease vuelve
+a cobrar 503 en `enqueue` y en `acquire`, que es exactamente el defecto que este
+trabajo existe para cerrar.
+
+ESCRIBE el test. Nombre:
+
+    test_lease_holder_is_not_fenced_when_tombstones_saturated
+
+Ojo con el detalle que midio el revisor: el holder del lease con un
+`operation_id` DISTINTO del suyo recibe **409 `operation_conflict`**, no un 2xx.
+Eso es lo correcto y es justo el arreglo — antes ni llegaba al 409 porque el 503
+disparaba primero. Asi que el assert NO es "devuelve 200": es "NO devuelve 503
+`operation_tombstones_saturated`". Escribelo de forma que la mutacion de arriba
+lo ponga rojo.
+
+===============================================================================
+MEDIO-1 — el `hint` se salta el saneado de codigos
+===============================================================================
+
+En `server.py:709-710` pusiste:
+
+    if error.hint:
+        return str(error)
+
+y eso se evalua ANTES de la allowlist. Resultado: cualquier respuesta no-2xx que
+traiga `hint` devuelve su codigo crudo saltandose el filtro `_REMOTE_ERROR_CODES`
+/ `_CONTROL_CLIENT_ERROR_CODES`. Hoy no hay regresion viva (ningun otro productor
+de `hint` viaja en no-2xx), pero es una puerta abierta para el que añada el
+siguiente `hint`.
+
+ARREGLALO exigiendo que el codigo sea conocido:
+
+    if error.hint and (
+        error.code in _REMOTE_ERROR_CODES
+        or error.code in _CONTROL_CLIENT_ERROR_CODES
+    ):
+        return str(error)
+
+Y escribe el test que lo pina:
+
+    test_unknown_remote_code_with_hint_is_still_masked
+
+Debe comprobar que un codigo que NO esta en las allowlists, aunque venga con
+`hint`, sigue saliendo como `remote_error` y no filtra el codigo crudo. Verifica
+tambien que `operation_tombstones_saturated` (que SI esta en la allowlist,
+`server.py:118`) sigue llevando su receta — o sea que el arreglo no rompe T4.
+
+===============================================================================
+COMO SE CIERRA
+===============================================================================
+
+1. Escribe los TRES tests nuevos.
+2. Aplica el arreglo de MEDIO-1.
+3. **Demuestra las mutaciones tu mismo.** Para cada uno de los tres tests: rompe
+   a proposito la linea de produccion que protege, corre el modulo, comprueba
+   que ese test se pone ROJO, y RESTAURA. Apunta en el informe: que rompiste,
+   que cayo, y que NO cayo. Sin esa tabla no vale.
+4. Suite entera verde. Escribe la salida en <RAIZ>\green_r2.log usando tu
+   `_run_green_suite.py` (cambiale el destino), que ya funciona bien.
+5. Añade al final de <RAIZ>\laneA1-report.md una seccion "## Ronda 2" con lo
+   anterior. No reescribas lo que ya hay.
+
+Lo que NO se toca sigue igual que en la ronda 1: constantes, codigo de error,
+ficheros del fencing, y el resto de tu implementacion, que la revision dio por
+CONFIRMADA. No aproveches para refactorizar.
+
+Un apunte que NO tienes que arreglar, solo conocer: el revisor observo que un
+privilegiado puede acuñar tombstones sin techo (500 cancels -> 628 tombstones).
+El spec lo acepta explicitamente ("puede acuñar el 129.º, igual que el cancel
+admitido de hoy"), asi que se queda como esta. No lo toques.

@@ -1,0 +1,4239 @@
+--- a/DayZ_MCP\scripts\5_Mission\MCPBridge.c
++++ b/DayZ_MCP\scripts\5_Mission\MCPBridge.c
+@@ -29,6 +29,7 @@
+ 	protected RestContext m_Ctx;
+ 	protected string m_Url;
+ 	protected string m_Key;
++	protected string m_PeerInstance;
+ 	protected string m_PollVersion;
+ 	protected float m_PollHz;
+ 	protected float m_Accum;
+@@ -63,6 +64,7 @@
+ 		m_TickPollSent = 0;
+ 		m_TickPollCallback = 0;
+ 		m_PollVersion = "";
++		m_PeerInstance = "";
+ 		m_PollInFlight = false;
+ 		m_Configured = false;
+ 		m_InitFailureLogged = false;
+@@ -178,6 +180,11 @@
+ 
+ 		m_Url = cfg.url;
+ 		m_Key = cfg.key;
++		m_PeerInstance = "";
++		if (cfg.instance != "")
++		{
++			m_PeerInstance = cfg.instance;
++		}
+ 		if (cfg.pollHz > 0.0)
+ 		{
+ 			m_PollHz = cfg.pollHz;
+@@ -194,7 +201,7 @@
+ 		m_Configured = true;
+ 		m_Backoff = 0.0;
+ 		m_Accum = 0.0;
+-		Log("config loaded path=" + path + " url=" + m_Url + " keylen=" + m_Key.Length() + " poll_hz=" + m_PollHz);
++		Log("config loaded path=" + path + " url=" + m_Url + " keylen=" + m_Key.Length() + " instlen=" + m_PeerInstance.Length() + " poll_hz=" + m_PollHz);
+ 	}
+ 
+ 	protected void LogInitFailure(string reason)
+@@ -218,6 +225,10 @@
+ 		m_CallbackRefs.Insert(cb);
+ 		string request = "poll?key=" + m_Key;
+ 		request = request + "&ver=" + GetPollVersion();
++		if (m_PeerInstance != "")
++		{
++			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
++		}
+ 		m_Ctx.GET(cb, request);
+ 	}
+ 
+@@ -3280,7 +3291,12 @@
+ 
+ 		MCPResultCallback cb = new MCPResultCallback(this);
+ 		m_CallbackRefs.Insert(cb);
+-		m_Ctx.POST(cb, "result?key=" + m_Key, body);
++		string resultRequest = "result?key=" + m_Key;
++		if (m_PeerInstance != "")
++		{
++			resultRequest = resultRequest + "&inst=" + EncodeQueryValue(m_PeerInstance);
++		}
++		m_Ctx.POST(cb, resultRequest, body);
+ 		string okStr = "0";
+ 		if (result.ok) { okStr = "1"; }
+ 		Log("result posted id=" + result.id + " ok=" + okStr + " sent_tick=" + result.tick_poll_sent + " callback_tick=" + result.tick_poll_callback + " dispatch_tick=" + result.tick_dispatch);
+--- a/DayZ_MCP\scripts\5_Mission\MCPClientBridge.c
++++ b/DayZ_MCP\scripts\5_Mission\MCPClientBridge.c
+@@ -127,6 +127,7 @@
+ 	protected RestContext m_Ctx;
+ 	protected string m_Url;
+ 	protected string m_Key;
++	protected string m_PeerInstance;
+ 	protected string m_PollVersion;
+ 	protected float m_PollHz;
+ 	protected float m_Accum;
+@@ -163,6 +164,7 @@
+ 		m_TickPollSent = 0;
+ 		m_TickPollCallback = 0;
+ 		m_PollVersion = "";
++		m_PeerInstance = "";
+ 		m_PollInFlight = false;
+ 		m_Configured = false;
+ 		m_InitFailureLogged = false;
+@@ -294,6 +296,11 @@
+ 
+ 		m_Url = cfg.url;
+ 		m_Key = cfg.key;
++		m_PeerInstance = "";
++		if (cfg.instance != "")
++		{
++			m_PeerInstance = cfg.instance;
++		}
+ 		if (cfg.pollHz > 0.0)
+ 		{
+ 			m_PollHz = cfg.pollHz;
+@@ -310,7 +317,7 @@
+ 		m_Configured = true;
+ 		m_Backoff = 0.0;
+ 		m_Accum = 0.0;
+-		Log("client config loaded path=" + path + " url=" + m_Url + " keylen=" + m_Key.Length() + " poll_hz=" + m_PollHz);
++		Log("client config loaded path=" + path + " url=" + m_Url + " keylen=" + m_Key.Length() + " instlen=" + m_PeerInstance.Length() + " poll_hz=" + m_PollHz);
+ 	}
+ 
+ 	protected void LogInitFailure(string reason)
+@@ -339,6 +346,10 @@
+ 		m_CallbackRefs.Insert(cb);
+ 		string request = "poll?peer=client&key=" + m_Key;
+ 		request = request + "&ver=" + GetPollVersion();
++		if (m_PeerInstance != "")
++		{
++			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
++		}
+ 		m_Ctx.GET(cb, request);
+ 	}
+ 
+@@ -3102,7 +3113,12 @@
+ 
+ 		MCPClientResultCallback cb = new MCPClientResultCallback(this);
+ 		m_CallbackRefs.Insert(cb);
+-		m_Ctx.POST(cb, "result?key=" + m_Key, body);
++		string resultRequest = "result?key=" + m_Key;
++		if (m_PeerInstance != "")
++		{
++			resultRequest = resultRequest + "&inst=" + EncodeQueryValue(m_PeerInstance);
++		}
++		m_Ctx.POST(cb, resultRequest, body);
+ 		string okStr = "0";
+ 		if (result.ok)
+ 		{
+--- a/DayZ_MCP\scripts\5_Mission\MCPMessages.c
++++ b/DayZ_MCP\scripts\5_Mission\MCPMessages.c
+@@ -7,6 +7,7 @@
+ 	string url;
+ 	string key;
+ 	float pollHz;
++	string instance;
+ };
+ 
+ // ui_dialog wire field. Key is default_text; default is reserved in Enforce.
+--- a/DayZ_MCP_dev\tools\dayz_mcp\core.py
++++ b/DayZ_MCP_dev\tools\dayz_mcp\core.py
+@@ -69,6 +69,9 @@
+         "version": version,
+         "version_state": state,
+         "version_detail": detail,
++        "binding_state": peer_snapshot.get("binding_state"),
++        "instance_prefix": peer_snapshot.get("instance_prefix"),
++        "bound_last_poll_age_s": peer_snapshot.get("bound_last_poll_age_s"),
+     }
+ 
+ 
+@@ -97,7 +100,7 @@
+         expected_game_version=expected_game_version,
+         expected_bridge_version=expected_bridge_version,
+     )
+-    return {
++    payload = {
+         "server_peer": server_peer,
+         "client_peer": client_peer,
+         "results_pending": snapshot["results_pending"],
+@@ -109,6 +112,10 @@
+         "expected_game_version": expected_game_version,
+         "require_version": require_version,
+     }
++    fence = snapshot.get("fence")
++    if isinstance(fence, dict):
++        payload["fence"] = fence
++    return payload
+ 
+ 
+ def load_exec_allowlist(path: str | None) -> set[str]:
+--- a/DayZ_MCP_dev\tools\dayz_mcp\daemon.py
++++ b/DayZ_MCP_dev\tools\dayz_mcp\daemon.py
+@@ -522,6 +522,7 @@
+             )
+         ),
+         recovery_fault_arm=arm_lifecycle_recovery_fault,
++        bindings=state,
+     )
+     if recovered_lifecycle_fault is None:
+         bounded_io(
+====================================================================================================
+NUEVO: DayZ_MCP_dev\tools\dayz_mcp\instance_fence.py
+====================================================================================================
++"""In-memory instance bindings for D-55 v1 fencing.
++
++Bindings are not persisted. After a daemon restart the map is empty and a
++live game that still sends its old inst= is unbound_after_restart.
++"""
++from __future__ import annotations
++
++import math
++import uuid
++from dataclasses import dataclass, field
++from datetime import UTC, datetime
++from typing import Protocol
++
++
++BINDING_STARTING = "STARTING"
++BINDING_BOUND = "BOUND"
++BINDING_AMBIGUOUS = "AMBIGUOUS"
++BINDING_RETIRED = "RETIRED"
++BINDING_LEGACY = "LEGACY_UNBOUND"
++BINDING_UNREADABLE = "creation_time_unreadable"
++
++FENCE_HINTS: dict[str, str] = {
++    "legacy_unbound": (
++        "Peer poll lacks a valid inst=. Relaunch via dayz_test_run so start_run "
++        "writes instance into $profile:dayz_mcp.json. Do not mutate a hand-launched game."
++    ),
++    "instance_malformed": (
++        "inst= is not a lowercase UUID4. Check the profile JSON; do not invent "
++        "the field. Relaunch via dayz_test_run."
++    ),
++    "instance_unknown": (
++        "This inst= is not in the daemon registry. If the daemon restarted, "
++        "relaunch the run. adopt_run does not restore mutations."
++    ),
++    "unbound_after_restart": (
++        "Daemon came up with a live game and no in-memory bindings. Relaunch "
++        "the run; do not remint JSON under a live process (the bridge will not "
++        "reload instance)."
++    ),
++    "instance_role_mismatch": (
++        "This instance is registered for a different peer role. Stop that "
++        "process and relaunch the correct role."
++    ),
++    "instance_ambiguous": (
++        "Two processes presented the same instance. Close the extra DayZDiag "
++        "that copied this profile. Mutations stay blocked until one PID remains."
++    ),
++    "instance_unattributed": (
++        "TCP table did not map this poll to exactly one PID. Retry; if it "
++        "persists, relaunch. Commands were not delivered."
++    ),
++    "creation_time_unreadable": (
++        "Could not read the process creation time, so this poll was not "
++        "accredited. Retry; if it persists, relaunch via dayz_test_run. "
++        "This does not mean a second DayZ copied the profile."
++    ),
++    "binding_not_ready": (
++        "Instance is minted but the first accredited poll has not landed. "
++        "Wait for bridge_status.ready; do not enqueue yet."
++    ),
++    "binding_retired": (
++        "Target instance was retired (stop, reap, or role replace). Relaunch "
++        "that role via dayz_test_run so start_run mints a new instance. "
++        "Resending this command will keep failing until the new instance is BOUND."
++    ),
++    "instance_peer_collision": (
++        "Two live instances are bound for this peer. Stop the extra DayZDiag; "
++        "mutations stay blocked until exactly one BOUND remains."
++    ),
++}
++
++FENCE_ENQUEUE_CODES = frozenset(FENCE_HINTS)
++FENCE_MUTATION_REJECT_CODES = (
++    "legacy_unbound",
++    "instance_unknown",
++    "instance_ambiguous",
++    "instance_unattributed",
++    "binding_retired",
++    "instance_role_mismatch",
++    "instance_peer_collision",
++    "binding_not_ready",
++    "creation_time_unreadable",
++)
++
++
++def format_creation_time_utc(create_time: float) -> str:
++    """Canonical process creation stamp: microseconds + Z, never +00:00."""
++    creation_time = datetime.fromtimestamp(create_time, UTC)
++    return creation_time.isoformat(timespec="microseconds").replace("+00:00", "Z")
++
++
++def normalize_creation_time_utc(value: object) -> str | None:
++    """Re-format a stored stamp through format_creation_time_utc, or None.
++
++    Never raises: unparseable or out-of-range stamps return None.
++    """
++    if not isinstance(value, str):
++        return None
++    text = value.strip()
++    if not text:
++        return None
++    if text.endswith("Z") or text.endswith("z"):
++        text = text[:-1] + "+00:00"
++    try:
++        parsed = datetime.fromisoformat(text)
++        if parsed.tzinfo is None:
++            parsed = parsed.replace(tzinfo=UTC)
++        stamp = parsed.timestamp()
++        if not math.isfinite(stamp):
++            return None
++        return format_creation_time_utc(stamp)
++    except (OSError, OverflowError, ValueError, TypeError):
++        return None
++
++
++class BindingPrepareError(Exception):
++    def __init__(self, code: str) -> None:
++        self.code = code
++        super().__init__(code)
++
++
++class BindingRegistry(Protocol):
++    def prepare(self, run_id: str, role: str, profiles_dir: str) -> str: ...
++    def confirm(self, instance: str, record: object) -> None: ...
++    def retire_role(self, run_id: str, role: str, reason: str) -> None: ...
++    def retire_run(self, run_id: str, reason: str) -> None: ...
++
++
++@dataclass
++class Binding:
++    instance: str
++    run_id: str
++    role: str
++    epoch: int
++    pid: int | None
++    creation_time_utc: str | None
++    state: str
++    presented_pids: set[int] = field(default_factory=set)
++    last_present_at: dict[int, float] = field(default_factory=dict)
++    last_poll_at: float | None = None
++    last_attributed_pid: int | None = None
++    last_verified_at: float | None = None
++
++
++def instance_prefix(instance: str | None) -> str | None:
++    if not instance:
++        return None
++    try:
++        parsed = uuid.UUID(instance)
++    except (ValueError, AttributeError, TypeError):
++        return None
++    if parsed.version != 4 or str(parsed) != instance:
++        return None
++    return parsed.hex[:8]
++
++
++def fence_error(code: str) -> tuple[int, dict[str, object]]:
++    payload: dict[str, object] = {"error": code}
++    hint = FENCE_HINTS.get(code)
++    if hint is not None:
++        payload["hint"] = hint
++    return 409, payload
++
++
++def classify_instance_token(value: str | None) -> tuple[str | None, str]:
++    """Return (normalized_instance_or_none, class)."""
++    if value is None or value == "":
++        return None, BINDING_LEGACY
++    if instance_prefix(value) is None:
++        return None, "instance_malformed"
++    return value, "instance_present"
+--- a/DayZ_MCP_dev\tools\dayz_mcp\loopback.py
++++ b/DayZ_MCP_dev\tools\dayz_mcp\loopback.py
+@@ -9,7 +9,10 @@
+ import sys
+ import threading
+ import time
++import uuid
++from collections import OrderedDict
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from pathlib import Path
+ from typing import Callable
+ from urllib.parse import parse_qs, urlparse
+ 
+@@ -17,6 +20,21 @@
+ from dayz_mcp.core import (
+     BLOCKED_VERSION_STATES,
+     EXPECTED_BRIDGE_VERSION,
++)
++from dayz_mcp.instance_fence import (
++    BINDING_AMBIGUOUS,
++    BINDING_BOUND,
++    BINDING_LEGACY,
++    BINDING_RETIRED,
++    BINDING_STARTING,
++    BINDING_UNREADABLE,
++    Binding,
++    BindingPrepareError,
++    FENCE_MUTATION_REJECT_CODES,
++    classify_instance_token,
++    fence_error,
++    instance_prefix,
++    normalize_creation_time_utc,
+ )
+ from dayz_mcp.session_coordination import (
+     ClientIdentity,
+@@ -101,6 +119,7 @@
+ # its last poll exceeds PEER_RECONNECT_GAP_S (the previous game/session is gone).
+ COMMAND_TTL_S = 30.0
+ PEER_RECONNECT_GAP_S = 10.0
++RETIRED_INSTANCE_LIMIT = 64
+ # Ceiling for Handler._read_json. Checked against exec_enforce (short
+ # allowlisted expr), world_spawn (tiny), pipeline_feedback (not on this
+ # socket; 8 KiB inbox cap), ui_tree /result (<=512 nodes) and
+@@ -504,6 +523,40 @@
+     return True, None
+ 
+ 
++class TestIdentityOverride:
++    """Single test-only door for fake PID + creation_time.
++
++    Production (prepare/confirm/Handler) never installs this. HTTP fixtures
++    go through install_bound_peer, which is the only writer.
++    """
++
++    def __init__(self) -> None:
++        self._pid_by_instance: dict[str, int] = {}
++        self._ctime_by_pid: dict[int, str] = {}
++
++    def bind(self, instance: str, pid: int, creation_time_utc: str) -> None:
++        self._pid_by_instance[instance] = pid
++        if isinstance(creation_time_utc, str) and creation_time_utc:
++            self._ctime_by_pid[pid] = creation_time_utc
++
++    def pid_for(self, instance: str | None) -> int | None:
++        if not instance:
++            return None
++        pid = self._pid_by_instance.get(instance)
++        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
++            return pid
++        return None
++
++    def ctime_for(self, pid: int) -> str | None:
++        value = self._ctime_by_pid.get(pid)
++        return value if isinstance(value, str) and value else None
++
++    def drop_instance(self, instance: str, pid: int | None) -> None:
++        self._pid_by_instance.pop(instance, None)
++        if isinstance(pid, int):
++            self._ctime_by_pid.pop(pid, None)
++
++
+ class ServerState:
+     def __init__(
+         self,
+@@ -530,7 +583,30 @@
+         self.daemon_generation: str | None = None
+         self._lock = threading.RLock()
+         self._next_id = 1
+-        self._queues: dict[str, list[dict]] = {"server": [], "client": []}
++        self._legacy_queues: dict[str, list[dict]] = {"server": [], "client": []}
++        self._queues = self._legacy_queues
++        self._bound_queues: dict[str, list[dict]] = {}
++        self._bindings: dict[str, Binding] = {}
++        self._role_index: dict[tuple[str, str], str] = {}
++        self._station_epoch = 0
++        self._ever_bound = False
++        self._seen_valid_inst_poll = False
++        self._peer_last_class: dict[str, str] = {}
++        self._bound_last_poll_at: dict[str, float | None] = {
++            "server": None,
++            "client": None,
++        }
++        self._command_fence: dict[int, tuple[str, int, int]] = {}
++        self._test_identity_override: TestIdentityOverride | None = None
++        self._retired_instances: OrderedDict[str, None] = OrderedDict()
++        self._retired_roles: set[str] = set()
++        self._creation_time_fn: Callable[[int], str | None] | None = None
++        self._connections_fn: Callable[[], object] | None = None
++        self._fence_reject_counts: dict[str, int] = {
++            code: 0 for code in FENCE_MUTATION_REJECT_CODES
++        }
++        self._unaccredited_mutation_enqueues = 0
++        self._unaccredited_poll_counts: dict[str, int] = {}
+         self._exec_capacity_reserved: dict[str, int] = {"server": 0, "client": 0}
+         self._enqueue_generation = 0
+         self._stopping = False
+@@ -554,6 +630,329 @@
+ 
+     def _now(self) -> float:
+         return self._time_fn()
++
++    def prepare(self, run_id: str, role: str, profiles_dir: str) -> str:
++        from dayz_mcp.process_lifecycle import _valid_uuid4
++        from dayz_mcp.runtime_state import atomic_write_json
++
++        if (
++            not isinstance(profiles_dir, str)
++            or not profiles_dir
++            or not Path(profiles_dir).is_absolute()
++        ):
++            raise BindingPrepareError("instance_config_missing")
++        config_path = Path(profiles_dir) / "dayz_mcp.json"
++        if not config_path.is_file():
++            raise BindingPrepareError("instance_config_missing")
++        try:
++            payload = json.loads(config_path.read_text(encoding="utf-8"))
++        except (OSError, ValueError) as exc:
++            raise BindingPrepareError("instance_config_missing") from exc
++        if not isinstance(payload, dict):
++            raise BindingPrepareError("instance_config_missing")
++        minted = str(uuid.uuid4())
++        if not _valid_uuid4(minted):
++            minted = str(uuid.uuid4())
++        payload["instance"] = minted
++        atomic_write_json(config_path, payload)
++        try:
++            reread = json.loads(config_path.read_text(encoding="utf-8"))
++        except (OSError, ValueError) as exc:
++            raise BindingPrepareError("instance_config_mismatch") from exc
++        if not isinstance(reread, dict) or reread.get("instance") != minted:
++            raise BindingPrepareError("instance_config_mismatch")
++        with self._lock:
++            self._station_epoch += 1
++            self._bindings[minted] = Binding(
++                instance=minted,
++                run_id=run_id,
++                role=role,
++                epoch=self._station_epoch,
++                pid=None,
++                creation_time_utc=None,
++                state=BINDING_STARTING,
++            )
++            self._role_index[(run_id, role)] = minted
++            self._bound_queues.setdefault(minted, [])
++            self._ever_bound = True
++        return minted
++
++    def confirm(self, instance: str, record: object) -> None:
++        pid = getattr(record, "pid", None)
++        creation = getattr(record, "creation_time_utc", None)
++        role = getattr(record, "role", None)
++        with self._lock:
++            binding = self._bindings.get(instance)
++            if binding is None or binding.state != BINDING_STARTING:
++                return
++            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
++                return
++            if not isinstance(creation, str) or not creation:
++                return
++            binding.pid = pid
++            binding.creation_time_utc = creation
++            if isinstance(role, str) and role:
++                binding.role = role
++            binding.state = BINDING_BOUND
++            self._retired_roles.discard(binding.role)
++            if binding.role == "offline":
++                self._retired_roles.discard("server")
++                self._retired_roles.discard("client")
++
++    def retire_role(self, run_id: str, role: str, reason: str) -> None:
++        with self._lock:
++            instance = self._role_index.pop((run_id, role), None)
++            if instance is None:
++                return
++            self._retire_instance_locked(instance, reason)
++
++    def retire_run(self, run_id: str, reason: str) -> None:
++        with self._lock:
++            keys = [key for key in self._role_index if key[0] == run_id]
++            for key in keys:
++                instance = self._role_index.pop(key, None)
++                if instance is not None:
++                    self._retire_instance_locked(instance, reason)
++
++    def install_bound_peer(
++        self,
++        *,
++        instance: str,
++        role: str,
++        pid: int,
++        run_id: str = "testrun",
++        creation_time_utc: str = "2026-08-18T00:00:00.000000Z",
++    ) -> None:
++        from dayz_mcp.process_lifecycle import _valid_uuid4
++
++        if not _valid_uuid4(instance):
++            raise ValueError("instance_malformed")
++        with self._lock:
++            self._station_epoch += 1
++            self._bindings[instance] = Binding(
++                instance=instance,
++                run_id=run_id,
++                role=role,
++                epoch=self._station_epoch,
++                pid=pid,
++                creation_time_utc=creation_time_utc,
++                state=BINDING_BOUND,
++            )
++            self._role_index[(run_id, role)] = instance
++            self._bound_queues.setdefault(instance, [])
++            if self._test_identity_override is None:
++                self._test_identity_override = TestIdentityOverride()
++            self._test_identity_override.bind(instance, pid, creation_time_utc)
++            self._ever_bound = True
++
++    def _retire_instance_locked(self, instance: str, reason: str) -> None:
++        binding = self._bindings.get(instance)
++        if binding is None:
++            return
++        self._station_epoch += 1
++        queue = self._bound_queues.get(instance, [])
++        discarded_exec: list[tuple[str, str, int]] = []
++        finished_operations: list[tuple[ClientIdentity, str, int, str, str]] = []
++        self._discard_queue(queue, "binding_retired", discarded_exec, finished_operations)
++        self._retired_instances[instance] = None
++        self._retired_instances.move_to_end(instance)
++        while len(self._retired_instances) > RETIRED_INSTANCE_LIMIT:
++            self._retired_instances.popitem(last=False)
++        self._retired_roles.add(binding.role)
++        if binding.role == "offline":
++            self._retired_roles.update({"server", "client"})
++        retired_pid = binding.pid
++        self._bindings.pop(instance, None)
++        self._bound_queues.pop(instance, None)
++        override = self._test_identity_override
++        if override is not None:
++            override.drop_instance(instance, retired_pid)
++        for command_id, fence in list(self._command_fence.items()):
++            if fence[0] == instance:
++                self._command_fence.pop(command_id, None)
++
++    def _peer_covers(self, binding: Binding, peer: str) -> bool:
++        return binding.role == peer or binding.role == "offline"
++
++    def _active_bindings_for_peer(self, peer: str) -> list[Binding]:
++        return [
++            binding
++            for binding in self._bindings.values()
++            if binding.state != BINDING_RETIRED and self._peer_covers(binding, peer)
++        ]
++
++    def _enqueue_fence_target(
++        self, peer: str, cmd: str
++    ) -> tuple[str | None, list[dict] | None, str | None]:
++        mutation = command_requires_lease(cmd)
++        candidates = self._active_bindings_for_peer(peer)
++        bound = [binding for binding in candidates if binding.state == BINDING_BOUND]
++        ambiguous = [
++            binding for binding in candidates if binding.state == BINDING_AMBIGUOUS
++        ]
++        starting = [
++            binding for binding in candidates if binding.state == BINDING_STARTING
++        ]
++        unreadable = [
++            binding for binding in candidates if binding.state == BINDING_UNREADABLE
++        ]
++        if len(bound) > 1:
++            return "instance_peer_collision", None, None
++        if mutation:
++            if len(bound) == 1:
++                instance = bound[0].instance
++                return None, self._bound_queues.setdefault(instance, []), instance
++            if ambiguous:
++                return "instance_ambiguous", None, None
++            if unreadable:
++                return "creation_time_unreadable", None, None
++            if starting:
++                return "binding_not_ready", None, None
++            if not candidates and (
++                peer in self._retired_roles or "offline" in self._retired_roles
++            ):
++                return "binding_retired", None, None
++            if self._seen_valid_inst_poll and not self._ever_bound:
++                return "unbound_after_restart", None, None
++            return "legacy_unbound", None, None
++        if len(bound) == 1:
++            instance = bound[0].instance
++            return None, self._bound_queues.setdefault(instance, []), instance
++        if ambiguous:
++            return "instance_ambiguous", None, None
++        if unreadable:
++            return "creation_time_unreadable", None, None
++        if starting:
++            return "binding_not_ready", None, None
++        return None, self._legacy_queues[peer], None
++
++    def _peer_queue_len(self, peer: str) -> int:
++        total = len(self._legacy_queues[peer]) + self._exec_capacity_reserved[peer]
++        for instance, queue in self._bound_queues.items():
++            binding = self._bindings.get(instance)
++            if binding is None or binding.state == BINDING_RETIRED:
++                continue
++            if not self._peer_covers(binding, peer):
++                continue
++            total += sum(
++                1
++                for command in queue
++                if peer_for_command(str(command.get("cmd") or "")) == peer
++            )
++        return total
++
++    def _iter_mutable_queues(self):
++        yield from self._legacy_queues.items()
++        yield from self._bound_queues.items()
++
++    def _seal_command(
++        self, command_id: int, instance: str | None, binding: Binding | None
++    ) -> None:
++        if not instance:
++            return
++        epoch = binding.epoch if binding is not None else self._station_epoch
++        pid = 0
++        if binding is not None and isinstance(binding.pid, int):
++            pid = binding.pid
++        self._command_fence[command_id] = (instance, epoch, pid)
++
++    def resolve_poll_pid(self, instance: str | None, sock: object) -> int | None:
++        if not instance:
++            return None
++        override = self._test_identity_override
++        if override is not None:
++            forced = override.pid_for(instance)
++            if forced is not None:
++                return forced
++        pid = self._lookup_connected_pid(sock)
++        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
++            return pid
++        return None
++
++    def _lookup_creation_time(self, pid: int | None) -> str | None:
++        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
++            return None
++        override = self._test_identity_override
++        if override is not None:
++            forced = override.ctime_for(pid)
++            if forced is not None:
++                return forced
++        reader = self._creation_time_fn
++        if callable(reader):
++            try:
++                value = reader(pid)
++            except Exception:
++                return None
++            if isinstance(value, str) and value:
++                return value
++        lifecycle = self.lifecycle
++        if lifecycle is None:
++            return None
++        try:
++            actual = lifecycle.guard.snapshot(pid)
++        except Exception:
++            return None
++        if not isinstance(actual, dict):
++            return None
++        value = actual.get("creation_time_utc")
++        return value if isinstance(value, str) and value else None
++
++    def _tcp_connections(self) -> object:
++        connections_fn = self._connections_fn
++        if connections_fn is None:
++            try:
++                import psutil
++            except ImportError:
++                return None
++
++            def connections_fn() -> object:
++                return psutil.net_connections(kind="tcp")
++        try:
++            return connections_fn()
++        except Exception:
++            return None
++
++    def _lookup_connected_pid(self, sock: object) -> int | None:
++        # Direct scan (ronda 3). A 50ms table cache never contained the
++        # connection of the next request (new TCP per poll); useful hit
++        # rate measured 0. NUEVO-3: a failed lookup is instance_unattributed
++        # this tick only. Keep-alive on the bridge (Enforce) is out of v1.
++        if sock is None:
++            return None
++        table = self._tcp_connections()
++        if table is None:
++            return None
++        try:
++            from dayz_mcp.accredited_daemon_transport import _connected_server_pid
++
++            return _connected_server_pid(sock, connections_fn=lambda: table)
++        except Exception:
++            return None
++
++    def _audit_fence(
++        self,
++        event: str,
++        command_id: int,
++        expected: str | None,
++        origin: str | None,
++        extra: dict[str, object] | None = None,
++    ) -> None:
++        writer = self.audit_writer
++        write = getattr(writer, "write", None)
++        if not callable(write):
++            return
++        payload: dict[str, object] = {
++            "event": event,
++            "command_id": command_id,
++            "expected_instance_prefix": instance_prefix(expected),
++            "origin_instance_prefix": instance_prefix(origin),
++        }
++        if extra:
++            payload.update(extra)
++        try:
++            write(payload)
++        except Exception:
++            pass
+ 
+     def touch_client(self) -> None:
+         """Mark session-side (client) HTTP activity for the daemon idle watchdog."""
+@@ -815,8 +1214,16 @@
+         with self._lock:
+             if self._stopping:
+                 return 409, {"error": "enqueue_cancelled"}
+-            queue = self._queues[peer]
+-            if len(queue) + self._exec_capacity_reserved[peer] >= MAX_QUEUE:
++            fence_error_code, queue, fence_instance = self._enqueue_fence_target(
++                peer, cmd
++            )
++            if fence_error_code is not None or queue is None:
++                code = fence_error_code or "legacy_unbound"
++                self._fence_reject_counts[code] = (
++                    self._fence_reject_counts.get(code, 0) + 1
++                )
++                return fence_error(code)
++            if self._peer_queue_len(peer) >= MAX_QUEUE:
+                 return 429, {"error": "queue_full"}
+ 
+             command_id = self._next_id
+@@ -833,6 +1240,16 @@
+                 self._operation_deadlines[command_id] = (
+                     enqueued_at + operation_timeout_s
+                 )
++            binding = (
++                self._bindings.get(fence_instance) if fence_instance else None
++            )
++            self._seal_command(command_id, fence_instance, binding)
++            if command_requires_lease(cmd) and (
++                fence_instance is None
++                or binding is None
++                or binding.state != BINDING_BOUND
++            ):
++                self._unaccredited_mutation_enqueues += 1
+ 
+         return 200, {"id": command_id, "peer": peer, "cmd": cmd}
+ 
+@@ -865,10 +1282,15 @@
+         with self._lock:
+             if self._stopping:
+                 return 409, {"error": "enqueue_cancelled"}
+-            if (
+-                len(self._queues[peer]) + self._exec_capacity_reserved[peer]
+-                >= MAX_QUEUE
+-            ):
++            fence_error_code, _queue, _fence_instance = self._enqueue_fence_target(
++                peer, "exec_enforce"
++            )
++            if fence_error_code is not None:
++                self._fence_reject_counts[fence_error_code] = (
++                    self._fence_reject_counts.get(fence_error_code, 0) + 1
++                )
++                return fence_error(fence_error_code)
++            if self._peer_queue_len(peer) >= MAX_QUEUE:
+                 return 429, {"error": "queue_full"}
+             command_id = self._next_id
+             self._next_id += 1
+@@ -890,11 +1312,19 @@
+         capacity_lost = False
+         fence_lost = False
+         with self._lock:
+-            queue = self._queues[peer]
++            fence_error_code, queue, fence_instance = self._enqueue_fence_target(
++                peer, "exec_enforce"
++            )
+             self._exec_capacity_reserved[peer] -= 1
+-            if self._stopping or self._enqueue_generation != enqueue_generation:
++            if fence_error_code is not None or queue is None:
+                 fence_lost = True
+-            elif len(queue) >= MAX_QUEUE:
++                if fence_error_code is not None:
++                    self._fence_reject_counts[fence_error_code] = (
++                        self._fence_reject_counts.get(fence_error_code, 0) + 1
++                    )
++            elif self._stopping or self._enqueue_generation != enqueue_generation:
++                fence_lost = True
++            elif self._peer_queue_len(peer) >= MAX_QUEUE:
+                 capacity_lost = True
+             elif commit is not None and not commit(command_id):
+                 commit_failed = True
+@@ -908,6 +1338,16 @@
+                     )
+                 if owner_client is not None and owner_lease_id is not None:
+                     self._command_owner[command_id] = (owner_client, owner_lease_id)
++                binding = (
++                    self._bindings.get(fence_instance) if fence_instance else None
++                )
++                self._seal_command(command_id, fence_instance, binding)
++                if (
++                    fence_instance is None
++                    or binding is None
++                    or binding.state != BINDING_BOUND
++                ):
++                    self._unaccredited_mutation_enqueues += 1
+ 
+         if commit_failed or capacity_lost or fence_lost:
+             try:
+@@ -924,13 +1364,18 @@
+         return 200, {"id": command_id, "peer": peer, "cmd": "exec_enforce"}
+ 
+     def _rollback_enqueued(self, command_id: int) -> None:
+-        for peer, queue in self._queues.items():
+-            self._queues[peer] = [
++        for key, queue in self._iter_mutable_queues():
++            survivors = [
+                 command for command in queue if command.get("id") != command_id
+             ]
++            if key in self._legacy_queues:
++                self._legacy_queues[key] = survivors
++            else:
++                self._bound_queues[key] = survivors
+         self._enqueued_at.pop(command_id, None)
+         self._operation_deadlines.pop(command_id, None)
+         self._command_owner.pop(command_id, None)
++        self._command_fence.pop(command_id, None)
+ 
+     def abandon_command(
+         self, command_id: int, reason: str = "tool_timeout"
+@@ -948,7 +1393,7 @@
+                 or command_id in self._fire_and_forget_ids
+             )
+             found_queued = False
+-            for peer, queue in self._queues.items():
++            for key, queue in self._iter_mutable_queues():
+                 survivors: list[dict] = []
+                 for command in queue:
+                     if command.get("id") == command_id:
+@@ -961,7 +1406,11 @@
+                         found_queued = True
+                     else:
+                         survivors.append(command)
+-                self._queues[peer] = survivors
++                if key in self._legacy_queues:
++                    self._legacy_queues[key] = survivors
++                else:
++                    self._bound_queues[key] = survivors
++            self._command_fence.pop(command_id, None)
+             had_result = command_id in self._results
+             owner = self._command_owner.pop(command_id, None)
+             self._results.pop(command_id, None)
+@@ -1008,7 +1457,14 @@
+             commands.update(EXEC_COMMANDS)
+         return commands
+ 
+-    def record_poll(self, peer: str, version: str | None = None) -> tuple[int, dict]:
++    def record_poll(
++        self,
++        peer: str,
++        version: str | None = None,
++        instance: str | None = None,
++        source_pid: int | None = None,
++        source_creation_time: str | None = None,
++    ) -> tuple[int, dict]:
+         if peer not in VALID_PEERS:
+             return 400, {"error": "bad_peer"}
+ 
+@@ -1023,38 +1479,98 @@
+             else None
+         )
+         self.reap_expired_commands(self._now())
++        token, token_class = classify_instance_token(instance)
++        if source_pid is not None and source_creation_time is None:
++            source_creation_time = self._lookup_creation_time(source_pid)
+ 
+         with self._lock:
+             now = self._now()
+             prev_poll = self._last_poll_at.get(peer)
+             self._poll_versions[peer] = version
+             self._last_poll_at[peer] = now
++            bind_label = BINDING_LEGACY
++            accredited = False
++            queue: list[dict] | None = None
++            for stale_queue in list(self._legacy_queues.values()) + list(
++                self._bound_queues.values()
++            ):
++                self._expire_stale_commands(
++                    stale_queue, now, discarded_exec, finished_operations
++                )
++
++            if token_class == "instance_malformed":
++                self._peer_last_class[peer] = "instance_malformed"
++                bind_label = "instance_malformed"
++            elif token is not None:
++                self._seen_valid_inst_poll = True
++                binding = self._bindings.get(token)
++                if binding is None:
++                    if token in self._retired_instances:
++                        bind_label = "binding_retired"
++                    elif not self._ever_bound:
++                        bind_label = "unbound_after_restart"
++                    else:
++                        bind_label = "instance_unknown"
++                    self._peer_last_class[peer] = bind_label
++                elif binding.state == BINDING_RETIRED:
++                    bind_label = "binding_retired"
++                    self._peer_last_class[peer] = bind_label
++                elif not self._peer_covers(binding, peer):
++                    bind_label = "instance_role_mismatch"
++                    self._peer_last_class[peer] = bind_label
++                elif source_pid is None:
++                    # NUEVO-3: TCP miss this tick. Binding stays as-is;
++                    # commands are not delivered (fail-closed).
++                    bind_label = "instance_unattributed"
++                    self._peer_last_class[peer] = bind_label
++                elif binding.state == BINDING_STARTING:
++                    bind_label = BINDING_STARTING
++                    self._peer_last_class[peer] = bind_label
++                else:
++                    bind_label = self._note_poll_pid_locked(
++                        binding, source_pid, now, source_creation_time
++                    )
++                    self._peer_last_class[peer] = bind_label
++                    if bind_label == BINDING_BOUND:
++                        accredited = True
++                        self._bound_last_poll_at[peer] = now
++                        queue = self._bound_queues.setdefault(token, [])
++                        self._expire_stale_commands(
++                            queue, now, discarded_exec, finished_operations
++                        )
++            else:
++                self._peer_last_class[peer] = BINDING_LEGACY
++                queue = self._legacy_queues[peer]
++                if prev_poll is not None and (now - prev_poll) > PEER_RECONNECT_GAP_S:
++                    self._discard_queue(
++                        queue,
++                        "peer_reconnect_flush",
++                        discarded_exec,
++                        finished_operations,
++                    )
++                self._expire_stale_commands(
++                    queue, now, discarded_exec, finished_operations
++                )
++
++            if not accredited:
++                self._unaccredited_poll_counts[bind_label] = (
++                    self._unaccredited_poll_counts.get(bind_label, 0) + 1
++                )
++
+             if version_state in {"legacy_blocked", "version_mismatch"}:
+-                return 200, {"commands": [], "delay_ms": 0}
+-
+-            queue = self._queues[peer]
+-
+-            # Reconnect flush (BUG-041): a poll gap wider than PEER_RECONNECT_GAP_S
+-            # means the game/session that owned this queue is gone; its commands
+-            # are stale and must not reach the fresh peer. The first poll
+-            # (prev_poll is None) has no measurable gap and never flushes.
+-            if prev_poll is not None and (now - prev_poll) > PEER_RECONNECT_GAP_S:
+-                self._discard_queue(
+-                    queue,
+-                    "peer_reconnect_flush",
+-                    discarded_exec,
+-                    finished_operations,
+-                )
+-
+-            # TTL: drop commands older than COMMAND_TTL_S even without a reconnect,
+-            # so an abandoned queue never delivers ancient commands.
+-            self._expire_stale_commands(
+-                queue, now, discarded_exec, finished_operations
+-            )
+-
++                return 200, {"commands": [], "delay_ms": 0, "bind": bind_label}
++
++            if queue is None:
++                return 200, {"commands": [], "delay_ms": 0, "bind": bind_label}
++
++            deliver_queue = queue
++            deliver_accredited = accredited
++
++        commands: list[dict] = []
++        delay_ms = 0
+         while True:
+             with self._lock:
+-                queue_ref = self._queues[peer]
++                queue_ref = deliver_queue
+                 snapshot = list(queue_ref)
+             has_mutation = any(
+                 isinstance(command.get("cmd"), str)
+@@ -1062,8 +1578,6 @@
+                 for command in snapshot
+             )
+             if coordination is not None and has_mutation:
+-                # Expiry may audit and invoke cleanup. Reads skip the entire
+-                # authority/probe path and remain independently dispatchable.
+                 coordination.expire_due()
+             retail_quarantined = (
+                 self._retail_quarantined()
+@@ -1072,7 +1586,7 @@
+             )
+ 
+             with self._lock:
+-                queue = self._queues[peer]
++                queue = deliver_queue
+                 if (
+                     queue is not queue_ref
+                     or len(queue) < len(snapshot)
+@@ -1083,10 +1597,20 @@
+                 ):
+                     continue
+ 
+-                commands = []
++                remaining: list[dict] = []
+                 for command in snapshot:
+                     command_id = command.get("id")
+                     command_name = command.get("cmd")
++                    if peer_for_command(str(command_name or "")) != peer:
++                        remaining.append(command)
++                        continue
++                    if (
++                        isinstance(command_name, str)
++                        and command_requires_lease(command_name)
++                        and not deliver_accredited
++                    ):
++                        remaining.append(command)
++                        continue
+                     if (
+                         isinstance(command_id, int)
+                         and isinstance(command_name, str)
+@@ -1101,9 +1625,6 @@
+                             command_name == "vehicle_release"
+                             and command_id in self._fire_and_forget_ids
+                         ):
+-                            # Owner release deliberately invalidates the lease before
+-                            # cleanup. Only this atomically registered internal command
+-                            # may dispatch without an active owner mapping.
+                             pass
+                         elif owner is None:
+                             discard_reason = "authority_missing"
+@@ -1126,16 +1647,12 @@
+                     wire_command.pop("owner_session_id", None)
+                     wire_command.pop("owner_lease_id", None)
+                     commands.append(wire_command)
+-                del queue[: len(snapshot)]
+-                delay_ms = 0
++                queue[:] = remaining + queue[len(snapshot) :]
+                 if commands and self._poll_delay_ms > 0:
+                     delay_ms = self._poll_delay_ms
+                     self._poll_delay_ms = 0
+                 break
+ 
+-        # Keep the exec audit ledger consistent (an 'allowed' entry must equal a
+-        # command that reached the game): an exec_enforce dropped before delivery
+-        # is recorded as 'discarded'. Done outside the lock — exec_audit may do I/O.
+         for expr, main_fn, command_id in discarded_exec:
+             try:
+                 self.exec_audit(expr, "discarded", main_fn, command_id)
+@@ -1143,7 +1660,60 @@
+                 pass
+         self._finish_operations(finished_operations)
+ 
+-        return 200, {"commands": commands, "delay_ms": delay_ms}
++        return 200, {"commands": commands, "delay_ms": delay_ms, "bind": bind_label}
++
++    def _note_poll_pid_locked(
++        self,
++        binding: Binding,
++        source_pid: int,
++        now: float,
++        source_creation_time: str | None = None,
++    ) -> str:
++        if binding.pid is None:
++            return BINDING_STARTING
++        binding.last_present_at[source_pid] = now
++        binding.presented_pids.add(source_pid)
++        identity_mismatch = source_pid != binding.pid
++        source_norm = normalize_creation_time_utc(source_creation_time)
++        bound_norm = normalize_creation_time_utc(binding.creation_time_utc)
++        if source_norm is None or bound_norm is None:
++            if identity_mismatch:
++                if binding.state != BINDING_AMBIGUOUS:
++                    self._station_epoch += 1
++                    binding.epoch = self._station_epoch
++                binding.state = BINDING_AMBIGUOUS
++                return BINDING_AMBIGUOUS
++            binding.state = BINDING_UNREADABLE
++            return BINDING_UNREADABLE
++        if source_norm != bound_norm:
++            identity_mismatch = True
++        if identity_mismatch:
++            if binding.state != BINDING_AMBIGUOUS:
++                self._station_epoch += 1
++                binding.epoch = self._station_epoch
++            binding.state = BINDING_AMBIGUOUS
++            return BINDING_AMBIGUOUS
++        if binding.state == BINDING_UNREADABLE:
++            if source_pid == binding.pid:
++                binding.state = BINDING_BOUND
++                binding.presented_pids = {binding.pid}
++                return BINDING_BOUND
++            binding.state = BINDING_AMBIGUOUS
++            return BINDING_AMBIGUOUS
++        if binding.state == BINDING_AMBIGUOUS:
++            live = {
++                pid
++                for pid, seen_at in binding.last_present_at.items()
++                if (now - seen_at) <= PEER_RECONNECT_GAP_S
++            }
++            if live == {binding.pid} and source_pid == binding.pid:
++                binding.state = BINDING_BOUND
++                binding.presented_pids = {binding.pid}
++                return BINDING_BOUND
++            return BINDING_AMBIGUOUS
++        if binding.state == BINDING_BOUND and source_pid == binding.pid:
++            return BINDING_BOUND
++        return binding.state
+ 
+     def _discard_queue(
+         self,
+@@ -1203,6 +1773,7 @@
+             self._results[command_id] = {"id": command_id, "ok": False, "error": reason}
+         self._enqueued_at.pop(command_id, None)
+         self._operation_deadlines.pop(command_id, None)
++        self._command_fence.pop(command_id, None)
+         owner = self._command_owner.get(command_id)
+         command_name = command.get("cmd")
+         if owner is not None and isinstance(command_name, str):
+@@ -1243,7 +1814,9 @@
+                     result["cleanup_degraded"] = values
+                 self._audit_degraded_count += 1
+ 
+-    def store_result(self, body: dict) -> tuple[int, dict]:
++    def store_result(
++        self, body: dict, instance: str | None = None
++    ) -> tuple[int, dict]:
+         try:
+             command_id = int(body.get("id"))
+         except (TypeError, ValueError):
+@@ -1256,6 +1829,42 @@
+         owner_operation: tuple[ClientIdentity, str, int] | None = None
+         discarded = False
+         with self._lock:
++            fence = self._command_fence.get(command_id)
++            if fence is not None:
++                target_instance, target_epoch, _target_pid = fence
++                presented = instance or ""
++                if target_instance and presented != target_instance:
++                    self._audit_fence(
++                        "late_result_fenced",
++                        command_id,
++                        target_instance,
++                        instance,
++                        extra={
++                            "expected_epoch": target_epoch,
++                            "origin_epoch": self._station_epoch,
++                        },
++                    )
++                    return 200, {
++                        "ok": True,
++                        "id": command_id,
++                        "ok_value": None,
++                        "discarded": True,
++                    }
++                if (
++                    target_instance
++                    and presented == target_instance
++                    and target_epoch != self._station_epoch
++                ):
++                    self._audit_fence(
++                        "late_result_same_instance",
++                        command_id,
++                        target_instance,
++                        instance,
++                        extra={
++                            "expected_epoch": target_epoch,
++                            "origin_epoch": self._station_epoch,
++                        },
++                    )
+             deadline = self._operation_deadlines.get(command_id)
+             known = (
+                 command_id in self._enqueued_at
+@@ -1343,7 +1952,7 @@
+         cancelled = 0
+         with self._lock:
+             self._enqueue_generation += 1
+-            for peer, queue in self._queues.items():
++            for key, queue in self._iter_mutable_queues():
+                 survivors: list[dict] = []
+                 for command in queue:
+                     command_id = command.get("id")
+@@ -1359,7 +1968,10 @@
+                         cancelled += 1
+                     else:
+                         survivors.append(command)
+-                self._queues[peer] = survivors
++                if key in self._legacy_queues:
++                    self._legacy_queues[key] = survivors
++                else:
++                    self._bound_queues[key] = survivors
+ 
+         for expr, main_fn, command_id in discarded_exec:
+             try:
+@@ -1461,26 +2073,88 @@
+         with self._lock:
+             last_poll_at = dict(self._last_poll_at)
+             versions = dict(self._poll_versions)
+-            queue_depth = {peer: len(queue) for peer, queue in self._queues.items()}
+             results_pending = len(self._results)
+             last_client_request_at = self._last_client_request_at
+             audit_degraded_count = self._audit_degraded_count
+-
+-        peers = {}
+-        for peer in sorted(VALID_PEERS):
+-            poll_at = last_poll_at.get(peer)
+-            peers[peer] = {
+-                "last_poll_at": poll_at,
+-                "last_poll_age_s": None if poll_at is None else max(0.0, now - poll_at),
+-                "queue_depth": queue_depth.get(peer, 0),
+-                "version": versions.get(peer),
++            peers = {}
++            for peer in sorted(VALID_PEERS):
++                poll_at = last_poll_at.get(peer)
++                bind_state, prefix, bound_age, depth = self._peer_status_view(
++                    peer, now
++                )
++                peers[peer] = {
++                    "last_poll_at": poll_at,
++                    "last_poll_age_s": (
++                        None if poll_at is None else max(0.0, now - poll_at)
++                    ),
++                    "queue_depth": depth,
++                    "version": versions.get(peer),
++                    "binding_state": bind_state,
++                    "instance_prefix": prefix,
++                    "bound_last_poll_age_s": bound_age,
++                }
++            rejects = {code: 0 for code in FENCE_MUTATION_REJECT_CODES}
++            rejects.update(
++                {code: int(count) for code, count in self._fence_reject_counts.items()}
++            )
++            fence = {
++                "mutation_rejects_by_code": rejects,
++                "unaccredited_mutation_enqueues": int(
++                    self._unaccredited_mutation_enqueues
++                ),
++                "unaccredited_polls_by_class": dict(self._unaccredited_poll_counts),
+             }
+         return {
+             "peers": peers,
+             "results_pending": results_pending,
+             "last_client_request_at": last_client_request_at,
+             "audit_degraded_count": audit_degraded_count,
++            "fence": fence,
+         }
++
++    def _peer_status_view(
++        self, peer: str, now: float
++    ) -> tuple[str, str | None, float | None, int]:
++        active = self._active_bindings_for_peer(peer)
++        bound = [binding for binding in active if binding.state == BINDING_BOUND]
++        ambiguous = [
++            binding for binding in active if binding.state == BINDING_AMBIGUOUS
++        ]
++        starting = [
++            binding for binding in active if binding.state == BINDING_STARTING
++        ]
++        unreadable = [
++            binding for binding in active if binding.state == BINDING_UNREADABLE
++        ]
++        chosen: Binding | None = None
++        if ambiguous:
++            chosen = ambiguous[0]
++            state = BINDING_AMBIGUOUS
++        elif unreadable:
++            chosen = unreadable[0]
++            state = BINDING_UNREADABLE
++        elif bound:
++            chosen = bound[0]
++            state = BINDING_BOUND
++        elif starting:
++            chosen = starting[0]
++            state = BINDING_STARTING
++        else:
++            state = self._peer_last_class.get(peer, BINDING_LEGACY)
++            chosen = None
++        prefix = instance_prefix(chosen.instance) if chosen is not None else None
++        bound_at = self._bound_last_poll_at.get(peer)
++        bound_age = None if bound_at is None else max(0.0, now - bound_at)
++        if chosen is not None and chosen.state == BINDING_BOUND:
++            queue = self._bound_queues.get(chosen.instance, [])
++            depth = sum(
++                1
++                for command in queue
++                if peer_for_command(str(command.get("cmd") or "")) == peer
++            )
++        else:
++            depth = len(self._legacy_queues.get(peer, []))
++        return state, prefix, bound_age, depth
+ 
+     def cancel_pending(self, reason: str = "server_stopping") -> None:
+         discarded_exec: list[tuple[str, str, int]] = []
+@@ -1490,7 +2164,7 @@
+         with self._lock:
+             self._enqueue_generation += 1
+             self._stopping = True
+-            for queue in self._queues.values():
++            for _key, queue in self._iter_mutable_queues():
+                 self._discard_queue(
+                     queue, reason, discarded_exec, finished_operations
+                 )
+@@ -1572,7 +2246,7 @@
+             return
+ 
+         if parsed.path == "/result":
+-            self._handle_result()
++            self._handle_result(qs)
+             return
+ 
+         if parsed.path == "/set_poll_delay":
+@@ -1944,31 +2618,53 @@
+     def _handle_poll(self, qs: dict[str, list[str]]) -> None:
+         peer = qs.get("peer", ["server"])[0] or "server"
+         version = qs["ver"][0] if "ver" in qs else None
+-        status, payload = self.state.record_poll(peer, version)
++        inst_raw = qs.get("inst", [""])[0]
++        instance = inst_raw if inst_raw else None
++        source_pid = self.state.resolve_poll_pid(
++            instance, getattr(self, "connection", None)
++        )
++        status, payload = self.state.record_poll(
++            peer,
++            version,
++            instance=instance,
++            source_pid=source_pid,
++        )
+         if status != 200:
+             self._json(status, payload)
+             return
+ 
+         delay_ms = int(payload.get("delay_ms", 0))
+         commands = payload["commands"]
++        bind = payload.get("bind", "-")
+         if delay_ms > 0:
+             time.sleep(delay_ms / 1000.0)
+ 
+-        self._log(f"HIT GET /poll peer={peer} commands={len(commands)} delay_ms={delay_ms}")
++        inst8 = instance_prefix(instance) or "-"
++        self._log(
++            f"HIT GET /poll peer={peer} inst8={inst8} bind={bind} "
++            f"commands={len(commands)} delay_ms={delay_ms}"
++        )
+         self._json(200, {"commands": commands})
+ 
+-    def _handle_result(self) -> None:
++    def _handle_result(self, qs: dict[str, list[str]] | None = None) -> None:
+         body = self._read_json()
+         if body is None:
+             return
+ 
+-        status, payload = self.state.store_result(body)
++        inst_raw = ""
++        if qs is not None:
++            inst_raw = qs.get("inst", [""])[0]
++        instance = inst_raw if inst_raw else None
++        status, payload = self.state.store_result(body, instance=instance)
+         if status != 200:
+             self._json(status, payload)
+             return
+ 
+         self._log(f"RESULT id={payload['id']} ok={payload.get('ok_value')}")
+-        self._json(200, {"ok": True})
++        response: dict[str, object] = {"ok": True}
++        if payload.get("discarded"):
++            response["discarded"] = True
++        self._json(200, response)
+ 
+     def _handle_set_poll_delay(self) -> None:
+         body = self._read_json()
+--- a/DayZ_MCP_dev\tools\dayz_mcp\process_lifecycle.py
++++ b/DayZ_MCP_dev\tools\dayz_mcp\process_lifecycle.py
+@@ -13,6 +13,7 @@
+ from pathlib import Path
+ from typing import Callable
+ 
++from dayz_mcp.instance_fence import BindingPrepareError
+ from dayz_mcp.runtime_state import RuntimePaths, atomic_write_bytes
+ from dayz_mcp.session_coordination import (
+     AuthorizationDecision,
+@@ -794,6 +795,7 @@
+         id_fn: Callable[[], str] | None = None,
+         recovery_fault_arm: RecoveryFaultArm | None = None,
+         argv_of: Callable[[int], list[str] | None] | None = None,
++        bindings: object | None = None,
+     ) -> None:
+         self.coordinator = coordinator
+         self.manifest = manifest
+@@ -806,9 +808,52 @@
+         self.id_fn = id_fn or (lambda: uuid.uuid4().hex)
+         self.recovery_fault_arm = recovery_fault_arm
+         self.argv_of = argv_of or _default_argv_of
++        self.bindings = bindings
+         self._box_cache: tuple[float, dict[str, object]] | None = None
+         self._operation_lock = threading.RLock()
+         self._command_id = -1
++
++    def _prepare_instance(
++        self,
++        run_id: str,
++        role: str,
++        profiles_dir: str,
++        replacing_role: bool,
++    ) -> tuple[str | None, str | None]:
++        bindings = self.bindings
++        if bindings is None:
++            return None, None
++        try:
++            if replacing_role:
++                bindings.retire_role(run_id, role, "replace-role")
++            minted = bindings.prepare(run_id, role, profiles_dir)
++        except BindingPrepareError as exc:
++            return None, exc.code
++        except Exception:
++            return None, "instance_config_missing"
++        if not isinstance(minted, str) or not minted:
++            return None, "instance_config_missing"
++        return minted, None
++
++    def _confirm_instance(self, minted: str | None, record: ProcessRecord) -> None:
++        bindings = self.bindings
++        if bindings is None or minted is None:
++            return
++        bindings.confirm(minted, record)
++
++    def _retire_minted(
++        self, run_id: str, role: str, minted: str | None, reason: str
++    ) -> None:
++        bindings = self.bindings
++        if bindings is None or minted is None:
++            return
++        bindings.retire_role(run_id, role, reason)
++
++    def _retire_run_bindings(self, run_id: str, reason: str) -> None:
++        bindings = self.bindings
++        if bindings is None:
++            return
++        bindings.retire_run(run_id, reason)
+ 
+     def _launch(self, argv: list[str], cwd: str, window_style: str) -> object:
+         kwargs: dict[str, object] = {"cwd": cwd, "close_fds": True}
+@@ -1290,6 +1335,8 @@
+ 
+             launched: object | None = None
+             record: ProcessRecord | None = None
++            minted: str | None = None
++            launch_role = str(parsed["role"])
+             try:
+                 if self._quarantined():
+                     return self._settle_failed_launch(
+@@ -1299,6 +1346,18 @@
+                         launched=None,
+                         record=None,
+                         confirmed_error="retail_quarantine",
++                    )
++                minted, prepare_error = self._prepare_instance(
++                    run_id, launch_role, str(parsed["profiles"]), existing is not None
++                )
++                if prepare_error is not None:
++                    return self._settle_failed_launch(
++                        client=client,
++                        previous=previous,
++                        provisional=provisional,
++                        launched=None,
++                        record=None,
++                        confirmed_error=prepare_error,
+                     )
+                 try:
+                     launched = self.launcher(
+@@ -1310,6 +1369,7 @@
+                     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                         raise OSError("invalid_launcher_pid")
+                 except Exception:
++                    self._retire_minted(run_id, launch_role, minted, "launch_failed")
+                     return self._settle_failed_launch(
+                         client=client,
+                         previous=previous,
+@@ -1323,8 +1383,9 @@
+                     actual = self.guard.snapshot(pid)
+                 except Exception:
+                     actual = {"error": "guard_unavailable", "exit_code": 3}
+-                record = self._record_from_snapshot(actual, str(parsed["role"]))
++                record = self._record_from_snapshot(actual, launch_role)
+                 if record is None:
++                    self._retire_minted(run_id, launch_role, minted, "launch_failed")
+                     return self._settle_failed_launch(
+                         client=client,
+                         previous=previous,
+@@ -1333,6 +1394,7 @@
+                         record=None,
+                         confirmed_error="identity_unavailable",
+                     )
++                self._confirm_instance(minted, record)
+ 
+                 completed = RunRecord.from_payload(dataclasses.asdict(provisional))
+                 completed.processes.append(record)
+@@ -1340,6 +1402,7 @@
+                 try:
+                     self.manifest.replace(completed)
+                 except Exception:
++                    self._retire_minted(run_id, launch_role, minted, "launch_failed")
+                     return self._settle_failed_launch(
+                         client=client,
+                         previous=previous,
+@@ -1761,6 +1824,7 @@
+                     "state": "EXITED",
+                     "terminated": terminated,
+                 }
++                self._retire_run_bindings(run_id, "stopped")
+                 return self._terminal_outcome(
+                     result,
+                     "lifecycle_stop_outcome",
+@@ -1945,6 +2009,7 @@
+                         current.processes = []
+                         self.manifest.replace(current)
+                         released.append(current.run_id)
++                        self._retire_run_bindings(current.run_id, "released")
+                     released.extend(
+                         self.manifest.release_owner(session_id, lease_id)
+                     )
+@@ -2046,6 +2111,7 @@
+                 self.manifest.replace(run)
+             except Exception:
+                 return {"terminal_safe": False, "error": "manifest_drift"}
++            self._retire_run_bindings(run_id, "recovery_repaired")
+             return {
+                 "terminal_safe": True,
+                 "run_id": run_id,
+@@ -2131,6 +2197,7 @@
+                     restored.replace(run)
+                 except Exception:
+                     return self._manifest_repair_failure("manifest_drift")
++                self._retire_run_bindings(run.run_id, "manifest_repaired")
+             try:
+                 restored.recover_after_restart()
+             except Exception:
+@@ -2201,6 +2268,7 @@
+             self.manifest.replace(run)
+         except Exception:
+             return "manifest_failed"
++        self._retire_run_bindings(run.run_id, "reaped")
+         return ""
+ 
+     def _reap_dead_runs_locked(self) -> list[str]:
+@@ -2588,6 +2656,8 @@
+                 self.manifest.replace(run)
+             except Exception:
+                 return self._error("manifest_failed", 503)
++            if run.state == "EXITED":
++                self._retire_run_bindings(run.run_id, "admin_reconciled")
+             result: dict[str, object] = {
+                 "reconciled": True,
+                 "run_id": run_id,
+--- a/DayZ_MCP_dev\tools\dayz_mcp\server.py
++++ b/DayZ_MCP_dev\tools\dayz_mcp\server.py
+@@ -86,6 +86,17 @@
+     "client_not_polling",
+     "client_legacy_blocked",
+     "version_mismatch",
++    "binding_ambiguous",
++    "unbound_after_restart",
++    "binding_not_ready",
++    "binding_retired",
++    "instance_unknown",
++    "instance_unattributed",
++    "instance_role_mismatch",
++    "instance_malformed",
++    "instance_peer_collision",
++    "legacy_unbound",
++    "creation_time_unreadable",
+ })
+ WAIT_FOR_LOOKBACK_MAX = 2000
+ _REMOTE_ERROR_CODES = frozenset({
+@@ -121,6 +132,19 @@
+     "ticket_invalid",
+     "unauthorized",
+     "version_blocked",
++    "legacy_unbound",
++    "instance_malformed",
++    "instance_unknown",
++    "unbound_after_restart",
++    "instance_role_mismatch",
++    "instance_ambiguous",
++    "instance_unattributed",
++    "binding_not_ready",
++    "binding_retired",
++    "instance_peer_collision",
++    "instance_config_missing",
++    "instance_config_mismatch",
++    "creation_time_unreadable",
+ })
+ _STALE_TICKET_ERRORS = frozenset({"ticket_expired", "ticket_invalid"})
+ _STALE_LEASE_ERRORS = frozenset({"lease_expired", "lease_invalid"})
+@@ -182,10 +206,33 @@
+     return "remote_error"
+ 
+ 
++_FENCE_BLOCK_READY = {
++    "AMBIGUOUS": "binding_ambiguous",
++    "STARTING": "binding_not_ready",
++    "RETIRED": "binding_retired",
++    "binding_retired": "binding_retired",
++    "instance_unknown": "instance_unknown",
++    "unbound_after_restart": "unbound_after_restart",
++    "instance_unattributed": "instance_unattributed",
++    "instance_role_mismatch": "instance_role_mismatch",
++    "instance_malformed": "instance_malformed",
++    "instance_peer_collision": "instance_peer_collision",
++    "creation_time_unreadable": "creation_time_unreadable",
++}
++
++
+ def _peer_is_live(peer: object) -> bool:
+     if not isinstance(peer, dict):
+         return False
+-    age = peer.get("last_poll_age_s")
++    bind = peer.get("binding_state")
++    if bind == "LEGACY_UNBOUND":
++        return False
++    if bind in {None, ""}:
++        age = peer.get("last_poll_age_s")
++    elif bind != "BOUND":
++        return False
++    else:
++        age = peer.get("bound_last_poll_age_s")
+     return isinstance(age, (int, float)) and not isinstance(age, bool) and age < PEER_STALE_S
+ 
+ 
+@@ -203,6 +250,18 @@
+     c_live = _peer_is_live(client)
+     s_state = server.get("version_state")
+     c_state = client.get("version_state")
++    s_bind = server.get("binding_state")
++    c_bind = client.get("binding_state")
++    s_block = _FENCE_BLOCK_READY.get(s_bind)
++    c_block = _FENCE_BLOCK_READY.get(c_bind)
++    if s_block:
++        return {"ready": False, "reason": s_block}
++    if c_block:
++        return {"ready": False, "reason": c_block}
++    if s_bind == "LEGACY_UNBOUND" and s_age is not None:
++        return {"ready": False, "reason": "legacy_unbound"}
++    if c_bind == "LEGACY_UNBOUND" and c_age is not None:
++        return {"ready": False, "reason": "legacy_unbound"}
+     if s_live and c_live and s_state == "ok" and c_state == "ok":
+         return {"ready": True, "reason": "ready"}
+     if s_age is None and c_age is None:
+====================================================================================================
+NUEVO: DayZ_MCP_dev\tools\tests\fence_helpers.py
+====================================================================================================
++"""Helpers so existing tests can enqueue mutations under instance fencing."""
++from __future__ import annotations
++
++INST_SERVER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
++INST_CLIENT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
++PID_SERVER = 41001
++PID_CLIENT = 41002
++
++
++def bind_both_peers(state: object, run_id: str = "test-run") -> tuple[str, str]:
++    installer = getattr(state, "install_bound_peer", None)
++    if not callable(installer):
++        raise AssertionError("ServerState.install_bound_peer is required")
++    installer(
++        instance=INST_SERVER,
++        role="server",
++        pid=PID_SERVER,
++        run_id=run_id,
++    )
++    installer(
++        instance=INST_CLIENT,
++        role="client",
++        pid=PID_CLIENT,
++        run_id=run_id,
++    )
++    return INST_SERVER, INST_CLIENT
++
++
++def accredited_poll(
++    state: object,
++    peer: str,
++    version: str | None = None,
++):
++    instance = INST_SERVER if peer == "server" else INST_CLIENT
++    pid = PID_SERVER if peer == "server" else PID_CLIENT
++    return state.record_poll(peer, version, instance=instance, source_pid=pid)
++
++
++def bound_queue(state: object, peer: str) -> list[dict]:
++    instance = INST_SERVER if peer == "server" else INST_CLIENT
++    queues = getattr(state, "_bound_queues", {})
++    return list(queues.get(instance, []))
+--- a/DayZ_MCP_dev\tools\tests\test_client_mode.py
++++ b/DayZ_MCP_dev\tools\tests\test_client_mode.py
+@@ -21,6 +21,7 @@
+ from dayz_mcp.server import ServerConfig
+ from tests.test_daemon import DaemonHttpServer, _config, _free_port, _http
+ from tests.test_mcp_tools import _content_json
++from tests.fence_helpers import INST_CLIENT, INST_SERVER
+ 
+ 
+ def _fixture_client_runtime(
+@@ -88,12 +89,20 @@
+     def _run(self) -> None:
+         while not self._stop.is_set():
+             query = {"peer": self.peer}
++            query["inst"] = INST_SERVER if self.peer == "server" else INST_CLIENT
+             if self.version is not None:
+                 query["ver"] = self.version
+             try:
+                 _status, body = _http(self.base, "GET", "/poll", self.key, query=query)
+                 for command in body.get("commands", []):
+-                    _http(self.base, "POST", "/result", self.key, payload=self.responder(command))
++                    _http(
++                        self.base,
++                        "POST",
++                        "/result",
++                        self.key,
++                        payload=self.responder(command),
++                        query={"inst": query["inst"]},
++                    )
+             except Exception:
+                 pass
+             time.sleep(0.02)
+--- a/DayZ_MCP_dev\tools\tests\test_daemon.py
++++ b/DayZ_MCP_dev\tools\tests\test_daemon.py
+@@ -25,6 +25,7 @@
+ from dayz_mcp import core, daemon, loopback, orphan_guard
+ from dayz_mcp.native_process_guard import identity_hashes
+ from dayz_mcp.server import ServerConfig
++from tests.fence_helpers import bind_both_peers
+ 
+ 
+ IDENTITY = {
+@@ -91,6 +92,7 @@
+             self.state = daemon.build_server_state(
+                 config, self.key, activate_coordination=True
+             )
++        bind_both_peers(self.state)
+         provider = daemon.make_status_provider(config, self.state)
+         self.httpd = loopback.create_http_server(
+             port, self.state, log_sink=lambda _m: None, reclaim_orphans=False, status_provider=provider
+--- a/DayZ_MCP_dev\tools\tests\test_fase4b_loopback.py
++++ b/DayZ_MCP_dev\tools\tests\test_fase4b_loopback.py
+@@ -14,6 +14,9 @@
+     def start_server(self, enable_exec_enforce: bool = False) -> None:
+         self.key = "test-key"
+         state = loopback.ServerState(self.key, enable_exec_enforce=enable_exec_enforce)
++        from tests.fence_helpers import bind_both_peers
++
++        bind_both_peers(state)
+         self.httpd = loopback.create_http_server(0, state, log_sink=lambda _message: None)
+         self.state = state
+         self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+--- a/DayZ_MCP_dev\tools\tests\test_fase4b_tools.py
++++ b/DayZ_MCP_dev\tools\tests\test_fase4b_tools.py
+@@ -36,6 +36,9 @@
+             )
+         )
+         runtime.start_loopback()
++        from tests.fence_helpers import bind_both_peers
++
++        bind_both_peers(runtime.state)
+         self.runtimes.append(runtime)
+         return app, runtime
+ 
+====================================================================================================
+NUEVO: DayZ_MCP_dev\tools\tests\test_instance_fence.py
+====================================================================================================
++"""Unit tests for instance fencing (D-55 v1, spec §8.1).
++
++Each test is written so it is RED against the pre-fence tree: either an
++assertion on new behavior, or a reference to a symbol the old code lacks.
++"""
++from __future__ import annotations
++
++import ast
++import dataclasses
++import hashlib
++import inspect
++import json
++import os
++import re
++import unittest
++import uuid
++from pathlib import Path
++from tempfile import TemporaryDirectory
++from types import SimpleNamespace
++
++from tests._addon_paths import addon_root
++
++from dayz_mcp import instance_fence as instance_fence_mod
++from dayz_mcp import loopback
++from dayz_mcp import process_lifecycle as process_lifecycle_mod
++from dayz_mcp import server as server_mod
++from dayz_mcp.core import EXPECTED_BRIDGE_VERSION, version_state_for
++from dayz_mcp.native_process_guard import NativeProcessGuard
++from dayz_mcp.process_lifecycle import (
++    ProcessLifecycle,
++    ProcessRecord,
++    RunManifestStore,
++    RunRecord,
++)
++from dayz_mcp.runtime_state import RuntimePaths
++from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
++
++
++INST_C1 = "11111111-1111-4111-8111-111111111111"
++INST_C2 = "22222222-2222-4222-8222-222222222222"
++INST_S1 = "33333333-3333-4333-8333-333333333333"
++INST_OFF = "44444444-4444-4444-8444-444444444444"
++HASH_A = "a" * 64
++HASH_B = "b" * 64
++TELEPORT = {"pos": [1.0, 2.0, 3.0]}
++LEGACY_UNBOUND_HINT = (
++    "Peer poll lacks a valid inst=. Relaunch via dayz_test_run so start_run "
++    "writes instance into $profile:dayz_mcp.json. Do not mutate a hand-launched game."
++)
++IDENTITY_A = ClientIdentity("codex", 11, 1, "2026-07-15T00:00:00Z", "A", "owner")
++MOD_SCRIPTS = addon_root() / "scripts" / "5_Mission"
++BRIDGES = (
++    MOD_SCRIPTS / "MCPBridge.c",
++    MOD_SCRIPTS / "MCPClientBridge.c",
++)
++
++
++class FakeClock:
++    def __init__(self, start: float = 1000.0) -> None:
++        self.t = start
++
++    def __call__(self) -> float:
++        return self.t
++
++    def advance(self, seconds: float) -> None:
++        self.t += seconds
++
++
++def _method_body(source: str, signature: str) -> str:
++    start = source.index(signature)
++    brace = source.index("{", start)
++    depth = 0
++    for index in range(brace, len(source)):
++        if source[index] == "{":
++            depth += 1
++        elif source[index] == "}":
++            depth -= 1
++            if depth == 0:
++                return source[brace + 1 : index]
++    raise AssertionError(f"unterminated method: {signature}")
++
++
++def _record(pid: int, role: str) -> ProcessRecord:
++    return ProcessRecord(
++        pid,
++        f"2026-08-18T00:00:{pid % 60:02d}.000000Z",
++        HASH_A,
++        HASH_B,
++        role,
++        identity_scheme="psutil-argv-v2",
++    )
++
++
++def _snapshot(record: ProcessRecord) -> dict[str, object]:
++    return {
++        "pid": record.pid,
++        "creation_time_utc": record.creation_time_utc,
++        "executable_sha256": record.executable_sha256,
++        "command_line_sha256": record.command_line_sha256,
++        "identity_scheme": record.identity_scheme,
++        "identity_complete": True,
++    }
++
++
++def _bind(
++    state: loopback.ServerState,
++    instance: str,
++    role: str,
++    pid: int,
++    run_id: str = "run-fence",
++) -> None:
++    state.install_bound_peer(
++        instance=instance,
++        role=role,
++        pid=pid,
++        run_id=run_id,
++        creation_time_utc=f"2026-08-18T00:00:{pid % 60:02d}.000000Z",
++    )
++
++
++class RecordPollFenceTest(unittest.TestCase):
++    def test_record_poll_without_instance_does_not_deliver_mutation(self) -> None:
++        state = loopback.ServerState("k")
++        _bind(state, INST_S1, "server", 1001)
++        status, payload = state.enqueue_command("player_teleport", dict(TELEPORT))
++        self.assertEqual(status, 200, payload)
++        _status, poll = state.record_poll("server")
++        self.assertEqual(_status, 200)
++        self.assertNotIn(
++            "player_teleport",
++            [command.get("cmd") for command in poll["commands"]],
++        )
++
++    def test_record_poll_without_instance_still_delivers_read(self) -> None:
++        state = loopback.ServerState("k")
++        status, payload = state.enqueue_command("query_player_state", {})
++        self.assertEqual(status, 200, payload)
++        self.assertTrue(hasattr(state, "_legacy_queues"))
++        queued = [command.get("cmd") for command in state._legacy_queues["server"]]
++        self.assertIn("query_player_state", queued)
++        _status, poll = state.record_poll("server")
++        self.assertEqual([command["id"] for command in poll["commands"]], [payload["id"]])
++
++    def test_bound_poll_receives_only_its_instance_queue(self) -> None:
++        state = loopback.ServerState("k")
++        _bind(state, INST_C2, "client", 2002, run_id="run-c2")
++        status, sealed = state.enqueue_command(
++            "camera_set", {"cam_mode": "orient"}, peer="client"
++        )
++        self.assertEqual(status, 200, sealed)
++        _bind(state, INST_C1, "client", 2001, run_id="run-c1")
++        _status, poll_c1 = state.record_poll(
++            "client", instance=INST_C1, source_pid=2001
++        )
++        self.assertNotIn(sealed["id"], [command["id"] for command in poll_c1["commands"]])
++        _status, poll_c2 = state.record_poll(
++            "client", instance=INST_C2, source_pid=2002
++        )
++        self.assertEqual([command["id"] for command in poll_c2["commands"]], [sealed["id"]])
++
++    def test_role_mismatch_does_not_drain_server_queue(self) -> None:
++        state = loopback.ServerState("k")
++        _bind(state, INST_S1, "server", 1001)
++        status, payload = state.enqueue_command("query_player_state", {})
++        self.assertEqual(status, 200, payload)
++        _status, poll = state.record_poll(
++            "client", instance=INST_S1, source_pid=1001
++        )
++        self.assertEqual(poll["commands"], [])
++        remaining = [command.get("id") for command in state._bound_queues[INST_S1]]
++        self.assertIn(payload["id"], remaining)
++        _status, server_poll = state.record_poll(
++            "server", instance=INST_S1, source_pid=1001
++        )
++        self.assertEqual(
++            [command["id"] for command in server_poll["commands"]], [payload["id"]]
++        )
++
++    def test_offline_instance_may_poll_both_peers(self) -> None:
++        state = loopback.ServerState("k")
++        _bind(state, INST_OFF, "offline", 3003)
++        server_status, server_cmd = state.enqueue_command("query_player_state", {})
++        client_status, client_cmd = state.enqueue_command("camera_get", {}, peer="client")
++        self.assertEqual((server_status, client_status), (200, 200), (server_cmd, client_cmd))
++        _status, server_poll = state.record_poll(
++            "server", instance=INST_OFF, source_pid=3003
++        )
++        self.assertEqual(
++            [command["id"] for command in server_poll["commands"]], [server_cmd["id"]]
++        )
++        _status, client_poll = state.record_poll(
++            "client", instance=INST_OFF, source_pid=3003
++        )
++        self.assertEqual(
++            [command["id"] for command in client_poll["commands"]], [client_cmd["id"]]
++        )
++
++    def test_reconnect_gap_does_not_flush_bound_queue(self) -> None:
++        clock = FakeClock()
++        state = loopback.ServerState("k", time_fn=clock)
++        _bind(state, INST_C1, "client", 2001)
++        state.record_poll("client", instance=INST_C1, source_pid=2001)
++        status, payload = state.enqueue_command("camera_get", {}, peer="client")
++        self.assertEqual(status, 200, payload)
++        clock.advance(loopback.PEER_RECONNECT_GAP_S + 1.0)
++        _status, poll = state.record_poll(
++            "client", instance=INST_C1, source_pid=2001
++        )
++        self.assertEqual([command["id"] for command in poll["commands"]], [payload["id"]])
++
++    def test_reconnect_gap_still_flushes_legacy_queue(self) -> None:
++        clock = FakeClock()
++        state = loopback.ServerState("k", time_fn=clock)
++        self.assertTrue(hasattr(state, "_legacy_queues"))
++        state.record_poll("client")
++        _status, payload = state.enqueue_command("camera_get", {}, peer="client")
++        clock.advance(loopback.PEER_RECONNECT_GAP_S + 1.0)
++        _status, poll = state.record_poll("client")
++        self.assertEqual(poll["commands"], [])
++        result = state.take_result(payload["id"])
++        self.assertIsNotNone(result)
++        self.assertEqual(result["error"], "peer_reconnect_flush")
++        self.assertEqual(state._legacy_queues["client"], [])
++
++    def test_command_ttl_still_expires_bound_command(self) -> None:
++        clock = FakeClock()
++        state = loopback.ServerState("k", time_fn=clock)
++        _bind(state, INST_C1, "client", 2001)
++        status, payload = state.enqueue_command("camera_get", {}, peer="client")
++        self.assertEqual(status, 200, payload)
++        clock.advance(loopback.COMMAND_TTL_S + 1.0)
++        _status, poll = state.record_poll(
++            "client", instance=INST_C1, source_pid=2001
++        )
++        self.assertEqual(poll["commands"], [])
++        result = state.take_result(payload["id"])
++        self.assertIsNotNone(result)
++        self.assertEqual(result["error"], "stale_discarded")
++
++    def test_second_pid_same_instance_marks_ambiguous(self) -> None:
++        state = loopback.ServerState("k")
++        _bind(state, INST_C1, "client", 2001)
++        status, payload = state.enqueue_command(
++            "camera_set", {"cam_mode": "orient"}, peer="client"
++        )
++        self.assertEqual(status, 200, payload)
++        _status, first = state.record_poll(
++            "client", instance=INST_C1, source_pid=9999
++        )
++        self.assertEqual(first["commands"], [])
++        _status, second = state.record_poll(
++            "client", instance=INST_C1, source_pid=2001
++        )
++        self.assertEqual(second["commands"], [])
++        blocked, body = state.enqueue_command(
++            "camera_set", {"cam_mode": "orient"}, peer="client"
++        )
++        self.assertEqual(blocked, 409)
++        self.assertEqual(body["error"], "instance_ambiguous")
++
++    def test_unattributed_poll_gets_zero_commands(self) -> None:
++        state = loopback.ServerState("k")
++        _bind(state, INST_C1, "client", 2001)
++        status, payload = state.enqueue_command("camera_get", {}, peer="client")
++        self.assertEqual(status, 200, payload)
++        _status, poll = state.record_poll(
++            "client", instance=INST_C1, source_pid=None
++        )
++        self.assertEqual(poll["commands"], [])
++        remaining = [command.get("id") for command in state._bound_queues[INST_C1]]
++        self.assertIn(payload["id"], remaining)
++
++
++class EnqueueFenceTest(unittest.TestCase):
++    def test_enqueue_mutation_without_binding_is_legacy_unbound(self) -> None:
++        state = loopback.ServerState("k")
++        status, payload = state.enqueue_command("player_teleport", dict(TELEPORT))
++        self.assertEqual(status, 409)
++        self.assertEqual(payload.get("error"), "legacy_unbound")
++        self.assertEqual(payload.get("hint"), LEGACY_UNBOUND_HINT)
++        self.assertEqual(state.status_snapshot()["peers"]["server"]["queue_depth"], 0)
++
++
++class ResultFenceTest(unittest.TestCase):
++    def test_store_result_wrong_instance_is_discarded_200(self) -> None:
++        state = loopback.ServerState("k")
++        events: list[dict] = []
++
++        class _Writer:
++            def write(self, event: dict) -> bool:
++                events.append(event)
++                return True
++
++        state.audit_writer = _Writer()
++        _bind(state, INST_C1, "client", 2001)
++        status, payload = state.enqueue_command("camera_get", {}, peer="client")
++        self.assertEqual(status, 200, payload)
++        result_status, result = state.store_result(
++            {"id": payload["id"], "ok": 1, "value": 9},
++            instance=INST_C2,
++        )
++        self.assertEqual(result_status, 200)
++        self.assertTrue(result.get("discarded"))
++        stored = state.take_result(payload["id"])
++        self.assertTrue(stored is None or stored.get("ok") is not True)
++        if stored is not None:
++            self.assertNotEqual(stored.get("value"), 9)
++        blob = json.dumps(events) + json.dumps(result)
++        self.assertNotIn(INST_C1, blob)
++        self.assertNotIn(INST_C2, blob)
++        names = [event.get("event") for event in events]
++        self.assertIn("late_result_fenced", names)
++
++
++class EnforceBridgeFenceTest(unittest.TestCase):
++    def test_reload_key_after_failure_does_not_assign_peer_instance(self) -> None:
++        for bridge in BRIDGES:
++            with self.subTest(bridge=bridge.name):
++                source = bridge.read_text(encoding="utf-8")
++                self.assertIn("protected string m_PeerInstance;", source)
++                reload_body = _method_body(
++                    source, "protected void ReloadKeyAfterFailure()"
++                )
++                self.assertNotIn("m_PeerInstance", reload_body)
++
++    def test_try_init_copies_instance_once_in_both_bridges(self) -> None:
++        for bridge in BRIDGES:
++            with self.subTest(bridge=bridge.name):
++                source = bridge.read_text(encoding="utf-8")
++                try_init = _method_body(source, "protected void TryInit()")
++                self.assertIn("m_PeerInstance", try_init)
++                self.assertIn("cfg.instance", try_init)
++                start = _method_body(source, "protected void StartPoll()")
++                self.assertIn("&inst=", start)
++                self.assertIn("EncodeQueryValue(m_PeerInstance)", start)
++                post = _method_body(source, "protected void PostResult(MCPResult result)")
++                self.assertIn("&inst=", post)
++
++    def test_start_poll_omits_inst_when_peer_instance_empty(self) -> None:
++        for bridge in BRIDGES:
++            with self.subTest(bridge=bridge.name):
++                start = _method_body(
++                    bridge.read_text(encoding="utf-8"), "protected void StartPoll()"
++                )
++                self.assertIn('m_PeerInstance != ""', start)
++                self.assertNotIn("&inst=\"\"", start)
++                self.assertIn("m_PeerInstance", start)
++
++
++class LifecycleFenceTest(unittest.TestCase):
++    def setUp(self) -> None:
++        self.temporary = TemporaryDirectory()
++        self.root = Path(self.temporary.name)
++        self.game = self.root / "DayZ"
++        self.game.mkdir()
++        (self.game / "DayZDiag_x64.exe").write_bytes(b"")
++        (self.game / "DayZ_BE.exe").write_bytes(b"")
++        (self.game / "DayZ_x64.exe").write_bytes(b"")
++        paths = RuntimePaths(
++            self.root / "runtime",
++            self.root / "runtime" / "audit",
++            self.root / "runtime" / "coordination.json",
++            self.root / "runtime" / "runs.json",
++        )
++        self.events: list[dict[str, object]] = []
++        self.coordinator = SessionCoordinator(
++            token_fn=lambda: "token-A",
++            id_fn=lambda: "lease-A",
++            audit=lambda event: self.events.append(event) or True,
++        )
++        status, acquired = self.coordinator.acquire(IDENTITY_A, "lifecycle")
++        self.assertEqual(status, 200)
++        self.token = acquired["lease_token"]
++        self.store = RunManifestStore(paths)
++        self.state = loopback.ServerState("k")
++        self.snapshots: dict[int, dict[str, object]] = {}
++        self.launcher = _IncrementingLauncher()
++
++        class _Guard:
++            def __init__(self, snapshots: dict[int, dict[str, object]]) -> None:
++                self.snapshots = snapshots
++
++            def snapshot(self, pid: int) -> dict[str, object]:
++                return dict(self.snapshots.get(pid, {"error": "identity_unavailable"}))
++
++            def terminate(self, record: ProcessRecord) -> dict[str, object]:
++                return {"terminated": True}
++
++        self.lifecycle = ProcessLifecycle(
++            coordinator=self.coordinator,
++            manifest=self.store,
++            audit=lambda event: self.events.append(event) or True,
++            guard=_Guard(self.snapshots),
++            retail_probe=lambda: {"known": True, "processes": []},
++            diag_probe=lambda: {"known": True, "processes": []},
++            game_path=self.game,
++            launcher=self.launcher,
++            id_fn=lambda: "run-fence-1",
++            bindings=self.state,
++        )
++
++    def tearDown(self) -> None:
++        self.temporary.cleanup()
++
++    def _profile(self, name: str) -> Path:
++        directory = self.root / name
++        directory.mkdir(parents=True, exist_ok=True)
++        (directory / "dayz_mcp.json").write_text(
++            json.dumps(
++                {"url": "http://127.0.0.1:8765/", "key": "k", "pollHz": 5},
++                separators=(",", ":"),
++            ),
++            encoding="utf-8",
++        )
++        return directory
++
++    def _request(self, role: str, profiles: Path, run_id: str | None = None) -> dict[str, object]:
++        payload: dict[str, object] = {
++            "argv": [str(self.game / "DayZDiag_x64.exe"), "-mission=test"],
++            "cwd": str(self.game),
++            "role": role,
++            "window_style": "normal",
++            "label": "fence",
++            "mod": "@Mod",
++            "profiles": str(profiles),
++            "mission": "test",
++        }
++        if run_id is not None:
++            payload["run_id"] = run_id
++        return payload
++
++    def _seed_next_pid(self, role: str) -> ProcessRecord:
++        record = _record(self.launcher.next_pid, role)
++        self.snapshots[record.pid] = _snapshot(record)
++        return record
++
++    def test_adopt_run_does_not_confirm_binding(self) -> None:
++        record = _record(107, "client")
++        self.store.add(
++            RunRecord(
++                "run-existing",
++                None,
++                None,
++                "RUNNING_IDLE",
++                "same",
++                "@Mod",
++                "profiles",
++                "mission",
++                [record],
++            )
++        )
++        self.snapshots[record.pid] = _snapshot(record)
++        result = self.lifecycle.adopt_run(IDENTITY_A, self.token, "run-existing")
++        self.assertEqual(result.get("ok"), True, result)
++        bound = [
++            binding
++            for binding in self.state._bindings.values()
++            if binding.state == "BOUND"
++        ]
++        self.assertEqual(bound, [])
++
++    def test_start_run_writes_instance_before_popen(self) -> None:
++        profiles = self._profile("client_profiles")
++        config_path = profiles / "dayz_mcp.json"
++        self.launcher.config_path = config_path
++        self._seed_next_pid("client")
++        result = self.lifecycle.start_run(
++            IDENTITY_A, self.token, self._request("client", profiles)
++        )
++        self.assertTrue(result.get("ok"), result)
++        minted = self.launcher.instance_at_launch
++        self.assertIsNotNone(minted)
++        self.assertEqual(uuid.UUID(str(minted)).version, 4)
++        on_disk = json.loads(config_path.read_text(encoding="utf-8"))
++        self.assertEqual(on_disk["instance"], minted)
++        self.assertGreaterEqual(len(self.launcher.calls), 1)
++
++    def test_start_run_does_not_write_mission_config(self) -> None:
++        profiles = self._profile("client_profiles")
++        mission = self.root / "mpmissions" / "dayzOffline.chernarusplus"
++        mission.mkdir(parents=True)
++        mission_cfg = mission / "dayz_mcp.json"
++        mission_cfg.write_text(
++            json.dumps({"url": "http://127.0.0.1:1/", "key": "mission", "pollHz": 5}),
++            encoding="utf-8",
++        )
++        before = mission_cfg.read_bytes()
++        self._seed_next_pid("client")
++        result = self.lifecycle.start_run(
++            IDENTITY_A, self.token, self._request("client", profiles)
++        )
++        self.assertTrue(result.get("ok"), result)
++        self.assertEqual(mission_cfg.read_bytes(), before)
++        client_cfg = json.loads((profiles / "dayz_mcp.json").read_text(encoding="utf-8"))
++        self.assertIn("instance", client_cfg)
++
++    def test_client_relaunch_retires_old_instance_keeps_server(self) -> None:
++        server_profiles = self._profile("server_profiles")
++        client_profiles = self._profile("client_profiles")
++        self._seed_next_pid("server")
++        started = self.lifecycle.start_run(
++            IDENTITY_A, self.token, self._request("server", server_profiles)
++        )
++        self.assertTrue(started.get("ok"), started)
++        run_id = started["run_id"]
++        server_instance = json.loads(
++            (server_profiles / "dayz_mcp.json").read_text(encoding="utf-8")
++        )["instance"]
++        self._seed_next_pid("client")
++        first_client = self.lifecycle.start_run(
++            IDENTITY_A,
++            self.token,
++            self._request("client", client_profiles, run_id=run_id),
++        )
++        self.assertTrue(first_client.get("ok"), first_client)
++        client_v1 = json.loads(
++            (client_profiles / "dayz_mcp.json").read_text(encoding="utf-8")
++        )["instance"]
++        old_pid = self.launcher.calls[-1][3]
++        self._seed_next_pid("client")
++        second_client = self.lifecycle.start_run(
++            IDENTITY_A,
++            self.token,
++            self._request("client", client_profiles, run_id=run_id),
++        )
++        self.assertTrue(second_client.get("ok"), second_client)
++        client_v2 = json.loads(
++            (client_profiles / "dayz_mcp.json").read_text(encoding="utf-8")
++        )["instance"]
++        self.assertNotEqual(client_v1, client_v2)
++        status, queued = self.state.enqueue_command(
++            "camera_set", {"cam_mode": "orient"}, peer="client"
++        )
++        self.assertEqual(status, 200, queued)
++        _status, stale = self.state.record_poll(
++            "client", instance=client_v1, source_pid=old_pid
++        )
++        self.assertEqual(stale["commands"], [])
++        server_binding = self.state._bindings[server_instance]
++        self.assertEqual(server_binding.state, "BOUND")
++
++    def _start_bound_client(self) -> tuple[str, str, ProcessRecord]:
++        profiles = self._profile("client_profiles")
++        record = self._seed_next_pid("client")
++        result = self.lifecycle.start_run(
++            IDENTITY_A, self.token, self._request("client", profiles)
++        )
++        self.assertTrue(result.get("ok"), result)
++        run_id = str(result["run_id"])
++        instance = json.loads(
++            (profiles / "dayz_mcp.json").read_text(encoding="utf-8")
++        )["instance"]
++        self.assertEqual(self.state._bindings[instance].state, "BOUND")
++        status, payload = self.state.enqueue_command(
++            "camera_set", {"cam_mode": "orient"}, peer="client"
++        )
++        self.assertEqual(status, 200, payload)
++        self.assertGreater(len(self.state._bound_queues.get(instance, [])), 0)
++        return run_id, instance, record
++
++    def _assert_binding_retired(self, instance: str) -> None:
++        self.assertNotIn(instance, self.state._bindings)
++        self.assertIn(instance, self.state._retired_instances)
++        self.assertEqual(self.state._bound_queues.get(instance, []), [])
++
++    def _mark_unacknowledged(self, run_id: str) -> RunRecord:
++        run = self.store.get(run_id)
++        self.assertIsNotNone(run)
++        assert run is not None
++        run.launch_operation_id = (
++            run.launch_operation_id or "22222222-2222-4222-8222-222222222222"
++        )
++        run.launch_request_sha256 = run.launch_request_sha256 or ("a" * 64)
++        run.launch_acknowledged = False
++        self.store.replace(run)
++        return run
++
++    def test_release_owner_retires_bindings(self) -> None:
++        run_id, instance, _record = self._start_bound_client()
++        run = self._mark_unacknowledged(run_id)
++        disposition = self.lifecycle.begin_release_owner(
++            str(run.owner_session_id), str(run.owner_lease_id)
++        )
++        self.assertTrue(disposition.terminal_event.wait(2.0))
++        self.assertTrue(
++            disposition.terminal_result.get("terminal_safe"),
++            disposition.terminal_result,
++        )
++        self._assert_binding_retired(instance)
++
++    def test_repair_recovery_fault_retires_bindings(self) -> None:
++        run_id, instance, _record = self._start_bound_client()
++        run = self._mark_unacknowledged(run_id)
++        run_hash = hashlib.sha256(
++            json.dumps(
++                dataclasses.asdict(run),
++                ensure_ascii=False,
++                sort_keys=True,
++                separators=(",", ":"),
++            ).encode("utf-8")
++        ).hexdigest()
++        result = self.lifecycle.repair_recovery_fault(
++            {
++                "scope": "run",
++                "run_id": run.run_id,
++                "launch_operation_id": run.launch_operation_id,
++                "run_record_sha256": run_hash,
++            }
++        )
++        self.assertTrue(result.get("terminal_safe"), result)
++        self._assert_binding_retired(instance)
++
++    def test_repair_manifest_recovery_retires_bindings(self) -> None:
++        run_id, instance, _record = self._start_bound_client()
++        run = self._mark_unacknowledged(run_id)
++        raw = (
++            json.dumps(
++                {"version": 1, "runs": [dataclasses.asdict(run)]},
++                ensure_ascii=False,
++                separators=(",", ":"),
++            )
++            + "\n"
++        ).encode("utf-8")
++        result = self.lifecycle.repair_manifest_recovery(raw)
++        self.assertTrue(result.get("terminal_safe"), result)
++        self._assert_binding_retired(instance)
++
++    def test_admin_reconcile_retires_bindings(self) -> None:
++        run_id, instance, record = self._start_bound_client()
++        run = self.store.get(run_id)
++        self.assertIsNotNone(run)
++        assert run is not None
++        run.state = "RUNNING_IDLE"
++        run.owner_session_id = None
++        run.owner_lease_id = None
++        self.store.replace(run)
++        self.snapshots[record.pid] = {
++            "error": "process_not_found",
++            "exit_code": 4,
++        }
++        result = self.lifecycle.admin_reconcile(run_id, record.pid, "incident")
++        self.assertEqual(result.get("state"), "EXITED", result)
++        self.assertTrue(result.get("reconciled"), result)
++        self._assert_binding_retired(instance)
++
++
++class ExitedBindingInvariantTest(unittest.TestCase):
++    """Every `state = "EXITED"` path must retire bindings, except the declared list."""
++
++    DECLARED_EXCEPTIONS = {
++        "_settle_failed_launch": (
++            "EXITED only when previous is None; start_run already called "
++            "_retire_minted on that minted role"
++        ),
++    }
++
++    def test_every_exited_path_retires_bindings(self) -> None:
++        source_path = Path(process_lifecycle_mod.__file__).resolve()
++        tree = ast.parse(source_path.read_text(encoding="utf-8"))
++
++        class Visitor(ast.NodeVisitor):
++            def __init__(self) -> None:
++                self.stack: list[str] = []
++                self.exited_at: dict[str, list[int]] = {}
++                self.retire_at: set[str] = set()
++
++            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
++                self.stack.append(node.name)
++                self.generic_visit(node)
++                self.stack.pop()
++
++            visit_AsyncFunctionDef = visit_FunctionDef
++
++            def visit_Assign(self, node: ast.Assign) -> None:
++                if self.stack and _assign_sets_exited(node):
++                    name = ".".join(self.stack)
++                    self.exited_at.setdefault(name, []).append(node.lineno)
++                self.generic_visit(node)
++
++            def visit_Call(self, node: ast.Call) -> None:
++                if self.stack and isinstance(node.func, ast.Attribute):
++                    if node.func.attr == "_retire_run_bindings":
++                        self.retire_at.add(".".join(self.stack))
++                self.generic_visit(node)
++
++        walker = Visitor()
++        walker.visit(tree)
++        self.assertTrue(walker.exited_at, "parser found no state = EXITED assignments")
++        self.assertIn("_settle_failed_launch", walker.exited_at)
++        missing = []
++        for func, lines in sorted(walker.exited_at.items()):
++            if func in self.DECLARED_EXCEPTIONS:
++                continue
++            if func not in walker.retire_at:
++                missing.append(f"{func} (lines {lines})")
++        self.assertEqual(
++            missing,
++            [],
++            "EXITED without _retire_run_bindings: " + "; ".join(missing),
++        )
++
++
++def _assign_sets_exited(node: ast.Assign) -> bool:
++    if not any(
++        isinstance(target, ast.Attribute) and target.attr == "state"
++        for target in node.targets
++    ):
++        return False
++    return _value_can_be_exited(node.value)
++
++
++def _value_can_be_exited(value: ast.AST) -> bool:
++    if isinstance(value, ast.Constant) and value.value == "EXITED":
++        return True
++    if isinstance(value, ast.IfExp):
++        return _value_can_be_exited(value.body) or _value_can_be_exited(value.orelse)
++    return False
++
++
++class _IncrementingLauncher:
++    def __init__(self) -> None:
++        self.next_pid = 9001
++        self.calls: list[tuple[list[str], str, str, int]] = []
++        self.config_path: Path | None = None
++        self.instance_at_launch: str | None = None
++
++    def __call__(self, argv: list[str], cwd: str, window_style: str):
++        if self.config_path is not None and self.config_path.is_file():
++            payload = json.loads(self.config_path.read_text(encoding="utf-8"))
++            self.instance_at_launch = payload.get("instance")
++        pid = self.next_pid
++        self.next_pid += 1
++        self.calls.append((list(argv), cwd, window_style, pid))
++        return type("Launched", (), {"pid": pid})()
++
++
++class StatusAndVersionFenceTest(unittest.TestCase):
++    def test_status_hides_full_instance(self) -> None:
++        state = loopback.ServerState("k")
++        _bind(state, INST_C1, "client", 2001)
++        snapshot = state.status_snapshot()
++        blob = json.dumps(snapshot)
++        self.assertNotIn(INST_C1, blob)
++        prefix = snapshot["peers"]["client"].get("instance_prefix")
++        self.assertEqual(prefix, uuid.UUID(INST_C1).hex[:8])
++        self.assertEqual(len(str(prefix)), 8)
++        self.assertNotRegex(blob, r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
++
++    def test_ready_uses_bound_last_poll_not_legacy(self) -> None:
++        clock = FakeClock()
++        state = loopback.ServerState("k", time_fn=clock)
++        _bind(state, INST_S1, "server", 1001)
++        _bind(state, INST_C1, "client", 2001)
++        state.record_poll("server", "8~1.29.0", instance=INST_S1, source_pid=1001)
++        state.record_poll("client", "8~1.29.0", instance=INST_C1, source_pid=2001)
++        clock.advance(20.0)
++        state.record_poll("server", "8~1.29.0")
++        state.record_poll("client", "8~1.29.0")
++        snapshot = state.status_snapshot()
++        server_peer = snapshot["peers"]["server"]
++        client_peer = snapshot["peers"]["client"]
++        self.assertLess(server_peer["last_poll_age_s"], 1.0)
++        self.assertGreaterEqual(server_peer["bound_last_poll_age_s"], 19.0)
++        ready = server_mod.compute_bridge_ready(
++            {
++                "server_peer": {**server_peer, "version_state": "ok"},
++                "client_peer": {**client_peer, "version_state": "ok"},
++            }
++        )
++        self.assertFalse(ready["ready"])
++        self.assertNotEqual(ready["reason"], "ready")
++
++    def test_version_gate_unchanged_for_v8_without_inst(self) -> None:
++        state, detail = version_state_for(
++            "8~1.29.0",
++            require_version=False,
++            expected_game_version=None,
++        )
++        self.assertEqual(state, "ok")
++        self.assertNotEqual(state, "version_mismatch")
++        runtime = loopback.ServerState(
++            "k",
++            version_validator=lambda version: version_state_for(
++                version,
++                require_version=False,
++                expected_game_version=None,
++            )[0],
++        )
++        runtime.record_poll("server", "8~1.29.0")
++        status, payload = runtime.enqueue_command("player_teleport", dict(TELEPORT))
++        self.assertNotEqual(payload.get("error"), "version_blocked")
++        self.assertEqual(status, 409)
++        self.assertEqual(payload.get("error"), "legacy_unbound")
++
++    def test_expected_bridge_version_stays_8(self) -> None:
++        self.assertEqual(EXPECTED_BRIDGE_VERSION, "8")
++        messages = (MOD_SCRIPTS / "MCPMessages.c").read_text(encoding="utf-8")
++        self.assertIn('const string MCP_BRIDGE_VERSION = "8";', messages)
++        self.assertNotIn('const string MCP_BRIDGE_VERSION = "9";', messages)
++        match = re.search(r"class MCPConfig\s*\{([^}]*)\}", messages)
++        self.assertIsNotNone(match)
++        self.assertIn("string instance;", match.group(1))
++
++
++class _FakeSock:
++    def __init__(self, local: tuple[str, int], peer: tuple[str, int]) -> None:
++        self._local = local
++        self._peer = peer
++
++    def getsockname(self) -> tuple[str, int]:
++        return self._local
++
++    def getpeername(self) -> tuple[str, int]:
++        return self._peer
++
++
++class _FakeConn:
++    def __init__(
++        self,
++        laddr: tuple[str, int],
++        raddr: tuple[str, int],
++        pid: int,
++        status: str,
++    ) -> None:
++        self.laddr = laddr
++        self.raddr = raddr
++        self.pid = pid
++        self.status = status
++
++
++def _established_status() -> str:
++    try:
++        import psutil
++    except ImportError:
++        return "ESTABLISHED"
++    return getattr(psutil, "CONN_ESTABLISHED", "ESTABLISHED")
++
++
++def _profile_dir(root: Path, name: str) -> Path:
++    directory = root / name
++    directory.mkdir(parents=True, exist_ok=True)
++    (directory / "dayz_mcp.json").write_text(
++        json.dumps(
++            {"url": "http://127.0.0.1:8765/", "key": "k", "pollHz": 5},
++            separators=(",", ":"),
++        ),
++        encoding="utf-8",
++    )
++    return directory
++
++
++class ProductionAttributionFenceTest(unittest.TestCase):
++    """CRITICO-2 / ronda 3: el camino prepare+confirm + resolve_poll_pid.
++
++    No usa install_bound_peer ni _test_identity_override. El PID sale de
++    connections_fn contra ESTE socket.
++    """
++
++    def setUp(self) -> None:
++        self.temporary = TemporaryDirectory()
++        self.root = Path(self.temporary.name)
++        self.state = loopback.ServerState("k")
++        self.profiles = _profile_dir(self.root, "client_profiles")
++        self.daemon_ep = ("127.0.0.1", 8765)
++        self.sock_registered = _FakeSock(self.daemon_ep, ("127.0.0.1", 51001))
++        self.sock_intruder = _FakeSock(self.daemon_ep, ("127.0.0.1", 51002))
++        self.pid_registered = 61001
++        self.pid_intruder = 61002
++        self.record = _record(self.pid_registered, "client")
++        status = _established_status()
++        self.table = [
++            _FakeConn(
++                self.sock_registered.getpeername(),
++                self.sock_registered.getsockname(),
++                self.pid_registered,
++                status,
++            ),
++            _FakeConn(
++                self.sock_intruder.getpeername(),
++                self.sock_intruder.getsockname(),
++                self.pid_intruder,
++                status,
++            ),
++        ]
++        self.state._connections_fn = lambda: list(self.table)
++        minted = self.state.prepare("run-attr", "client", str(self.profiles))
++        self.instance = minted
++        self.state.confirm(minted, self.record)
++
++    def tearDown(self) -> None:
++        self.temporary.cleanup()
++
++    def test_resolve_poll_pid_does_not_reuse_cached_pid_across_sockets(self) -> None:
++        first = self.state.resolve_poll_pid(self.instance, self.sock_registered)
++        second = self.state.resolve_poll_pid(self.instance, self.sock_intruder)
++        self.assertEqual(first, self.pid_registered)
++        self.assertEqual(second, self.pid_intruder)
++        self.assertNotEqual(first, second)
++
++    def test_second_socket_same_instance_does_not_receive_mutation(self) -> None:
++        status, payload = self.state.enqueue_command(
++            "camera_set", {"cam_mode": "orient"}, peer="client"
++        )
++        self.assertEqual(status, 200, payload)
++        registered_pid = self.state.resolve_poll_pid(
++            self.instance, self.sock_registered
++        )
++        _status, first = self.state.record_poll(
++            "client",
++            instance=self.instance,
++            source_pid=registered_pid,
++            source_creation_time=self.record.creation_time_utc,
++        )
++        self.assertEqual(
++            [command["id"] for command in first["commands"]], [payload["id"]]
++        )
++
++        status, second_cmd = self.state.enqueue_command(
++            "camera_set", {"cam_mode": "orient"}, peer="client"
++        )
++        self.assertEqual(status, 200, second_cmd)
++        intruder_pid = self.state.resolve_poll_pid(
++            self.instance, self.sock_intruder
++        )
++        _status, second = self.state.record_poll(
++            "client",
++            instance=self.instance,
++            source_pid=intruder_pid,
++            source_creation_time=self.record.creation_time_utc,
++        )
++        self.assertEqual(intruder_pid, self.pid_intruder)
++        self.assertEqual(second["commands"], [])
++        self.assertEqual(self.state._bindings[self.instance].state, "AMBIGUOUS")
++        blocked, body = self.state.enqueue_command(
++            "camera_set", {"cam_mode": "orient"}, peer="client"
++        )
++        self.assertEqual(blocked, 409)
++        self.assertEqual(body["error"], "instance_ambiguous")
++
++
++class Round3FenceRegressionTest(unittest.TestCase):
++    def test_creation_time_mismatch_marks_ambiguous(self) -> None:
++        state = loopback.ServerState("k")
++        _bind(state, INST_C1, "client", 2001)
++        status, payload = state.enqueue_command(
++            "camera_set", {"cam_mode": "orient"}, peer="client"
++        )
++        self.assertEqual(status, 200, payload)
++        _status, poll = state.record_poll(
++            "client",
++            instance=INST_C1,
++            source_pid=2001,
++            source_creation_time="1999-01-01T00:00:00.000000Z",
++        )
++        self.assertEqual(poll["commands"], [])
++        self.assertEqual(state._bindings[INST_C1].state, "AMBIGUOUS")
++
++    def test_ready_false_when_binding_retired(self) -> None:
++        clock = FakeClock()
++        state = loopback.ServerState("k", time_fn=clock)
++        _bind(state, INST_S1, "server", 1001)
++        _bind(state, INST_C1, "client", 2001)
++        state.record_poll("server", "8~1.29.0", instance=INST_S1, source_pid=1001)
++        state.record_poll("client", "8~1.29.0", instance=INST_C1, source_pid=2001)
++        state.retire_run("run-fence", "stopped")
++        state.record_poll("server", "8~1.29.0", instance=INST_S1, source_pid=1001)
++        state.record_poll("client", "8~1.29.0", instance=INST_C1, source_pid=2001)
++        snapshot = state.status_snapshot()
++        ready = server_mod.compute_bridge_ready(
++            {
++                "server_peer": {**snapshot["peers"]["server"], "version_state": "ok"},
++                "client_peer": {**snapshot["peers"]["client"], "version_state": "ok"},
++            }
++        )
++        self.assertFalse(ready["ready"])
++        self.assertNotEqual(ready["reason"], "ready")
++        status, payload = state.enqueue_command("player_teleport", dict(TELEPORT))
++        self.assertEqual(status, 409)
++        self.assertEqual(payload["error"], "binding_retired")
++        self.assertNotIn("it will target the new instance", payload.get("hint", ""))
++
++    def test_starting_does_not_enqueue_reads(self) -> None:
++        state = loopback.ServerState("k")
++        with TemporaryDirectory() as raw:
++            profiles = _profile_dir(Path(raw), "p")
++            minted = state.prepare("run-start", "server", str(profiles))
++        self.assertEqual(state._bindings[minted].state, "STARTING")
++        status, payload = state.enqueue_command("query_player_state", {})
++        self.assertEqual(status, 409)
++        self.assertEqual(payload["error"], "binding_not_ready")
++
++    def test_confirm_without_pid_stays_starting(self) -> None:
++        state = loopback.ServerState("k")
++        with TemporaryDirectory() as raw:
++            profiles = _profile_dir(Path(raw), "p")
++            minted = state.prepare("run-start", "client", str(profiles))
++        state.confirm(minted, object())
++        self.assertEqual(state._bindings[minted].state, "STARTING")
++        status, payload = state.enqueue_command(
++            "camera_set", {"cam_mode": "orient"}, peer="client"
++        )
++        self.assertEqual(status, 409)
++        self.assertEqual(payload["error"], "binding_not_ready")
++
++    def test_two_bound_peers_is_instance_peer_collision(self) -> None:
++        state = loopback.ServerState("k")
++        _bind(state, INST_C1, "client", 2001, run_id="run-a")
++        _bind(state, INST_C2, "client", 2002, run_id="run-b")
++        status, payload = state.enqueue_command(
++            "camera_set", {"cam_mode": "orient"}, peer="client"
++        )
++        self.assertEqual(status, 409)
++        self.assertEqual(payload["error"], "instance_peer_collision")
++        self.assertIn("hint", payload)
++        self.assertNotEqual(payload["error"], "legacy_unbound")
++
++    def test_retire_does_not_accumulate_bindings(self) -> None:
++        state = loopback.ServerState("k")
++        with TemporaryDirectory() as raw:
++            profiles = _profile_dir(Path(raw), "p")
++            for index in range(200):
++                minted = state.prepare(f"run-{index}", "client", str(profiles))
++                state.confirm(minted, _record(7000 + index, "client"))
++                state.retire_role(f"run-{index}", "client", "stopped")
++        active = [
++            binding
++            for binding in state._bindings.values()
++            if binding.state != "RETIRED"
++        ]
++        self.assertEqual(active, [])
++        self.assertLessEqual(len(state._bindings), 1)
++        self.assertLessEqual(len(state._bound_queues), 1)
++        limit = getattr(loopback, "RETIRED_INSTANCE_LIMIT", 0)
++        self.assertGreater(limit, 0)
++        self.assertLess(len(state._retired_instances), 200)
++        self.assertLessEqual(len(state._retired_instances), limit)
++
++
++class Round4FenceRegressionTest(unittest.TestCase):
++    """Re-revision holes: supply, ready, retire cap, table cache, counters."""
++
++    def _prepare_confirmed(
++        self, pid: int = 77001, role: str = "client"
++    ) -> tuple[loopback.ServerState, str, ProcessRecord]:
++        state = loopback.ServerState("k")
++        with TemporaryDirectory() as raw:
++            profiles = _profile_dir(Path(raw), "p")
++            minted = state.prepare("run-r4", role, str(profiles))
++        record = _record(pid, role)
++        state.confirm(minted, record)
++        self.assertEqual(state._bindings[minted].state, "BOUND")
++        self.assertEqual(state._bindings[minted].creation_time_utc, record.creation_time_utc)
++        return state, minted, record
++
++    def _enqueue_client_mutation(self, state: loopback.ServerState) -> dict:
++        status, payload = state.enqueue_command(
++            "camera_set", {"cam_mode": "orient"}, peer="client"
++        )
++        self.assertEqual(status, 200, payload)
++        return payload
++
++    def test_lookup_creation_time_via_lifecycle_like_daemon(self) -> None:
++        """(b) Walk state.lifecycle.guard.snapshot as daemon.py:578 wires it."""
++        state = loopback.ServerState("k")
++        guard = NativeProcessGuard()
++        state.lifecycle = SimpleNamespace(guard=guard)
++        pid = os.getpid()
++        got = state._lookup_creation_time(pid)
++        snap = guard.snapshot(pid)
++        self.assertIs(snap.get("identity_complete"), True, snap)
++        self.assertIsInstance(got, str)
++        self.assertTrue(got)
++        self.assertEqual(got, snap["creation_time_utc"])
++        self.assertRegex(got, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
++
++    def test_missing_creation_time_without_lifecycle_does_not_deliver(self) -> None:
++        state, minted, record = self._prepare_confirmed()
++        self.assertIsNone(state.lifecycle)
++        self.assertIsNone(state._creation_time_fn)
++        payload = self._enqueue_client_mutation(state)
++        _status, poll = state.record_poll(
++            "client", instance=minted, source_pid=record.pid
++        )
++        self.assertEqual(poll["commands"], [])
++        self.assertNotIn(payload["id"], [command.get("id") for command in poll["commands"]])
++        self.assertEqual(state._bindings[minted].state, "creation_time_unreadable")
++
++    def test_missing_creation_time_when_reader_raises_does_not_deliver(self) -> None:
++        state, minted, record = self._prepare_confirmed()
++
++        def boom(_pid: int) -> str | None:
++            raise RuntimeError("creation_time_unavailable")
++
++        state._creation_time_fn = boom
++        payload = self._enqueue_client_mutation(state)
++        _status, poll = state.record_poll(
++            "client", instance=minted, source_pid=record.pid
++        )
++        self.assertEqual(poll["commands"], [])
++        self.assertNotIn(payload["id"], [command.get("id") for command in poll["commands"]])
++        self.assertEqual(state._bindings[minted].state, "creation_time_unreadable")
++
++    def test_missing_creation_time_when_reader_returns_none_does_not_deliver(
++        self,
++    ) -> None:
++        state, minted, record = self._prepare_confirmed()
++        state._creation_time_fn = lambda _pid: None
++        payload = self._enqueue_client_mutation(state)
++        _status, poll = state.record_poll(
++            "client", instance=minted, source_pid=record.pid
++        )
++        self.assertEqual(poll["commands"], [])
++        self.assertNotIn(payload["id"], [command.get("id") for command in poll["commands"]])
++        self.assertEqual(state._bindings[minted].state, "creation_time_unreadable")
++
++    def test_creation_time_format_helper_locks_isoformat_microseconds_z(self) -> None:
++        self.assertTrue(hasattr(instance_fence_mod, "format_creation_time_utc"))
++        formatted = instance_fence_mod.format_creation_time_utc(1_700_000_000.125)
++        self.assertEqual(formatted, "2023-11-14T22:13:20.125000Z")
++        self.assertTrue(formatted.endswith("Z"))
++        self.assertNotIn("+00:00", formatted)
++        self.assertRegex(formatted, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
++        snapshot_src = inspect.getsource(NativeProcessGuard._snapshot_process)
++        self.assertIn('isoformat(timespec="microseconds")', snapshot_src)
++        self.assertIn('"+00:00"', snapshot_src)
++        self.assertIn('"Z"', snapshot_src)
++
++    def test_confirm_and_lookup_share_creation_time_format(self) -> None:
++        state = loopback.ServerState("k")
++        guard = NativeProcessGuard()
++        state.lifecycle = SimpleNamespace(guard=guard)
++        pid = os.getpid()
++        snap = guard.snapshot(pid)
++        self.assertIs(snap.get("identity_complete"), True, snap)
++        with TemporaryDirectory() as raw:
++            minted = state.prepare(
++                "run-r4-fmt", "client", str(_profile_dir(Path(raw), "p"))
++            )
++        state.confirm(
++            minted,
++            ProcessRecord(
++                int(snap["pid"]),
++                str(snap["creation_time_utc"]),
++                str(snap["executable_sha256"]),
++                str(snap["command_line_sha256"]),
++                "client",
++                identity_scheme=str(snap["identity_scheme"]),
++            ),
++        )
++        stored = state._bindings[minted].creation_time_utc
++        looked = state._lookup_creation_time(pid)
++        self.assertEqual(stored, looked)
++        self.assertEqual(stored, snap["creation_time_utc"])
++        self.assertRegex(str(stored), r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
++
++    def test_legacy_unbound_is_not_ready_with_own_reason(self) -> None:
++        clock = FakeClock()
++        state = loopback.ServerState("k", time_fn=clock)
++        state.record_poll("server", "8~1.29.0")
++        snapshot = state.status_snapshot()
++        self.assertEqual(snapshot["peers"]["server"]["binding_state"], "LEGACY_UNBOUND")
++        ready = server_mod.compute_bridge_ready(
++            {
++                "server_peer": {**snapshot["peers"]["server"], "version_state": "ok"},
++                "client_peer": {**snapshot["peers"]["client"], "version_state": "ok"},
++            }
++        )
++        self.assertFalse(ready["ready"])
++        self.assertEqual(ready["reason"], "legacy_unbound")
++        self.assertIn("legacy_unbound", server_mod.READY_REASONS)
++        self.assertNotEqual(ready["reason"], "no_run")
++        self.assertNotEqual(ready["reason"], "server_poll_stale")
++        status, payload = state.enqueue_command("player_teleport", dict(TELEPORT))
++        self.assertEqual(status, 409)
++        self.assertEqual(payload["error"], "legacy_unbound")
++
++    def test_never_polled_stays_no_run_not_legacy_unbound(self) -> None:
++        state = loopback.ServerState("k")
++        snapshot = state.status_snapshot()
++        ready = server_mod.compute_bridge_ready(
++            {
++                "server_peer": {
++                    **snapshot["peers"]["server"],
++                    "version_state": "legacy",
++                },
++                "client_peer": {
++                    **snapshot["peers"]["client"],
++                    "version_state": "legacy",
++                },
++            }
++        )
++        self.assertFalse(ready["ready"])
++        self.assertEqual(ready["reason"], "no_run")
++
++    def test_tcp_table_snapshot_resolves_two_sockets_to_distinct_pids(self) -> None:
++        clock = FakeClock()
++        state = loopback.ServerState("k", time_fn=clock)
++        with TemporaryDirectory() as raw:
++            minted = state.prepare(
++                "run-r4-tcp", "client", str(_profile_dir(Path(raw), "p"))
++            )
++        state.confirm(minted, _record(61001, "client"))
++        status = _established_status()
++        sock_a = _FakeSock(("127.0.0.1", 8765), ("127.0.0.1", 52001))
++        sock_b = _FakeSock(("127.0.0.1", 8765), ("127.0.0.1", 52002))
++        table = [
++            _FakeConn(sock_a.getpeername(), sock_a.getsockname(), 61001, status),
++            _FakeConn(sock_b.getpeername(), sock_b.getsockname(), 61002, status),
++        ]
++        fetches = {"n": 0}
++
++        def connections_fn() -> list:
++            fetches["n"] += 1
++            return list(table)
++
++        state._connections_fn = connections_fn
++        first = state.resolve_poll_pid(minted, sock_a)
++        second = state.resolve_poll_pid(minted, sock_b)
++        self.assertEqual(first, 61001)
++        self.assertEqual(second, 61002)
++        self.assertNotEqual(first, second)
++        self.assertEqual(fetches["n"], 2)
++
++    def test_stale_tcp_snapshot_missing_socket_is_unattributed(self) -> None:
++        clock = FakeClock()
++        state = loopback.ServerState("k", time_fn=clock)
++        with TemporaryDirectory() as raw:
++            minted = state.prepare(
++                "run-r4-stale", "client", str(_profile_dir(Path(raw), "p"))
++            )
++        record = _record(61001, "client")
++        state.confirm(minted, record)
++        status = _established_status()
++        sock_reg = _FakeSock(("127.0.0.1", 8765), ("127.0.0.1", 53001))
++        sock_new = _FakeSock(("127.0.0.1", 8765), ("127.0.0.1", 53002))
++        live_table = [
++            _FakeConn(sock_reg.getpeername(), sock_reg.getsockname(), 61001, status)
++        ]
++
++        def connections_fn() -> list:
++            return list(live_table)
++
++        state._connections_fn = connections_fn
++        self.assertEqual(state.resolve_poll_pid(minted, sock_reg), 61001)
++        live_table.append(
++            _FakeConn(sock_new.getpeername(), sock_new.getsockname(), 61099, status)
++        )
++        self.assertEqual(state.resolve_poll_pid(minted, sock_new), 61099)
++
++    def test_handle_poll_does_not_lookup_creation_time(self) -> None:
++        source = inspect.getsource(loopback.Handler._handle_poll)
++        self.assertNotIn("_lookup_creation_time", source)
++
++    def test_record_poll_looks_up_creation_time_once(self) -> None:
++        state, minted, record = self._prepare_confirmed()
++        calls: list[int] = []
++
++        def reader(pid: int) -> str:
++            calls.append(pid)
++            return record.creation_time_utc
++
++        state._creation_time_fn = reader
++        state.record_poll("client", instance=minted, source_pid=record.pid)
++        self.assertEqual(calls, [record.pid])
++
++    def test_status_snapshot_exposes_fence_counters(self) -> None:
++        state = loopback.ServerState("k")
++        status, payload = state.enqueue_command("player_teleport", dict(TELEPORT))
++        self.assertEqual(status, 409)
++        self.assertEqual(payload["error"], "legacy_unbound")
++        state.record_poll("server")
++        snapshot = state.status_snapshot()
++        fence = snapshot["fence"]
++        rejects = fence["mutation_rejects_by_code"]
++        self.assertEqual(rejects["legacy_unbound"], 1)
++        for code in (
++            "legacy_unbound",
++            "instance_unknown",
++            "instance_ambiguous",
++            "instance_unattributed",
++            "binding_retired",
++            "instance_role_mismatch",
++            "instance_peer_collision",
++            "binding_not_ready",
++        ):
++            self.assertIn(code, rejects)
++            self.assertIsInstance(rejects[code], int)
++        self.assertEqual(fence["unaccredited_mutation_enqueues"], 0)
++        polls = fence["unaccredited_polls_by_class"]
++        self.assertGreaterEqual(polls.get("LEGACY_UNBOUND", 0), 1)
++        blob = json.dumps(snapshot)
++        self.assertNotRegex(
++            blob,
++            r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
++        )
++
++    def test_accredited_mutation_does_not_increment_unaccredited_delivery(
++        self,
++    ) -> None:
++        state, minted, record = self._prepare_confirmed()
++        state._creation_time_fn = lambda _pid: record.creation_time_utc
++        status, payload = state.enqueue_command(
++            "camera_set", {"cam_mode": "orient"}, peer="client"
++        )
++        self.assertEqual(status, 200, payload)
++        snapshot = state.status_snapshot()
++        self.assertEqual(snapshot["fence"]["unaccredited_mutation_enqueues"], 0)
++
++
++class Round5FenceRegressionTest(unittest.TestCase):
++    """NUEVO-A/B cache phase bugs, MAYOR-1 residues, shortcut enclosure."""
++
++    def _phased_state(self, role: str = "client"):
++        clock = FakeClock()
++        state = loopback.ServerState("k", time_fn=clock)
++        temporary = TemporaryDirectory()
++        root = Path(temporary.name)
++        profiles = _profile_dir(root, role)
++        minted = state.prepare("run-r5", role, str(profiles))
++        record = _record(61001, role)
++        state.confirm(minted, record)
++        status = _established_status()
++        live: list[_FakeConn] = []
++
++        def connections_fn() -> list:
++            return list(live)
++
++        state._connections_fn = connections_fn
++        return clock, state, minted, record, live, status, temporary
++
++    def _new_sock_conn(
++        self,
++        live: list[_FakeConn],
++        status: str,
++        pid: int,
++        port: int,
++    ) -> tuple[_FakeSock, _FakeConn]:
++        sock = _FakeSock(("127.0.0.1", 8765), ("127.0.0.1", port))
++        conn = _FakeConn(sock.getpeername(), sock.getsockname(), pid, status)
++        live.append(conn)
++        return sock, conn
++
++    def test_phased_same_run_client_never_unattributed(self) -> None:
++        """(f) server+client, client 20 ms behind, 40 ticks, 0 unattributed."""
++        clock = FakeClock()
++        state = loopback.ServerState("k", time_fn=clock)
++        temporary = TemporaryDirectory()
++        self.addCleanup(temporary.cleanup)
++        root = Path(temporary.name)
++        inst_s = state.prepare("run-r5", "server", str(_profile_dir(root, "s")))
++        inst_c = state.prepare("run-r5", "client", str(_profile_dir(root, "c")))
++        rec_s = _record(61001, "server")
++        rec_c = _record(61002, "client")
++        state.confirm(inst_s, rec_s)
++        state.confirm(inst_c, rec_c)
++        status = _established_status()
++        live: list[_FakeConn] = []
++        state._connections_fn = lambda: list(live)
++        client_binds: list[str] = []
++        port = 54000
++        for tick in range(40):
++            port += 1
++            sock_s, conn_s = self._new_sock_conn(live, status, 61001, port)
++            pid_s = state.resolve_poll_pid(inst_s, sock_s)
++            state.record_poll(
++                "server",
++                instance=inst_s,
++                source_pid=pid_s,
++                source_creation_time=rec_s.creation_time_utc,
++            )
++            live.remove(conn_s)
++            clock.advance(0.020)
++            port += 1
++            sock_c, conn_c = self._new_sock_conn(live, status, 61002, port)
++            pid_c = state.resolve_poll_pid(inst_c, sock_c)
++            _status, poll = state.record_poll(
++                "client",
++                instance=inst_c,
++                source_pid=pid_c,
++                source_creation_time=rec_c.creation_time_utc,
++            )
++            live.remove(conn_c)
++            client_binds.append(str(poll.get("bind")))
++            clock.advance(0.180)
++        unattributed = sum(1 for label in client_binds if label == "instance_unattributed")
++        self.assertEqual(unattributed, 0, client_binds[:8])
++        self.assertEqual(state._bindings[inst_c].state, "BOUND")
++
++    def test_phased_intruder_marks_ambiguous(self) -> None:
++        """(d) registered + intruder 20 ms behind → AMBIGUOUS."""
++        clock, state, minted, record, live, status, temporary = self._phased_state()
++        self.addCleanup(temporary.cleanup)
++        port = 55000
++        for tick in range(40):
++            port += 1
++            sock_r, conn_r = self._new_sock_conn(live, status, 61001, port)
++            pid_r = state.resolve_poll_pid(minted, sock_r)
++            state.record_poll(
++                "client",
++                instance=minted,
++                source_pid=pid_r,
++                source_creation_time=record.creation_time_utc,
++            )
++            live.remove(conn_r)
++            clock.advance(0.020)
++            port += 1
++            sock_i, conn_i = self._new_sock_conn(live, status, 61999, port)
++            pid_i = state.resolve_poll_pid(minted, sock_i)
++            state.record_poll(
++                "client",
++                instance=minted,
++                source_pid=pid_i,
++                source_creation_time=record.creation_time_utc,
++            )
++            live.remove(conn_i)
++            clock.advance(0.180)
++        self.assertEqual(state._bindings[minted].state, "AMBIGUOUS")
++
++    def test_unread_creation_time_has_own_class_not_ambiguous(self) -> None:
++        state = loopback.ServerState("k")
++        with TemporaryDirectory() as raw:
++            minted = state.prepare(
++                "run-r5-unread", "client", str(_profile_dir(Path(raw), "p"))
++            )
++        record = _record(77001, "client")
++        state.confirm(minted, record)
++        status, queued = state.enqueue_command(
++            "camera_set", {"cam_mode": "orient"}, peer="client"
++        )
++        self.assertEqual(status, 200, queued)
++        _status, poll = state.record_poll(
++            "client", instance=minted, source_pid=record.pid
++        )
++        self.assertEqual(poll["commands"], [])
++        self.assertEqual(poll.get("bind"), "creation_time_unreadable")
++        self.assertNotEqual(state._bindings[minted].state, "AMBIGUOUS")
++        self.assertEqual(state._bindings[minted].state, "creation_time_unreadable")
++        blocked, body = state.enqueue_command(
++            "camera_set", {"cam_mode": "orient"}, peer="client"
++        )
++        self.assertEqual(blocked, 409)
++        self.assertEqual(body["error"], "creation_time_unreadable")
++        hint = str(body.get("hint", ""))
++        self.assertIn("creation time", hint.lower())
++        self.assertNotIn("Two processes presented the same instance", hint)
++        self.assertIn("creation_time_unreadable", server_mod.READY_REASONS)
++
++    def test_normalize_creation_time_utc_rejects_extremes_without_raising(
++        self,
++    ) -> None:
++        extremes = (
++            "9999-12-31T23:59:59.999999Z",
++            "1601-01-01T00:00:00.000000Z",
++        )
++        for stamp in extremes:
++            with self.subTest(stamp=stamp):
++                try:
++                    got = instance_fence_mod.normalize_creation_time_utc(stamp)
++                except Exception as exc:  # noqa: BLE001 — the bug is the raise
++                    self.fail(f"normalize raised {type(exc).__name__}: {exc}")
++                self.assertIsNone(got)
++
++    def test_status_snapshot_names_unaccredited_enqueues_not_deliveries(
++        self,
++    ) -> None:
++        state = loopback.ServerState("k")
++        snapshot = state.status_snapshot()
++        fence = snapshot["fence"]
++        self.assertIn("unaccredited_mutation_enqueues", fence)
++        self.assertNotIn("unaccredited_mutation_deliveries", fence)
++        self.assertEqual(fence["unaccredited_mutation_enqueues"], 0)
++
++    def test_test_identity_override_is_the_only_shortcut(self) -> None:
++        state = loopback.ServerState("k")
++        self.assertTrue(hasattr(state, "_test_identity_override"))
++        self.assertIsNone(state._test_identity_override)
++        self.assertFalse(hasattr(state, "_forced_poll_pids"))
++        self.assertFalse(hasattr(state, "_forced_creation_times"))
++        _bind(state, INST_C1, "client", 2001)
++        self.assertIsNotNone(state._test_identity_override)
++        self.assertEqual(state.resolve_poll_pid(INST_C1, object()), 2001)
++        looked = state._lookup_creation_time(2001)
++        self.assertEqual(looked, "2026-08-18T00:00:21.000000Z")
++
++
++if __name__ == "__main__":
++    unittest.main()
++
+--- a/DayZ_MCP_dev\tools\tests\test_inventory_give.py
++++ b/DayZ_MCP_dev\tools\tests\test_inventory_give.py
+@@ -30,6 +30,9 @@
+ class InventoryGiveIngressTest(unittest.TestCase):
+     def setUp(self) -> None:
+         self.state = loopback.ServerState("test-key")
++        from tests.fence_helpers import bind_both_peers
++
++        bind_both_peers(self.state)
+ 
+     def test_happy_path_server_mutating(self) -> None:
+         self.assertIn(COMMAND, loopback.SERVER_COMMANDS)
+--- a/DayZ_MCP_dev\tools\tests\test_loopback.py
++++ b/DayZ_MCP_dev\tools\tests\test_loopback.py
+@@ -13,12 +13,14 @@
+ from dayz_mcp import loopback
+ from dayz_mcp import server
+ from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
++from tests.fence_helpers import INST_CLIENT, INST_SERVER, accredited_poll, bind_both_peers
+ 
+ 
+ class LoopbackTest(unittest.TestCase):
+     def setUp(self) -> None:
+         self.key = "test-key"
+         self.state = loopback.ServerState(self.key)
++        bind_both_peers(self.state)
+         self.httpd = loopback.create_http_server(0, self.state, log_sink=lambda _message: None)
+         self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+         self.thread.start()
+@@ -96,11 +98,16 @@
+         self.assertEqual(status, 200)
+         command_id = body["id"]
+ 
+-        status, body = self.request("GET", "/poll")
++        status, body = self.request("GET", "/poll", query={"inst": INST_SERVER})
+         self.assertEqual(status, 200)
+         self.assertEqual(body["commands"][0]["id"], command_id)
+ 
+-        status, body = self.request("POST", "/result", {"id": command_id, "ok": 1, "value": 7})
++        status, body = self.request(
++            "POST",
++            "/result",
++            {"id": command_id, "ok": 1, "value": 7},
++            query={"inst": INST_SERVER},
++        )
+         self.assertEqual(status, 200)
+         self.assertEqual(body, {"ok": True})
+ 
+@@ -128,7 +135,7 @@
+         self.request("POST", "/enqueue", {"cmd": "query_player_state", "args": {}})
+ 
+         t0 = time.monotonic()
+-        status, body = self.request("GET", "/poll")
++        status, body = self.request("GET", "/poll", query={"inst": INST_SERVER})
+         first_elapsed = time.monotonic() - t0
+         self.assertEqual(status, 200)
+         self.assertEqual(len(body["commands"]), 1)
+@@ -136,7 +143,7 @@
+ 
+         self.request("POST", "/enqueue", {"cmd": "query_player_state", "args": {}})
+         t1 = time.monotonic()
+-        status, body = self.request("GET", "/poll")
++        status, body = self.request("GET", "/poll", query={"inst": INST_SERVER})
+         second_elapsed = time.monotonic() - t1
+         self.assertEqual(status, 200)
+         self.assertEqual(len(body["commands"]), 1)
+@@ -157,10 +164,12 @@
+         status, payload = self.state.enqueue_command("camera_get", {}, peer="client")
+         self.assertEqual(status, 200)
+         command_id = payload["id"]
+-        status, poll = self.state.record_poll("client", version="4~game")
++        status, poll = accredited_poll(self.state, "client", version="4~game")
+         self.assertEqual(status, 200)
+         self.assertEqual(poll["commands"][0]["id"], command_id)
+-        status, result = self.state.store_result({"id": command_id, "ok": 1})
++        status, result = self.state.store_result(
++            {"id": command_id, "ok": 1}, instance=INST_CLIENT
++        )
+         self.assertEqual(status, 200)
+         self.assertIsNotNone(self.state.take_result(command_id))
+         self.assertIsNotNone(self.state.take_result(command_id, remove=True))
+@@ -197,8 +206,12 @@
+         self.assertEqual((first["peer"], second["peer"]), ("client", "client"))
+         self.assertNotEqual(first["id"], second["id"])
+ 
+-        self.state.store_result({"id": first["id"], "ok": 1, "cursor": 0})
+-        self.state.store_result({"id": second["id"], "ok": 1, "cursor": 64})
++        self.state.store_result(
++            {"id": first["id"], "ok": 1, "cursor": 0}, instance=INST_CLIENT
++        )
++        self.state.store_result(
++            {"id": second["id"], "ok": 1, "cursor": 64}, instance=INST_CLIENT
++        )
+         self.assertEqual(self.state.take_result(first["id"])["cursor"], 0)
+         self.assertEqual(self.state.take_result(second["id"])["cursor"], 64)
+ 
+@@ -383,6 +396,7 @@
+         coordinator.test_audit_events = audit_events  # type: ignore[attr-defined]
+         state.coordination = coordinator
+         state.retail_probe = lambda: {"known": True, "processes": []}
++        bind_both_peers(state)
+         status, active = coordinator.acquire(client, "queue test")
+         self.assertEqual(status, 200)
+         return state, coordinator, client, active["lease_token"], clock
+@@ -402,7 +416,7 @@
+         self.assertEqual(state.pending_for_owner(client.session_id), 1)
+         self.assertGreater(coordinator.status(client)["owner"]["expires_in_s"], 299.0)
+ 
+-        status, poll = state.record_poll("server")
++        status, poll = accredited_poll(state, "server")
+         self.assertEqual(status, 200)
+         self.assertEqual(
+             poll["commands"],
+@@ -415,7 +429,7 @@
+             ],
+         )
+ 
+-        state.store_result({"id": command_id, "ok": 1})
++        state.store_result({"id": command_id, "ok": 1}, instance=INST_SERVER)
+         self.assertLessEqual(coordinator.status(client)["owner"]["expires_in_s"], 120.0)
+         self.assertEqual(state.pending_for_owner(client.session_id), 1)
+         state.take_result(command_id, remove=True)
+@@ -456,8 +470,10 @@
+                     identity_payload=COORDINATED_IDENTITY,
+                     lease_token=token,
+                 )
+-                state.record_poll("client")
+-                state.store_result({"id": release["id"], "ok": ok_value})
++                accredited_poll(state, "client")
++                state.store_result(
++                    {"id": release["id"], "ok": ok_value}, instance=INST_CLIENT
++                )
+                 coordinator.release(client, token)
+                 self.assertEqual(cleanup_flags[-1], expected_cleanup)
+ 
+@@ -495,7 +511,7 @@
+             lease_token=token,
+         )
+         clock.advance(loopback.COMMAND_TTL_S + 1.0)
+-        state.record_poll("client")
++        accredited_poll(state, "client")
+         coordinator.release(client, token)
+         self.assertTrue(cleanup_flags[-1])
+ 
+@@ -514,7 +530,7 @@
+         result = state.cancel_owner_pending(client.session_id, "owner_release")
+         self.assertEqual(result, {"cancelled": 1})
+         self.assertEqual(state.take_result(owned["id"])["error"], "owner_release")
+-        _, poll = state.record_poll("server")
++        _, poll = accredited_poll(state, "server")
+         self.assertEqual([command["id"] for command in poll["commands"]], [unowned_read["id"]])
+ 
+     def test_stale_discard_finishes_operation_pin(self) -> None:
+@@ -527,7 +543,7 @@
+             operation_timeout_s=300.0,
+         )
+         clock.advance(loopback.COMMAND_TTL_S + 1.0)
+-        _, poll = state.record_poll("server")
++        _, poll = accredited_poll(state, "server")
+         self.assertEqual(poll["commands"], [])
+         self.assertEqual(state.take_result(queued["id"])["error"], "stale_discarded")
+         self.assertLess(coordinator.status(client)["owner"]["expires_in_s"], 100.0)
+@@ -578,7 +594,7 @@
+         self.assertEqual(enqueue_result[0], (409, {"error": "lease_invalid"}))
+         self.assertEqual(release_result[0][0], 200)
+ 
+-        _, poll = state.record_poll("server")
++        _, poll = accredited_poll(state, "server")
+         self.assertEqual(poll["commands"], [])
+         self.assertEqual(state.pending_for_owner(client.session_id), 0)
+ 
+@@ -819,20 +835,23 @@
+ 
+     def test_internal_vehicle_release_result_is_purged_without_owner_mapping(self) -> None:
+         state = loopback.ServerState("k")
++        bind_both_peers(state)
+         cleanup = state.cleanup_owner(
+             "released-owner", "released-lease", "owner_release", True
+         )
+         self.assertEqual(cleanup["vehicle_release_enqueued"], 1)
+         self.assertEqual(state.pending_for_owner("released-owner"), 0)
+ 
+-        _, poll = state.record_poll("client")
++        _, poll = accredited_poll(state, "client")
+         self.assertEqual(len(poll["commands"]), 1)
+         command_id = poll["commands"][0]["id"]
+         self.assertEqual(poll["commands"][0]["cmd"], "vehicle_release")
+         self.assertNotIn(command_id, state._command_owner)
+         self.assertIn(command_id, state._fire_and_forget_ids)
+ 
+-        status, _ = state.store_result({"id": command_id, "ok": 1})
++        status, _ = state.store_result(
++            {"id": command_id, "ok": 1}, instance=INST_CLIENT
++        )
+         self.assertEqual(status, 200)
+         self.assertIsNone(state.take_result(command_id))
+         self.assertNotIn(command_id, state._fire_and_forget_ids)
+@@ -842,31 +861,38 @@
+     def test_internal_vehicle_release_ttl_discard_purges_result_and_id(self) -> None:
+         clock = FakeClock()
+         state = loopback.ServerState("k", time_fn=clock)
++        bind_both_peers(state)
+         state.cleanup_owner(
+             "released-owner", "released-lease", "owner_release", True
+         )
+-        command_id = state._queues["client"][0]["id"]
++        command_id = state._bound_queues[INST_CLIENT][0]["id"]
+ 
+         clock.advance(loopback.COMMAND_TTL_S + 1.0)
+-        _, poll = state.record_poll("client")
++        _, poll = accredited_poll(state, "client")
+         self.assertEqual(poll["commands"], [])
+         self.assertIsNone(state.take_result(command_id))
+         self.assertNotIn(command_id, state._fire_and_forget_ids)
+         self.assertEqual(state.status_snapshot()["results_pending"], 0)
+         self.assertEqual(state.pending_for_owner("released-owner"), 0)
+ 
+-    def test_internal_vehicle_release_reconnect_discard_purges_result_and_id(self) -> None:
++    def test_internal_vehicle_release_survives_reconnect_gap_on_bound_queue(self) -> None:
+         clock = FakeClock()
+         state = loopback.ServerState("k", time_fn=clock)
+-        state.record_poll("client")
++        bind_both_peers(state)
++        accredited_poll(state, "client")
+         state.cleanup_owner(
+             "released-owner", "released-lease", "owner_release", True
+         )
+-        command_id = state._queues["client"][0]["id"]
++        command_id = state._bound_queues[INST_CLIENT][0]["id"]
+ 
+         clock.advance(loopback.PEER_RECONNECT_GAP_S + 1.0)
+-        _, poll = state.record_poll("client")
+-        self.assertEqual(poll["commands"], [])
++        _, poll = accredited_poll(state, "client")
++        # Bound queues are not flushed on reconnect gap (D-55.5).
++        self.assertEqual([command["id"] for command in poll["commands"]], [command_id])
++        status, _ = state.store_result(
++            {"id": command_id, "ok": 1}, instance=INST_CLIENT
++        )
++        self.assertEqual(status, 200)
+         self.assertIsNone(state.take_result(command_id))
+         self.assertNotIn(command_id, state._fire_and_forget_ids)
+         self.assertEqual(state.status_snapshot()["results_pending"], 0)
+@@ -967,6 +993,7 @@
+             exec_audit=lambda *a: audit_calls.append(a),
+             time_fn=clock,
+         )
++        bind_both_peers(state)
+         status, payload = state.enqueue_command(
+             "exec_enforce", {"expr": "probe()", "main_fn": "Main"}, peer="server"
+         )
+@@ -986,6 +1013,7 @@
+     def setUp(self) -> None:
+         self.key = "test-key"
+         self.state = loopback.ServerState(self.key)
++        bind_both_peers(self.state)
+         self.httpd = loopback.create_http_server(0, self.state, log_sink=lambda _message: None)
+         self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+         self.thread.start()
+@@ -1066,7 +1094,9 @@
+         )
+         self.assertEqual(status, 200)
+         self.assertIn("id", body)
+-        status, poll = self.request("GET", "/poll", query={"peer": "client"})
++        status, poll = self.request(
++            "GET", "/poll", query={"peer": "client", "inst": INST_CLIENT}
++        )
+         self.assertEqual(status, 200)
+         self.assertEqual(poll["commands"][0]["cmd"], "ui_dialog")
+ 
+--- a/DayZ_MCP_dev\tools\tests\test_mcp_server.py
++++ b/DayZ_MCP_dev\tools\tests\test_mcp_server.py
+@@ -18,6 +18,11 @@
+         self.key = "test-key"
+         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), mcp_server.Handler)
+         self.httpd.state = mcp_server.ServerState(self.key)  # type: ignore[attr-defined]
++        from tests.fence_helpers import INST_CLIENT, INST_SERVER, bind_both_peers
++
++        bind_both_peers(self.httpd.state)
++        self.inst_server = INST_SERVER
++        self.inst_client = INST_CLIENT
+         self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+         self.thread.start()
+         host, port = self.httpd.server_address
+@@ -78,15 +83,19 @@
+         status, client_body = self.request("POST", "/enqueue", {"cmd": "camera_set", "args": {"cam_mode": "orient"}})
+         self.assertEqual(status, 200)
+ 
+-        status, body = self.request("GET", "/poll")
++        status, body = self.request("GET", "/poll", query={"inst": self.inst_server})
+         self.assertEqual(status, 200)
+         self.assertEqual([command["id"] for command in body["commands"]], [server_body["id"]])
+ 
+-        status, body = self.request("GET", "/poll", query={"peer": "client"})
++        status, body = self.request(
++            "GET", "/poll", query={"peer": "client", "inst": self.inst_client}
++        )
+         self.assertEqual(status, 200)
+         self.assertEqual([command["id"] for command in body["commands"]], [client_body["id"]])
+ 
+-        status, body = self.request("GET", "/poll", query={"peer": "server"})
++        status, body = self.request(
++            "GET", "/poll", query={"peer": "server", "inst": self.inst_server}
++        )
+         self.assertEqual(status, 200)
+         self.assertEqual(body, {"commands": []})
+ 
+--- a/DayZ_MCP_dev\tools\tests\test_mcp_tools.py
++++ b/DayZ_MCP_dev\tools\tests\test_mcp_tools.py
+@@ -13,6 +13,7 @@
+ 
+ from dayz_mcp import server as server_module
+ from dayz_mcp.server import EXPECTED_BRIDGE_VERSION, ServerConfig, Runtime, build_app
++from tests.fence_helpers import INST_CLIENT, INST_SERVER, bind_both_peers
+ 
+ 
+ def _content_json(content: Any) -> dict[str, Any]:
+@@ -96,6 +97,7 @@
+     def run(self) -> None:
+         while not self.stop_event.is_set():
+             query = {"peer": self.peer}
++            query["inst"] = INST_SERVER if self.peer == "server" else INST_CLIENT
+             if self.version is not None:
+                 query["ver"] = self.version
+             try:
+@@ -107,7 +109,12 @@
+                     if self.result_delay_s > 0.0:
+                         time.sleep(self.result_delay_s)
+                     result = self.responder(command)
+-                    self.request("POST", "/result", payload=result)
++                    self.request(
++                        "POST",
++                        "/result",
++                        payload=result,
++                        query={"inst": query["inst"]},
++                    )
+             except Exception:
+                 time.sleep(0.02)
+             time.sleep(0.02)
+@@ -126,6 +133,7 @@
+     def build_started(self, **config_kwargs: Any):
+         app, runtime = build_app(ServerConfig(key=self.key, port=0, log_sink=lambda _message: None, **config_kwargs))
+         runtime.start_loopback()
++        bind_both_peers(runtime.state)
+         self.runtimes.append(runtime)
+         return app, runtime
+ 
+--- a/DayZ_MCP_dev\tools\tests\test_object_anim.py
++++ b/DayZ_MCP_dev\tools\tests\test_object_anim.py
+@@ -35,6 +35,9 @@
+ class ObjectAnimIngressTest(unittest.TestCase):
+     def setUp(self) -> None:
+         self.state = loopback.ServerState("test-key")
++        from tests.fence_helpers import bind_both_peers
++
++        bind_both_peers(self.state)
+ 
+     def test_happy_read_and_write_server(self) -> None:
+         self.assertIn(COMMAND, loopback.SERVER_COMMANDS)
+--- a/DayZ_MCP_dev\tools\tests\test_player_teleport.py
++++ b/DayZ_MCP_dev\tools\tests\test_player_teleport.py
+@@ -30,6 +30,9 @@
+ class PlayerTeleportIngressTest(unittest.TestCase):
+     def setUp(self) -> None:
+         self.state = loopback.ServerState("test-key")
++        from tests.fence_helpers import bind_both_peers
++
++        bind_both_peers(self.state)
+ 
+     def test_happy_path_server_mutating(self) -> None:
+         self.assertIn(COMMAND, loopback.SERVER_COMMANDS)
+--- a/DayZ_MCP_dev\tools\tests\test_poll_key_reload_contract.py
++++ b/DayZ_MCP_dev\tools\tests\test_poll_key_reload_contract.py
+@@ -61,6 +61,10 @@
+                     reload_body.index("if (cfg.key == m_Key)"),
+                     reload_body.index("m_Backoff = 0.0;"),
+                 )
++                # Identity is not a secret and must not ride the key-reload path
++                # (D-55.2): a live process cannot adopt a later run's instance.
++                self.assertIn("protected string m_PeerInstance;", source)
++                self.assertNotIn("m_PeerInstance", reload_body)
+ 
+     def test_reload_reads_the_same_config_locations_as_the_initial_load(self) -> None:
+         # A reload that looked somewhere else would "work" in tests and silently
+--- a/DayZ_MCP_dev\tools\tests\test_python_backlog_fixes.py
++++ b/DayZ_MCP_dev\tools\tests\test_python_backlog_fixes.py
+@@ -198,6 +198,9 @@
+             exec_allowlist={"Probe()"},
+             exec_audit=blocking_audit,
+         )
++        from tests.fence_helpers import bind_both_peers
++
++        bind_both_peers(state)
+         runtime = server.Runtime(
+             server.ServerConfig(
+                 key="fixture-key",
+--- a/DayZ_MCP_dev\tools\tests\test_restore_gameplay_contract.py
++++ b/DayZ_MCP_dev\tools\tests\test_restore_gameplay_contract.py
+@@ -35,6 +35,9 @@
+         self.assertEqual(loopback.peer_for_command("restore_gameplay"), "client")
+ 
+         state = loopback.ServerState("test-key")
++        from tests.fence_helpers import bind_both_peers
++
++        bind_both_peers(state)
+         status, body = state.enqueue_command("restore_gameplay", {})
+         self.assertEqual((status, body["peer"]), (200, "client"))
+         self.assertEqual(
+--- a/DayZ_MCP_dev\tools\tests\test_retail_quarantine.py
++++ b/DayZ_MCP_dev\tools\tests\test_retail_quarantine.py
+@@ -30,6 +30,9 @@
+     def setUp(self) -> None:
+         self.events: list[dict[str, object]] = []
+         self.state = loopback.ServerState("key")
++        from tests.fence_helpers import bind_both_peers
++
++        bind_both_peers(self.state)
+         self.coordinator = SessionCoordinator(
+             token_fn=lambda: "token",
+             id_fn=lambda: "lease",
+--- a/DayZ_MCP_dev\tools\tests\test_session_e2e.py
++++ b/DayZ_MCP_dev\tools\tests\test_session_e2e.py
+@@ -23,6 +23,7 @@
+ from _session_coordination import e2e_agent_sessions as binary_e2e
+ from tests.test_daemon import _free_port, _http
+ from tests.test_client_mode import _fixture_client_runtime
++from tests.fence_helpers import INST_CLIENT, INST_SERVER, bind_both_peers
+ 
+ 
+ class IntegrationDaemon:
+@@ -42,6 +43,7 @@
+             self.state = daemon.build_server_state(
+                 self.config, key, activate_coordination=True
+             )
++        bind_both_peers(self.state)
+         self.httpd = loopback.create_http_server(
+             port,
+             self.state,
+@@ -105,6 +107,9 @@
+                 "/result",
+                 self.key,
+                 payload={"id": item["id"], "ok": 1, "cmd": item["cmd"]},
++                query={
++                    "inst": INST_SERVER if self.peer == "server" else INST_CLIENT
++                },
+             )
+ 
+     def _poll_once(self) -> None:
+@@ -113,7 +118,10 @@
+             "GET",
+             "/poll",
+             self.key,
+-            query={"peer": self.peer},
++            query={
++                "peer": self.peer,
++                "inst": INST_SERVER if self.peer == "server" else INST_CLIENT,
++            },
+         )
+         new_items: list[dict[str, object]] = []
+         with self._lock:
+@@ -126,6 +134,7 @@
+                 self.commands_seen.append(item)
+                 new_items.append(item)
+         if self.respond:
++            inst = INST_SERVER if self.peer == "server" else INST_CLIENT
+             for item in new_items:
+                 _http(
+                     self.base,
+@@ -133,6 +142,7 @@
+                     "/result",
+                     self.key,
+                     payload={"id": item["id"], "ok": 1, "cmd": item["cmd"]},
++                    query={"inst": inst},
+                 )
+                 with self._lock:
+                     item["responded"] = True
+--- a/DayZ_MCP_dev\tools\tests\test_session_http.py
++++ b/DayZ_MCP_dev\tools\tests\test_session_http.py
+@@ -16,6 +16,7 @@
+ 
+ from dayz_mcp import loopback
+ from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
++from tests.fence_helpers import INST_CLIENT, INST_SERVER, bind_both_peers
+ 
+ 
+ IDENTITY_A = {
+@@ -93,6 +94,7 @@
+         self.audit_events: list[dict[str, object]] = []
+         self.store = SnapshotStore()
+         self.state = loopback.ServerState(self.key)
++        bind_both_peers(self.state)
+ 
+         def audit(event: dict[str, object]) -> bool:
+             self.audit_events.append(event)
+@@ -471,7 +473,7 @@
+         self.assertEqual(done["result"]["error"], "owner_release")
+ 
+         status, polled = _http(
+-            self.base, "GET", "/poll", self.key, query={"peer": "server"}
++            self.base, "GET", "/poll", self.key, query={"peer": "server", "inst": INST_SERVER}
+         )
+         self.assertEqual(status, 200)
+         self.assertEqual([item["id"] for item in polled["commands"]], [foreign_read["id"]])
+@@ -497,7 +499,7 @@
+         self.assertEqual(released["cleanup"]["vehicle_release_enqueued"], 1)
+ 
+         status, polled = _http(
+-            self.base, "GET", "/poll", self.key, query={"peer": "client"}
++            self.base, "GET", "/poll", self.key, query={"peer": "client", "inst": INST_CLIENT}
+         )
+         self.assertEqual(status, 200)
+         self.assertEqual(len(polled["commands"]), 1)
+--- a/DayZ_MCP_dev\tools\tests\test_task7_final_authority_regressions.py
++++ b/DayZ_MCP_dev\tools\tests\test_task7_final_authority_regressions.py
+@@ -16,6 +16,7 @@
+     Sequence,
+ )
+ from tests.test_task7_rereview_regressions import IDENTITY_B
++from tests.fence_helpers import INST_SERVER, accredited_poll, bind_both_peers, bound_queue
+ 
+ 
+ def wait_until(predicate, timeout_s: float = 0.5) -> bool:
+@@ -1448,6 +1449,7 @@
+         state = loopback.ServerState(
+             "key", time_fn=clock, coordination=coordinator
+         )
++        bind_both_peers(state)
+         state_holder.append(state)
+         advanced = False
+ 
+@@ -1491,6 +1493,7 @@
+         state = loopback.ServerState(
+             "key", time_fn=clock, coordination=coordinator
+         )
++        bind_both_peers(state)
+         state_holder.append(state)
+         state.retail_probe = lambda: {"known": True, "processes": []}
+         _, lease = coordinator.acquire(IDENTITY, "claim-expiry")
+@@ -1505,7 +1508,7 @@
+         # Isolate the lease-claim boundary from the independent 30 s queue TTL.
+         with state._lock:
+             state._enqueued_at[queued["id"]] = clock.now
+-        _, polled = state.record_poll("server")
++        _, polled = accredited_poll(state, "server")
+         self.assertEqual(polled["commands"], [])
+         self.assertEqual(state.take_result(queued["id"])["error"], "lease_inactive")
+         self.assertEqual(observations, [True])
+@@ -1517,6 +1520,7 @@
+             audit=lambda _event: True,
+         )
+         state = loopback.ServerState("key", coordination=coordinator)
++        bind_both_peers(state)
+         status, queued = state.enqueue_command(
+             "query_player_state",
+             {},
+@@ -1534,7 +1538,7 @@
+ 
+         state.retail_probe = blocking_probe
+         polled: list[tuple[int, dict]] = []
+-        thread = threading.Thread(target=lambda: polled.append(state.record_poll("server")))
++        thread = threading.Thread(target=lambda: polled.append(accredited_poll(state, "server")))
+         thread.start()
+         thread.join(0.20)
+         progressed = not thread.is_alive()
+@@ -1553,6 +1557,7 @@
+             audit=lambda _event: True,
+         )
+         state = loopback.ServerState("key", coordination=coordinator)
++        bind_both_peers(state)
+         state.retail_probe = lambda: {"known": True, "processes": []}
+         _, lease = coordinator.acquire(IDENTITY, "poll-probe")
+         state.enqueue_command(
+@@ -1574,7 +1579,7 @@
+             return {"known": True, "processes": []}
+ 
+         state.retail_probe = blocking_probe
+-        poll_thread = threading.Thread(target=lambda: state.record_poll("server"))
++        poll_thread = threading.Thread(target=lambda: accredited_poll(state, "server"))
+         poll_thread.start()
+         self.assertTrue(probe_entered.wait(1.0))
+ 
+@@ -1619,6 +1624,7 @@
+             exec_allowlist={"allowed_expr"},
+             exec_audit=audit,
+         )
++        bind_both_peers(state)
+         result: list[tuple[int, dict]] = []
+         enqueue_thread = threading.Thread(
+             target=lambda: result.append(
+@@ -1642,6 +1648,7 @@
+         self.assertEqual(decisions, ["allowed", "discarded"])
+         with state._lock:
+             self.assertEqual(state._queues["server"], [])
++            self.assertEqual(bound_queue(state, "server"), [])
+             self.assertEqual(state._exec_capacity_reserved["server"], 0)
+ 
+     def test_last_queue_slot_cannot_emit_phantom_allowed_audit(self) -> None:
+@@ -1661,6 +1668,7 @@
+             exec_allowlist={"allowed_expr"},
+             exec_audit=audit,
+         )
++        bind_both_peers(state)
+         with state._lock:
+             state._queues["server"] = [
+                 {"id": -(index + 1), "cmd": "noop", "args": {}}
+@@ -1694,8 +1702,12 @@
+         ]
+         self.assertEqual(len(allowed_ids), 1)
+         with state._lock:
+-            queued_ids = {command["id"] for command in state._queues["server"]}
+-        self.assertIn(allowed_ids[0], queued_ids)
++            legacy_ids = {command["id"] for command in state._queues["server"]}
++            published_ids = set(legacy_ids) | {
++                command["id"] for command in bound_queue(state, "server")
++            }
++        self.assertIn(allowed_ids[0], published_ids)
++        self.assertNotIn(allowed_ids[0], legacy_ids)
+ 
+ 
+ class OwnerReadRevalidationTest(unittest.TestCase):
+@@ -1717,6 +1729,7 @@
+             return True
+ 
+         state = loopback.ServerState("key", coordination=None)
++        bind_both_peers(state)
+         coordinator = SessionCoordinator(
+             token_fn=Sequence("token"),
+             id_fn=Sequence("lease"),
+@@ -1785,7 +1798,7 @@
+             self.assertEqual(coordinator._active.expires_at, l2_expiry)
+         released = coordinator.release(IDENTITY, l2["lease_token"])[1]
+         self.assertEqual(released["cleanup"].get("cancelled"), 0)
+-        _, polled = state.record_poll("server")
++        _, polled = accredited_poll(state, "server")
+         self.assertEqual([item["id"] for item in polled["commands"]], [command_id])
+ 
+ 
+--- a/DayZ_MCP_dev\tools\tests\test_task7_rereview_regressions.py
++++ b/DayZ_MCP_dev\tools\tests\test_task7_rereview_regressions.py
+@@ -28,6 +28,7 @@
+ )
+ from dayz_mcp.runtime_state import RuntimePaths
+ from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
++from tests.fence_helpers import accredited_poll, bind_both_peers
+ from tests.test_task7_review_regressions import (
+     Audit,
+     Guard,
+@@ -66,6 +67,7 @@
+         )
+         _, acquired = coordinator.acquire(IDENTITY, "authority")
+         state = loopback.ServerState("key", coordination=coordinator)
++        bind_both_peers(state)
+         state.retail_probe = lambda: {"known": True, "processes": []}
+         state._enqueue_command(
+             "query_player_state",
+@@ -93,7 +95,7 @@
+     def test_poll_of_existing_read_progresses_while_authorization_audit_is_blocked(self) -> None:
+         state, _coordinator, _acquired, resume, worker, _result = self._blocked_authorize()
+         polled: list[tuple[int, dict]] = []
+-        poller = threading.Thread(target=lambda: polled.append(state.record_poll("server")))
++        poller = threading.Thread(target=lambda: polled.append(accredited_poll(state, "server")))
+         try:
+             poller.start()
+             self.assertTrue(
+@@ -408,6 +410,7 @@
+             game.mkdir()
+             (game / "DayZDiag_x64.exe").write_bytes(b"")
+             state = loopback.ServerState("key", coordination=None)
++            bind_both_peers(state)
+             started = threading.Event()
+             resume = threading.Event()
+             finished = threading.Event()
+@@ -485,6 +488,7 @@
+         resume_probe = threading.Event()
+         cleanup_finished = threading.Event()
+         state = loopback.ServerState("key", coordination=None)
++        bind_both_peers(state)
+ 
+         def cleanup(session_id, lease_id, reason, vehicle_active):
+             result = state.cleanup_owner(
+@@ -517,7 +521,7 @@
+         self.assertIn("cleanup_timeout", released["cleanup_degraded"])
+         resume_probe.set()
+         self.assertTrue(cleanup_finished.wait(1.0))
+-        _, polled = state.record_poll("client")
++        _, polled = accredited_poll(state, "client")
+         self.assertEqual(polled["commands"], [])
+ 
+ 
+@@ -531,6 +535,7 @@
+         )
+         _, acquired = coordinator.acquire(IDENTITY, "dispatch")
+         state = loopback.ServerState("key", coordination=coordinator)
++        bind_both_peers(state)
+         state.retail_probe = lambda: {"known": True, "processes": []}
+         status, queued = state.enqueue_command(
+             "world_time_set",
+@@ -544,7 +549,7 @@
+             "known": True,
+             "processes": [{"pid": 44, "name": "DayZ_x64.exe"}],
+         }
+-        _, polled = state.record_poll("server")
++        _, polled = accredited_poll(state, "server")
+         self.assertEqual(polled["commands"], [])
+         result = state.take_result(queued["id"])
+         self.assertEqual(result["error"], "retail_quarantine")
+--- a/DayZ_MCP_dev\tools\tests\test_task7_review_regressions.py
++++ b/DayZ_MCP_dev\tools\tests\test_task7_review_regressions.py
+@@ -30,6 +30,7 @@
+ from dayz_mcp.server import ServerConfig
+ from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
+ from _session_coordination.process_guard_gate import validate_result_shape
++from tests.fence_helpers import accredited_poll, bind_both_peers
+ 
+ 
+ IDENTITY = ClientIdentity(
+@@ -428,6 +429,7 @@
+ 
+     def test_stale_l1_enqueue_cannot_be_delivered_after_same_identity_gets_l2(self) -> None:
+         state = loopback.ServerState("key")
++        bind_both_peers(state)
+         coordinator = SessionCoordinator(
+             token_fn=Sequence("token"),
+             id_fn=Sequence("lease"),
+@@ -467,12 +469,13 @@
+         worker.join(2.0)
+         self.assertFalse(worker.is_alive())
+         self.assertNotEqual(results[0][0], 200)
+-        self.assertEqual(state.record_poll("server")[1]["commands"], [])
++        self.assertEqual(accredited_poll(state, "server")[1]["commands"], [])
+ 
+ 
+ class DispatchAuthorityAndQuarantineTest(unittest.TestCase):
+     def _state(self, *, clock: Clock | None = None):
+         state = loopback.ServerState("key", time_fn=clock)
++        bind_both_peers(state)
+         events: list[dict[str, object]] = []
+         coordinator = SessionCoordinator(
+             time_fn=clock or __import__("time").monotonic,
+@@ -502,7 +505,7 @@
+         self.assertEqual(status, 200)
+         clock.advance(121.0)
+         with patch.object(loopback, "COMMAND_TTL_S", 1000.0):
+-            polled = state.record_poll("server")[1]
++            polled = accredited_poll(state, "server")[1]
+         self.assertEqual(polled["commands"], [])
+         self.assertEqual(coordinator.status(IDENTITY)["self"]["state"], "none")
+         self.assertIn(
+@@ -526,7 +529,7 @@
+             "known": True,
+             "processes": [{"pid": 42, "name": "DayZ_x64.exe"}],
+         }
+-        commands = state.record_poll("server")[1]["commands"]
++        commands = accredited_poll(state, "server")[1]["commands"]
+         self.assertEqual([item["id"] for item in commands], [read["id"]])
+         self.assertEqual(state.take_result(mutation["id"])["error"], "retail_quarantine")
+         self.assertIn("session_rejected", [event.get("event") for event in events])
+@@ -541,7 +544,7 @@
+             lease_token=acquired["lease_token"],
+         )[1]
+         state.retail_probe = lambda: {"known": False, "processes": []}
+-        self.assertEqual(state.record_poll("server")[1]["commands"], [])
++        self.assertEqual(accredited_poll(state, "server")[1]["commands"], [])
+         self.assertEqual(state.take_result(queued["id"])["error"], "retail_quarantine")
+ 
+     def test_missing_probe_with_coordination_is_unknown_and_fail_closed(self) -> None:
+@@ -555,7 +558,7 @@
+             lease_token=acquired["lease_token"],
+         )
+         self.assertEqual((status, result["error"]), (409, "retail_quarantine"))
+-        self.assertEqual(state.record_poll("server")[1]["commands"], [])
++        self.assertEqual(accredited_poll(state, "server")[1]["commands"], [])
+ 
+     def test_dispatch_claim_wins_before_release_and_delivers_exactly_once(self) -> None:
+         state, coordinator, acquired, _events = self._state()
+@@ -579,7 +582,7 @@
+         coordinator.claim_dispatch = paused  # type: ignore[method-assign]
+         poll_result: list[tuple[int, dict]] = []
+         release_result: list[tuple[int, dict]] = []
+-        poll = threading.Thread(target=lambda: poll_result.append(state.record_poll("server")))
++        poll = threading.Thread(target=lambda: poll_result.append(accredited_poll(state, "server")))
+         poll.start()
+         self.assertTrue(claimed.wait(1.0))
+         release = threading.Thread(
+@@ -616,7 +619,7 @@
+         coordinator.claim_dispatch = paused  # type: ignore[method-assign]
+         poll_result: list[tuple[int, dict]] = []
+         release_result: list[tuple[int, dict]] = []
+-        poll = threading.Thread(target=lambda: poll_result.append(state.record_poll("server")))
++        poll = threading.Thread(target=lambda: poll_result.append(accredited_poll(state, "server")))
+         poll.start()
+         self.assertTrue(before_claim.wait(1.0))
+         release = threading.Thread(
+@@ -905,6 +908,7 @@
+                 )
+             )
+             state = loopback.ServerState("key")
++            bind_both_peers(state)
+             with patch.dict(os.environ, {"LOCALAPPDATA": temporary}):
+                 daemon._activate_server_coordination(state, "new-generation")
+             run = state.lifecycle.manifest.get("persisted")
+@@ -929,6 +933,7 @@
+             )
+             before = paths.runs_path.read_bytes()
+             state = loopback.ServerState("key")
++            bind_both_peers(state)
+             with (
+                 patch.dict(os.environ, {"LOCALAPPDATA": temporary}),
+                 patch.object(daemon.JsonlAuditWriter, "write", return_value=False),
+@@ -1054,6 +1059,7 @@
+     def test_real_lifecycle_quarantine_blocks_mutations_but_status_and_release_work(self) -> None:
+         fixture = LifecycleFixture()
+         state = loopback.ServerState("key", coordination=fixture.coordinator)
++        bind_both_peers(state)
+         state.lifecycle = fixture.lifecycle
+         state.retail_probe = lambda: {"known": False, "processes": []}
+         fixture.probe = {"known": False, "processes": []}
+@@ -1103,6 +1109,7 @@
+     def test_real_lifecycle_clean_routes_cover_start_stop_adopt_reconcile_and_empty(self) -> None:
+         fixture = LifecycleFixture()
+         state = loopback.ServerState("key", coordination=fixture.coordinator)
++        bind_both_peers(state)
+         state.lifecycle = fixture.lifecycle
+         state.retail_probe = lambda: {"known": True, "processes": []}
+         fixture.probe = {"known": True, "processes": []}
+--- a/DayZ_MCP_dev\tools\tests\test_vehicle_prepare_fixture.py
++++ b/DayZ_MCP_dev\tools\tests\test_vehicle_prepare_fixture.py
+@@ -35,6 +35,9 @@
+ class VehiclePrepareFixtureTest(unittest.TestCase):
+     def setUp(self) -> None:
+         self.state = loopback.ServerState("test-key")
++        from tests.fence_helpers import bind_both_peers
++
++        bind_both_peers(self.state)
+ 
+     def test_command_is_whitelisted_and_routes_only_to_server(self) -> None:
+         self.assertIn(COMMAND, loopback.SERVER_COMMANDS)
+--- a/DayZ_MCP_dev\tools\tests\test_vehicle_trace_contract.py
++++ b/DayZ_MCP_dev\tools\tests\test_vehicle_trace_contract.py
+@@ -50,6 +50,9 @@
+         self.assertEqual(loopback.peer_for_command("vehicle_trace"), "client")
+ 
+         state = loopback.ServerState("test-key")
++        from tests.fence_helpers import bind_both_peers
++
++        bind_both_peers(state)
+         valid = {
+             "mode": "start",
+             "trace_id": "a" * 32,
+--- a/DayZ_MCP_dev\tools\tests\test_x5_loopback.py
++++ b/DayZ_MCP_dev\tools\tests\test_x5_loopback.py
+@@ -150,7 +150,11 @@
+         def audit(_expr: str, _verdict: str, _main_fn: str, _command_id: int | None) -> None:
+             raise OSError("audit locked")
+ 
+-        self.start_server(loopback.ServerState(self.key, enable_exec_enforce=True, exec_allowlist={"allowed"}, exec_audit=audit))
++        state = loopback.ServerState(self.key, enable_exec_enforce=True, exec_allowlist={"allowed"}, exec_audit=audit)
++        from tests.fence_helpers import bind_both_peers
++
++        bind_both_peers(state)
++        self.start_server(state)
+         status, body = self.request("POST", "/enqueue", {"cmd": "exec_enforce", "args": {"expr": "allowed"}})
+         self.assertEqual(status, 503)
+         self.assertEqual(body, {"error": "audit_failed"})
+@@ -169,6 +173,9 @@
+             exec_allowlist={"allowed"},
+             exec_audit=lambda expr, verdict, _fn, cid: audited.append((expr, verdict, cid)),
+         )
++        from tests.fence_helpers import bind_both_peers
++
++        bind_both_peers(state)
+         for _ in range(loopback.MAX_QUEUE):
+             status, _ = state.enqueue_command("query_player_state", {}, peer="server")
+             self.assertEqual(status, 200)
+--- a/DayZ_MCP_dev\tools\tests\test_x5_tools.py
++++ b/DayZ_MCP_dev\tools\tests\test_x5_tools.py
+@@ -36,6 +36,9 @@
+             )
+         )
+         runtime.start_loopback()
++        from tests.fence_helpers import bind_both_peers
++
++        bind_both_peers(runtime.state)
+         self.runtimes.append(runtime)
+         return app, runtime
+ 

@@ -1,0 +1,22 @@
+--- base/MCPMessages.c
++++ grok/MCPMessages.c
+@@ -80,6 +80,8 @@
+ 	ref array<string> want;
+ 	// Optional player identity (GetPlainId). Empty = first human / broadcast.
+ 	string uid;
++	// action_use: ActionBase typename (Type().ToString()), e.g. LFPG_ActionOpenBTCAtm.
++	string action;
+ 
+ 	void MCPArgs()
+ 	{
+@@ -417,6 +419,10 @@
+ 	bool clicked;
+ 	string handler;
+ 	int user_id;
++	// action_use: started means local dispatch only; server ack is not awaited.
++	string action;
++	float distance;
++	bool started;
+ };
+ 
+ class MCPJob

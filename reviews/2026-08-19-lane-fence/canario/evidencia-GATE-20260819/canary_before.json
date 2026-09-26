@@ -1,0 +1,53 @@
+{
+  "phase": "before",
+  "ts": "2026-08-19T22:47:05",
+  "fence": {
+    "client_binding_state": "BOUND",
+    "client_instance_prefix": "5f5b9e7a",
+    "unaccredited_mutation_enqueues": 0,
+    "unaccredited_polls_by_class": {},
+    "mutation_rejects_by_code": {
+      "legacy_unbound": 0,
+      "instance_unknown": 0,
+      "instance_ambiguous": 0,
+      "instance_unattributed": 0,
+      "binding_retired": 0,
+      "instance_role_mismatch": 0,
+      "instance_peer_collision": 0,
+      "binding_not_ready": 0,
+      "creation_time_unreadable": 0
+    }
+  },
+  "capture_bound": {
+    "ok": true,
+    "error": "",
+    "method": "printwindow",
+    "window": {
+      "pid": 21044,
+      "class": "DayZ",
+      "title": "DayZ",
+      "left": 909,
+      "top": 487,
+      "width": 1942,
+      "height": 1136
+    },
+    "stats": {
+      "meanBrightness": 121.27977560763777,
+      "nonBlackRatio": 1
+    },
+    "sha256": "93370B3810AD44913AFFA58984C0FF0D758580ED2266EEA39FA0D8257810F748",
+    "client": {
+      "left": 11,
+      "top": 45,
+      "width": 1920,
+      "height": 1080
+    },
+    "clientStats": {
+      "meanBrightness": 117.72643923610998,
+      "nonBlackRatio": 1
+    },
+    "path": "C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/reviews/2026-08-19-lane-fence/canario/evidencia-GATE-20260819\\A_bound.png",
+    "exists": true,
+    "bytes": 1944611
+  }
+}

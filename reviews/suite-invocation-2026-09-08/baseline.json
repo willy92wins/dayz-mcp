@@ -1,0 +1,22 @@
+{
+  "tools/tests/test_lote2_t2_steam.py": {
+    "bytes": 5462,
+    "sha256": "633b620c3a210a45795c7e5607174b58f73d14c288951674f3af2b1852f0c739"
+  },
+  "tools/run-tests.ps1": {
+    "bytes": 0,
+    "sha256": null
+  },
+  "GATES.md": {
+    "bytes": 2354,
+    "sha256": "9dae7c9b219e3219f135102a36cb9c9ccc73e5fb742bc79e9ad8dd0a22ce15d7"
+  },
+  "tools/tests/test_steam_preflight.py": {
+    "bytes": 15321,
+    "sha256": "2651a355de212a496851cb86bf7c465bdb484acc47c5305e9ed1ad0db33e1f45"
+  },
+  "tools/tests/test_dayz_test_tool.py": {
+    "bytes": 86328,
+    "sha256": "d0ec2f608e923038b8090dc9b254bff54e06d37363a1e92d806d31f7f6fb35fe"
+  }
+}

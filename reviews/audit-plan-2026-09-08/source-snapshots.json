@@ -1,0 +1,318 @@
+{
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\audit-triage-2026-09-08\\REPORT.md": {
+    "bytes": 54918,
+    "sha256": "849fd5496ad279274f8f4505ac337b8f796ddf2b11bc8b333aadd83e0387b1a5"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\AUDITORIA_MCP_2026-09-07.md": {
+    "bytes": 52205,
+    "sha256": "4826f922da710b4f4db5eeaed106d9b63c75d49619ad7364e64274a3bb8543ef"
+  },
+  "C:\\Users\\guill\\.claude\\skills\\enforce-script-reference\\SKILL.md": {
+    "bytes": 84733,
+    "sha256": "333c4fe88367618b1f759e1be34984addc98480d729d9e65355ff28589b3bb7e"
+  },
+  "C:\\Users\\guill\\ObsidianVault\\AI\\20_Knowledge\\dayz-mod-implementation-checklists.md": {
+    "bytes": 24952,
+    "sha256": "d93860116e66f1ef5e31e73d930bbcc6dc6d0a96d872ea1572de510cafbe69f8"
+  },
+  "C:\\Users\\guill\\.claude\\skills\\pre-output-discipline\\SKILL.md": {
+    "bytes": 24427,
+    "sha256": "3991b126b9995927ee717cc5f3ce138974305d02fef66ef00c7f152379d7590a"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\product-spec.md": {
+    "bytes": 54632,
+    "sha256": "716a8e9ba31c7c78b98933840e16a66babff1729543decfde5fa78e9ae540df4"
+  },
+  "C:\\Users\\guill\\ObsidianVault\\AI\\00_System\\workflow.md": {
+    "bytes": 17763,
+    "sha256": "7c6b6575776feae143cf42ab16b2ab5b9ae0bff30fad45b3fcfb38d51ce90f43"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\addon\\scripts\\5_Mission\\MCPCallbacks.c": {
+    "bytes": 1147,
+    "sha256": "ed05f17a26a71e2de2705f52d57205a70f7fb16175e30139eafea578d2bdc82c"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\addon\\scripts\\5_Mission\\MCPClientBridge.c": {
+    "bytes": 93901,
+    "sha256": "1480066c077aa58cea5e17f66760f78ca337dbf8533817384acf9af247c295f7"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\daemon_policy_contract.py": {
+    "bytes": 4012,
+    "sha256": "7fe0c07bb83c2df03b0127847848493fc9423c519cee1b0929fc4a934d8c4e45"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\daemon_policy.py": {
+    "bytes": 13400,
+    "sha256": "4e70e065e677b95c80e914cad7776aab14001d02ff529f38109e328e1afacc32"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\normal_daemon_policy.py": {
+    "bytes": 5011,
+    "sha256": "8a43cc1c3cd9323e5e027388918d7abd9ac8a168eefebcaf60f4e690750e34ee"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\daemon_credential.py": {
+    "bytes": 12282,
+    "sha256": "0412ee9a5a80be14daf8f74222db419fcbd1e773f29093308a520cd66f84bd13"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\accredited_daemon_transport.py": {
+    "bytes": 10725,
+    "sha256": "feec5f9657ebfdab668923cfbe897f3aa2e14fd9cfc2aab843baf7f0d07b6556"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\lease_supervisor.py": {
+    "bytes": 6953,
+    "sha256": "9c0e9c00f8c2aca843780dee456c1f698fbd300b2e699cedac206221f083f1ef"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py": {
+    "bytes": 226274,
+    "sha256": "79a902ba2778b08b348cc04f3e257dac166a23afe4962dea9af32a0bd905aef3"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\daemon.py": {
+    "bytes": 65091,
+    "sha256": "8c8174975abf15940bace317fca24ea834c8e59062555fdd57b570ad32ff2711"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_task7_final_authority_regressions.py": {
+    "bytes": 69513,
+    "sha256": "6fd70206dcb34628e41826df30d592d3aa648a5f95c2a0da9edad43acb130887"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_task7_final_lifecycle_regressions.py": {
+    "bytes": 12228,
+    "sha256": "c63c0090495dd320c34b9b77295f08320f0f2c6313021e4d69656e24e7115339"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_task7_review_regressions.py": {
+    "bytes": 58289,
+    "sha256": "6e02eea2fd800dd642ab6e0cfab19a4293829a77dd2feb846964aaa1cf9b96c3"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_task7_rereview_regressions.py": {
+    "bytes": 51150,
+    "sha256": "a999f978b646d769963d48a76559fcc33fe7b2800b5feaaa9618fa16b4c5bf3f"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\addon\\scripts\\5_Mission\\MCPBridge.c": {
+    "bytes": 80958,
+    "sha256": "3a86e09d9b9694bfb06bdfe8b9dcce950920f93771fbc3c01c900d9421537d8d"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\log_tail.py": {
+    "bytes": 7734,
+    "sha256": "19b675aba11dcb663b7b91dc67f7319845151cb5388362ac31be1a0b71ca5f30"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\schemas\\vehicle-trace-v1.json": {
+    "bytes": 5769,
+    "sha256": "d5c66985987362d3c6991fceff47ee396cd839150f90cdd6d459d13d3831cf88"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\fixtures\\vehicle-trace-civilian-sedan-control-v1.json": {
+    "bytes": 586,
+    "sha256": "9ca3c765642e725f6be11d82f3e9844ebbe23503b5e6c4c4a252df02d054ba65"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\fixtures\\vehicle_trace\\negative_mutations.json": {
+    "bytes": 1544,
+    "sha256": "94854713809feff79b7f8956596914139940d08f120416881b729e3856e6cbe9"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_vehicle_trace.py": {
+    "bytes": 21963,
+    "sha256": "f79436504811f9c6d2adc3b38f50dd6e1a37e3425dcbd85983d5cbc055b6c4ef"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_vehicle_prepare_fixture.py": {
+    "bytes": 6178,
+    "sha256": "5e005e499013dd7396df340f8eea9d480c0ae984f8f9e7b5fa15f69ed18b351f"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\scripts\\1_core\\proto\\enscript.c": {
+    "bytes": 24588,
+    "sha256": "1ca3897df3f842e6eaacb5e771a4a04ece1d77e2a7c987f0a8174351770b43d4"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\loopback.py": {
+    "bytes": 155642,
+    "sha256": "9c3c270e84813013fc5396d26d0326d19aee073557e6b2e6a57acc9cf4f20936"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\addon\\scripts\\4_World\\MCP_CarScript.c": {
+    "bytes": 15127,
+    "sha256": "f1fbb2a82038f7ca299406f2c88d198df0f4cb9ac6fd0977d88e918034ae49db"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\mcp_capture.py": {
+    "bytes": 55983,
+    "sha256": "20294389b4bd79a640eac75e53351571a740b9eb476bf544d31d9b8bd592de61"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\lote_harness\\mutation_gate.py": {
+    "bytes": 5924,
+    "sha256": "3802ab6b467483c766699041cbb77aabeccd6c16c9b006809f973e539f0644dd"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\build_native_launcher.py": {
+    "bytes": 47468,
+    "sha256": "e1a8b657c7c223700ced4f628375764b7b3459b81750aa6646561d9902bc100c"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_wait_for.py": {
+    "bytes": 34245,
+    "sha256": "36c4f10ca776f30635658cfe6bf91cdcc3562d6ff5f99fd482a956ba8b2ee727"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_wait_for_launch_and_contract.py": {
+    "bytes": 26038,
+    "sha256": "f5b06a3da7c97360fabe792b740909ed35aa05149b522de5bff9cc7bb5059192"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_wait_for_requires_a_live_run.py": {
+    "bytes": 4399,
+    "sha256": "76965123bc6fd726bb6a627da92f0b96f3043d68aab3d5a9eea8112f2cbc7fe9"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_wait_for_marker.py": {
+    "bytes": 4766,
+    "sha256": "53829f7051cbc82c2023f5eac67e63dd2fac24f701fb0c94cf16ec4f2b69580f"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\run-tests.ps1": {
+    "bytes": 1575,
+    "sha256": "2b08dea99f89c709c645c65610cba781c356f3f0d1a0f48976a49b8333245908"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_lote2_t2_steam.py": {
+    "bytes": 5450,
+    "sha256": "883b3b3e4ca634dd9a179fe0f939f4a1954b3663bdca53c036c3c335ddb8b945"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\PROJECT-MAP.md": {
+    "bytes": 3789,
+    "sha256": "cd76ea094a63505f837bacec8d7937714d52248c05b0b3c45b31b5a3fa52bd50"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\gen-project-map.ps1": {
+    "bytes": 8232,
+    "sha256": "66b7cf5c3599ad10894cddaf54c7f10c08b24aafd2ae4ecbbdf842e2d7e44a6e"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\control_client.py": {
+    "bytes": 32044,
+    "sha256": "febb352e6619585f366c01286df3bd69b18be249512ea935a00971b9784374e4"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\host_config.py": {
+    "bytes": 46471,
+    "sha256": "f0c100c63c16fcf8f19cf22f0aadec122e143bdcb90c8635e6e4d12df4dbaf34"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_docs_truth.py": {
+    "bytes": 30518,
+    "sha256": "3c4c21cb65e7c647be49551b0b513343c0ac5cca590676b1b910a1a14028181c"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\GATES.md": {
+    "bytes": 4041,
+    "sha256": "33f6bafa94340481cbecd0f75c601680ab10490472ea014185d02e0dd2274b51"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\QUICKSTART.md": {
+    "bytes": 2624,
+    "sha256": "9d94cddc76512cb24f8d95774ce34f2db76b277a602236b33a56471bb0f53cd4"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\session_coordination.py": {
+    "bytes": 149703,
+    "sha256": "cd966adcf4584bdf0cb07025221b534212ea5071c68ca98ba367dd87a0f173a2"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\process_lifecycle.py": {
+    "bytes": 181050,
+    "sha256": "cfa0c268eef4b44825cd3f8b2c0a749d581564f5aa326cbc6a64858a3989366e"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\orphan_guard.py": {
+    "bytes": 45765,
+    "sha256": "82902f24ad0cbef99978bb27a0aa66c18a3dda1708ae0f229a5ae22a7fd8ca31"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\launcher_registry.py": {
+    "bytes": 15992,
+    "sha256": "8a614c0423e1c8c992a4a386994cffd381870fcc27f536ebdae4d31c574a6191"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\native_launcher_transaction.py": {
+    "bytes": 32187,
+    "sha256": "5950ea85b07052fbcc6ac8b7585e5dfba1f4978544858c95331d247c6375704d"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_daemon_contract.py": {
+    "bytes": 6711,
+    "sha256": "301527fb605d35b40eaca611babf6f0f2b5e076db50436c4d8361a6236d51adf"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_session_e2e.py": {
+    "bytes": 23440,
+    "sha256": "484adde5fe238ac0a5b70e233d618a12c18188129075b77eec027d2368c8c39b"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_client_credential_rotation_e2e.py": {
+    "bytes": 24539,
+    "sha256": "05400b2cc255e4d07c6d37f1ba16f27d305359fdaae0eede9a9ba77630aa908d"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\addon\\scripts\\5_Mission\\MCPDialogController.c": {
+    "bytes": 17138,
+    "sha256": "fb527db88f9490dc7d6a17923cfc4bf80fd3784d8ff88dc79de6aaa21b207941"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_client_mode.py": {
+    "bytes": 69247,
+    "sha256": "6eb705d303f0b44bfb0ef12b5eb6f3fc800f3014672c224368c937b63a27c1bc"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_mcp_tools.py": {
+    "bytes": 59572,
+    "sha256": "d048530eeea34610803f5931090dfc8534fae0d19d05029a2155dab37d43b2cf"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_lifecycle_cli.py": {
+    "bytes": 15950,
+    "sha256": "96fa441e6e42bc450828840a8f1b6d1aaf55ba13948eae131c44d9cfbc888bdc"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\daemon_contract.py": {
+    "bytes": 3408,
+    "sha256": "0a22414413a7b34a323ceced7193135f83601e623ce5f03a9dba12ca92006976"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\README-mcp.md": {
+    "bytes": 20081,
+    "sha256": "b894d07f50b8a942325aa008e9360ff99de90e9c41418be48a95591e16b52623"
+  },
+  "C:\\Users\\guill\\ObsidianVault\\AI\\00_Protocols\\evidence-led-memory.md": {
+    "bytes": 12519,
+    "sha256": "cebfefaacd440cb44bb371cc76cc1af46fc278e95071ec82f1198f573538f216"
+  },
+  "C:\\Users\\guill\\ObsidianVault\\AI\\20_Runbooks\\maintain-project-memory.md": {
+    "bytes": 5086,
+    "sha256": "a7db28865db252f140aa7a47ede34c4f57e76735309fe73e2e52ae90f6bbbe7d"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\effective_schema_catalog.py": {
+    "bytes": 4967,
+    "sha256": "8d35a5f51a1aef976ff21ddd456c29edad7b66cbf30d72eaca6a763f762b5a01"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\effective_schema.py": {
+    "bytes": 10503,
+    "sha256": "26ae37cb73dec4b23b598ee1985faa7d99cad8a8fdb2d7688c091b0d41df593b"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_registry_lock.py": {
+    "bytes": 2881,
+    "sha256": "431e5b1eecf884d1cda60bfb47341e9825f5a244db1c42992359f064a864314f"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_retail_quarantine.py": {
+    "bytes": 7703,
+    "sha256": "510c333aaa0faeb869bf92021ffe5d0471b99efe76781d9ddaf5b193c79127e3"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_launcher_registry_update.py": {
+    "bytes": 48772,
+    "sha256": "627458e31b3c1359b94c7df183f0b0af6814c9d1defcac60957c450d3ea62bb5"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\_session_coordination\\h8_distributed_codex_gate.py": {
+    "bytes": 58256,
+    "sha256": "d5d8f81300a05021eef2fc12b4ea9606a6d0c7902a0d6a1726d0e1ce54dc70f9"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\_session_coordination\\h8_real_codex_gate.py": {
+    "bytes": 46448,
+    "sha256": "13c6e7c71ab716160e668df7afea587ca7741d657f96ca94b8345b8a8f719727"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\native_process_guard.py": {
+    "bytes": 11127,
+    "sha256": "6d45b4b7e2a2737bdaa38a8477875d6dd20919761dbad2e82b8ac7a0c9bb9ae0"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\addon\\config.cpp": {
+    "bytes": 536,
+    "sha256": "f5874213dbc4af71dbf95ab3ee08c02a0eac5094eb319b52ab17141bf67ec6ee"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\addon\\gui\\layouts\\mcp_dialog.layout": {
+    "bytes": 7922,
+    "sha256": "653f170ae544bd9015cae7dcc2b4220f0f96518126735ed7862118624186821a"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\dayz_test_tool.py": {
+    "bytes": 72917,
+    "sha256": "6909b46db9f0a0d1557f6c173c852d1603a4e2a953f71ef02efdbbe68e095979"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_bug046_startup_deadlock.py": {
+    "bytes": 60490,
+    "sha256": "9d99ed810f5578e486e0f0bb3879ab067d1384a65d2f56e602c4f05479577991"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\secure_launcher.py": {
+    "bytes": 9594,
+    "sha256": "d4139911a21e28499e96b4fe7fa9c1cff5b26c7683d5b3a98ff2b07283cd3705"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\scripts\\5_mission\\gui\\ingamemenu.c": {
+    "bytes": 11281,
+    "sha256": "6335c713b0449145bde03830c5a2d7c0aa80c0724a69f513806647f8571eed21"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\CLAUDE.md": {
+    "bytes": 7149,
+    "sha256": "7f0a7330e2f7e80794d74f9bffa3e5b50cbfeb58a0b10efaf992ef0df4ee8f6d"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\audit-triage-2026-09-08\\STATE.md": {
+    "bytes": 10319,
+    "sha256": "92400843af9776d083722ac0718fb3e5d239f9d73d7e0b36ccf2e64a08c68f51"
+  }
+}

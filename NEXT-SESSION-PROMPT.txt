@@ -1,0 +1,5 @@
+OBSOLETO 2026-09-12. No usar este fichero.
+
+Producto publicado v1.2 y en pausa. No hay plan en vuelo.
+Fuente viva: HANDOFF.md (bloque LIVE-STATE).
+Checkout de trabajo: rama main, no inbox.

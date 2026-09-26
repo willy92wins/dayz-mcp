@@ -1,0 +1,114 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+===============================================================================
+§0. QUÉ SE REVISA. Sólo esto.
+===============================================================================
+
+El PRODUCTO son tres cosas observables en el código entregado:
+
+  P1. El lookup de actividad **no escribe**. Una lectura de `box_occupancy` deja el
+      `events.jsonl` byte a byte igual.
+  P2. La actividad basal es el último `lifecycle_start_outcome` con `decision="started"` y
+      `state="RUNNING"` para ese `run_id` y esa `daemon_generation`, **leído** del audit. La
+      edad sale de su `timestamp_utc`. Umbral 900 s: `<=900` recent, `>900` stale.
+  P3. Un evento de actividad sin `daemon_generation` utilizable es ambiguo ⇒ `unknown`/null.
+      Uno de OTRA generación no cuenta: el run queda heredado ⇒ `unknown` hasta actividad
+      durable nueva.
+
+Y sigue en pie del lote anterior: memoria sticky por `(daemon_generation, run_id)` ante fallo
+del escritor, que una escritura buena posterior NO limpia; `run_command_activity` sólo en el
+enqueue ACEPTADO de las dos ramas y nunca en un rechazo; fail-closed a `unknown`/null ante
+timestamp futuro, fallo de escritor, ausencia, rotación o JSON inválido; y **la actividad es
+diagnóstico, no autoridad**: no decide `occupied` ni autoriza stop/reap.
+
+**LO QUE NO ES EL PRODUCTO, y no es tu trabajo aunque tengas razón.** Va a una sección
+`BACKLOG` de tu dictamen, no a los hallazgos:
+
+  - El oráculo, el gate, los mutantes, la calibración, el ledger, los briefs, el workspace.
+  - El sobre estructurado de `dayz_test_stop`, los `retired_run_diagnostic` y la
+    desambiguación de `lifecycle_stop_outcome`: son otro lote, a propósito.
+  - Refactors, renombrados, estilo, tipado, cobertura de tests como fin en sí misma.
+  - **Prohibido justificar alcance con «es donde han salido cosas antes».** Si un hallazgo no
+    se puede escribir como «entradas o estado X ⇒ el producto hace Y, que está mal», no es un
+    hallazgo de esta revisión.
+
+===============================================================================
+§1. DÓNDE MIRAR
+===============================================================================
+
+Raíz del árbol entregado (te la paso como --add-dir):
+    ws/tools/dayz_mcp/process_lifecycle.py     <- el grueso del cambio
+    ws/tools/dayz_mcp/loopback.py              <- los dos hooks de enqueue aceptado
+    ws/tools/dayz_mcp/daemon.py                <- inyección de daemon_generation
+    ws/tools/dayz_mcp/runtime_state.py         <- JsonlAuditWriter, rotación
+    ws/tools/tests/test_box_occupancy.py       <- tests entregados
+
+Piezas concretas:
+  - `_latest_jsonl_activity_epoch`  `process_lifecycle.py:991`  (el lookup)
+  - `_run_activity`                 `:1046`
+  - `_write_command_activity`       `:958`   `record_command_activity` `:928`
+  - `_ensure_activity_persisted`    `:979`
+  - `_capture_start_activity`       `:913`, sembrada en el start `:1593`
+  - `occupancy_error_fields`        `:233-270`
+  - `_box_occupancy_uncached`, fila de run y decisión `occupied`
+
+===============================================================================
+§2. LO QUE YA SÉ. No lo redescubras; ataca sus consecuencias
+===============================================================================
+
+Esto es la ronda 2. La ronda 1 iba verde 11/11 en un gate que **no abría el audit ni una
+vez** (su sumidero era una lista, así que `_audit_jsonl_path()` daba `None`). Con el gate
+corregido aparecieron tres defectos, ya arreglados en lo que revisas:
+
+  1. Una lectura pura escribía un `run_command_activity` con `reason="activity_observed"`.
+  2. Ese evento fabricado llevaba el nombre que el propio lookup consulta, para un run con
+     cero comandos, retrofechado al `creation_time_utc` del proceso.
+  3. La basal salía de `creation_time_utc` y no del `lifecycle_start_outcome` acreditado.
+
+Y dos cosas que sé y NO están resueltas — dime si te parecen defecto o aceptables:
+
+  a. **`_ensure_activity_persisted` (`:979`) quedó como código muerto que SÍ escribe en el
+     audit.** Hoy no la llama nadie (lo verifiqué por grep en todo el árbol). Es el resto
+     exacto del defecto 1. ¿Se queda o se va?
+  b. **El lookup lee el fichero entero.** `path.read_text()` sobre un audit de hasta
+     `AUDIT_MAX_BYTES` = 5 MB, parseando cada línea como JSON, **una vez por run** y en cada
+     `box_occupancy` no cacheada. Y abre sólo `current_path`, no los `AUDIT_BACKUPS` = 5
+     backups. La ficha pide un lookup «read-only/**acotado**» sobre «events.jsonl + backups».
+
+===============================================================================
+§3. LO QUE QUIERO DE TI
+===============================================================================
+
+Ataca el producto por donde un gate verde no mira:
+
+  - **Una lectura que escribe, por cualquier otra puerta.** Rastrea TODO camino que salga de
+    `box_occupancy` / `occupancy_error_fields` / `status` hasta `self.audit`. El gate cubre
+    una ruta; tú busca las demás.
+  - **La invariante «la actividad no es autoridad».** ¿Puede el cálculo de actividad colarse
+    en la decisión `occupied`, en un stop o en un reap? Si un run viejo dejara de ocupar la
+    caja, otro arranque pisaría una sesión viva: es el daño más caro del lote.
+  - **Concurrencia.** `_activity_lock` frente a `_operation_lock`: orden de adquisición,
+    posibilidad de deadlock, estado leído fuera del lock, y la caché de `box_occupancy`.
+  - **Transiciones de generación.** Reinicio real: qué queda en disco, qué lee el arranque
+    siguiente, y si algún camino puede afirmar continuidad que no tiene.
+  - **El audit como evidencia.** ¿Se distingue una actividad de comando real de una derivada
+    del arranque? ¿Puede un evento de otra procedencia hacerse pasar por actual?
+  - **Fail-closed de verdad.** Cada rama que devuelve una edad: ¿puede sostenerla?
+
+Reglas duras:
+  - **Enseña, no cuentes.** Todo hallazgo pega el código literal con `path:line`. Una
+    descripción sin el fragmento no es un hallazgo.
+  - **Escribe el fallo concreto**: entradas o estado ⇒ resultado incorrecto.
+  - **La tolerancia no es un defecto.** Una guarda redundante, un parser que acepta dos
+    formatos, una rama defensiva: eso es robustez, y como mucho va a BACKLOG.
+  - Cero hallazgos es una respuesta legítima y mejor que rellenar.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO        — una línea: ¿es seguro integrarlo?
+    ## HALLAZGOS        — por severidad. Cada uno: título, path:line, código pegado,
+                          el fallo concreto, y por qué es del PRODUCTO.
+    ## LAS DOS ABIERTAS — tu opinión sobre (a) y (b) del §2.
+    ## BACKLOG          — lo que viste y no es de este lote.
+    ## NO VERIFICADO    — sin excusas. Vacío es señal de alarma, no de calidad.

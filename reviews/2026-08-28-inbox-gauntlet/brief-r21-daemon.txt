@@ -1,0 +1,35 @@
+REVISION ADVERSARIAL R21 (read-only). Revisas 4 fixes + 1 diagnostico implementados por otro modelo sobre el daemon Python del MCP de DayZ. Tu trabajo: intentar tumbarlos. Veredicto: APPROVE o REQUEST-CHANGES con findings P1/P2/P3 con fichero:linea.
+
+CARGA (dentro del cwd)
+1. INFORME.md — claims del implementador (resumen por tarea, gates rojo->verde, diagnostico T5).
+2. tools\dayz_mcp\{core.py, dayz_test_tool.py, server.py} — EDITADOS.
+3. tools\tests\{test_bridge_status_generation.py, test_daemon.py, test_dayz_test_tool.py} — tests EDITADOS.
+4. _review\original\ — los MISMOS 6 ficheros ANTES del cambio (diffea contra ellos; es la unica fuente del diff).
+5. patch_launcher_width_height.diff — parche PROPUESTO (no aplicado) al launcher.
+6. _ref\launcher_src\ — source del launcher (app_main.py, launcher.cpp) para juzgar T5.
+
+QUE SE PIDIO (resumen de las 5 tareas)
+T1: dayz_test_run con lease de sesion del llamante devolvia "session_transition_conflict" pelado; el fix debia enriquecer SOLO ese camino con "release your session lease first...". PROHIBIDO tocar maquina de estados/lease.
+T2: bad_dayz_test_request debia nombrar campo y enum (mode expected server|all|client) + docstring.
+T3: docstring de ui_focus — quitar "plain TextWidget" de los no-focusables (solo doc).
+T4: bridge_status — peer sin poll en la generacion actual debia dejar de servir version_state persistido (legacy_blocked stale) y decir never_polled_this_generation. PROHIBIDO redisenar acreditacion.
+T5: solo DIAGNOSTICO de por que width/height no fijan el viewport del cliente + parche propuesto sin aplicar + docstring honesto.
+
+HECHOS VERIFICADOS POR EL ORQUESTADOR
+- El arbol original de _review\original es byte-identico al arbol vivo actual (hashes comprobados hoy).
+- El implementador PASO el control de import (dayz_mcp.__file__ dentro del workspace) antes de correr la suite.
+- Rojo->verde reproducido para 6 tests nuevos; 245 tests de los modulos afectados en verde (unittest, python del venv real 3.14.3).
+- La suite COMPLETA del workspace da 60 failures / 78 errors que el implementador atribuye a arbol incompleto de la copia (faltan README/CLAUDE/addon/playbooks/test-contracts). ESTE CLAIM NO ESTA VERIFICADO con una copia limpia — ver angulo A5.
+
+ANGULOS OBLIGATORIOS (uno a uno: limpio o finding)
+A1 (T1). Lee el helper que captura el conflicto en dayz_test_tool.py:318-335 y su condicion (acepta .code o str(error)=="session_transition_conflict" segun el informe). Ataca: ¿puede reetiquetar un session_transition_conflict que NO viene del lease del llamante (p.ej. transicion/cola real de otra sesion, recovery en curso) y dar un hint FALSO ("release your session lease") a quien no tiene lease? Traza los 7 raise-sites del original (_review\original\...\control_client.py no esta — usa el vivo instalado NO: usa el rastro del INFORME y el codigo de dayz_test_tool.py editado) y di si el camino capturado es exclusivo del caso lease-del-llamante. Si no lo es, el mensaje debe ser condicional o mas honesto ("a session lease is held or a transition is in flight...").
+A2 (T2). ¿El enum aceptado y el mensaje coinciden con la realidad? El informe dice que "offline" se ACEPTA pero el mensaje dice "expected server|all|client". Juzga: ¿offline es superficie publica (docstring/schema) o interno? ¿El catch-all del parse sigue cubriendo los cruces de campos? ¿Algun modo valido que ahora se rechace o invalido que ahora pase?
+A3 (T4). Diffea core.py contra el original. ¿El relabel (version_state=never_polled_this_generation cuando no hay poll esta generacion) rompe algun CONSUMIDOR de version_state fuera de tests? Grep de version_state/legacy_blocked por todo tools\dayz_mcp\. El informe declara que _version_block_fields (loopback.py:1370-1395) NO se toco — ¿eso deja una INCONSISTENCIA visible (423 dice legacy_blocked mientras bridge_status dice never_polled...) y es aceptable o confusa? ¿ready= se calcula igual?
+A4 (T3 + docstrings). Los cambios de server.py son solo texto donde se prometio solo texto? Diffea server.py entero contra el original y confirma que NO hay cambios de logica fuera de lo declarado (T1 hint, T2 enum en docstring, T3 ui_focus, T5 nota width/height). Cualquier cambio no declarado = finding.
+A5 (gates). Los 60F/78E de la suite completa: muestrea 5-8 fallos por NOMBRE (el informe cita playbook_runner_missing y ficheros ausentes) y juzga si la atribucion "arbol incompleto, no mis diffs" es solida leyendo que importa/toca cada test muestreado. Si alguno de los fallos toca modulos editados (core/dayz_test_tool/server), findings.
+A6 (T5). Con _ref\launcher_src\ y el INFORME: ¿el diagnostico es correcto y completo? (el worker empaquetado mete -x/-y para client/offline; server no; el engine/perfil pisa). ¿El patch_launcher_width_height.diff propuesto es razonable como propuesta (EnumWindows por titulo "DayZ" — el propio informe avisa que puede pillar server+client en mode=all)? Solo P3 informativos aqui salvo error factual.
+A7 (alcance). Ficheros editados fuera de {core.py, dayz_test_tool.py, server.py, 3 tests}: ya verificado por hashes que NO los hay. Revisa que dentro de los tests editados no se debilito ningun assert preexistente (un test relajado para pasar = P1).
+
+FORMATO DE SALIDA (ultimo mensaje)
+VEREDICTO: APPROVE | REQUEST-CHANGES
+FINDINGS: numerados, "P1|P2|P3 - titulo - fichero:linea - que pasa - fix minimo". Angulo limpio = "A<n>: limpio". Nada mas.

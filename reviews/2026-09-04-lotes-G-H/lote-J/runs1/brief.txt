@@ -1,0 +1,182 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar. Tienes shell: úsalo.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+LOTE J, RONDA 1 — dos consecuencias de «P6 estricto» (un run sin dueño no despacha NADA) medidas
+hoy en producción, en el daemon del MCP de DayZ (`tools/dayz_mcp/`, Python 3.14, sin red).
+Lee `gate/GATES.md` entero antes de tocar nada: ahí están las tres fichas y las dos decisiones.
+
+===============================================================================
+§0. LAS DOS DECISIONES (ya tomadas; no se debaten, se implementan)
+===============================================================================
+
+  P-J1. **La limpieza interna del daemon está EXENTA del cerco.**
+        Hoy: `cleanup_begin` (`tools/dayz_mcp/daemon.py:77-108`) llama PRIMERO a
+        `ServerState.cleanup_owner` (`loopback.py:2659-2711`), que encola `vehicle_release` con
+        `internal=True` (`:2702-2704`, único llamador de `internal=True` en todo `dayz_mcp/`) y lo
+        apunta en `_fire_and_forget_ids`; DESPUÉS `lifecycle.begin_release_owner` cerca el run
+        (`process_lifecycle.py:1666-1690` `_transition_to_idle` → `_fence_runs` →
+        `ServerState.fence_runs` `loopback.py:1195-1211`) y `_drain_run_locked` (`:1154-1170`) descarta
+        la cola entera, la limpieza incluida; el poll de un run cercado tampoco entrega nada
+        (`_poll_should_hold_commands` `:1258-1263`, sitios `:2145-2158` y `:2196-2226`).
+        Contrato nuevo: una orden interna del daemon (la que nace con `internal=True`) se ENTREGA al
+        peer aunque el run esté RUNNING_IDLE o cercado; NO acredita actividad (ya no lo hace al
+        encolar, `:1807-1815`; tampoco debe hacerlo al entregar ni al recibir el resultado); NO saca
+        al run de RUNNING_IDLE; y sigue sujeta al TTL (`_expire_stale_commands`) y a
+        `_mark_discarded` para fire-and-forget. TODO lo demás —mutaciones y lecturas de cualquier
+        sesión— se sigue drenando y rechazando exactamente igual (`run_not_owned`).
+        Cómo, como diseño (no como texto obligatorio): UN predicado con nombre en `ServerState`
+        (p. ej. `_command_exempt_from_fence(command_id)` ≡ `command_id in self._fire_and_forget_ids`),
+        usado por los CUATRO sitios: `_drain_run_locked` conserva los exentos y descarta el resto;
+        los dos sitios del poll entregan SOLO los exentos cuando el run está retenido (en vez de
+        `queue = []` / `commands = []`); y `_enqueue_run_rejection(internal=True)` (`:1272-1287`) no
+        rechaza por cerco ni por RUNNING_IDLE (sí sigue rechazando `run_state_unavailable` y
+        `binding_retired`: sin estado durable legible o sin binding no hay entrega, P22'). El campo
+        `internal` NUNCA se lee del cuerpo de `/enqueue` (`_handle_enqueue` `:3052-3078` no lo pasa;
+        que siga así).
+        Consecuencia en tests: `tests/test_session_e2e.py::test_vehicle_release_cleanup_is_enqueued_exactly_once`
+        vuelve a afirmar que el peer client ve `["vehicle_control", "vehicle_release"]` (su forma
+        actual codifica el defecto).
+
+  P-J2. **La CONCESIÓN del lease de la caja adopta el run sin dueño.**
+        Hoy: `_handle_session` (`loopback.py:3079-3165`) devuelve el lease en dos ramas —`acquire`
+        (`coordination.acquire` `session_coordination.py:269`, respuesta `status: "active"` +
+        `lease_token` cuando la caja está libre) y `wait` (`coordination.wait` `:895`, `status:
+        "active"` + `lease_token` cuando llega el turno de la FIFO, `:3640-3641`)— y no adopta nada.
+        Contrato nuevo: en las dos ramas, cuando la respuesta es un lease activo, el daemon adopta con
+        `lifecycle.adopt_run(client, lease_token, run_id)` (`process_lifecycle.py:2487-2563`) el ÚNICO
+        run RUNNING_IDLE sin dueño del manifiesto y añade a la respuesta la clave `adopted_run`:
+            sin run adoptable                → "adopted_run": null
+            adoptado                         → {"ok": true, "run_id": ..., "state": "RUNNING",
+                                                "dispatchable": <bool>[, "hint": ...]}   (lo que ya
+                                                devuelve adopt_run, tal cual)
+            rechazado por adopt_run          → {"ok": false, "run_id": ..., "error": <código de
+                                                adopt_run: run_processes_gone, process_identity_mismatch,
+                                                guard_unavailable, active_run_exists, retail_quarantine...>
+                                                [, "hint": ...]}
+            más de un run RUNNING_IDLE sin dueño (no debería ocurrir) → {"ok": false, "run_id": null,
+                                                "error": "multiple_idle_runs"}
+        El lease se concede IGUAL en todos los casos: la adopción es fail-open para el lease y
+        declarada en la respuesta (la caja es del concesionario; el run muerto lo recogerá el reaper).
+        Un helper único (p. ej. `_adopt_on_grant(client, payload)`) llamado desde las dos ramas, fuera
+        del lock del coordinador (adopt_run toma `_operation_lock` y llama al coordinador: no lo
+        anides dentro de `coordination.acquire/wait`). La respuesta de `status` NO cambia.
+        `adopt_run` pasa a ser IDEMPOTENTE para el mismo dueño: si el run está RUNNING con
+        `owner_session_id == client.session_id` y `owner_lease_id == lease del llamante`, devuelve el
+        mismo payload de éxito (`ok`, `run_id`, `state: RUNNING`, `dispatchable`) sin cambiar nada y
+        con la reserva del coordinador cerrada correctamente (commit de no-op o rechazo que no sea
+        error: tú eliges, pero el audit debe seguir siendo coherente y el payload idéntico al de una
+        adopción real). Motivo: `dayz_test_worker` adopta explícitamente antes de extender un run
+        (`dayz_test_worker.py:593-596`, mode=client) y antes de parar (`:527-545`, kill); con la
+        adopción en el acquire, su adopt explícito daría `run_not_adoptable` y esas rutas se
+        romperían. Un ajeno (otra sesión, sin lease o con un token que no es suyo) sigue sin poder
+        adoptar (JB7).
+        `control_client.py` y `server.py` NO se tocan: `_remember_acquire_or_wait` (`control_client.py:238-262`)
+        y `_with_own_identity` (`:278-285`) pasan la respuesta entera al tool, así que `adopted_run`
+        llega a `session_acquire`, `session_acquire_wait` y `lease_acquire` sin cambios en el cliente.
+
+===============================================================================
+§1. EL ORÁCULO (13 checks; 9 rojos hoy; 4 verdes que NO pueden romperse)
+===============================================================================
+
+`gate/oracle_tests.py` monta el daemon con el cableado de producción (`daemon.build_server_state` +
+`loopback.create_http_server` + `daemon.make_status_provider`), ata los dos peers con
+`tests/fence_helpers.bind_both_peers` (run `test-run` RUNNING_IDLE sin dueño, procesos = el propio
+intérprete según el guard real) y lo ataca por HTTP como un cliente MCP y un peer del juego.
+
+  P-J1:  JA1 tras `session_release` con vehículo activo el peer client recibe `vehicle_release`
+              (hoy ve sólo `[vehicle_control]`).
+         JA2 (VERDE, control negativo) una lectura sobre el run cercado sigue siendo 409
+              `run_not_owned`; su control positivo pasa con el cerco parcheado.
+         JA3 una mutación del dueño encolada antes del release (peer en pausa) NO se entrega
+              (su `/await` es ok False con `owner_release` o `run_not_owned`) y `vehicle_release` SÍ.
+         JA4 (VERDE) tras entregar la limpieza el run sigue RUNNING_IDLE y su `activity_state` no es
+              `recent`.
+         JA5 (VERDE) `/enqueue` con `"internal": true` en el cuerpo sigue siendo `run_not_owned`;
+              `internal=True` tiene un único llamador en `dayz_mcp/` y es `cleanup_owner`.
+  P-J2:  JB1 `/session/acquire` adopta y declara `adopted_run` (ok/run_id/RUNNING/dispatchable true);
+              `session_status.box.runs[0]` muestra `owner_session` del concesionario y `state` RUNNING.
+         JB2 con el run adoptado por el acquire, una lectura (`camera_get`) y una mutación
+              (`vehicle_control`) se entregan al peer.
+         JB3 B encola en la FIFO, A libera, B recibe el lease por `/session/wait` y `adopted_run.ok`.
+         JB4 caja vacía: acquire → active + `adopted_run: null` (la clave PRESENTE y nula).
+         JB5 run con un pid muerto: acquire → active + `adopted_run.ok false` + `error` no vacío +
+              `run_id`; el run sigue RUNNING_IDLE sin dueño.
+         JB6 tras el acquire, `/lifecycle/adopt` del mismo dueño dos veces → ok/RUNNING/dispatchable.
+         JB7 (VERDE) un ajeno sin lease o con el token de otro no adopta.
+         JB8 tras adoptar por el acquire, `session_release` lista `runs_released == ["test-run"]` y
+              deja RUNNING_IDLE sin dueño.
+
+===============================================================================
+§2. EL GATE (triple)
+===============================================================================
+
+    bash gate/product_frozen.sh       -> PRODUCTO-CONGELADO OK   (todo dayz_mcp/*.py salvo los 2 del write-set)
+    bash gate/run_oracle_tests.sh     -> ORACULO-TESTS-VERDE     (13 checks)
+    bash gate/suite_full.sh           -> SUITE-COMPLETA OK       (rojos == los 2 permitidos, por nombre)
+
+Ahora mismo: PRODUCTO-CONGELADO OK · ORACULO-TESTS: PASS=4 FAIL=9 UNMET=0 de 13 · SUITE-COMPLETA OK.
+**Los verdes son la línea que no se puede romper.** Guarda anti-vacuidad: un `UNMET` no es tu
+código; si un criterio del oráculo está mal, DISPUTAS. `gate/` está sellado por hash y es de sólo
+lectura. Dos tests son intermitentes bajo la carga de la suite completa y verdes en solitario
+(`tests.test_wait_for_marker...test_lookback_can_match_a_line_written_before_the_action` y
+`tests.test_bug046_startup_deadlock...test_run_daemon_candidate_wave_and_cross_port_publish_one_generation`):
+si uno de ellos es el ÚNICO rojo extra, repite la suite una vez y pega las dos salidas.
+
+===============================================================================
+§3. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/loopback.py
+    tools/dayz_mcp/process_lifecycle.py
+    tools/tests/test_session_e2e.py
+    tools/tests/test_process_lifecycle.py
+    tools/tests/test_instance_fence.py
+    tools/tests/test_daemon.py
+    tools/tests/test_client_mode.py
+    tools/tests/test_loopback.py
+
+PROHIBIDO: cualquier otro fichero de `tools/dayz_mcp/` (en especial `server.py`, que otra sesión
+tiene en vuelo, `control_client.py`, `daemon.py`, `session_coordination.py`, `dayz_test_*.py`);
+`tools/tests/fence_helpers.py` (el oráculo lo importa); `gate/`; `addon/`; `unittest.skip` /
+`expectedFailure`; borrar o renombrar tests; tocar `allowed_red.txt`; un opt-out de la adopción
+por flag del cliente; red.
+
+Tests que DEBES añadir (mínimo, además de restaurar la aserción del e2e):
+  - `test_process_lifecycle.py`: adopt idempotente para el mismo dueño (payload idéntico, sin cambio
+    de estado, audit coherente) y adopt de otra sesión sigue rechazado.
+  - `test_instance_fence.py` o `test_loopback.py`: (a) el drenaje conserva el fire-and-forget interno
+    y descarta el resto; (b) el poll de un run retenido entrega SOLO el exento; (c) la entrega del
+    exento no acredita actividad; (d) `internal=True` encolado sobre un run ya cercado no es
+    `run_not_owned` pero sí `run_state_unavailable` sin estado durable legible.
+  - `test_daemon.py`: acquire adopta (clave `adopted_run` en los cuatro casos: adoptado / null /
+    rechazado / múltiple) y wait-al-conceder adopta; el lease se concede aunque la adopción falle.
+  - `test_session_e2e.py`: el flujo real de las fichas: acquire → lectura y mutación entregadas →
+    release → `runs_released` → segundo cliente por la FIFO adopta.
+Fixtures que cambian por P-J2: los tests que hoy construyen `DaemonHttpServer(adopt_fixture=False)`
+y luego adquieren verán el run adoptado (RUNNING con dueño) donde antes quedaba RUNNING_IDLE. Cada
+aserción que cambie por eso se lista en STATE.md (`test → antes → después → P-J2`); sin P-item no
+se toca ninguna otra aserción.
+
+Intérprete: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`,
+desde `tools/` con `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1`. Un test suelto:
+`... -m unittest tests.test_session_e2e -k vehicle_release`. La versión anterior del producto y de
+los tests está en `../../ws-frozen-r0/tools/` (sólo lectura: es la baseline del diff).
+
+===============================================================================
+§4. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — P-J1 y P-J2 con `path:line` del producto entregado; dónde vive el predicado
+                          de exención y dónde el helper de adopción; qué hace adopt_run en el caso
+                          idempotente con la reserva del coordinador.
+    ## ASERCIONES       — tabla `test → antes → después → P-item` de TODO lo que cambie.
+    ## GATE             — la salida literal de los TRES gates, pegada, no resumida.
+    ## CONTROL POSITIVO — el e2e de vehicle_release y un test nuevo de adopt-en-acquire fallando
+                          contra el producto de `../../ws-frozen-r0/` (cópialo a un temporal, corre
+                          ahí los dos tests) pegado literal: rojo antes, verde después.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si un criterio del oráculo o del brief está mal, aquí, con el argumento.

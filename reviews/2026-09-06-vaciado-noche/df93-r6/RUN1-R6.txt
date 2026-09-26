@@ -1,0 +1,1 @@
+model=cursor-grok-4.6-xhigh exit=RC=0 started=20:08:27 ended=20:15:56

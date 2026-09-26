@@ -1,0 +1,22 @@
+{
+  "module": "M06",
+  "measured_by": "orchestrator",
+  "generated_utc": "2026-09-02T00:09:36.515904+00:00",
+  "owns": {
+    "tools/dayz_mcp/loopback.py": {
+      "sha256": "511dd9093a7f607365678bf3d185afddf08c43d86f2d7affe83b42ca83a5e3b8",
+      "size_bytes": 130697,
+      "mtime_utc": "2026-08-28T23:03:10.988271+00:00"
+    },
+    "tools/tests/test_loopback.py": {
+      "sha256": "c08470241f2765cf516706af96846d8a26276eee27c5b3f8340e6251fa782772",
+      "size_bytes": 58379,
+      "mtime_utc": "2026-08-28T19:35:53.986362+00:00"
+    },
+    "tools/tests/test_validate_command_args_table.py": {
+      "sha256": "0b9f788e4346e7743d7c0f874d651b57648f40ef49c9c75b18f7e874d176a097",
+      "size_bytes": 15902,
+      "mtime_utc": "2026-08-28T23:03:15.278423+00:00"
+    }
+  }
+}

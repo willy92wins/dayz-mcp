@@ -1,0 +1,213 @@
+{
+  "ticket": "fb-20260829-024827-9b7b",
+  "tickets": ["fb-20260829-024827-9b7b", "fb-20260829-025012-103f"],
+  "module": "M14-REGISTRY-FINGERPRINT",
+  "packet": "inbox-20260831-v6",
+  "plan": "plans/inbox-20260830/07-fb-20260829-024827-9b7b.md",
+  "plans": [
+    "plans/inbox-20260830/07-fb-20260829-024827-9b7b.md",
+    "plans/inbox-20260830/09-fb-20260829-025012-103f.md"
+  ],
+  "gate_file": "gates/inbox-07-024827-9b7b.md y gates/inbox-09-025012-103f.md (read only; no box flipped)",
+  "ownership_addendum": "plans/inbox-20260830/physical-ownership-addendum-v1.md:63",
+  "dag_row": "plans/inbox-20260830/00-execution-dag.md:49",
+  "scope": "Acreditación del helper puro M14 ya presente en los dos OWNS: serializador JSON A, snapshot inmutable, parser de AuthorityBundleBytes y comparador fresh|stale|unknown. Eso cubre la mitad unitaria de 9b7b/103f. Seam build_app, overlay público de bridge_status, I/O de los cinco paths M23, dos procesos FastMCP y /status son M22/M23 y no están en server.py:3836-3838. Hashes, mtimes, tamaños y corrida unittest de esta hop INCONCLUSIVE (brief: lane sin shell; no se inventan digest ni recuentos). No es el caso M07 de suite verde heredada con cero puntos: estos bytes implementan el contrato M14, no un leftover anterior al lote.",
+  "owns": {
+    "tools/dayz_mcp/tool_registry_fingerprint.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Brief de acreditación: esta lane no mide SHA-256/mtime/size; el orquestador fusiona. No se transcribe censo ajeno (tautología). Source leído entero este hop: tools/dayz_mcp/tool_registry_fingerprint.py:1-783."
+    },
+    "tools/tests/test_tool_registry_fingerprint.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Misma limitación de medición. Source leído entero este hop: tools/tests/test_tool_registry_fingerprint.py:1-834."
+    }
+  },
+  "plan_points": {
+    "9b7b_1_m14_canonical_fingerprint": {
+      "plan_citation": "plans/inbox-20260830/07-fb-20260829-024827-9b7b.md:27",
+      "verdict": "IMPLEMENTED",
+      "owner": "M14-REGISTRY-FINGERPRINT",
+      "code": "tools/dayz_mcp/tool_registry_fingerprint.py:301-309 canonical_json_bytes (UTF-8, sort_keys, separators (',',':'), allow_nan=False, sin BOM ni newline); :316-355 _project_tool exige keyset exacto de cinco campos y tipos/enum antes de _tool_record; :358-376 canonical_registry_fingerprint fotografía Sequence una vez, NFC, ordena records por name, hashea {'tools':[...]} ; description vacía permitida y None rechazado en :328-329.",
+      "tests": "tools/tests/test_tool_registry_fingerprint.py:30-57 PAIR_BYTES/PAIR_SHA256 literales externos; :252-263 oracle independiente; :267-274 las cuatro parejas clavan bytes+sha; :276-287 orden incidental de records no cambia digest, orden de public_constraints sí; :289-301 mutar cada campo cambia digest; :303-343 keyset incompleto/extra, extract de tres campos, description=None, Sequence ilegal y generator → unknown; :345-373 NFC positivo y colisiones post-NFC.",
+      "not_claimed": "La corrida unittest no se ejecutó en esta hop."
+    },
+    "9b7b_2_m13_serverconfig_projection": {
+      "plan_citation": "plans/inbox-20260830/07-fb-20260829-024827-9b7b.md:28",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "authority": "00-execution-dag.md:48 (M13 posee effective_schema.py); la ficha asigna la proyección pura a M13. M14 no importa ni llama project_server_config_identity.",
+      "observed_readonly": "tools/dayz_mcp/effective_schema.py:28-41 project_server_config_identity(enable_exec_enforce, client_platform) → ('standard'|'exec_enforce', 'claude'|'codex') o ('unknown','unknown'). M14 solo acepta la pareja ya finalizada vía _require_pair en tool_registry_fingerprint.py:257-260."
+    },
+    "9b7b_3_m14_snapshot_identity_binding": {
+      "plan_citation": "plans/inbox-20260830/07-fb-20260829-024827-9b7b.md:29",
+      "verdict": "IMPLEMENTED",
+      "owner": "M14-REGISTRY-FINGERPRINT",
+      "code": "tools/dayz_mcp/tool_registry_fingerprint.py:194-202 RegistrySnapshot(session_id, profile, role, captured_at_utc, fingerprint, canonical_bytes, status); :379-404 capture_registry_snapshot exige session_id y captured_at_utc str no vacíos y pareja canónica; cualquier fallo devuelve _UNKNOWN_REGISTRY :223-231 (status unknown, fingerprint None). La API no tiene pid, daemon generation ni modo: no pueden sustituir la tupla.",
+      "tests": "test_tool_registry_fingerprint.py:396-405 mismas bytes/digest con session-a vs session-b; :407-423 session/captured vacíos o no-str, profile embedded, role daemon o no canónico → UNKNOWN_REGISTRY."
+    },
+    "9b7b_3_m22_controlidentity_provenance": {
+      "plan_citation": "plans/inbox-20260830/07-fb-20260829-024827-9b7b.md:29 y :50",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57 (único dueño de server.py); addendum :72. La procedencia ControlIdentity.session_id y el paso de None en embedded/daemon son glue de build_app.",
+      "observed_readonly": "M14 no importa ControlIdentity ni server.py. Grep de capture_registry_snapshot/tool_registry_* sobre tools/dayz_mcp/server.py: cero hits. bridge_status en server.py:3836-3838 solo hace runtime.touch() y return await runtime.bridge_status_payload()."
+    },
+    "9b7b_4_m13_m23_inventory_and_publication": {
+      "plan_citation": "plans/inbox-20260830/07-fb-20260829-024827-9b7b.md:30",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE + M23-FINAL-SCHEMA-PROMOTION",
+      "authority": "00-execution-dag.md:48 (fixtures v5) y :58 (M23 posee promote_effective_schema.py y canónicos bajo reports/.../M23/). Instanciar ServerConfig y publicar el envelope no es OWNS M14 (addendum :63 vs :61, :73).",
+      "observed_readonly": "El fixture tools/tests/fixtures/effective_schema_v5/profile_inventory.json existe como OWNS M13. reports/2026-08-30-inbox-implementation/M23/ no se abrió ni se acredita en esta hop."
+    },
+    "9b7b_4_m14_reader_four_pair_order": {
+      "plan_citation": "plans/inbox-20260830/07-fb-20260829-024827-9b7b.md:30 (cardinalidad/orden de las cuatro parejas que el lector debe exigir)",
+      "verdict": "IMPLEMENTED",
+      "owner": "M14-REGISTRY-FINGERPRINT",
+      "code": "tool_registry_fingerprint.py:65-70 _PAIR_ORDER = standard|claude, standard|codex, exec_enforce|claude, exec_enforce|codex; :501-521 _parse_payloads exige exactamente cuatro payloads en ese orden; :691 selected = payloads[_PAIR_ORDER.index(pair)].",
+      "tests": "test_tool_registry_fingerprint.py:500-511 known para cada pareja; :543-545 payloads invertidos → unknown."
+    },
+    "9b7b_5_m14_five_blob_reader": {
+      "plan_citation": "plans/inbox-20260830/07-fb-20260829-024827-9b7b.md:31",
+      "verdict": "IMPLEMENTED",
+      "owner": "M14-REGISTRY-FINGERPRINT",
+      "code": "tool_registry_fingerprint.py:205-211 AuthorityBundleBytes (cinco blobs, no paths); :647-698 _read_authority_marker: presencia de cinco bytes, JSON canónico A, artifact_version=5/schema_version=1, cuatro payloads, manifest fingerprint y recomputación, marker.fingerprint_sha256/verdict_sha256/producers_sha256 sobre bytes de sidecar, banco PASS contra _BANK_TABLE :81-167, unión _MINIMUM_PRODUCERS :169-190, un único commit con schema_sha256=sha256(marker) en :609-644. Cualquier fallo → _UNKNOWN_AUTHORITY :232-238 vía read_authority_marker :701-714. No abre ficheros (imports :5-14: hashlib/json/math/re/unicodedata, sin os/pathlib).",
+      "tests": "test_tool_registry_fingerprint.py:500-511 bundle literal known; :513-520 cada blob None → unknown (salida INCONCLUSIVE del módulo); :522-551 shape/versión/txid/orden; :553-576 manifest espacios/LF/orden/digest; :578-618 enlace payload/hash/verdict/producers; :620-666 banco e ids_sha256 externo (autoconsistente inyectado sigue unknown); :668-686 BOM/pretty/UTF-8/clave duplicada; :688-757 unión producers, validator_sources, approval; :759-830 receipts vacíos/corruptos/schema hash distinto/duplicado/sin LF/histórico-only y digest-only incompleto.",
+      "caveat": "El parser no produce la clave pública tool_registry_source_stale=null; devuelve AuthoritySnapshot.status=unknown. El overlay público es M22. Concordancia de _BANK_TABLE con los SHA-256 actuales de los fixtures M13 en disco: INCONCLUSIVE (sin shell)."
+    },
+    "9b7b_5_m22_reread_paths_and_sibling_reject": {
+      "plan_citation": "plans/inbox-20260830/07-fb-20260829-024827-9b7b.md:31 (releer el marker en cada bridge_status; ningún path configurable, candidate, backup, journal ni snapshot histórico)",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57; addendum :72. M14 recibe bytes ya leídos. La frontera de cinco literales repo-relative y el rechazo de siblings es adapter M22.",
+      "observed_readonly": "tool_registry_fingerprint.py no contiene los paths reports/2026-08-30-inbox-implementation/M23/*. El lector no distingue un sibling byte-idéntico."
+    },
+    "9b7b_6_m14_immutable_snapshot": {
+      "plan_citation": "plans/inbox-20260830/07-fb-20260829-024827-9b7b.md:32 (snapshot local inmutable ligado a session_id+profile/role)",
+      "verdict": "IMPLEMENTED",
+      "owner": "M14-REGISTRY-FINGERPRINT",
+      "code": "tool_registry_fingerprint.py:194 @dataclass(frozen=True) class RegistrySnapshot; capture_registry_snapshot :396-404 construye el valor y no lo muta después. canonical_bytes y fingerprint quedan en el snapshot; session/profile/role no entran en el hash (:375 hashea solo {'tools': records}).",
+      "tests": "test_tool_registry_fingerprint.py:396-405; :461-497 dataclasses incoherentes (fingerprint distinto del sha de canonical_bytes, unknown parcial, txid no hex) → comparador unknown."
+    },
+    "9b7b_6_m22_build_app_seam_and_overlay": {
+      "plan_citation": "plans/inbox-20260830/07-fb-20260829-024827-9b7b.md:32 (captura al cierre real de build_app; mutante post-alias :4298; overlay tras bridge_status_payload)",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57; addendum :72. El helper no conoce build_app ni el alias.",
+      "observed_readonly": "server.py:3836-3838 bridge_status no fusiona tool_registry_fingerprint/captured_at/source_stale/remediation. tests/test_tool_registry_fingerprint.py no importa server ni llama build_app. El mutante que registra una tool después del alias :4298 no existe en OWNS M14."
+    },
+    "9b7b_7_103f_4_wire_two_fastmcp_processes": {
+      "plan_citation": "plans/inbox-20260830/07-fb-20260829-024827-9b7b.md:33; plans/inbox-20260830/09-fb-20260829-025012-103f.md:29",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION (fixture wire) + M23-FINAL-SCHEMA-PROMOTION (promoción Y externa)",
+      "authority": "00-execution-dag.md:57-58. app.call_tool('bridge_status'), dos procesos FastMCP, payload remoto compartido y promoción fuera de ambos no son tests OWNS M14 (addendum :63 vs :72-73).",
+      "observed_readonly": "La suite M14 opera in-memory con AuthorityBundleBytes literales; no crea apps ni habla con /status."
+    },
+    "9b7b_amendment_m14_comparator": {
+      "plan_citation": "plans/inbox-20260830/07-fb-20260829-024827-9b7b.md:51; 09-fb-20260829-025012-103f.md:50",
+      "verdict": "IMPLEMENTED",
+      "owner": "M14-REGISTRY-FINGERPRINT",
+      "code": "tool_registry_fingerprint.py:769-783 compare_snapshot_to_authority: local/authority inválidos o unknown → unknown; cruce de pareja → unknown; misma pareja digest igual → fresh; distinta → stale. No usa PID ni app propia.",
+      "tests": "test_tool_registry_fingerprint.py:425-459 same-pair X vs bundle known = fresh; cruce de role con digest copiado = unknown; :759-830 digest-only sin parser completo = unknown.",
+      "coverage_gap_not_a_product_bug": "En :438-446 la autoridad Y para stale se fabrica rebotando AuthoritySnapshot.fingerprint = local_y.fingerprint (salida del helper bajo prueba), no con un segundo bundle de cinco blobs congelado. 103f:50 prohíbe expected derivado del helper como oracle actual. El comparador en :781-783 sí implementa stale; el discriminante Y no está congelado como oracle externo. No se parchea en esta hop."
+    },
+    "9b7b_amendment_m22_dpf_overlay": {
+      "plan_citation": "plans/inbox-20260830/07-fb-20260829-024827-9b7b.md:52",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57; addendum :72. Los cuatro campos DPF (fingerprint, captured_at, source_stale, remediation='reopen_mcp_client') se publican en el retorno local de bridge_status tras el payload. M14 no escribe Runtime, daemon.make_status_provider ni loopback /status.",
+      "observed_readonly": "server.py:3836-3838 no añade esas claves. M14 no contiene el literal reopen_mcp_client."
+    },
+    "103f_1_consume_m13_without_second_algorithm": {
+      "plan_citation": "plans/inbox-20260830/09-fb-20260829-025012-103f.md:26 y :15",
+      "verdict": "IMPLEMENTED",
+      "owner": "M14-REGISTRY-FINGERPRINT",
+      "code": "Un solo módulo: tool_registry_fingerprint.py importa EffectiveSchemaError y _tool_record (línea 14), no proyecta ServerConfig ni duplica enable_exec_enforce. _require_pair :257-260 sólo admite las cuatro parejas canónicas. 103f no autoriza segundo writer: no hay otro fichero de algoritmo en el grep de capture_registry_snapshot fuera de estos OWNS.",
+      "tests": "test_tool_registry_fingerprint.py:19-28 importa únicamente dayz_mcp.tool_registry_fingerprint (+ EffectiveSchemaError para el helper JSON). No importa server."
+    },
+    "103f_3_m23_materialize_from_inventory": {
+      "plan_citation": "plans/inbox-20260830/09-fb-20260829-025012-103f.md:28",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M23-FINAL-SCHEMA-PROMOTION",
+      "authority": "00-execution-dag.md:58; addendum :73-74. Materializar las cuatro configs y escribir canónicos/receipts es M23. El lector fail-closed de los bytes ya está cubierto en 9b7b_5_m14_five_blob_reader."
+    },
+    "103f_5_m22_local_overlay_after_payload": {
+      "plan_citation": "plans/inbox-20260830/09-fb-20260829-025012-103f.md:30",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57. Duplica 9b7b_6_m22: overlay estrictamente local, mismo payload base, snapshots/session_id distintos por proceso.",
+      "observed_readonly": "server.py:3836-3838."
+    },
+    "103f_6_m22_status_provider_fixtures": {
+      "plan_citation": "plans/inbox-20260830/09-fb-20260829-025012-103f.md:31",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57. Fixtures de /status y make_status_provider sin tool_registry_* y mutante que mueve el overlay al daemon son tests M22. La reutilización del helper M14 (sin segundo algoritmo) está en 103f_1.",
+      "observed_readonly": "test_tool_registry_fingerprint.py no toca daemon.py ni loopback.py."
+    }
+  },
+  "verdict_counts": {
+    "IMPLEMENTED": 7,
+    "OUT-OF-SCOPE": 10,
+    "NOT-IMPLEMENTED": 0,
+    "INCONCLUSIVE": 0,
+    "note": "Conteos sobre las 17 entradas de plan_points (7+10+0+0=17). owns.sha256 y la corrida unittest son INCONCLUSIVE aparte, no son puntos de plan. Cero NOT-IMPLEMENTED en territorio M14: el hueco del lote está en M22/M23, no en la ausencia del helper."
+  },
+  "preexisting_suite_not_run": {
+    "file": "tools/tests/test_tool_registry_fingerprint.py",
+    "methods_visible": 20,
+    "methods": [
+      "OracleReproductionTests.test_independent_oracle_reproduces_known_blobs_and_pair_table:252",
+      "RegistryCanonTests.test_four_pairs_match_external_bytes_and_sha:267",
+      "RegistryCanonTests.test_record_order_does_not_change_digest_constraint_order_does:276",
+      "RegistryCanonTests.test_mutating_each_field_changes_digest:289",
+      "RegistryCanonTests.test_invalid_records_and_sequences_yield_fully_unknown_snapshots:303",
+      "RegistryCanonTests.test_nfc_positive_and_post_nfc_collisions:345",
+      "RegistryCanonTests.test_json_illegal_values_are_unknown_or_error:375",
+      "SnapshotComparatorTests.test_four_pairs_known_and_session_does_not_enter_digest:396",
+      "SnapshotComparatorTests.test_invalid_identity_is_fully_unknown:407",
+      "SnapshotComparatorTests.test_same_pair_distinct_registries_and_cross_pair_digest_copy:425",
+      "SnapshotComparatorTests.test_manual_incoherent_dataclasses_are_unknown:461",
+      "AuthorityBundleTests.test_literal_bundle_is_known_for_each_pair:500",
+      "AuthorityBundleTests.test_each_blob_none_is_unknown:513",
+      "AuthorityBundleTests.test_marker_shape_and_payload_order_mutations:522",
+      "AuthorityBundleTests.test_manifest_spacing_order_and_digest_mutations:553",
+      "AuthorityBundleTests.test_payload_tool_and_hash_sidecars_must_stay_linked:578",
+      "AuthorityBundleTests.test_verdict_member_result_and_external_table_mutations:620",
+      "AuthorityBundleTests.test_noncanonical_json_and_utf8_are_unknown:668",
+      "AuthorityBundleTests.test_producer_union_validator_sources_and_approval:688",
+      "AuthorityBundleTests.test_receipts_and_digest_only_incomplete_parser:759"
+    ],
+    "note": "Inventario de source, no resultado de unittest. El brief prohíbe inventar ran/failures. Que existan y que el orquestador afirme que la suite pasa no acredita M22 ni el marker físico M23."
+  },
+  "bugs_observed_not_fixed": [
+    {
+      "id": "stale-y-oracle-from-helper",
+      "location": "tools/tests/test_tool_registry_fingerprint.py:438-446",
+      "problem": "La autoridad Y del caso stale copia local_y.fingerprint del helper bajo prueba en vez de un bundle Y congelado. Choca con 103f:50 (no usar expected derivado del helper como oracle actual).",
+      "action": "no parcheado; es cobertura del test, no un fallo del comparador :781-783."
+    },
+    {
+      "id": "extra-launcher-txid-neq-artifact",
+      "location": "tools/dayz_mcp/tool_registry_fingerprint.py:596-597",
+      "problem": "Fail-closed extra: launcher txid no puede igualar artifact_txid. Las fichas 9b7b/103f no exigen esa desigualdad. Un bundle que las fichas aceptarían podría quedar unknown.",
+      "action": "no parcheado; más estricto que el plan, no un punto NOT-IMPLEMENTED."
+    }
+  ],
+  "not_touched": [
+    "tools/dayz_mcp/tool_registry_fingerprint.py (leído :1-783; no escrito)",
+    "tools/tests/test_tool_registry_fingerprint.py (leído :1-834; no escrito)",
+    "tools/dayz_mcp/server.py (leído :3828-3838 para OUT-OF-SCOPE; no escrito)",
+    "tools/dayz_mcp/effective_schema.py (leído :28-41 y :211-214 para proyección M13 y serializador distinto; no escrito)",
+    "GATES.md",
+    "gates/**",
+    "plans/**",
+    "product-spec.md",
+    "tools/.venv-mcp"
+  ]
+}

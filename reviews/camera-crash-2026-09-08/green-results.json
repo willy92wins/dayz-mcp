@@ -1,0 +1,191 @@
+[
+  {
+    "module": "tests.test_camera_native_crash",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_camera_native_crash -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 12 tests in 0.522s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_action_use",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_action_use -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 3 tests in 0.109s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_bridge_client_capabilities",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_bridge_client_capabilities -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 8 tests in 0.005s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_addon_tree_has_no_write_artifacts",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_addon_tree_has_no_write_artifacts -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 5 tests in 0.004s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_effective_schema_catalog",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_effective_schema_catalog -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 5 tests in 0.003s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_guards_bridge",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_guards_bridge -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 8 tests in 0.093s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_instance_fence",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_instance_fence -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 64 tests in 1.279s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_leak_callback_lifetime",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_leak_callback_lifetime -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 7 tests in 0.016s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_key_press",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_key_press -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 6 tests in 0.189s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_loopback",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_loopback -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 74 tests in 0.971s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_mcp_tools",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_mcp_tools -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 51 tests in 8.778s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_player_respawn",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_player_respawn -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 4 tests in 0.095s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_poll_key_reload_contract",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_poll_key_reload_contract -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 2 tests in 0.001s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_poll_watchdog_contract",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_poll_watchdog_contract -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 8 tests in 0.003s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_restore_gameplay_contract",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_restore_gameplay_contract -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 12 tests in 0.645s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_ui_click_scriptview",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_ui_click_scriptview -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 6 tests in 0.002s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_ui_error_diagnostics",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_ui_error_diagnostics -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 10 tests in 0.669s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_ui_enforce_contract",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_ui_enforce_contract -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 15 tests in 0.010s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_vehicle_telemetry_contract",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_vehicle_telemetry_contract -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 10 tests in 0.035s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_ui_reload_layout",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_ui_reload_layout -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 10 tests in 0.083s",
+      "OK"
+    ]
+  },
+  {
+    "module": "tests.test_vehicle_trace_contract",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_vehicle_trace_contract -v",
+    "exit_code": 0,
+    "summary": [
+      "Ran 7 tests in 0.093s",
+      "OK"
+    ]
+  }
+]

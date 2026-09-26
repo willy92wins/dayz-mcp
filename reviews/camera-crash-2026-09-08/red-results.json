@@ -1,0 +1,20 @@
+[
+  {
+    "module": "tests.test_camera_native_crash",
+    "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -B -m unittest tests.test_camera_native_crash -v",
+    "exit_code": 1,
+    "summary": [
+      "FAIL: test_camera_reference_is_checked_before_the_instance_native (tests.test_camera_native_crash.CameraNativeCrashSourceTest.test_camera_reference_is_checked_before_the_instance_native)",
+      "FAIL: test_failed_snapshot_is_empty_and_explicitly_not_ok (tests.test_camera_native_crash.CameraNativeCrashSourceTest.test_failed_snapshot_is_empty_and_explicitly_not_ok)",
+      "FAIL: test_missing_owned_camera_is_never_claimed_as_observed_player_camera (tests.test_camera_native_crash.CameraNativeCrashSourceTest.test_missing_owned_camera_is_never_claimed_as_observed_player_camera)",
+      "FAIL: test_native_getter_from_both_crash_stacks_is_never_called (tests.test_camera_native_crash.CameraNativeCrashSourceTest.test_native_getter_from_both_crash_stacks_is_never_called)",
+      "FAIL: test_readiness_and_state_guards_return_before_camera_reads (tests.test_camera_native_crash.CameraNativeCrashSourceTest.test_readiness_and_state_guards_return_before_camera_reads)",
+      "FAIL: test_settle_reports_unavailable_state_before_global_interpolation_read (tests.test_camera_native_crash.CameraNativeCrashSourceTest.test_settle_reports_unavailable_state_before_global_interpolation_read)",
+      "FAIL: test_success_reads_the_tracked_active_camera_after_the_guard (tests.test_camera_native_crash.CameraNativeCrashSourceTest.test_success_reads_the_tracked_active_camera_after_the_guard)",
+      "FAIL: test_vehicle_guard_does_not_depend_only_on_the_vehicle_command (tests.test_camera_native_crash.CameraNativeCrashSourceTest.test_vehicle_guard_does_not_depend_only_on_the_vehicle_command)",
+      "FAIL: test_actual_restore_tool_keeps_every_unavailable_state_unverified (tests.test_camera_native_crash.CameraRestoreConsumerTest.test_actual_restore_tool_keeps_every_unavailable_state_unverified)",
+      "Ran 12 tests in 0.031s",
+      "FAILED (failures=9)"
+    ]
+  }
+]

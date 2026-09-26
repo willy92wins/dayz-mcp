@@ -1,0 +1,6 @@
+production sha ca4e442fab43
+mutant a: verb gate removed: RED (killed) rc=1
+mutant b: scalars for every UI verb: RED (killed) rc=1
+mutant c: detail before code: RED (killed) rc=1
+mutant d: echo iterates all keys: RED (killed) rc=1
+restored sha ca4e442fab43 | all mutants killed: True

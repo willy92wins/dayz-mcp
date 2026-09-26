@@ -1,0 +1,280 @@
+{
+  "ticket": "fb-20260829-104625-7c88",
+  "tickets": [
+    "fb-20260829-104625-7c88",
+    "fb-20260829-115147-4407"
+  ],
+  "module": "M21-TERMINAL-INTEGRATION",
+  "packet": "inbox-20260831-v6",
+  "dag_row": "plans/inbox-20260830/00-execution-dag.md:56",
+  "plans": [
+    "plans/inbox-20260830/17-fb-20260829-104625-7c88.md",
+    "plans/inbox-20260830/20-fb-20260829-115147-4407.md"
+  ],
+  "gate_file": "gates/inbox-17-104625-7c88.md; gates/inbox-20-115147-4407.md (read only; no box flipped)",
+  "ownership_addendum": "plans/inbox-20260830/physical-ownership-addendum-v1.md:71 (M21 modify dayz_test_tool.py + test_dayz_test_tool.py); serialización M19→M21 en :85",
+  "scope": "Acreditación del estado pre-M21 sobre los bytes de hoy. El parser DZW1 de cinco claves y WorkerTerminal son baseline anterior al lote. La correlación `preflight != (terminal.run_id is None)` sigue en dayz_test_tool.py:469 (el bug que 7c88 punto 6 pide corregir) y el test :458-463 la encierra. _compact_result no publica ningún campo storage; tools/dayz_mcp/dayz_test_storage.py no existe. Hashes y unittest de esta hop INCONCLUSIVE (lane sin shell); no se copian digest del censo de arranque.",
+  "owns": {
+    "tools/dayz_mcp/dayz_test_tool.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Brief: esta lane no tiene shell; no se calcula SHA-256/mtime/size y no se transcribe el censo de arranque (tautología). Source leído entero este hop: tools/dayz_mcp/dayz_test_tool.py:1-716.",
+      "region_owned_by_m21": "terminal/resultados (DAG :56). M19 posee el resto del mismo fichero (addendum :68) en ventana anterior."
+    },
+    "tools/tests/test_dayz_test_tool.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Brief: esta lane no tiene shell; no se calcula SHA-256/mtime/size y no se transcribe el censo de arranque (tautología). Source leído entero este hop: tools/tests/test_dayz_test_tool.py:1-1215.",
+      "region_owned_by_m21": "tests terminal (DAG :56). El resto de métodos del fichero son región M19 (addendum :68) serializada después."
+    }
+  },
+  "plan_points": {
+    "7c88_1_cartesian_matrix": {
+      "plan_citation": "plans/inbox-20260830/17-fb-20260829-104625-7c88.md:24",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M18-REQUEST-CONTRACT + M19-TOOL-READINESS + M22-SERVER-INTEGRATION",
+      "authority": "plans/inbox-20260830/00-execution-dag.md:53,54,57; ficha 7c88 OWNS en :14. M21 solo consume el recorte terminal del punto 6.",
+      "observed_readonly": "build_run_request en dayz_test_tool.py:172-177 sigue colapsando TypeError/ValueError a bad_dayz_test_request opaco. execute_dayz_test_run:646-647 llama require_extension_run para todo run_id no nulo; no hay rama run_not_adoptable ni dry-run preflight que conserve UUID. test_dayz_test_tool.py no materializa la matriz preflight × mode × run_id."
+    },
+    "7c88_2_m18_named_causes": {
+      "plan_citation": "plans/inbox-20260830/17-fb-20260829-104625-7c88.md:25",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M18-REQUEST-CONTRACT",
+      "authority": "00-execution-dag.md:53; addendum :67",
+      "observed_readonly": "dayz_test_request.py:41-43 declara _INVALID_RUN_ID/_CLIENT_REQUIRES_RUN_ID/_SERVER_ALL_FORBID_RUN_ID. :339 UUID malformado; :360-362 server/all con run_id y client sin run_id ya no están dentro de un `if not preflight` (el EXACT de la ficha citaba :341-345). Eso no acredita M18 ni es trabajo M21."
+    },
+    "7c88_2_m19_error_translation": {
+      "plan_citation": "plans/inbox-20260830/17-fb-20260829-104625-7c88.md:25",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M19-TOOL-READINESS",
+      "authority": "00-execution-dag.md:54; addendum :68. La captura en build_run_request es región no-terminal.",
+      "observed_readonly": "dayz_test_tool.py:172-177 except (TypeError, ValueError): _fail('bad_dayz_test_request'). test_build_run_request_delegates_cross_field_validation test_dayz_test_tool.py:191-199 exige exactamente ese código opaco para mode=client sin run_id, no client_requires_run_id."
+    },
+    "7c88_3_m19_execute_matrix_tests": {
+      "plan_citation": "plans/inbox-20260830/17-fb-20260829-104625-7c88.md:26",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M19-TOOL-READINESS",
+      "authority": "00-execution-dag.md:54; addendum :68 (test_dayz_test_tool.py en ventana M19 salvo tests terminal)",
+      "observed_readonly": "Ningún test de execute_dayz_test_run cubre la matriz preflight × mode × run_id ni inyecta steam_preflight. dayz_test_tool.py no importa steam_preflight. Los tests de ejecución :535-1210 cubren bridge, progress, readiness, client_dead, session lease, overflow; no las filas 7c88."
+    },
+    "7c88_3_m22_call_tool_matrix": {
+      "plan_citation": "plans/inbox-20260830/17-fb-20260829-104625-7c88.md:26",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57 (único dueño de server.py y tests públicos app.call_tool)",
+      "observed_readonly": "No se recorrió server.py para acreditar; M22 es posterior y no está en el OWNS de esta hop."
+    },
+    "7c88_4_stop_structured_envelope": {
+      "plan_citation": "plans/inbox-20260830/17-fb-20260829-104625-7c88.md:27",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M19-TOOL-READINESS (consume diagnósticos M17)",
+      "authority": "00-execution-dag.md:54; addendum :68",
+      "observed_readonly": "resolve_stop_run dayz_test_tool.py:218-233: presente pero no RUNNING/RUNNING_IDLE (salvo never_started unacked) → _fail('run_not_active'); UUID ausente → _fail('run_not_found') vía _exact_run:200-201. No hay dict estructurado con daemon_generation_at_launch/daemon_generation_current/generation_changed. test_stop_rejects_acked_exited_run :291-304 espera DayzTestToolError run_not_active, no envelope."
+    },
+    "7c88_5_reattach_broker_and_steam": {
+      "plan_citation": "plans/inbox-20260830/17-fb-20260829-104625-7c88.md:28",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M16-STEAM-PREFLIGHT + M19-TOOL-READINESS + M20-WORKER-STORAGE",
+      "authority": "00-execution-dag.md:51,54,55; addendum :65,68-70",
+      "observed_readonly": "dayz_test_tool.py no referencia steam_preflight ni un broker adopt/start-client. El worker (fuera de OWNS) no se recorre para acreditar adopt; M21 no posee esa región."
+    },
+    "7c88_6_keep_run_id_on_success_and_failure": {
+      "plan_citation": "plans/inbox-20260830/17-fb-20260829-104625-7c88.md:29 (mantiene run_id en éxito y fallo terminal; sin añadir campos)",
+      "verdict": "IMPLEMENTED",
+      "owner": "M21-TERMINAL-INTEGRATION",
+      "preexisting_baseline": true,
+      "code": "WorkerTerminal dayz_test_tool.py:41-47 incluye run_id. parse_worker_terminal :316-322 lo copia en éxito y fallo. Éxito exige exit_code=0, error_code is None, not cleanup_degraded (:304-306) y admite UUID4 (:301-303). Fallo degradado exige run_id no nulo; fallo no degradado exige run_id is None (:307-315). _TERMINAL_KEYS :30-32 sigue siendo exactamente las cinco claves; no hay sexta.",
+      "tests": "test_parse_success_terminal test_dayz_test_tool.py:308-323 aserta result.run_id == RUN_ID. test_parse_failure_terminal_with_degraded_cleanup :325-340 aserta run_id en fallo degradado. test_typed_readiness_codes_keep_five_key_terminal_contract :342-372 aserta el keyset de cinco y parsea fallos con run_id=None.",
+      "not_claimed": "Esto es el contrato DZW1 anterior al lote, no una corrección M21. No acredita el recorte de correlación preflight del mismo punto 6. Suite no ejecutada este hop."
+    },
+    "7c88_6_preflight_correlation_fix": {
+      "plan_citation": "plans/inbox-20260830/17-fb-20260829-104625-7c88.md:29",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M21-TERMINAL-INTEGRATION",
+      "why": "El EXACT de la ficha (:21) nombra el bug: con preflight=true, UUID no nulo y terminal exitoso, `preflight != (terminal.run_id is None)` produce terminal_invalid. Esa comparación sigue en dayz_test_tool.py:467-472. El DESIGN pide: si expected_run_id no es nulo, un terminal exitoso debe traer exactamente ese ID aunque preflight=true; si es nulo, preflight exitoso trae run_id=null. El XOR actual hace imposible la primera cláusula.",
+      "code": "_validate_terminal_context :461-472: si not terminal.ok return; luego `if preflight != (terminal.run_id is None): _fail('terminal_invalid')`; luego mismatch de expected_run_id. _execute_request :554-557 llama parse y después esta validación. execute_dayz_test_run :658 pasa expected_run_id=run_id.",
+      "tests": "test_success_run_id_matches_operation_context :446-471 encierra el XOR viejo: success_with_run + preflight=True + expected_run_id=None espera terminal_invalid (:458-463). No existe el caso positivo preflight=True + expected_run_id=RUN_ID + terminal.run_id=RUN_ID, que el DESIGN exige que no muera como terminal_invalid. No hay mutante de 'fila pública válida acabada en terminal_invalid'.",
+      "public_valid_row_still_maps_to_terminal_invalid": "preflight=true, mode=client, UUID acreditado, terminal ok con ese UUID: el XOR :469 lo convierte en terminal_invalid. Eso es el FAIL nombrado en 7c88.md:44."
+    },
+    "7c88_7_m22_docs": {
+      "plan_citation": "plans/inbox-20260830/17-fb-20260829-104625-7c88.md:30",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57; addendum :72 (server.py, instructions, superficie pública)"
+    },
+    "4407_1_m15_mission_binding": {
+      "plan_citation": "plans/inbox-20260830/20-fb-20260829-115147-4407.md:31",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M15-STORAGE-CORE",
+      "authority": "00-execution-dag.md:50; addendum :64",
+      "observed_readonly": "Glob tools/**/dayz_test_storage.py → 0 ficheros. tools/tests/test_dayz_test_storage.py tampoco existe. El leaf mission_binding_v1 no está en el árbol."
+    },
+    "4407_2_fingerprint_and_tree_digest": {
+      "plan_citation": "plans/inbox-20260830/20-fb-20260829-115147-4407.md:32",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M15-STORAGE-CORE",
+      "authority": "00-execution-dag.md:50; addendum :64",
+      "observed_readonly": "Ningún símbolo storage-tree-v1 / payload fingerprint en dayz_test_tool.py ni en su test. El productor es M15, ausente."
+    },
+    "4407_3_matrix_a_to_f": {
+      "plan_citation": "plans/inbox-20260830/20-fb-20260829-115147-4407.md:33",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M15-STORAGE-CORE",
+      "authority": "00-execution-dag.md:50"
+    },
+    "4407_4_reserved_sibling_names": {
+      "plan_citation": "plans/inbox-20260830/20-fb-20260829-115147-4407.md:34",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M15-STORAGE-CORE",
+      "authority": "00-execution-dag.md:50"
+    },
+    "4407_5_journal_enumeration": {
+      "plan_citation": "plans/inbox-20260830/20-fb-20260829-115147-4407.md:35",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M15-STORAGE-CORE",
+      "authority": "00-execution-dag.md:50"
+    },
+    "4407_6_journal_schema_v1": {
+      "plan_citation": "plans/inbox-20260830/20-fb-20260829-115147-4407.md:36",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M15-STORAGE-CORE",
+      "authority": "00-execution-dag.md:50"
+    },
+    "4407_7_failure_compensation": {
+      "plan_citation": "plans/inbox-20260830/20-fb-20260829-115147-4407.md:37",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M15-STORAGE-CORE",
+      "authority": "00-execution-dag.md:50"
+    },
+    "4407_8_sidecar_write": {
+      "plan_citation": "plans/inbox-20260830/20-fb-20260829-115147-4407.md:38",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M15-STORAGE-CORE",
+      "authority": "00-execution-dag.md:50"
+    },
+    "4407_9_pending_run_id_cas": {
+      "plan_citation": "plans/inbox-20260830/20-fb-20260829-115147-4407.md:39",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M20-WORKER-STORAGE (invoca helper M15)",
+      "authority": "00-execution-dag.md:55; addendum :69-70"
+    },
+    "4407_10_m15_reader_and_m20_packaging": {
+      "plan_citation": "plans/inbox-20260830/20-fb-20260829-115147-4407.md:40",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M15-STORAGE-CORE + M20-WORKER-STORAGE",
+      "authority": "00-execution-dag.md:50,55; addendum :64,69-70. El lector read-only lo consume M21 en el punto 12, no lo posee aquí.",
+      "observed_readonly": "Sin dayz_test_storage.py no hay helper mutador ni lector. _write_worker_terminal en app_main.py:55-72 (read-only este hop) sigue emitiendo las cinco claves; test_dayz_test_app.py:196-207 (fuera de OWNS) sigue exigiendo ese keyset y DZW1 sin DZW2."
+    },
+    "4407_11_m20_alias_table_and_bundle": {
+      "plan_citation": "plans/inbox-20260830/20-fb-20260829-115147-4407.md:41",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M20-WORKER-STORAGE (precondición M19 de ingress en a396.md:29-30)",
+      "authority": "00-execution-dag.md:54-55; addendum :68-70",
+      "observed_readonly": "La precondición que M21 debe consumir no está en esta hop: build_run_request dayz_test_tool.py:134-135 sigue `if mission not in _MISSION_ALIASES: _fail('bad_mission')`. test_build_run_request_rejects_unknown_project_and_public_paths :153-160 rechaza una absoluta P:\\missions\\custom.ChernarusPlus con bad_mission. Eso es el FAIL de 4407.md:60 ('que M21 reinstale alias-only') todavía vivo en la ingress, región M19."
+    },
+    "4407_12_preserve_dzw1_five_keys": {
+      "plan_citation": "plans/inbox-20260830/20-fb-20260829-115147-4407.md:42 (primero conserva _TERMINAL_KEYS, WorkerTerminal, parse_worker_terminal y _validate_terminal_context; sexta clave storage_rotated muere como terminal_invalid)",
+      "verdict": "IMPLEMENTED",
+      "owner": "M21-TERMINAL-INTEGRATION",
+      "preexisting_baseline": true,
+      "code": "_TERMINAL_KEYS dayz_test_tool.py:30-32 = {cleanup_degraded, error_code, exit_code, ok, run_id}. parse_worker_terminal :287-288 exige set(value) == _TERMINAL_KEYS. Una sexta clave cualquiera (incluido storage_rotated) muere terminal_invalid antes de cualquier lector, porque no hay lector posterior.",
+      "tests": "test_terminal_rejects_non_closed_or_inconsistent_payloads caso 'extra' test_dayz_test_tool.py:384 usa clave 'secret' y espera terminal_invalid :441-444. test_typed_readiness_codes_keep_five_key_terminal_contract :361-370 aserta el keyset de cinco. No hay un caso literalmente nombrado storage_rotated; el predicado extra-key es el mismo.",
+      "not_claimed": "Conservar el parser no es enriquecer. La secuencia 'antes de invocar el lector' es vacuamente parse-only: no existe llamada a un lector M15. Suite no ejecutada este hop."
+    },
+    "4407_12_post_dzw1_storage_enrichment": {
+      "plan_citation": "plans/inbox-20260830/20-fb-20260829-115147-4407.md:42",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M21-TERMINAL-INTEGRATION",
+      "why": "Tras parse+_validate_terminal_context (:554-557) el código no vuelve a parsear raw_request con M18 ni sealed_policies, no aplica _mission, no reacredita mission_roots, no invoca el lector M15 y no añade campos storage a _compact_result.",
+      "code": "_execute_request :554-590: parse → _validate_terminal_context → opcional last_start_error → liveness → return _compact_result. _compact_result :436-458 publica exactamente status/project/mode/run_id/phase/elapsed_s/artifacts_paths/error_code/cleanup_degraded/server_alive/client_alive. No hay storage_rotated, storage_backup, storage_marker_backup, storage_pending_clear_deferred, storage_recovery_required, storage_txid ni storage_reset_notice. dayz_test_tool.py no importa dayz_test_storage (el módulo no existe). verified_bundle se pasa al launcher (:545) y no se usa para recomputar misión tras el terminal.",
+      "tests": "test_run_reports_progress_and_returns_compact_terminal_result :619-633 y test_typed_readiness_failure_uses_existing_nine_key_result :687-701 exigen set(result) igual a esas once claves; añadir storage rompería esos asertos. Grep de storage_rotated|storage_backup|storage_reset_notice|mission_binding en test_dayz_test_tool.py: 0 hits. Fixtures obligatorias del punto 12 (alias vs absoluta, lfheli sin mapping, sexta clave storage_rotated, marker copiado entre raíces, mutaciones de binding) no existen.",
+      "predecessor_blocker_not_an_excuse": "M15 ausente y ingress alias-only (M19) impiden el camino feliz, pero el hueco M21 es observable en los bytes propios: no hay región post-DZW1 que enriquezca."
+    }
+  },
+  "verdict_counts": {
+    "IMPLEMENTED": 2,
+    "OUT-OF-SCOPE": 19,
+    "NOT-IMPLEMENTED": 2,
+    "INCONCLUSIVE": 0,
+    "note": "Conteos sobre las 23 entradas de plan_points (2+19+2=23). Las 2 IMPLEMENTED son preexisting_baseline del contrato DZW1 de cinco claves, no trabajo nuevo M21. Hashes de owns y corrida unittest son INCONCLUSIVE aparte."
+  },
+  "preexisting_suite_not_run": {
+    "file": "tools/tests/test_dayz_test_tool.py",
+    "methods_visible": 33,
+    "methods": [
+      "test_build_run_request_uses_sealed_project_and_policy_defaults:75",
+      "test_build_run_request_requires_bridge_in_effective_mods:93",
+      "test_build_run_request_rejects_unknown_project_and_public_paths:149",
+      "test_build_run_request_delegates_cross_field_validation:191",
+      "test_build_run_request_names_invalid_mode_and_expected_values:201",
+      "test_extension_run_must_be_idle_and_match_selected_project:214",
+      "test_stop_resolves_project_only_from_exact_manifest_run:244",
+      "test_stop_resolves_never_started_unacked_exited_run:270",
+      "test_stop_rejects_acked_exited_run:291",
+      "test_parse_success_terminal:308",
+      "test_parse_failure_terminal_with_degraded_cleanup:325",
+      "test_typed_readiness_codes_keep_five_key_terminal_contract:342",
+      "test_terminal_rejects_non_closed_or_inconsistent_payloads:374",
+      "test_success_run_id_matches_operation_context:446",
+      "test_stop_artifact_must_be_derived_from_sealed_project:473",
+      "test_run_rejects_missing_bridge_before_secure_launch:535",
+      "test_run_reports_progress_and_returns_compact_terminal_result:563",
+      "test_typed_readiness_failure_uses_existing_nine_key_result:646",
+      "test_run_fails_when_client_pid_is_already_dead:706",
+      "test_list_project_names_returns_mod_fields_only:761",
+      "test_list_project_names_missing_policy_is_not_invalid:811",
+      "test_list_project_names_unreadable_policy_stays_invalid:824",
+      "test_run_rejects_busy_session_before_opening_launcher:840",
+      "test_run_rejects_public_offline_mode_with_expected_enum:853",
+      "test_run_names_held_session_lease_on_transition_conflict:866",
+      "test_run_transition_conflict_without_local_lease_stays_neutral:893",
+      "test_stop_names_held_session_lease_without_naming_run:921",
+      "test_idle_guard_recovers_stale_local_operation_before_launch:947",
+      "test_run_id_is_bound_before_secure_launch:968",
+      "test_stop_derives_policy_and_builds_adopt_then_stop_request:1004",
+      "test_stop_reconciles_lost_terminal_response_from_exact_exited_run:1058",
+      "test_worker_failed_carries_lifecycle_start_error:1110",
+      "test_stdout_overflow_sentinel_is_rejected_by_real_parser:1154"
+    ],
+    "note": "Inventario de source (9 request + 6 terminal + 18 execution = 33), no resultado de unittest. El brief prohíbe inventar ran/failures."
+  },
+  "bugs_observed_not_fixed": [
+    {
+      "id": "7c88-preflight-xor-still-open",
+      "location": "tools/dayz_mcp/dayz_test_tool.py:469 y tools/tests/test_dayz_test_tool.py:458-463",
+      "problem": "La comparación `preflight != (terminal.run_id is None)` convierte un dry-run client+UUID exitoso en terminal_invalid. El test de contexto encierra ese XOR en lugar del recorte 7c88.",
+      "action": "no parcheado; es el hueco DESIGN M21 de 7c88 punto 6."
+    },
+    {
+      "id": "4407-no-storage-enrichment",
+      "location": "tools/dayz_mcp/dayz_test_tool.py:436-458 y :554-590",
+      "problem": "_compact_result no añade campos storage; tras DZW1 no hay reparse M18 ni lector M15. test :619-633 congela el keyset de once claves sin storage.",
+      "action": "no parcheado; es el hueco DESIGN M21 de 4407 punto 12. El leaf M15 ni siquiera está en el árbol."
+    },
+    {
+      "id": "m19-alias-only-ingress-still-present",
+      "location": "tools/dayz_mcp/dayz_test_tool.py:134-135",
+      "problem": "build_run_request sigue rechazando mission absoluta con bad_mission. Región M19, no M21; bloquea la precondición que 4407 punto 12 dice 'ya materializada'.",
+      "action": "no parcheado (fuera de alcance y el brief prohíbe arreglar)."
+    }
+  ],
+  "not_touched": [
+    "tools/dayz_mcp/dayz_test_tool.py (leído entero :1-716; no escrito)",
+    "tools/tests/test_dayz_test_tool.py (leído entero :1-1215; no escrito)",
+    "tools/dayz_mcp/dayz_test_request.py (leído :41-43,:339,:360-362 para OUT-OF-SCOPE M18; no escrito)",
+    "tools/dayz_mcp/dayz_test_worker.py (grep _mission :188; no escrito)",
+    "tools/native-launchers/dayz-test-v1/src/app_main.py (leído :55-72 emisor DZW1; no escrito)",
+    "tools/tests/test_dayz_test_app.py (leído :196-207 oráculo cinco claves; no escrito)",
+    "tools/dayz_mcp/dayz_test_storage.py (ausente)",
+    "tools/dayz_mcp/server.py (no recorrido a fondo; M22)",
+    "GATES.md",
+    "gates/**",
+    "plans/**",
+    "product-spec.md",
+    "tools/.venv-mcp"
+  ]
+}

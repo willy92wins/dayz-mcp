@@ -1,0 +1,1 @@
+{'hwnd': 62915548, 'owner_pid': 20568, 'owner': 'daemon interpreter', 'class': 'PseudoConsoleWindow', 'title': '', 'visible': True, 'iconic': False, 'rect': (0, 0, 0, 0)}

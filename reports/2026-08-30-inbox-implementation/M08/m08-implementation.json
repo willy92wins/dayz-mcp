@@ -1,0 +1,45 @@
+{
+  "ticket": "fb-20260829-024848-c7ca",
+  "module": "M08-INBOX",
+  "packet": "inbox-20260831-v6",
+  "plan": "plans/inbox-20260830/08-fb-20260829-024848-c7ca.md",
+  "gate_file": "gates/inbox-08-024848-c7ca.md",
+  "ownership_addendum": "plans/inbox-20260830/physical-ownership-addendum-v1.md:55,88",
+  "scope": "plan points 1-3 + helper tests; helpers already existed and matched the plan, working bytes not rewritten",
+  "owns": {
+    "tools/dayz_mcp/inbox.py": {
+      "sha256": "c7843a7bc4e023fbabc57925928d8190a5f3738515430abceaaf64334052f0a7",
+      "mtime_utc": "2026-08-31T22:42:09.554321+00:00",
+      "size_bytes": 7896
+    },
+    "tools/tests/test_pipeline_feedback.py": {
+      "sha256": "2a0e0be8f83a9cb75b5d9ae7e2fa5c60b960628cdc0adfd2fba0141f4da71677",
+      "mtime_utc": "2026-08-31T22:43:00.096509+00:00",
+      "size_bytes": 13667
+    }
+  },
+  "plan_points": {
+    "1_evidence_ref_validation": {
+      "implemented": "tools/dayz_mcp/inbox.py:15-16 (roots+segment regex), inbox.py:30-47 (_validate_evidence_ref: ASCII 1..240, POSIX relative, exactly reviews/|gates/|reports/|research/, segments [A-Za-z0-9._-]+, fail-closed empty/. /.., absolute, drive, backslash, colon, URI, control, non-ASCII, other roots)",
+      "entry_point": "tools/dayz_mcp/inbox.py:121-146 (append_resolution evidence_ref optional)",
+      "tests": "tools/tests/test_pipeline_feedback.py:137-171 (4 valid roots + 14 rejected mutants)"
+    },
+    "2_age_derivation": {
+      "implemented": "tools/dayz_mcp/inbox.py:49-64 (_age_fields: injectable now, floor Ns/Nm/Nh/Nd, invalid_timestamp/future_timestamp both null+age_reason)",
+      "derived_only_from_original_entry_ts": "tools/dayz_mcp/inbox.py:203 (item.update(_age_fields(item.get('ts'), now)); resolutions never overwrite entry ts, inbox.py:183-187)",
+      "never_persisted": "age fields added only in _read_inbox read path; no age key is ever appended (append paths inbox.py:148-169)",
+      "tests": "tools/tests/test_pipeline_feedback.py:193-232 (boundaries 59/60/3599/3600/86399/86400, invalid/future null+reason, raw JSONL contains no age_s/age_label)"
+    },
+    "3_last_resolution_wins_and_clears": {
+      "implemented": "tools/dayz_mcp/inbox.py:182-188 (later resolution overwrites resolution/resolved_ts, pops previous evidence_ref, only re-adds if the later record carries one)",
+      "tests": "tools/tests/test_pipeline_feedback.py:130-135 (last wins), 173-191 (later resolution without ref clears previous; append-only, no age persisted)"
+    }
+  },
+  "not_touched": [
+    "tools/dayz_mcp/knowledge.py",
+    "tools/dayz_mcp/steam_preflight.py",
+    "tools/dayz_mcp/server.py",
+    "tools/tests/test_pipeline_feedback.py PipelineToolsTest region (lines 245+, pre-existing bytes unchanged)",
+    "GATES.md boxes (copies for read)"
+  ]
+}

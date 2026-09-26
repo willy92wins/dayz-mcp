@@ -1,0 +1,18 @@
+{
+  "phase": "spawn",
+  "ts": "2026-08-19T22:33:55",
+  "intruder": {
+    "pid": 38808,
+    "profiles": "C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/reviews/2026-08-19-lane-fence/canario/evidencia-20260819\\intruder_profiles",
+    "instance_in_copied_config": "4926f46e",
+    "cmd": [
+      "C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ\\DayZDiag_x64.exe",
+      "-profiles=C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/reviews/2026-08-19-lane-fence/canario/evidencia-20260819\\intruder_profiles",
+      "-mod=P:\\Mods\\@DayZ_MCP",
+      "-connect=127.0.0.1",
+      "-port=2302",
+      "-name=Intruso"
+    ]
+  },
+  "nota": "esperar a que el intruso pinte (~60 s). Si no pinta, el canario es INCONCLUSO, no un PASS."
+}

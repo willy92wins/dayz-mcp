@@ -1,0 +1,32 @@
+{
+  "module": "M17",
+  "measured_by": "orchestrator",
+  "generated_utc": "2026-09-02T00:09:36.515904+00:00",
+  "owns": {
+    "tools/dayz_mcp/process_lifecycle.py": {
+      "sha256": "eefc662fac97aa9c5f7a4644758d0589d68749a0401e4740c9a424dd8715de19",
+      "size_bytes": 108158,
+      "mtime_utc": "2026-08-19T23:01:39.867038+00:00"
+    },
+    "tools/dayz_mcp/daemon.py": {
+      "sha256": "f282c0a11ed3387d724c6021cde4fd68c1b9f8aa8859dcd8122a23f0a8159a08",
+      "size_bytes": 37692,
+      "mtime_utc": "2026-08-21T10:09:38.227028+00:00"
+    },
+    "tools/dayz_mcp/loopback.py": {
+      "sha256": "511dd9093a7f607365678bf3d185afddf08c43d86f2d7affe83b42ca83a5e3b8",
+      "size_bytes": 130697,
+      "mtime_utc": "2026-08-28T23:03:10.988271+00:00"
+    },
+    "tools/tests/test_process_lifecycle.py": {
+      "sha256": "8d949616519bd0ac45bba38a4b27ca0f3c103b6f3f5b0e6f887c4128e15ac9ef",
+      "size_bytes": 69399,
+      "mtime_utc": "2026-08-21T10:09:38.255409+00:00"
+    },
+    "tools/tests/test_lifecycle_http.py": {
+      "sha256": "d6bfe300a495707740ea26eb9a7df5279ec97cae2d131c13593774e1a0acf86e",
+      "size_bytes": 21096,
+      "mtime_utc": "2026-08-22T19:53:50.037557+00:00"
+    }
+  }
+}

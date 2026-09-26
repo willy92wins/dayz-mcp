@@ -1,0 +1,187 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobacion, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar o hasta agotar los turnos.
+Si te bloqueas, escribe el bloqueo en STATE.md y sigue con lo que no dependa de el.
+
+===============================================================================
+S0. EL PRODUCTO - y solo el producto
+===============================================================================
+
+Cinco arreglos independientes en las herramientas del servidor MCP de DayZ (Python 3.14,
+unittest). Ninguno toca `server.py`, el bundle nativo ni el registro aprobado.
+
+  W6. `tools/h9_native_probe.py` vuelve a funcionar: su llamada a
+      `launch_registered_native(...)` (`h9_native_probe.py:282`) pasa TODOS los argumentos
+      keyword-only obligatorios de la firma actual
+      (`tools/dayz_mcp/native_launcher_backend.py:1566-1575`), en particular
+      `daemon_policy_json`, obtenido igual que lo hace `tools/dayz_mcp/secure_launcher.py:144-152`
+      (`serialize_normal_daemon_policy(load_normal_daemon_policy())`). Y `main()`
+      (`h9_native_probe.py:372-387`) no pliega un error interno de programacion (TypeError)
+      al codigo de bundle `invalid_native_launcher_bundle`: o lo deja propagar, o lo publica
+      como `{"ok": false, "error": "probe_internal_error: <Tipo>: <mensaje>"}`.
+  W7. `tools/tests/test_effective_schema.py` (14 funciones `def test_*` a nivel de modulo,
+      `:16-205`, estilo pytest) pasa a clases `unittest.TestCase`, conservando los 14 casos
+      y sus aserciones: `python -m unittest tests.test_effective_schema` colecciona >= 14 y
+      sale OK. Hoy colecciona 0 (la venv no tiene pytest) y el CHANGELOG publica ese modulo
+      como feature sin que la suite lo vea.
+  W8. `tools/dayz_mcp/doctor.py` gana una comprobacion del closure-manifest del bundle
+      nativo contra el disco, con esta costura pura (nombre y firma son contrato; el
+      metodo es tuyo):
+
+          check_native_bundle_externals(entries, *, stat) -> list[dict]
+
+      `entries` son los items del `closure-manifest.json` (dicts con `kind`, `path`,
+      `size`, `sha256`; ver `tools/dayz_mcp/native_bundle.py:455-490`); `stat(path)`
+      devuelve `(size, sha256_hex)` del fichero en disco o `None` si no existe. Solo se
+      comprueban los `kind == "external"`; los `bundle` tienen su propio verificador y NO
+      se reportan aqui. Findings con el mismo helper `_finding` que el resto
+      (`doctor.py:431-432`):
+        - todos casan: UN finding `NATIVE_BUNDLE_EXTERNALS_OK`, severity `INFO`,
+          `checked=<n externals>`;
+        - alguno difiere en size o sha256, o falta: UN finding
+          `NATIVE_BUNDLE_EXTERNAL_DRIFT`, severity `FAIL`, `drifted=[<paths>]` y
+          `remediation=<texto>` que nombre el ciclo real de renovacion:
+          `python tools/build_native_launcher.py --offline --verify-reproducible`, luego
+          `python -m dayz_mcp.launcher_registry_update rollback-last`, luego
+          `install-dayz-test-v1 --expected-sha256 <sha256 del approved-launchers.json ACTUAL>`.
+      Y la costura se CABLEA en la corrida normal del doctor: se abre el launcher aprobado
+      (`tools/dayz_mcp/launcher_registry.py:294 open_approved_launcher("dayz-test-v1")`),
+      se lee su `closure-manifest.json` (`native_bundle.py:616`) y se llama a la costura
+      con un `stat` real (sha256 + tamano). Si no hay launcher aprobado o el manifest no se
+      puede leer, un finding `NATIVE_BUNDLE_MANIFEST_UNREADABLE` (WARN) y nada mas: el
+      doctor no revienta. El JSON del doctor (`--json`) los transporta como cualquier otro.
+  W9. Guard de interprete en la suite, fichero NUEVO `tools/tests/test_interpreter_guard.py`
+      con dos funciones de modulo (contrato) y un TestCase que las usa:
+        - `approved_interpreter(package_file: Path) -> Path`: el interprete aprobado del
+          arbol del que se cargo `dayz_mcp`, con la MISMA derivacion que
+          `tools/dayz_mcp/daemon.py:186-191`: `<arbol>/tools/.venv-mcp/Scripts/python.exe`
+          (package_file es `Path(dayz_mcp.__file__)`).
+        - `verdict(current: Path, approved: Path, *, approved_exists: bool) -> tuple[str, str]`:
+          `("ok", msg)` si son el mismo interprete (comparar con os.path.normcase);
+          `("mismatch", msg)` si el aprobado existe y difieren, con AMBAS rutas en msg;
+          `("absent", msg)` si el aprobado no existe, con `.venv-mcp` en msg.
+      El TestCase: `mismatch` -> `self.fail(msg)`; `absent` -> `self.skipTest(msg)`;
+      `ok` -> pasa. Motivo (ficha fb-20260902-202527-da54): este repo tiene dos interpretes
+      que dan resultados distintos sobre la misma suite (C:\Python314 da 5 rojos falsos) y
+      nada lo declaraba; toda cifra de suite tiene que venir con su interprete.
+  W12. `tools/tests/test_docs_truth.py:635` y `:655`: los dos mensajes que aconsejan
+      "Regenerate the map" pasan a decir que `PROJECT-MAP.md` se mantiene A MANO ("by hand";
+      no existe generador, ficha fb-20260902-124229-f715). Solo esos mensajes; ninguna
+      asercion cambia.
+
+LO QUE NO ES EL PRODUCTO, y por tanto no es tu trabajo aunque tengas razon:
+  - El oraculo de `gate/`, su calibracion o su diseno. Si crees que esta mal, escribelo en
+    STATE.md bajo `DISPUTAS` y sigue. NO lo edites.
+  - `tools/build_native_launcher.py`: su sha256 viaja dentro del contrato del bundle
+    (`_build_contract`, `:717-729`); editarlo invalida el bundle desplegado. NO lo toques.
+  - `native_bundle.py`, `launcher_registry*.py`, `dayz_test_*.py`, `server.py`, el bundle,
+    `approved-launchers.json`. Refactors, renombrados, limpiezas "de paso".
+
+Si terminas los cinco y te sobra turno, PARA.
+
+===============================================================================
+S1. ENTORNO - verificado hoy
+===============================================================================
+
+  - Workspace: el directorio en el que estas. Contiene `tools/`, `addon/`, `playbooks/`,
+    `gate/` y los .md de la raiz. Todo lo que no este en el write-set del S5 es de solo
+    lectura.
+  - Interprete, exacto y sin alternativa:
+      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+  - **Esa venv NO tiene pytest.** La suite es `unittest`: clases `unittest.TestCase`.
+  - Para importar el paquete: `cd tools` y `PYTHONPATH=.`
+    Ejemplo:  cd tools && PYTHONPATH=. "<interprete>" -m unittest tests.test_doctor
+  - `tests/test_docs_truth.py` lee los .md del arbol que le diga `DAYZ_MCP_WATCHDOG_REPO`;
+    `gate/suite.sh` ya lo apunta al arbol vivo. No copies ni edites esos .md.
+  - En ESTE workspace no existe `tools/.venv-mcp`: el guard W9 tiene que SALTARSE aqui
+    (`absent`) y el oraculo lo comprueba asi.
+  - No hay red, no hay juego corriendo, no hay daemon que necesites. El doctor real puede
+    encontrar o no un launcher aprobado en este arbol copiado: por eso W8 exige el finding
+    WARN en vez de reventar.
+  - Tope de tiempo: ~100 turnos. Escribe por tramos: cada producto terminado, a disco y a
+    STATE.md antes del siguiente.
+
+===============================================================================
+S2. HECHOS VERIFICADOS - los abri yo con Read
+===============================================================================
+
+  - `h9_native_probe.py:168` `async def _run(...)`; `:282` la llamada a
+    `launch_registered_native(root_authority, verified_bundle=..., identity_json=...,
+    lease_token=..., canonical_request=frame, cancel_event=..., output_sink=...)`; falta
+    `daemon_policy_json`. `main()` en `:372-387` captura `(OSError, ValueError, RuntimeError)`.
+  - `native_launcher_backend.py:1566-1575`: `launch_registered_native(opened_launcher, *,
+    verified_bundle, identity_json, lease_token, daemon_policy_json, canonical_request,
+    cancel_event, output_sink=None)`.
+  - `secure_launcher.py:18-19` importa `load_normal_daemon_policy, serialize_normal_daemon_policy`;
+    `:197` `daemon_policy = load_normal_daemon_policy()`; `:144` lo serializa; `:151` lo pasa.
+  - `doctor.py:431-432` `_finding(code, *, severity="FAIL", **details)`; `:435` `_check_knowledge_pack`
+    es el patron de una comprobacion que anade findings a una lista; `:1114-1116` cuenta FAIL/WARN;
+    `:1156` imprime `[SEV] CODE`. Tests existentes: `tests/test_doctor.py`, `tests/test_doctor_pairing.py`.
+  - `native_bundle.py:609` `load_verified_bundle(opened_launcher)`; `:616` `manifest_path = root /
+    "closure-manifest.json"`; `:455-490` la forma de cada entry (kind, path, size, sha256).
+  - `launcher_registry.py:25` `_CANONICAL_REGISTRY = <tools>/approved-launchers.json`; `:294`
+    `open_approved_launcher(launcher_id)`.
+  - `daemon.py:186-198` `_ensure_identity_migration`: la derivacion del interprete aprobado.
+  - `tests/test_docs_truth.py:635` y `:655`: los dos f-strings con "Regenerate the map".
+  - `tests/test_effective_schema.py:4-14` importa de `dayz_mcp.effective_schema`; 14 funciones.
+
+===============================================================================
+S3. PRECISIONES
+===============================================================================
+
+  - W7: no cambies lo que cada test comprueba; solo la forma (clase + metodos). Si un test
+    usaba `pytest.raises` u otro helper de pytest, sustituyelo por el equivalente unittest.
+  - W8: `stat` recibe la ruta tal cual figura en el manifest (cadena). La comparacion de
+    sha256 es case-insensitive sobre hex; la de size es exacta.
+  - W9: el TestCase NO debe fallar en este workspace (aqui el aprobado no existe): salta.
+  - Tests nuevos para W6/W8: en `tools/tests/test_doctor.py` (W8) y en un fichero nuevo
+    `tools/tests/test_lote_w_h9.py` (W6: el test AST de kwargs y el de `main()`), o en
+    `tools/tests/test_lote_w_*.py`. `unittest` puro.
+
+===============================================================================
+S4. EL GATE
+===============================================================================
+
+    bash gate/run.sh      -> G1, el oraculo
+    bash gate/suite.sh    -> G2, los tests vecinos
+
+Estado de partida MEDIDO de G1:
+
+    PASS=2  FAIL=4  UNMET=2  de 8
+    PASS : W6-main-does-not-fold-TypeError, W12-by-hand-advice
+    FAIL : W7-collected (0 de 14), W7-green, W6-kwargs-complete (falta daemon_policy_json),
+           W12-no-regenerate-advice
+    UNMET: W8-seam (la costura no existe), W9 (el modulo no existe)
+    G2 hoy: `test_effective_schema : Ran 0 tests NO TESTS RAN` -> SUITE-ACOTADA ROJA por el
+    propio sujeto de W7; los otros seis modulos OK.
+
+Los FAIL/UNMET son tu trabajo. Los PASS no se pueden romper. Terminas cuando G1 dice
+`ORACULO-VERDE` y G2 dice `SUITE-ACOTADA OK`. `gate/` es de solo lectura, sellado por hash.
+
+===============================================================================
+S5. FRONTERAS - write-set cerrado
+===============================================================================
+
+PUEDES editar:
+  - tools/h9_native_probe.py
+  - tools/tests/test_effective_schema.py
+  - tools/dayz_mcp/doctor.py
+  - tools/tests/test_doctor.py
+  - tools/tests/test_docs_truth.py  (SOLO los dos mensajes)
+  - ficheros NUEVOS: tools/tests/test_interpreter_guard.py, tools/tests/test_lote_w_*.py
+  - STATE.md (raiz del workspace)
+
+NO puedes tocar nada mas. Prohibido: git, pip, red, borrar ficheros, ejecutar el launcher
+nativo o el doctor contra un daemon (no hace falta).
+
+===============================================================================
+S6. CIERRE - STATE.md en la raiz del workspace
+===============================================================================
+
+    ## HECHO
+    Por producto (W6, W7, W8, W9, W12): que cambiaste, path:line, y que test lo cubre.
+    ## GATES
+    Salida literal de `bash gate/run.sh` y `bash gate/suite.sh` en tu ultima corrida.
+    ## LO QUE NO PUDE VERIFICAR
+    Sin excusas.
+    ## DISPUTAS
+    Concreto o "Ninguna."

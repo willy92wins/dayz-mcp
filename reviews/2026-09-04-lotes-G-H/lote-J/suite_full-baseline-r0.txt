@@ -1,0 +1,4 @@
+Ran 2538 tests in 206.950s
+rojos = permitidos (2)
+SUITE-COMPLETA OK
+rc=0

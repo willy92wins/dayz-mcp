@@ -1,0 +1,156 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+LOTE H, ronda 1. Cierra lo que queda de la ficha 16 (pasos 5-8 del plan, criterios PASS 3.º y
+4.º) y el 2.º PASS de la ficha 17: el **sobre estructurado de `dayz_test_stop`** y los
+**diagnósticos de runs retirados**. El árbol que tienes ya lleva el lote G entero (actividad en
+memoria por generación; caja derivada de una foto; binding que muere con su run). No lo toques
+(D3): este lote AÑADE superficie, no la reescribe. Diseña para que dure: el anillo y la
+proyección son estado del daemon con su invariante escrita en la cabecera, no un parche.
+
+===============================================================================
+§0. EL PRODUCTO
+===============================================================================
+
+  H1. Para un run **presente**, `status()` (`lifecycle_status`) y `box_occupancy` adjuntan a
+      cada fila `daemon_generation_at_launch`, `daemon_generation_current` y
+      `generation_changed`. La generación de lanzamiento se PERSISTE en el manifiesto
+      (`RunRecord`, campo nuevo AL FINAL con default `None`); la actual es la del daemon.
+      `generation_changed` = `launch != current` sólo cuando hay lanzamiento acreditado;
+      sin él, **`null`, nunca `false`** (D4).
+  H2. Para runs **ya ausentes** (retirados por stop, reap, release, repair o reconcile), el
+      status publica como máximo **32** `retired_run_diagnostics`, los más recientes primero,
+      cada uno con `run_id`, `daemon_generation_at_launch`, `daemon_generation_current`,
+      `generation_changed`, `event`, `reason`, `decision` y `state`; **sin timestamps ni
+      paths**. Viven en un anillo acotado EN MEMORIA de `ProcessLifecycle`, alimentado por los
+      MISMOS seis caminos que retiran bindings (grep `_retire_run_bindings`). Tras un reinicio
+      el anillo empieza vacío y eso se publica tal cual (D1): nunca se reconstruye leyendo
+      `events.jsonl`.
+  H3. `execute_dayz_test_stop` (`tools/dayz_mcp/dayz_test_tool.py:774`) captura **un** snapshot
+      pre-dispatch de status y clasifica el resultado de `resolve_stop_run`: run presente pero
+      no activo → dict `{"status":"failed","run_id":...,"error_code":"run_not_active"}` + los
+      tres campos de generación **copiados** del snapshot (no recalculados); run podado/ausente
+      con **un único** `retired_run_diagnostic` exacto → el mismo dict con
+      `error_code="run_not_found"`; UUID nunca visto o diagnóstico ausente/ambiguo →
+      `ToolError("run_not_found")` sin campos inventados. Stop sobre run activo sigue igual.
+      **El sobre va en `execute_dayz_test_stop`, no en `resolve_stop_run`**: sus tests de API
+      pública exigen que levante (`tests/test_dayz_test_tool.py:357-370`).
+  H4. `dayz_test_stop` público transporta ese dict íntegro (hoy `server.py:3054-3055` traduce
+      `DayzTestToolError` a `ToolError`: el sobre es un RETORNO, no una excepción, y así cruza
+      sin tocar `server.py`). `retired_run_diagnostics` viaja SÓLO en el status, nunca en el
+      sobre de stop.
+  H5. Un `lifecycle_stop_outcome` exitoso (`reason="stopped"`, `decision="stopped"`,
+      `state="EXITED"`) se distingue en el diagnóstico de `manual_cleanup_required`,
+      `partial_cleanup`, `RUNNING`, `STOPPING` y `UNRECONCILED`; `run_reaped` acredita retirada
+      **sin terminación**. Un stop fallido NO retira: el run sigue presente y no entra al anillo.
+
+Decisiones heredadas, escritas en `gate/GATES.md` §Decisiones — no se renegocian desde aquí:
+D1 (la lectura no abre el audit), D2 (compatibilidad del manifiesto: un manifiesto viejo sin el
+campo carga y publica `null`; el campo sobrevive al round-trip `asdict→from_payload` de
+`_clone`; la construcción posicional de `process_lifecycle.py` pasa 12 argumentos sin nombre,
+así que el campo va al final con default), D3 (la actividad no se toca), D4 (fail-closed).
+
+[DESIGN] Forma que dura: un registro inmutable para cada diagnóstico (dataclass congelado con
+exactamente esos ocho campos), un anillo `collections.deque(maxlen=32)` bajo `_activity_lock`
+(mismo orden de locks que hoy: `_operation_lock → _activity_lock`; nunca el inverso), un único
+método `_retire_run_diagnostic(run, event, reason, decision, state)` llamado desde los seis
+caminos en el mismo punto en que hoy se llama a `_retire_run_bindings`, y una proyección pura
+de fila → los tres campos de generación que usan `status()` y `_derive_box` por igual.
+Cabecera (tono vanilla, sin primera persona): «Retired-run diagnostics live in daemon memory
+and start empty after a restart; the audit file is never read to reconstruct them.»
+
+LO QUE NO ES EL PRODUCTO: el gate, el oráculo, el ledger, este brief (defecto ahí →
+`DISPUTAS`); la matriz `preflight × mode × run_id` de la ficha 17 (pasos 1-3, 5-7); la
+actividad; refactors fuera de lo anterior.
+
+===============================================================================
+§1. LOS DOCE ROJOS Y LOS SEIS UNMET DEL GATE
+===============================================================================
+
+Ahora mismo, sobre tu árbol: `ORACULO: PASS=11 FAIL=12 UNMET=6 de 29`. Los 11 verdes son
+`[GUARDA]`: preservación, y la línea que no se puede romper.
+
+Rojos: `H1-STATUS-GEN-PRESENTE`, `H1-BOX-GEN-PRESENTE`, `H1-GEN-CAMBIADA`,
+`H1-FAIL-CLOSED-SIN-GENERACION`, `D2-MUT-FROM-PAYLOAD-NO-LEE`, `H2-DIAG-TRAS-STOP`,
+`H2-DIAG-TRAS-REAP`, `H2-TOPE-32-POR-RECENCIA`, `H2-ANILLO-EN-MEMORIA-EMPIEZA-VACIO`,
+`H3-RUN-NOT-ACTIVE-SOBRE`, `H3-RUN-NOT-FOUND-SOBRE-CON-DIAG`, `H4-TOOL-TRANSPORTA-EL-SOBRE`.
+
+Los seis `UNMET` (`H2-SIN-TIMESTAMP-NI-PATH`, `H3-MUT-RECOMPUTA-GENERATION-CHANGED`,
+`H3-INTEGRACION-STATUS-REAL`, `H4-DIAGNOSTICOS-SOLO-EN-STATUS`, `H5-STOP-EXITOSO-SE-DISTINGUE`,
+`H5-REAP-ACREDITA-SIN-TERMINAR`) no son tuyos todavía: su sujeto (el anillo, el sobre) no
+existe. En cuanto exista pasan a PASS o a FAIL. Terminas con **cero** UNMET: un UNMET al final
+significa que tu diseño dejó ese check sin alcance, y entonces va a `DISPUTAS` con el motivo.
+
+===============================================================================
+§2. LO QUE NO TIENE CHECK EN EL GATE. Lo cierro yo al recibir
+===============================================================================
+
+  (A) **Cuatro de los seis caminos no están gateados.** El oráculo ejercita `stop_run` y
+      `_reap_run_locked`; NO `begin_release_owner`, `repair_recovery_fault`,
+      `repair_manifest_recovery` ni `admin_reconcile`. Un anillo enganchado sólo a dos caminos
+      pasaría el gate. Escribe un test por camino (rojo-antes en `CONTROL POSITIVO`) y en
+      `HECHO` la lista de los seis con `path:line` y el grep que la prueba.
+  (B) **`public_status()`** (`process_lifecycle.py` ~:2543, consumido por `daemon.py` ~:655)
+      tiene que llevar los mismos campos que `status()`; el oráculo sólo mide `status()`.
+  (C) **Los dos mutantes de la ficha que el gate no calibra**: «más de 32 diagnósticos» y
+      «un diagnóstico con timestamp o path». Test propio para cada uno.
+  (D) **Manifiesto preexistente real**: un `runs.json` escrito por el árbol ANTERIOR a tu
+      cambio (sin el campo) carga, publica `daemon_generation_at_launch=null` y
+      `generation_changed=null`, y sobrevive a `get()`/`list_runs()`/`replace()` sin perder
+      nada. Test con el fichero de verdad, no con un dict a mano.
+
+===============================================================================
+§3. EL GATE
+===============================================================================
+
+    bash gate/run.sh      -> G1, el oráculo de producto (29 checks)
+    bash gate/suite.sh    -> G2, once módulos acotados (unittest; no hay pytest)
+
+G2 exige el layout `<ws>/{addon,tools,gate}` que ya tienes: `test_process_lifecycle` y
+`test_loopback` leen `tools/process-guard.ps1` y `addon/scripts/5_Mission/*.c`.
+
+Terminas cuando `gate/run.sh` diga `ORACULO-VERDE` y `gate/suite.sh` diga `SUITE-ACOTADA OK`.
+`gate/` está sellado por hash y es de sólo lectura. Compruebo el sello al recibir.
+
+===============================================================================
+§4. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/process_lifecycle.py      (anillo, campo de RunRecord, proyección en
+                                              status()/public_status()/_derive_box)
+    tools/dayz_mcp/dayz_test_tool.py         (el sobre en execute_dayz_test_stop)
+    tools/dayz_mcp/daemon.py                 (SÓLO si hace falta pasar la generación de
+                                              lanzamiento; probablemente no)
+    tools/tests/test_process_lifecycle.py
+    tools/tests/test_box_occupancy.py
+    tools/tests/test_dayz_test_tool.py
+    tools/tests/test_lifecycle_http.py
+    tools/tests/test_run_reaper.py
+    tools/tests/test_mcp_tools.py            (sólo si el transporte público exige un test ahí)
+
+PROHIBIDO: `gate/`; `addon/`; `server.py` (si crees que un check no puede ponerse verde sin
+tocarlo, `DISPUTAS` con el motivo, no lo toques); `loopback.py`; `runtime_state.py`; leer
+`events.jsonl` en cualquier ruta de lectura; debilitar o borrar validaciones existentes; tocar
+la actividad; usar red; correr la suite completa.
+
+⚠ **Data-crítico (DZ-R9)**: el manifiesto. Un campo que `from_payload` no lea se pierde en
+silencio en cada `_clone`; un campo sin default rompe todo manifiesto preexistente. Escribe
+tests para lo que entregas y córrelos ANTES de tu cambio para comprobar que fallan.
+
+===============================================================================
+§5. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — qué entregaste, con `path:line`: la forma del anillo y del registro,
+                          el campo de RunRecord y su default, la proyección, la lista COMPLETA
+                          de los seis caminos que alimentan el anillo con el grep que lo prueba.
+    ## GATE             — la salida literal de los dos gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea que demuestra que fallaba antes.
+                          Los de §2 (A)-(D) van aquí obligatoriamente.
+                          Si un test cubre algo que ya funcionaba, dilo: es preservación.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si crees que un criterio del gate está mal, aquí, con el argumento.

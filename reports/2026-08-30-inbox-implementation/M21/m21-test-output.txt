@@ -1,0 +1,43 @@
+# medido por el orquestador (Claude Opus 5) el 2026-09-02T00:09:36.515904+00:00, no por la lane: Cursor rechaza shell en esta configuracion headless y la lane devolvio INCONCLUSIVE en vez de inventar cifras
+# comando: -m unittest tests.test_dayz_test_tool -v
+# cwd: tools
+
+test_idle_guard_recovers_stale_local_operation_before_launch (tests.test_dayz_test_tool.DayzTestExecutionTest.test_idle_guard_recovers_stale_local_operation_before_launch) ... ok
+test_list_project_names_missing_policy_is_not_invalid (tests.test_dayz_test_tool.DayzTestExecutionTest.test_list_project_names_missing_policy_is_not_invalid)
+A clone has no sealed policy; that is missing, not corrupt. ... ok
+test_list_project_names_returns_mod_fields_only (tests.test_dayz_test_tool.DayzTestExecutionTest.test_list_project_names_returns_mod_fields_only) ... ok
+test_list_project_names_unreadable_policy_stays_invalid (tests.test_dayz_test_tool.DayzTestExecutionTest.test_list_project_names_unreadable_policy_stays_invalid) ... ok
+test_run_fails_when_client_pid_is_already_dead (tests.test_dayz_test_tool.DayzTestExecutionTest.test_run_fails_when_client_pid_is_already_dead) ... ok
+test_run_id_is_bound_before_secure_launch (tests.test_dayz_test_tool.DayzTestExecutionTest.test_run_id_is_bound_before_secure_launch) ... ok
+test_run_names_held_session_lease_on_transition_conflict (tests.test_dayz_test_tool.DayzTestExecutionTest.test_run_names_held_session_lease_on_transition_conflict) ... ok
+test_run_rejects_busy_session_before_opening_launcher (tests.test_dayz_test_tool.DayzTestExecutionTest.test_run_rejects_busy_session_before_opening_launcher) ... ok
+test_run_rejects_missing_bridge_before_secure_launch (tests.test_dayz_test_tool.DayzTestExecutionTest.test_run_rejects_missing_bridge_before_secure_launch) ... ok
+test_run_rejects_public_offline_mode_with_expected_enum (tests.test_dayz_test_tool.DayzTestExecutionTest.test_run_rejects_public_offline_mode_with_expected_enum) ... ok
+test_run_reports_progress_and_returns_compact_terminal_result (tests.test_dayz_test_tool.DayzTestExecutionTest.test_run_reports_progress_and_returns_compact_terminal_result) ... ok
+test_run_transition_conflict_without_local_lease_stays_neutral (tests.test_dayz_test_tool.DayzTestExecutionTest.test_run_transition_conflict_without_local_lease_stays_neutral) ... ok
+test_stdout_overflow_sentinel_is_rejected_by_real_parser (tests.test_dayz_test_tool.DayzTestExecutionTest.test_stdout_overflow_sentinel_is_rejected_by_real_parser) ... ok
+test_stop_derives_policy_and_builds_adopt_then_stop_request (tests.test_dayz_test_tool.DayzTestExecutionTest.test_stop_derives_policy_and_builds_adopt_then_stop_request) ... ok
+test_stop_names_held_session_lease_without_naming_run (tests.test_dayz_test_tool.DayzTestExecutionTest.test_stop_names_held_session_lease_without_naming_run) ... ok
+test_stop_reconciles_lost_terminal_response_from_exact_exited_run (tests.test_dayz_test_tool.DayzTestExecutionTest.test_stop_reconciles_lost_terminal_response_from_exact_exited_run) ... ok
+test_typed_readiness_failure_uses_existing_nine_key_result (tests.test_dayz_test_tool.DayzTestExecutionTest.test_typed_readiness_failure_uses_existing_nine_key_result) ... ok
+test_worker_failed_carries_lifecycle_start_error (tests.test_dayz_test_tool.DayzTestExecutionTest.test_worker_failed_carries_lifecycle_start_error) ... ok
+test_parse_failure_terminal_with_degraded_cleanup (tests.test_dayz_test_tool.DayzTestTerminalTest.test_parse_failure_terminal_with_degraded_cleanup) ... ok
+test_parse_success_terminal (tests.test_dayz_test_tool.DayzTestTerminalTest.test_parse_success_terminal) ... ok
+test_stop_artifact_must_be_derived_from_sealed_project (tests.test_dayz_test_tool.DayzTestTerminalTest.test_stop_artifact_must_be_derived_from_sealed_project) ... ok
+test_success_run_id_matches_operation_context (tests.test_dayz_test_tool.DayzTestTerminalTest.test_success_run_id_matches_operation_context) ... ok
+test_terminal_rejects_non_closed_or_inconsistent_payloads (tests.test_dayz_test_tool.DayzTestTerminalTest.test_terminal_rejects_non_closed_or_inconsistent_payloads) ... ok
+test_typed_readiness_codes_keep_five_key_terminal_contract (tests.test_dayz_test_tool.DayzTestTerminalTest.test_typed_readiness_codes_keep_five_key_terminal_contract) ... ok
+test_build_run_request_delegates_cross_field_validation (tests.test_dayz_test_tool.DayzTestToolRequestTest.test_build_run_request_delegates_cross_field_validation) ... ok
+test_build_run_request_names_invalid_mode_and_expected_values (tests.test_dayz_test_tool.DayzTestToolRequestTest.test_build_run_request_names_invalid_mode_and_expected_values) ... ok
+test_build_run_request_rejects_unknown_project_and_public_paths (tests.test_dayz_test_tool.DayzTestToolRequestTest.test_build_run_request_rejects_unknown_project_and_public_paths) ... ok
+test_build_run_request_requires_bridge_in_effective_mods (tests.test_dayz_test_tool.DayzTestToolRequestTest.test_build_run_request_requires_bridge_in_effective_mods) ... ok
+test_build_run_request_uses_sealed_project_and_policy_defaults (tests.test_dayz_test_tool.DayzTestToolRequestTest.test_build_run_request_uses_sealed_project_and_policy_defaults) ... ok
+test_extension_run_must_be_idle_and_match_selected_project (tests.test_dayz_test_tool.DayzTestToolRequestTest.test_extension_run_must_be_idle_and_match_selected_project) ... ok
+test_stop_rejects_acked_exited_run (tests.test_dayz_test_tool.DayzTestToolRequestTest.test_stop_rejects_acked_exited_run) ... ok
+test_stop_resolves_never_started_unacked_exited_run (tests.test_dayz_test_tool.DayzTestToolRequestTest.test_stop_resolves_never_started_unacked_exited_run) ... ok
+test_stop_resolves_project_only_from_exact_manifest_run (tests.test_dayz_test_tool.DayzTestToolRequestTest.test_stop_resolves_project_only_from_exact_manifest_run) ... ok
+
+----------------------------------------------------------------------
+Ran 33 tests in 0.181s
+
+OK

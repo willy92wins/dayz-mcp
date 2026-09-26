@@ -1,0 +1,108 @@
+{
+ "status": "ok",
+ "agujero_2": {
+  "done": true,
+  "files": [
+   "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\loopback.py",
+   "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\session_coordination.py",
+   "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\runtime_state.py",
+   "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_session_http.py"
+  ],
+  "tests_added": [
+   "test_session_status_without_revision_change_does_not_write_coordination",
+   "test_box_wait_refresh_does_not_write_coordination",
+   "test_acquire_that_grants_lease_writes_coordination"
+  ]
+ },
+ "agujero_3": {
+  "done": true,
+  "files": [
+   "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\session_coordination.py",
+   "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\process_lifecycle.py",
+   "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_run_reaper.py"
+  ],
+  "tests_added": [
+   "test_note_run_reaped_wakes_condition_waiters",
+   "test_reap_drops_box_claim_of_owner_session",
+   "test_reap_does_not_drop_active_lease",
+   "test_reap_wake_is_audited"
+  ]
+ },
+ "logs": [
+  "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\red_first.log",
+  "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\green.log",
+  "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\mutations.log",
+  "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\suite_final.log"
+ ],
+ "mutations": [
+  {
+   "name": "hole2_invert_skip_le_to_ge",
+   "killed_by": "test_acquire_that_grants_lease_writes_coordination",
+   "survived": false
+  },
+  {
+   "name": "hole2_invert_skip_le_to_gt",
+   "killed_by": "test_session_status_without_revision_change_does_not_write_coordination",
+   "survived": false
+  },
+  {
+   "name": "hole2_remove_skip",
+   "killed_by": "test_session_status_without_revision_change_does_not_write_coordination",
+   "survived": false
+  },
+  {
+   "name": "hole3_remove_notify_all",
+   "killed_by": "test_note_run_reaped_wakes_condition_waiters",
+   "survived": false
+  },
+  {
+   "name": "hole3_remove_box_leave",
+   "killed_by": "test_reap_drops_box_claim_of_owner_session",
+   "survived": false
+  },
+  {
+   "name": "hole3_capture_owner_after_null",
+   "killed_by": "test_reap_drops_box_claim_of_owner_session",
+   "survived": false
+  }
+ ],
+ "suite_final": {
+  "ran": 1709,
+  "failures": 2,
+  "expected_sentinels": 2
+ },
+ "spec_divergences": [
+  "_persist_coordination usa getattr(store, 'persisted_revision', None) en vez de store.persisted_revision() directo: el writer ya se resuelve con getattr; si un fake no trae el metodo, se escribe (fail-open) en vez de marcar snapshot_failed. SnapshotStore de test y CoordinationSnapshotStore si lo implementan.",
+  "note_run_reaped envuelve self._audit(...) en try/except: el spec [DESIGN] lo llamaba desnudo; un sink que lance no debe tumbar _reap_run_locked despues de retire.",
+  "_box_leave_locked(ticket_id None/'') delega en _box_leave_session_locked en vez de dejar el branch match_client inline. Mismo comportamiento; extraido para reutilizar el match por session_id.",
+  "test_acquire_that_grants_lease_writes_coordination tambien exige que un acquire en cola (B, 202) escriba: sin eso, invertir <= a >= sobrevivia el grant inicial (persisted is None)."
+ ],
+ "propagation_dzr7": [
+  "loopback._persist_coordination: unico skip; lo llaman _handle_enqueue (2399), _handle_session (2490), _handle_lifecycle (2569, cubre HTTP reap) y _handle_admin admin_release (2623).",
+  "process_lifecycle._reap_run_locked: unico hook note_run_reaped, DESPUES de _retire_run_bindings, owner capturado ANTES de anular. Lo alcanzan reap_dead_runs (hilo reaper via _reap_dead_runs_locked) y reap_dead_run (HTTP).",
+  "CoordinationSnapshotStore.persisted_revision anadido junto al skip; SnapshotStore de tests.test_session_http tambien, si no acquire/status caerian a snapshot_failed.",
+  "install_run_reaper no cambia de firma; FakeLifecycle de test_run_reaper.InstallRunReaperTest sigue.",
+  "WAL/ensure_coordination no se toco. No se auto-libera el lease (D-48)."
+ ],
+ "verified": [
+  "rojo primero: status 6!=1, box refresh 6!=1, acquire-writes verde, note_run_reaped AttributeError x3, box claim True after reap (red_first.log)",
+  "verde post-arreglo: 11 tests (3 skip + 2 snapshot caracterizacion + 6 reaper) OK en 0.166s (green.log)",
+  "6/6 mutaciones killed, ninguna sobrevivio (mutations.log); cada una revertida antes de la siguiente",
+  "suite completa: Ran 1709 tests in 261.601s, FAILED (failures=2, skipped=4); los 2 rojos son test_task9_spawn_phase_markers (suite_final.log)",
+  "modulos de caracterizacion process_lifecycle + box_occupancy + session_acquire_wait: Ran 129 OK (no es la suite completa; la cifra 1709 si lo es)"
+ ],
+ "not_verified": [
+  "hilo dayz-mcp-run-reaper real contra procesos DayZ (prohibido lanzar/matar DayZDiag)",
+  "daemon MCP / herramientas MCP / in-game",
+  "cadena persist HTTP -> cleanup_degraded:['audit_failed'] (el except sigue siendo snapshot_failed)",
+  "box_occupancy con diag foreign vivo tras soltar claim (spec seccion C, fuera de estos agujeros)",
+  "contencion I/O real de coordination.json en OneDrive"
+ ],
+ "noticed_but_untouched": [
+  "BUG-105 _seed_bridge_config / config_port",
+  "agujero 1 tombstones (ya promocionado)",
+  "centinelas test_task9_spawn_phase_markers (hash de bridge; no recongelar)",
+  "_handle_admin audit-repair y lifecycle-recovery-repair no pasan por _persist_coordination (ya era asi)",
+  "ruido argparse de otros tests en suite_final.log; no es fallo nuevo"
+ ]
+}

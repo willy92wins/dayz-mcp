@@ -1,0 +1,93 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta. Trabaja hasta terminar.
+
+RONDA DE REVISIÓN DEL LOTE D. Tu entrega pasó la revisión cruzada de otra familia con **un
+solo bloqueante**, sobre el producto y con repro ejecutable. Todo lo demás quedó conforme:
+el revisor verificó por su cuenta el snapshot congelado, la no-filtración del overlay, el
+sobre uniforme de 17 claves en cinco filas distintas, los cuatro alias, los tres ataques de
+contención, y que `_validate_terminal_context` sigue siendo obligatorio. Esto es un arreglo
+puntual, no un rechazo.
+
+===============================================================================
+EL BLOQUEANTE
+===============================================================================
+
+`tools/dayz_mcp/dayz_test_tool.py:714-716`:
+
+    if not preflight and mode in {"client", "all"}:
+        steam = evaluate_steam_session()
+        if steam.error_code is not None:
+            ...
+
+Esa llamada no contiene sus excepciones. Si `evaluate_steam_session()` lanza en vez de
+devolver, la excepción escapa hasta `server.py:2991`, que la convierte en
+`ToolError: dayz_test_failed:RuntimeError`. El consumidor deja de poder ramificar por
+`status`/`error_code`, que es justo la propiedad observable de P2.
+
+**Contexto honesto, para que no lo arregles de más**: hoy ese disparador NO es alcanzable.
+Lo he medido: `evaluate_steam_session` es una función total — `_read_stable_snapshot`
+(`steam_preflight.py:166-172`) y `_safe_live_pids` (`:177-185`) envuelven todo en
+try/except, `process_exists` y `process_image_path` están envueltos en el llamador, y
+`WindowsSteamPreflightProvider` no tiene `__init__`. El revisor lo provocó inyectando la
+excepción con un mock.
+
+Se arregla igual, y la razón es la que decide la forma del arreglo: esa totalidad es un
+detalle de OTRO módulo. El contrato de `dayz_test_run` es devolver siempre el sobre, y no
+puede depender de que un vecino no lance nunca. Estás endureciendo una frontera de
+contrato, no tapando un agujero explotable.
+
+===============================================================================
+EL ARREGLO
+===============================================================================
+
+Contén las excepciones ordinarias de esa llamada y proyéctalas **fail-closed** por
+`_compact_result`, con el mismo conjunto de claves que las demás filas. Es decir: si el
+evaluador lanza, el resultado es el mismo sobre que si hubiera devuelto sesión caduca.
+Eso es coherente con cómo el propio `steam_preflight` trata sus fallos internos: cualquier
+incapacidad de determinar el estado cae a `steam_session_stale` (`:156-163`).
+
+Requisitos, y son todos verificables:
+  - La guarda sigue siendo exactamente `not preflight and mode in {"client", "all"}`.
+    No amplíes ni reduzcas cuándo se consulta Steam.
+  - El sobre resultante conserva las 17 claves. Ni una más ni una menos.
+  - No captures `BaseException`: `KeyboardInterrupt` y `SystemExit` deben seguir subiendo.
+  - No toques `steam_preflight.py`. El arreglo va en el punto de llamada.
+  - No vuelvas a introducir `skip_run_id_context` ni debilites ninguna validación.
+
+===============================================================================
+EL GATE
+===============================================================================
+
+He añadido una puerta nueva, **P2-F**, que mide exactamente esto. Estado ahora mismo,
+medido por mí:
+
+    bash gate/run.sh
+      [FAIL ] P2-F una excepcion del evaluador sigue dando el sobre, no ToolError
+              escapo RuntimeError: sonda P2-F
+      ORACULO: PASS=12 FAIL=1 UNMET=0 de 13
+
+Las otras doce siguen verdes y **no pueden dejar de estarlo**. Terminas cuando:
+
+    bash gate/run.sh    -> ORACULO-VERDE
+    bash gate/suite.sh  -> SUITE-ACOTADA OK
+
+`gate/` sigue sellado y de sólo lectura. Compruebo el sello al recibir.
+
+===============================================================================
+FRONTERAS
+===============================================================================
+
+WRITE-SET de esta ronda:
+    tools/dayz_mcp/dayz_test_tool.py
+    tools/tests/test_dayz_test_tool.py
+
+PROHIBIDO: `steam_preflight.py`, `server.py`, `gate/`, y cualquier otro fichero.
+
+Escribe un test que cubra el caso, y córrelo ANTES de tu arreglo para comprobar que falla.
+
+===============================================================================
+CIERRE
+===============================================================================
+
+Reescribe `STATE.md` con las secciones de siempre (HECHO / GATE / CONTROL POSITIVO /
+LO QUE NO PUDE VERIFICAR / DISPUTAS), pegando la salida literal de los dos gates.

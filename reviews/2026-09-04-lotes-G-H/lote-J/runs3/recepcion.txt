@@ -1,0 +1,34 @@
+[1] sello: 8/8 intactos
+[2] write-set: 6 ficheros tocados desde STARTED; fuera del allowlist: ninguno
+      BRIEF.txt
+      STATE.md
+      tools/dayz_mcp/loopback.py
+      tools/dayz_mcp/process_lifecycle.py
+      tools/tests/test_daemon.py
+      tools/tests/test_process_lifecycle.py
+[3] hashes del producto:
+      0584eb10d5f9c17c1198d7adcc6ae491e5b3bad5da95e05b3ff49f1738553377  tools/dayz_mcp/loopback.py
+      ccf463ecafaf2eec66c02aaee312b2f0912fcfcf133e1ca75df119054726968a  tools/dayz_mcp/process_lifecycle.py
+      484adde5fe238ac0a5b70e233d618a12c18188129075b77eec027d2368c8c39b  tools/tests/test_session_e2e.py
+      48ed7fffafe16f4bfc8f469cac664fa4cce76ead89a72786f620e767b71fc871  tools/tests/test_process_lifecycle.py
+      57ce5c5d8be55a174aaf66d4d20b03d18617fcc0ec21a5cee633401ce3d23927  tools/tests/test_instance_fence.py
+      716b86d0815fcd78ec0247b2da26dfa05df61f2d611ac31e46e210c554ae1131  tools/tests/test_daemon.py
+      6eb705d303f0b44bfb0ef12b5eb6f3fc800f3014672c224368c937b63a27c1bc  tools/tests/test_client_mode.py
+      ae6817cdfc31e41b03b3a01fdf63bd3eb9aceba00ef7285a3f8beeab27e88db4  tools/tests/test_loopback.py
+[4] diff LF-normalizado contra C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws-frozen-r2:
+      tools/dayz_mcp/loopback.py: +57 -19   (CRLF en el fichero entregado: 0)
+      tools/dayz_mcp/process_lifecycle.py: +27 -7   (CRLF en el fichero entregado: 0)
+      tools/tests/test_session_e2e.py: +0 -0   (CRLF en el fichero entregado: 0)
+      tools/tests/test_process_lifecycle.py: +106 -0   (CRLF en el fichero entregado: 0)
+      tools/tests/test_instance_fence.py: +0 -0   (CRLF en el fichero entregado: 0)
+      tools/tests/test_daemon.py: +80 -0   (CRLF en el fichero entregado: 0)
+      tools/tests/test_client_mode.py: +0 -0   (CRLF en el fichero entregado: 0)
+      tools/tests/test_loopback.py: +0 -0   (CRLF en el fichero entregado: 0)
+      TOTAL +270 -26
+[5] gates (corridos aqui, no pegados):
+      product_frozen.sh: rc=0 VERDE | PRODUCTO-CONGELADO OK (61 ficheros sellados + 2 del write-set)
+      run_oracle_tests.sh: rc=0 VERDE | ORACULO-TESTS: PASS=18 FAIL=0 UNMET=0 de 18 | ORACULO-TESTS-VERDE
+      suite_full.sh: rc=0 VERDE | rojos = permitidos (2) | SUITE-COMPLETA OK
+[6] congelado en ws-frozen-r3 (2380 ficheros)
+RECEPCION: OK
+rc=0

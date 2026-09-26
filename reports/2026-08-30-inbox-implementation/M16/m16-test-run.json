@@ -1,0 +1,22 @@
+{
+  "ticket": "fb-20260829-133459-a396",
+  "module": "M16-STEAM-PREFLIGHT",
+  "generated_utc": "2026-09-01T08:50:14.590493+00:00",
+  "command": "tools\\\\.venv-mcp\\\\Scripts\\\\python.exe -m unittest tests.test_steam_preflight -v",
+  "cwd": "tools",
+  "interpreter": "native tools/.venv-mcp/Scripts/python.exe (Windows venv of DayZ_MCP_dev; no pip, no Linux shim, no Linux python involved)",
+  "launcher_note": "WSLInterop binfmt is unregistered in this WSL session and passwordless sudo is unavailable; the native exe was launched via the WSL /init passthrough (cmd.exe /c m16run.bat, temp runner outside the repo, deleted after the run). The interpreter that executed the tests is the native Windows venv python.exe.",
+  "test_target": "tools/tests/test_steam_preflight.py (8 pre-existing tests bytes-untouched + 5 new gap-closing tests)",
+  "results": {
+    "ran": 13,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "status": "OK"
+  },
+  "evidence": {
+    "stdout_file": "reports/2026-08-30-inbox-implementation/M16/m16-test-output.txt",
+    "note": "unittest verbose output captured verbatim (stderr merged)"
+  },
+  "no_host_side_effects": "Tests use the injectable fake provider only; no registry read, no process enumeration, no Steam/DayZ launch."
+}

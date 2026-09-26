@@ -1,0 +1,68 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+REVISIÓN CIEGA DEL LOTE I: reconciliación de tests EXTERNOS con el contrato que cerraron los
+lotes G y H (tú revisaste ese producto en tres deltas; la última, 0 hallazgos). Al integrar ese
+producto en el árbol del repo, la suite completa dio 30 rojos nuevos en cuatro módulos de test
+que el gate acotado no cubría. Un worker los reconcilió con el PRODUCTO CONGELADO POR HASH.
+Aquí el producto que revisas son los TESTS: el diff de esos módulos.
+
+Producto: `../ws/tools/tests/test_instance_fence.py` (SHA-256 2956d6c8e39aaa2f3cfc07f3c66838f76e2e8fea29711ec48af46cb6e5ef913b),
+`../ws/tools/tests/test_client_mode.py` (SHA-256 e11c5bbcb82ca6262b10167cd61f0976c551b35b03f04043150e59a3945464f5), `../ws/tools/tests/test_daemon.py`
+(SHA-256 ce5c9228e4995ff663881110736d0149854e19b92533ba38c31078bdb8671536), `../ws/tools/tests/test_session_e2e.py` (SHA-256 684b9b3a32bfbae909ff95d3aa46bc46fcfbc032e350737ff22972318cfa5bbe),
+`../ws/tools/tests/fence_helpers.py` (SHA-256 d9c88de9520d34d26b901ad5c319cd6f7a1c974219ac9f1b44c95a6fa13c8a03). La versión ANTES del lote está en
+`../ws-frozen-r0/tools/tests/` (sólo lectura). El producto de código (`../ws/tools/dayz_mcp/`) no
+ha cambiado: `bash ../ws/gate/product_frozen.sh` lo acredita.
+
+===============================================================================
+§0. EL CONTRATO (cerrado; no se revisa aquí, se usa como vara)
+===============================================================================
+
+  C1. Un binding BOUND despacha sólo si el manifiesto del lifecycle conoce su `run_id` en
+      RUNNING/STARTING; run ausente → `binding_retired`; RUNNING_IDLE o cercado → `run_not_owned`;
+      sin lifecycle / sin `manifest.get` / `get` que lanza → `run_state_unavailable` 503.
+  C2. El release NO retira el binding: cerca; la mutación siguiente es `run_not_owned`; el poll
+      acreditado devuelve `commands: []`; `adopt_run` rehabilita el MISMO binding (N20).
+  C3. Toda transición terminal retira los bindings ANTES de persistir EXITED, vía
+      `_commit_retirement` (`_retire_run_bindings` y después `manifest.replace`).
+  C4. `adopt_run` exige ≥1 proceso `owned`; responde `{ok, run_id, state, dispatchable[, hint]}`.
+  C5. `install_bound_peer` instala `_BoundPeerDispatchable` como lifecycle sólo si
+      `state.lifecycle is None`; con lifecycle real no registra nada en el manifiesto.
+
+===============================================================================
+§1. LO QUE QUIERO DE TI
+===============================================================================
+
+  La pregunta única: **¿alguna reconciliación debilita una aserción que el contrato NO
+  supersede, o hace que el test deje de observar lo que su nombre promete?** En concreto:
+  - Por cada test cuyo cuerpo cambió: ¿cambió el FIXTURE (estado ahora posible en producción:
+    un `RunRecord` RUNNING con dueño en un manifiesto real; `state.lifecycle` cableado; un
+    lifecycle falso con `manifest.get`) o cambió la ASERCIÓN? Si la aserción cambió, ¿la
+    supersede un C-item de §0, citado en `../ws/STATE.md`? Una aserción cambiada sin C-item es un
+    hallazgo ALTA.
+  - ¿Algún fixture nuevo representa un estado IMPOSIBLE en producción (p. ej. un run RUNNING sin
+    dueño, un binding BOUND para un run que sólo existe en un manifiesto falso cuando el test
+    dice probar el lifecycle real, un guard que acredita cualquier pid)? Eso convierte el test en
+    tautología: hallazgo.
+  - `test_every_exited_path_retires_bindings`: ¿el detector ampliado sigue fallando si un camino
+    asigna EXITED sin retirar, y si `_commit_retirement` persistiera antes de retirar? Pruébalo
+    con un mutante sobre una copia temporal del producto (nunca sobre `../ws`).
+  - `fence_helpers.bind_both_peers`: si cambió, ¿los otros ocho módulos que lo usan siguen
+    midiendo lo mismo? ¿Registra runs sólo cuando hay manifiesto real, sin inventar dueños que
+    los tests no controlan?
+  - ¿Hay `skip`, `expectedFailure`, tests borrados o renombrados, o `allowed_red.txt` tocado?
+    (`diff -r ../ws-frozen-r0/tools/tests ../ws/tools/tests` te da el inventario.)
+  - `test_session_e2e.py` está sin trackear en el repo y NO se commiteará: revísalo igual.
+
+Reglas duras: **enseña, no cuentes** (diff literal con `path:line`); **escribe el fallo
+concreto**; **la tolerancia no es un defecto**; cero hallazgos es una respuesta legítima.
+Ejecuta `bash ../ws/gate/product_frozen.sh` y `bash ../ws/gate/suite_full.sh` (≈4 min) y pega su
+última línea.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrar estos tests?
+    ## HALLAZGOS      — por severidad: título, path:line, diff pegado, fallo concreto.
+    ## ASERCIONES CAMBIADAS — tabla: test, antes, después, C-item que la supersede (o «ninguno»).
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.

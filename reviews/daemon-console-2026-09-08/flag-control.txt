@@ -1,0 +1,12 @@
+OLD  DETACHED_PROCESS   flags=0x00000208
+  wrapper      pid=7856   console={'attached': False, 'win32_error': 6}
+  interpreter  pid=22936  console={'attached': True, 'members': [22936], 'console_hwnd': 28448586}
+  conhost      pid=64988  parent=interpreter
+  child exited rc=0
+
+NEW  CREATE_NO_WINDOW   flags=0x08000200
+  wrapper      pid=15404  console={'attached': True, 'members': [63104, 15404], 'console_hwnd': None}
+  interpreter  pid=63104  console={'attached': True, 'members': [63104, 15404], 'console_hwnd': None}
+  conhost      pid=38480  parent=wrapper
+  child exited rc=0
+

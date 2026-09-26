@@ -1,0 +1,180 @@
+# af59 -- RONDA 2: cerrar los dos bloqueos del piloto y AMPLIAR el arnes
+
+## 1. TAREA
+
+En `dayz-test.ps1` cerrar dos defectos reproducidos por ejecucion (H1/P1 y H2/P2), y ampliar
+`test-af59.ps1` con dos escenarios nuevos que hoy NO ejercita, sin romper los 7 que ya pasan.
+
+## 2. ROL Y CRITERIO DE EXITO
+
+Rol: IMPLEMENTACION. No es un informe: el entregable son dos ficheros `.ps1` parcheados.
+
+Exito = las tres condiciones a la vez, todas ejecutables por ti:
+
+  E1. `test-af59.ps1 -Script dayz-test.ps1` sale 0 con `PASS=9 FAIL=0`.
+  E2. Los dos escenarios NUEVOS DISCRIMINAN: demuestras por MUTACION que cada uno cae
+      solo cuando se borra el control que le corresponde (detalle en la seccion 8).
+  E3. Los 7 escenarios viejos siguen verdes con el sujeto parcheado.
+
+Un `PASS=9` que no venga acompanado de las dos mutaciones de E2 NO cuenta: un escenario que
+nunca ha estado rojo no ha demostrado que mida nada.
+
+## 3. CARGA INICIAL (todo dentro del workspace, rutas relativas a tu --cwd)
+
+  ws/dayz-test.ps1          EL SUJETO. 31107 B, sha256 empieza por 338e782ff73722bf.
+  ws/test-af59.ps1          EL ARNES. Toma -Script <ruta al sujeto>. Exit != 0 si algo falla.
+  ws/CONTRACT.md            El contrato que acordaron las dos lanes ciegas de la ronda 1.
+  ws/stub-addonbuilder.cmd  Stub de AddonBuilder que usa el arnes.
+  ws/_subject-buggy.ps1     Control NEGATIVO del arnes (comportamiento viejo).
+  ws/_subject-fixed.ps1     Control POSITIVO minimo del arnes.
+
+## 4. LOS DOS DEFECTOS, CON SU path:line VERIFICADO
+
+Todas estas lineas son de `ws/dayz-test.ps1` y estan comprobadas abriendo el fichero.
+
+### H1/P1 -- el preflight no cubre el camino de build, y el script FABRICA el destino
+
+  :87   `$ModsDir = Join-Path $WorkDrive 'Mods'`
+  :412  `function Invoke-Build {`
+  :421  `if (-not (Test-Path $target)) { New-Item -ItemType Directory -Force -Path $target | Out-Null }`
+        con `$target = Join-Path $ModsDir "@$Mod\Addons"`
+  :667  `if ($BuildOnly) { ... Invoke-Build; exit 0 }`
+  :680  `Invoke-Preflight`  <-- INALCANZABLE desde -BuildOnly y desde -Mode none
+        (:657 `if ($Mode -eq 'none') { $BuildOnly = $true }`)
+
+Reproducido EJECUTANDO, literal: `exit=0; Mods created=True; junction=False`.
+
+Consecuencia real: en el host de verdad `P:\Mods` es un JUNCTION al arbol de mods del juego.
+Si no existe, este codigo lo crea como carpeta NORMAL: el PBO se deposita donde el motor no
+lee, el build dice `[ok] deployed:`, y la carpeta falsa ENMASCARA el fallo para siempre --
+las corridas siguientes ya encuentran `Mods` y nunca vuelven a quejarse.
+
+**MEA CULPA, y es importante que lo sepas antes de disenar nada.** La culpa de este defecto
+NO es de quien escribio el script: es del contrato que escribi yo. `CONTRACT.md` seccion 3
+dice literalmente que el camino `-Build -BuildOnly` "tiene que ser alcanzable con ESTE
+layout: sin P: real, sin el junction P:\Mods". Cumplir eso al pie de la letra es exactamente
+lo que produjo el `New-Item -Force`. El criterio era mio y estaba mal.
+
+Por tanto: **tienes autoridad para cambiar CONTRACT.md** en lo que haga falta para resolver
+la tension, y esa autoridad es parte del encargo. Lo que NO puede cambiar es que la fixture
+del arnes siga siendo ejecutable sin P: real, sin DayZ y sin DayZ Tools.
+
+Invariante que hay que dejar cierta (el COMO lo eliges tu):
+
+  > El script nunca convierte en exito un build cuyo destino no es el destino real. Si el
+  > directorio de mods del disco de trabajo no esta preparado, el script lo DICE y falla;
+  > no lo fabrica.
+
+Y el preflight de build tiene que EXISTIR y ser alcanzable desde -BuildOnly / -Mode none,
+acotado al camino de build: no puede empezar a exigir DayZ instalado, ni DayZ Tools, ni
+mission, ni nada que la fixture no tenga.
+
+### H2/P2 -- el conteo de .c es inalcanzable justo para el mod que lo necesita
+
+  :447  `$hasAssets = ... Extension -in @('.p3d','.paa','.rvmat') ... -gt 0`
+  :448  `$usePackOnly = $PackOnly -or (-not $hasAssets)`
+  :514  `if ((Test-Path (Join-Path $src 'scripts')) -and (-not $usePackOnly)) {`
+
+Un mod SOLO-SCRIPTS no tiene .p3d/.paa/.rvmat -> `$hasAssets` es falso -> `$usePackOnly` es
+verdadero -> el conteo de .c de :515-522 NO se ejecuta. El unico mod para el que ese control
+importa es precisamente el unico para el que esta apagado. Medido con control positivo.
+
+Invariante que hay que dejar cierta:
+
+  > Si la fuente tiene `scripts\` con ficheros .c, el PBO entregado tiene que llevar al
+  > menos tantas entradas .c, y eso se comprueba SIEMPRE, sea cual sea el modo de empaque.
+
+## 5. ALCANCE POSITIVO Y FRONTERAS NEGATIVAS
+
+DENTRO:
+  - editar `ws/dayz-test.ps1`, `ws/test-af59.ps1` y `ws/CONTRACT.md`;
+  - crear ficheros auxiliares tuyos dentro del workspace (sujetos mutados, notas, logs).
+
+FUERA, y no hay excepcion:
+  - cualquier ruta fuera de tu --cwd;
+  - git (no hay repo aqui y no debes buscarlo);
+  - la red;
+  - lanzar DayZ, DayZDiag, el daemon MCP o el AddonBuilder REAL. Solo existe el stub.
+
+## 6. HECHOS VERIFICADOS Y SUPUESTOS
+
+VERIFICADO (no lo re-derives, pero puedes comprobarlo):
+  - El arnes da hoy **PASS=7 FAIL=0, exit 0** contra `ws/dayz-test.ps1` sin tocar. Lo he
+    corrido yo mismo hoy, no es una cita de segunda mano.
+  - El arnes DISCRIMINA: contra un sujeto con el comportamiento viejo caen exactamente
+    S2, S3, S4 y S5.
+  - Borrar el chequeo de TEXTO mata solo S3; borrar el de MTIME/HASH mata solo S4.
+    Los dos controles ya estan demostrados portantes uno por uno.
+  - H1 y H2 estan reproducidos ejecutando, con los literales de la seccion 4.
+  - Dos hipotesis del revisor de la ronda 1 (H4 y H7) NO se reproducen: quedan refutadas.
+    No las reintroduzcas.
+
+[ASSUMPTION] Que `P:\Mods` sea un junction es la convencion de ESTE host; no esta comprobado
+que lo sea en toda instalacion de DayZ. Si tu diseno depende de "es un reparse point",
+declara el supuesto y ofrece la via de escape (una variable de entorno, por ejemplo).
+
+## 7. ENTREGABLE
+
+  ws/dayz-test.ps1     parcheado
+  ws/test-af59.ps1     con los dos escenarios nuevos
+  ws/CONTRACT.md       actualizado si tu diseno lo exige
+  STATE.md             en la RAIZ del workspace (no dentro de ws/)
+
+`STATE.md` en texto plano, con estas secciones y en este orden:
+
+  ## RESULTADO        una linea: PASS=n FAIL=n y el exit del arnes
+  ## QUE CAMBIE       por fichero, que invariante cierras y en que lineas
+  ## MUTACIONES       la evidencia de E2: que borraste, que cayo, que siguio verde
+  ## DECISIONES       lo que elegiste y por que, incluido el cambio de CONTRACT.md
+  ## LO QUE NO PUDE VERIFICAR
+
+## 8. GATE QUE DEBES EJECUTAR TU
+
+Gate principal:
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File ws\test-af59.ps1 -Script ws\dayz-test.ps1
+
+tiene que salir 0 e imprimir `PASS=9 FAIL=0`.
+
+Y las DOS mutaciones de E2, cada una sobre una COPIA del sujeto (nunca sobre el original):
+
+  M1 (temp): quita del sujeto el borrado del directorio temporal de AddonBuilder
+             (hoy en :440-445). El escenario nuevo del wipe de temp tiene que caer, y
+             NINGUN otro.
+  M2 (.c):   quita del sujeto el conteo de entradas .c del PBO. El escenario nuevo del
+             conteo tiene que caer, y NINGUN otro.
+
+Si una mutacion tumba mas escenarios de la cuenta, tu escenario nuevo no esta aislado y hay
+que arreglarlo -- no se justifica en prosa.
+
+## 9. LIMITES DEL ENTORNO (te los doy yo porque desde ahi no los ves)
+
+  - Corres en WSL. El workspace esta en `/mnt/c/...` (drvfs): los recorridos recursivos
+    grandes son ~40x mas lentos. No recorras arboles enteros; el workspace es pequeno.
+  - **PowerShell 5.1 SI es alcanzable desde WSL**, comprobado hoy en este host:
+    `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe` -> `5.1.22621.6133`.
+    Invocalo por `-File` con ruta WINDOWS (`C:\...`); pasar el script por `-Command` con
+    comillas anidadas se rompe. Por eso el gate es tuyo y no mio.
+  - PowerShell 5.1 NO tiene `&&`, `||`, ternario, `??`, `?.` ni `ConvertFrom-Json -AsHashtable`.
+    `New-Item -Force` sobre un FICHERO lo TRUNCA. `Set-Content` sin `-Encoding` escribe ANSI.
+  - Todo `.ps1` que escribas va en **ASCII puro**: sin acentos, sin flechas, sin comillas
+    tipograficas. Comentarios y nombres en INGLES (el .md puede ir en castellano).
+  - Tope de reloj de la corrida: 45 minutos. Si ves que no llegas, ESCRIBE lo que tengas y
+    cierra `STATE.md`; una entrega parcial declarada vale, una corrida muerta sin consolidar
+    no vale nada.
+  - El metodo es TUYO. Como estructures el preflight, donde pongas el conteo de .c, como
+    montes los escenarios nuevos: tu decides. Arriba estan las invariantes y las fronteras,
+    no la implementacion.
+
+## 10. CIERRE Y RECEPTOR
+
+Al cerrar, `## LO QUE NO PUDE VERIFICAR` es obligatoria y no puede quedar vacia por cortesia:
+si de verdad no queda nada, dilo con esas palabras.
+
+Y una casilla libre, obligatoria: **que puede estar mal en la premisa de este encargo?**
+Ya te he dicho que una parte del encuadre de la ronda 1 era mia y estaba mal; si ves otra,
+dila. Un PASA en todos los gates acota lo que el contrato pregunto, nunca lo que el trabajo
+necesitaba.
+
+Receptor: el orquestador (Claude) repite el gate desde fuera con tu sujeto parcheado, y
+despues lo revisa una familia distinta (Grok via Cursor), a ciegas.

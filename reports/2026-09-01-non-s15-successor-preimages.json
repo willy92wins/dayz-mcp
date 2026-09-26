@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "captured_at_local": "2026-09-01",
+  "repo_root": "P:\\DayZ_MCP_dev",
+  "git_branch": "master",
+  "git_commit": "9a582560e3ce51239480715c1ab7096414f56b78",
+  "active_authority": {
+    "generation": "20260831-ledger-v3",
+    "graph_version": "inbox-20260831-v6",
+    "protocol": "grok-cursor-only",
+    "bundle_sha256": "9a0679809c30831d353838165abbfdffef461c6f8531a83ca4b906026fba0b49"
+  },
+  "scope_note": "authority_apply is binding for installing this authority. repo_module_preimages and external_module_preimages are initial references only for the enumerated non-S15 leaves, not universal batch baselines. Every material batch must capture a fresh full OWNS preimage after predecessors and bind it to its delivery manifest; serialized successors use the predecessor delivery hash.",
+  "authority_apply": [
+    {"path":"GATES.md","state":"file","bytes":2149,"sha256":"9993283e6c43ce20c886107b0aa89dbccc2c4d0b7cb7d3a19e7cd60f0e6c0ea7"},
+    {"path":"gates/non-s15-successor.md","state":"absent"},
+    {"path":"plans/inbox-20260830/non-s15-successor-authority-v1.md","state":"absent"},
+    {"path":"plans/inbox-20260830/S13-authority-options.md","state":"absent"},
+    {"path":"plans/inbox-20260830/S14-authority-options.md","state":"absent"},
+    {"path":"plans/inbox-20260830/authority-bundle-v8.sha256","state":"absent"},
+    {"path":"reports/2026-09-01-non-s15-successor-transition.md","state":"absent"},
+    {"path":"reports/2026-09-01-non-s15-successor-preimages.json","state":"absent"}
+  ],
+  "repo_module_preimages": [
+    {"path":"addon/scripts/5_Mission/MCPBridge.c","state":"file","bytes":79362,"sha256":"6a7ac297e4f48c1e186c5c83e8d7177cfd9825686e6193f356adc22780e7361c"},
+    {"path":"tools/tests/test_entities_has_cargo.py","state":"absent"},
+    {"path":"tools/tests/test_bridge_server_capabilities.py","state":"absent"},
+    {"path":"addon/scripts/5_Mission/MCPClientBridge.c","state":"file","bytes":81072,"sha256":"961629aa670c42b66e6e917ffd2c6307d5b4d44c7a27184cc1a9508fad47292b"},
+    {"path":"tools/tests/test_vehicle_telemetry_contract.py","state":"absent"},
+    {"path":"tools/tests/test_ui_click_scriptview.py","state":"file","bytes":3246,"sha256":"8695e34815a522bc48c7bea68e84fa8aba9b3ac94dc0e5d51d00ec95c2813022"},
+    {"path":"tools/tests/test_ui_enforce_contract.py","state":"absent"},
+    {"path":"tools/tests/test_bridge_client_capabilities.py","state":"absent"},
+    {"path":"tools/dayz_mcp/loopback.py","state":"file","bytes":130697,"sha256":"511dd9093a7f607365678bf3d185afddf08c43d86f2d7affe83b42ca83a5e3b8"},
+    {"path":"tools/tests/test_loopback.py","state":"file","bytes":58379,"sha256":"c08470241f2765cf516706af96846d8a26276eee27c5b3f8340e6251fa782772"},
+    {"path":"tools/tests/test_validate_command_args_table.py","state":"file","bytes":15902,"sha256":"0b9f788e4346e7743d7c0f874d651b57648f40ef49c9c75b18f7e874d176a097"},
+    {"path":"tools/mcp_capture.py","state":"file","bytes":21840,"sha256":"b06fa0ea85aad5e217730b9c1e42c5925cecd9b59abe436f732bb45af404ef7d"},
+    {"path":"tools/tests/test_mcp_capture.py","state":"file","bytes":8644,"sha256":"dd635f3d79759956312943f4480385e5757cb3a9262735d001ace4d73164eeaf"},
+    {"path":"tools/pbo_freshness.py","state":"absent"},
+    {"path":"tools/tests/test_pbo_freshness.py","state":"absent"},
+    {"path":"tools/dayz_mcp/effective_schema.py","state":"file","bytes":7852,"sha256":"d5fe81826da87e3f7d7da1b1cbac5fb598b410745face6227d25886d67e1eea4"},
+    {"path":"tools/tests/test_effective_schema.py","state":"file","bytes":5019,"sha256":"5b3a03ad260eb9e7d4eb4af614be7c3cf57aac7e58ff8d434bfa896902753cb7"},
+    {"path":"tools/dayz_mcp/tool_registry_fingerprint.py","state":"absent"},
+    {"path":"tools/tests/test_tool_registry_fingerprint.py","state":"absent"}
+  ],
+  "external_module_preimages": [
+    {"path":"C:\\Users\\guill\\.agents\\skills\\dayz-test-ingame\\templates\\dayz-test.ps1","state":"file","bytes":35274,"sha256":"68a61ffdc679b9d5a76aeedc38122906a1059f9481d3490fbc9d5947d4e652bb"},
+    {"path":"C:\\Users\\guill\\.claude\\skills\\dayz-test-ingame\\templates\\dayz-test.ps1","state":"file","bytes":35274,"sha256":"68a61ffdc679b9d5a76aeedc38122906a1059f9481d3490fbc9d5947d4e652bb"},
+    {"path":"P:\\LFQuad2_dev\\tools\\dayz-test.ps1","state":"file","bytes":28818,"sha256":"20ce5669db5c63811304fb6dbfdfd30d7ff4411ba7729956cc655f595c869eae"},
+    {"path":"P:\\LFPowerGrid_dev\\tools\\build_guarded.py","state":"file","bytes":10705,"sha256":"37c501481c49213158838a6c0d8623eb63f29a4839a51b75079101bb846f5b90"},
+    {"path":"P:\\LFPowerGrid_dev\\tests\\test_version_gate.py","state":"file","bytes":2163,"sha256":"506b1a077fa564b247e8fb4dbcb85ff5712a28857595eb2010d71d46d0371b5e"},
+    {"path":"P:\\LFPowerGrid\\config.cpp","state":"file","bytes":90957,"sha256":"d3ac71035c71019a914a35f43f25f017e2c14b0c3493d792b0c46fb2c40ab95b"},
+    {"path":"P:\\LFPowerGrid\\scripts\\3_Game\\LFPG_Defines.c","state":"file","bytes":49578,"sha256":"a6cc34187368fb5f2a1fb7295decdfed1a0e7f569ab383478648b1948b903af0"},
+    {"path":"P:\\LFPowerGrid_dev\\tools\\verify_corrective.py","state":"file","bytes":47961,"sha256":"7d1b763796e0e17b95a2bbe9114f9e2135447c862eac572a73494e7d1ace4f0e"},
+    {"path":"P:\\Mods\\@LFPowerGrid\\Addons\\LFPowerGrid.pbo","state":"file","bytes":108027366,"sha256":"08ffcd14e320f5eab2fa5f3c9d5dbee914893e53c3661139c1d1693e0f45e086"},
+    {"path":"P:\\pboviewer-cli-windows-x64\\PboViewer.exe","state":"file","bytes":162304,"sha256":"b7fdf77955ef657005ffd1487ce4b3df6e615b6b72d8a827a19d2abafe35e78a"},
+    {"path":"C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ Tools\\Bin\\CfgConvert\\CfgConvert.exe","state":"file","bytes":1246712,"sha256":"4c4fc15ef9773b42b4191155d4e243d8c95d3156cf7b6f24e7d84dea7cd15a4c"}
+  ]
+}

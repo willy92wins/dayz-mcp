@@ -1,0 +1,17 @@
+{
+  "module": "M21",
+  "measured_by": "orchestrator",
+  "generated_utc": "2026-09-02T00:09:36.515904+00:00",
+  "owns": {
+    "tools/dayz_mcp/dayz_test_tool.py": {
+      "sha256": "c783fb51b47376982cc1cd7b1bb59d4dfd5cadf859894df54b6517b765c35ce8",
+      "size_bytes": 23840,
+      "mtime_utc": "2026-08-31T12:28:57.276061+00:00"
+    },
+    "tools/tests/test_dayz_test_tool.py": {
+      "sha256": "994dd06b2e9dbe2312713c433fc68a78e99448998c5cbb23d008ccd799dd308f",
+      "size_bytes": 43339,
+      "mtime_utc": "2026-08-28T19:38:02.157121+00:00"
+    }
+  }
+}

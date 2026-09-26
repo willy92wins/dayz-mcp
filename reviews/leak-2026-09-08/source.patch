@@ -1,0 +1,236 @@
+diff --git a/addon/scripts/5_Mission/MCPBridge.c b/addon/scripts/5_Mission/MCPBridge.c
+index 0ebb995..8eccf37 100644
+--- a/addon/scripts/5_Mission/MCPBridge.c
++++ b/addon/scripts/5_Mission/MCPBridge.c
+@@ -1,4 +1,4 @@
+-class MCPBridge
++class MCPBridge : Managed
+ {
+ 	protected const int MAX_DISPATCH_PER_TICK = 4;
+ 	protected const int MAX_PENDING = 32;
+@@ -56,6 +56,7 @@ class MCPBridge
+ 	protected bool m_InitFailureLogged;
+ 	protected bool m_ResultDropLogged;
+ 	protected ref array<ref RestCallback> m_CallbackRefs;
++	protected ref MCPPollCallback m_PollCallback;
+ 	protected ref array<Man> m_Players;
+ 	protected ref array<ref MCPCommand> m_Pending;
+ 	protected ref map<int, ref MCPJob> m_Jobs;
+@@ -244,7 +245,13 @@ class MCPBridge
+ 		m_PollInFlight = true;
+ 		m_TickPollSent = m_Tick;
+ 
+-		MCPPollCallback cb = new MCPPollCallback(this);
++		// Reuse across completed polls, as the client does. A native-retained
++		// RestCallback must not turn every successful poll into another object.
++		if (!m_PollCallback)
++		{
++			m_PollCallback = new MCPPollCallback(this);
++		}
++		MCPPollCallback cb = m_PollCallback;
+ 		m_CallbackRefs.Insert(cb);
+ 		string request = "poll?key=" + m_Key;
+ 		request = request + "&ver=" + GetPollVersion();
+@@ -357,13 +364,21 @@ class MCPBridge
+ 		m_Pending.Insert(command);
+ 	}
+ 
++	bool IsActivePollCallback(MCPPollCallback cb)
++	{
++		return cb == m_PollCallback;
++	}
++
+ 	void OnPollError(int errorCode)
+ 	{
++		// OnError may repeat (restapi.c:53); retire this request identity.
++		m_PollCallback = null;
+ 		OnPollFail("error=" + errorCode);
+ 	}
+ 
+ 	void OnPollTimeout()
+ 	{
++		m_PollCallback = null;
+ 		OnPollFail("timeout");
+ 	}
+ 
+@@ -3512,6 +3527,13 @@ class MCPBridge
+ 
+ 	void Shutdown()
+ 	{
++		// A completed cached callback is no longer in m_CallbackRefs.
++		if (m_PollCallback)
++		{
++			m_PollCallback.DetachBridge();
++		}
++		m_PollCallback = null;
++
+ 		if (m_Ctx)
+ 		{
+ 			m_Ctx.reset();
+diff --git a/addon/scripts/5_Mission/MCPCallbacks.c b/addon/scripts/5_Mission/MCPCallbacks.c
+index 88059ac..5233e92 100644
+--- a/addon/scripts/5_Mission/MCPCallbacks.c
++++ b/addon/scripts/5_Mission/MCPCallbacks.c
+@@ -1,17 +1,27 @@
+ class MCPPollCallback : RestCallback
+ {
+-	protected ref MCPBridge m_Bridge;
++	// The mission singleton owns the Managed bridge; this is a weak soft link.
++	protected MCPBridge m_Bridge;
+ 
+ 	void MCPPollCallback(MCPBridge bridge)
+ 	{
+ 		m_Bridge = bridge;
+ 	}
+ 
++	void DetachBridge()
++	{
++		m_Bridge = null;
++	}
++
+ 	override void OnSuccess(string data, int dataSize)
+ 	{
+ 		if (m_Bridge)
+ 		{
+ 			m_Bridge.ReleaseCallback(this);
++			if (!m_Bridge.IsActivePollCallback(this))
++			{
++				return;
++			}
+ 			m_Bridge.OnPollSuccess(data, dataSize);
+ 		}
+ 	}
+@@ -21,6 +31,10 @@ class MCPPollCallback : RestCallback
+ 		if (m_Bridge)
+ 		{
+ 			m_Bridge.ReleaseCallback(this);
++			if (!m_Bridge.IsActivePollCallback(this))
++			{
++				return;
++			}
+ 			m_Bridge.OnPollError(errorCode);
+ 		}
+ 	}
+@@ -30,6 +44,10 @@ class MCPPollCallback : RestCallback
+ 		if (m_Bridge)
+ 		{
+ 			m_Bridge.ReleaseCallback(this);
++			if (!m_Bridge.IsActivePollCallback(this))
++			{
++				return;
++			}
+ 			m_Bridge.OnPollTimeout();
+ 		}
+ 	}
+@@ -37,7 +55,8 @@ class MCPPollCallback : RestCallback
+ 
+ class MCPResultCallback : RestCallback
+ {
+-	protected ref MCPBridge m_Bridge;
++	// The mission singleton owns the Managed bridge; this is a weak soft link.
++	protected MCPBridge m_Bridge;
+ 
+ 	void MCPResultCallback(MCPBridge bridge)
+ 	{
+diff --git a/addon/scripts/5_Mission/MCPClientBridge.c b/addon/scripts/5_Mission/MCPClientBridge.c
+index 382e215..342e0ce 100644
+--- a/addon/scripts/5_Mission/MCPClientBridge.c
++++ b/addon/scripts/5_Mission/MCPClientBridge.c
+@@ -1,5 +1,6 @@
+ class MCPClientPollCallback : RestCallback
+ {
++	// MCPJobRunnerOwner is not Managed: detach explicitly; a raw link can dangle.
+ 	protected ref MCPClientBridge m_Bridge;
+ 
+ 	void MCPClientPollCallback(MCPClientBridge bridge)
+@@ -19,6 +20,7 @@ class MCPClientPollCallback : RestCallback
+ 			m_Bridge.ReleaseCallback(this);
+ 			if (!m_Bridge.IsActivePollCallback(this))
+ 			{
++				DetachBridge();
+ 				return;
+ 			}
+ 			m_Bridge.OnPollSuccess(data, dataSize);
+@@ -32,9 +34,11 @@ class MCPClientPollCallback : RestCallback
+ 			m_Bridge.ReleaseCallback(this);
+ 			if (!m_Bridge.IsActivePollCallback(this))
+ 			{
++				DetachBridge();
+ 				return;
+ 			}
+ 			m_Bridge.OnPollError(errorCode);
++			DetachBridge();
+ 		}
+ 	}
+ 
+@@ -45,15 +49,18 @@ class MCPClientPollCallback : RestCallback
+ 			m_Bridge.ReleaseCallback(this);
+ 			if (!m_Bridge.IsActivePollCallback(this))
+ 			{
++				DetachBridge();
+ 				return;
+ 			}
+ 			m_Bridge.OnPollTimeout();
++			DetachBridge();
+ 		}
+ 	}
+ };
+ 
+ class MCPClientResultCallback : RestCallback
+ {
++	// MCPJobRunnerOwner is not Managed: detach explicitly; a raw link can dangle.
+ 	protected ref MCPClientBridge m_Bridge;
+ 
+ 	void MCPClientResultCallback(MCPClientBridge bridge)
+@@ -72,6 +79,7 @@ class MCPClientResultCallback : RestCallback
+ 		{
+ 			m_Bridge.ReleaseCallback(this);
+ 			m_Bridge.OnResultSuccess(data, dataSize);
++			DetachBridge();
+ 		}
+ 	}
+ 
+@@ -81,6 +89,7 @@ class MCPClientResultCallback : RestCallback
+ 		{
+ 			m_Bridge.ReleaseCallback(this);
+ 			m_Bridge.OnResultError(errorCode);
++			DetachBridge();
+ 		}
+ 	}
+ 
+@@ -90,6 +99,7 @@ class MCPClientResultCallback : RestCallback
+ 		{
+ 			m_Bridge.ReleaseCallback(this);
+ 			m_Bridge.OnResultTimeout();
++			DetachBridge();
+ 		}
+ 	}
+ };
+@@ -546,11 +556,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
+ 
+ 	void OnPollError(int errorCode)
+ 	{
++		// OnError may repeat (restapi.c:53); retire this request identity.
++		m_PollCallback = null;
+ 		OnPollFail("error=" + errorCode);
+ 	}
+ 
+ 	void OnPollTimeout()
+ 	{
++		m_PollCallback = null;
+ 		OnPollFail("timeout");
+ 	}
+ 
+@@ -4119,6 +4132,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
+ 		RestoreGameplay();
+ 		ReleaseCamera();
+ 
++		// A completed cached callback is absent from m_PollCallbackRefs.
++		if (m_PollCallback)
++		{
++			m_PollCallback.DetachBridge();
++		}
++
+ 		// Break the callback->bridge->callback-array ref cycle before
+ 		// contexts are dropped. Shared context plus a posted terminal
+ 		// POST keeps the arrays, so a never-completing GET must not keep

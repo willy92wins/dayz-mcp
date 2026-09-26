@@ -1,0 +1,347 @@
+[
+  {
+    "module": "test_leak_callback_lifetime",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_leak_callback_lifetime -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "FAIL: test_error_and_timeout_retire_identity_before_allowing_another_request (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_error_and_timeout_retire_identity_before_allowing_another_request) (owner='MCPClientBridge', event='Error')",
+      "FAIL: test_error_and_timeout_retire_identity_before_allowing_another_request (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_error_and_timeout_retire_identity_before_allowing_another_request) (owner='MCPClientBridge', event='Timeout')",
+      "FAIL: test_four_backlinks_are_weak_and_targets_have_managed_soft_links (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_four_backlinks_are_weak_and_targets_have_managed_soft_links) (kind='MCPClientPollCallback')",
+      "FAIL: test_four_backlinks_are_weak_and_targets_have_managed_soft_links (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_four_backlinks_are_weak_and_targets_have_managed_soft_links) (kind='MCPClientResultCallback')",
+      "FAIL: test_shutdown_detaches_cached_callback_even_when_pending_array_is_empty (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_shutdown_detaches_cached_callback_even_when_pending_array_is_empty) (owner='MCPClientBridge')",
+      "Ran 6 tests in 0.021s",
+      "FAILED (failures=5)"
+    ],
+    "exit_code": 1
+  },
+  {
+    "module": "test_leak_callback_drain",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_leak_callback_drain -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 8 tests in 0.617s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_action_use",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_action_use -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 3 tests in 0.091s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_addon_tree_has_no_write_artifacts",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_addon_tree_has_no_write_artifacts -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 5 tests in 0.003s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_batch6",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_batch6 -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 13 tests in 0.186s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_bridge_client_capabilities",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_bridge_client_capabilities -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 8 tests in 0.004s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_bridge_server_capabilities",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_bridge_server_capabilities -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 9 tests in 0.011s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_d09_d10_spawn_timeout_object_id",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_d09_d10_spawn_timeout_object_id -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 2 tests in 0.019s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_effective_schema_catalog",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_effective_schema_catalog -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 5 tests in 0.002s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_entities_has_cargo",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_entities_has_cargo -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 5 tests in 0.006s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_entities_query_cargo",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_entities_query_cargo -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 12 tests in 0.386s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_guards_bridge",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_guards_bridge -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 8 tests in 0.083s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_instance_fence",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_instance_fence -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 64 tests in 2.137s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_inventory_give",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_inventory_give -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 5 tests in 0.092s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_key_press",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_key_press -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 6 tests in 0.170s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_loopback",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_loopback -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 74 tests in 0.967s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_mcp_tools",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_mcp_tools -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 51 tests in 8.634s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_object_anim",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_object_anim -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 4 tests in 0.101s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_object_inspect",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_object_inspect -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 4 tests in 0.098s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_player_respawn",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_player_respawn -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 4 tests in 0.091s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_player_teleport",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_player_teleport -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 9 tests in 0.518s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_poll_key_reload_contract",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_poll_key_reload_contract -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 2 tests in 0.001s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_poll_watchdog_contract",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_poll_watchdog_contract -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 8 tests in 0.002s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_restore_gameplay_contract",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_restore_gameplay_contract -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 12 tests in 0.636s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_surface_query",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_surface_query -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 4 tests in 0.091s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_task9_spawn_phase_markers",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_task9_spawn_phase_markers -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 7 tests in 0.001s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_ui_click_scriptview",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_ui_click_scriptview -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 6 tests in 0.002s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_ui_enforce_contract",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_ui_enforce_contract -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 15 tests in 0.008s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_ui_error_diagnostics",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_ui_error_diagnostics -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 10 tests in 0.627s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_ui_reload_layout",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_ui_reload_layout -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 10 tests in 0.089s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_vehicle_prepare_fixture",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_vehicle_prepare_fixture -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 4 tests in 0.109s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_vehicle_telemetry_contract",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_vehicle_telemetry_contract -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 10 tests in 0.029s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_vehicle_trace_contract",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_vehicle_trace_contract -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 7 tests in 0.105s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "module": "test_world_spawn_ground_contract",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_world_spawn_ground_contract -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "Ran 2 tests in 0.001s",
+      "OK"
+    ],
+    "exit_code": 0
+  }
+]

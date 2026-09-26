@@ -1,0 +1,41 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. Trabaja hasta emitir el dictamen y escríbelo en disco.
+Si algo te bloquea, dilo en el dictamen y sigue con el resto.
+
+§0. TU PAPEL: AUDITOR R9, ÁNGULO ADMIN / REBOOT / RECOVERY / MÁQUINA DE ESTADOS del lote D. Eres adversarial: busca el
+escenario de operación (daemon reiniciado, run muerto, admin reconciliando, caja «ocupada para siempre») en el que el
+cambio deja la caja bloqueada sin salida, o deja pasar un lanzamiento que no debía. Lee primero COMUN.txt (mismo
+directorio): contexto, cambio, fronteras y regla de CRITICAL-con-repro.
+
+§1. PREGUNTAS QUE DEBES CONTESTAR CON EVIDENCIA
+B-1 Reboot del daemon con un run vivo. Tras `daemon` re-spawn los PIDs registrados vienen de `runs.json`
+    (manifest). Si el manifiesto se recupera bien, el servidor sigue «registrado» y sus puertos no son foreign. Pero si
+    la recuperación deja el run en EXITED/UNRECONCILED con el proceso VIVO y el puerto sostenido: ¿la caja queda
+    `occupied` por foreign-por-puerto (correcto: hay un DayZ vivo) y cuál es la salida del operador? Recorre
+    `reap_dead_run(s)`, `admin_reconcile`, `recover_unacknowledged_before_listen`, `lifecycle_cli.py` y di si existe una
+    vía que NO sea matar a mano el proceso. Si no existe y antes sí (porque el proceso era invisible), es una
+    REGRESIÓN operativa: MAJOR con la secuencia; CRITICAL solo con repro.
+B-2 `admin_reconcile(..., empty=True)` usa `_diag_snapshot_empty()` (solo nombre `DayZDiag_x64.exe`). Con el nuevo
+    testigo, ¿debería «vacío» exigir también que ningún holder DayZ sostenga un puerto? Argumenta con path:line qué
+    pasa hoy si un admin declara `empty` con un DayZServer ajeno vivo: ¿estado inconsistente? BACKLOG o MAJOR.
+B-3 Un run PROPIO cuyo proceso murió pero cuyo puerto sigue en TIME_WAIT/reservado, o cuyo hijo (BattlEye, crash
+    handler) hereda el socket con OTRO pid no registrado: ¿el siguiente lanzamiento en el mismo puerto se rechaza con
+    `port_in_use_foreign` (holder no registrado)? ¿Es correcto (fail-closed) o bloquea el relanzamiento legítimo
+    mientras `wait_for_box_s` espera hasta el timeout? Busca en el código quién registra PIDs hijos (ProcessRecord por
+    run) y di si un hijo heredero queda fuera de `registered_pids`. Repro con fakes si puedes.
+B-4 Máquina de estados de `start_run`: el nuevo rechazo va DESPUÉS de `_foreign_diag_reason` y ANTES de `_quarantined`
+    y `_commit_reserved`. ¿Deja la reserva del lease coherente (`_start_rejection` → `_reject_reserved`)? ¿El audit
+    `lifecycle_start_rejected` con reason `port_in_use_foreign`/`port_scan_unknown` lo entiende `_failed_active_run_result`
+    y el `hint` del cliente («retry with wait_for_box_s»)? Lee server.py `_failed_active_run_result` y
+    `occupancy_error_fields`. Un hint que manda esperar cuando el bloqueo es `port_scan_unknown` (nunca se resuelve
+    esperando) es MAJOR: propón texto.
+B-5 Recovery-fault y quarantine: ¿interactúa `port_scan_unknown` con `lifecycle-recovery-faults` o con
+    `retail_quarantine`? Si el sondeo de puertos falla de forma persistente (netstat ausente, psutil roto), ¿la caja
+    queda «ocupada» para siempre sin ningún mensaje que lo diga? Comprueba que `session_status.box.port_scan_known:false`
+    llega al cliente y que `dayz_test_run` lo expone en su error (si no, MAJOR con propuesta).
+
+§2. ENTREGABLE — escribe C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-D\AUDIT-ADMIN.md con:
+## VEREDICTO
+CRITICAL=N (con repro ejecutable) · MAJOR=N · BACKLOG=N
+## B-1 … B-5 (evidencia: comandos, salida literal recortada, path:line)
+## HALLAZGOS (cada uno: severidad, secuencia exacta, repro [EXACT] o «sin repro → backlog», fix propuesto [DESIGN])
+## LO QUE NO PUDE VERIFICAR

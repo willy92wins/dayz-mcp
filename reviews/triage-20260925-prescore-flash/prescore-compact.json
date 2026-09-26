@@ -1,0 +1,953 @@
+{
+  "run_id": "20260925-prescore-flash",
+  "n": 43,
+  "fichas": [
+    {
+      "id": "fb-20260924-235534-df3a",
+      "kind": "finding",
+      "project": "DayZ_MCP",
+      "title": "object_anim en un coche: la fase escrita vuelve a 0 en menos de 0,3 s",
+      "body_excerpt": "Medido el 2026-09-25 hacia las 01:50, run 648d71b9, con SUB_WRXSTI creado por `world_spawn` (flags=8389668).\n\n- `object_anim(object_id, source=\"DoorsDriver\", phase=1.0)` devuelve `phase` 1.0, releída en el mismo tick (MCPBridge.c:1281-1284). La lectura a 0,3 s y a 2,3 s da 0.0.\n- Igual con el coche pelado (0 accesorios) que con cuatro ruedas y la puerta montadas. La fuente es `user` con `animPeriod` 0.5.\n- Nadie más escribe esa fase:\n  - en el mod del MCP, `SetAnimationPhase` solo aparece en MCPBridge.c:1281;\n  - `CarScript.EEItemAttached` (carscript.c:740-789) no toca fases.\n- Consecuencias:\n  - `object_anim` no sirve hoy para dejar una puerta abierta y medirla, ni con captura ni con rayo;\n  - `query_get_in_condition` sigue viendo la puerta cerrada (`crew_can_get_through=0`).\n- El 2026-09-04, con el fixture funcionando, la misma llamada sí dejó las puertas abiertas en captura. Parece un",
+      "senales": {
+        "D1": 1,
+        "D2": 5,
+        "D3": false,
+        "D4": false,
+        "D5": "default",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [],
+      "primary_symbol": "world_spawn",
+      "scope_prod_files": [
+        "addon/scripts/5_Mission/MCPBridge.c"
+      ]
+    },
+    {
+      "id": "fb-20260924-235528-0878",
+      "kind": "bug",
+      "project": "DayZ_MCP",
+      "title": "vehicle_prepare_fixture da bad_args con argumentos válidos: la herramienta y el PBO desplegado de @DayZ_MCP no casan",
+      "body_excerpt": "Medido el 2026-09-25 entre las 01:40 y las 01:50, run 648d71b9.\n\n- Tres llamadas con `{\"type\":\"SUB_WRXSTI\",\"pos\":[9270.706,6.672,1968.418]}`, con y sin `timeout_s`, devuelven «Error executing tool vehicle_prepare_fixture: bad_args». El coche queda con `attachment_count` 0.\n- La herramienta envía `mode=\"object_at\"` y `radius` (server.py:5595-5600), y el fuente del mod acepta esos argumentos (MCPBridge.c:1028).\n- Pero el servidor en marcha anuncia 21 comandos sin `vehicle_drive`, y el `SERVER_CAPABILITIES` del fuente sí lo incluye (MCPBridge.c:35). El PBO desplegado de @DayZ_MCP es anterior al fuente y al contrato de la herramienta.\n- `bridge_status` no lo detecta: da `capabilities.state=match` porque compara nombres de comando, no el contrato de argumentos.\n- Solución provisional: `inventory_attach` por slot funciona (seis puertas y cuatro ruedas montadas sin error).\n- Propuesta: reempaqu",
+      "senales": {
+        "D1": 2,
+        "D2": 145,
+        "D3": false,
+        "D4": false,
+        "D5": "default",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [],
+      "primary_symbol": "timeout_s",
+      "scope_prod_files": [
+        "tools/dayz_mcp/server.py",
+        "addon/scripts/5_Mission/MCPBridge.c"
+      ]
+    },
+    {
+      "id": "fb-20260924-235524-e7ef",
+      "kind": "bug",
+      "project": "DayZ_MCP",
+      "title": "Claude Code nunca ve los verbos de juego: el aviso tools/list_changed tras el lease no le llega",
+      "body_excerpt": "Medido el 2026-09-25 entre las 01:21 y las 01:35, en una sesión de Claude Code (desktop, claude-code 2.1.280), con el demonio en la generación 64825001 y el run 648d71b9.\n\n- Sin lease, el catálogo tiene 17-18 herramientas: `_compact_initial_catalog` (server.py:675) y `list_tools_progressive` (server.py:7168-7172).\n- Tras `session_acquire_wait` con lease activo y `adopted_run.ok`, server.py:4711-4715 envía `notifications/tools/list_changed`. El supervisor reenvía tal cual todo lo que no es respuesta (mcp_supervisor.py:195-230).\n- Aun así, la sesión no encuentra `world_spawn`, `object_anim` ni `camera_set` ni en ese turno ni en el siguiente. No puede llamar a ningún verbo de juego.\n- Control: un cliente stdio propio (`mcp.ClientSession`, con el mismo comando que Claude Code y sin supervisor) pasa de 17 a 63 herramientas tras el lease. El servidor responde bien; el hueco está entre el aviso",
+      "senales": {
+        "D1": 2,
+        "D2": 2,
+        "D3": false,
+        "D4": true,
+        "D5": "firma",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [],
+      "primary_symbol": "_compact_initial_catalog",
+      "scope_prod_files": [
+        "tools/dayz_mcp/server.py",
+        "tools/dayz_mcp/mcp_supervisor.py"
+      ]
+    },
+    {
+      "id": "fb-20260924-232706-1db8",
+      "kind": "finding",
+      "project": "ai-pipeline",
+      "title": "El Grok Bot dio por hecho y comprobado un cambio en sus permisos que no está en disco",
+      "body_excerpt": "Seguimiento de fb-20260924-150528-edd1.\n\n- 2026-09-25, 01:18: Guillermo le pidió al Grok Bot que quitara de allowInstructions la regla «Run SSH maintenance commands on local network machines using paramiko» y que añadiera un bloqueo para el GX10.\n- El bot contestó: «Ya he cambiado el archivo de configuración… Lo he comprobado leyendo el archivo otra vez, y antes guardé una copia del original». Fuente: copia local de la conversación en AppData\\Roaming\\Grok Bot\\sand-client-persistence, transcript 8cfee116.\n- Medido en Willy justo después:\n  - C:\\Users\\guill\\.grokbot\\settings.json no se escribe desde el 2026-09-22 17:11.\n  - Sigue teniendo 15 allowInstructions, con la de paramiko; blockInstructions está vacío y localToolPermission sigue en \"always\".\n  - Ningún fichero de .grokbot, AppData ni Documents escrito entre las 01:15 y las 01:30 contiene la regla nueva, y no hay ninguna copia de seg",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [
+        "fb-20260924-150528-edd1"
+      ],
+      "primary_symbol": "hecho",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260924-150528-edd1",
+      "kind": "finding",
+      "project": "ai-pipeline",
+      "title": "Corrección: la purga de V4.1 la ejecutó muy probablemente el Grok Bot, no Cursor",
+      "body_excerpt": "Corrige fb-20260924-142440-5fd7.\n\n- Guillermo confirmó el 2026-09-24 que él pidió el cambio a la receta de máxima concurrencia (MiaAI-Lab). No consta que pidiera también borrar V4.1.\n- El formato de C:\\Users\\guill\\terminals\\*.txt (cabecera con running_for_ms) no identifica a Cursor. La misma cadena está en Cursor\\resources\\app\\extensions\\cursor-agent-exec y en Grok Bot\\resources\\app.asar.\n- Lo que apunta al Grok Bot:\n  - ~/.grokbot/settings.json tiene localToolPermission \"always\" y la regla de auto-aprobación «Run SSH maintenance commands on local network machines using paramiko».\n  - Las terminales siguientes del swap (791698-791701) son scripts paramiko contra 192.168.1.53.\n  - Cursor no escribió ninguna terminal en ~/.cursor/projects ni tocó su estado entre las 18:20 y las 19:00.\n  - Claude Code, Codex y Hermes no tienen actividad en esa ventana.\n- Sin confirmar: la conversación del G",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": false
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [
+        "fb-20260924-142440-5fd7",
+        "fb-20260924-142445-5c69"
+      ],
+      "primary_symbol": "purga",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260924-142445-5c69",
+      "kind": "request",
+      "project": "ai-pipeline",
+      "title": "Gate para borrados en el GX10 que no dependa de que el worker haya leído la skill",
+      "body_excerpt": "Consecuencia del hallazgo sobre la purga de V4.1 del 2026-09-19. Las reglas duras de infra-ia-local («NUNCA borres…», «NUNCA cargues por fuera de gx10-load.sh») solo protegen si quien actúa carga la skill. Un worker delegado (Cursor, Grok, Qwen) no la carga (G7), y un script de swap borró 620 GiB sin dejar rastro de quién lo autorizó.\n\nPropuesta, para decidir. No está implementada ni medida.\n- Una lista de rutas protegidas en el propio GX10, por ejemplo ~/.protected-paths, más un guard que los scripts de limpieza tengan que consultar. O bien una condición en el brief de delegar: cualquier rm de más de N GiB en el GX10 exige confirmación explícita de Guillermo en el chat.\n- Que los scripts que borran dejen su log en ~/logs y no en /tmp. /tmp se vacía en cada arranque y a los 30 días (tmpfiles: D /tmp 1777 root root 30d). Esta vez la evidencia sobrevivió solo porque la caja no se ha reinic",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": false
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [],
+      "primary_symbol": "borrados",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260924-142440-5fd7",
+      "kind": "finding",
+      "project": "ai-pipeline",
+      "title": "Un worker de Cursor borró la lane V4.1 del GX10 (620 GiB) saltándose la regla 3 de infra-ia-local",
+      "body_excerpt": "Medido el 2026-09-24 en solo lectura. Handoff: ObsidianVault\\AI\\30_Sessions\\2026-09-24-ai-pipeline-gx10-purga-v41.md\n\nQué pasó:\n- El 2026-09-19 a las 18:31:27 (hora del GX10, en NTP), una limpieza borró los dos packs DSV4.1 (307,72 + 307,70 GiB), ~/models, la receta, el lanzador, el venv exl3_v41, 37 ficheros DeepSeek del fork ExL3 y los logs de V4.1: FREED_TOTAL_GIB=620.7. Lo registra /tmp/mia-clean-20260919.log en el GX10 (sha256 b6d4467a…).\n- Justo después se clonó la receta MiaAI-Lab de Flash-Next.\n- Casi seguro lo lanzó un agente de Cursor en Willy: la terminal C:\\Users\\guill\\terminals\\791697.txt («Run Mia Single swap script on Willy») ejecutó %TEMP%\\mia-single-gx10-20260919\\RUN-ON-WILLY.ps1 de 18:32 a 18:56, hora de Willy, y salió con código 3. El script ya no existe y la conversación de Cursor no aparece.\n- La skill infra-ia-local tenía como regla dura «NUNCA borres el pack origin",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [],
+      "primary_symbol": "worker",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260924-142001-f2e2",
+      "kind": "finding",
+      "project": "harness",
+      "title": "ffmpeg 9.0.1 (gyan.dev) en el PC: drawtext sin fontfile muere con segfault",
+      "body_excerpt": "Qué pasa: el ffmpeg del PATH de Willy (`ffmpeg version 9.0.1-full_build-www.gyan.dev`, con `--enable-libfreetype`) tiene el filtro `drawtext`. Si se usa sin `fontfile=`, imprime `Fontconfig error: Cannot load default config file: File not found` y el proceso muere con un segfault (código de salida 139). Es una caída del proceso, no un error controlado: un script que no mire el código de salida no ve un mensaje de ffmpeg explicando el fallo.\n\nMedido el 2026-09-24:\n- `ffmpeg -f lavfi -i color=c=black:s=320x180:d=0.1 -vf \"drawtext=text=Hola:fontsize=24:fontcolor=white\" -frames:v 1 x.png` → segfault, rc 139.\n- El mismo comando con `fontfile=arial.ttf`, ejecutado desde `C:\\Windows\\Fonts` para evitar escapar `:` en la ruta → rc 0.\n\nCómo evitarlo:\n- pasar siempre `fontfile`, con la ruta relativa o con `:` escapado;\n- o componer el rótulo en PNG (Pillow) y superponerlo con `overlay`, que es lo q",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [],
+      "primary_symbol": "drawtext",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260924-132805-1045",
+      "kind": "finding",
+      "project": "infra-ia-local",
+      "title": "GX10: el timer de mantenimiento relanzará Flash-Next el dom 27-09 04:00 pese al flag manual de hoy 14:13",
+      "body_excerpt": "Para quien esté usando el GX10 (192.168.1.53), p. ej. la sesión de ComfyUI + minimax-h3-comfyui.\n\nEstado leído el 2026-09-24 (solo lectura): Flash-Next (vllm-fn-tp1) parado con flag `manual` en ~/Qwen3.8-Flash-Next-Single-DGX-Spark/logs/stopping desde las 14:13:27; el supervisor systemd de usuario respeta ese flag. Pero `qwen38-flash-maintenance.timer` está activo, con el próximo disparo el domingo 2026-09-27 a las 04:00 CEST, y `maintenance-relaunch.sh` NO respeta el flag manual (receta @ 6b50864: `touch` del flag en :35, `stop.sh` en :56 y `start.sh` en :59; `start.sh` borra el flag manual al llegar a /health, :1170-1172). No pasa por gx10-preflight: solo lo frenan los gates de start.sh (GPU sin procesos, que falla abierto si nvidia-smi da error, y MemAvailable >= 102 GiB).\n\nSi la parada tiene que durar más allá del domingo, en el GX10: `systemctl --user stop qwen38-flash-maintenance.t",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [],
+      "primary_symbol": "manual",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260924-132122-834e",
+      "kind": "finding",
+      "project": "harness",
+      "title": "Scratchpad de Claude Code en Windows: git falla con rutas de más de ~259 caracteres",
+      "body_excerpt": "Qué pasa: la ruta del scratchpad de sesión de Claude Code desktop mide unos 246 caracteres (C:\\Users\\guill\\AppData\\Local\\Temp\\claude\\C--Users-guill-AppData-Roaming-Claude-scratch-workspaces-<uuid>-<uuid>-scratch-<fecha>-<id>\\<uuid>\\scratchpad\\). Con eso solo quedan unos 13 caracteres para el nombre de fichero antes del MAX_PATH de Windows.\n\nMedido el 2026-09-24:\n- `git diff --no-index <scratchpad>/gx10.pre-edit.md ...` (ruta de 262 caracteres) → `error: Could not access '<ruta>'`, y el diff sale vacío (0 hunks) sin que el comando falle de forma visible si no miras stderr.\n- Con nombres cortos (pre.md, staged.md, ~255 caracteres) `git merge-file`, Python `open()` y las herramientas MSYS (cp, diff, sha256sum) funcionan.\n- `sha256sum` de MSYS sí leyó la ruta de 262 caracteres: el fallo es de git para Windows, no del disco.\n\nCómo evitarlo: nombres de fichero de 12 caracteres o menos en el sc",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [],
+      "primary_symbol": "sha256sum",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260924-130252-6084",
+      "kind": "finding",
+      "project": "DayZ_MCP",
+      "title": "Steam not running: la app ve una copia congelada de Steam\\ActiveProcess; WMI lee el real (medido)",
+      "body_excerpt": "Relacionado con fb-20260924-011620-678b y el PR #90 («Steam not running»). Medido el 2026-09-24 durante el smoke de terrain holes (lanzamiento manual de DayZ 1.30 Exp), no en el daemon.\n\nMedido:\n- Un powershell.exe hijo de la app de Claude lee HKCU\\Software\\Valve\\Steam\\ActiveProcess pid=13156 (Steam anterior). El registro real, por WMI (StdRegProv.GetDWORDValue, hive 0x80000001), da pid=24464 = steam.exe vivo. ActiveUser coincide (180756209).\n- Tras reiniciar el PC, la vista de la app seguía en 24464; el real y steam.exe en 11232.\n- Un proceso creado con Invoke-CimMethod Win32_Process -MethodName Create corre en la sesión 1 (padre WmiPrvSE), lee el pid real y no muere con el árbol del comando que lo lanzó. Por esa vía se lanzaron servidor y cliente DayZDiag 1.30 sin el error de Steam.\n- Escribir el pid real en la copia de la app (Set-ItemProperty desde la app) la corrige solo hasta el si",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [
+        "fb-20260924-011620-678b"
+      ],
+      "primary_symbol": "running",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260924-125931-cab2",
+      "kind": "bug",
+      "project": "pipeline",
+      "title": "codex exec: hooks.json del plugin claude-council no parsea (unknown field `modules`) y sale como item error",
+      "body_excerpt": "Observado 2026-09-24 ~14:58 CEST en una revision R21 lanzada con `codex exec -m gpt-6-sol -s read-only --json` (codex-cli 0.156.0, host WILLY).\n\nPrimer item del stream JSON:\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"error\",\"message\":\"failed to parse plugin hooks config C:\\\\Users\\\\guill\\\\.codex\\\\plugins\\\\cache\\\\hex-plugins\\\\claude-council\\\\2026.9.14\\\\hooks\\\\hooks.json: unknown field `modules`, expected `description` or `hooks` at line 15 column 11\"}}\n\nEfecto: no fatal (la corrida sigue y ejecuta comandos), pero (a) los hooks de ese plugin no se cargan bajo Codex, y (b) un receptor o vigia que cuente `\"type\":\"error\"` en el stream para decidir si la lane fallo dara un falso negativo en TODAS las corridas de codex exec mientras el fichero siga asi.\n\nAdemas, en stderr: 3 errores `rmcp::transport::worker ... HTTP 429 challenge` de un MCP (el mismo `challenge` que da answeroverflow",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [],
+      "primary_symbol": "modules",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260924-012921-296b",
+      "kind": "bug",
+      "project": "DayZ_MCP",
+      "title": "El preflight de Steam lee la clave REAL (WMI) pero el cliente DayZ lee la copia virtualizada de la app: verde falso",
+      "body_excerpt": "Medido 2026-09-24 03:04-03:14 en Claude Desktop (MSIX).\nEstado: HKCU\\Software\\Valve\\Steam\\ActiveProcess REAL (WMI StdRegProv) pid=13156 ActiveUser=180756209 (Steam vivo, lanzado por WMI fuera del contenedor); COPIA virtualizada de la app de Claude (Get-ItemProperty desde un hijo de Claude) pid=0 ActiveUser=0.\ndayz_test_run(project=DayZ_MCP, mode=all) -> succeeded, server_alive y client_alive true, steam_startup=observed. Pero el cliente murio a 1 s: RPT solo cabecera + ErrorMessage_DayZDiag_x64_2026-09-24_03-04-46.mdmp con 'SteamInternal_SetMinidumpSteamID ... [API loaded no]'. El run se reapeo (all_processes_gone_or_foreign) y nadie lo diagnostico como Steam.\nTras copiar el pid vivo tambien a la COPIA (Set-ItemProperty desde dentro de la app, con guardas), el mismo run arranco y el cliente entro (run 5ce76ee9, e7a059e3).\nConclusion: el cliente DayZ hereda la virtualizacion de registro d",
+      "senales": {
+        "D1": 1,
+        "D2": 0,
+        "D3": false,
+        "D4": true,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [],
+      "primary_symbol": "preflight",
+      "scope_prod_files": [
+        "tools/dayz_mcp/daemon.py"
+      ]
+    },
+    {
+      "id": "fb-20260924-011620-678b",
+      "kind": "bug",
+      "project": "DayZ_MCP",
+      "title": "DayZ no arranca: error «Steam not running» al lanzar (2026-09-24); diagnosticar el preflight de Steam",
+      "body_excerpt": "REPORTE (usuario, 2026-09-24, madrugada hora local)\nUn lanzamiento de DayZ falló con el error «Steam not running» y DayZ no llegó a arrancar. No tengo todavía el texto literal, la hora exacta ni la sesión o herramienta que lanzaba (dayz_test_run u otra): lo primero es localizarlo en audit/events.jsonl y en los logs.\n\nESTADO MEDIDO AL ABRIR EL TICKET (session_status + bridge_status, ~01:14 UTC)\n- Caja ocupada por un run sin dueño en RUNNING_IDLE: run 5ce76ee9-0035-40ff-9254-1bfa02d0a816, mod @DayZ_MCP, server pid 9552 y client pid 29124, creados a las 01:13 UTC. Inferencia, sin verificar: alguien relanzó con éxito después del fallo.\n- bridge: ready=false, reason=binding_not_ready (peers nunca sondeados en esta generación).\n- daemon_generation 7033aa84178e4fd4a25a94323d086e84.\n\nCONTEXTO EN EL REPO\n- Ya hay lógica de Steam: tools/dayz_mcp/steam_preflight.py, steam_launch_guard.py, steam_pre",
+      "senales": {
+        "D1": 8,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "default",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [
+        "fb-20260920-230648-99db"
+      ],
+      "primary_symbol": "arranca",
+      "scope_prod_files": [
+        "tools/dayz_mcp/steam_preflight.py",
+        "tools/dayz_mcp/steam_launch_guard.py",
+        "tools/dayz_mcp/steam_prepare_helper.py",
+        "tools/dayz_mcp/daemon.py",
+        "tools/dayz_mcp/server.py",
+        "HANDOFF.md",
+        "tools/dayz_mcp/native_bundle.py",
+        "tools/native-launchers/dayz-test-v1/closure-manifest.json"
+      ]
+    },
+    {
+      "id": "fb-20260924-010108-b1a7",
+      "kind": "request",
+      "project": "DayZ_MCP",
+      "title": "Recuperar una sesion MCP sin reiniciar la app: hot reload sin lease fantasma y verbos sin reabrir el cliente",
+      "body_excerpt": "Contexto: 2026-09-24, caja con varias sesiones de Claude vivas; el usuario NO puede reiniciar la app para arreglar una sola sesion. Hoy la unica salida fue matar a mano el arbol dayz-mcp de ESA sesion (launcher 20712 -> supervisor 20700 -> worker 29016/53736) y que el usuario reconecte desde /mcp. Ver fb-20260924-003722-0c27 para el fallo concreto.\n\nDos problemas y lo que pediria, cualquiera de las dos vias vale:\n\n1) server_reload hereda un lease muerto y bloquea la sesion.\n   Tras server_reload, el worker nuevo consume el handoff con lease_token pero sin operacion; _reconcile_idle_session_locked (control_client.py:760-768) no tiene salida y TODO devuelve session_transition_conflict, mientras session_status dice self.state=none.\n   - Via A (hot reload correcto): al consumir el handoff, validar el lease contra el daemon; si self.state=none, clear_handoff y estado CLOSED en vez de arrastra",
+      "senales": {
+        "D1": 2,
+        "D2": 0,
+        "D3": false,
+        "D4": true,
+        "D5": "default",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [
+        "fb-20260924-003722-0c27"
+      ],
+      "primary_symbol": "sesion",
+      "scope_prod_files": [
+        "tools/dayz_mcp/control_client.py",
+        "tools/dayz_mcp/mcp_supervisor.py"
+      ]
+    },
+    {
+      "id": "fb-20260924-003722-0c27",
+      "kind": "bug",
+      "project": "DayZ_MCP",
+      "title": "server_reload deja al worker nuevo con un lease heredado sin operacion: todo da session_transition_conflict",
+      "body_excerpt": "Medido 2026-09-24 ~02:28-02:45 (daemon_generation 7033aa84...). Secuencia:\n1. dayz_test_run(project=DayZ_MCP, mode=all, preflight=true) -> succeeded, pero con caller_tool_registry_stale=true y warning tool_registry_stale_reopen_client (la sesion solo ve 18 tools: no hay world_spawn/camera_set/player_teleport aunque bridge_status los lista en registered_bridge_tools).\n2. server_reload -> {status: recycled, generation: 2, lease_heartbeat: answered}. La sesion NO recibe tools nuevas (Claude Code no refresca tras notifications/tools/list_changed, mcp_supervisor.py:305; el catalogo sigue en 18).\n3. Desde ahi, dayz_test_run(mode=all) x2 -> session_transition_conflict: release your session lease first; session_acquire_wait -> session_transition_conflict. Mientras, session_status: owner=null, self.state=none, box libre, claimable=true.\nLectura del codigo: el worker nuevo consume un handoff con l",
+      "senales": {
+        "D1": 2,
+        "D2": 5,
+        "D3": false,
+        "D4": true,
+        "D5": "default",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [],
+      "primary_symbol": "server_reload",
+      "scope_prod_files": [
+        "tools/dayz_mcp/mcp_supervisor.py",
+        "tools/dayz_mcp/control_client.py"
+      ]
+    },
+    {
+      "id": "fb-20260923-002410-052e",
+      "kind": "finding",
+      "project": "AI_Pipeline",
+      "title": "Dos codex exec en paralelo mueren con \"code-mode host closed its stdout\" (rc=127) si la máquina está cargada",
+      "body_excerpt": "MEDIDO (2026-09-23 ~01:52-02:01, sesión 741dc585, Windows 11, Codex CLI con --model gpt-5.6-sol --sandbox read-only):\n\n- Lancé dos `codex exec` en segundo plano, cada uno con su propio -C y --output-last-message. Uno era una revisión y el otro una verificación de delta.\n- La máquina tenía además dos DayZDiag_x64 vivos de otra sesión, de unos 3,7 GB de RAM cada uno.\n- Los dos murieron a mitad de trabajo, con la misma última línea: `ERROR codex_core::tools::router: error=code-mode host closed its stdout`. El shell devolvió rc=127 y no dejaron fichero de salida. Uno había llegado a enunciar un hallazgo que se perdió.\n- Relanzados de uno en uno, con los DayZ ya cerrados, los dos terminaron con veredicto.\n\nNO VERIFICADO\nNo sé si la causa es la concurrencia de dos Codex, la presión de memoria o las dos cosas: no tengo un control con dos Codex sin DayZ.\n\nSUGERENCIA (sin probar)\nEn la receta de ",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [],
+      "primary_symbol": "codex",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260922-165434-9458",
+      "kind": "finding",
+      "project": "AI_Pipeline",
+      "title": "Corrección a 2b84: el worker hereda CLAUDE_CODE_SESSION_ATTENDED=1 de la sesión que lo lanza",
+      "body_excerpt": "Corrige la SUGERENCIA de fb-20260922-165410-2b84. El diagnóstico se mantiene; el arreglo propuesto allí no funciona.\n\nMEDIDO (2026-09-22, Bash tool de la sesión 741dc585, escritorio): CLAUDE_CODE_SESSION_ATTENDED=1 y CLAUDE_CODE_CHILD_SESSION=1 están en el entorno desde el que se lanzan las lanes. Un grok-cli (o codex, o cursor) arrancado desde ahí los HEREDA. Por eso el early-exit del parche (ATTENDED presente y distinto de '1') nunca se cumple para un worker delegado. Y \"disparar solo si ATTENDED == '1'\" tampoco lo distingue: el worker también ve '1'.\n\nARREGLO QUE ENCAJA CON EL PARCHE ACTUAL (sin probar)\nLanzar los workers delegados con la variable sobrescrita, por ejemplo `CLAUDE_CODE_SESSION_ATTENDED=0 grok -p ...`. El hook ya sale con '0'. Tiene sitio natural en la receta de la skill delegar (routes/grok-cli.md, cursor-cli.md, codex-exec.md) o en un wrapper común de lanzamiento. Alt",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [
+        "fb-20260922-165410-2b84"
+      ],
+      "primary_symbol": "worker",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260922-165410-2b84",
+      "kind": "bug",
+      "project": "AI_Pipeline",
+      "title": "0e62 reincide con el hook ya parcheado: la promoción alcanza a grok-cli 1.0.40 con cwd fuera de %TEMP%",
+      "body_excerpt": "Continuación de fb-20260921-015854-0e62 y de 51f6. Tercera observación, la primera DESPUÉS del parche de promotion-gate.ps1 (2026-09-21 02:43, copia promotion-gate.ps1.bak-20260921-51f6).\n\nQUÉ PASÓ (2026-09-22 ~18:47 local, sesión 741dc585)\nWorker delegado: grok-cli 1.0.40, `grok -p <brief> --always-approve --max-turns 60 --output-format plain --cwd C:\\temp\\lfv-i29 < /dev/null`. El brief acotaba la escritura a tres ficheros .c y prohibía git salvo diff/status. Su informe termina respondiendo a una petición que no estaba en el brief: \"Es específico de LF_VStorage (el presupuesto de chunks y la línea de ticks de este job). No hay invariante para promover a una skill de dominio.\"\n\nPOR QUÉ EL PARCHE NO LO CUBRE (leído en el hook, no probado por separado)\nEl parche sale temprano solo si CLAUDE_CODE_SESSION_ATTENDED existe y no vale 1, o si el cwd está bajo %TEMP% (C:\\Users\\guill\\AppData\\Local",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [
+        "fb-20260921-015854-0e62"
+      ],
+      "primary_symbol": "reincide",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260921-164248-a140",
+      "kind": "tool_contribution",
+      "project": "LFPowerGrid",
+      "title": "Detector numérico OpenGL/DirectX para normal maps, y comprobación de V en p3d",
+      "body_excerpt": "Dos pruebas baratas que evitan adivinar convenciones. Las dos están en `LFPowerGrid_dev/assets/heater/`.\n\n1) `normal_convencion.py`: dice si un normal map es OpenGL (Y+) o DirectX (Y-) sin mirarlo. En un surco, d(nx)/dx y d(ny)/dy tienen el MISMO signo en DirectX y signo OPUESTO en OpenGL. El surco se localiza con la suciedad del albedo en paso alto (oscuro = hueco), y el canal rojo calibra el signo. Control: invertir el verde tiene que cambiar el veredicto. Sobre el calefactor de Sketchfab: rojo -0,130, verde -0,085 → **DirectX**, con ~490.000 píxeles. Se habría apostado por OpenGL, que es lo típico de Sketchfab. Encaja en `dayz-texture-pipeline` junto a la regla 3 (`_nohq` DirectX).\n\n2) `uv_convencion.py`: comprueba la convención de V en un p3d validado. Se muestrea la textura en las caras de una selección con color propio (la bombilla `light_emit` de la lámpara de pared) con las dos l",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [],
+      "primary_symbol": "_nohq",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260921-164243-abef",
+      "kind": "finding",
+      "project": "LFPowerGrid",
+      "title": "Winding FBX/Blender→p3d: invariante medido en 5 modelos validados, y receta",
+      "body_excerpt": "Las explicaciones de winding de `dayz-model-pipeline/SKILL.md` se contradicen entre sí: la Regla 12 (`:222`) y el matiz de la Regla 13 (`:302`) dicen «rotación propia det=+1 → NO invertir». La sección GLB (tras SP-003) dice que un import de Blender/GLB con esa misma rotación sale con las caras hacia dentro y hay que invertir. SP-003 dice «~100 % hacia dentro». Con un FBX delante no se puede decidir leyendo.\n\nMedido el 2026-09-21 con py3d sobre 5 p3d de LFPG que funcionan en juego (lámpara de pared, lámpara de techo, placa, nevera, puerta AND):\n- En **todos** los LODs, el cross(p1-p0, p2-p0) coincide al 100 % con la media de las normales declaradas de sus vértices.\n- En **todos** los LODs de colisión (Geometry, ViewGeo, FireGeo), el cross apunta hacia DENTRO al 100 % (método del centroide por pieza conectada).\n- En los visuales el método del centroide sale ruidoso (31-92 %) por piezas fin",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "dup_candidatos": [],
+      "primary_symbol": "invariante",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260921-164235-718f",
+      "kind": "bug",
+      "project": "LFPowerGrid",
+      "title": "procedural-textures.md: la tabla SMDI tiene los canales cambiados",
+      "body_excerpt": "`dayz-model-pipeline/references/procedural-textures.md:583-635` (§7 SMDI) dice R = especular, G = brillo, B = 0 (\"detail index\"), y su `generate_smdi_map` escribe eso. Contradice a `dayz-texture-pipeline/references/map-conventions.md:53-76`, que dice R ≈ 255 fijo, G especular, B brillo (rugosidad invertida), citando la wiki de Bohemia (Super shader).\n\nMedido el 2026-09-21 decodificando con ImageToPAA cuatro `_smdi` que funcionan en juego:\n- LFPG `searchlight/lf_searchlight_smdi.paa`: R 255 (mínimo 255), G 79,5, B 79,3\n- LFPG `battery_adapter/battery_adapter_smdi.paa`: R 255, G 87,8, B 87,5\n- LFPG `sorter/textures/housing_smdi.paa`: R 255, G 94,7, B 94,5\n- vanilla `DZ/gear/camping/data/battery_charger_smdi.paa`: R 255, G 54,1, B 99,1\n\nR = 255 constante en los cuatro. Tiene razón `map-conventions.md`, y la tabla y el generador de `procedural-textures.md` están mal: quien los siga produce u",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "dup_candidatos": [],
+      "primary_symbol": "generate_smdi_map",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260921-121956-2569",
+      "kind": "bug",
+      "project": "",
+      "title": "LF_VStorage via dayz_test_run: build=true rechazado por el gate nativo; wait_for no ve el run",
+      "body_excerpt": "Medido 2026-09-21 ~14:07-14:15, sesion 741dc585, primera vez que se usa la ruta del MCP para el proyecto LF_VStorage (hasta hoy solo la habia usado el ejecutor Python y el runner heredado).\n\n1. BUILD RECHAZADO POR EL GATE NATIVO\ndayz_test_run(project=\"LF_VStorage\", mode=\"server\", build=true, pack_only=true, mission=\"chernarus\", no_file_patching=true, extra_mods=[\"@DayZ_MCP\"]) -> error inmediato:\ndayz_test_failed:NativeLauncherBackendError:native_debug_gate_rejected:unapproved_debug_image\nCon pack_only el proceso hijo es la cadena de AddonBuilder, no DayZDiag, asi que la imagen rechazada es AddonBuilder, uno de sus procesos auxiliares o una DLL que cargan (native_launcher_backend.py:1380-1460: raiz, hijos anunciados, auxiliares de AddonBuilder con tope _MAX_ADDON_HELPER_LAUNCHES, y cada LOAD_DLL). NO SE SABE CUAL: el rechazo no deja rastro en disco (ni manifiesto de run, ni linea en audit",
+      "senales": {
+        "D1": 3,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "default",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [],
+      "primary_symbol": "dayz_test_run",
+      "scope_prod_files": [
+        "tools/dayz_mcp/native_launcher_backend.py",
+        "tools/dayz_mcp/dayz_test_worker.py",
+        "tools/spike0/_grabdiag/work/mpmissions/dayzOffline.chernarusplus/init.c"
+      ]
+    },
+    {
+      "id": "fb-20260921-015854-0e62",
+      "kind": "bug",
+      "project": "",
+      "title": "El stop hook de promoción vuelve a alcanzar a un worker delegado de grok-cli (reincidencia de fb-20260918-015158-51f6)",
+      "body_excerpt": "REINCIDENCIA medida el 2026-09-21 de madrugada, en dos corridas independientes de grok-cli 1.0.34 lanzadas desde esta sesión (741dc585) con `-p --always-approve --cwd <repo> < /dev/null`.\n\nQUÉ PASÓ\nEn las dos corridas, el `thought` final del worker respondía a una petición de promoción de lección que NO estaba en su brief. El brief acotaba la escritura a ficheros concretos del workspace y prohibía git. Literales observados:\n\n- Corrida 1 (arreglo de gate legacy): \"No: el escape es de este mod (FORMAT_LFV2 vs .lfv legacy) y no es un invariante cross-proyecto que ahorre iteraciones en el siguiente.\"\n- Corrida 2 (guard de captura): \"El hook pide promoción: compruebo si dayz-persistence / rigorous-data-audit ya cubren el walk por índice sobre cargo que compacta.\" y después \"Quedó como SP-418 pending en el ledger del Pack (dayz-persistence); no toqué el árbol vivo de skills.\"\n\nLa corrida 2 dic",
+      "senales": {
+        "D1": 1,
+        "D2": 1,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": false
+      },
+      "clase_mecanica": "C2",
+      "dup_candidatos": [],
+      "primary_symbol": "thought",
+      "scope_prod_files": [
+        "reviews/2026-09-21-arreglos-arnes/README.md"
+      ]
+    },
+    {
+      "id": "fb-20260920-235719-f515",
+      "kind": "finding",
+      "project": "SUB_BRZ",
+      "title": "facc medido: 19 de las 20 claves volcadas siguen vivas; el shell local queda descartado como origen",
+      "body_excerpt": "Follow-up to fb-20260918-203525-facc, measured on 2026-09-21 from session 741dc585. No secret value was read into a report, printed, copied or transmitted anywhere: the checks below work on names, lengths and one-shot salted digests.\n\nWHERE IT LANDED, EXACTLY\nTwo events in the transcript of session d773deff (project SUB-BRZ-dev), both at 2026-09-17T23:20:54Z, 21 KB each, recorded with type=user, which is how a tool RESULT is stored. So the dump did not merely sit in a local file: it entered the conversation as tool output and was transmitted to the model provider like any other tool result. The file holds 121 distinct variable assignments.\n\nChecked and clean: the transcript of session 741dc585 contains exactly one declare -x line and it is PATH. No other local transcript carries a dump.\n\nWHAT IS STILL EXPOSED\n20 variables with a sensitive name were dumped with their values. Comparing a o",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "dup_candidatos": [
+        "fb-20260918-203525-facc"
+      ],
+      "primary_symbol": "medido",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260920-230648-99db",
+      "kind": "request",
+      "project": "DayZ_MCP",
+      "title": "Gate: detect a stale launcher seal at merge or daemon start, and name the failing key in the error",
+      "body_excerpt": "Carried forward from fb-20260920-150408-4f66 and fb-20260910-105607-1025, both closed on 2026-09-21. Those closed because their own work landed; this is the gap neither of them covers.\n\nWHAT HAPPENS\nPRs #86 (e731f9f) and #87 (d72a734) changed tools/dayz_mcp/dayz_test_worker.py. That module is one of the 16 in _APP_PACKAGED_MODULES (native_bundle.py:65-84) and one of the 4 pinned in closure-manifest.json. Nobody rebuilt the bundle, so from 2026-09-18 to 2026-09-20 every dayz_test_run from every session died with invalid_native_launcher_bundle. Two sessions were blocked for two days. The lesson had been written in project memory since 2026-09-15 and it bit anyway, which is the point: this is a missing gate, not missing knowledge.\n\nWHY IT RECURS, STRUCTURALLY\nThe bundle and the registry are gitignored on purpose (.gitignore:9 for tools/approved-launchers.json, :21 for dayz-test-v1/*.pyz). O",
+      "senales": {
+        "D1": 6,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "default",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [
+        "fb-20260910-105607-1025",
+        "fb-20260915-151528-6ed1",
+        "fb-20260920-150408-4f66"
+      ],
+      "primary_symbol": "detect",
+      "scope_prod_files": [
+        "tools/dayz_mcp/dayz_test_worker.py",
+        "tools/dayz_mcp/native_bundle.py",
+        "tools/native-launchers/dayz-test-v1/closure-manifest.json",
+        "tools/approved-launchers.json",
+        "tools/dayz_mcp/win32_fileinfo.py",
+        "tools/.venv-mcp/Lib/site-packages/pythonwin/pywin/framework/app.py"
+      ]
+    },
+    {
+      "id": "fb-20260918-203528-9556",
+      "kind": "bug",
+      "project": "SUB_BRZ",
+      "title": "PowerShell hook blocks here-strings whose Spanish text contains the word 'del'",
+      "body_excerpt": "2026-09-18 (and already on 2026-09-14): a PowerShell command carrying a Python here-string with Spanish prose was refused with \"Remove-Item on system path '\"\\n\"' is blocked. This path is protected from removal.\" The hook reads the Spanish preposition in the text as the cmd alias for Remove-Item and takes the next token as its path. Nothing was being deleted. Workaround used: write the script with the Write tool and run it with python. Suggested: have the hook parse PowerShell tokens (ignore content inside quoted strings and here-strings) instead of matching the alias as a bare word.",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": false
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [],
+      "primary_symbol": "blocks",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260918-203525-facc",
+      "kind": "bug",
+      "project": "SUB_BRZ",
+      "title": "Bash tool returned an `export -p` dump (env with API keys) instead of running the command",
+      "body_excerpt": "2026-09-18, Claude Code desktop session d773deff (SUB_BRZ s96). Two Bash tool calls (`ls -la ... | head -40` and `cat .../gps_design.json`) did not run: each returned the full `declare -x` environment listing instead. That listing contains many API keys and a password-like variable, so they are now in the session transcript. The agent did not use them and switched to PowerShell for the rest of the session. Earlier in the same session (before compaction) a Bash measurement had returned empty output, which may be the same fault.\n\nImpact: credential exposure in transcripts, and silent loss of the command (the output looks like a successful run).\nSuggested: investigate the Git-Bash wrapper and profile (a profile that runs `export -p`, or a sandbox fallback that prints the env), and consider rotating the exposed keys. Values are deliberately not reproduced here.",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "dup_candidatos": [],
+      "primary_symbol": "returned",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260918-023443-98f3",
+      "kind": "finding",
+      "project": "LFPowerGrid",
+      "title": "Dos bucles nocturnos en el mismo proyecto sin verse: un «restaurar PBO por sha» con línea base vieja pisa el despliegue",
+      "body_excerpt": "tool: coordinación entre sesiones (no hay registro de bucles por proyecto; la caja de DayZ tiene lease, pero el despliegue de PBO y el main del mod no).\n\nhecho: 2026-09-18. La sesión 80a72e46 integraba LFPowerGrid en modo nocturno (merge a main 04:1x, despliegue del PBO A `E98B7FBD` a las 04:23, arranques 04:21-04:25). A las 04:12 otra sesión lanzó un bucle de cinco lanes en `LFPowerGrid_dev/_night/` con la línea base de ese momento (`main` = `3805f8b`, PBO `8B37C43E`). Su L4 (runs MCP in-game) termina «restaurando el PBO `8B37C43E` por sha», y su gate exige ese sha: habría quitado el PBO que va a probar el tester. Ninguna de las dos sesiones sabía de la otra: `git status` solo mostró `_night/` sin seguimiento, y la caja estaba libre (L4 aún no había corrido).\n\nerror: 1) El dueño del bucle no se puede identificar desde fuera: ni `LOOP-STATE.md` ni `watch.ps1` nombran la sesión, y `ListAg",
+      "senales": {
+        "D1": 1,
+        "D2": 0,
+        "D3": false,
+        "D4": true,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [],
+      "primary_symbol": "E98B7FBD",
+      "scope_prod_files": [
+        "HANDOFF.md"
+      ]
+    },
+    {
+      "id": "fb-20260918-023433-d70d",
+      "kind": "finding",
+      "project": "LFPowerGrid",
+      "title": "Heredoc a Python por la herramienta Bash: las dobles barras llegan simples y \\r se vuelve retorno de carro",
+      "body_excerpt": "tool: Bash (Claude Code desktop, Windows 11, Git Bash), `python - <<'PY' ... PY` con delimitador entre comillas.\n\nargs: script Python en línea con literales de ruta Windows escritos con barra doble dentro de una cadena normal, p. ej. `%TEMP%` + barra doble + `lfpgb` + barra doble + `A_d0ea5cd` + barra doble + `run` + barra doble + `output`.\n\nerror: Python recibió barras SIMPLES. Aviso `SyntaxWarning: \"\\M\" is an invalid escape sequence` en otra ruta del mismo script, y la secuencia barra+`run` se interpretó como `\\r` (CR, 0x0D) seguido de `un`. Resultado: un retorno de carro real escrito en HANDOFF.md (OneDrive) en mitad de una ruta. Detectado con `od -c`; arreglado con un script escrito a fichero.\n\nSegundo síntoma en la misma sesión: `$(grep -c $'\\r' fichero)` dentro de comillas dobles devolvió el total de líneas (patrón vacío), mientras que el mismo `grep -c $'\\r'` fuera de `$(...)` dev",
+      "senales": {
+        "D1": 1,
+        "D2": 0,
+        "D3": false,
+        "D4": true,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "dup_candidatos": [],
+      "primary_symbol": "lfpgb",
+      "scope_prod_files": [
+        "HANDOFF.md"
+      ]
+    },
+    {
+      "id": "fb-20260917-151533-e0f0",
+      "kind": "finding",
+      "project": "LFPowerGrid",
+      "title": "codex exec -s workspace-write deniega escribir en CUALQUIER dir llamado .git (mata la delegacion sobre worktrees)",
+      "body_excerpt": "tool: codex exec (codex-cli 0.153.4), -s workspace-write\nargs: -C <workspace> -m gpt-5.6-sol -c model_reasoning_effort=max -s workspace-write\nerror: fatal: Unable to create '<...>/.git/index.lock': Permission denied\n\nHALLAZGO\nEl sandbox workspace-write de Codex deniega escritura en cualquier directorio\nllamado `.git`, INCLUIDO el que esta dentro del propio workspace. No es cuestion\nde ruta, de OneDrive, del espacio en \"DayZ Projects\" ni de permisos de disco.\nEs el nombre del directorio. Consecuencia: un worker de Codex NO puede hacer\n`git commit` en workspace-write, y por tanto no puede entregar \"un commit por\nmetodo\" ni nada versionado.\n\nREPRO / ELIMINACION (2026-09-17, cuatro rondas)\n1. Workspace = git worktree -> falla en\n   <repo>/.git/worktrees/<nombre>/index.lock. Parece \"esta fuera del workspace\".\n2. Anadir --add-dir \"<repo>/.git\" -> el sandbox LO REGISTRA (sale en su linea\n   \"sa",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "dup_candidatos": [],
+      "primary_symbol": "codex",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260917-092743-1432",
+      "kind": "finding",
+      "project": "DayZ_MCP",
+      "title": "session_status.foreign_ports returns ~58 OS-noise ports; box reads as busy even though occupied:false",
+      "body_excerpt": "tool: session_status\n\nargs: none (default call).\n\nerror: no exception. session_status.foreign_ports returns roughly 58 entries of unrelated OS/listener noise. The field name reads as \"ports belonging to other DayZ/test sessions that are in my way\", and the list is long enough to look like a real conflict. The signal that actually matters — occupied:false — is a single boolean competing with 58 noise rows.\n\nrepro:\n1. On a normal Windows desktop with its usual background listeners, call session_status with no args.\n2. Observe foreign_ports populated with ~58 OS/system entries.\n3. Observe occupied:false.\n4. Note that nothing in the payload states which of those 58 entries, if any, are relevant to DayZ or to the current run.\n\nwhy it hurts free/local small models:\n- Counting is a reliable heuristic for small models and a reliable trap here. \"58 foreign ports\" reads as \"the box is busy / many ",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "dup_candidatos": [],
+      "primary_symbol": "session_status",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260915-151528-6ed1",
+      "kind": "finding",
+      "project": "DayZ_MCP",
+      "title": "Árbol vivo de DayZ_MCP_dev: 9 ficheros versionados con copia CRLF; dos van embebidos en el launcher sellado",
+      "body_excerpt": "tool: git / launcher nativo dayz-test-v1\n\nargs: git ls-files --eol -- tools, en el árbol vivo (main 3f4b976), 2026-09-15.\n\nerror: nueve ficheros versionados bajo tools/ tienen la copia de trabajo con CRLF mientras git guarda LF (i/lf w/crlf, con .gitattributes `* text=auto eol=lf`): tools/checks/check_readme_cites.py, tools/dayz_mcp/win32_fileinfo.py, tools/deploy-addon.ps1, tools/native-launchers/dayz-test-v1/src/launcher.cpp, cuatro tests (test_d40_marker_rewound_reads_only_the_tail.py, test_host_python_floor.py, test_logs_since_marker_roundtrip.py, test_startup_keyfile.py) y tools/vendor/psutil/LICENSE (este último marcado -text). git status los da limpios porque no vuelve a leer ficheros que no se han tocado.\n\nmedido:\n- El launcher instalado incrusta los bytes CRLF de win32_fileinfo.py (app.pyz, 57 CR, igual a la copia viva). src/launcher.cpp de la carpeta del bundle también es la co",
+      "senales": {
+        "D1": 4,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "default",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [],
+      "primary_symbol": "ficheros",
+      "scope_prod_files": [
+        "tools/checks/check_readme_cites.py",
+        "tools/dayz_mcp/win32_fileinfo.py",
+        "tools/deploy-addon.ps1",
+        "tools/.venv-mcp/Lib/site-packages/pythonwin/pywin/framework/app.py"
+      ]
+    },
+    {
+      "id": "fb-20260915-133831-c586",
+      "kind": "bug",
+      "project": "AI_Pipeline",
+      "title": "Claude Code: el .output de un subagente en segundo plano queda en 0 B; el informe solo llega en la notificación",
+      "body_excerpt": "tool: herramienta Agent de Claude Code, con subagent_type Explore y ejecución en segundo plano. Sesión 80a72e46, 2026-09-15.\n\nObservado:\n- Las tareas a0faf9ca99bace6d5 (DZ-R9, ángulo 1) y ade5d586f5b04d956 (ángulo 6) terminaron con informes de varios KB en la notificación de fin.\n- Sus ficheros `%TEMP%\\claude\\...\\tasks\\<id>.output` pesan 0 B (creados a las 15:05 y 15:06). La notificación pide leer ese fichero para obtener el resultado.\n- Antes, en la misma sesión, tampoco se pudo sacar del fichero de salida el plan de la lane opus del council («no assistant text found»). Hubo que copiarlo a mano desde la notificación.\n- La notificación trae `&gt;` y `&lt;` dentro de los fragmentos de código. Al guardarla hay que decodificar esas entidades.\n\nRiesgo:\n- Un vigía que cuente los bytes del `.output`, o un orquestador que lo relea, da el trabajo por vacío.\n- Un informe que solo vive en la notif",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [],
+      "primary_symbol": "output",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260915-132202-2143",
+      "kind": "finding",
+      "project": "SUB_BRZ",
+      "title": "vehicle_get_in_client: tras minutos sin conducir, el jugador vuelve al punto de teleport y todo get-in da not_seated",
+      "body_excerpt": "Observación suelta que venía dentro de fb-20260914-042742-6d18 (SUB_BRZ, noche del 2026-09-14) y que no tenía ficha propia. Se archiva aparte al cerrar 6d18 para que no se pierda. Es de segunda mano: no está reproducida en DayZ-MCP.\n\ntool: vehicle_get_in_client\n\nargs: los de los runs delegados de SUB_BRZ de esa noche; no constan en la ficha original.\n\nerror: según la ficha original, vehicle_get_in_client sienta al jugador solo en el cliente. Tras unos minutos sin conducir, el jugador volvía al punto de teleport y cada get-in posterior devolvía not_seated durante el resto de la vida de ese cliente.\n\nevidencia citada por el emisor: jobs 195-238 en P:\\SUB_BRZ_dev\\_client\\profiles\\script_2026-09-14_05-47-23.log.\n\nrepro (por confirmar): lanzar un run con cliente, vehicle_get_in_client, esperar varios minutos sin vehicle_control, repetir vehicle_get_in_client y leer not_seated.\n\nrelación: pued",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "dup_candidatos": [
+        "fb-20260914-042742-6d18"
+      ],
+      "primary_symbol": "vehicle_get_in_client",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260915-111038-75e7",
+      "kind": "finding",
+      "project": "DayZ_MCP",
+      "title": "f298 confirmado por el dueño: DayZ roba el foco en cada arranque, también en segundo plano, y a veces el MCP",
+      "body_excerpt": "tool: dayz_test_run (arranque de servidor y cliente) y los verbos del MCP durante un run. Relación: fb-20260907-133851-f298 y fb-20260915-105311-fade.\n\ndueño (2026-09-15, textual): \"dayz me lo quita y se lo lleva siempre que arranca, aunque sea en segundo plano y ahora con lo del mcp a veces te lo llevas tu. Es un problemilla que me interrumpe mi trabajo.\"\n\nencaja con lo medido en fade: el foco pasó a DayZDiag_x64 al arrancar el servidor (2,5 s) y el cliente (1 s y 0,75 s).\n\ncódigo (hipótesis, sin medir todavía):\n1. Arranque. launcher.cpp:1301-1311 crea los procesos con STARTF_USESTDHANDLES y sin STARTF_USESHOWWINDOW, así que la primera ventana de DayZ se muestra con el comando por defecto, que la activa. Candidato: wShowWindow=SW_SHOWNOACTIVATE para el cliente y SW_SHOWMINNOACTIVE para el servidor, medido con la sonda de fade. Si Enfusion fuerza el foco por su cuenta, hará falta otra ví",
+      "senales": {
+        "D1": 2,
+        "D2": 0,
+        "D3": false,
+        "D4": true,
+        "D5": "default",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [
+        "fb-20260907-133851-f298",
+        "fb-20260915-105311-fade"
+      ],
+      "primary_symbol": "confirmado",
+      "scope_prod_files": [
+        "tools/mcp_capture.py",
+        "tools/dayz_mcp/daemon.py"
+      ]
+    },
+    {
+      "id": "fb-20260915-105311-fade",
+      "kind": "finding",
+      "project": "DayZ_MCP",
+      "title": "f298 medido con sonda pasiva: el join no confina el cursor; los DayZ toman el foco 1-2,5 s al arrancar",
+      "body_excerpt": "tool: dayz_test_run(project=DayZ_MCP, mode=all, extra_mods=[@LFCarTune]), run 0be29aea, 2026-09-15 12:39. Relación: fb-20260907-133851-f298.\n\nsonda: GetForegroundWindow, GetClipCursor y GetCursorInfo cada 250 ms de 12:39:13 a 12:49:05, en un proceso con DPI por monitor. Solo se nombran procesos DayZ. Script y registro en AI/10_Projects/DayZ_MCP/reviews/2026-09-15-post57/ (bin/f298_probe.py y f298_probe_launch2.jsonl).\n\nmedido:\n- GetClipCursor coincide con la pantalla virtual ([-3440, 0, 3840, 2160]) en las 31 filas: el cursor no se confinó en ningún momento, tampoco durante el join.\n- El foco pasó a DayZDiag_x64 al arrancar cada proceso: al servidor (pid 42552) a las 12:39:16.3 durante 2,5 s, y al cliente (pid 44484) a las 12:39:29.3 durante 1,0 s y a las 12:39:32.1 durante 0,75 s. En los tres casos volvió a otra aplicación; la sonda no distingue si lo devolvió el usuario o el sistema.\n-",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [
+        "fb-20260907-133851-f298"
+      ],
+      "primary_symbol": "medido",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260915-014753-ba11",
+      "kind": "finding",
+      "project": "DayZ_MCP",
+      "title": "Canario BUG-096 (2026-09-15): intruso con la misma cuenta Steam se queda en el menu; killed_verified falso negativo",
+      "body_excerpt": "tool: reviews/2026-08-19-lane-fence/canario/canary_fence.py. Se corrio con el OK del dueño para la excepcion acotada: intruso fuera del lifecycle y taskkill solo de su PID. Run 997b3eb6, 2026-09-15 03:34-03:37.\n\nmedido:\n- El intruso (pid 33788, perfil copiado con la instancia 2a557680, -mod=@DayZ_MCP;@LFCarTune -connect=127.0.0.1 -port=2302) pinto a 3840x2160, pero cargo la mision intro (linea 10 de su script log) y no llego a [MCP-CLIENT].\n- El servidor siguio con 1 jugador y el fence en BOUND con 0 rechazos.\n- RPT del intruso: \"[ErrorModuleHandler] :: Error thrown: 0x000400B3\" justo antes de cargar el menu.\nReconfirma fb-20260819-204959-e4cf (dos clientes DayZ comparten Steam ID): el canario sigue sin poder ejercitar el fence en esta maquina. Veredicto: INCONCLUSO. No se emitio camera_set, porque solo probaria que el cliente registrado lo recibe.\n\nnota: con env -u PSModulePath las capt",
+      "senales": {
+        "D1": 1,
+        "D2": 4,
+        "D3": false,
+        "D4": false,
+        "D5": "default",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [
+        "fb-20260819-204959-e4cf",
+        "fb-20260915-011312-ba70"
+      ],
+      "primary_symbol": "intruso",
+      "scope_prod_files": [
+        "reviews/2026-08-19-lane-fence/canario/canary_fence.py"
+      ]
+    },
+    {
+      "id": "fb-20260915-010502-2084",
+      "kind": "finding",
+      "project": "LFPowerGrid",
+      "title": "Follow-up: a restored storage_1 loaded after a 1.5 h gap",
+      "body_excerpt": "tool: DayZDiag server, CE storage (same mission as fb-20260914-231736-52c3)\n\nobservation (2026-09-15):\n- At 01:16, prep-boot restored storage_1 from a snapshot copy.\n- The boot at 02:43, 1.5 h later, loaded it: 16 \"Restoring file\", 0 \"valid:NO\", no reinitialization.\n- The 00:52 boot had rejected the original of that world (saved at 00:07), and restored snapshots were rejected on 2026-09-14.\n- Neither \"the world was restored\" nor \"the gap since the last save\" predicts the rejection on its own.\n\nimpact: keep checking the RPT for \"Restoring file\" with items before trusting persistence counts. The cause is still open.",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": false
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [
+        "fb-20260914-231736-52c3"
+      ],
+      "primary_symbol": "restored",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260914-231736-52c3",
+      "kind": "finding",
+      "project": "LFPowerGrid",
+      "title": "DayZDiag rejects an orderly-saved storage_1 when the next boot comes after a gap",
+      "body_excerpt": "tool: DayZDiag server, CE storage of mission P:\\LFPowerGrid_dev\\_server\\mpmissions\\dayzOffline.chernarusplus\\storage_1 (the tree is under OneDrive, reached through subst P:)\n\nerror: \"[CE][Storage] ver:0 stamp:0, valid:NO\" for every data file (.bin, .001, .002), then \"[CE][Hive] :: Empty storage folder, reinitializing ...\"\n\nobservations (2026-09-14/15):\n- Rejected:\n  - 22:21 boot: world saved by an orderly shutdown at 19:13, a 3 h gap.\n  - 00:52 boot: world saved by an orderly shutdown at 00:07, a 45 min gap.\n  - Every snapshot copied back into storage_1 (A-v2 twice, EXPORT-B011).\n- Loaded:\n  - 22:55 and 23:04 boots, 1 to 3 min after the previous shutdown.\n  - 01:09 boot, 1 min after the 01:08 orderly shutdown: 16 \"Restoring file\".\n- The world rejected at 00:52 had been copied at 00:46. In that copy the header bytes are not zero (types.bin starts 21 00 00 00 8e 00 00 00) and the file attr",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": true
+      },
+      "clase_mecanica": "C2",
+      "dup_candidatos": [],
+      "primary_symbol": "rejects",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260914-194728-e4be",
+      "kind": "request",
+      "project": "DayZ_MCP",
+      "title": "La poda de backups (160e) borra por ruta: una junction cambiada entre check y unlink redirige un borrado",
+      "body_excerpt": "tool: daemon (LifecycleRecoveryFaultStore._prune_manifest_backups), ticket 160e.\n\ncontexto: la retencion de lifecycle-recovery-faults/backups (160e) borra cada directorio caducado por ruta. Lista el directorio, valida sus miembros y, antes de cada os.unlink y del os.rmdir, vuelve a leer sin seguir enlaces la identidad (st_dev, st_ino) del directorio. La review Codex (delta de la ronda 3) mantiene un P0: entre esa comprobacion y el unlink sigue habiendo una ventana, y un proceso que en ese instante cambie el directorio por una junction a una copia protegida hace borrar un fichero de esa copia.\n\ndecision del dueno (2026-09-14): aceptarlo como limitacion documentada y mergear 160e, porque:\n- con la biblioteca estandar de Python en Windows no hay borrado relativo a un handle de directorio (os.unlink no admite dir_fd);\n- el unico actor capaz es un proceso del mismo usuario compitiendo en micr",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": false,
+        "D7": false
+      },
+      "clase_mecanica": "X",
+      "dup_candidatos": [],
+      "primary_symbol": "backups",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260913-143454-8bc6",
+      "kind": "bug",
+      "project": "DayZ_MCP",
+      "title": "Un coche de world_spawn que sobrevive a su run vuelve por persistencia y object_delete ya no lo alcanza",
+      "body_excerpt": "tools: world_spawn, object_delete, vehicle_prepare_fixture, vehicle_get_in_client (proyecto DayZ_MCP, mision chernarus, persistencia del servidor activa).\n\nRepro medida (2026-09-13, banco LFCarTune):\n1. Run 377fbcaf-158d-4051-8a74-32a38d536f22: world_spawn(type=\"CT_Sedan_TQ130\", pos=[4200, 338.6, 10650], flags=0) -> object_id 347. Durante vehicle_control el run muere (el servidor registra \"Client 11942661 disconnecting\" a las 16:05:54) antes del object_delete del episodio.\n2. Los runs siguientes (19a42adb a las 16:06 y f605e101 a las 16:25, servidores nuevos) cargan ese coche: entities_query(pos=[4200,338.6,10650], radius=30) en f605e101 a las 16:33 devuelve CT_Sedan_TQ130 en [4198.05, 338.60, 10649.21].\n3. object_delete(object_id=347) en f605e101 no lo quita: el id es del registro del run muerto y el coche sigue ahi despues.\n\nImpacto medido: el sitio de pruebas queda inutilizable sin er",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [],
+      "primary_symbol": "coche",
+      "scope_prod_files": []
+    },
+    {
+      "id": "fb-20260910-102449-f47b",
+      "kind": "bug",
+      "project": "Arma2Quad",
+      "title": "camera_set deja el render del cliente congelado y restore_gameplay no lo recupera ni lo detecta",
+      "body_excerpt": "Reportado por el usuario en primera persona: \"al moverme escucho sonidos del juego, pero no veo\nmovimiento en mi pantalla\". El cliente quedo inservible y hubo que reiniciar el run entero.\n\nSINTOMA\nEl render del cliente se congela mientras simulacion, audio e input siguen funcionando. El jugador\ncamina (se le oye y su posicion avanza en el servidor) pero la imagen no cambia. No es un cuelgue:\nel proceso responde y el puente contesta.\n\nEVIDENCIA\n- capture_screenshot(frames=6) -> distinct_frames: 1, max_adjacent_delta: 0.0, frame_stale: false.\n  Cinco fotogramas identicos seguidos. Una captura anterior daba distinct_frames: 4, asi que el\n  render estaba vivo antes y dejo de estarlo.\n- query_player_state: el jugador se habia desplazado de [12100,140,12500] a\n  [12101.65,140.02,12502.75] entre dos lecturas. La simulacion corria.\n- El usuario confirmo audio de pasos sin imagen.\n\nSECUENCIA QUE ",
+      "senales": {
+        "D1": 0,
+        "D2": 0,
+        "D3": false,
+        "D4": false,
+        "D5": "pure_add",
+        "D6": true,
+        "D7": true
+      },
+      "clase_mecanica": "C3",
+      "dup_candidatos": [
+        "fb-20260910-031716-f5a7"
+      ],
+      "primary_symbol": "camera_set",
+      "scope_prod_files": []
+    }
+  ]
+}

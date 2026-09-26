@@ -1,0 +1,240 @@
+{
+  "ticket": "fb-20260829-104608-4d66",
+  "tickets": ["fb-20260829-104608-4d66", "fb-20260829-135408-cc2d"],
+  "module": "M17-LIFECYCLE-STATUS",
+  "packet": "inbox-20260831-v6",
+  "plan": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md",
+  "plans": [
+    "plans/inbox-20260830/16-fb-20260829-104608-4d66.md",
+    "plans/inbox-20260830/22-fb-20260829-135408-cc2d.md"
+  ],
+  "gate_file": "gates/inbox-16-104608-4d66.md and gates/inbox-22-135408-cc2d.md (read only; no box flipped)",
+  "ownership_addendum": "plans/inbox-20260830/physical-ownership-addendum-v1.md:66",
+  "dag_row": "plans/inbox-20260830/00-execution-dag.md:52",
+  "scope": "Acreditación del estado pre-4d66/cc2d. Los ficheros OWNS existen y conservan el baseline anterior al lote: age_s de creation time, outcomes start/stop/reap, rechazo active_run_exists y reaper sin terminate. Cero puntos DESIGN nuevos de actividad/sticky/reader JSONL/generación/retired diagnostics están hechos. Hooks loopback y accessor sticky ausentes; M06 caps-wire tampoco está en loopback.py (cero literales caps). Hashes/mtime/size INCONCLUSIVE: esta lane no tiene shell y no transcribe el censo de arranque. Suite no ejecutada.",
+  "owns": {
+    "tools/dayz_mcp/process_lifecycle.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Lane sin shell; no se calcula SHA-256/mtime/size. No se transcribe el censo de arranque (tautología). Grep íntegro del fichero más lectura de las regiones contractuales citadas abajo."
+    },
+    "tools/dayz_mcp/daemon.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Lane sin shell. Leídas las regiones de generation, JsonlAuditWriter, construcción de ProcessLifecycle y restart recovery."
+    },
+    "tools/dayz_mcp/loopback.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Lane sin shell. Grep íntegro: cero hits de run_command_activity, activity_state, sticky, caps, capability_announcements. Leídos enqueue normal, exec_enforce, _audit_fence, filtro /lifecycle/status y ServerState.__init__."
+    },
+    "tools/tests/test_process_lifecycle.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Lane sin shell. Grep de métodos y lectura de FakeGuard/reaper/A-vs-B stop. Cero hits de activity_state, last_activity_age_s, run_command_activity, retired_run, sticky, age_s."
+    },
+    "tools/tests/test_lifecycle_http.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Lane sin shell. Grep: cero hits de run_command_activity, activity_state, sticky, enqueue, exec_enforce, retired_run. Leídos setUp y el test del envelope dirigido."
+    }
+  },
+  "plan_points": {
+    "4d66_1_age_s_creation_clock": {
+      "plan_citation": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md:29",
+      "verdict": "IMPLEMENTED",
+      "preexisting_baseline": true,
+      "owner": "M17-LIFECYCLE-STATUS",
+      "code": "tools/dayz_mcp/process_lifecycle.py:171-179 (_run_age_s usa min(creation_time_utc) de los procesos; no hay campos created/updated ni inferencia de actividad). box_occupancy publica ese valor en :2465-2473 como age_s junto a run_id/mod/label/owner_session/state. occupancy_error_fields :262-267 copia age_s del item.",
+      "tests": "Ningún aserto de age_s en tools/tests/test_process_lifecycle.py (grep age_s = 0 hits). Cobertura preexistente fuera de OWNS: tools/tests/test_box_occupancy.py:152-174 (age_s >= 0.0 en un run gestionado). Eso cubre presencia, no el mutante 'age_s derivada de actividad'.",
+      "not_claimed": "El contrato 899/900/901 de last_activity_age_s no existe; no se acredita como reloj de actividad."
+    },
+    "4d66_2_run_command_activity_hooks": {
+      "plan_citation": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md:30",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M17-LIFECYCLE-STATUS",
+      "code": "Enqueue normal tools/dayz_mcp/loopback.py:1466-1506: tras append/_seal_command sale del lock y retorna 200 {'id','peer','cmd'} en :1506; no captura run_id/comando ni escribe run_command_activity. exec_enforce :1508-1616: la aceptación real es la segunda sección crítica :1566-1602 (append+seal); el retorno 200 está en :1616 sin writer de actividad. Rechazos (whitelist :1522-1529, fence, queue, commit, stopping) tampoco escriben actividad, que es el negativo correcto, pero el positivo no existe. _audit_fence :1163-1186 traga excepciones, no exige reason/duration y no es el writer M17.",
+      "basal_start_already_audits": "El start exitoso ya emite lifecycle_start_outcome reason=started decision=started state=RUNNING en process_lifecycle.py:1421-1435 vía _terminal_outcome :1078-1095. Eso es el EXACT preexistente, no el hook de comando.",
+      "binding_run_id_exists": "tools/dayz_mcp/instance_fence.py:129-140 Binding.run_id existe (read-only para M17). loopback.py:1495-1498 y :1593-1596 ya recuperan el Binding antes del seal; no lo usan para actividad.",
+      "tests": "tools/tests/test_lifecycle_http.py: cero métodos de hook normal/exec, rechazo, writer exception/False o sticky. tools/tests/test_loopback.py es read-only para M17 (addendum :66 vs M06 :53) y no se usó como cobertura."
+    },
+    "4d66_3_lookup_continuity_recent_stale_unknown": {
+      "plan_citation": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md:31-32",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M17-LIFECYCLE-STATUS",
+      "code": "Grep íntegro de process_lifecycle.py: cero activity_state, last_activity_age_s, sticky, run_command_activity. No hay clasificación recent/stale/unknown ni umbral 900.0. ServerState (loopback.py:757-785) no tiene accessor ni conjunto sticky (generation, run_id). _run_age_s:179 clampa a max(0.0, ...) la edad de creación; el plan de actividad prohíbe clampear timestamp futuro a recent — irrelevante porque el reloj de actividad no existe.",
+      "tests": "Ningún fixture 899/900/901, inherited G+1, contaminación cruzada de run, ni mutante same-generation en test_process_lifecycle.py ni test_lifecycle_http.py."
+    },
+    "4d66_3_sticky_same_generation_mutant": {
+      "plan_citation": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md:32-33,49",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M17-LIFECYCLE-STATUS",
+      "code": "No hay marca sticky en memoria. Un writer posterior no puede dejar de limpiarla porque no hay marca. loopback.py grep _sticky|activity_fault|writer_fault|degraded_runs = 0 hits.",
+      "tests": "Ausentes el mutante same-generation sin restart (edad >900 sigue unknown tras write exitoso), 'fallback al start', 'success clears sticky' y 'omite sólo _enqueue_exec_enforce'."
+    },
+    "4d66_4_jsonl_reader_and_daemon_injection": {
+      "plan_citation": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md:34",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M17-LIFECYCLE-STATUS",
+      "code": "ProcessLifecycle.__init__ process_lifecycle.py:786-818 acepta coordinator/manifest/audit/guard/retail/game_path y opcionales hasta bindings; no hay runtime_paths ni daemon_generation. Grep del mismo fichero: cero events.jsonl, audit_dir, JsonlAuditWriter, AUDIT_BACKUPS. daemon.py:519-537 construye ProcessLifecycle sin paths ni generation. La generation sí se instala en ServerState (daemon.py:332-356) y el JsonlAuditWriter ya añade daemon_generation y rota backups (runtime_state.py:244-323, 26-27 AUDIT_MAX_BYTES/AUDIT_BACKUPS=5; daemon.py:388-389) — eso es el EXACT de writer/daemon, no el reader M17. RuntimePaths ya está importado en process_lifecycle.py:16-18 y no se usa para leer audit.",
+      "restart_arrays_preexisting": "daemon.py:549-572 escribe lifecycle_restart_recovery con released_run_ids/unreconciled_run_ids; recover_after_restart process_lifecycle.py:745-768 aplica RUNNING_IDLE/UNRECONCILED. El reader que normaliza esos eventos no existe.",
+      "tests": "Ningún JSONL literal a mano, ni .5, ni JSON inválido, ni timestamp futuro en los tests OWNS."
+    },
+    "4d66_5_present_run_generation_fields": {
+      "plan_citation": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md:35",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M17-LIFECYCLE-STATUS",
+      "code": "box_occupancy process_lifecycle.py:2465-2473 no añade daemon_generation_at_launch, daemon_generation_current ni generation_changed. status() :2365-2376 y public_status() :2378-2389 tampoco. Grep process_lifecycle.py de esos tres nombres = 0 hits.",
+      "tests": "Ausentes."
+    },
+    "4d66_5_retired_run_diagnostics": {
+      "plan_citation": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md:35,51",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M17-LIFECYCLE-STATUS",
+      "code": "public_status process_lifecycle.py:2385-2388 publica runs_retired como entero (len(runs)-len(active)), no una lista de hasta 32 diagnósticos con run_id/launch/current/event/reason/decision/state. Grep retired_run_diagnostics = 0 en process_lifecycle.py, loopback.py y ambos tests OWNS. El near-miss runs_retired no cubre el contrato.",
+      "tests": "test_process_lifecycle.py:253-262 acredita que public_status omite EXITED y cuenta runs_retired=3; no es la lista diagnóstica ni prohíbe timestamp/path."
+    },
+    "4d66_5_m19_stop_classification": {
+      "plan_citation": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md:35-36,50",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M19-TOOL-READINESS",
+      "authority": "plans/inbox-20260830/00-execution-dag.md:54 (M19 posee dayz_test_tool.py excepto terminal); physical-ownership-addendum-v1.md:68. La ficha 4d66:14 asigna a M19 la clasificación de stop en la región no terminal.",
+      "observed_readonly": "tools/dayz_mcp/dayz_test_tool.py:196-201 _exact_run falla run_not_found si no hay match único; :218-228 resolve_stop_run llama _fail('run_not_active') y no devuelve dict estructurado con campos de generación. execute_dayz_test_stop :663-710 no se reabrió para implementar. M17 no edita este fichero."
+    },
+    "4d66_6_exited_prune_keep": {
+      "plan_citation": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md:36",
+      "verdict": "IMPLEMENTED",
+      "preexisting_baseline": true,
+      "owner": "M17-LIFECYCLE-STATUS",
+      "code": "RunManifestStore._prune_exited_on_load process_lifecycle.py:514-539 retira state==EXITED al cargar, con backup preprune. public_status :2382-2388 ya filtra _ACTIVE_STATES = RUN_STATES - {EXITED} (:29).",
+      "tests": "test_process_lifecycle.py:290-308 (prune + backup), :253-262 (public_status omite EXITED).",
+      "not_claimed": "Esto no publica retired_run_diagnostics ni cambia run_not_found/run_not_active de M19."
+    },
+    "4d66_6_m19_predispatch_snapshot": {
+      "plan_citation": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md:36",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M19-TOOL-READINESS",
+      "authority": "00-execution-dag.md:54; addendum :68. El snapshot pre-dispatch de lifecycle_status y la distinción structured dict vs ToolError pelado son M19. La relectura post-ejecución de run_stop_failed permanece M19 y no se tocó."
+    },
+    "4d66_7_stop_outcome_writer_forms": {
+      "plan_citation": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md:37",
+      "verdict": "IMPLEMENTED",
+      "preexisting_baseline": true,
+      "owner": "M17-LIFECYCLE-STATUS",
+      "code": "El writer ya distingue formas: éxito reason=stopped decision=stopped state=EXITED en process_lifecycle.py:1834-1848; manual_cleanup_required con RUNNING :1666-1675 y UNRECONCILED :1684-1693; manifest_failed STOPPING :1722-1731; partial_cleanup UNRECONCILED :1793-1804 y STOPPING :1824-1833. run_reaped :2256-2288 acredita retirada sin terminate. _run_all_dead :2240-2254: owned→process_alive, unknown bloquea, foreign no propio.",
+      "tests": "test_process_lifecycle.py:1187-1240 (stop/reaper clasifican owned/gone/foreign), :1046-1083 (reap sin terminate), :1332-1336 (partial_cleanup→UNRECONCILED).",
+      "not_claimed": "Materializar esas formas como proyección diagnóstica (punto siguiente) no está hecho."
+    },
+    "4d66_7_stop_outcome_diagnostic_projection": {
+      "plan_citation": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md:37",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M17-LIFECYCLE-STATUS",
+      "code": "No hay reader que tome lifecycle_stop_outcome/run_reaped del JSONL y publique diagnósticos. Un consumidor no puede distinguir stop exitoso vs RUNNING|STOPPING|UNRECONCILED|manual_cleanup_required|partial_cleanup salvo leyendo el audit crudo (fuera de la proyección pública). Cap 32 y exclusión timestamp/path no existen porque la lista no existe.",
+      "tests": "Ausentes."
+    },
+    "4d66_8_m22_transport": {
+      "plan_citation": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md:38",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57 (único dueño de tools/dayz_mcp/server.py); addendum :72. M22 transporta retired_run_diagnostics en status público y los dicts estructurados de dayz_test_stop. Depende de M17 (:71 ola 3).",
+      "observed_readonly": "server.py:43 importa occupancy_error_fields; :2352/:2369 lo usan para extra de active_run_exists. Eso reenviaría activity_state si M17 lo copiara; hoy occupancy_error_fields no los tiene, así que M22 no acredita el transporte 4d66."
+    },
+    "4d66_9_occupancy_error_fields_activity": {
+      "plan_citation": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md:39",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M17-LIFECYCLE-STATUS",
+      "code": "occupancy_error_fields process_lifecycle.py:233-274 copia occupied_by_run_id/mod/label/age_s/foreign/hint. No lee ni escribe activity_state ni last_activity_age_s; no hay rama unknown/null fail-closed para esos campos. box.runs :2465-2473 tampoco los materializa, así que el mutante 'sólo en box.runs' ni siquiera tiene el primer lado. Conservados y no tocados: process_alive, identity mismatch, diag_snapshot_unknown, foreign, audit_failed/manifest_failed, ocupación fail-closed.",
+      "tests": "test_box_occupancy.py:213-227 (fuera de OWNS) aserta occupied_by_run_id/hint sobre active_run_exists, no activity_state. Tests OWNS: cero asertos de esos campos."
+    },
+    "4d66_lifecycle_http_envelope": {
+      "plan_citation": "plans/inbox-20260830/16-fb-20260829-104608-4d66.md:35,38 (status conserva diagnóstico; envelope dirigido)",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M17-LIFECYCLE-STATUS",
+      "code": "El filtro dirigido loopback.py:2794-2809 copia result y recorta runs por run_id; las claves extra del dict de status() sobrevivirían. status() process_lifecycle.py:2365-2376 no emite activity_state, last_activity_age_s ni retired_run_diagnostics, así que el envelope no puede conservarlos.",
+      "tests": "test_lifecycle_http.py:169-194: status fake con daemon_generation+retail_quarantine; aserta que el filtro conserva esas claves y recorta runs. No aserta retired_run_diagnostics ni activity. Es el seam preexistente, no el contrato 4d66."
+    },
+    "cc2d_1_owned_live_blocks_other_start": {
+      "plan_citation": "plans/inbox-20260830/22-fb-20260829-135408-cc2d.md:24",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M17-LIFECYCLE-STATUS",
+      "code": "El mecanismo de rechazo existe: start_run process_lifecycle.py:1251-1256 (y :1255-1256) devuelve active_run_exists si hay active. No es el fixture pedido: identidad A / run A / PID owned vivo + intento de B, bytes de manifiesto inmutables, terminate_calls==[].",
+      "tests": "test_process_lifecycle.py no tiene start_run(IDENTITY_B) contra un run A vivo. Lo más cercano en OWNS es test_stop_never_started_does_not_open_foreign_running_runs :1615-1635 (B no puede stop del run de A; terminate_calls=[]; state RUNNING owner A) y test_same_mod_does_not_grant_ownership :1272-1281 (stop B → run_not_adopted). Ninguno comprueba start de B ni igualdad de bytes del manifiesto. test_box_occupancy.py:213-227 (fuera de OWNS) rechaza start de A contra run-existing sin terminate/manifest bytes."
+    },
+    "cc2d_2_gone_foreign_reaper_unknown_occupied": {
+      "plan_citation": "plans/inbox-20260830/22-fb-20260829-135408-cc2d.md:25",
+      "verdict": "IMPLEMENTED",
+      "preexisting_baseline": true,
+      "owner": "M17-LIFECYCLE-STATUS",
+      "code": "reap_dead_runs process_lifecycle.py:2304-2320 y _reap_run_locked :2256-2288 no llaman terminate; sólo retiran dead/foreign acreditado. _run_all_dead :2247-2250: owned vivo no se reapea; unknown bloquea.",
+      "tests": "test_process_lifecycle.py:1046-1056 (all-dead reapea, terminate_calls=[]), :1073-1083 (foreign identity reapea sin terminate), :1085-1090 (live skip, estado intacto), :1092-1097 (diag inesperado no reapea; run sigue RUNNING_IDLE), :1123 (agent reap de live → run_not_reapable). FakeGuard.terminate_calls :68-73.",
+      "gap_vs_cc2d_text": "test_reaper_skips_live_run :1085-1090 no aserta terminate_calls==[]. El unknown ocupado de box_occupancy (diag_probe None) vive en test_box_occupancy.py:207-211, fuera de OWNS. Generation no autoriza takeover: no hay código que lo haga; tampoco hay aserto cc2d que lo nombre."
+    },
+    "cc2d_3_evidence_reason_age_generation": {
+      "plan_citation": "plans/inbox-20260830/22-fb-20260829-135408-cc2d.md:26",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M17-LIFECYCLE-STATUS",
+      "code": "age_s ya se publica (punto 4d66_1). reason de ocupación/reap existe en audit (p.ej. run_reaped reason=all_processes_gone_or_foreign :2264-2267). daemon_generation_at_launch/current/generation_changed no se proyectan. El DESIGN pide evidencia de generación 'si aplica'; sin esos campos el fixture cc2d no está cerrado.",
+      "tests": "Ausente un caso OWNS que publique reason+age_s+generation juntos sin convertir generation en autorización."
+    }
+  },
+  "verdict_counts": {
+    "IMPLEMENTED": 4,
+    "OUT-OF-SCOPE": 3,
+    "NOT-IMPLEMENTED": 11,
+    "INCONCLUSIVE": 0,
+    "note": "Conteos sobre las 18 entradas de plan_points (4+3+11=18). Los cinco owns.sha256 son INCONCLUSIVE aparte, no son puntos de plan. Los 4 IMPLEMENTED son baseline pre-lote (KEEP/EXACT), no materialización 4d66/cc2d."
+  },
+  "preexisting_suite_not_run": {
+    "files": [
+      "tools/tests/test_process_lifecycle.py",
+      "tools/tests/test_lifecycle_http.py"
+    ],
+    "note": "Inventario de source, no resultado de unittest. El brief prohíbe ejecutar. Que la suite exista y (según el orquestador) pase no acredita ningún punto DESIGN: son tests anteriores al lote. test_process_lifecycle.py no menciona age_s ni activity. test_lifecycle_http.py tiene 8 métodos visibles: test_lifecycle_routes_validate_identity_and_transport_http_status:130, test_lifecycle_targeted_status_filters_exact_run_and_retains_envelope:169, test_admin_release_requires_exact_confirmation_and_reconcile_is_quarantinable:196, test_admin_audit_repair_is_confirmed_idempotent_and_unblocks_grants:229, test_admin_lifecycle_recovery_repair_is_exactly_confirmed_and_cas_bound:323, test_manifest_scope_restores_only_hash_bound_backup_before_repaired:374, test_manifest_scope_receipt_drift_returns_to_armed_without_reconcile:414, test_lifecycle_recovery_repair_resumes_from_repairing:464."
+  },
+  "m06_dependency_observed": {
+    "dag": "00-execution-dag.md:52,67 (M06 debe terminar antes del hook estrecho M17 en loopback.py; M06→M17 serializa loopback.py, addendum :84)",
+    "observed": "loopback.py grep caps|capability_announcements = 0 hits. El hook M17 tampoco está. Esta hop no acredita M06; solo registra que la precondición DAG del hook no aparece en los bytes leídos."
+  },
+  "bugs_observed_not_fixed": [
+    {
+      "id": "4d66-still-open",
+      "location": "tools/dayz_mcp/loopback.py:1506 y :1616; tools/dayz_mcp/process_lifecycle.py:233-274 y :2465-2473",
+      "problem": "Tras enqueue aceptado no hay run_command_activity; occupancy no proyecta activity_state/last_activity_age_s ni campos de generación; no hay reader JSONL ni sticky.",
+      "action": "no parcheado; es el hueco que el plan pide materializar."
+    },
+    {
+      "id": "retired-near-miss",
+      "location": "tools/dayz_mcp/process_lifecycle.py:2385-2388",
+      "problem": "runs_retired es un entero de recuento, no retired_run_diagnostics[<=32]. Un consumidor que busque la lista 4d66 no la encontrará.",
+      "action": "no parcheado."
+    }
+  ],
+  "not_touched": [
+    "tools/dayz_mcp/process_lifecycle.py (leído por regiones/grep; no escrito)",
+    "tools/dayz_mcp/daemon.py (leído por regiones; no escrito)",
+    "tools/dayz_mcp/loopback.py (leído por regiones/grep; no escrito)",
+    "tools/tests/test_process_lifecycle.py (leído por regiones/grep; no escrito)",
+    "tools/tests/test_lifecycle_http.py (leído por regiones/grep; no escrito)",
+    "tools/dayz_mcp/server.py (leído occupancy_error_fields call-sites :2352/:2369 para OUT-OF-SCOPE; no escrito)",
+    "tools/dayz_mcp/dayz_test_tool.py (leído :196-228 para OUT-OF-SCOPE M19; no escrito)",
+    "tools/dayz_mcp/runtime_state.py (leído JsonlAuditWriter :244-323 y AUDIT_BACKUPS :26-27; no escrito; no es OWNS)",
+    "tools/dayz_mcp/instance_fence.py (leído Binding :129-140; no escrito; no es OWNS)",
+    "tools/tests/test_box_occupancy.py (leído :152-227 y :207-211 como contraste; no es OWNS; no escrito)",
+    "tools/tests/test_loopback.py (no abierto; read-only M17)",
+    "GATES.md",
+    "gates/** (hojas 4d66/cc2d leídas; no flipped)",
+    "plans/**",
+    "product-spec.md",
+    "tools/.venv-mcp"
+  ]
+}

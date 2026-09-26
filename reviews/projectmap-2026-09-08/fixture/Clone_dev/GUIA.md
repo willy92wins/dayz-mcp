@@ -1,0 +1,1 @@
+Guía: líneas, histórico.

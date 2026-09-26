@@ -1,0 +1,8 @@
+
+
+ProcessId       : 17968
+ParentProcessId : 20568
+CommandLine     : \??\C:\windows\system32\conhost.exe 0x4
+
+
+

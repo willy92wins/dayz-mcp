@@ -1,0 +1,16 @@
+﻿tokens used
+266.469
+VEREDICTO: REQUEST-CHANGES
+
+FINDINGS:
+
+1. P2 - A1: hint de lease aplicado a conflictos no exclusivos - tools\dayz_mcp\dayz_test_tool.py:333 - Captura cualquier `session_transition_conflict` de reconciliación, incluso con solo ticket/operation ID, drift o estado remoto no-idle; además afecta a `dayz_test_stop` en la línea 655 pero menciona `dayz_test_run`. Puede recomendar liberar un lease inexistente - Fix mínimo: enriquecer únicamente cuando se acredite lease activo del llamante; para el resto usar un mensaje condicional y neutral.
+2. P2 - A2: `offline` sigue expuesto aunque el error y la docstring lo niegan - tools\dayz_mcp\dayz_test_tool.py:125 - `_ACCEPTED_MODES` incluye `offline`, y la entrada pública pasa `mode` sin otro filtro; por tanto `dayz_test_run(mode="offline")` es válido mientras anuncia `server|all|client` - Fix mínimo: rechazar `offline` en `execute_dayz_test_run`, conservándolo solo para la petición interna de stop.
+3. P2 - A3: el nuevo `version_state` no se propagó a sus consumidores - tools\dayz_mcp\server.py:604 - `never_polled_this_generation` se trata como permitido y alcanza el gate de enqueue; además `_version_block_fields` sigue publicando `legacy_blocked`/`poll did not include ver=` para el mismo peer nunca sondeado (`loopback.py:1380-1394`). `ready` no cambia, pero las superficies públicas se contradicen y cambia el orden del gate - Fix mínimo: tratar el estado nuevo como `game_not_ready` en el consumidor y alinear solo la etiqueta pública del 409/423, sin cambiar la acreditación.
+4. P3 - A6: parche de ventana no está ligado al run y es racy - patch_launcher_width_height.diff:36 - Selecciona toda ventana visible cuyo título contenga `DayZ` y ejecuta una única pasada inmediatamente después del ACK de proceso; puede no encontrar aún al cliente o redimensionar servidor/clientes ajenos - Fix mínimo: esperar con timeout la ventana del PID cliente del `run_id` exacto, redimensionar solo esa y comprobar el resultado.
+
+A4: limpio
+
+A5: limpio
+
+A7: limpio

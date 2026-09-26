@@ -1,0 +1,79 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni propongas un plan.
+Trabaja hasta terminar.
+
+RONDA 2 DEL LOTE F. Tu entrega pasó la revisión cruzada con **un solo bloqueante**, y los
+otros 24 checks siguen verdes. Esto es un arreglo puntual, no un rechazo.
+
+===============================================================================
+EL BLOQUEANTE, y por qué el gate no lo vio antes
+===============================================================================
+
+`root=null` EXPLÍCITO no se rechaza: se trata como si el campo se hubiera omitido, y la
+llamada se encola **sin `root`**, o sea con alcance global en vez de rechazar una petición
+inválida. Es fail-open, y es justo la clase de defecto que estas dos fichas vienen a cerrar.
+
+La causa es de tipado, y no es obvia. Lo medí yo con una app mínima sobre esta versión de
+FastMCP:
+
+    root: str | None = None   ->  schema {"anyOf": [{"type":"string"},{"type":"null"}]}
+                                  {"root": null}  ->  ACEPTA
+    root: str = None          ->  schema {"type": "string", "default": null}
+                                  {"root": null}  ->  RECHAZA (Pydantic, antes de la funcion)
+
+Con `str | None`, FastMCP colapsa la omisión y el `null` explícito en el mismo `None`, así
+que tu guarda `if root is not None` ya no puede distinguirlos por construcción. No es un
+fallo de tu guarda: es que el tipo le quita la información antes de llegar.
+
+**El gate no lo cazaba porque yo no lo puse.** Probaba `root=""` y `root=7`, no `root=null`.
+Es un hueco de cobertura mío, no un descuido tuyo.
+
+===============================================================================
+TU ENCARGO, QUE ES UNO SOLO
+===============================================================================
+
+Que `root=null` explícito se rechace ANTES de encolar, en las cuatro tools.
+
+El arreglo verificado: declarar las cuatro firmas como `root: str = None` en vez de
+`root: str | None = None`, y **conservar tal cual las guardas que ya escribiste** — siguen
+haciendo falta para `root=""` y para una llamada directa a la función que no pase por
+Pydantic.
+
+Sí, `root: str = None` es una anotación que miente sobre su defecto. Es deliberado y es el
+idioma que esta versión de FastMCP necesita para publicar `type: string` sin `null`. Ponle un
+comentario corto diciendo por qué, o el próximo que lo lea lo "arreglará" de vuelta a
+`str | None` y reabrirá el agujero.
+
+Estado exacto ahora mismo, con el gate ya ampliado con el check nuevo:
+
+    bash gate/run.sh    -> ORACULO: PASS=24 FAIL=4 UNMET=0 de 28
+      [FAIL] F5b-ui_tree      root=null explicito se rechaza ANTES de encolar
+      [FAIL] F5b-ui_set_text  idem
+      [FAIL] F5b-ui_click     idem
+      [FAIL] F5b-ui_focus     idem
+    bash gate/suite.sh  -> SUITE-ACOTADA OK
+
+Los otros 24 están verdes y **no pueden dejar de estarlo**. En particular los cuatro
+`F3-*`: con `root: str = None`, omitir `root` sigue teniendo que dejarlo FUERA de `args`.
+
+Terminas cuando `gate/run.sh` diga `ORACULO-VERDE` y `gate/suite.sh` diga `SUITE-ACOTADA OK`.
+
+===============================================================================
+FRONTERAS
+===============================================================================
+
+WRITE-SET de esta ronda:
+    tools/dayz_mcp/server.py
+    tools/tests/test_mcp_tools.py
+
+PROHIBIDO: `gate/`; `addon/`; `loopback.py`; `MCPMessages.c`; `MCPClientBridge.c`;
+debilitar o borrar cualquier validación; borrar tests.
+
+Añade un test por tool que fije el rechazo de `root=null`, y córrelo antes de tu cambio
+para comprobar que falla.
+
+===============================================================================
+CIERRE
+===============================================================================
+
+Reescribe `STATE.md` con las secciones de siempre (HECHO / GATE / CONTROL POSITIVO /
+LO QUE NO PUDE VERIFICAR / DISPUTAS), pegando la salida literal de los dos gates.

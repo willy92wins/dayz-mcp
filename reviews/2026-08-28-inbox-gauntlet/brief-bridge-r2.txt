@@ -1,0 +1,16 @@
+RONDA 2 — arbitraje del revisor adversarial (Codex R21) sobre tu fix del pool. Dos findings ACEPTADOS que exigen rediseño acotado, uno rechazado. Aplica SOLO esto.
+
+ARBITRAJE
+- F1 ACEPTADO (P1): tu asuncion "un evento por GET" es falsa por contrato vanilla: restapi.c documenta en OnError "Note! May be called multiple times in case of (RetryCount > 1)". Tu OnError (:45-58) recicla a 0 en el PRIMER evento; si el slot se re-adquiere y llega el retry-error (o el success final) del GET viejo a la MISMA instancia, lee la generacion NUEVA y despacha datos obsoletos como si fueran del poll vivo. Es el mismo agujero por el que rechazaste el single-slot, reintroducido por el reciclado-en-evento.
+- F2 ACEPTADO (P1): con ambos slots bound (dos GET sin callback), StartPoll hace log+return SIN armar m_PollInFlight; el watchdog vigila m_PollInFlight y nunca dispara: stall PERMANENTE del poleo + log cada tick. Verificado el mecanismo en tu :406-439.
+- F3 RECHAZADO por alcance: Print("[MCP-CLIENT] " + message) (:3724) es PREEXISTENTE (identico en el original :3628). No lo toques — fuera del delta.
+
+DIRECCION DE REDISENO (criterios duros; si ves un agujero en la direccion, dilo en el informe y propon, pero los criterios se cumplen)
+(a) NUNCA re-adquirir una instancia que pueda tener eventos pendientes del engine. Concreto: OnSuccess es el UNICO evento tras el cual esta permitido devolver el slot a idle (0). OnError y OnTimeout NO reciclan: RETIRAN el slot (generacion marcada imposible, p.ej. -1, y fuera de la rotacion para siempre; el engine puede seguir disparando sobre el — con -1 jamas despacha). AbandonInFlightPoll tambien retira, no recicla.
+(b) StartPoll: adquiere un slot idle; si no hay, REPONE con new (ese new queda FUERA del camino caliente per-poll: solo corre tras errores/timeouts/abandonos) con un techo de instancias vivas creadas (p.ej. MAX 8 por generacion de bridge). Techo alcanzado: OnPollFail + backoff normal, log RATE-LIMITED (no por tick), y el siguiente intento vuelve a evaluar — nunca stall permanente sin log util.
+(c) El leak resultante pasa de O(polls) a O(errores+abandonos), acotado por el techo: DECLARALO con numeros en el informe (sesion de 80 min con la tasa de error observada ~0 => ~0-decenas retenidas frente a 11798).
+(d) Reescribe la PRUEBA DE NO-REGRESION cubriendo los 4 casos: (1) retry-error doble del mismo GET, (2) error seguido de success final del mismo GET, (3) abandono por watchdog con evento tardio, (4) pool agotado -> reposicion -> techo -> recuperacion al liberarse. Paso a paso contra el CODIGO nuevo.
+(e) Actualiza INFORME.md entero (causa sigue; fix y prueba nuevos; gates re-medidos: llaves pre/post, greps — "new MCPClientPollCallback" ahora puede aparecer tambien en el camino de reposicion: lista TODAS sus lineas y por que ninguna es per-poll caliente).
+(f) Mantenlo todo en MCPClientBridge.c; mismas reglas Enforce; el conteo del watchdog (CountBoundPollCallbacks o equivalente) debe seguir contando GETs vivos y ahora tambien retirados-vivos por separado si es barato.
+
+Ultima respuesta: "DONE" + ruta del informe.

@@ -1,0 +1,174 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+RONDA 2 del lote G. Tu ronda 1 quedó verde y la acepté. Esto no es un rechazo.
+
+===============================================================================
+§0. EL PRODUCTO
+===============================================================================
+
+Tres cosas observables. Todas sobre el mismo sujeto: de dónde sale la actividad y quién
+puede escribirla.
+
+  P1. **El lookup de actividad NO escribe.** Una lectura de `box_occupancy` deja el
+      `events.jsonl` byte a byte igual. Hoy escribe un evento.
+  P2. **La basal es el `lifecycle_start_outcome` acreditado**, leído del audit, no el
+      `creation_time_utc` del proceso leído de memoria. Un run sin comandos a 899 s desde
+      ESE evento es `recent`; a 901 s, `stale`.
+  P3. **Un evento sin `daemon_generation` es ambiguo ⇒ `unknown`.** No se acepta como si
+      fuera de la generación viva.
+
+LO QUE NO ES EL PRODUCTO, y no es tu trabajo aunque tengas razón:
+  - El oráculo, el gate, el ledger, los mutantes, la calibración, el workspace, este brief.
+    Si ves un defecto ahí, va a `DISPUTAS` en STATE.md. NO lo edites. (En la ronda 1 lo
+    hiciste y acertaste: por eso existe esta ronda.)
+  - **El sobre estructurado de `dayz_test_stop`**, los `retired_run_diagnostic` y la
+    desambiguación de `lifecycle_stop_outcome`. Bloques PASS 3 y 4, otro lote. No los toques.
+  - Refactorizar, renombrar o mejorar de paso nada.
+  - **El sticky, la proyección al error público y los dos campos nuevos ya están bien.** No
+    los rediseñes. Son 13 de los 16 checks y están en verde.
+
+===============================================================================
+§1. EL ERROR ERA MÍO. Dónde, para que no lo pagues dos veces
+===============================================================================
+
+Mi oráculo de la ronda 1 **no abría el audit ni una sola vez**. Su sumidero es un objeto de
+lista, así que `getattr(sink, "__self__")` es `None`, `_audit_jsonl_path()` devuelve `None` y
+`_latest_jsonl_activity_epoch` contesta `"absent"` siempre. Los once checks medían la ruta en
+memoria; P3 —la durabilidad por el jsonl— quedó sin medir.
+
+Y mi `G4` inyectaba el fallo de escritor alrededor de `box_occupancy`, no de un enqueue. Para
+que ese fallo fuera observable, tu implementación **tuvo que** hacer que la lectura tocara al
+escritor. Eso lo forzó mi gate, no tú. Lo escribiste en `DISPUTAS` y tenías razón.
+
+El oráculo de esta ronda ya abre un `JsonlAuditWriter` de verdad.
+
+===============================================================================
+§2. HECHOS VERIFICADOS — medidos hoy contra TU entrega
+===============================================================================
+
+Sonda con forma de producción (audit real): una lectura pura, cero comandos encolados,
+escribe **un** evento:
+
+    {"event":"run_command_activity","reason":"activity_observed","decision":"recorded",
+     "run_id":"run-1","activity_epoch":1784073641.0,"daemon_generation":"gen-A"}
+
+Dos cosas malas ahí, y la segunda es la grave:
+  1. Escribe desde una lectura.
+  2. El nombre que escribe es `run_command_activity`, **el mismo evento que tu propio lookup
+     consulta**, para un run que no ha recibido ni un comando, y retrofechado al
+     `creation_time_utc` del proceso. El audit pasa a afirmar actividad de comando que nunca
+     ocurrió, y quien lo lea después —tu lookup tras un reinicio, la ficha 17, un humano— la
+     lee como real.
+
+El evento que la ficha SÍ nombra como basal está en el audit y nadie lo lee. Medido:
+
+    lifecycle_start_outcome  →  campos ['client','daemon_generation','decision','duration_s',
+                                'event','reason','run_id','state','timestamp_utc']
+                                decision="started"   state="RUNNING"
+
+Dónde vive cada pieza en TU entrega (rutas del workspace):
+  - `_run_activity`                    `tools/dayz_mcp/process_lifecycle.py:1036`
+  - la llamada que escribe desde la lectura   `:1041`
+  - `_ensure_activity_persisted`       `:979`
+  - `_write_command_activity`          `:958`
+  - `_capture_start_activity`          `:913`, sembrada en el start en `:1588`
+  - `_latest_jsonl_activity_epoch`     `:991`, y su filtro de generación en `:1015-1017`
+
+Ese filtro es `if generation and event_generation not in (None, generation): continue`, o sea
+acepta como ACTUAL un evento **sin** generación. Hoy no es explotable —`JsonlAuditWriter`
+siempre la estampa (`runtime_state.py:322`) y `_require_generation` rechaza el vacío—, pero
+es fail-open en una frontera de generación y la ficha manda `unknown` ante evidencia
+ambigua, nunca inferencia.
+
+===============================================================================
+§3. EL CONTRATO de esta ronda
+===============================================================================
+
+(a) `box_occupancy`, `occupancy_error_fields` y todo el camino de lectura **no escriben en el
+    audit**. Ni un evento, ni con otro `reason`, ni «una sola vez por run».
+(b) La actividad basal de un run de la generación actual es el último
+    `lifecycle_start_outcome` con `decision="started"` y `state="RUNNING"` para ese `run_id`
+    y esa `daemon_generation`, leído del jsonl. La edad se mide desde SU `timestamp_utc`.
+(c) Un evento cuyo `daemon_generation` falta es ambiguo: `unknown` / null. Uno de OTRA
+    generación no cuenta (el run queda heredado ⇒ `unknown` hasta actividad durable nueva).
+(d) Sigue en pie todo lo de la ronda 1: sticky por `(daemon_generation, run_id)` que una
+    escritura buena posterior NO limpia; evento sólo en el enqueue ACEPTADO de las dos ramas;
+    un rechazo no registra nada; fail-closed a `unknown`/null ante timestamp futuro, fallo de
+    escritor, ausencia, rotación o JSON inválido; la actividad **nunca** decide `occupied`.
+(e) `_capture_start_activity` puede quedarse: cuando no hay jsonl que leer (sumidero sin
+    fichero) es la única basal que hay, y los checks en memoria la usan. Lo que no puede es
+    acabar escrita en el audit como si fuera un comando.
+
+===============================================================================
+§4. EL GATE
+===============================================================================
+
+    bash gate/run.sh      -> G1, el oráculo de producto
+    bash gate/suite.sh    -> G2, los tests de lifecycle, ocupación y loopback
+
+Ahora mismo: `PASS=13 FAIL=3 UNMET=0 de 16`. Tus tres rojos son:
+
+    R1-READONLY   una lectura de box_occupancy no escribe en el audit
+    R2-BASAL      sin comandos, el start ACREDITADO da recent/stale a 899/901 s
+    R4-AMBIGUA    un evento sin daemon_generation no se toma por actual
+
+**Los 13 verdes son la línea que no se puede romper.** Dos son nuevos y te vigilan de cerca:
+`R3-HEREDADO` (un run de otra generación es `unknown`) y `R5-DURABLE` (un comando aceptado
+deja **un** evento y la edad sale de él — su `len(evs) == 1` salta si vuelve a aparecer una
+escritura desde la lectura).
+
+**Está probado que los 16 pueden ponerse verdes**: construí un prototipo, midió 16/16 y lo
+reverti. No te lo paso a propósito — si te diera mi solución estaría midiendo mi conjetura y
+no tu entrega.
+
+**Un test tuyo cae, y ya sé cuál.** Medido con el prototipo: de 200 tests en cuatro módulos
+cae exactamente uno,
+
+    tests.test_box_occupancy.RunCommandActivityTest
+      test_writer_fault_is_sticky_unknown_for_the_generation
+
+porque conduce el fallo de escritor por `box_occupancy`. Reescríbelo conduciéndolo por el
+**enqueue aceptado**, que es la ruta del contrato. No lo arregles restaurando la escritura
+desde la lectura. `test_new_generation_clears_inherited_unknown` tiene la misma forma y hoy
+pasa; míralo por si acaso.
+
+Terminas cuando `gate/run.sh` diga `ORACULO-VERDE` y `gate/suite.sh` diga `SUITE-ACOTADA OK`.
+
+`gate/` está sellado por hash y es de sólo lectura. Compruebo el sello al recibir.
+
+===============================================================================
+§5. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/process_lifecycle.py
+    tools/tests/test_box_occupancy.py
+    tools/tests/test_process_lifecycle.py
+
+`loopback.py` y `daemon.py` **no deberían hacer falta** en esta ronda: los hooks de enqueue y
+la inyección de generación ya están bien. Si crees que uno hace falta, dilo en `DISPUTAS`
+antes de tocarlo.
+
+PROHIBIDO: `gate/`; `addon/`; `server.py`; `dayz_test_tool.py`; debilitar o borrar cualquier
+validación existente; borrar tests; usar red; correr la suite completa.
+
+⚠ **Data-crítico**: esto toca el audit jsonl. No cambies el formato de un evento existente,
+no toques la rotación, y que un fallo de escritura no tumbe una operación: el audit informa,
+no autoriza. Después del gate hay una auditoría independiente por ángulos.
+
+Escribe tests para lo que entregas, y córrelos ANTES de tu cambio para comprobar que fallan.
+
+===============================================================================
+§6. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — qué entregaste, con `path:line`.
+    ## GATE             — la salida literal de los dos gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea que demuestra que fallaba antes.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si crees que un criterio del gate está mal, aquí, con el argumento.
+                          En la ronda 1 usarlo fue lo correcto y cambió el lote.

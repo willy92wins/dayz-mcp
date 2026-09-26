@@ -1,0 +1,81 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+REVISIÓN FINAL, antes de integrar, del producto FUSIONADO de dos lotes (DayZ-MCP, fichas 16 y
+17): lote G (actividad de run en memoria, caja derivada de una foto, ciclo de vida del binding y
+del cerco; 11 rondas) y lote H (proyección de generación, anillo de diagnósticos de runs
+retirados, sobre estructurado de `dayz_test_stop`; 4 rondas). Has revisado G siete veces y H una;
+otro revisor ciego de otra familia, cinco; y un R9 de siete ángulos con verificación ciega
+confirmó 14 afirmaciones más. Todo lo confirmado se cerró y esta es la última pasada.
+Producto: `../ws/tools/dayz_mcp/process_lifecycle.py` (SHA-256 70179879d1a0af8e0d2adcf625cd9d1e3d46ee8a7e56a5476dd52ed89729c6e0),
+`../ws/tools/dayz_mcp/loopback.py` (SHA-256 d607e62e8f37f8ea8a3d6169a8c5e333f7f158ab1cc2cec353a02ad721d3230e) y
+`../ws/tools/dayz_mcp/dayz_test_tool.py` (SHA-256 bca97e26e3a7d9cef96846bee6559eebc938dbbd90e46b3eab6b0f75019f4b5d).
+
+===============================================================================
+§0. QUÉ SE REVISA — el contrato completo, en una página
+===============================================================================
+
+Actividad (G): en memoria por `(daemon_generation, run_id)`; la ruta de lectura NO lee el
+audit; sticky `unknown` que una escritura buena no limpia; atribución por el `run_id` del
+binding; basal que sella el proceso lanzado por este daemon (y en una extensión entra como
+`max`); fail-closed a `unknown`/null; frescura monótona; todo borrado deja tumba por época y
+ninguna escritura con `epoch ≤ tumba` aterriza; la compensación del rollback fallido corre
+también si el `replace` falla, y mientras compensa el lector publica `unknown`; **la actividad
+es diagnóstico, no autoridad**.
+Caja (G): derivada de UNA foto (revisión → manifiesto → actividad, sin E/S dentro), sondas
+fuera, derivación pura, filas nunca cacheadas, sello del caché de sondas como cota inferior;
+sin `_operation_lock` en la lectura.
+Binding y cerco (G): retirada antes de la transición durable en stop/reap/repair/reconcile;
+sin dueño (`RUNNING_IDLE`) NADA se despacha —lectura, mutación, interno— con `run_not_owned`;
+el cerco (`_fenced_runs`) se activa bajo el lock del loopback ANTES de persistir, por un método
+único para TODA transición a `RUNNING_IDLE` (`_transition_to_idle`), se revierte si la
+persistencia falla, lo levanta `adopt_run` y lo borra `retire_run`; el poll revalida al retomar
+el lock; un comando descartado no acredita nada; retirar cierra lo que descarta; estado
+durable ilegible ⇒ rechazo; la valla de resultado sobrevive a la retirada; recovery reparable;
+reconcile no deja runs no acreditados; hints sin efectos; residuos limpiados en EXITED.
+Diagnósticos y sobre (H): `daemon_generation_at_launch` persistido en `RunRecord` (al final,
+default None; legacy → `null`, nunca `false`); anillo en memoria de ≤32 diagnósticos con
+exactamente ocho campos, sin timestamps ni paths, que empieza vacío tras reiniciar, alimentado
+SÓLO tras persistir por los seis caminos, deduplicado, `reason` de código cerrado; `status()`
+nunca publica fila no terminal + diagnóstico del mismo run; `execute_dayz_test_stop` con un
+snapshot pre-dispatch y sobre `run_not_active`/`run_not_found` sólo desde un diagnóstico
+validado (ocho claves, `run_id` exacto, `state == EXITED`); si no, `ToolError` pelado.
+
+**LO QUE NO ES EL PRODUCTO**, y va a `BACKLOG`: gates, oráculos, ledgers, briefs;
+`server.py`; `daemon.py`; `runtime_state.py`; perf del caché de sondas; refactors, estilo, tipado.
+**Prohibido justificar alcance con «es donde han salido cosas antes».**
+
+===============================================================================
+§1. LO QUE QUIERO DE TI
+===============================================================================
+
+  - **Composición**: G y H se fusionaron por rebase. ¿Hay interacción entre el anillo/proyección
+    de H y el cerco/actividad de G que ninguno de los dos contratos cubre por separado?
+    (P. ej.: un run cercado que se retira, ¿entra al anillo con el estado correcto y sin
+    residuos? ¿`_transition_to_idle` y `_commit_retirement` respetan el mismo orden de locks?)
+  - **Orden de locks final**: `_operation_lock → (ServerState._lock | _activity_lock)`; ninguna
+    lectura toma `_operation_lock`; el crédito bajo el lock del loopback no toma
+    `_operation_lock`. ¿Alguna inversión?
+  - **Regresiones**: cualquier propiedad del §0 que ya no se cumpla.
+  - **Validaciones debilitadas** respecto a la base (`../../lote-G/ws-frozen-r8/tools/` es el
+    árbol anterior a los cierres; sólo lectura).
+  - **Fail-open**: cualquier rama que ante error, excepción o estado ilegible deje pasar,
+    despache o acredite.
+
+Y la pregunta de proceso: **¿lo que encuentres es de familia NUEVA o de las visitadas**
+(coherencia de caché, identidad/autoridad del destino, frontera de generación, sello-vs-dato,
+borrado-sin-tumba, invariante-atada-al-call-site, ciclo de vida asimétrico del cerco)?
+
+Reglas duras: **enseña, no cuentes** (código literal con `path:line`); **escribe el fallo
+concreto**; **la tolerancia no es un defecto**; cero hallazgos es una respuesta legítima y,
+tras once rondas, plausible. Ejecuta los tres gates (`bash ../ws/gate/run.sh`,
+`bash ../ws/gate/suite.sh`, y desde `../ws/tools`: `PYTHONPATH=. python ../../gate-extra/oracle_lote_g.py`)
+y pega su última línea en NO VERIFICADO si no los corres.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrarlo?
+    ## HALLAZGOS      — por severidad: título, path:line, código pegado, fallo concreto.
+    ## FAMILIAS       — la pregunta de proceso.
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.

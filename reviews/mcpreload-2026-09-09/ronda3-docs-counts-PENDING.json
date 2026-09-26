@@ -1,0 +1,10 @@
+{
+  "README.md": {
+    "source_sha256": "457611655ee0cb77e71643f3d97a85c7cb121b6a373aef0c735ea3b67179f865",
+    "proposed_sha256": "42e5c441d15c236a6f99d265b38ca00cb1e7392e38ff992b0f732910cbfb53f3"
+  },
+  "dayz-mcp-architecture.md": {
+    "source_sha256": "63167b84f7489acaa0a2c728250965e8f113c133d3a4b05acb92271fecf5dc45",
+    "proposed_sha256": "5f1f03568eb23113bdd8c92c550c54241049aa5d4d17e6513d334938e1d8a3e9"
+  }
+}

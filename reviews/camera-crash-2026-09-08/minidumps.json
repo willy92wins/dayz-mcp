@@ -1,0 +1,50 @@
+[
+  {
+    "path": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\SUB_BRZ_dev\\_client\\profiles\\DayZDiag_x64_2026-09-08_14-08-21.mdmp",
+    "bytes": 1353349,
+    "sha256": "6d6629cb97f23ad358f97b5e14181d3302c56d54ea8fe53f915b1389a9c60144",
+    "exception_code": "0xc0000005",
+    "exception_flags": 0,
+    "address": "0x7ff67c227910",
+    "parameters": [
+      "0x0",
+      "0x68"
+    ],
+    "rax": "0x0",
+    "rcx": "0x7ff67cfb76f0",
+    "rip": "0x7ff67c227910",
+    "fault_module": {
+      "name": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ\\DayZDiag_x64.exe",
+      "base": "0x7ff67bd30000",
+      "size": 77496320,
+      "offset": "0x4f7910",
+      "timestamp": 1785921018,
+      "checksum": 20297285
+    },
+    "code_16_before_16_at": "48 83 ec 28 48 8d 0d e5 fd d8 00 e8 c0 07 00 00 48 8b 48 68 48 83 c4 28 e9 13 fd ff ff cc cc cc"
+  },
+  {
+    "path": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\SUB_BRZ_dev\\_client\\profiles\\DayZDiag_x64_2026-09-08_15-00-28.mdmp",
+    "bytes": 1273651,
+    "sha256": "91bf3692fde8737f956129902e687c1355b42badb84283569976f7d00df1e141",
+    "exception_code": "0xc0000005",
+    "exception_flags": 0,
+    "address": "0x7ff67c227910",
+    "parameters": [
+      "0x0",
+      "0x68"
+    ],
+    "rax": "0x0",
+    "rcx": "0x7ff67cfb76f0",
+    "rip": "0x7ff67c227910",
+    "fault_module": {
+      "name": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ\\DayZDiag_x64.exe",
+      "base": "0x7ff67bd30000",
+      "size": 77496320,
+      "offset": "0x4f7910",
+      "timestamp": 1785921018,
+      "checksum": 20297285
+    },
+    "code_16_before_16_at": "48 83 ec 28 48 8d 0d e5 fd d8 00 e8 c0 07 00 00 48 8b 48 68 48 83 c4 28 e9 13 fd ff ff cc cc cc"
+  }
+]

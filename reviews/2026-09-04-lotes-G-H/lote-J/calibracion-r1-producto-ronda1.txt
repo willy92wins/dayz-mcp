@@ -1,0 +1,66 @@
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 52641)
+Traceback (most recent call last):
+  File "C:\Python314\Lib\socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\socketserver.py", line 766, in __init__
+    self.handle()
+    ~~~~~~~~~~~^^
+  File "C:\Python314\Lib\http\server.py", line 496, in handle
+    self.handle_one_request()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Python314\Lib\http\server.py", line 484, in handle_one_request
+    method()
+    ~~~~~~^^
+  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws\tools\dayz_mcp\loopback.py", line 2997, in do_POST
+    self._handle_session(session_action)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws\tools\dayz_mcp\loopback.py", line 3266, in _handle_session
+    payload = self._adopt_on_grant(client, payload)
+  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws\tools\dayz_mcp\loopback.py", line 3155, in _adopt_on_grant
+    result = lifecycle.adopt_run(client, token, run_id)
+  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws\tools\dayz_mcp\process_lifecycle.py", line 2505, in adopt_run
+    run = self.manifest.get(run_id)
+  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\oracle_tests.py", line 610, in broken_get
+    raise OSError("manifest read failed inside adopt_run")
+OSError: manifest read failed inside adopt_run
+----------------------------------------
+========================================================================================================
+[PASS ] JA1-LIMPIEZA-INTERNA-LLEGA-AL-PEER tras session_release con vehiculo activo el peer client recibe vehicle_release
+          peer client vio ['vehicle_control', 'vehicle_release'] tras el release (cleanup={'terminal_safe': True, 'runs_released': ['test-run'], 'cancelled': 0, 'vehicle_release_enqueued': 1}) -- la limpieza vehicle_release que encola el release del dueno es una orden interna del daemon: el cerco P6 protege de sesiones sin dueno, no de la limpieza del propio daemon; drenarla deja el vehiculo del juego bajo control fantasma (fb
+[PASS ] JA2-EL-CERCO-SIGUE-PARA-LO-NORMAL una lectura sobre el run cercado sigue siendo run_not_owned (control positivo: pasa con el cerco parcheado)
+          lectura sobre RUNNING_IDLE cercado: 409 {'error': 'run_not_owned', 'hint': 'This run has no owner (RUNNING_IDLE). Adopt the existing run before dispatching.'} (esperado 409 run_not_owned); control positivo con el cerco parcheado: 200 {'id': 1} (esperado 200) -- si el control no pasa, el check no esta observando el cerco
+[PASS ] JA3-DRENA-LO-NORMAL-Y-ENTREGA-LO-INTERNO una mutacion encolada antes del release se descarta run_not_owned y vehicle_release se entrega
+          peer vio ['vehicle_control', 'vehicle_release'] (esperado [vehicle_control, vehicle_release]); await #2: 200 {'status': 'done', 'result': {'id': 2, 'ok': False, 'error': 'owner_release'}} (esperado done/ok False/owner_release|run_not_owned) -- el cerco drena lo que NO es limpieza del daemon y entrega lo que si lo es
+[PASS ] JA4-LA-LIMPIEZA-ENTREGADA-NO-ACREDITA-ACTIVIDAD tras entregar vehicle_release el run sigue RUNNING_IDLE y su actividad no es recent
+          antes del release: {'run_id': 'test-run', 'mod': '', 'label': 'fence-fixture', 'age_s': 2.241, 'owner_session': 'session-A-01', 'state': 'RUNNING', 'activity_state': 'recent', 'last_activity_age_s': 0.01, 'daemon_generation_at_launch': None, 'daemon_generation_current': '', 'generation_changed': None}; despues de entregar la limpieza: {'run_id': 'test-run', 'mod': '', 'label': 'fence-fixture', 'age_s': 2.624, 'owner_
+[PASS ] JA5-INTERNAL-NO-SE-ACEPTA-POR-HTTP un /enqueue con internal:true sobre el run cercado sigue siendo run_not_owned; internal=True tiene un unico llamador (cleanup_owner)
+          internal=True en dayz_mcp: 1 en loopback.py dentro de ['cleanup_owner'], otros ficheros ninguno; /enqueue con internal:true sobre el run cercado: 409 {'error': 'run_not_owned', 'hint': 'This run has no owner (RUNNING_IDLE). Adopt the existing run before dispatching.'} (esperado 409 run_not_owned) -- la exencion es del daemon, no de quien lo pida
+[PASS ] JB1-ADQUIRIR-ADOPTA /session/acquire sobre la caja con un run RUNNING_IDLE sin dueno lo adopta y lo declara en adopted_run
+          acquire -> adopted_run={'ok': True, 'run_id': 'test-run', 'state': 'RUNNING', 'dispatchable': True}; box run={'run_id': 'test-run', 'mod': '', 'label': 'fence-fixture', 'age_s': 3.103, 'owner_session': 'session-A-01', 'state': 'RUNNING', 'activity_state': 'unknown', 'last_activity_age_s': None, 'daemon_generation_at_launch': None, 'daemon_generation_current': '', 'generation_changed': None} -- sin esto ningun run lle
+[PASS ] JB2-DESPACHO-TRAS-ADQUIRIR con el run adoptado por el acquire una lectura y una mutacion se entregan al peer
+          lectura: 200 {'id': 1}; mutacion: 200 {'id': 2}; peer vio ['camera_get', 'vehicle_control'] -- el oraculo de las fichas: tras lanzar y adquirir, el puente despacha y run_not_owned no sube
+[PASS ] JB3-LA-CONCESION-EN-COLA-ADOPTA el siguiente de la FIFO recibe el lease por /session/wait y adopta el run que el anterior dejo RUNNING_IDLE
+          wait de B -> 200 status='active' adopted_run={'ok': True, 'run_id': 'test-run', 'state': 'RUNNING', 'dispatchable': True}; box run={'run_id': 'test-run', 'mod': '', 'label': 'fence-fixture', 'age_s': 3.813, 'owner_session': 'session-B-fe', 'state': 'RUNNING', 'activity_state': 'unknown', 'last_activity_age_s': None, 'daemon_generation_at_launch': None, 'daemon_generation_current': '', 'generation_changed': None} -- l
+[PASS ] JB4-SIN-RUN-ADOPTABLE-CONCEDE-SIN-ADOPTAR con la caja vacia el acquire concede el lease y declara adopted_run null
+          acquire sin run -> 200 {'status': 'active', 'adopted_run': None} (esperado active + adopted_run: null) -- el lease sigue siendo de la caja; la clave presente y nula dice 'no habia nada que adoptar', distinto de 'no lo intente'
+[PASS ] JB5-PROCESOS-MUERTOS-CONCEDE-SIN-ADOPTAR un run RUNNING_IDLE cuyos procesos ya no existen no se adopta, el lease se concede igual y adopted_run trae el motivo
+          acquire con pid muerto 4000000 -> 200 status='active' adopted_run={'ok': False, 'run_id': 'test-run', 'error': 'run_processes_gone', 'hint': 'This run has no live owned process. Reap or recover the run (reap_dead_run / reap_dead_runs / admin reconcile) so the durable EXITED state converges; adopt_run does not restore a dead run.'}; box run={'run_id': 'test-run', 'mod': '', 'label': 'fence-fixture', 'age_s': 1516860.6
+[PASS ] JB6-ADOPT-EXPLICITO-IDEMPOTENTE /lifecycle/adopt por el mismo dueno (misma sesion, mismo lease) devuelve ok/RUNNING/dispatchable en vez de run_not_adoptable
+          acquire adopted_run={'ok': True, 'run_id': 'test-run', 'state': 'RUNNING', 'dispatchable': True}; adopt #1 -> 200 {'ok': True, 'run_id': 'test-run', 'state': 'RUNNING', 'dispatchable': True}; adopt #2 -> 200 {'ok': True, 'run_id': 'test-run', 'state': 'RUNNING', 'dispatchable': True}; box run={'run_id': 'test-run', 'mod': '', 'label': 'fence-fixture', 'age_s': 4.371, 'owner_session': 'session-A-01', 'state': 'RUNNING
+[PASS ] JB7-UN-AJENO-NO-ADOPTA otra sesion sin lease no puede adoptar el run que el titular posee
+          adopt de B sin lease -> 423 {'error': 'lease_required'}; adopt de B con el token de A -> 403 {'error': 'lease_invalid'}; box run={'run_id': 'test-run', 'mod': '', 'label': 'fence-fixture', 'age_s': 4.6, 'owner_session': 'session-A-01', 'state': 'RUNNING', 'activity_state': 'unknown', 'last_activity_age_s': None, 'daemon_generation_at_launch': None, 'daemon_generation_current': '', 'generation_changed': None} -- la ad
+[PASS ] JB8-EL-RELEASE-DEVUELVE-EL-RUN tras adoptar por el acquire, session_release lista el run en runs_released y lo deja RUNNING_IDLE
+          release -> 200 cleanup={'terminal_safe': True, 'runs_released': ['test-run'], 'cancelled': 0, 'vehicle_release_enqueued': 0}; box run={'run_id': 'test-run', 'mod': '', 'label': 'fence-fixture', 'age_s': 4.85, 'owner_session': None, 'state': 'RUNNING_IDLE', 'activity_state': 'unknown', 'last_activity_age_s': None, 'daemon_generation_at_launch': None, 'daemon_generation_current': '', 'generation_changed': None} -- runs
+[FAIL ] JB9-MANIFIESTO-ILEGIBLE-NO-ES-NULL si list_runs falla, el acquire concede el lease y adopted_run declara run_state_unavailable (null es solo 'enumeracion valida sin candidato')
+          acquire con manifiesto ilegible -> 200 status='active' adopted_run=None (esperado ok False, error run_state_unavailable, run_id None) -- F-02: 'no pude mirar' y 'no habia nada' no pueden ser la misma respuesta
+[FAIL ] JB10-ADOPT-QUE-REVIENTA-NO-CORTA-LA-CONCESION si adopt_run lanza tras abrir la reserva, la respuesta llega entera (200 + adopted_run ok:false), no queda reserva huerfana y el lease sigue usable
+          acquire con adopt_run reventando -> None {'status': None, 'adopted_run': None} transporte='RemoteDisconnected: Remote end closed connection without response'; reservas pendientes en el lease activo=1 (esperado 0); release -> None; box run={'run_id': 'test-run', 'mod': '', 'label': 'fence-fixture', 'age_s': 5.18, 'owner_session': None, 'state': 'RUNNING_IDLE', 'activity_state': 'unknown', 'last_activity_age_s': None, 
+[FAIL ] JC1-EL-NOMBRE-DEL-TEST-DICE-LO-QUE-AFIRMA el test de la limpieza tras publicar idle ya no se llama *_is_gone_* y su nombre dice que sobrevive
+          nombre viejo presente=True; nombre nuevo=None -- F-03: un mantenedor que elija tests por nombre leeria lo contrario de la asercion
+========================================================================================================
+ORACULO-TESTS: PASS=13 FAIL=3 UNMET=0 de 16

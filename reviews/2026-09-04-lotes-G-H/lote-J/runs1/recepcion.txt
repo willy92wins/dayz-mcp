@@ -1,0 +1,36 @@
+[1] sello: 8/8 intactos
+[2] write-set: 8 ficheros tocados desde STARTED; fuera del allowlist: ninguno
+      BRIEF.txt
+      STATE.md
+      tools/dayz_mcp/loopback.py
+      tools/dayz_mcp/process_lifecycle.py
+      tools/tests/test_daemon.py
+      tools/tests/test_loopback.py
+      tools/tests/test_process_lifecycle.py
+      tools/tests/test_session_e2e.py
+[3] hashes del producto:
+      3dd20a65a8e72a2d1300be3256d0fd9a20b91a0880cf6ee73b174ec8d4283aa9  tools/dayz_mcp/loopback.py
+      6678ff9e992c73a148c2d3d86b7e8dabacc22bcda3103d1cbe77875bbd4227a1  tools/dayz_mcp/process_lifecycle.py
+      484adde5fe238ac0a5b70e233d618a12c18188129075b77eec027d2368c8c39b  tools/tests/test_session_e2e.py
+      f3de27194f006dc8126e5ec9f3e45949f4beffa56feb70c33447a4c2255463f9  tools/tests/test_process_lifecycle.py
+      57ce5c5d8be55a174aaf66d4d20b03d18617fcc0ec21a5cee633401ce3d23927  tools/tests/test_instance_fence.py
+      2878e32676082991625851366b3aa92b3eb998e72a1a261904bb04af482f68bc  tools/tests/test_daemon.py
+      6eb705d303f0b44bfb0ef12b5eb6f3fc800f3014672c224368c937b63a27c1bc  tools/tests/test_client_mode.py
+      ae6817cdfc31e41b03b3a01fdf63bd3eb9aceba00ef7285a3f8beeab27e88db4  tools/tests/test_loopback.py
+[4] diff LF-normalizado contra C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws-frozen-r0:
+      tools/dayz_mcp/loopback.py: +123 -14   (CRLF en el fichero entregado: 0)
+      tools/dayz_mcp/process_lifecycle.py: +28 -0   (CRLF en el fichero entregado: 0)
+      tools/tests/test_session_e2e.py: +38 -3   (CRLF en el fichero entregado: 0)
+      tools/tests/test_process_lifecycle.py: +69 -2   (CRLF en el fichero entregado: 0)
+      tools/tests/test_instance_fence.py: +0 -0   (CRLF en el fichero entregado: 0)
+      tools/tests/test_daemon.py: +161 -0   (CRLF en el fichero entregado: 0)
+      tools/tests/test_client_mode.py: +0 -0   (CRLF en el fichero entregado: 0)
+      tools/tests/test_loopback.py: +57 -0   (CRLF en el fichero entregado: 0)
+      TOTAL +476 -19
+[5] gates (corridos aqui, no pegados):
+      product_frozen.sh: rc=0 VERDE | PRODUCTO-CONGELADO OK (61 ficheros sellados + 2 del write-set)
+      run_oracle_tests.sh: rc=0 VERDE | ORACULO-TESTS: PASS=13 FAIL=0 UNMET=0 de 13 | ORACULO-TESTS-VERDE
+      suite_full.sh: rc=0 VERDE | rojos = permitidos (2) | SUITE-COMPLETA OK
+[6] congelado en ws-frozen-r1 (2380 ficheros)
+RECEPCION: OK
+rc=0

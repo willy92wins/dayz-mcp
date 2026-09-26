@@ -1,0 +1,97 @@
+{
+  "source": "reviews/2026-08-19-lane-fence/DayZ_MCP_fence_DCC8730F.pbo",
+  "bytes": 205008,
+  "sha256": "dcc8730feb98ff2a4f7c203075d799428c53a669360e3499311aa3b4d31afed3",
+  "header_bytes": 705,
+  "properties": [
+    [
+      "product",
+      "dayz ugc"
+    ],
+    [
+      "prefix",
+      "DayZ_MCP"
+    ]
+  ],
+  "entries": [
+    {
+      "name": "$PBOPREFIX$",
+      "method": 0,
+      "original_size": 0,
+      "stored_size": 9
+    },
+    {
+      "name": "CLAUDE.md",
+      "method": 0,
+      "original_size": 0,
+      "stored_size": 477
+    },
+    {
+      "name": "config.cpp",
+      "method": 0,
+      "original_size": 0,
+      "stored_size": 536
+    },
+    {
+      "name": "gui\\layouts\\mcp_dialog.layout",
+      "method": 0,
+      "original_size": 0,
+      "stored_size": 7922
+    },
+    {
+      "name": "scripts\\4_World\\MCP_CarScript.c",
+      "method": 0,
+      "original_size": 0,
+      "stored_size": 15127
+    },
+    {
+      "name": "scripts\\5_Mission\\MCPBridge.c",
+      "method": 0,
+      "original_size": 0,
+      "stored_size": 75794
+    },
+    {
+      "name": "scripts\\5_Mission\\MCPCallbacks.c",
+      "method": 0,
+      "original_size": 0,
+      "stored_size": 1147
+    },
+    {
+      "name": "scripts\\5_Mission\\MCPClientBridge.c",
+      "method": 0,
+      "original_size": 0,
+      "stored_size": 72484
+    },
+    {
+      "name": "scripts\\5_Mission\\MCPDialogController.c",
+      "method": 0,
+      "original_size": 0,
+      "stored_size": 18116
+    },
+    {
+      "name": "scripts\\5_Mission\\MCPJobRunner.c",
+      "method": 0,
+      "original_size": 0,
+      "stored_size": 1941
+    },
+    {
+      "name": "scripts\\5_Mission\\MCPMessages.c",
+      "method": 0,
+      "original_size": 0,
+      "stored_size": 9877
+    },
+    {
+      "name": "scripts\\5_Mission\\MissionGameplay.c",
+      "method": 0,
+      "original_size": 0,
+      "stored_size": 443
+    },
+    {
+      "name": "scripts\\5_Mission\\MissionServer.c",
+      "method": 0,
+      "original_size": 0,
+      "stored_size": 409
+    }
+  ],
+  "sha1_trailer_verified": true
+}

@@ -1,0 +1,26 @@
+ENCARGO: revision ciega delta-3 del lote df93 (preflight de las herramientas de admin VPP en la ruta secure_launcher del servidor MCP de DayZ), ronda 4. Decide si la ronda 4 cierra los dos hallazgos que el dictamen delta-2 dejo abiertos (R3-F-01 y R3-F-02) sin abrir otros. MODO NO INTERACTIVO: no hay operador al otro lado; no pidas aprobacion; decide, ejecuta y escribe. Terminar sin el dictamen en disco cuenta como no haber hecho el encargo.
+
+0. ALCANCE Y FRONTERA
+Codigo propio del proyecto. Todo se hace en local. No se lanza nada: ni el juego, ni el daemon, ni el launcher nativo. El worktree es SOLO LECTURA salvo para ejecutar tests (y las mutaciones de 3.2, que restauras byte a byte); escribes unicamente en tu directorio de trabajo (cwd). El trabajo es verificacion de robustez de un analizador de ficheros de configuracion y de un gate de arranque, sobre ficheros de prueba en memoria.
+
+1. CARGA INICIAL (rutas absolutas Windows)
+ 1.1 REVIEW-CODEX-delta2.md (en tu cwd): el dictamen anterior, con los repros [EXACT] de R3-F-01 y R3-F-02 y las matrices E1 (formas de meta.cpp) y E2 (casos del scanner del cfg).
+ 1.2 DELTA-R4.patch (en tu cwd): el diff de la ronda 4 (fd660d2 -> HEAD de la rama work/df93-vpp-preflight). COMMITS.txt: los commits de la rama sobre 24919cb.
+ 1.3 Worktree de la rama (solo lectura): C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\e89adcdf-b230-4060-83b7-f733911e169a\scratchpad\wt-df93  -- ficheros: tools\dayz_mcp\native_launcher_transaction.py y tools\tests\test_vpp_preflight.py. Interprete: <worktree>\tools\.venv-mcp\Scripts\python.exe. Tests desde <worktree>\tools con PYTHONPATH=. : python -m unittest tests.test_vpp_preflight (53 OK declarados por el implementador) y tests.test_native_launcher_transaction tests.test_dayz_test_tool tests.test_dayz_test_tool_modes tests.test_lifecycle_reconcile (129 OK declarados).
+ 1.4 Contexto del lote (solo lectura): C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\2026-09-04-reserva\lote-df93\CIERRE.md y GATES.md.
+
+2. QUE CAMBIO, segun el implementador (compruebalo, no lo creas)
+ - R3-F-01: _proves_vpp_identity() ya no usa un regex; pasa meta.cpp por _live_assignments() (el mismo scanner que lee serverDZ.cfg) y exige EXACTAMENTE una asignacion viva de la clave publishedid cuyo valor sea el decimal canonico 1828439124; un fichero por encima del tope de lectura (_MAX_PREFLIGHT_READ_CHARS) devuelve False (un prefijo no prueba nada).
+ - R3-F-02: _live_assignments() trata la comilla simple y la doble como delimitadores de cadena (terreno muerto); una cadena sin cerrar corre hasta el final del fichero y el gate rechaza en vez de adivinar donde pararia el motor.
+ - Tests: clase VppPreflightRound4Test (4 tests, 11 subcasos), medida rojo-primero sobre fd660d2 (11 subcasos rojos) y verde tras el parche.
+
+3. QUE TE PIDO
+ 3.1 Reejecuta tus repros [EXACT] de delta-2 contra el worktree actual, y las matrices E1 y E2 completas; anade los casos del mismo tipo que se te ocurran (por ejemplo: BOM UTF-8 delante de publishedid; UTF-16; comilla simple dentro de un comentario; apostrofe dentro de una cadena doble; finales \r\n; valor con signo o con espacios raros; publishedid seguido de un comentario en la misma linea; dos asignaciones identicas; clave en mayusculas; clave repetida en el cfg dentro y fuera de cadenas). Anota cada caso con su salida literal.
+ 3.2 Mutantes: al menos tres mutaciones del producto que los tests nuevos DEBEN cazar (por ejemplo: aceptar len(values) >= 1 en vez de == 1; quitar chr(39) de _STRING_DELIMITERS; quitar la comprobacion del tope en _proves_vpp_identity). Ejecuta tests.test_vpp_preflight con cada mutante, anota cuantos tests caen, y restaura el fichero exactamente (hash sha256 antes y despues, literal en el dictamen).
+ 3.3 Regresion: los cuatro modulos tocados de 1.3 y cualquier test que dependa del scanner. NO corras la suite completa: levanta daemons y se cuelga con las sesiones vivas de esta maquina.
+ 3.4 Contrato: di si cambia algun token de missing/warnings, la descripcion de alguna tool, o un modulo sellado en app.pyz (secure_launcher.py esta pinneado por dependency-lock.json; el diff no debe tocarlo). Di tambien si la ronda 4 debilita algun aserto de rondas anteriores.
+ 3.5 Veredicto en REVIEW-CODEX.md (en tu cwd), mismo formato que delta-2: cabecera con SEGURO INTEGRAR o NO ES SEGURO INTEGRAR; convergencia de R3-F-01 y R3-F-02 (CIERRA / NO CIERRA, con la evidencia ejecutada); por cada hallazgo nuevo: tipo concreto (crash / exception / degradation / cosmetic), path:line, repro [EXACT] ejecutado, severidad (ALTA / MEDIA / BAJA); una seccion final obligatoria: LO QUE NO PUDE VERIFICAR. Al terminar escribe EXIT-DELTA3.txt con la palabra DONE; si no puedes terminar, PARTIAL y el motivo.
+
+4. SHA256 DEL PRODUCTO DE LA RONDA 4 (worktree, HEAD 180815e); comprueba que lo que lees es esto:
+ac33f7adcf6992f0968e0eb7c07839dcdc9d2c2907c84abbb926ea8108552f05 *tools/dayz_mcp/native_launcher_transaction.py
+0dcc46c4d3db745fda49460cf4f933eee8ae01776de430b5e49b32c2f1cac6bf *tools/tests/test_vpp_preflight.py

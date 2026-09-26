@@ -1,0 +1,3 @@
+product_frozen.sh|PRODUCTO-CONGELADO OK
+run_oracle_tests.sh|ORACULO-TESTS-VERDE
+suite_full.sh|SUITE-COMPLETA OK

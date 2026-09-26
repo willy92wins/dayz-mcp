@@ -1,0 +1,28 @@
+REVISION ADVERSARIAL R21 (read-only). Revisas un fix de Enforce Script (DayZ) implementado por otro modelo. Tu trabajo: intentar tumbarlo. Veredicto final: APPROVE o REQUEST-CHANGES con findings P1/P2/P3, cada uno con fichero:linea.
+
+CONTEXTO
+Bridge cliente del MCP de DayZ (modded MissionGameplay side). Sintoma medido in-game: al cerrar el cliente tras ~80 min, Enforce reporta Leaked 'MCPClientPollCallback' (11798x) — una instancia por poll a ~2.5/s. El fix sustituye new-por-poll por un pool de 2 callbacks persistentes con descarte por generacion.
+
+CARGA (todo dentro del cwd)
+1. MCPClientBridge.c            -> el fichero EDITADO (resultado del fix)
+2. _review\MCPClientBridge_ORIGINAL.c -> el fichero ANTES del fix (diffea mentalmente o con herramientas)
+3. INFORME.md                   -> los claims del implementador (causa, fix, prueba de no-regresion, gates)
+4. _ref\MCPBridge.c             -> bridge server (referencia de patrones; NO es objetivo)
+Vanilla RestApi (fuera del cwd, solo lectura): C:\Users\guill\OneDrive\Documentos\DayZ Projects\scripts\3_game\http\restapi.c — proto GET(RestCallback cb, string request) :103, comentarios de retries :44-56, reset() :133.
+
+HECHOS VERIFICADOS POR EL ORQUESTADOR (no los re-litigues, usalos)
+- El ORIGINAL no tiene m_PollGeneration (0 hits, verificado por grep): su descarte era por identidad (IsActivePollCallback x4, EnsurePollCallback x2, AbandonInFlightPoll pone m_PollCallback=null y el siguiente StartPoll vuelve a new). El claim del INFORME sobre el original es correcto.
+- En el EDITADO: new MCPClientPollCallback aparece exactamente 1 vez (:454, EnsurePollCallbackPool); POLL_CALLBACK_POOL_SIZE :185; IsCurrentPollGeneration x4. Llaves balanceadas 558/558.
+- El watchdog del poll existe en ambos (POLL_WATCHDOG_S=30, abandono + OnPollFail("watchdog")).
+- No puedes compilar Enforce ni ejecutar el juego. La compilacion y el re-conteo del leak quedan para el ciclo in-game del orquestador.
+
+ANGULOS OBLIGATORIOS (uno a uno, di limpio o finding)
+A1. Maquina de generaciones y carreras: recorre TODOS los caminos (exito, error, timeout, watchdog-abandon, regeneracion TryInit, shutdown). Casos concretos a atacar: GET viejo completa tarde (el INFORME trae la prueba paso a paso — verificala contra el CODIGO, no contra el informe); doble callback por retries del proto (restapi.c avisa reintentos); pool de 2 agotado (ambos slots bound) — ¿puede el bridge quedarse SIN polear para siempre (stall permanente) o el watchdog lo recupera siempre? cuantifica el peor caso; SetGeneration escrito sobre slot no-idle (¿hay algun camino?).
+A2. Regla del brief original: el descarte por generacion del poll ABANDONADO debe seguir funcionando. IsCurrentPollGeneration(0) siempre falso — ¿hay camino donde un slot reciclado a 0 despache igualmente?
+A3. Enforce correctness: ternarios (prohibidos), condiciones && / || multilinea (prohibidas), Print con composicion inline (prohibido — variable local primero), tipado explicito, null-checks. CRITICO: el INFORME dice que m_Bridge del callback pasa a referencia debil — si el bridge muere y el engine dispara el callback retenido, ¿el dispatch null-checkea m_Bridge antes de usarlo? En Enforce, tocar una ref debil a instancia muerta lanza VM exception incluso en comparaciones — revisa como se protege.
+A4. Regresiones colaterales del diff completo: ReleaseCallback ya no se llama desde el dispatch del poll — ¿quedan usos/arrays (m_PollCallbackRefs u otros) huerfanos, con conteos que ahora mienten o crecen? ¿El log del watchdog (CountBoundPollCallbacks) es coherente con el nuevo modelo? ¿PostResult/MCPClientResultCallback quedo intacto como promete el informe? ¿Algun simbolo publico renombrado que otro fichero (MCPBridge.c, MCPMessages.c) use?
+A5. El claim de diseno: el INFORME rechaza el candidato de UN solo callback porque "reescribir m_Generation en la unica instancia hace que el OnSuccess tardio del GET viejo vea la generacion nueva y pise el poll vivo". ¿Es correcto ese razonamiento, o habia una via de 1 slot segura que el implementador descarto mal? (Si la hay, es P3 informativo, no bloqueo.)
+
+FORMATO DE SALIDA (ultimo mensaje)
+VEREDICTO: APPROVE | REQUEST-CHANGES
+FINDINGS: lista numerada, cada uno "P1|P2|P3 - titulo - fichero:linea - que pasa - fix minimo sugerido". Si un angulo esta limpio, di "A<n>: limpio" en una linea. Nada mas.

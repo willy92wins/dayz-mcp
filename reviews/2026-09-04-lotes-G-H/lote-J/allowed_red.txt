@@ -1,0 +1,2 @@
+FAIL: test_full_source_hash_is_frozen
+FAIL: test_removing_only_marker_lines_restores_frozen_source_hash

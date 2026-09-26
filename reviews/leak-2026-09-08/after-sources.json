@@ -1,0 +1,22 @@
+{
+  "addon/scripts/5_Mission/MCPCallbacks.c": {
+    "bytes": 1541,
+    "sha256": "21644b19ea5b2cfff306101a4985cb0d07219f89f7915f86519f0876749c577a"
+  },
+  "addon/scripts/5_Mission/MCPBridge.c": {
+    "bytes": 82283,
+    "sha256": "cf3a2d0fb18ccdfb5481f7c8bab2bf303254d5bdbf18c9fbee92c7b93d631817"
+  },
+  "addon/scripts/5_Mission/MCPClientBridge.c": {
+    "bytes": 94919,
+    "sha256": "e41bb9ea05cd214da44639ccc7ffb1e7186ae13c113b12994971004f63f7c47b"
+  },
+  "tools/tests/test_leak_callback_lifetime.py": {
+    "bytes": 7142,
+    "sha256": "d27cbe61074d3869aa65469f811965adf45ad4917ad6d6e3362f2d851b17dc05"
+  },
+  "tools/tests/test_leak_callback_drain.py": {
+    "bytes": 8347,
+    "sha256": "f26b4f895e279c1a98a5a3ee8a323fbc195af17f718a7616045e34adff592998"
+  }
+}

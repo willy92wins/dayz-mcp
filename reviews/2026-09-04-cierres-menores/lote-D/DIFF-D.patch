@@ -1,0 +1,865 @@
+diff --git a/tools/README-mcp.md b/tools/README-mcp.md
+index d50816b..8362981 100644
+--- a/tools/README-mcp.md
++++ b/tools/README-mcp.md
+@@ -53,7 +53,7 @@ There is no embedded fallback for interactive agent sessions. If client/daemon d
+ 
+ Mutating work uses the request-bound high-level queue by default:
+ 
+-1. `session_status()` first: `owner`/`queue`/`claimable` describe the **lease**. `box` describes the **game box** (managed `runs`, unmanaged `foreign` DayZDiag, `ports_in_use`, and the box wait FIFO). A free lease does not mean a free box.
++1. `session_status()` first: `owner`/`queue`/`claimable` describe the **lease**. `box` describes the **game box** (managed `runs`, unmanaged `foreign` DayZ processes, seen by image or by a held UDP port even without a run record, `ports_in_use` from the socket table, and the box wait FIFO). A free lease does not mean a free box.
+ 2. `session_acquire_wait(purpose, max_wait_s)` remains queued until it returns an active lease or fails. It never returns `queued`.
+ 3. Run only the required mutating operations. The lease/ticket TTL is 120 seconds; heartbeat is for active exclusive work only.
+ 4. `session_release(lease_token)` as soon as exclusive work ends.
+@@ -75,7 +75,7 @@ A mutation without a lease returns `lease_required`. Call `session_acquire_wait`
+ 
+ Use `dayz_test_run(project, mode, ...)` for normal MCP launches. The call remains open while it waits in the FIFO and while the test runs; it acquires, heartbeats and releases the lease internally. Projects and paths come only from the sealed `dayz-test-v1` policy. Use `dayz_test_stop(run_id)` to queue adoption and shutdown of that exact managed run. Neither tool accepts or returns a lease token, executable, PID, argv or arbitrary path.
+ 
+-The box is a second resource. `wait_for_box_s=0` (default) fails immediately with `active_run_exists` if the box is occupied. `wait_for_box_s=<n>` waits up to n seconds (max 600, same order as `wait_for`), FIFO among waiters, without holding `tool_lock` and without requiring a lease heartbeat. A claimed head uses a 600 s claim TTL, not the 120 s waiter TTL; `dayz_test_run` heartbeats that claim until the launch returns, so a build longer than 120 s does not hand the box to the next waiter. While a session holds that claim, `dayz_test_run` from any other session is rejected (`active_run_exists`) even if no run is registered yet. On timeout the same `active_run_exists` is returned, enriched in the MCP tool (not on the sealed lifecycle wire) with `occupied_by_run_id`/`mod`/`label`/`age_s` when the occupant is a managed run, or `foreign=true` plus `port`/mods when it is not. The failed result keeps `run_id` null; the occupant's id is `occupied_by_run_id`. The stop recipe is only emitted when the caller owns the run or it is `RUNNING_IDLE`; otherwise retry with `wait_for_box_s=<n>` (and never terminate a foreign process). `box_queue_saturated` means the box wait FIFO is full — retry with `wait_for_box_s=<n>` after a waiter leaves.
++The box is a second resource. `wait_for_box_s=0` (default) fails immediately with `active_run_exists` if the box is occupied. A DayZ server holding a game port occupies the box even without a run record, and a launch onto a port held by a process that is not ours is refused (audit reason `port_in_use_foreign`; `port_scan_unknown` when the socket table could not be read), never started on top of it. `wait_for_box_s=<n>` waits up to n seconds (max 600, same order as `wait_for`), FIFO among waiters, without holding `tool_lock` and without requiring a lease heartbeat. A claimed head uses a 600 s claim TTL, not the 120 s waiter TTL; `dayz_test_run` heartbeats that claim until the launch returns, so a build longer than 120 s does not hand the box to the next waiter. While a session holds that claim, `dayz_test_run` from any other session is rejected (`active_run_exists`) even if no run is registered yet. On timeout the same `active_run_exists` is returned, enriched in the MCP tool (not on the sealed lifecycle wire) with `occupied_by_run_id`/`mod`/`label`/`age_s` when the occupant is a managed run, or `foreign=true` plus `port`/mods when it is not. The failed result keeps `run_id` null; the occupant's id is `occupied_by_run_id`. The stop recipe is only emitted when the caller owns the run or it is `RUNNING_IDLE`; otherwise retry with `wait_for_box_s=<n>` (and never terminate a foreign process). `box_queue_saturated` means the box wait FIFO is full — retry with `wait_for_box_s=<n>` after a waiter leaves.
+ 
+ Pick a free game port from `session_status.box.ports_in_use` and pass a different `port=` to `dayz_test_run`. There is no reservation registry.
+ 
+diff --git a/tools/dayz_mcp/daemon.py b/tools/dayz_mcp/daemon.py
+index 9a2a531..dd2afa0 100644
+--- a/tools/dayz_mcp/daemon.py
++++ b/tools/dayz_mcp/daemon.py
+@@ -526,6 +526,9 @@ def _activate_server_coordination(
+         diag_probe=lambda: orphan_guard.snapshot_processes_by_name(
+             ["DayZDiag_x64.exe"]
+         ),
++        # fb-20260904-114520-6927: the socket table is the second witness of
++        # the box; a DayZ image holding a UDP port occupies it without a run.
++        port_probe=orphan_guard.snapshot_udp_port_holders,
+         game_path=Path(
+             os.environ.get(
+                 "DAYZ_GAME_PATH",
+diff --git a/tools/dayz_mcp/orphan_guard.py b/tools/dayz_mcp/orphan_guard.py
+index 637ac8b..aada4d1 100644
+--- a/tools/dayz_mcp/orphan_guard.py
++++ b/tools/dayz_mcp/orphan_guard.py
+@@ -386,6 +386,124 @@ def listener_pid_for_port(port: int) -> int | None:
+     return _listener_pid_from_netstat_output(result.stdout or b"", port)
+ 
+ 
++_DAYZ_IMAGE_NAMES = frozenset(
++    name.casefold()
++    for name in ("DayZDiag_x64.exe", "DayZServer_x64.exe", "DayZ_x64.exe", "DayZ_BE.exe")
++)
++
++
++def is_dayz_image_name(name: object) -> bool:
++    """True for the DayZ client/server images, case-insensitively."""
++    return isinstance(name, str) and name.casefold() in _DAYZ_IMAGE_NAMES
++
++
++def _udp_holders_from_netstat_output(raw: bytes | str) -> list[tuple[int, int | None]]:
++    """Parse a ``netstat -ano -p UDP`` dump into ``(port, pid)`` pairs.
++
++    UDP rows carry no State column: ``UDP  0.0.0.0:2302  *:*  45428`` (four
++    whitespace-separated fields; an IPv6 local looks like ``[::]:2302``). A row
++    whose PID column is not an int keeps the port with pid None: the socket is
++    real even when its holder cannot be attributed.
++    """
++    text = _decode_console_bytes(raw) if isinstance(raw, bytes) else raw
++    holders: list[tuple[int, int | None]] = []
++    for line in text.splitlines():
++        parts = line.split()
++        if len(parts) < 3 or parts[0].upper() != "UDP":
++            continue
++        local = parts[1]
++        if ":" not in local:
++            continue
++        try:
++            port = int(local.rsplit(":", 1)[1])
++        except ValueError:
++            continue
++        if not 1 <= port <= 65535:
++            continue
++        pid: int | None = None
++        if len(parts) >= 4:
++            try:
++                pid = int(parts[-1])
++            except ValueError:
++                pid = None
++            if pid is not None and pid <= 0:
++                pid = None
++        holders.append((port, pid))
++    return holders
++
++
++def _udp_holders_via_psutil() -> list[tuple[int, int | None]] | None:
++    if psutil is None:
++        return None
++    try:
++        connections = psutil.net_connections(kind="udp")
++    except Exception:
++        return None
++    holders: list[tuple[int, int | None]] = []
++    for connection in connections:
++        local = getattr(connection, "laddr", None)
++        port = getattr(local, "port", None)
++        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
++            continue
++        pid = getattr(connection, "pid", None)
++        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
++            pid = None
++        holders.append((port, pid))
++    return holders
++
++
++def _udp_holders_via_netstat() -> list[tuple[int, int | None]] | None:
++    if not _IS_WINDOWS:  # pragma: no cover - production target is Windows.
++        return None
++    try:
++        result = subprocess.run(
++            ["netstat", "-ano", "-p", "UDP"],
++            capture_output=True,
++            timeout=10,
++        )
++    except (OSError, subprocess.SubprocessError):
++        return None
++    if result.returncode != 0:
++        return None
++    return _udp_holders_from_netstat_output(result.stdout or b"")
++
++
++def snapshot_udp_port_holders() -> dict[str, object]:
++    """Every bound UDP port with its holder PID and image name, from the OS table.
++
++    fb-20260904-114520-6927: the box probe enumerated ``DayZDiag_x64.exe`` by
++    name and read ports from argv, so a server with another image, or one that
++    argv did not describe, held 2302 while the box read as free and a launch
++    went on top of it. This reads the socket table instead: psutil when it is
++    importable, ``netstat -ano -p UDP`` otherwise. Image names come from one
++    ToolHelp snapshot; a PID that snapshot does not list (exited between the
++    two reads) keeps ``name`` None. ``known`` is False when no source answered:
++    callers treat that as occupied, never as empty.
++    """
++    holders = _udp_holders_via_psutil()
++    if holders is None:
++        holders = _udp_holders_via_netstat()
++    if holders is None:
++        return {"known": False, "holders": []}
++    entries = _snapshot_all_process_entries()
++    names = {int(pid): name for pid, name in entries} if entries else {}
++    rows: list[dict[str, object]] = [
++        {
++            "port": int(port),
++            "pid": pid,
++            "name": names.get(pid) if isinstance(pid, int) else None,
++        }
++        for port, pid in holders
++    ]
++    rows.sort(
++        key=lambda row: (
++            int(row["port"]),
++            row["pid"] if isinstance(row["pid"], int) else -1,
++        )
++    )
++    return {"known": True, "holders": rows}
++
++
+ def _native_listener_pid_for_port(port: int) -> int | None:
+     """Unique exact-loopback listener PID without starting a helper process."""
+     if (
+diff --git a/tools/dayz_mcp/process_lifecycle.py b/tools/dayz_mcp/process_lifecycle.py
+index a4071ff..72edb02 100644
+--- a/tools/dayz_mcp/process_lifecycle.py
++++ b/tools/dayz_mcp/process_lifecycle.py
+@@ -41,6 +41,12 @@ _HEX = frozenset("0123456789abcdef")
+ _IDENTITY_SCHEMES = frozenset({"legacy-wmi-v1", "psutil-argv-v2"})
+ _BOX_MOD_CAP = 12
+ _BOX_OCCUPANCY_CACHE_S = 1.5
++# fb-20260904-114520-6927: images whose bound UDP ports make the box occupied
++# even without a run record. Mirrors orphan_guard so a probe fed from another
++# source is classified the same way.
++_DAYZ_IMAGE_NAMES = frozenset(
++    {"dayzdiag_x64.exe", "dayzserver_x64.exe", "dayz_x64.exe", "dayz_be.exe"}
++)
+ _ACTIVITY_STALE_S = 900.0
+ _ACTIVE_RUN_STOP_HINT = "stop it with dayz_test_stop(run_id={run_id})"
+ _ACTIVE_RUN_WAIT_HINT = "retry with wait_for_box_s=<n>"
+@@ -150,6 +156,18 @@ def parse_dayz_launch_argv(argv: object) -> dict[str, object]:
+     }
+ 
+ 
++def _is_dayz_image(name: object) -> bool:
++    return isinstance(name, str) and name.casefold() in _DAYZ_IMAGE_NAMES
++
++
++def _requested_port(argv: object) -> int | None:
++    """The -port this launch asked for, or None when argv names none."""
++    ports = parse_dayz_launch_argv(argv).get("ports")
++    if isinstance(ports, list) and ports and isinstance(ports[0], int):
++        return ports[0]
++    return None
++
++
+ def _utc_epoch(value: object) -> float | None:
+     if not isinstance(value, str) or not value.strip():
+         return None
+@@ -229,6 +247,7 @@ class _BoxProbes:
+     foreign: tuple[dict[str, object], ...]
+     ports_in_use: tuple[int, ...]
+     scan_known: bool
++    port_scan_known: bool = True
+ 
+ 
+ def _activity_from_snapshot(
+@@ -314,7 +333,8 @@ def _derive_box(snapshot: _BoxSnapshot, probes: _BoxProbes) -> dict[str, object]
+         }
+         row.update(_generation_projection(run, snapshot.daemon_generation))
+         runs.append(row)
+-    occupied = True if not probes.scan_known else bool(runs or probes.foreign)
++    scans_known = probes.scan_known and probes.port_scan_known
++    occupied = True if not scans_known else bool(runs or probes.foreign)
+     return {
+         "occupied": occupied,
+         "runs": runs,
+@@ -322,6 +342,7 @@ def _derive_box(snapshot: _BoxSnapshot, probes: _BoxProbes) -> dict[str, object]
+         "ports_in_use": list(probes.ports_in_use),
+         "queue": [],
+         "scan_known": probes.scan_known,
++        "port_scan_known": probes.port_scan_known,
+     }
+ 
+ 
+@@ -946,6 +967,7 @@ class ProcessLifecycle:
+         retail_probe: RetailProbe | None,
+         game_path: Path,
+         diag_probe: RetailProbe | None = None,
++        port_probe: RetailProbe | None = None,
+         launcher: Launcher | None = None,
+         id_fn: Callable[[], str] | None = None,
+         recovery_fault_arm: RecoveryFaultArm | None = None,
+@@ -959,6 +981,7 @@ class ProcessLifecycle:
+         self.guard = guard
+         self.retail_probe = retail_probe
+         self.diag_probe = diag_probe
++        self.port_probe = port_probe
+         self.game_path = Path(game_path).resolve()
+         self.launcher = launcher or self._launch
+         self.id_fn = id_fn or (lambda: uuid.uuid4().hex)
+@@ -1887,6 +1910,16 @@ class ProcessLifecycle:
+                     "active_run_exists",
+                     audit_reason=foreign_diag_reason,
+                 )
++            foreign_port_reason = self._foreign_port_reason(
++                registered_pids, _requested_port(parsed["argv"])
++            )
++            if foreign_port_reason is not None:
++                return self._start_rejection(
++                    client,
++                    authority,
++                    "active_run_exists",
++                    audit_reason=foreign_port_reason,
++                )
+             if self._quarantined():
+                 return self._reject_reserved(authority, command, "retail_quarantine")
+             if not self._audit("lifecycle_start", client, "lease_valid", "allowed"):
+@@ -3178,6 +3211,79 @@ class ProcessLifecycle:
+             observed.append(process)
+         return None, observed
+ 
++    def _port_holders(
++        self,
++    ) -> tuple[str | None, list[dict[str, object]] | None]:
++        """Bound UDP ports with holder pid and image, or why the scan is unknown.
++
++        No probe wired means the feature is absent (an empty, known scan), not
++        an unknown one: daemons and fixtures built without it keep their
++        behaviour. A wired probe that fails, or answers with a shape this code
++        cannot vouch for, is unknown: launching on that would be a guess.
++        """
++        if self.port_probe is None:
++            return None, []
++        try:
++            result = self.port_probe()
++        except Exception:
++            return "port_scan_unknown", None
++        if not isinstance(result, dict) or result.get("known") is not True:
++            return "port_scan_unknown", None
++        holders = result.get("holders")
++        if not isinstance(holders, list):
++            return "port_scan_unknown", None
++        observed: list[dict[str, object]] = []
++        for holder in holders:
++            if not isinstance(holder, dict):
++                return "port_scan_unknown", None
++            port = holder.get("port")
++            if (
++                not isinstance(port, int)
++                or isinstance(port, bool)
++                or not 1 <= port <= 65535
++            ):
++                return "port_scan_unknown", None
++            pid = holder.get("pid")
++            if pid is not None and (
++                not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0
++            ):
++                return "port_scan_unknown", None
++            name = holder.get("name")
++            observed.append(
++                {
++                    "port": port,
++                    "pid": pid,
++                    "name": name if isinstance(name, str) else None,
++                }
++            )
++        return None, observed
++
++    def _foreign_port_reason(
++        self, registered_pids: set[int], requested_port: int | None
++    ) -> str | None:
++        """Refuse to launch on top of a socket this lifecycle does not own.
++
++        A holder is foreign when its pid is not a process of an active run (an
++        unattributable pid counts as foreign). It blocks the launch when it is
++        a DayZ image on any port, or any image on the port this launch asked
++        for. Always a fresh probe: the 1.5 s box cache serves readers, and a
++        server that appeared a second ago is exactly the case this guards
++        (fb-20260904-114520-6927: a 6-minute-old foreign server on 2302 was
++        launched over because the name probe did not list it).
++        """
++        reason, holders = self._port_holders()
++        if reason is not None or holders is None:
++            return reason or "port_scan_unknown"
++        for holder in holders:
++            pid = holder.get("pid")
++            if isinstance(pid, int) and pid in registered_pids:
++                continue
++            if _is_dayz_image(holder.get("name")) or (
++                requested_port is not None and holder["port"] == requested_port
++            ):
++                return "port_in_use_foreign"
++        return None
++
+     def box_occupancy(self, *, now: float | None = None) -> dict[str, object]:
+         """The box is derived from one snapshot; live state is never re-read after it.
+ 
+@@ -3267,11 +3373,13 @@ class ProcessLifecycle:
+                 scan_known=False,
+             )
+         foreign: list[dict[str, object]] = []
++        diag_foreign_pids: set[int] = set()
+         for process in observed:
+             pid = int(process["pid"])
+             parsed = _absorb_argv(pid)
+             if pid in registered_pids:
+                 continue
++            diag_foreign_pids.add(pid)
+             parsed_ports = parsed.get("ports")
+             port = (
+                 parsed_ports[0]
+@@ -3285,10 +3393,48 @@ class ProcessLifecycle:
+                     "profiles": _public_profiles_label(parsed.get("profiles")),
+                 }
+             )
++        # fb-20260904-114520-6927: the socket table is the second witness. A
++        # DayZ image holding a UDP port is foreign even when the name probe
++        # never saw it (other image, argv without -port); its ports and the
++        # ports of registered processes come from the OS, not from argv.
++        # Unrelated services (DNS, IKE) never touch the box.
++        port_reason, holders = self._port_holders()
++        if port_reason is not None or holders is None:
++            return _BoxProbes(
++                foreign=tuple(foreign),
++                ports_in_use=tuple(ports),
++                scan_known=True,
++                port_scan_known=False,
++            )
++        rows_by_pid: dict[int, dict[str, object]] = {}
++        for holder in holders:
++            pid = holder.get("pid")
++            port = holder["port"]
++            name = holder.get("name")
++            registered = isinstance(pid, int) and pid in registered_pids
++            dayz = _is_dayz_image(name)
++            if registered or dayz:
++                _remember_port(int(port))
++            if registered or not dayz or pid in diag_foreign_pids:
++                continue
++            row = rows_by_pid.get(int(pid))
++            if row is None:
++                row = {
++                    "port": int(port),
++                    "mods": [],
++                    "profiles": None,
++                    "image": name,
++                    "source": "port",
++                }
++                rows_by_pid[int(pid)] = row
++                foreign.append(row)
++            elif int(port) < int(row["port"]):
++                row["port"] = int(port)
+         return _BoxProbes(
+             foreign=tuple(foreign),
+             ports_in_use=tuple(ports),
+             scan_known=True,
++            port_scan_known=True,
+         )
+ 
+     def _probes_for_snapshot(
+diff --git a/tools/dayz_mcp/server.py b/tools/dayz_mcp/server.py
+index c752f80..ad54b41 100644
+--- a/tools/dayz_mcp/server.py
++++ b/tools/dayz_mcp/server.py
+@@ -3038,7 +3038,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
+     @app.tool(
+         description=(
+             "Read redacted daemon/queue/self coordination state, including "
+-            "box occupancy (managed runs, foreign DayZDiag, ports_in_use, "
++            "box occupancy (managed runs; foreign DayZ processes seen by image "
++            "or by a held UDP port, even without a run record; ports_in_use "
++            "from the socket table; "
+             "and the box wait FIFO). blocked_on names the resource and next "
+             "queue, or is null when neither lease nor box is busy. Lease TTL "
+             f"is {config.session_ttl_s:g} s; renewal is internal."
+@@ -3081,7 +3083,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
+             "(a disposable probe need not be registered as a project). "
+             "wait_for_box_s>0 waits "
+             "until session_status.box is free (FIFO, no tool_lock while "
+-            f"sleeping). 0 is the immediate reject. wait_for_box_s must be <= "
++            "sleeping). A DayZ server holding a game port counts as an "
++            "occupied box even without a run record, and a launch onto a "
++            "port held by a process that is not ours is refused "
++            "(active_run_exists, audit port_in_use_foreign), never started "
++            "on top of it. "
++            f"0 is the immediate reject. wait_for_box_s must be <= "
+             f"{BOX_WAIT_MAX_S:g}. Choose port= from "
+             "session_status.box.ports_in_use. width/height are copied into "
+             "the request and the worker passes -x/-y to the client exe, but "
+diff --git a/tools/tests/test_box_port_occupancy.py b/tools/tests/test_box_port_occupancy.py
+new file mode 100644
+index 0000000..3e3cb3f
+--- /dev/null
++++ b/tools/tests/test_box_port_occupancy.py
+@@ -0,0 +1,321 @@
++"""fb-20260904-114520-6927: the box is occupied by whoever holds a game port.
++
++The name probe (``DayZDiag_x64.exe`` by image) read ports from argv, so a
++server with another image, or one argv did not describe, held 2302 while the
++box read as free and ``dayz_test_run`` launched on top of it. The socket table
++is now a second witness: a DayZ image holding a UDP port is foreign even
++without a run record, ports come from the OS, an unreadable table is an
++occupied box, and ``start_run`` refuses to launch onto a socket we do not own.
++"""
++from __future__ import annotations
++
++import json
++import sys
++import unittest
++from pathlib import Path
++from tempfile import TemporaryDirectory
++
++_TOOLS_DIR = Path(__file__).resolve().parents[1]
++if str(_TOOLS_DIR) not in sys.path:
++    sys.path.insert(0, str(_TOOLS_DIR))
++
++from dayz_mcp.process_lifecycle import (
++    ProcessLifecycle,
++    RunManifestStore,
++    RunRecord,
++    _BoxProbes,
++    _BoxSnapshot,
++    _derive_box,
++    _requested_port,
++)
++from dayz_mcp.runtime_state import RuntimePaths
++from dayz_mcp.session_coordination import SessionCoordinator
++from tests.test_box_occupancy import _argv_lookup
++from tests.test_process_lifecycle import (
++    IDENTITY_A,
++    AuditSink,
++    FakeGuard,
++    FakeLauncher,
++    process,
++    snapshot,
++)
++
++DIAG_EMPTY = {"known": True, "processes": []}
++
++
++def _holders(*rows: tuple[int, int | None, str | None]) -> dict[str, object]:
++    return {
++        "known": True,
++        "holders": [{"port": port, "pid": pid, "name": name} for port, pid, name in rows],
++    }
++
++
++class PortOccupancyTest(unittest.TestCase):
++    def setUp(self) -> None:
++        self.temporary = TemporaryDirectory()
++        self.root = Path(self.temporary.name)
++        self.game = self.root / "DayZ"
++        self.game.mkdir()
++        (self.game / "DayZDiag_x64.exe").write_bytes(b"")
++        paths = RuntimePaths(
++            self.root / "runtime",
++            self.root / "runtime" / "audit",
++            self.root / "runtime" / "coordination.json",
++            self.root / "runtime" / "runs.json",
++        )
++        self.audit = AuditSink()
++        self.coordinator = SessionCoordinator(
++            token_fn=lambda: "token-A",
++            id_fn=lambda: "lease-A",
++            audit=self.audit,
++        )
++        status, acquired = self.coordinator.acquire(IDENTITY_A, "lifecycle")
++        self.assertEqual(status, 200)
++        self.token_a = acquired["lease_token"]
++        self.store = RunManifestStore(paths)
++        self.guard = FakeGuard()
++        self.launcher = FakeLauncher()
++        self.argv: dict[int, list[str]] = {}
++        self.port_holders: dict[str, object] = _holders()
++        self.lifecycle = ProcessLifecycle(
++            coordinator=self.coordinator,
++            manifest=self.store,
++            audit=self.audit,
++            guard=self.guard,
++            retail_probe=lambda: DIAG_EMPTY,
++            diag_probe=lambda: DIAG_EMPTY,
++            port_probe=lambda: self.port_holders,
++            game_path=self.game,
++            launcher=self.launcher,
++            id_fn=lambda: "run-1",
++            argv_of=_argv_lookup(self.argv),
++        )
++
++    def tearDown(self) -> None:
++        self.temporary.cleanup()
++
++    def request(self, port: int | None = 2302) -> dict[str, object]:
++        argv = [str(self.game / "DayZDiag_x64.exe"), "-mission=test"]
++        if port is not None:
++            argv.append(f"-port={port}")
++        return {
++            "argv": argv,
++            "cwd": str(self.game),
++            "role": "client",
++            "window_style": "normal",
++            "label": "gate",
++            "mod": "@SameMod",
++            "profiles": "profiles",
++            "mission": "test",
++        }
++
++    def add_run(self, record, *, owner: str | None = "A", state: str = "RUNNING") -> RunRecord:
++        run = RunRecord(
++            "run-existing",
++            owner,
++            "lease-A" if owner else None,
++            state,
++            "same",
++            "@SameMod",
++            "profiles",
++            "mission",
++            [record],
++        )
++        self.store.add(run)
++        return run
++
++    def rejected_reasons(self) -> list[object]:
++        return [
++            event.get("reason")
++            for event in self.audit.events
++            if event.get("event") == "lifecycle_start_rejected"
++        ]
++
++    # --- box_occupancy -------------------------------------------------------
++
++    def test_foreign_dayz_server_on_a_game_port_occupies_the_box(self) -> None:
++        # The ficha: a 6-minute-old server, not ours, no run record, and the
++        # name probe empty. Its image is not DayZDiag, so only the socket
++        # table can see it.
++        self.port_holders = _holders(
++            (2302, 777, "DayZServer_x64.exe"), (2304, 777, "DayZServer_x64.exe")
++        )
++
++        box = self.lifecycle.box_occupancy()
++
++        self.assertTrue(box["occupied"])
++        self.assertEqual(box["runs"], [])
++        self.assertEqual(
++            box["foreign"],
++            [
++                {
++                    "port": 2302,
++                    "mods": [],
++                    "profiles": None,
++                    "image": "DayZServer_x64.exe",
++                    "source": "port",
++                }
++            ],
++        )
++        self.assertEqual(box["ports_in_use"], [2302, 2304])
++        self.assertTrue(box["scan_known"])
++        self.assertTrue(box["port_scan_known"])
++        self.assertNotIn("pid", json.dumps(box))
++
++    def test_unrelated_services_never_touch_the_box(self) -> None:
++        self.port_holders = _holders((53, 4032, "svchost.exe"), (500, 6084, "svchost.exe"))
++
++        box = self.lifecycle.box_occupancy()
++
++        self.assertFalse(box["occupied"])
++        self.assertEqual(box["foreign"], [])
++        self.assertEqual(box["ports_in_use"], [])
++
++    def test_registered_run_ports_come_from_the_socket_table(self) -> None:
++        # argv says nothing about ports; the OS does. A registered pid is never foreign.
++        self.add_run(process(4242))
++        self.argv[4242] = ["DayZDiag_x64.exe", "-server"]
++        self.port_holders = _holders((2402, 4242, "DayZDiag_x64.exe"), (2404, 4242, "DayZDiag_x64.exe"))
++
++        box = self.lifecycle.box_occupancy()
++
++        self.assertTrue(box["occupied"])
++        self.assertEqual([row["run_id"] for row in box["runs"]], ["run-existing"])
++        self.assertEqual(box["foreign"], [])
++        self.assertEqual(box["ports_in_use"], [2402, 2404])
++
++    def test_diag_and_port_witnesses_of_one_process_make_one_row(self) -> None:
++        self.lifecycle.diag_probe = lambda: {
++            "known": True,
++            "processes": [{"pid": 909, "name": "DayZDiag_x64.exe"}],
++        }
++        self.argv[909] = ["DayZDiag_x64.exe", "-server", "-port=2402", "-mod=@Foreign"]
++        self.port_holders = _holders((2402, 909, "DayZDiag_x64.exe"), (2404, 909, "DayZDiag_x64.exe"))
++
++        box = self.lifecycle.box_occupancy()
++
++        self.assertEqual(len(box["foreign"]), 1)
++        self.assertEqual(box["foreign"][0]["port"], 2402)
++        self.assertEqual(box["foreign"][0]["mods"], ["@Foreign"])
++        self.assertNotIn("source", box["foreign"][0])
++        self.assertEqual(box["ports_in_use"], [2402, 2404])
++
++    def test_unreadable_socket_table_is_an_occupied_box(self) -> None:
++        def boom() -> dict[str, object]:
++            raise OSError("netstat unavailable")
++
++        for probe in (boom, lambda: {"known": False, "holders": []}, lambda: {"known": True, "holders": "x"}):
++            with self.subTest(probe):
++                self.lifecycle.port_probe = probe
++                self.lifecycle._invalidate_box_cache()
++                box = self.lifecycle.box_occupancy()
++                self.assertTrue(box["occupied"])
++                self.assertTrue(box["scan_known"])
++                self.assertFalse(box["port_scan_known"])
++                self.assertEqual(box["foreign"], [])
++
++    def test_no_port_probe_keeps_the_legacy_behaviour(self) -> None:
++        self.lifecycle.port_probe = None
++
++        box = self.lifecycle.box_occupancy()
++
++        self.assertFalse(box["occupied"])
++        self.assertTrue(box["port_scan_known"])
++        self.assertEqual(box["foreign"], [])
++
++    def test_derive_box_treats_an_unknown_port_scan_as_occupied(self) -> None:
++        snapshot = _BoxSnapshot(
++            clock=100.0, runs=(), activity={}, unknown=frozenset(), revision=1
++        )
++        probes = _BoxProbes(foreign=(), ports_in_use=(), scan_known=True, port_scan_known=False)
++        box = _derive_box(snapshot, probes)
++        self.assertTrue(box["occupied"])
++        self.assertFalse(box["port_scan_known"])
++        legacy = _BoxProbes(foreign=(), ports_in_use=(), scan_known=True)
++        self.assertFalse(_derive_box(snapshot, legacy)["occupied"])
++
++    # --- start_run -----------------------------------------------------------
++
++    def test_start_refuses_the_requested_port_held_by_a_process_that_is_not_ours(self) -> None:
++        # Any image: what matters is that we would bind on top of it.
++        self.port_holders = _holders((2302, 31337, "python.exe"))
++
++        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request(port=2302))
++
++        self.assertEqual(result.get("error"), "active_run_exists")
++        self.assertEqual(self.rejected_reasons()[-1], "port_in_use_foreign")
++        self.assertEqual(self.launcher.calls, [])
++        self.assertEqual(self.store.list_runs(), [])
++
++    def test_start_refuses_while_a_foreign_dayz_image_holds_any_port(self) -> None:
++        self.port_holders = _holders((2402, 777, "DayZServer_x64.exe"))
++
++        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request(port=2302))
++
++        self.assertEqual(result.get("error"), "active_run_exists")
++        self.assertEqual(self.rejected_reasons()[-1], "port_in_use_foreign")
++        self.assertEqual(self.launcher.calls, [])
++
++    def test_start_refuses_an_unattributable_holder_of_the_requested_port(self) -> None:
++        self.port_holders = _holders((2302, None, None))
++
++        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request(port=2302))
++
++        self.assertEqual(result.get("error"), "active_run_exists")
++        self.assertEqual(self.rejected_reasons()[-1], "port_in_use_foreign")
++
++    def test_start_proceeds_when_holders_are_unrelated(self) -> None:
++        self.port_holders = _holders((53, 4032, "svchost.exe"), (2402, 5555, "python.exe"))
++
++        launched = process(self.launcher.pid)
++        self.guard.snapshots[launched.pid] = snapshot(launched)
++
++        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request(port=2302))
++
++        self.assertTrue(result.get("ok"), result)
++        self.assertEqual(len(self.launcher.calls), 1)
++        self.assertEqual(self.rejected_reasons(), [])
++
++    def test_start_uses_a_fresh_probe_not_the_box_cache(self) -> None:
++        # A reader filled the 1.5 s cache while the port was free; the server
++        # appeared right after. The launch must see it.
++        self.assertFalse(self.lifecycle.box_occupancy()["occupied"])
++        self.port_holders = _holders((2302, 777, "DayZServer_x64.exe"))
++
++        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request(port=2302))
++
++        self.assertEqual(result.get("error"), "active_run_exists")
++        self.assertEqual(self.rejected_reasons()[-1], "port_in_use_foreign")
++
++    def test_start_is_refused_when_the_socket_table_cannot_be_read(self) -> None:
++        def boom() -> dict[str, object]:
++            raise OSError("netstat unavailable")
++
++        self.lifecycle.port_probe = boom
++
++        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request(port=2302))
++
++        self.assertEqual(result.get("error"), "active_run_exists")
++        self.assertEqual(self.rejected_reasons()[-1], "port_scan_unknown")
++        self.assertEqual(self.launcher.calls, [])
++
++    def test_start_without_a_port_probe_is_unchanged(self) -> None:
++        self.lifecycle.port_probe = None
++
++        launched = process(self.launcher.pid)
++        self.guard.snapshots[launched.pid] = snapshot(launched)
++
++        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request(port=2302))
++
++        self.assertTrue(result.get("ok"), result)
++        self.assertEqual(len(self.launcher.calls), 1)
++
++    def test_requested_port_parsing(self) -> None:
++        self.assertEqual(_requested_port(["x.exe", "-port=2402"]), 2402)
++        self.assertEqual(_requested_port(["x.exe", "-port", "2302"]), 2302)
++        self.assertIsNone(_requested_port(["x.exe", "-mission=test"]))
++        self.assertIsNone(_requested_port(None))
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tools/tests/test_orphan_guard_udp.py b/tools/tests/test_orphan_guard_udp.py
+new file mode 100644
+index 0000000..76400b2
+--- /dev/null
++++ b/tools/tests/test_orphan_guard_udp.py
+@@ -0,0 +1,100 @@
++"""fb-20260904-114520-6927: the UDP socket table as the second witness of the box (orphan_guard)."""
++from __future__ import annotations
++
++import sys
++import unittest
++from types import SimpleNamespace
++from unittest.mock import patch
++
++from dayz_mcp import orphan_guard
++
++NETSTAT_SAMPLE = """
++Conexiones activas
++
++  Proto  Dirección local          Dirección remota        Estado           PID
++  TCP    127.0.0.1:8765         0.0.0.0:0              LISTENING       1234
++  UDP    0.0.0.0:53             *:*                                    4032
++  UDP    0.0.0.0:2302           *:*                                    45428
++  UDP    [::]:2304              *:*                                    45428
++  UDP    127.0.0.1:1900         *:*                                    n/a
++  UDP    garbage
++"""
++
++
++class NetstatUdpParserTest(unittest.TestCase):
++    def test_rows_become_port_pid_pairs_including_ipv6_and_unattributable(self) -> None:
++        pairs = orphan_guard._udp_holders_from_netstat_output(NETSTAT_SAMPLE)
++        self.assertEqual(pairs, [(53, 4032), (2302, 45428), (2304, 45428), (1900, None)])
++
++    def test_oem_bytes_do_not_raise(self) -> None:
++        raw = "  UDP    0.0.0.0:2302           *:*   45428\r\n".encode("cp850")
++        self.assertEqual(orphan_guard._udp_holders_from_netstat_output(raw), [(2302, 45428)])
++
++
++class SnapshotUdpPortHoldersTest(unittest.TestCase):
++    def test_psutil_rows_are_named_from_one_toolhelp_snapshot(self) -> None:
++        rows = [
++            SimpleNamespace(laddr=SimpleNamespace(ip="0.0.0.0", port=2304), pid=45428),
++            SimpleNamespace(laddr=SimpleNamespace(ip="0.0.0.0", port=2302), pid=45428),
++            SimpleNamespace(laddr=SimpleNamespace(ip="0.0.0.0", port=53), pid=None),
++            SimpleNamespace(laddr=SimpleNamespace(ip="::", port=70000), pid=7),
++        ]
++        fake_psutil = SimpleNamespace(net_connections=lambda kind: rows)
++        with patch.object(orphan_guard, "psutil", fake_psutil), patch.object(
++            orphan_guard,
++            "_snapshot_all_process_entries",
++            return_value=[(45428, "DayZDiag_x64.exe"), (4032, "svchost.exe")],
++        ):
++            result = orphan_guard.snapshot_udp_port_holders()
++        self.assertTrue(result["known"])
++        self.assertEqual(
++            result["holders"],
++            [
++                {"port": 53, "pid": None, "name": None},
++                {"port": 2302, "pid": 45428, "name": "DayZDiag_x64.exe"},
++                {"port": 2304, "pid": 45428, "name": "DayZDiag_x64.exe"},
++            ],
++        )
++
++    def test_netstat_is_the_fallback_when_psutil_is_absent(self) -> None:
++        with patch.object(orphan_guard, "psutil", None), patch.object(
++            orphan_guard, "_udp_holders_via_netstat", return_value=[(2302, 45428)]
++        ), patch.object(orphan_guard, "_snapshot_all_process_entries", return_value=None):
++            result = orphan_guard.snapshot_udp_port_holders()
++        self.assertEqual(result, {"known": True, "holders": [{"port": 2302, "pid": 45428, "name": None}]})
++
++    def test_no_source_is_unknown_never_empty(self) -> None:
++        with patch.object(orphan_guard, "psutil", None), patch.object(
++            orphan_guard, "_udp_holders_via_netstat", return_value=None
++        ):
++            result = orphan_guard.snapshot_udp_port_holders()
++        self.assertEqual(result, {"known": False, "holders": []})
++
++    def test_psutil_failure_falls_back_to_netstat(self) -> None:
++        def boom(kind: str):
++            raise PermissionError("access denied")
++
++        with patch.object(orphan_guard, "psutil", SimpleNamespace(net_connections=boom)), patch.object(
++            orphan_guard, "_udp_holders_via_netstat", return_value=[(2302, None)]
++        ), patch.object(orphan_guard, "_snapshot_all_process_entries", return_value=[]):
++            result = orphan_guard.snapshot_udp_port_holders()
++        self.assertEqual(result["holders"], [{"port": 2302, "pid": None, "name": None}])
++
++    @unittest.skipUnless(sys.platform == "win32", "socket table read is the Windows production path")
++    def test_live_socket_table_is_readable_on_this_host(self) -> None:
++        result = orphan_guard.snapshot_udp_port_holders()
++        self.assertTrue(result["known"], result)
++        self.assertTrue(result["holders"], result)
++        for row in result["holders"]:
++            self.assertTrue(1 <= row["port"] <= 65535, row)
++            self.assertTrue(row["pid"] is None or row["pid"] > 0, row)
++
++    def test_dayz_image_names(self) -> None:
++        for name in ("DayZDiag_x64.exe", "dayzserver_x64.EXE", "DayZ_x64.exe", "DayZ_BE.exe"):
++            self.assertTrue(orphan_guard.is_dayz_image_name(name), name)
++        for name in ("svchost.exe", "python.exe", None, 3):
++            self.assertFalse(orphan_guard.is_dayz_image_name(name), name)
++
++
++if __name__ == "__main__":
++    unittest.main()

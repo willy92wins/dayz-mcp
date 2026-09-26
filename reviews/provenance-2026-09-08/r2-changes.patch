@@ -1,0 +1,145 @@
+--- r1/tools/dayz_mcp/host_config.py
++++ r2/tools/dayz_mcp/host_config.py
+@@ -338,6 +338,7 @@
+         "codex": codex_path or (Path.home() / ".codex" / "config.toml"),
+     }
+     with _open_pinned_configs(paths) as handles:
++        identities: dict[str, tuple[object, ...]] = {}
+         registrations: dict[str, _ClientRegistration | None] = {}
+         for platform in ("claude", "codex"):
+             handle = handles[platform]
+@@ -345,6 +346,7 @@
+                 registrations[platform] = None
+                 continue
+             raw = handle.read()
++            identities[platform] = handle.identity()
+             registrations[platform] = _registration_from_raw(raw, platform=platform)
+ 
+         present = sum(registration is not None for registration in registrations.values())
+@@ -389,12 +391,13 @@
+                 if os.path.lexists(paths[platform]):
+                     raise HostConfigError("daemon_provenance_conflict")
+                 continue
+-            # Host CLIs own the surrounding file and may replace/reformat it.
+-            # Revalidate the same strict registration parser on each observation;
+-            # only the accredited registration must match, not file bytes/IDs.
+-            # Keep pinned opens and canonical/no-reparse checks on the reopen.
++            # Compare content through the same strict registration parser.
++            # Within this resolution, the path must still name the pinned file;
++            # replacement between resolutions is allowed with the same registration.
++            identity = identities[platform]
+             if (
+-                _registration_from_raw(handle.read(), platform=platform)
++                handle.identity() != identity
++                or _registration_from_raw(handle.read(), platform=platform)
+                 != registrations[platform]
+             ):
+                 raise HostConfigError("daemon_provenance_conflict")
+@@ -404,7 +407,8 @@
+                 raise HostConfigError("daemon_provenance_conflict") from None
+             try:
+                 if (
+-                    _registration_from_raw(reopened.read(), platform=platform)
++                    reopened.identity() != identity
++                    or _registration_from_raw(reopened.read(), platform=platform)
+                     != registrations[platform]
+                 ):
+                     raise HostConfigError("daemon_provenance_conflict")
+--- r1/tools/tests/test_mcp_host_timeouts.py
++++ r2/tools/tests/test_mcp_host_timeouts.py
+@@ -728,9 +728,10 @@
+         final_path.assert_not_called()
+         close.assert_called_once_with(fake_handle)
+ 
+-    def test_final_pinned_revalidation_rejects_byte_drift(self) -> None:
++    def test_final_pinned_revalidation_accepts_byte_drift_with_same_registration(self) -> None:
+         self._write_claude()
+         self._write_codex()
++        expected = self._resolve()
+         original = host_config._PinnedConfigFile.read
+         reads: dict[str, int] = {}
+ 
+@@ -745,10 +746,38 @@
+         with mock.patch.object(
+             host_config._PinnedConfigFile, "read", autospec=True,
+             side_effect=drift_on_second_read,
+-        ), self.assertRaisesRegex(
+-            host_config.HostConfigError, "^daemon_provenance_conflict$"
+-        ):
+-            self._resolve()
++        ):
++            self.assertEqual(self._resolve(), expected)
++        # Initial read, reread of the pinned handle, and read through the reopen.
++        self.assertEqual(reads[str(self.codex_path)], 3)
++
++    def test_final_pinned_revalidation_rejects_byte_drift_with_changed_registration(self) -> None:
++        self._write_claude()
++        self._write_codex()
++        original = host_config._PinnedConfigFile.read
++        for path in (self.claude_path, self.codex_path):
++            for first_changed_read in (2, 3):
++                with self.subTest(path=path.name, first_changed_read=first_changed_read):
++                    reads: dict[str, int] = {}
++
++                    def drift_on_final_read(handle):
++                        value = original(handle)
++                        key = str(handle.path)
++                        reads[key] = reads.get(key, 0) + 1
++                        if handle.path == path and reads[key] >= first_changed_read:
++                            # Valid syntax and schema, but a different daemon policy.
++                            self.assertEqual(value.count(b'"12.5"'), 1)
++                            return value.replace(b'"12.5"', b'"13.0"', 1)
++                        return value
++
++                    with mock.patch.object(
++                        host_config._PinnedConfigFile, "read", autospec=True,
++                        side_effect=drift_on_final_read,
++                    ), self.assertRaisesRegex(
++                        host_config.HostConfigError, "^daemon_provenance_conflict$"
++                    ):
++                        self._resolve()
++                    self.assertEqual(reads[str(path)], first_changed_read)
+ 
+     @unittest.skipUnless(os.name == "nt", "Windows no-reparse semantics required")
+     def test_config_reparse_points_are_rejected(self) -> None:
+--- r1/tools/tests/test_provenance_gate.py
++++ r2/tools/tests/test_provenance_gate.py
+@@ -95,7 +95,7 @@
+ 
+     @contextmanager
+     def _race(self, changes, *, reread=False):
+-        """Exercise final reads/reopen despite Windows denying real concurrent rename."""
++        """Isolate content drift on one file; Windows pins forbid real concurrent writes."""
+         owner = self
+         opened = []
+         class SnapshotHandle:
+@@ -113,12 +113,17 @@
+             def close(self):
+                 self.closed = True
+         native = host_config._local_native_executable()
+-        def replace_after_parse():
++        def rewrite_after_parse():
+             for platform, raw in changes.items():
+-                owner._replace(platform, raw)
++                path = owner.paths[platform]
++                before = path.stat()
++                owner._write(path, raw)
++                after = path.stat()
++                owner.assertEqual((before.st_dev, before.st_ino),
++                                  (after.st_dev, after.st_ino))
+             return native
+         with patch.object(host_config, "_PinnedConfigFile", SnapshotHandle), patch.object(
+-            host_config, "_local_native_executable", side_effect=replace_after_parse
++            host_config, "_local_native_executable", side_effect=rewrite_after_parse
+         ):
+             try:
+                 yield
+@@ -131,6 +136,8 @@
+         for platform in self.paths:
+             self._replace(platform, self._raw(platform, self.entries[platform], unrelated=True))
+         self.assertEqual(self._status(), {"status": "ok"})
++        self.send.assert_called_once()
++        # Within a resolution, formatting may drift but file identity must stay pinned.
+         for platform in self.paths:
+             for reread in (False, True):
+                 with self.subTest(platform=platform, phase="reread" if reread else "reopen"):

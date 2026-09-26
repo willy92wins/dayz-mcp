@@ -1,0 +1,23 @@
+{
+  "ticket": "fb-20260829-024848-c7ca",
+  "command": "tools\\\\.venv-mcp\\\\Scripts\\\\python.exe -m unittest tests.test_pipeline_feedback -v",
+  "cwd": "tools",
+  "interpreter": "native tools/.venv-mcp/Scripts/python.exe (Windows venv of DayZ_MCP_dev; no Linux shim, no Linux python involved)",
+  "launcher_note": "WSLInterop binfmt registration is disabled in this WSL session (no root to re-register), so the native exe was launched via the WSL /init passthrough (cmd.exe /c m08run.bat). The interpreter that ran the tests is the native Windows venv python.exe; no source shim was applied (module under test imports no msvcrt).",
+  "runner_batch": "cwd-orq-temp/m08run.bat (temp dir, outside repo; cd /d into the junctioned tools dir)",
+  "test_target": "tools/tests/test_pipeline_feedback.py InboxTest (FIRST REGION); module also ran the 2 pre-existing PipelineToolsTest methods (not modified, not extended)",
+  "results": {
+    "ran": 15,
+    "inbox_tests": 13,
+    "pipeline_tools_tests_preexisting": 2,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "status": "OK",
+    "duration_s": 0.236
+  },
+  "evidence": {
+    "stdout_file": "reports/2026-08-30-inbox-implementation/M08/m08-test-output.txt",
+    "note": "unittest verbose output goes to stderr; captured verbatim"
+  }
+}

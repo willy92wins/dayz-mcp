@@ -1,0 +1,50 @@
+{
+  "BRIEF.txt": {
+    "bytes": 9276,
+    "sha256": "e4d529ce2b6c2d75b4f57819a2c952b1698e7e7320ab32c6df3e5130adbfffc9"
+  },
+  "CONTRACT.md": {
+    "bytes": 7180,
+    "sha256": "60691cefbf4839e732eb7cdceeec95cfc78502293da6f65b693c0bf783364058"
+  },
+  "dayz-test.ps1": {
+    "bytes": 33670,
+    "sha256": "86c42b46e6901d385256b18cbdd23f482220da5a4976f2a1284aae10a8eaea45"
+  },
+  "gate.log": {
+    "bytes": 489,
+    "sha256": "f036379c273d6bf8ad57462b414c5f845db663fce5b73e9c78d4b9387a403153"
+  },
+  "H1.log": {
+    "bytes": 345,
+    "sha256": "5de0f6000a5ae870cb0e6e65b53e89fba2e3e4229f0b794f3062d671cc7be259"
+  },
+  "M1.log": {
+    "bytes": 1400,
+    "sha256": "73d30910ff380d7de5e93eb74a4adaca89d27b56d1edd5e1aa478f226d75bf7d"
+  },
+  "M2.log": {
+    "bytes": 1320,
+    "sha256": "082c66b666169a08ebbd29c567d9c76bd3cb30dbad2f7aa8a43ecfee0aad7e45"
+  },
+  "pbo-counter-notes.md": {
+    "bytes": 801,
+    "sha256": "29036eb7640ea356889bedc2c9a1cddcc9c38d3c5a39c7fe63c64fae28cb6a69"
+  },
+  "pbo-counter.txt": {
+    "bytes": 3275,
+    "sha256": "fde79c2239f0915a6da409846a257747910435b42be6d0e04b781f879727c6d1"
+  },
+  "STATE.md": {
+    "bytes": 5149,
+    "sha256": "64e164e21f7831456125803a2bf961306f673905b1ea87d704eeea839f4e81e9"
+  },
+  "test-af59.ps1": {
+    "bytes": 14464,
+    "sha256": "81cd410158d4494c8488c67ccdf34595f6ead6505d9114ee824ab727b7624ee8"
+  },
+  "test-H1.ps1": {
+    "bytes": 14729,
+    "sha256": "72c2238e8ca9a9a5f40f2ec3c7938dbe45fb0a891da7ca68c8c9c7ddcb99063c"
+  }
+}

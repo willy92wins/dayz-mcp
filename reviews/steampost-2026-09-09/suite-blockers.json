@@ -1,0 +1,329 @@
+{
+  "categories": {
+    "bundle_access_denied": 28,
+    "path_authority_not_isolated": 19,
+    "process_scan_access_denied": 33
+  },
+  "failures": [
+    {
+      "test": "ERROR: test_compact_module_client_with_equals_value_is_not_a_blocker (tests.test_bug046_startup_deadlock.DaemonStartupE\nlectionProcessTest.test_compact_module_client_with_equals_value_is_not_a_blocker)\n``-mdayz_mcp`` without ``-I`` is scanned as a client, not a writer.",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_isolated_dash_I_client_argv_is_not_a_blocker \n(tests.test_bug046_startup_deadlock.DaemonStartupElectionProcessTest.test_isolated_dash_I_client_argv_is_not_a_blocker)\n``-Imdayz_mcp`` is an argv classifier, not copy accreditation.",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_module_main_entrypoint_is_observed_as_real_writer_process (tests.test_bug046_startup_deadlock.DaemonStartup\nElectionProcessTest.test_module_main_entrypoint_is_observed_as_real_writer_process)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_fixture_accredits_live_request_paths \n(tests.test_build_native_launcher_policy.FixturePolicyBehaviorTest.test_fixture_accredits_live_request_paths)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_lifecycle_status_forwards_exact_run_after_erasing_inherited_secrets (tests.test_dayz_test_app.DayzTestAppTe\nrminalTests.test_lifecycle_status_forwards_exact_run_after_erasing_inherited_secrets)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_main_maps_unknown_exception_to_internal_failure \n(tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_maps_unknown_exception_to_internal_failure)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_main_serializes_known_worker_failure_without_exception_text \n(tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) \n(code='readiness_failed')",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_main_serializes_known_worker_failure_without_exception_text \n(tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) \n(code='readiness_probe_failed')",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_main_serializes_known_worker_failure_without_exception_text \n(tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) \n(code='readiness_run_not_running')",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_main_serializes_known_worker_failure_without_exception_text \n(tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) \n(code='readiness_server_pid_dead')",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_main_serializes_known_worker_failure_without_exception_text \n(tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) \n(code='readiness_server_process_invalid')",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_main_serializes_known_worker_failure_without_exception_text \n(tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) \n(code='readiness_status_invalid')",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_main_serializes_known_worker_failure_without_exception_text \n(tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) \n(code='readiness_timeout')",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_main_serializes_known_worker_failure_without_exception_text \n(tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) \n(code='readiness_udp_foreign_owner')",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_main_serializes_known_worker_failure_without_exception_text \n(tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) \n(code='readiness_udp_snapshot_invalid')",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_success_terminal_has_exact_closed_schema \n(tests.test_dayz_test_app.DayzTestAppTerminalTests.test_success_terminal_has_exact_closed_schema)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_checker_accepts_recoverable_stalled_residue \n(tests.test_launcher_registry_update.AbortedPreparedRecoveryTest.test_checker_accepts_recoverable_stalled_residue)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_the_witness_hint_names_the_bundle_and_daemon_versions \n(tests.test_lifecycle_reconcile.LifecycleReconcileTest.test_the_witness_hint_names_the_bundle_and_daemon_versions)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_addon_helper_after_builder_exit_fails_before_continue (tests.test_native_launcher_backend.NativeDebugOwners\nhipTests.test_addon_helper_after_builder_exit_fails_before_continue)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_addon_helper_lifetime_cap_fails_closed \n(tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_addon_helper_lifetime_cap_fails_closed)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_announced_descendant_requires_exact_authority_before_continue (tests.test_native_launcher_backend.NativeDeb\nugOwnershipTests.test_announced_descendant_requires_exact_authority_before_continue) (approved=True)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_announced_descendant_requires_exact_authority_before_continue (tests.test_native_launcher_backend.NativeDeb\nugOwnershipTests.test_announced_descendant_requires_exact_authority_before_continue) (approved=False)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_cancellation_closes_liveness_before_job_without_writing_a_signal (tests.test_native_launcher_backend.Native\nDebugOwnershipTests.test_cancellation_closes_liveness_before_job_without_writing_a_signal)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_cancellation_without_exit_process_never_reports_clean_130 (tests.test_native_launcher_backend.NativeDebugOw\nnershipTests.test_cancellation_without_exit_process_never_reports_clean_130)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_descendant_create_event_disarms_start_watchdog \n(tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_descendant_create_event_disarms_start_watchdog)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_descendant_job_pid_mismatch_is_rejected_before_continue (tests.test_native_launcher_backend.NativeDebugOwne\nrshipTests.test_descendant_job_pid_mismatch_is_rejected_before_continue)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_exact_helper_without_announcement_is_allowed_only_during_active_addon_builder (tests.test_native_launcher_b\nackend.NativeDebugOwnershipTests.test_exact_helper_without_announcement_is_allowed_only_during_active_addon_builder)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_failing_detail_capture_never_breaks_the_cleanup \n(tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_failing_detail_capture_never_breaks_the_cleanup)\nObservability must not alter control flow.",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_gate_rejection_includes_resolved_image_path_when_available (tests.test_native_launcher_backend.NativeDebugO\nwnershipTests.test_gate_rejection_includes_resolved_image_path_when_available)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_gate_rejection_preserves_fine_code_kind_and_pid \n(tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_gate_rejection_preserves_fine_code_kind_and_pid)\nGate rejections keep the stable code and surface the fine detail.",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_load_dll_requires_handle_accreditation_before_continue (tests.test_native_launcher_backend.NativeDebugOwner\nshipTests.test_load_dll_requires_handle_accreditation_before_continue) (approved=True)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_load_dll_requires_handle_accreditation_before_continue (tests.test_native_launcher_backend.NativeDebugOwner\nshipTests.test_load_dll_requires_handle_accreditation_before_continue) (approved=False)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_partial_pending_announcement_blocks_addon_helper_fallback (tests.test_native_launcher_backend.NativeDebugOw\nnershipTests.test_partial_pending_announcement_blocks_addon_helper_fallback)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_rejected_descendant_closes_job_before_its_single_continue (tests.test_native_launcher_backend.NativeDebugOw\nnershipTests.test_rejected_descendant_closes_job_before_its_single_continue)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_request_and_debug_events_finish_before_active_zero_and_return (tests.test_native_launcher_backend.NativeDeb\nugOwnershipTests.test_request_and_debug_events_finish_before_active_zero_and_return)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_request_write_deadline_cancels_io_and_fails_closed \n(tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_request_write_deadline_cancels_io_and_fails_closed)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_request_write_error_still_closes_job_drains_and_waits_active_zero (tests.test_native_launcher_backend.Nativ\neDebugOwnershipTests.test_request_write_error_still_closes_job_drains_and_waits_active_zero)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_root_create_requires_pinned_hfile_identity_before_continue (tests.test_native_launcher_backend.NativeDebugO\nwnershipTests.test_root_create_requires_pinned_hfile_identity_before_continue)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_root_exit_without_descendant_preserves_exit_code_immediately (tests.test_native_launcher_backend.NativeDebu\ngOwnershipTests.test_root_exit_without_descendant_preserves_exit_code_immediately)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_second_announced_addon_builder_fails_before_continue (tests.test_native_launcher_backend.NativeDebugOwnersh\nipTests.test_second_announced_addon_builder_fails_before_continue)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_second_simultaneous_addon_helper_fails_before_continue (tests.test_native_launcher_backend.NativeDebugOwner\nshipTests.test_second_simultaneous_addon_helper_fails_before_continue)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_start_watchdog_times_out_when_root_create_event_is_absent (tests.test_native_launcher_backend.NativeDebugOw\nnershipTests.test_start_watchdog_times_out_when_root_create_event_is_absent)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_started_cancellation_allows_cooperative_exit_before_job_close (tests.test_native_launcher_backend.NativeDeb\nugOwnershipTests.test_started_cancellation_allows_cooperative_exit_before_job_close)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_started_cancellation_cancels_blocked_request_write_without_stalling_debug (tests.test_native_launcher_backe\nnd.NativeDebugOwnershipTests.test_started_cancellation_cancels_blocked_request_write_without_stalling_debug)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_successful_supervise_does_not_gain_gate_rejection_detail (tests.test_native_launcher_backend.NativeDebugOwn\nershipTests.test_successful_supervise_does_not_gain_gate_rejection_detail)\nNegative control: a non-rejected run keeps plain success, no gate attrs.",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_unannounced_helper_without_active_addon_builder_fails_before_continue (tests.test_native_launcher_backend.N\nativeDebugOwnershipTests.test_unannounced_helper_without_active_addon_builder_fails_before_continue)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_single_create_call_has_atomic_job_exact_handles_and_closed_environment (tests.test_native_launcher_backend.\nNativeLauncherBackendTests.test_single_create_call_has_atomic_job_exact_handles_and_closed_environment)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "ERROR: test_cpp_addon_builder_binding_is_not_project_hardcoded \n(tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_cpp_addon_builder_binding_is_not_project_hardcoded)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_cpp_addon_response_requires_a_fresh_regular_pbo \n(tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_cpp_addon_response_requires_a_fresh_regular_pbo)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_cpp_broker_has_closed_protocol_and_single_process_boundary (tests.test_native_launcher_bundle.NativeLaunche\nrBundleTest.test_cpp_broker_has_closed_protocol_and_single_process_boundary)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_cpp_broker_preserves_full_frame_and_is_bidirectional \n(tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_cpp_broker_preserves_full_frame_and_is_bidirectional)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_cpp_broker_rejects_nested_private_and_invalid_responses (tests.test_native_launcher_bundle.NativeLauncherBu\nndleTest.test_cpp_broker_rejects_nested_private_and_invalid_responses)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_cpp_broker_routes_exact_three_kinds_and_secrets_only_to_lifecycle (tests.test_native_launcher_bundle.Native\nLauncherBundleTest.test_cpp_broker_routes_exact_three_kinds_and_secrets_only_to_lifecycle)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_cpp_child_creation_is_atomic_cancel_bounded_and_private_cwd (tests.test_native_launcher_bundle.NativeLaunch\nerBundleTest.test_cpp_child_creation_is_atomic_cancel_bounded_and_private_cwd)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_cpp_child_output_keeps_bytes_when_pipe_closes_before_process_signal (tests.test_native_launcher_bundle.Nati\nveLauncherBundleTest.test_cpp_child_output_keeps_bytes_when_pipe_closes_before_process_signal)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_cpp_validates_private_and_lifecycle_payloads_byte_exactly (tests.test_native_launcher_bundle.NativeLauncher\nBundleTest.test_cpp_validates_private_and_lifecycle_payloads_byte_exactly)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_generated_addon_roots_table_accepts_sealed_temp_and_rejects_foreign (tests.test_native_launcher_bundle.Nati\nveLauncherBundleTest.test_generated_addon_roots_table_accepts_sealed_temp_and_rejects_foreign)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_private_worker_inherits_liveness_and_awaits_cancel_cleanup (tests.test_native_launcher_bundle.NativeLaunche\nrBundleTest.test_private_worker_inherits_liveness_and_awaits_cancel_cleanup)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_private_worker_uses_debugger_safe_blocking_read \n(tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_private_worker_uses_debugger_safe_blocking_read)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_worker_failure_still_emits_generic_terminal \n(tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_worker_failure_still_emits_generic_terminal)",
+      "category": "bundle_access_denied"
+    },
+    {
+      "test": "ERROR: test_consumer_failure_still_releases_and_verifies_terminal_status (tests.test_native_launcher_transaction.Native\nLauncherTransactionTests.test_consumer_failure_still_releases_and_verifies_terminal_status)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_heartbeat_failure_cancels_consumer_before_release (tests.test_native_launcher_transaction.NativeLauncherTra\nnsactionTests.test_heartbeat_failure_cancels_consumer_before_release)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_invalid_schema_or_path_identity_sends_no_control_request (tests.test_native_launcher_transaction.NativeLaun\ncherTransactionTests.test_invalid_schema_or_path_identity_sends_no_control_request) (label='schema')",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_invalid_schema_or_path_identity_sends_no_control_request (tests.test_native_launcher_transaction.NativeLaun\ncherTransactionTests.test_invalid_schema_or_path_identity_sends_no_control_request) (label='identity')",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_malformed_active_grant_with_token_is_released_before_error (tests.test_native_launcher_transaction.NativeLa\nuncherTransactionTests.test_malformed_active_grant_with_token_is_released_before_error)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_non_terminal_status_turns_success_into_cleanup_error (tests.test_native_launcher_transaction.NativeLauncher\nTransactionTests.test_non_terminal_status_turns_success_into_cleanup_error)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_repeated_task_cancellation_cannot_skip_consumer_cleanup_or_release (tests.test_native_launcher_transaction.\nNativeLauncherTransactionTests.test_repeated_task_cancellation_cannot_skip_consumer_cleanup_or_release)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_schema_and_paths_precede_acquire_then_supervise_consumer (tests.test_native_launcher_transaction.NativeLaun\ncherTransactionTests.test_schema_and_paths_precede_acquire_then_supervise_consumer)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_intermediate_reparse_point_is_rejected \n(tests.test_request_path_authority.RequestPathAuthorityTests.test_intermediate_reparse_point_is_rejected)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_leaf_directory_symlink_is_rejected \n(tests.test_request_path_authority.RequestPathAuthorityTests.test_leaf_directory_symlink_is_rejected)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_leaf_mount_point_under_allowed_root_accredits_destination_identity (tests.test_request_path_authority.Reque\nstPathAuthorityTests.test_leaf_mount_point_under_allowed_root_accredits_destination_identity)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_leaf_mount_point_under_disallowed_root_is_rejected \n(tests.test_request_path_authority.RequestPathAuthorityTests.test_leaf_mount_point_under_disallowed_root_is_rejected)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_mcp_absolute_mod_inside_mod_roots_is_accepted \n(tests.test_request_path_authority.RequestPathAuthorityTests.test_mcp_absolute_mod_inside_mod_roots_is_accepted)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_mcp_absolute_mod_outside_mod_roots_is_rejected \n(tests.test_request_path_authority.RequestPathAuthorityTests.test_mcp_absolute_mod_outside_mod_roots_is_rejected)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_regular_tree_is_pinned_until_context_exit \n(tests.test_request_path_authority.RequestPathAuthorityTests.test_regular_tree_is_pinned_until_context_exit)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_relative_mod_must_resolve_under_exactly_one_root \n(tests.test_request_path_authority.RequestPathAuthorityTests.test_relative_mod_must_resolve_under_exactly_one_root)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_replaced_root_identity_fails_closed \n(tests.test_request_path_authority.RequestPathAuthorityTests.test_replaced_root_identity_fails_closed)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "ERROR: test_semantic_policy_cannot_be_mixed_with_foreign_sealed_roots (tests.test_request_path_authority.RequestPathAut\nhorityTests.test_semantic_policy_cannot_be_mixed_with_foreign_sealed_roots)",
+      "category": "path_authority_not_isolated"
+    },
+    {
+      "test": "FAIL: test_run_daemon_candidate_wave_and_cross_port_publish_one_generation (tests.test_bug046_startup_deadlock.DaemonSt\nartupElectionProcessTest.test_run_daemon_candidate_wave_and_cross_port_publish_one_generation)",
+      "category": "process_scan_access_denied"
+    },
+    {
+      "test": "FAIL: test_both_request_parser_hashes_are_printed_in_the_same_case \n(tests.test_lifecycle_reconcile.LifecycleReconcileTest.test_both_request_parser_hashes_are_printed_in_the_same_case)",
+      "category": "bundle_access_denied"
+    }
+  ]
+}

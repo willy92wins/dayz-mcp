@@ -1,0 +1,132 @@
+ADVERSARIAL CODE REVIEW - two commits, one report. Round 1 of at most 2.
+
+This channel is HEADLESS and there is no operator. NEVER ask for approval and never
+try request_user_input: decide, write the report, and record any doubt in the
+"LO QUE NO PUDE VERIFICAR" section. A run that ends by asking a question is a lost run.
+
+== TASK (one sentence) ==
+Attack two commits on branch work/inbox-20260830-modules of the DayZ-MCP repo and
+report every defect you can demonstrate, with a preference for showing that a test
+does NOT see the defect it claims to guard.
+
+== ROLE AND SUCCESS CRITERION ==
+You are the cross-family reviewer. The author is an Anthropic model; you are not
+reviewing your own work. Success is ONE file written at the path in OUTPUT below,
+containing a verdict and a findings list. An empty findings list is an acceptable
+outcome ONLY if you say what you attacked and failed to break.
+
+MECHANICAL GREEN, fixed before you start (do not renegotiate it):
+  - the report file exists at the OUTPUT path, and
+  - every finding you mark BLOCKING carries an executable repro: exact command or
+    exact edit, plus the observed output. A finding without a runnable repro is
+    filed as NON-BLOCKING (backlog), never as a blocker.
+ROUND CAP: this is round 1 of at most 2. There is no round 3.
+
+== WHAT TO LOAD (all paths relative to your -C workspace) ==
+  1. git show 48298d1 --stat  and  git show 48298d1
+  2. git show 60e6f1d --stat  and  git show 60e6f1d
+  3. tools/tests/test_wait_for.py            (commit 1 rewrites the tail of this file)
+  4. tools/dayz_mcp/loopback.py              (commit 2; look at parse_poll_caps,
+     _record_poll_caps_locked, _capabilities_view_locked, record_poll, _handle_poll)
+  5. tools/tests/test_loopback.py            (commit 2; class PollCapabilityIngressTest)
+  6. tools/dayz_mcp/server.py                (only the wait_for region: the helpers
+     _offset_before_last_lines_in_window, _marker_rewound, _log_markers_with_lookback,
+     _scanned_report, execute_wait_for)
+  7. The two specs the commits claim to satisfy:
+     plans/inbox-20260830/12-fb-20260829-030056-d73b.md   (commit 1, BUG-086, EVIDENCIA)
+     plans/inbox-20260830/05-fb-20260829-023649-8f8c.md   (commit 2: read POINT 9 only;
+        points 1-8 and 10-12 belong to other modules and are NOT in scope)
+  8. plans/inbox-20260830/00-execution-dag.md  (the OWNS table, lines 33-60)
+  9. addon/scripts/5_Mission/MCPBridge.c and MCPClientBridge.c, only the constants
+     SERVER_CAPABILITIES / CLIENT_POLL_CAPS and the two lines that send caps=.
+
+== WHAT THE COMMITS CLAIM (claims, not facts - your job is to break them) ==
+Commit 48298d1, ficha 12 (BUG-086, disposition EVIDENCIA, no productive code):
+  C1. The three new cases prove the ORDER action -> durable response -> marker, which
+      the pre-existing tests did not: they all write the needle before wait_for exists,
+      so an implementation that took its marker at EOF would pass them too.
+  C2. The lookback_lines=0 control proves it actually READ the file (probes >= 1 and a
+      non-matching line counted in scanned), because from outside "read and did not
+      match" and "never opened it" look identical.
+  C3. The window edge is inclusive at 200: needle + 199 fillers is inside, needle + 200
+      fillers is outside, and both scan exactly 200 lines. The verdicts come from a
+      literal table, not from the helpers under test.
+  C4. Mutant calibration: BASE green; deleting only the lookback_lines<=0 branch is an
+      EQUIVALENT mutant and stays green on purpose; deleting that branch AND treating 0
+      as the positive default 200 goes red; _marker_rewound(path, lookback_lines + 1)
+      goes red and is caught ONLY by the new cardinality case.
+
+Commit 60e6f1d, M06, point 9 of ficha 05:
+  C5. At most 64 ASCII names [a-z][a-z0-9_]{0,63}, no duplicates, 4096 bytes total.
+  C6. Only the LAST announcement of an ACCREDITED poll is kept, tagged with the daemon
+      generation, and it is never inherited across a generation change.
+  C7. Absent, legacy, invalid, oversized or unaccredited does NOT block commands: the
+      poll is answered exactly as it would be with no census, and what it loses is the
+      right to be believed (state=unknown plus a reason).
+  C8. Six mutants, each caught by the test that owns the property.
+  C9. The seam holds: the census each bridge really announces is accepted by this
+      decoder (server 21 names / 329 bytes with entities_query; client 19 / 255 with
+      ui_dialog).
+
+== WHERE TO ATTACK FIRST (ranked) ==
+  A. A guard blind to the form it guards. For EACH new test, ask: if I reintroduce the
+     exact defect it names, does THIS test go red naming that subject? Prefer this over
+     style. A green test that cannot see its own defect is the highest-value finding.
+  B. Equivalent mutants presented as calibration. C4 explicitly claims one mutant is
+     equivalent; check whether any of the OTHER mutants is also equivalent, i.e. the red
+     comes from something other than the property claimed.
+  C. The differential assertion in C7 ("answered the same as with no census"). Does it
+     actually discriminate, or would it also pass if the census were ignored entirely?
+     Construct the case that makes it vacuous if you can.
+  D. Concurrency and lock discipline in loopback.py: the census is written inside
+     self._lock. Find any path where it is read outside, or where an early return leaves
+     it inconsistent.
+  E. The write-set. Per 00-execution-dag.md, M06 owns tools/dayz_mcp/loopback.py and its
+     tests; ficha 12 owns tools/tests/test_wait_for.py and nothing else. Report any file
+     touched outside that. (git show --stat is enough.)
+  F. C6's generation check when daemon_generation is None on both sides.
+  G. The seam test in C9 parses an Enforce const with a regex over one source line.
+     Break it: what shape of that constant would make the test pass while the real
+     bridge sends something the decoder rejects?
+
+== BOUNDARIES ==
+  - DO NOT modify any file under tools/, addon/ or plans/. This is a review.
+  - You MAY create scratch files, but only under reviews/2026-09-03-lote-B-M06-M22/.
+  - DO NOT run the full test suite. Python inside your sandbox is not the interpreter
+    this project uses and a red from it would mean nothing. If you want a test run, say
+    exactly which command you want and the orchestrator runs it in round 2. The project
+    interpreter, for your reference only, is tools/.venv-mcp/Scripts/python.exe
+  - You MAY read files and run git and PowerShell read commands freely.
+  - DO NOT rewrite git history, do not commit, do not switch branches.
+
+== FACTS (verified by the orchestrator) vs ASSUMPTIONS ==
+FACT: full suite with the project interpreter is "Ran 2280 tests, FAILED (failures=2,
+      skipped=6)". The two reds are pre-existing and unrelated (a whole-file hash
+      sentinel over MCPBridge.c, ticket fb-20260902-194845-bd90). Do not chase them.
+FACT: loopback.py is NOT in PACKAGED_MODULES nor its mirror in native_bundle.py, so the
+      launcher bundle is unchanged by commit 60e6f1d.
+FACT: the mutant tables in both commit messages were produced on throwaway copies with
+      the tests byte-identical across runs.
+[ASSUMPTION] The author believes the accredited path is genuinely reached in the tests
+      via tests/fence_helpers.py bind_both_peers + record_poll with instance and
+      source_pid. Verify it rather than trusting it.
+
+== OUTPUT (exact path, inside your workspace) ==
+  reviews/2026-09-03-lote-B-M06-M22/REVIEW-CODEX.md
+
+Format, in this order:
+  1. A single line: VERDICT: PASS | FINDINGS
+  2. A table of findings: id, severity (BLOCKING / NON-BLOCKING), claim it breaks
+     (C1..C9 or "other"), one-sentence summary.
+  3. One section per finding: what is wrong, the executable repro (exact command or
+     exact edit plus observed output), and why the existing tests do not catch it.
+  4. A section "ATACADO Y NO ROTO": what you tried against each of C1..C9 and could not
+     break. This section is mandatory and is what makes a PASS mean anything.
+  5. A section "LO QUE NO PUDE VERIFICAR": everything you could not check and why.
+
+Write that file even if you find nothing. Do not print the report to stdout only.
+
+== RECEIVER ==
+The orchestrator (Claude Opus 5) reads your file, runs any test command you request,
+and decides. Findings with a runnable repro are fixed in round 2; findings without one
+go to the pipeline backlog with your name on them. Nothing you write is applied blind.

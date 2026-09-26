@@ -1,0 +1,15 @@
+{
+  "backup": {
+    "bytes": 107331,
+    "sha256": "2807DCB5815DE501CC9B8A93FCEF8D9656B57426680A7543425664F9E4C027A5"
+  },
+  "backup_path": "P:\\DayZ_MCP_dev\\reports\\security\\migration\\P0S-IDENTITY-V2\\runs.pre-v2.json",
+  "kind": "dayz-mcp-runs-backup-receipt-v1",
+  "schema_version": 1,
+  "source": {
+    "bytes": 107331,
+    "sha256": "2807DCB5815DE501CC9B8A93FCEF8D9656B57426680A7543425664F9E4C027A5"
+  },
+  "source_absent": false,
+  "source_path": "C:\\Users\\guill\\AppData\\Local\\DayZ_MCP\\runs.json"
+}

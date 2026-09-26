@@ -1,0 +1,130 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar o hasta agotar los turnos.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+===============================================================================
+§0. EL PRODUCTO — y sólo el producto
+===============================================================================
+
+Tres cosas observables en la tool pública `dayz_test_run`:
+
+  P1. Las tres causas de rechazo llegan NOMBRADAS al cliente, en vez del opaco
+      `bad_dayz_test_request`, y el mismo código sale por la fachada y por la tool.
+  P2. Ninguna fila pública válida acaba en `terminal_invalid`. En concreto,
+      `preflight=true, mode=client, run_id=<UUID>` tiene éxito conservando ese UUID.
+  P3. La descripción REGISTRADA de la tool documenta la secuencia reattach y que preflight
+      no relaja la matriz.
+
+LO QUE NO ES EL PRODUCTO, y no es tu trabajo aunque tengas razón:
+
+  - El oráculo de `gate/`, su calibración o sus fixtures. Si crees que están mal, escríbelo
+    en STATE.md bajo `DISPUTAS` y sigue. NO los edites.
+  - **El sobre estructurado de `dayz_test_stop` y los tres campos de generación.** Es la
+    otra mitad de esta ficha y va en otro lote: exige superficie nueva en el daemon. No lo
+    empieces.
+  - Refactorizar, renombrar o mejorar de paso nada.
+
+===============================================================================
+§1. ENTORNO — medido hoy
+===============================================================================
+
+  - Intérprete, exacto y sin alternativa:
+      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+  - **Esa venv NO tiene pytest.** La suite es `unittest`. Un comando con `pytest` falla con
+    "No module named pytest" y no dice nada sobre tu código.
+      cd tools && PYTHONPATH=. "<intérprete>" -m unittest tests.test_dayz_test_tool
+  - Sin red, sin juego, sin PBO. Nada de este lote toca `addon/`.
+
+===============================================================================
+§2. HECHOS VERIFICADOS — los abrí yo, no son de memoria
+===============================================================================
+
+**P1.** El parser YA emite las tres causas cerradas, y para los dos valores de preflight:
+  - `dayz_test_request.py:41-43` define las constantes:
+      `_INVALID_RUN_ID = "invalid_run_id"`
+      `_CLIENT_REQUIRES_RUN_ID = "client_requires_run_id"`
+      `_SERVER_ALL_FORBID_RUN_ID = "server_all_forbid_run_id"`
+  - Se lanzan en `:339` (UUID malformado), `:361` (server/all con run_id) y `:363`
+    (client sin run_id). **La precedencia ya es correcta**: el UUID malformado se
+    comprueba antes que la combinación mode/run_id.
+  - **El eslabón que corta es la fachada**: `dayz_test_tool.py:178-179` hace
+      `except (TypeError, ValueError): _fail("bad_dayz_test_request")`
+    y colapsa las tres en una. Y los tokens no están en el mapa público
+    `_DAYZ_TEST_VALUE_ERROR_CODES` de `server.py:189`, que hoy sólo traduce
+    `invalid_dayz_test_request -> bad_dayz_test_request`.
+  - Códigos que el cliente debe ver: `bad_run_id` para el UUID malformado, y
+    `bad_dayz_test_request:client_requires_run_id` /
+    `bad_dayz_test_request:server_all_forbid_run_id` para las otras dos.
+
+**P2.** Hay una contradicción REAL entre dos ficheros, y ése es el bug:
+  - `dayz_test_worker.py:547-552`: en preflight el worker devuelve `WorkerResult(0, run_id)`,
+    o sea CON el run_id que le dieron.
+  - `dayz_test_tool.py:524`: `_validate_terminal_context` exige
+    `preflight != (terminal.run_id is None)`, o sea que en preflight el run_id sea None.
+  - Consecuencia: `preflight=true, mode=client, run_id=<UUID>` —que es la ruta de
+    reattach— muere con `terminal_invalid`. Repro directo, verificado por mí:
+
+      cd tools && PYTHONPATH=. "<intérprete>" -c "from dayz_mcp import dayz_test_tool as t; \
+      u='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'; \
+      t._validate_terminal_context(t.WorkerTerminal(False,None,0,True,u), preflight=True, expected_run_id=u)"
+
+  ⚠ **La correlación se CORRIGE, no se borra.** Un terminal genuinamente incoherente —una
+  ejecución real que vuelve sin run_id— tiene que seguir fallando. Hay un control en el gate
+  que conduce ese caso por la tool pública y se pone rojo si borras la validación. Y no
+  toques `dayz_test_worker.py` para «arreglarlo» por el otro lado: el worker hace lo
+  correcto, el validador es el que está mal.
+
+**P3.** `server.py` tiene **0 ocurrencias** de `reattach`. La descripción registrada de
+`dayz_test_run` mide hoy 660 caracteres y no menciona ni la secuencia ni preflight. Tiene
+que documentar: la secuencia `server -> run_id -> client(run_id)`, la prohibición simétrica
+(`client` exige run_id, `server|all` lo prohíben) y que **preflight no relaja la matriz**.
+El gate lee la descripción REGISTRADA, no el fuente: un comentario no cuenta.
+
+===============================================================================
+§3. EL GATE
+===============================================================================
+
+    bash gate/run.sh      -> G1, el oráculo de producto
+    bash gate/suite.sh    -> G2, los tests del write-set
+
+Ahora mismo: `PASS=7 FAIL=13 UNMET=0 de 20`. Los 13 FAIL son tu trabajo.
+
+**Los 7 PASS son la línea que no puedes romper**, y cuatro son controles de vacuidad:
+  - `E3-CONTROL`: una fila productiva `client` SÍ consulta Steam. Sin él, «cero consultas en
+    preflight» se cumple no consultando nunca.
+  - `E2-CONTROL`: un terminal incoherente SIGUE rechazándose por la tool pública. Sin él,
+    P2 se cumple borrando la validación.
+  - `E0-SELLO`: `tests/test_client_mode.py` sin editar.
+
+Terminas cuando `gate/run.sh` diga `ORACULO-VERDE` y `gate/suite.sh` diga `SUITE-ACOTADA OK`.
+
+`gate/` está sellado por hash y de sólo lectura. Compruebo el sello al recibir.
+
+===============================================================================
+§4. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/dayz_test_tool.py
+    tools/dayz_mcp/server.py
+    tools/tests/test_dayz_test_tool.py
+    tools/tests/test_mcp_tools.py
+
+PROHIBIDO: `gate/`; `tests/test_client_mode.py` (de ahí sale la fixture del gate y está
+sellado); `dayz_test_worker.py`; `dayz_test_request.py` (el parser ya está bien);
+`addon/`; debilitar o borrar cualquier validación para que un test pase; borrar tests
+existentes; usar red; correr la suite completa.
+
+Escribe tests para lo que entregas, y córrelos ANTES de tu arreglo para comprobar que fallan.
+
+===============================================================================
+§5. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace con, en este orden:
+
+    ## HECHO            — qué entregaste, con `path:line` de cada cambio.
+    ## GATE             — la salida literal de los dos gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea que demuestra que fallaba antes.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si crees que un criterio del gate está mal, aquí, con el argumento.

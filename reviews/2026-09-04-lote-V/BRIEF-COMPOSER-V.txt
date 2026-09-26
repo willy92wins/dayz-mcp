@@ -1,0 +1,210 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobacion, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar o hasta agotar los turnos.
+Si te bloqueas, escribe el bloqueo en STATE.md y sigue con lo que no dependa de el.
+
+===============================================================================
+S0. EL PRODUCTO - y solo el producto
+===============================================================================
+
+Cinco mejoras de ergonomia en superficies PUBLICAS del servidor MCP de DayZ
+(`tools/dayz_mcp/server.py`, Python 3.14, FastMCP 1.27.2, pydantic 2.13.4, suite unittest).
+Ninguna anade parametros a una tool; cambian descripciones, un campo de respuesta, una
+validacion y un bucle de espera. Nada toca Enforce, el daemon, el bundle ni el registro.
+
+  V1. `bridge_status`: su descripcion (`server.py:4105-4111`) enumera SEIS valores de
+      `ready.reason`, pero `compute_bridge_ready` (`:379-422`) emite ademas `legacy_unbound`
+      (`:398,:400`) y CUALQUIER valor de `_FENCE_BLOCK_READY` (`:349-361`, via `:395-396`).
+      La autoridad cerrada es `READY_REASONS` (`:115-133`, 17 valores). Producto: la
+      descripcion se CONSTRUYE en `build_app` (`:2749`) a partir de
+      `READY_REASONS | set(_FENCE_BLOCK_READY.values())`, leyendo los dos globales del
+      modulo EN ESE MOMENTO (no los copies a una constante de modulo ni a un Literal: el
+      oraculo parchea cada uno por separado y construye una app nueva, y el valor nuevo
+      tiene que aparecer). Lista todos los valores ordenados y declara el conjunto ABIERTO
+      con esta frase (los tres tokens `open set`, `shape`, `whitelist` son contrato):
+        "reason is an OPEN set (today: <valores separados por |>): validate by shape
+         (ready: bool, reason: non-empty string), never against a whitelist."
+      Conserva el resto de la descripcion actual (`daemon_modules.stale = ...`). Precedente
+      de "derivar de la autoridad en build_app": `_patch_mode_enum_from_authority` (`:1773`).
+  V2. `entities_query`: `_annotate_entities_reliability` (`:1890-1918`) ya sabe que no hay
+      ningun jugador conectado (sonda `query_all_players` ok con lista vacia) pero lo deja
+      implicito en `nearest_player_m: null`. Producto: cuando `players_result.ok` es verdadero
+      Y la lista `players` esta vacia, la respuesta lleva ADEMAS `reason: "no_player_connected"`
+      (con `nearest_player_m: null` y `reliability: "remote_unverified"` como hoy). En
+      cualquier otro caso NO hay clave `reason` (jugador lejos: no; sonda fallida `ok: 0`: no,
+      porque no sabemos nada; consulta fallida: se devuelve intacta como hoy). La descripcion
+      de la tool (`:3725-3737`) nombra `no_player_connected`.
+  V3. `wait_for`: `execute_wait_for` (`:2289`) valida `timeout_s` en `:2327-2329` y en `:2330`
+      lo RECORTA en silencio a `WAIT_FOR_MAX_TIMEOUT_S` (600.0, `:79`). El contrato miente
+      (ficha 05.2: acepta 200, 900... y el llamador no sabe cuanto espero). Producto: si
+      `timeout_s > WAIT_FOR_MAX_TIMEOUT_S` se lanza `ToolError("bad_args: timeout_s must be
+      <= 600")` (renderiza el tope desde la constante, p. ej. `int(WAIT_FOR_MAX_TIMEOUT_S)`)
+      ANTES de tocar `runtime.tool_lock` y antes de cualquier sonda o sleep; 600.0 exacto se
+      acepta. La descripcion de la tool (`:4455-4472`) dice `timeout_s <= 600 (bad_args
+      above; never clamped)` con los tokens `timeout_s`, `600` y `bad_args`. Y
+      `tools/README-mcp.md:137` cambia la frase "`timeout_s` is capped at 600." por
+      "`timeout_s` above 600 is rejected up front with `bad_args: timeout_s must be <= 600`
+      (never clamped)." Solo esa frase; el parrafo sigue igual.
+  V4. `wait_for(players_at_least|players_at_most)` justo despues de `dayz_test_run` muere en
+      la PRIMERA sonda con `game_not_ready:reason=server_poll_stale` (el servidor aun no
+      poll-ea; `:2427-2433` re-lanza todo `game_not_ready`). Producto: en la rama de jugadores
+      del bucle (`:2408-2447`), si la sonda lanza `ToolError` cuyo mensaje es EXACTAMENTE
+      (igualdad de cadena, no `startswith`) `game_not_ready:reason=server_poll_stale`, la
+      espera NO aborta: cuenta `not_ready_probes += 1`, guarda `last_error = <ese mensaje>`,
+      deja `satisfied = False` y sigue al sleep DE FUERA del lock (`:2466-2467`; nunca duermas
+      dentro de `async with runtime.tool_lock`). El deadline es el mismo `deadline` de `:2353`:
+      no se extiende. Cualquier otro mensaje (`game_not_ready:reason=client_not_polling`,
+      `...=no_run`, `version_blocked`, `daemon_unavailable`, y tambien
+      `game_not_ready:reason=server_poll_stale; <sufijo>`) aborta en la primera sonda como
+      hoy. La respuesta (`_wait_for_response`, justo antes de `:2289`) gana `not_ready_probes`
+      (int, siempre presente, 0 si no hubo) y `last_error` (str, solo cuando hubo al menos una
+      sonda reintentada). `probes` sigue contando TODAS las sondas, reintentadas incluidas.
+      Con solo sondas reintentadas hasta el deadline: `ok: true, satisfied: false, timed_out:
+      true, observed: null`. La descripcion de la tool anade: "players_* waits through server
+      startup: a probe answered game_not_ready:reason=server_poll_stale is retried until
+      timeout_s (not_ready_probes, last_error in the response); any other not-ready reason
+      aborts on the first probe." La rama `log_matches` no cambia.
+  V5. `action_use`: `MCPClientBridge.c` empareja `action` por NOMBRE DE CLASE
+      (`candidate.Type().ToString()`), pero la descripcion (`:4425-4428`) no lo dice y un
+      agente pasa el texto visible y recibe `action_not_found`. Producto: la descripcion
+      anade: "action = the Enforce class name of the user action (candidate.Type().ToString(),
+      e.g. ActionOpenDoors), NOT the visible/localized prompt text; classname = the target's
+      GetType()." Los tokens `class name`, `GetType()` y `not the visible` son contrato.
+
+LO QUE NO ES EL PRODUCTO, y por tanto no es tu trabajo aunque tengas razon:
+  - El oraculo de `gate/`, su calibracion o su diseno. Si crees que esta mal, escribelo en
+    STATE.md bajo `DISPUTAS` y sigue. NO lo edites.
+  - La region `dayz_test_stop` de server.py (`:3102` y su cuerpo hasta el siguiente
+    `@app.tool`): en vuelo en otra sesion. NO la toques.
+  - `dayz_test_tool.py`, `loopback.py`, `daemon.py`, `process_lifecycle.py`,
+    `dayz_test_request.py` (su sha256 viaja en el contrato del bundle), `MCPClientBridge.c`,
+    `_CLOSED_SCHEMA_TOOLS` (ninguna tool gana parametros). Refactors, renombrados, limpiezas
+    "de paso", cambios de estilo.
+
+Si terminas los cinco y te sobra turno, PARA.
+
+===============================================================================
+S1. ENTORNO - verificado hoy
+===============================================================================
+
+  - Workspace: el directorio en el que estas. Contiene `tools/`, `addon/`, `playbooks/`,
+    `gate/` y los .md de la raiz. Todo lo que no este en el write-set del S5 es de solo
+    lectura.
+  - Interprete, exacto y sin alternativa:
+      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+  - **Esa venv NO tiene pytest.** La suite es `unittest`: clases `unittest.TestCase` /
+    `unittest.IsolatedAsyncioTestCase`.
+  - Para importar el paquete: `cd tools` y `PYTHONPATH=.`
+    Ejemplo:  cd tools && PYTHONPATH=. "<interprete>" -m unittest tests.test_wait_for
+  - `tests/test_docs_truth.py` lee los .md del arbol que le diga `DAYZ_MCP_WATCHDOG_REPO`;
+    `gate/suite.sh` ya lo apunta al arbol vivo. No copies ni edites esos .md.
+  - No hay red, no hay juego corriendo, no hay daemon. `build_app(ServerConfig(key="k",
+    port=0, log_sink=lambda _m: None))` construye la app en proceso; una sesion cliente real
+    sin stdio: `mcp.shared.memory.create_connected_server_and_client_session(app._mcp_server)`.
+  - Tope de tiempo: ~100 turnos. Escribe por tramos: cada producto terminado, a disco y a
+    STATE.md antes del siguiente.
+
+===============================================================================
+S2. HECHOS VERIFICADOS - los abri yo con Read
+===============================================================================
+
+  - `server.py:79` `WAIT_FOR_MAX_TIMEOUT_S = 600.0`; `:115-133` `READY_REASONS` (17 valores,
+    ya incluye todos los valores de `_FENCE_BLOCK_READY` y `legacy_unbound`); `:349-361`
+    `_FENCE_BLOCK_READY` (10 entradas); `:379-422` `compute_bridge_ready`; `:613-625`
+    `_game_not_ready_reason` (con `peer="server"` y servidor no vivo devuelve
+    `server_poll_stale`: por eso el mensaje de la ficha es ese).
+  - `:1636` `_bad_args(field, value, requirement)`; `:1690` `_finite_float(value, error)`.
+  - `:1890-1918` `_annotate_entities_reliability(result, players_result, pos)`: `players` solo
+    se lee si `players_result.get("ok")`; `nearest is None` => `nearest_player_m = None` y
+    `reliability = "remote_unverified"`.
+  - `:2289` `async def execute_wait_for(runtime, condition, value, pattern, timeout_s,
+    poll_interval_s, lookback_lines, lookback_from, marker)`; `:2327-2330` validacion y clamp
+    de `timeout_s`; `:2353` `deadline = started + timeout_s`; `:2408` `while time.monotonic()
+    < deadline:`; `:2409` `async with runtime.tool_lock:` por sonda; `:2419-2438` manejo del
+    `ToolError` de la sonda (timeout -> mensaje `wait_for timed out...`; `version_blocked` y
+    `game_not_ready` -> `raise`; `query_all_players` en el texto -> se renombra a `wait_for`);
+    `:2466-2467` `await asyncio.sleep(poll_interval_s)` FUERA del lock.
+  - `_wait_for_response(*, condition, started, probes, observed, satisfied, scanned=None)`
+    inmediatamente antes de `:2289`: campos `ok, satisfied, condition, elapsed_s, probes,
+    observed, timed_out, tool` (+ `scanned` para log_matches).
+  - `:2749` `def build_app(config)`; `:1773` `_patch_mode_enum_from_authority` (precedente:
+    lee la autoridad al construir la app); `:3725-3737` descripcion de `entities_query`;
+    `:3738-3763` su cuerpo (dos `call_bridge` bajo el lock, luego la anotacion); `:4104-4118`
+    `bridge_status` (descripcion `:4105-4111`); `:4425-4429` descripcion de `action_use`;
+    `:4455-4487` descripcion y wrapper de `wait_for`.
+  - `tools/README-mcp.md:137`: "... Gate on `satisfied`, not `ok`. `timeout_s` is capped at
+    600. With the game off, ...".
+  - Tests existentes que fijan lo que NO puede cambiar: `tests/test_wait_for.py:42-56`
+    `_FakeRuntime` (call_bridge que devuelve N jugadores), `:99-113`
+    `test_version_blocked_aborts_first_probe`, `:115-140` `test_sleep_does_not_hold_tool_lock`;
+    `tests/test_wave_fixes_20260824.py:25-69` `AnnotateEntitiesReliabilityTest` (seis casos;
+    `test_no_players_is_remote_with_null_distance` y `test_failed_players_probe_is_remote_not_a_crash`
+    siguen verdes con V2 porque solo miran `nearest_player_m` y `reliability`);
+    `tests/test_mcp_tools.py:512-530` never-polled => `game_not_ready` antes de encolar.
+  - El oraculo importa `tests.test_mcp_tools.bind_both_peers` para el e2e de V4; ese fichero
+    no esta en tu write-set.
+
+===============================================================================
+S3. PRECISIONES
+===============================================================================
+
+  - V1: la descripcion es un `str` calculado dentro de `build_app` (una funcion helper que
+    lea `READY_REASONS` y `_FENCE_BLOCK_READY` como globales del modulo al ser llamada vale).
+    Si el helper captura los valores al importar el modulo, el oraculo lo cazara.
+  - V3: el orden es validacion -> rechazo -> (solo si pasa) lock/sondas. El oraculo cuenta
+    adquisiciones del lock y llamadas a `call_bridge` en el caso 601: deben ser 0 y 0.
+  - V4: la igualdad es sobre `str(exc)` completo. `not_ready_probes` se emite SIEMPRE (0 si
+    no hubo reintentos); `last_error` solo si hubo. No cambies `probes`.
+  - Tests nuevos: en `tools/tests/test_wait_for.py` (V3 y V4, reutiliza `_FakeRuntime`
+    ampliandolo o con una subclase), en `tools/tests/test_wave_fixes_20260824.py` (V2) y en
+    un fichero NUEVO `tools/tests/test_lote_v_products.py` (V1 con el mutante de
+    `patch.dict(server._FENCE_BLOCK_READY, ...)` + app nueva; V5; V2/V3 por `app.call_tool`).
+    `unittest` puro; nada de pytest.
+  - No anadas `additionalProperties:false` ni `_CLOSED_SCHEMA_TOOLS` a estas tools: ninguna
+    gana parametros (decision ea10 del lote M).
+
+===============================================================================
+S4. EL GATE
+===============================================================================
+
+    bash gate/run.sh      -> G1, el oraculo
+    bash gate/suite.sh    -> G2, los doce modulos de test vecinos
+
+Estado de partida MEDIDO de G1 (arbol sin cambios):
+
+    PASS=10  FAIL=17  UNMET=0  de 27
+    PASS : V1-authority-covers-everything-emitted, V1-fence-reasons-flow-and-are-published,
+           V2-far-player-has-no-reason, V2-failed-probe-does-not-claim-no-player,
+           V2-failed-query-untouched, V3-accepts-exactly-600, V4-aborts-on[client_not_polling],
+           V4-aborts-on[no_run], V4-aborts-on[version_blocked], V4-aborts-on[server_poll_stale; serve]
+    FAIL : los 17 restantes (V1 x4, V2 x3, V3 x4, V4 x5, V5 x1); V4-e2e-never-polled-server
+           reproduce hoy el error literal de la ficha sobre el runtime real.
+
+Los FAIL son tu trabajo. Los PASS no se pueden romper. Terminas cuando G1 dice
+`ORACULO-VERDE` y G2 dice `SUITE-ACOTADA OK`. `gate/` es de solo lectura, sellado por hash.
+
+===============================================================================
+S5. FRONTERAS - write-set cerrado
+===============================================================================
+
+PUEDES editar:
+  - tools/dayz_mcp/server.py   (fuera de la region dayz_test_stop, S0)
+  - tools/README-mcp.md        (SOLO la frase de la linea 137)
+  - tools/tests/test_wait_for.py
+  - tools/tests/test_wave_fixes_20260824.py
+  - ficheros NUEVOS: tools/tests/test_lote_v_*.py
+  - STATE.md (raiz del workspace)
+
+NO puedes tocar nada mas. Prohibido: git, pip, red, borrar ficheros, lanzar DayZ o el daemon.
+
+===============================================================================
+S6. CIERRE - STATE.md en la raiz del workspace
+===============================================================================
+
+    ## HECHO
+    Por producto (V1..V5): que cambiaste, path:line, y que test lo cubre.
+    ## GATES
+    Salida literal de `bash gate/run.sh` y `bash gate/suite.sh` en tu ultima corrida.
+    ## LO QUE NO PUDE VERIFICAR
+    Sin excusas.
+    ## DISPUTAS
+    Concreto o "Ninguna."

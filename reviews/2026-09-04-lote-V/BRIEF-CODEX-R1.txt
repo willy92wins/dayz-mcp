@@ -1,0 +1,149 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni confirmación, no
+propongas un plan y esperes respuesta. Trabaja hasta emitir el dictamen y escríbelo en
+disco. Si algo te bloquea, dilo en el dictamen y sigue con el resto.
+
+===============================================================================
+§0. QUÉ ES EL PRODUCTO — y qué queda FUERA aunque tengas razón
+===============================================================================
+
+Revisas UN lote de cambios en el servidor MCP de DayZ (Python 3.14, FastMCP 1.27.2,
+pydantic 2.13.4, suite unittest): cinco mejoras de ergonomía en superficies públicas de
+`tools/dayz_mcp/server.py`. Las implementó Composer 2.5 (Cursor) a ciegas —su shell estaba
+bloqueado— y el orquestador (Claude) aplicó después los parches que lista §2. El producto
+son exactamente estas cosas observables:
+
+  V1. `bridge_status`: la descripción se construye en `build_app` a partir de
+      `READY_REASONS | set(_FENCE_BLOCK_READY.values())` leídos EN ESE MOMENTO, lista todos
+      los valores y declara «reason is an OPEN set (...): validate by shape (ready: bool,
+      reason: non-empty string), never against a whitelist». Un valor añadido a cualquiera de
+      los dos globales aparece en la descripción de una app NUEVA (mutante del oráculo).
+  V2. `entities_query`: `_annotate_entities_reliability` añade `reason: "no_player_connected"`
+      SOLO cuando la sonda `query_all_players` es ok y su lista está vacía; en cualquier otro
+      caso no hay clave `reason`; la descripción de la tool lo nombra.
+  V3. `wait_for`: `timeout_s > 600` se rechaza con `bad_args: timeout_s must be <= 600` antes
+      de tocar `runtime.tool_lock` y antes de cualquier sonda (antes se recortaba en silencio
+      a 600); 600.0 exacto se acepta; la descripción y `tools/README-mcp.md` (párrafo de
+      wait_for) lo dicen.
+  V4. `wait_for(players_at_least|players_at_most)`: una sonda cuyo `ToolError` es EXACTAMENTE
+      `game_not_ready:reason=server_poll_stale` se reintenta hasta el deadline único (sin
+      extenderlo), durmiendo FUERA del lock; la respuesta lleva `not_ready_probes` (int,
+      siempre) y `last_error` (str, si hubo reintentos); `probes` cuenta todas las sondas.
+      Cualquier otro mensaje (client_not_polling, no_run, version_blocked, daemon_unavailable,
+      y `...server_poll_stale; <sufijo>`) aborta en la primera sonda como antes. La rama
+      `log_matches` no cambia.
+  V5. La descripción de `action_use` dice que `action` es el nombre de clase Enforce de la
+      acción (`candidate.Type().ToString()`, p. ej. ActionOpenDoors), no el texto visible, y
+      que `classname` es el `GetType()` del objetivo.
+
+**FUERA DEL ALCANCE, y no es negociable ni aunque tengas razón:**
+  - El oráculo, los gates, los ledgers, los briefs, los workspaces: aparato del orquestador.
+    Defectos ahí → BACKLOG, nunca bloqueante.
+  - La región `dayz_test_stop` de server.py, `dayz_test_tool.py`, `loopback.py`, `daemon.py`,
+    `process_lifecycle.py` (en vuelo en otra sesión), `dayz_test_request.py` (contrato del
+    bundle), Enforce. No se tocaron a propósito.
+  - Arquitectura, estilo, nombres, deuda preexistente, refactors, «ya que estamos».
+
+**Queda expresamente PROHIBIDO justificar el alcance con «es donde suelen aparecer los
+fallos».** Un hallazgo es BLOQUEANTE si y sólo si: (a) es un defecto de V1-V5; (b) traes un
+comando que lo reproduce; (c) ese comando falla hoy con el código entregado. Sin repro
+ejecutable va a BACKLOG, salvo corrupción o pérdida de datos.
+
+===============================================================================
+§1. ENTORNO
+===============================================================================
+
+  - Lote V entregado (workspace con los cambios): C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-V\ws
+  - Árbol vivo (repo git, HEAD 00d4303): C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev
+    OJO: su árbol de TRABAJO no es la referencia limpia: lleva (a) los cambios de este lote ya
+    integrados sin commitear en los cinco ficheros del write-set y (b) cambios en vuelo de OTRA
+    sesión en loopback.py, process_lifecycle.py, dayz_test_tool.py y sus tests. La referencia
+    SIN el lote es `git show HEAD:<ruta>` desde ese directorio (no lo modifiques: ni git add, ni
+    stash, ni checkout; solo lectura).
+  - Diff LF-normalizado del lote contra HEAD: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-V\DIFF-V.patch
+  - Informe del implementador: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-V\STATE-V.md
+  - Parches del orquestador tras la entrega: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-V\RONDA2-V.md
+  - Oráculo externo que el lote debe dejar verde (léelo: define el contrato observable):
+    <ws>\gate\oracle.py ; se corre con `cd <ws>\tools && PYTHONPATH=. "<intérprete>" ..\gate\oracle.py`
+  - Intérprete, exacto y sin alternativa:
+      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+  - **Esa venv NO tiene pytest.** Suite unittest. Desde `<ws>\tools` con `PYTHONPATH=.`:
+      "<intérprete>" -m unittest tests.test_wait_for tests.test_wave_fixes_20260824 tests.test_lote_v_products
+      "<intérprete>" -m unittest tests.test_mcp_tools tests.test_weak_agent_consumer_ux tests.test_lote_m_products
+  - Sesión cliente real sin stdio: `mcp.shared.memory.create_connected_server_and_client_session(app._mcp_server)`.
+  - App en proceso: `build_app(ServerConfig(key="k", port=0, log_sink=lambda _m: None))`;
+    con `require_version=True` + `runtime.start_loopback()` + `tests.test_mcp_tools.bind_both_peers(runtime.state)`
+    un servidor nunca poll-eado produce el error literal de la ficha (`game_not_ready:reason=server_poll_stale`).
+  - El sandbox de Codex no ve el user-site de Python. Usa ese intérprete y ese PYTHONPATH.
+  - Sin juego, sin red, sin daemon.
+
+===============================================================================
+§2. HECHOS Y DECISIONES DEL ORQUESTADOR — refútalos si puedes
+===============================================================================
+
+  - V1: la autoridad publicada es `READY_REASONS ∪ _FENCE_BLOCK_READY.values()` (17 valores hoy;
+    READY_REASONS ya contenía todos los del mapa de cercas). Decisión: derivar en build_app, no
+    congelar en un Literal ni en una constante de módulo (mismo motivo que B-01 del lote M).
+  - V2: `reason` sólo con evidencia positiva (sonda ok + lista vacía). Con la sonda fallida no se
+    afirma nada (la ficha pedía «decirlo cuando no hay ningún jugador conectado», no adivinarlo).
+  - V3: cambia el contrato de «recorte silencioso» a «rechazo». README-mcp.md:137 decía «capped at
+    600»; ningún playbook ni caller interno pasa timeout_s > 600 (medido: `playbooks/` no fija
+    timeout_s de wait_for; `execute_wait_for` sólo lo llama el wrapper público).
+  - V4: igualdad EXACTA de `str(exc)`; el deadline es el mismo `deadline = started + timeout_s`;
+    el sleep sigue fuera del lock (test existente `test_sleep_does_not_hold_tool_lock` y el
+    oráculo con un contendiente). `observed` queda None si sólo hubo sondas reintentadas.
+    Pregunta abierta: ¿algún consumidor (playbooks, docs, tests, runner) compara la respuesta de
+    wait_for por igualdad de dict o por conjunto de claves y se rompe con las claves nuevas?
+  - V5: sólo descripción; listar acciones disponibles en `action_not_found` es Enforce (in-game).
+  - Parches del orquestador: ver RONDA2-V.md (puede estar vacío si Composer entregó completo).
+
+===============================================================================
+§3. LO QUE TIENES QUE ATACAR
+===============================================================================
+
+Sobre V1: ¿la descripción se calcula de verdad al construir la app (mutante: patch.dict de
+`_FENCE_BLOCK_READY` y app nueva) o hay una copia congelada en otro sitio (`READY_REASONS`
+duplicada, un Literal, un test que pinea la lista vieja de seis)? ¿`compute_bridge_ready` puede
+emitir algo que NO esté en la unión publicada (recorre sus `return`)?
+
+Sobre V2: constrúyelo por `app.call_tool` con `runtime.call_bridge` sustituido: sonda ok vacía →
+reason; sonda ok con jugador lejano → sin reason; sonda `ok: 0` → sin reason; consulta `ok: 0` →
+intacta. ¿La clave `reason` colisiona con algún campo que el bridge Enforce ya devuelva en
+`entities_query`? (busca `reason` en `addon/**/MCPBridge.c` para ese comando).
+
+Sobre V3: ¿queda algún camino por el que un `timeout_s` > 600 entre (playbook_run, alias, el
+wrapper público, `_finite_float` con inf/nan)? ¿El rechazo ocurre ANTES del lock y de cualquier
+`call_bridge` (cuenta ambos con un runtime falso)? ¿El README dice ahora la verdad y nada más
+cambió en ese párrafo?
+
+Sobre V4: escribe tus propios runtimes falsos: (a) stale×N luego satisfecho → satisfied, probes =
+N+1, not_ready_probes = N; (b) stale siempre → ok:true, satisfied:false, timed_out:true,
+last_error exacto, elapsed ≈ timeout_s y NUNCA más (deadline único); (c) cada otro motivo aborta
+en la primera sonda; (d) un contendiente adquiere `tool_lock` durante la espera; (e) el e2e con
+`require_version=True` del §1. ¿Puede el reintento enmascarar un servidor MUERTO para siempre
+(el llamador espera timeout_s completo)? Si sí, ¿es el contrato que la ficha pidió («esperar a
+través del arranque») o un defecto? Dilo con criterio, no con gusto.
+
+Sobre V5: ¿la descripción contradice algo de `MCPClientBridge.c` (busca cómo empareja `action`
+y `classname` de verdad)?
+
+Y la transversal: ¿hay algún camino por el que este diff invierta éxito/fallo fuera de lo
+enumerado? Corre la suite acotada del workspace (`bash gate/suite.sh` desde `<ws>`) y el oráculo,
+y di qué medirías tú que el orquestador no midió.
+
+===============================================================================
+§4. ENTREGABLE
+===============================================================================
+
+Escribe tu dictamen en: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-V\REVIEW-CODEX.md
+
+    ## VEREDICTO
+    Una línea: BLOQUEANTES=<n>.
+    ## BLOQUEANTES
+    Uno por bloque: qué producto rompe, path:line, comando de repro literal y su salida hoy.
+    ## BACKLOG
+    Todo lo demás, incluido lo del aparato del orquestador. Opinión completa.
+    ## LO QUE NO PUDE VERIFICAR
+    Sin excusas.
+    ## PREMISAS DEL ORQUESTADOR QUE CREO FALSAS
+    Si algo del §2 no se sostiene, dilo con el comando que lo refuta. Esta sección vale más
+    que las otras.

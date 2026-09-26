@@ -1,0 +1,57 @@
+{
+  "run_id": "20260925-gcal",
+  "when": "2026-09-25 11:15:59 Europe/Madrid",
+  "checkout": "78cc50a",
+  "repo": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+  "sheets_total": 35,
+  "owns_total": 22,
+  "descensos": 0,
+  "ascensos": 5,
+  "matches": 17,
+  "expect_descensos": 0,
+  "gcal_pass": true,
+  "clase_tally": {
+    "C2": 6,
+    "C3": 10,
+    "C4": 6
+  },
+  "floor_tally": {
+    "C2": 4,
+    "C3": 8,
+    "C1": 4,
+    "C4": 6
+  },
+  "descensos_list": [],
+  "ascensos_list": [
+    {
+      "id": "fb-20260829-024747-55dd",
+      "sheet": "06-fb-20260829-024747-55dd.md",
+      "clase_mecanica": "C3",
+      "oracle_floor": "C1"
+    },
+    {
+      "id": "fb-20260829-025502-251d",
+      "sheet": "10-fb-20260829-025502-251d.md",
+      "clase_mecanica": "C2",
+      "oracle_floor": "C1"
+    },
+    {
+      "id": "fb-20260829-030056-d73b",
+      "sheet": "12-fb-20260829-030056-d73b.md",
+      "clase_mecanica": "C2",
+      "oracle_floor": "C1"
+    },
+    {
+      "id": "fb-20260829-111016-344d",
+      "sheet": "19-fb-20260829-111016-344d.md",
+      "clase_mecanica": "C3",
+      "oracle_floor": "C2"
+    },
+    {
+      "id": "fb-20260829-135408-cc2d",
+      "sheet": "22-fb-20260829-135408-cc2d.md",
+      "clase_mecanica": "C2",
+      "oracle_floor": "C1"
+    }
+  ]
+}

@@ -1,0 +1,225 @@
+{
+  "ticket": "fb-20260828-224835-268a",
+  "tickets": ["fb-20260828-224835-268a"],
+  "module": "M07-CAPTURE",
+  "packet": "inbox-20260831-v6",
+  "plan": "plans/inbox-20260830/03-fb-20260828-224835-268a.md",
+  "gate_file": "gates/inbox-03-224835-268a.md (read only; no box flipped)",
+  "ownership_addendum": "plans/inbox-20260830/physical-ownership-addendum-v1.md:54",
+  "dag_row": "plans/inbox-20260830/00-execution-dag.md:42",
+  "scope": "Acreditación del estado pre-268a: captura dual legacy (apply_crop fail-open sobre el bitmap de ventana, meta.window/frame_sha256, fullres de chosen sin recortar). Cero puntos DESIGN de crop_space/client/recortador estricto/superficies están hechos. Firma pública, JSON obligatorio y app.call_tool son M22 OUT-OF-SCOPE. Hashes y suite de esta hop INCONCLUSIVE (Shell rechazado); no se copian digest del censo de arranque a owns.sha256.",
+  "owns": {
+    "tools/mcp_capture.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Shell rechazado; no se calcula SHA-256/mtime/size en esta hop. No se transcribe el censo de arranque (tautología). Source leído entero este hop: tools/mcp_capture.py:1-503.",
+      "prior_measurement_not_this_hop": {
+        "source": "TEMP M07-writer-census-forensics-v1.md:35 (2026-09-01) y receipt M00 successor w1 M07.json:67-78",
+        "sha256": "b06fa0ea85aad5e217730b9c1e42c5925cecd9b59abe436f732bb45af404ef7d",
+        "size_bytes": 21840,
+        "mtime_utc": "2026-08-23T19:54:04.1610656Z",
+        "note": "Medición ajena. No es el digest de esta hop."
+      }
+    },
+    "tools/tests/test_mcp_capture.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Shell rechazado; no se calcula SHA-256/mtime/size en esta hop. Source leído entero este hop: tools/tests/test_mcp_capture.py:1-223.",
+      "prior_measurement_not_this_hop": {
+        "source": "TEMP M07-writer-census-forensics-v1.md:36 (2026-09-01) y receipt M00 successor w1 M07.json:118-127",
+        "sha256": "dd635f3d79759956312943f4480385e5757cb3a9262735d001ace4d73164eeaf",
+        "size_bytes": 8644,
+        "mtime_utc": "2026-08-23T19:54:04.1620646Z",
+        "note": "Medición ajena. No es el digest de esta hop."
+      }
+    }
+  },
+  "plan_points": {
+    "1_m22_crop_space_public_signature": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:28",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "plans/inbox-20260830/00-execution-dag.md:57 (único dueño de tools/dayz_mcp/server.py); physical-ownership-addendum-v1.md:72",
+      "observed_readonly": "tools/dayz_mcp/server.py:3725-3735 firma pública sin crop_space (scale/max_tokens/frames/process_name/fmt/quality/crop/save_fullres/save_dir). :3784-3796 llama capture_dual sin crop_space. Cualquier valor distinto de client|window y el token bad_crop_space no existen en esta frontera."
+    },
+    "1_m07_crop_selection_and_logic": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:28",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M07-CAPTURE",
+      "code": "tools/mcp_capture.py:465-479 capture_dual no tiene crop_space; no hay rama client vs window. :485 siempre delega en image_content_from_image(..., crop=crop), que en :177 llama apply_crop. No hay recortador client fail-closed separado.",
+      "tests": "tools/tests/test_mcp_capture.py: no menciona crop_space ni un recortador client."
+    },
+    "2_preserve_same_frame_client_rect": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:29",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M07-CAPTURE",
+      "code": "tools/mcp_capture.py:403-423 grab_stable_frame obtiene chosen_result del mismo frame (:404) y valida clientStats (:405-420) pero sólo persiste chosen.info['window'] y chosen.info['sha256'] (:421-422). El rect client del payload no se copia. capture_dual:489-498 lee window/sha256, nunca client. El validador int/no-bool/no-overflow/no-degenerado y el token frame_client_rect_unverified no existen. El token vivo es frame_client_area_unverified (:407, :418), otro identificador.",
+      "backend_already_delivers_rect": "EXACT del plan, no es trabajo M07: tools/mcp-grab.ps1:278-303 emite client {left,top,width,height}; docstring grab_window_to_file mcp_capture.py:367-373 nombra client/clientStats. El mock de test_mcp_capture.py:134 también envía client y el código lo descarta.",
+      "tests": "ningún aserto de conservación del rect client ni de frame_client_rect_unverified."
+    },
+    "3_strict_client_crop_parser": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:30",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M07-CAPTURE",
+      "code": "Único recorte: apply_crop en tools/mcp_capture.py:138-166, fail-open (spec vacío o inválido devuelve img; frac se clampa a [0.05,1] en :154; bbox se clampa a [0,1] en :160). image_content_from_image:177 lo llama siempre, también con crop=\"\". No hay parser client que devuelva exactamente bad_crop ni que prohíba apply_crop.",
+      "tests": "ningún caso bad_crop / center:F fuera de rango / bbox degenerado fail-closed."
+    },
+    "4_m07_error_tokens": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:31",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M07-CAPTURE",
+      "code": "mcp_capture.py no contiene los literales bad_crop_space, bad_crop ni frame_client_rect_unverified. Errores vivos: frame_client_area_unverified (:407,:418), frame_client_all_black (:420), y los del backend (window_not_found cubierto en test :209-218). No hay rama que impida devolver ImageContent ni fallback client→window porque no hay modo client.",
+      "tests": "ausentes para los tres tokens 268a."
+    },
+    "4_m22_wire_safe_error": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:31",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57; addendum :72",
+      "observed_readonly": "tools/dayz_mcp/server.py:229-268 _wire_safe_error / _is_safe_error_token (identificador ASCII 3..64). Los tres tokens 268a, si M07 los devolviera, pasarían el predicado; hoy capture_screenshot:3798-3802 solo reenvía el error que venga de capture_dual. No acredita los tokens."
+    },
+    "5_surface_records": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:32",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M07-CAPTURE",
+      "code": "capture_dual meta en mcp_capture.py:489-498 publica native_width/native_height, crop, inline_mimeType, inline_base64_len, window, backend_sha256, frame_sha256. No existen window_surface, client_surface ni effective_surface (rect_window, pixel_sha256, stats, native_*/delivered_*).",
+      "tests": "test_mcp_capture.py:141-147 aserta window/backend_sha256/frame_sha256 legacy, no los tres records."
+    },
+    "5_encode_downscale_primitive": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:32",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M07-CAPTURE",
+      "code": "La cola encode/downscale sigue dentro de image_content_from_image:169-187 y arranca con apply_crop (:177). encode_bytes:122-135 solo serializa; no es la primitiva privada que recibe RGB ya recortado. capture_dual:485 no puede alimentar un viewport client recortado a esa cola.",
+      "tests": "test_downscale_to_budget:183-202 y test_png_format:204-207 cubren el wrapper legacy, no una primitiva post-crop client."
+    },
+    "5_legacy_meta_window_and_frame_sha256": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:32 y :42-43 (conservar forma legacy)",
+      "verdict": "IMPLEMENTED",
+      "owner": "M07-CAPTURE",
+      "preexisting_baseline": true,
+      "code": "grab_stable_frame mcp_capture.py:421 copia window al info; capture_dual:495 publica meta.window; :497-498 meta.frame_sha256 = sha256(chosen.tobytes()) del RGB completo de ventana. backend_sha256 en :496 queda como hash de transporte nombrado.",
+      "tests": "test_capture_dual_reports_the_selected_frames_identity_and_hashes test_mcp_capture.py:88-147: aserta meta.window == {pid,class,title,left,top,width,height} del frame elegido (:142) y frame_sha256 fijo del RGB 2x2 (:144-147).",
+      "not_claimed": "frame_sha256 == window_surface.pixel_sha256 no se puede acreditar: window_surface no existe."
+    },
+    "6_fullres_effective_surface": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:33",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M07-CAPTURE",
+      "code": "capture_dual:501-502 if save_fullres: write_fullres(chosen, ...). chosen es el RGB de ventana completo, sin crop client ni crop adicional. write_fullres:454-462 guarda ese img. Es exactamente el FAIL del plan (fullres de chosen/ventana completa).",
+      "tests": "ningún test de fullres vs superficie efectiva nativa."
+    },
+    "6_fullres_path_null_when_unrequested": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:33 (fullres_path=null sin save_fullres)",
+      "verdict": "INCONCLUSIVE",
+      "owner": "M07-CAPTURE",
+      "code_observed": "mcp_capture.py:487-488 inicializa fullres_path=None; sólo se asigna en :501-502 si save_fullres.",
+      "test_coverage": "test_mcp_capture.py:139 llama capture_dual(frames=3) sin save_fullres pero no aserta result['fullres_path'] is None.",
+      "why": "el source muestra el default; implementado ≠ cubierto por test, y la suite no corrió. Un verde aquí sería tautológico."
+    },
+    "6_publish_separate_file_hash_and_surfaces_without_fullres": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:33",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M07-CAPTURE",
+      "code": "No hay hash de fichero fullres separado. Sin save_fullres el meta de capture_dual tampoco incluye crop_space ni records de superficie. Nota M22 (fuera de alcance): server.py:3814-3816 con save_fullres=False retorna sólo Image, sin JSON.",
+      "tests": "ausentes."
+    },
+    "7_m22_public_blocks_and_call_tool": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:34",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57; addendum :72",
+      "observed_readonly": "server.py:3814-3818: save_fullres=False → un solo Image; True → [image, json.dumps(meta)]. No hay crop_space en firma/documentación :3718-3735. test público app.call_tool('capture_screenshot') no pertenece a test_mcp_capture.py."
+    },
+    "8_m07_rgb_fixture_and_oracle": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:35",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M07-CAPTURE",
+      "code": "tools/tests/test_mcp_capture.py:1-223 no construye fixture RGB con chrome rojo y viewport verde/azul, no calcula oracle de hashes/stats fuera de los helpers, no espiá apply_crop, no cubre origen 0,0 / rect ausente / bool / negativo / overflow / cero / bad_crop / bad_crop_space / modo window vs client.",
+      "preexisting_tests_are_not_268a": [
+        "test_grab_self_test_covers_client_area_liveness_contract:16",
+        "test_stable_frame_rejects_titlebar_only_client_area:53",
+        "test_stable_frame_accepts_nonblack_client_area:71",
+        "test_capture_dual_reports_the_selected_frames_identity_and_hashes:88",
+        "test_stable_frame_rejects_unverified_client_stats:149",
+        "test_downscale_to_budget_builds_image_content:183",
+        "test_png_format_is_still_selectable:204",
+        "test_capture_window_not_found_returns_is_error:209"
+      ]
+    },
+    "8_m22_public_call_tool_and_mutants": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:35",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57 (tests públicos). El plan exige demostrar reenvío server.py:3784-3796 → capture_dual y negativos vía app.call_tool; eso no es OWNS de M07 (addendum :54 vs :72)."
+    },
+    "amendment_m07_same_frame_strict_crop_surfaces": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:53",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M07-CAPTURE",
+      "why": "Reexpone los puntos 2, 3, 5 y 6: rect client del mismo chosen, recorte en capture_dual antes del downscale, recortador fail-closed distinto de apply_crop, tres records, conservar legacy. Nada de eso está en mcp_capture.py:465-503."
+    },
+    "amendment_m22_signature_docs_forward_json": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:53",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57; addendum :72. M13/M23 sólo consumen: ficha :15 y addendum :61-62, :72-74; esta hop no los escribe."
+    },
+    "amendment_oracle_outside_helpers": {
+      "plan_citation": "plans/inbox-20260830/03-fb-20260828-224835-268a.md:54",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M07-CAPTURE",
+      "why": "No hay oracle de fixture que calcule píxeles/stats/hashes fuera de apply_crop/image_content_from_image/capture_dual. test_mcp_capture.py:144-147 usa un hash esperado del RGB completo de ventana, no de chrome vs viewport."
+    }
+  },
+  "verdict_counts": {
+    "IMPLEMENTED": 1,
+    "OUT-OF-SCOPE": 5,
+    "NOT-IMPLEMENTED": 11,
+    "INCONCLUSIVE": 1,
+    "note": "Conteos sobre las 18 entradas de plan_points (1+5+11+1=18). Hashes de owns y corrida unittest son INCONCLUSIVE aparte, no son puntos de plan."
+  },
+  "preexisting_suite_not_run": {
+    "file": "tools/tests/test_mcp_capture.py",
+    "methods_visible": 8,
+    "methods": [
+      "test_grab_self_test_covers_client_area_liveness_contract:16",
+      "test_stable_frame_rejects_titlebar_only_client_area:53",
+      "test_stable_frame_accepts_nonblack_client_area:71",
+      "test_capture_dual_reports_the_selected_frames_identity_and_hashes:88",
+      "test_stable_frame_rejects_unverified_client_stats:149",
+      "test_downscale_to_budget_builds_image_content:183",
+      "test_png_format_is_still_selectable:204",
+      "test_capture_window_not_found_returns_is_error:209"
+    ],
+    "note": "Inventario de source, no resultado de unittest. El brief prohíbe inventar ran/failures."
+  },
+  "bugs_observed_not_fixed": [
+    {
+      "id": "268a-still-open",
+      "location": "tools/mcp_capture.py:177 y :485-502",
+      "problem": "crop se aplica sobre el RGB de ventana (chrome incluido) vía apply_crop fail-open; fullres guarda chosen sin recortar; el rect client del mismo frame se descarta en :421-422.",
+      "action": "no parcheado; es el hueco que el plan pide materializar."
+    },
+    {
+      "id": "token-near-miss",
+      "location": "tools/mcp_capture.py:407,418",
+      "problem": "frame_client_area_unverified no es frame_client_rect_unverified. Un consumidor que busque el token 268a no lo encontrará.",
+      "action": "no parcheado."
+    }
+  ],
+  "not_touched": [
+    "tools/mcp_capture.py (leído; no escrito)",
+    "tools/tests/test_mcp_capture.py (leído; no escrito)",
+    "tools/dayz_mcp/server.py (leído en :229-268 y :3718-3818 para OUT-OF-SCOPE; no escrito)",
+    "tools/mcp-grab.ps1 (leído en :278-303 para el EXACT del backend; no escrito)",
+    "GATES.md",
+    "gates/**",
+    "plans/**",
+    "product-spec.md",
+    "tools/.venv-mcp"
+  ]
+}

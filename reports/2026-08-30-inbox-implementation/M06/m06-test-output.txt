@@ -1,0 +1,85 @@
+# medido por el orquestador (Claude Opus 5) el 2026-09-02T00:09:36.515904+00:00, no por la lane: Cursor rechaza shell en esta configuracion headless y la lane devolvio INCONCLUSIVE en vez de inventar cifras
+# comando: -m unittest tests.test_loopback tests.test_validate_command_args_table -v
+# cwd: tools
+
+test_idle_tcp_connections_do_not_spawn_past_http_worker_ceiling (tests.test_loopback.LoopbackHttpBodyTest.test_idle_tcp_connections_do_not_spawn_past_http_worker_ceiling) ... ok
+test_read_json_happy_path_still_enqueues (tests.test_loopback.LoopbackHttpBodyTest.test_read_json_happy_path_still_enqueues) ... ok
+test_read_json_rejects_invalid_utf8 (tests.test_loopback.LoopbackHttpBodyTest.test_read_json_rejects_invalid_utf8) ... ok
+test_read_json_rejects_negative_content_length (tests.test_loopback.LoopbackHttpBodyTest.test_read_json_rejects_negative_content_length) ... ok
+test_read_json_rejects_non_numeric_content_length (tests.test_loopback.LoopbackHttpBodyTest.test_read_json_rejects_non_numeric_content_length) ... ok
+test_read_json_rejects_oversize_without_reading_body (tests.test_loopback.LoopbackHttpBodyTest.test_read_json_rejects_oversize_without_reading_body) ... ok
+test_read_json_rejects_short_body (tests.test_loopback.LoopbackHttpBodyTest.test_read_json_rejects_short_body) ... ok
+test_ui_dialog_enqueue_well_formed_and_rejects_seven_fields (tests.test_loopback.LoopbackHttpBodyTest.test_ui_dialog_enqueue_well_formed_and_rejects_seven_fields) ... ok
+test_ui_dialog_unhashable_kind_is_bad_args (tests.test_loopback.LoopbackHttpBodyTest.test_ui_dialog_unhashable_kind_is_bad_args) ... ok
+test_credential_recovery_telemetry_expires_and_saturates (tests.test_loopback.LoopbackTest.test_credential_recovery_telemetry_expires_and_saturates) ... ok
+test_drive_probe_client_routes_to_client_peer (tests.test_loopback.LoopbackTest.test_drive_probe_client_routes_to_client_peer) ... ok
+test_five_endpoints_round_trip (tests.test_loopback.LoopbackTest.test_five_endpoints_round_trip) ... ok
+test_h0_server_primitives_route_and_validate_args (tests.test_loopback.LoopbackTest.test_h0_server_primitives_route_and_validate_args) ... ok
+test_last_poll_and_version_hook (tests.test_loopback.LoopbackTest.test_last_poll_and_version_hook) ... ok
+test_query_get_in_condition_routes_to_server_peer (tests.test_loopback.LoopbackTest.test_query_get_in_condition_routes_to_server_peer) ... ok
+test_retail_quarantine_409_distinguishes_malformed_and_unknown_probe (tests.test_loopback.LoopbackTest.test_retail_quarantine_409_distinguishes_malformed_and_unknown_probe) ... ok
+test_retail_quarantine_409_distinguishes_process_shape_and_presence (tests.test_loopback.LoopbackTest.test_retail_quarantine_409_distinguishes_process_shape_and_presence) ... ok
+test_retail_quarantine_409_reports_no_probe (tests.test_loopback.LoopbackTest.test_retail_quarantine_409_reports_no_probe) ... ok
+test_retail_quarantine_409_reports_probe_error (tests.test_loopback.LoopbackTest.test_retail_quarantine_409_reports_probe_error) ... ok
+test_server_state_api (tests.test_loopback.LoopbackTest.test_server_state_api) ... ok
+test_set_poll_delay_applies_once_and_range_checks (tests.test_loopback.LoopbackTest.test_set_poll_delay_applies_once_and_range_checks) ... ok
+test_vehicle_trace_routes_to_client_and_uses_one_result_per_read_id (tests.test_loopback.LoopbackTest.test_vehicle_trace_routes_to_client_and_uses_one_result_per_read_id) ... ok
+test_vehicle_tramo_a_commands_route_to_client_peer (tests.test_loopback.LoopbackTest.test_vehicle_tramo_a_commands_route_to_client_peer) ... ok
+test_vehicle_tramo_a_tools_are_registered (tests.test_loopback.LoopbackTest.test_vehicle_tramo_a_tools_are_registered) ... ok
+test_abort_audit_failure_is_merged_without_changing_primary_error (tests.test_loopback.OwnerScopedQueueStateTest.test_abort_audit_failure_is_merged_without_changing_primary_error) ... ok
+test_authorized_reservation_is_aborted_when_enqueue_raises (tests.test_loopback.OwnerScopedQueueStateTest.test_authorized_reservation_is_aborted_when_enqueue_raises) ... ok
+test_cancel_owner_pending_drops_command_owner_entries (tests.test_loopback.OwnerScopedQueueStateTest.test_cancel_owner_pending_drops_command_owner_entries) ... ok
+test_cancel_owner_pending_marks_only_owner_commands (tests.test_loopback.OwnerScopedQueueStateTest.test_cancel_owner_pending_marks_only_owner_commands) ... ok
+test_discarded_vehicle_release_preserves_cleanup_obligation (tests.test_loopback.OwnerScopedQueueStateTest.test_discarded_vehicle_release_preserves_cleanup_obligation) ... ok
+test_internal_vehicle_release_result_is_purged_without_owner_mapping (tests.test_loopback.OwnerScopedQueueStateTest.test_internal_vehicle_release_result_is_purged_without_owner_mapping) ... ok
+test_internal_vehicle_release_survives_reconnect_gap_on_bound_queue (tests.test_loopback.OwnerScopedQueueStateTest.test_internal_vehicle_release_survives_reconnect_gap_on_bound_queue) ... ok
+test_internal_vehicle_release_ttl_discard_purges_result_and_id (tests.test_loopback.OwnerScopedQueueStateTest.test_internal_vehicle_release_ttl_discard_purges_result_and_id) ... ok
+test_lease_required_includes_version_block_fields (tests.test_loopback.OwnerScopedQueueStateTest.test_lease_required_includes_version_block_fields) ... ok
+test_lease_required_never_polled_does_not_invent_a_pbo (tests.test_loopback.OwnerScopedQueueStateTest.test_lease_required_never_polled_does_not_invent_a_pbo) ... ok
+test_never_polled_409_matches_bridge_status_label (tests.test_loopback.OwnerScopedQueueStateTest.test_never_polled_409_matches_bridge_status_label) ... ok
+test_owner_metadata_never_reaches_wire_and_result_clears_pin (tests.test_loopback.OwnerScopedQueueStateTest.test_owner_metadata_never_reaches_wire_and_result_clears_pin) ... ok
+test_post_authorize_exec_policy_and_audit_rejections_abort (tests.test_loopback.OwnerScopedQueueStateTest.test_post_authorize_exec_policy_and_audit_rejections_abort) ... ok
+test_post_authorize_late_exec_queue_full_aborts (tests.test_loopback.OwnerScopedQueueStateTest.test_post_authorize_late_exec_queue_full_aborts) ... ok
+test_post_authorize_queue_full_aborts (tests.test_loopback.OwnerScopedQueueStateTest.test_post_authorize_queue_full_aborts) ... ok
+test_post_authorize_version_blocked_aborts (tests.test_loopback.OwnerScopedQueueStateTest.test_post_authorize_version_blocked_aborts) ... ok
+test_post_authorize_whitelist_args_and_peer_rejections_abort (tests.test_loopback.OwnerScopedQueueStateTest.test_post_authorize_whitelist_args_and_peer_rejections_abort) ... ok
+test_release_cannot_race_authorize_then_append_into_zombie_command (tests.test_loopback.OwnerScopedQueueStateTest.test_release_cannot_race_authorize_then_append_into_zombie_command) ... ok
+test_stale_discard_finishes_operation_pin (tests.test_loopback.OwnerScopedQueueStateTest.test_stale_discard_finishes_operation_pin) ... ok
+test_vehicle_release_clears_cleanup_only_after_successful_result (tests.test_loopback.OwnerScopedQueueStateTest.test_vehicle_release_clears_cleanup_only_after_successful_result) ... ok
+test_results_are_capped_dropping_oldest_first (tests.test_loopback.ResultCapTests.test_results_are_capped_dropping_oldest_first) ... ok
+test_client_flush_leaves_server_queue_untouched (tests.test_loopback.StaleCommandHygieneTest.test_client_flush_leaves_server_queue_untouched) ... ok
+test_command_ttl_drops_aged_command (tests.test_loopback.StaleCommandHygieneTest.test_command_ttl_drops_aged_command) ... ok
+test_command_within_ttl_is_delivered (tests.test_loopback.StaleCommandHygieneTest.test_command_within_ttl_is_delivered) ... ok
+test_exec_enforce_discard_records_audit (tests.test_loopback.StaleCommandHygieneTest.test_exec_enforce_discard_records_audit) ... ok
+test_first_poll_never_flushes (tests.test_loopback.StaleCommandHygieneTest.test_first_poll_never_flushes) ... ok
+test_reconnect_flush_drops_previous_session_command (tests.test_loopback.StaleCommandHygieneTest.test_reconnect_flush_drops_previous_session_command) ... ok
+test_small_gap_delivers_command (tests.test_loopback.StaleCommandHygieneTest.test_small_gap_delivers_command) ... ok
+test_schemaless_commands_preserve_unchecked_payloads (tests.test_validate_command_args_table.ValidateCommandArgsFallbackTest.test_schemaless_commands_preserve_unchecked_payloads) ... ok
+test_unknown_command_is_rejected (tests.test_validate_command_args_table.ValidateCommandArgsFallbackTest.test_unknown_command_is_rejected) ... ok
+test_action_use (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_action_use) ... ok
+test_entities_query (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_entities_query) ... ok
+test_exec_enforce (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_exec_enforce) ... ok
+test_infected_drive (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_infected_drive) ... ok
+test_inventory_give (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_inventory_give) ... ok
+test_key_press (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_key_press) ... ok
+test_notify_players (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_notify_players) ... ok
+test_object_anim (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_object_anim) ... ok
+test_object_delete (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_object_delete) ... ok
+test_object_inspect (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_object_inspect) ... ok
+test_player_respawn (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_player_respawn) ... ok
+test_player_teleport (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_player_teleport) ... ok
+test_restore_gameplay (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_restore_gameplay) ... ok
+test_surface_query (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_surface_query) ... ok
+test_ui_click (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_ui_click) ... ok
+test_ui_dialog (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_ui_dialog) ... ok
+test_ui_focus (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_ui_focus) ... ok
+test_ui_reload_layout (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_ui_reload_layout) ... ok
+test_ui_set_text (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_ui_set_text) ... ok
+test_ui_tree (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_ui_tree) ... ok
+test_vehicle_prepare_fixture (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_vehicle_prepare_fixture) ... ok
+test_vehicle_trace (tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_vehicle_trace) ... ok
+
+----------------------------------------------------------------------
+Ran 76 tests in 0.859s
+
+OK

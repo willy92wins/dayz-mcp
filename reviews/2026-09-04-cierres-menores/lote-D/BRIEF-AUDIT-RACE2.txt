@@ -1,0 +1,43 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. Trabaja hasta emitir el informe y escríbelo en disco.
+Si algo te bloquea, dilo en el informe y sigue con el resto.
+
+§0. TU PAPEL: VERIFICACIÓN DE CONCURRENCIA Y COSTE del lote D (un cambio de ingeniería en un daemon de pruebas de
+DayZ que decide si la «caja» de juego está libre antes de lanzar un servidor local). Lee primero COMUN.txt (mismo
+directorio): contexto, cambio, fronteras y regla de CRITICAL-con-repro. Es una revisión de calidad de software sobre
+código propio del proyecto; nada de lo que se pide implica acceder a otros equipos ni a procesos de terceros: solo
+leer la tabla de sockets local (`netstat -ano`, psutil) y ejecutar los tests del repositorio con fakes.
+
+§1. PREGUNTAS QUE DEBES CONTESTAR CON EVIDENCIA
+A-1 Ventana entre sondeo y lanzamiento. `start_run` sondea FRESCO en `_foreign_port_reason` y luego lanza bajo
+    `_operation_lock`. Si otro servidor local aparece ENTRE el sondeo y `launcher(...)`, ¿es la misma ventana que ya
+    tenía `_foreign_diag_reason`, o mayor? Razona con path:line el tamaño de la ventana y di si hay algo barato que la
+    cierre (re-sondeo tras un bind fallido, o dejar que DayZ falle el bind y reconciliar). Sin repro ejecutable no es
+    CRITICAL: BACKLOG con la secuencia exacta.
+A-2 Caché de 1,5 s (`_BOX_OCCUPANCY_CACHE_S`, `_probes_for_snapshot`): `box_occupancy()` puede servir `occupied=False`
+    hasta 1,5 s después de que aparezca un holder. ¿Algún camino de LANZAMIENTO decide con esa lectura cacheada en vez
+    del sondeo fresco? Sigue `wait_for_box_s` (server.py `execute_wait_for_box`, `session_box_status`, claims de la
+    coordinación) hasta `start_run`. Un lanzamiento decidido por la caché sería CRITICAL con repro.
+A-3 Dos lanzadores concurrentes (dos sesiones, dos leases, `wait_for_box_s`) con el puerto libre: ¿el primero registra
+    su PID antes de que el segundo sondee? Si el segundo sondea cuando el primero ya bindeó pero aún no registró, el
+    holder sale «no registrado» y el segundo se rechaza (correcto); ¿hay un instante en que ambos pasan? Repro con hilos
+    sobre `ProcessLifecycle` y fakes (plantilla: `test_starting_provisional_invalidates_empty_occupancy_cache` en
+    tests/test_box_occupancy.py, lanzador lento con Event).
+A-4 Coste: `snapshot_udp_port_holders` = un `psutil.net_connections(kind="udp")` (o un `netstat` con timeout de 10 s)
+    más un snapshot ToolHelp por llamada; se invoca en cada `box_occupancy()` no cacheado y en cada `start_run`. Mide
+    en este host (`python -c` con `time.perf_counter`, 20 repeticiones) el coste medio de `snapshot_udp_port_holders()`
+    y de `snapshot_processes_by_name(["DayZDiag_x64.exe"])`. `session_status` se sondea en bucles de espera: di si el
+    coste cabe en el intervalo de sondeo o si conviene cachear el sondeo de puertos aparte. ¿Un `netstat` lento de 10 s
+    bloquea `_operation_lock`? Sí/no, path:line, CRITICAL o BACKLOG.
+A-5 Lista parcial sin error: si `psutil.net_connections` devuelve MENOS filas de las reales (por ejemplo cuando el
+    proceso del daemon no tiene permiso para leer la tabla completa), ¿la lista sale incompleta con `known=True`? Lee
+    la implementación de psutil en el venv (`.venv-mcp/Lib/site-packages/psutil/_pswindows.py`, `net_connections`) y di
+    si puede devolver un resultado parcial sin lanzar. Si puede, un holder que no aparece con `known=True` es el modo de
+    fallo de la ficha: CRITICAL solo con repro ejecutable, si no BACKLOG con propuesta (p. ej. cruzar psutil con netstat
+    y quedarse con la unión).
+
+§2. ENTREGABLE — escribe C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-D\AUDIT-RACE.md con:
+## VEREDICTO
+CRITICAL=N (con repro ejecutable) · MAJOR=N · BACKLOG=N
+## A-1 … A-5 (evidencia: comandos, salida literal recortada, path:line)
+## HALLAZGOS (cada uno: severidad, secuencia exacta, repro [EXACT] o «sin repro → backlog», fix propuesto [DESIGN])
+## LO QUE NO PUDE VERIFICAR

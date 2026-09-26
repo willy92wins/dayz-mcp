@@ -1,0 +1,538 @@
+--- a/tools/dayz_mcp/server.py
++++ b/tools/dayz_mcp/server.py
+@@ -26,6 +26,7 @@
+     core,
+     daemon,
+     daemon_credential,
++    dayz_test_modes,
+     dayz_test_tool,
+     host_config,
+     inbox,
+@@ -50,6 +51,19 @@
+ from dayz_mcp.process_lifecycle import empty_box, occupancy_error_fields
+ from dayz_mcp.session_coordination import ClientIdentity
+ from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
++
++UiClickMode = Literal["direct", "complete"]
++UiReloadLayoutMode = Literal["reload", "close"]
++
++_CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
++    "pipeline_resolve",
++    "capture_screenshot",
++    "ui_click",
++    "ui_reload_layout",
++    "dayz_knowledge_status",
++    "dayz_knowledge_prepare",
++    "dayz_test_run",
++)
+ 
+ 
+ DEFAULT_TOOL_TIMEOUT_S = 15.0
+@@ -1736,6 +1750,53 @@
+     object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
+ 
+ 
++def _patch_closed_tool_schema(app: FastMCP, tool_name: str) -> None:
++    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
++    if tool is None:
++        raise RuntimeError(f"missing tool {tool_name}")
++    tool.parameters["additionalProperties"] = False
++    # A zero-argument tool publishes `required: []` explicitly: a consumer that generates
++    # calls from the schema must see a closed, empty contract, not an absent key.
++    tool.parameters.setdefault("required", [])
++    allowed = set(tool.parameters.get("properties", {}))
++    original = tool.fn_metadata.call_fn_with_arg_validation
++
++    async def patched(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly):
++        unknown = set(arguments_to_validate) - allowed
++        if unknown:
++            raise ToolError("bad_args: unexpected arguments")
++        return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
++
++    object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
++
++
++def _patch_mode_enum_from_authority(app: FastMCP, tool_name: str, field: str = "mode") -> None:
++    """Publish and enforce a mode enum read from the M12 authority at build time and per call.
++
++    ``dayz_test_modes.public_mode_names()`` is read when the app is BUILT (never when this module
++    is imported) for the published schema, and again on EVERY call before validation, so a
++    substituted record set is honoured both by a new ``build_app()`` and by the next call
++    (Codex B-01, 2026-09-04). Schema and validation close together: the annotation stays ``str``
++    and this wrapper is the gate.
++    """
++    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
++    if tool is None:
++        raise RuntimeError(f"missing tool {tool_name}")
++    prop = tool.parameters.get("properties", {}).get(field)
++    if not isinstance(prop, dict):
++        raise RuntimeError(f"missing property {field} on {tool_name}")
++    prop["enum"] = list(dayz_test_modes.public_mode_names())
++    original = tool.fn_metadata.call_fn_with_arg_validation
++
++    async def patched(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly):
++        allowed = dayz_test_modes.public_mode_names()
++        if arguments_to_validate.get(field) not in allowed:
++            raise ToolError(f"bad_args: {field} must be one of " + "|".join(allowed))
++        return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
++
++    object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
++
++
+ def _player_count(result: dict[str, Any]) -> int:
+     players = result.get("players")
+     if not isinstance(players, list):
+@@ -2882,10 +2943,12 @@
+         description=(
+             "Queue and run an approved DayZ test project; lease ownership and "
+             "heartbeat remain internal to the tool. Release any held session "
+-            "lease before calling. mode is server|all|client. "
++            "lease before calling. "
+             "Reattach sequence: server -> run_id -> client(run_id). "
+             "client requires run_id; server|all forbid run_id. "
+             "preflight does not relax that matrix. "
++            "extra_mods accepts any folder under the project's mod_roots "
++            "(a disposable probe need not be registered as a project). "
+             "wait_for_box_s>0 waits "
+             "until session_status.box is free (FIFO, no tool_lock while "
+             f"sleeping). 0 is the immediate reject. wait_for_box_s must be <= "
+@@ -3930,9 +3993,11 @@
+     @app.tool(description=(
+         "Capture a screenshot from the DayZDiag window. Returns inline JPEG ImageContent fit to the "
+         "client's MAX_MCP_OUTPUT_TOKENS budget (default 25000 -> ~600px wide; raise that client env var for bigger inline frames: 50000 -> ~860px/2x px, 75000 -> ~1070px/3x, 100000 -> ~native; max_tokens spends LESS than the cap, above-cap is clamped). Use scale='full' to spend a raised inline budget on resolution (the default scale='small' is a hard 512px cap). crop ('center', 'center:0.4', or normalized 'l,t,r,b') zooms on the subject; "
+-        "for optical zoom set a narrow fov in radians via camera_set first. fmt='webp' is ~15% smaller (opt-in; Claude Code has known webp MIME bugs, JPEG stays default). save_fullres=True also writes the "
+-        "native-resolution frame to disk and returns its path in a JSON text block — read that file for "
+-        "fine detail, bypassing the inline token budget. Without window focus, the frame can be frozen. "
++        "for optical zoom set a narrow fov in radians via camera_set first. fmt='webp' is ~15% smaller (opt-in; Claude Code has known webp MIME bugs, JPEG stays default). "
++        "The result is ALWAYS two blocks: the image, then a JSON text block with the surface map (crop_space, window_surface, client_surface, effective_surface, frame_sha256, fullres_path). "
++        "crop_space='client' (default) normalizes crop over the rendered viewport (the space ui_tree rects use) and fails closed with frame_client_rect_unverified; 'window' is the legacy whole-window bitmap. save_fullres=True also writes the "
++        "native-resolution frame to disk and reports its path as fullres_path — read that file for "
++        "fine detail, bypassing the inline token budget. Without window focus, the frame can be frozen: compare frame_sha256 between captures to detect it. "
+         "With two DayZ clients, capture targets the live run's client through cmdline_match/client_pid."
+     ))
+     async def capture_screenshot(
+@@ -3943,6 +4008,7 @@
+         fmt: str = mcp_capture.DEFAULT_FORMAT,
+         quality: int = mcp_capture.DEFAULT_QUALITY,
+         crop: str = "",
++        crop_space: str = mcp_capture.DEFAULT_CROP_SPACE,
+         save_fullres: bool = False,
+         save_dir: str = "",
+     ):
+@@ -4005,6 +4071,7 @@
+                 fmt=fmt,
+                 quality=quality,
+                 crop=crop,
++                crop_space=crop_space,
+                 save_fullres=save_fullres,
+                 save_dir=save_dir,
+             )
+@@ -4024,9 +4091,6 @@
+             raise ToolError("bad image data") from exc
+         image_format = _image_format_from_mime(inline.get("mimeType"))
+         image = Image(data=raw, format=image_format)
+-        if not save_fullres:
+-            # Backward-compatible single-Image return (now JPEG instead of PNG).
+-            return image
+         meta = {"fullres_path": result.get("fullres_path"), **result.get("meta", {})}
+         return [image, json.dumps(meta)]
+ 
+@@ -4236,16 +4300,17 @@
+ 
+     @app.tool(description=(
+         f"{LEASE_TOOL_LINE} Click a client widget by name. button is "
+-        "0=left, 1=right, 2=middle."
++        "0=left, 1=right, 2=middle. mode='direct' is the default; the bridge "
++        "rejects mode='complete' with mode_not_implemented."
+     ))
+     async def ui_click(
+         path: str,
+-        button: int = 0,
++        button: StrictInt = 0,
+         # Not `str | None`: FastMCP would publish anyOf[string,null] and collapse
+         # explicit root=null into omit (global scope). `str = None` publishes
+         # type:string so Pydantic rejects the null before enqueue.
+         root: str = None,
+-        mode: str = "direct",
++        mode: UiClickMode = "direct",
+         bubble: StrictBool = False,
+         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+     ) -> dict[str, Any]:
+@@ -4280,7 +4345,7 @@
+     ))
+     async def ui_reload_layout(
+         path: str = "",
+-        mode: str = "reload",
++        mode: UiReloadLayoutMode = "reload",
+         limit: int = 256,
+         timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
+     ) -> dict[str, Any]:
+@@ -4516,6 +4581,7 @@
+     async def pipeline_resolve(
+         feedback_id: str,
+         resolution: str,
++        evidence_ref: Annotated[str | None, Field(max_length=240)] = None,
+     ) -> dict[str, Any]:
+         """Triage a feedback item by appending a resolution; deletes nothing, history is append-only."""
+         # The lock here only preserves the one-tool-at-a-time client invariant;
+@@ -4523,7 +4589,10 @@
+         async with runtime.tool_lock:
+             try:
+                 return inbox.append_resolution(
+-                    feedback_id, resolution, platform=_pipeline_platform()
++                    feedback_id,
++                    resolution,
++                    platform=_pipeline_platform(),
++                    evidence_ref=evidence_ref,
+                 )
+             except ValueError as exc:
+                 message = str(exc)
+@@ -4554,6 +4623,9 @@
+         """
+         return await playbook_tool_mod.execute_playbook_run(app, name, params)
+ 
++    _patch_mode_enum_from_authority(app, "dayz_test_run")
++    for _closed_tool in _CLOSED_SCHEMA_TOOLS:
++        _patch_closed_tool_schema(app, _closed_tool)
+     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
+     _tool_registry_overlay.update(_frozen_tool_registry_overlay(app, config))
+     return app, runtime
+--- a/tools/tests/test_mcp_tools.py
++++ b/tools/tests/test_mcp_tools.py
+@@ -305,7 +305,7 @@
+             running = asyncio.create_task(
+                 app.call_tool(
+                     "dayz_test_run",
+-                    {"project": "ExampleMod", "mode": "offline"},
++                    {"project": "ExampleMod", "mode": "server"},
+                 )
+             )
+             await started.wait()
+@@ -342,7 +342,7 @@
+         for tool, args, target in (
+             (
+                 "dayz_test_run",
+-                {"project": "ExampleMod", "mode": "offline"},
++                {"project": "ExampleMod", "mode": "server"},
+                 "execute_dayz_test_run",
+             ),
+             (
+@@ -372,7 +372,7 @@
+         ):
+             with self.assertRaises(Exception) as typed_err:
+                 await app.call_tool(
+-                    "dayz_test_run", {"project": "ExampleMod", "mode": "offline"}
++                    "dayz_test_run", {"project": "ExampleMod", "mode": "server"}
+                 )
+         typed_message = str(typed_err.exception)
+         self.assertIn("bad_project", typed_message)
+@@ -659,7 +659,7 @@
+         for tool, args, target in (
+             (
+                 "dayz_test_run",
+-                {"project": "ExampleMod", "mode": "offline"},
++                {"project": "ExampleMod", "mode": "server"},
+                 "execute_dayz_test_run",
+             ),
+             (
+--- a/tools/tests/test_pipeline_feedback.py
++++ b/tools/tests/test_pipeline_feedback.py
+@@ -277,8 +277,12 @@
+         rs_params = inspect.signature(resolve.fn).parameters
+         self.assertIn("feedback_id", rs_params)
+         self.assertIn("resolution", rs_params)
++        self.assertIn("evidence_ref", rs_params)
+         rs_required = resolve.parameters.get("required") or []
+         self.assertEqual(set(rs_required), {"feedback_id", "resolution"})
++        rs_props = resolve.parameters.get("properties", {})
++        self.assertIn("evidence_ref", rs_props)
++        self.assertNotIn("evidence_ref", rs_required)
+ 
+     async def test_feedback_tool_rejects_bad_kind(self) -> None:
+         app, _runtime = server.build_app(server.ServerConfig())
+--- a/tools/tests/test_lote_m_products.py
++++ b/tools/tests/test_lote_m_products.py
+@@ -0,0 +1,207 @@
++"""Lote M wire-surface tests: one positive and one negative per product."""
++
++from __future__ import annotations
++
++import base64
++import json
++import tempfile
++import unittest
++from pathlib import Path
++from unittest.mock import AsyncMock, patch
++
++from dayz_mcp import dayz_test_modes, inbox, server
++from dayz_mcp.server import ServerConfig, build_app
++
++_PNG_1x1 = base64.b64decode(
++    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="
++)
++
++
++def _text_json(result):
++    if isinstance(result, tuple):
++        result = result[0]
++    if isinstance(result, dict):
++        return result
++    return json.loads(result[0].text)
++
++
++class LoteMProductsTest(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self) -> None:
++        self.app, self.runtime = build_app(
++            ServerConfig(key="k", port=0, log_sink=lambda _m: None)
++        )
++
++    async def test_p0_closed_schema_rejects_extras_inprocess(self) -> None:
++        with self.assertRaises(Exception) as ctx:
++            await self.app.call_tool("pipeline_resolve", {
++                "feedback_id": "x", "resolution": "y", "bogus": 1,
++            })
++        self.assertIn("bad_args: unexpected arguments", str(ctx.exception))
++
++    async def test_p0_closed_schema_rejects_extras_wire(self) -> None:
++        from mcp.shared.memory import create_connected_server_and_client_session
++
++        async with create_connected_server_and_client_session(self.app._mcp_server) as session:
++            res = await session.call_tool("dayz_knowledge_status", {"repo": "Y"})
++            txt = " ".join(getattr(c, "text", "") for c in res.content)
++            self.assertTrue(res.isError)
++            self.assertIn("unexpected arguments", txt)
++
++    async def test_p1_evidence_ref_roundtrip(self) -> None:
++        with tempfile.TemporaryDirectory() as tmp:
++            tmp_dir = Path(tmp) / "inbox"
++            with patch.object(inbox, "INBOX_DIR", tmp_dir), \
++                 patch.object(inbox, "FEEDBACK_PATH", tmp_dir / "feedback.jsonl"):
++                created = _text_json(await self.app.call_tool("pipeline_feedback", {
++                    "kind": "bug", "title": "t", "body": "tool: x\nargs: {}\nerror: e\nrepro: r",
++                }))
++                fid = created["id"]
++                await self.app.call_tool("pipeline_resolve", {
++                    "feedback_id": fid,
++                    "resolution": "done",
++                    "evidence_ref": "reviews/2026-09-04-lote-M/REVIEW.md",
++                })
++                listed = _text_json(await self.app.call_tool("pipeline_inbox", {
++                    "include_resolved": True, "limit": 50,
++                }))
++                entry = next(e for e in listed["entries"] if e["id"] == fid)
++                self.assertEqual(entry["evidence_ref"], "reviews/2026-09-04-lote-M/REVIEW.md")
++
++    async def test_p1_invalid_evidence_ref_rejected(self) -> None:
++        with self.assertRaises(Exception) as ctx:
++            await self.app.call_tool("pipeline_resolve", {
++                "feedback_id": "fb-x", "resolution": "nope",
++                "evidence_ref": "C:\\abs\\path.md",
++            })
++        self.assertIn("evidence_ref", str(ctx.exception))
++
++    async def test_p2_knowledge_empty_args_ok(self) -> None:
++        err = None
++        try:
++            await self.app.call_tool("dayz_knowledge_status", {})
++        except Exception as exc:
++            err = exc
++        self.assertIsNone(err)
++
++    async def test_p2_knowledge_extras_rejected(self) -> None:
++        with self.assertRaises(Exception) as ctx:
++            await self.app.call_tool("dayz_knowledge_prepare", {"path": "X"})
++        self.assertIn("bad_args: unexpected arguments", str(ctx.exception))
++
++    async def test_p3_crop_space_forwarded(self) -> None:
++        captured: list[dict] = []
++
++        def _fake(**kwargs):
++            captured.append(dict(kwargs))
++            return {
++                "inline": {
++                    "data": base64.b64encode(_PNG_1x1).decode("ascii"),
++                    "mimeType": "image/png",
++                },
++                "fullres_path": None,
++                "meta": {
++                    "crop_space": kwargs.get("crop_space"),
++                    "frame_sha256": "f" * 64,
++                    "window_surface": {},
++                    "client_surface": None,
++                    "effective_surface": {},
++                },
++            }
++
++        self.runtime.lifecycle_status = AsyncMock(return_value={"runs": []})
++        with patch.object(server.mcp_capture, "capture_dual", side_effect=_fake):
++            blocks = await self.app.call_tool("capture_screenshot", {"crop_space": "window"})
++        self.assertEqual(captured[-1]["crop_space"], "window")
++        self.assertEqual(len(blocks), 2)
++
++    async def test_p3_bad_crop_space_rejected(self) -> None:
++        self.runtime.lifecycle_status = AsyncMock(return_value={"runs": []})
++        with self.assertRaises(Exception) as ctx:
++            await self.app.call_tool("capture_screenshot", {"crop_space": "bogus"})
++        self.assertIn("bad_crop_space", str(ctx.exception))
++
++    async def test_p3_public_round_trip_returns_image_and_meta_in_both_fullres_arms(self) -> None:
++        # Plan sheet 03 (:41): the JSON block travels in the default route too, not only
++        # when a full-resolution file is written. Both arms through the public tool.
++        def _fake(**kwargs):
++            out = {
++                "inline": {
++                    "data": base64.b64encode(_PNG_1x1).decode("ascii"),
++                    "mimeType": "image/png",
++                },
++                "fullres_path": None,
++                "meta": {
++                    "crop_space": kwargs.get("crop_space"),
++                    "frame_sha256": "f" * 64,
++                    "window_surface": {"pixel_sha256": "f" * 64},
++                    "client_surface": None,
++                    "effective_surface": {},
++                    "fullres_file_sha256": None,
++                },
++            }
++            if kwargs.get("save_fullres"):
++                out["fullres_path"] = "C:/fake/fullres.jpg"
++                out["meta"]["fullres_file_sha256"] = "a" * 64
++            return out
++
++        self.runtime.lifecycle_status = AsyncMock(return_value={"runs": []})
++        for arm in (False, True):
++            with self.subTest(save_fullres=arm):
++                with patch.object(server.mcp_capture, "capture_dual", side_effect=_fake):
++                    blocks = await self.app.call_tool("capture_screenshot", {"save_fullres": arm})
++                if isinstance(blocks, tuple):
++                    blocks = blocks[0]
++                self.assertEqual(2, len(blocks))
++                self.assertEqual("image", blocks[0].type)
++                meta = json.loads(blocks[1].text)
++                for key in ("crop_space", "window_surface", "client_surface", "effective_surface", "frame_sha256", "fullres_path"):
++                    self.assertIn(key, meta)
++                self.assertEqual(server.mcp_capture.DEFAULT_CROP_SPACE, meta["crop_space"])
++                self.assertEqual("C:/fake/fullres.jpg" if arm else None, meta["fullres_path"])
++
++    async def test_p4_ui_click_mode_enum_and_strict_button(self) -> None:
++        tool = self.app._tool_manager.get_tool("ui_click")
++        mode = tool.parameters["properties"]["mode"]
++        self.assertEqual(mode.get("enum"), ["direct", "complete"])
++        with self.assertRaises(Exception) as ctx:
++            await self.app.call_tool("ui_click", {"path": "a/b", "button": True, "timeout_s": 0.5})
++        self.assertIn("button", str(ctx.exception))
++
++    async def test_p4_ui_reload_layout_mode_enum(self) -> None:
++        tool = self.app._tool_manager.get_tool("ui_reload_layout")
++        mode = tool.parameters["properties"]["mode"]
++        self.assertEqual(mode.get("enum"), ["reload", "close"])
++
++    async def test_p5_mode_enum_from_authority(self) -> None:
++        tool = self.app._tool_manager.get_tool("dayz_test_run")
++        enum = tool.parameters["properties"]["mode"]["enum"]
++        self.assertEqual(set(enum), set(dayz_test_modes.public_mode_names()))
++        self.assertNotIn("offline", enum)
++
++    async def test_p5_enum_follows_a_substituted_authority_in_a_new_app(self) -> None:
++        # Codex B-01 (2026-09-04): the enum must be read from the authority when the app is
++        # built and on every call, never frozen at import of server.py.
++        from dataclasses import replace
++
++        original = dayz_test_modes.MODE_RECORDS
++        offline = next(record for record in original if record.name == "offline")
++        try:
++            dayz_test_modes.MODE_RECORDS = (replace(offline, public=True, default_when_omitted=True),)
++            app, _runtime = build_app(ServerConfig(key="k", port=0, log_sink=lambda _m: None))
++            enum = app._tool_manager.get_tool("dayz_test_run").parameters["properties"]["mode"]["enum"]
++            self.assertEqual(list(dayz_test_modes.public_mode_names()), enum)
++            self.assertEqual(["offline"], enum)
++            with self.assertRaises(Exception) as ctx:
++                await app.call_tool("dayz_test_run", {"project": "ExampleMod", "mode": "server"})
++            self.assertIn("mode", str(ctx.exception))
++        finally:
++            dayz_test_modes.MODE_RECORDS = original
++
++    async def test_p5_offline_rejected(self) -> None:
++        with self.assertRaises(Exception) as ctx:
++            await self.app.call_tool("dayz_test_run", {"project": "DayZ_MCP", "mode": "offline"})
++        self.assertIn("mode", str(ctx.exception))
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- a/tools/tests/test_weak_agent_consumer_ux.py
++++ b/tools/tests/test_weak_agent_consumer_ux.py
+@@ -470,9 +470,14 @@
+         }
+         with patch.object(server.mcp_capture, "capture_dual", return_value=payload):
+             result = await tool.fn(fmt="webp")
+-        self.assertEqual(result._format, "webp")
+-        self.assertEqual(result._mime_type, "image/webp")
+-        content = result.to_image_content()
++        # The tool returns [Image, meta JSON] in both save_fullres arms (ficha 268a); the
++        # image is the first block and keeps the encoder's mime type.
++        self.assertIsInstance(result, list)
++        self.assertEqual(2, len(result))
++        image = result[0]
++        self.assertEqual(image._format, "webp")
++        self.assertEqual(image._mime_type, "image/webp")
++        content = image.to_image_content()
+         self.assertEqual(content.mimeType, "image/webp")
+ 
+ 
+--- a/tools/tests/test_box_occupancy.py
++++ b/tools/tests/test_box_occupancy.py
+@@ -673,7 +673,7 @@
+             return {
+                 "status": "succeeded",
+                 "project": "ExampleMod",
+-                "mode": "offline",
++                "mode": "server",
+                 "run_id": "12345678-1234-4234-8234-1234567890ab",
+                 "phase": "completed",
+                 "elapsed_s": 0.1,
+@@ -697,7 +697,7 @@
+                     "dayz_test_run",
+                     {
+                         "project": "ExampleMod",
+-                        "mode": "offline",
++                        "mode": "server",
+                         "wait_for_box_s": 30.0,
+                     },
+                 )
+@@ -723,7 +723,7 @@
+                 "dayz_test_run",
+                 {
+                     "project": "ExampleMod",
+-                    "mode": "offline",
++                    "mode": "server",
+                     "wait_for_box_s": BOX_WAIT_MAX_S + 1,
+                 },
+             )
+@@ -796,7 +796,7 @@
+                     "dayz_test_run",
+                     {
+                         "project": "ExampleMod",
+-                        "mode": "offline",
++                        "mode": "server",
+                         "wait_for_box_s": 5.0,
+                     },
+                 )
+@@ -826,7 +826,7 @@
+             return {
+                 "status": "failed",
+                 "project": "ExampleMod",
+-                "mode": "offline",
++                "mode": "server",
+                 "run_id": None,
+                 "phase": "executing",
+                 "elapsed_s": 0.2,
+@@ -866,7 +866,7 @@
+             payload = _content_json(
+                 await app.call_tool(
+                     "dayz_test_run",
+-                    {"project": "ExampleMod", "mode": "offline"},
++                    {"project": "ExampleMod", "mode": "server"},
+                 )
+             )
+         self.assertEqual(payload.get("error_code"), "active_run_exists")

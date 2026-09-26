@@ -1,0 +1,157 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni confirmación, no
+propongas un plan y esperes respuesta. Trabaja hasta emitir el dictamen y escríbelo en
+disco. Si algo te bloquea, dilo en el dictamen y sigue con el resto.
+
+===============================================================================
+§0. QUÉ ES EL PRODUCTO — y qué queda FUERA aunque tengas razón
+===============================================================================
+
+Revisas DOS lotes de cambios en el servidor MCP de DayZ (Python 3.14, FastMCP 1.27.2,
+pydantic 2.13.4, suite unittest). Los implementó Composer 2.5 (Cursor) a ciegas —su shell
+estaba bloqueado— y el orquestador (Claude) aplicó después tres parches pequeños que también
+revisas. El producto son exactamente estas cosas observables:
+
+LOTE M — superficie pública de `tools/dayz_mcp/server.py` (siete tools):
+  P0. Las siete tools tocadas (pipeline_resolve, capture_screenshot, ui_click,
+      ui_reload_layout, dayz_knowledge_status, dayz_knowledge_prepare, dayz_test_run)
+      publican `additionalProperties: false` y rechazan un argumento desconocido con
+      `bad_args: unexpected arguments` ANTES de ejecutar nada (in-process y por sesión
+      cliente: isError=True). Helper `_patch_closed_tool_schema`.
+  P1. `pipeline_resolve` acepta `evidence_ref` opcional (≤240) y lo propaga a
+      `inbox.append_resolution`; `required` sigue siendo [feedback_id, resolution].
+  P2. `dayz_knowledge_status`/`dayz_knowledge_prepare`: schema `properties={}`,
+      `required=[]`, `additionalProperties=false`; `{}` sigue funcionando.
+  P3. `capture_screenshot` gana `crop_space` (default "client") reenviado a
+      `mcp_capture.capture_dual`; devuelve SIEMPRE `[Image, json meta]` en las dos ramas de
+      `save_fullres` (antes, con False, devolvía solo la imagen); `crop_space` inválido
+      llega como error con `bad_crop_space`.
+  P4. `ui_click.mode` publica enum ["direct","complete"], `ui_reload_layout.mode` enum
+      ["reload","close"], `ui_click.button` es StrictInt (true/"1"/1.0 rechazados, rango
+      0..2 conservado), la descripción de ui_click nombra `mode_not_implemented`.
+  P5. `dayz_test_run.mode` publica un enum DERIVADO de `dayz_test_modes.public_mode_names()`
+      (sin "offline"); la descripción documenta `extra_mods` bajo `mod_roots`.
+
+LOTE W — herramientas fuera de server.py:
+  W6. `tools/h9_native_probe.py` pasa `daemon_policy_json` a `launch_registered_native`
+      y `main()` publica un TypeError como `probe_internal_error: ...`, no como código de
+      bundle.
+  W7. `tools/tests/test_effective_schema.py`: 14 tests pytest → unittest.TestCase, mismas
+      aserciones.
+  W8. `tools/dayz_mcp/doctor.py`: costura pura `check_native_bundle_externals(entries, *,
+      stat, approved_sha256=None)` (solo kind=external; OK → INFO NATIVE_BUNDLE_EXTERNALS_OK
+      con checked=n; drift/missing → FAIL NATIVE_BUNDLE_EXTERNAL_DRIFT con drifted y
+      remediation) cableada en `_diagnose` SOLO cuando `DoctorSources.native_launcher_id`
+      no es None (default_sources lo fija a "dayz-test-v1"; fuentes inyectadas: None).
+  W9. `tools/tests/test_interpreter_guard.py`: `approved_interpreter()` (misma derivación
+      que daemon.py:186-191), `verdict()` ok/mismatch/absent; el TestCase falla en mismatch
+      nombrando ambas rutas y se salta en absent.
+  W12. Dos mensajes de `tests/test_docs_truth.py` dejan de aconsejar "Regenerate the map".
+
+**FUERA DEL ALCANCE, y no es negociable ni aunque tengas razón:**
+  - El oráculo, los gates, los ledgers, los briefs, los workspaces: aparato del orquestador.
+    Defectos ahí → BACKLOG, nunca bloqueante.
+  - La región `dayz_test_stop`/`resolve_stop_run` y `dayz_test_tool.py`, en vuelo en otra
+    sesión. `mcp_capture.py`, `inbox.py`, `knowledge.py`, `native_bundle.py`,
+    `build_native_launcher.py`: no se tocaron a propósito.
+  - Arquitectura, estilo, nombres, deuda preexistente, refactors.
+
+**Queda expresamente PROHIBIDO justificar el alcance con «es donde suelen aparecer los
+fallos».** Un hallazgo es BLOQUEANTE si y sólo si: (a) es un defecto de P0-P5 o W6-W12;
+(b) traes un comando que lo reproduce; (c) ese comando falla hoy con el código entregado.
+Sin repro ejecutable va a BACKLOG, salvo corrupción o pérdida de datos.
+
+===============================================================================
+§1. ENTORNO
+===============================================================================
+
+  - Lote M entregado: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-M\ws
+  - Lote W entregado: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-W\ws
+  - Árbol vivo de referencia (SIN los cambios, HEAD d007838): C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev
+  - Diffs LF-normalizados contra ese árbol: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\DIFF-M.patch y C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\DIFF-W.patch
+  - Informes del implementador: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\STATE-M.md, C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\STATE-W.md; parches del
+    orquestador: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\RONDA2-M.md, C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\RONDA2-W.md
+  - Intérprete, exacto y sin alternativa:
+      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+  - **Esa venv NO tiene pytest.** Suite unittest. Desde `<ws>\tools` con `PYTHONPATH=.`:
+      "<intérprete>" -m unittest tests.test_lote_m_products
+      "<intérprete>" -m unittest tests.test_doctor tests.test_effective_schema tests.test_interpreter_guard tests.test_lote_w_h9
+  - Sesión cliente real sin stdio: `mcp.shared.memory.create_connected_server_and_client_session(app._mcp_server)`.
+  - El sandbox de Codex no ve el user-site de Python. Usa ese intérprete y ese PYTHONPATH.
+  - Sin juego, sin red, sin daemon. El doctor real puede correr (`-m dayz_mcp.doctor
+    --daemon-policy normal --json`): en el workspace W abre el registro aprobado del host y
+    hoy reporta NATIVE_BUNDLE_EXTERNALS_OK checked=23.
+
+===============================================================================
+§2. HECHOS Y DECISIONES DEL ORQUESTADOR — refútalos si puedes
+===============================================================================
+
+  - P0 rechaza claves fuera de `tool.parameters["properties"]` envolviendo
+    `fn_metadata.call_fn_with_arg_validation`, igual que el alias existente de scene_raycast
+    (`_patch_public_argument_alias`). Decisión: aplicarlo SOLO a las siete tools tocadas,
+    no a las 60 (ficha ea10 pedía «las tools que ganen parámetros»).
+  - P1: `evidence_ref: Annotated[str | None, Field(max_length=240)] = None`. Decisión: null y
+    omitido significan lo mismo (sin evidencia); `""` la rechaza el helper (1..240).
+  - P3 cambia la FORMA del retorno con `save_fullres=False` (una Image → lista de dos). Lo
+    exige la ficha 03 (`plans/inbox-20260830/03-...md:41`). Un test existente que llamaba
+    `tool.fn()` y esperaba una Image (`tests/test_weak_agent_consumer_ux.py`) lo actualizó el
+    orquestador. Pregunta abierta: ¿algún OTRO consumidor del árbol —playbooks, docs, tests,
+    el runner de playbook_run— asume la Image suelta?
+  - P4 `button: StrictInt` es un endurecimiento con ruptura potencial para un cliente que
+    mandara "1" o 1.0; medido 0 usos así en %LOCALAPPDATA%\DayZ_MCP (audit + inbox).
+  - P5 `DayzTestRunMode = Literal[*dayz_test_modes.public_mode_names()]` a nivel de módulo:
+    el enum se fija en el import. Cinco tests de test_mcp_tools.py usaban mode="offline" con
+    la fachada simulada y pasaron a "server".
+  - Parche orquestador M: `setdefault("required", [])` en el helper P0; el test webp.
+  - Parche orquestador W: el gating por `DoctorSources.native_launcher_id` (RONDA2-W.md).
+  - W8 `_stat_external_file` lee cada DLL entera para el sha256 (steamclient.dll ~21 MB);
+    coste asumido en un doctor que ya escanea procesos.
+
+===============================================================================
+§3. LO QUE TIENES QUE ATACAR
+===============================================================================
+
+Sobre P0/P2: ¿hay algún camino por el que un argumento desconocido siga entrando (alias,
+nombre público vs interno, `arguments_to_pass_directly`, sesión cliente vs in-process)? ¿El
+wrapper compone bien con `_patch_public_argument_alias` si alguna vez se aplican los dos a la
+misma tool? ¿`required: []` sobrevive a `list_tools()` por el wire?
+
+Sobre P3: constrúyelo: llama a capture_screenshot por `app.call_tool` con capture_dual
+simulado en las dos ramas y comprueba que el segundo bloque es JSON con `crop_space`,
+`window_surface`, `client_surface`, `effective_surface`, `frame_sha256`, `fullres_path`. Busca
+consumidores de la forma vieja en TODO `tools/` y `playbooks/`.
+
+Sobre P4/P5: ¿queda alguna ruta por la que "" o "offline" lleguen al cuerpo? ¿El enum de P5
+cambia si cambia `dayz_test_modes` sin tocar server.py (test de sustitución)? ¿Algún test o
+doc del árbol pinea el texto viejo "mode is server|all|client"?
+
+Sobre W7: compara aserción a aserción con el fichero ORIGINAL (árbol vivo): ¿alguna se
+debilitó o se perdió al portar? Esa es la trampa clásica de este tipo de port.
+
+Sobre W8: ¿puede el finding INFO colarse en una corrida con fuentes inyectadas? ¿El WARN
+tapa un error real que debería ser FAIL? ¿`approved_sha256` es el sha correcto para el CAS
+(la ficha dice que el CAS es el sha del REGISTRO, no del PE)?
+
+Sobre W9: ¿`approved_interpreter` deriva bien en el árbol vivo y en un checkout con junctions?
+¿`verdict` compara con normcase?
+
+Y la transversal: ¿hay algún camino por el que este diff invierta éxito/fallo fuera de lo
+enumerado? Corre la suite acotada de cada workspace y di qué medirías tú que el orquestador
+no midió.
+
+===============================================================================
+§4. ENTREGABLE
+===============================================================================
+
+Escribe tu dictamen en: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\REVIEW-CODEX.md
+
+    ## VEREDICTO
+    Una línea: BLOQUEANTES=<n>.
+    ## BLOQUEANTES
+    Uno por bloque: qué producto rompe, path:line, comando de repro literal y su salida hoy.
+    ## BACKLOG
+    Todo lo demás, incluido lo del aparato del orquestador. Opinión completa.
+    ## LO QUE NO PUDE VERIFICAR
+    Sin excusas.
+    ## PREMISAS DEL ORQUESTADOR QUE CREO FALSAS
+    Si algo del §2 no se sostiene, dilo con el comando que lo refuta. Esta sección vale más
+    que las otras.

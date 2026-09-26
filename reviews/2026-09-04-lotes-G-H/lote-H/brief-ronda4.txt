@@ -1,0 +1,139 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar. Tienes shell: úsalo.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+RONDA DE CIERRE (lote H ronda 4 = lote G ronda 11) sobre el árbol fusionado (G + H). Tu ronda
+anterior ató el cerco a la transición, el poll revalida, el lector respeta la compensación,
+retirar borra el cerco. Una auditoría R9 de siete ángulos con verificación ciega confirmó 14
+afirmaciones más sobre el mismo componente; esta ronda cierra las que son defecto. No abras
+nada nuevo: cada regla de abajo tiene su check o su test, y el gate doble tiene que seguir verde.
+
+===============================================================================
+§0. EL PRODUCTO
+===============================================================================
+
+  P9.  **Un comando descartado no acredita nada.** El crédito de actividad de un enqueue se
+       acepta bajo el MISMO lock en que se acepta el comando (el epoch se muestrea ahí), o el
+       cerco y la retirada elevan tumba para el run: en ningún caso un crédito muestreado antes
+       del cerco aterriza después. Hoy `_note_run_command_activity` corre fuera del lock y tras
+       publicar; `fence_runs`/`retire` no dejan tumba.
+  P10. **Retirar cierra lo que descarta.** `_retire_instance_locked` ejecuta el mismo cierre
+       que `fence_runs`: `_flush_queue_discards` (operaciones del coordinador cerradas,
+       `exec_audit(..., "discarded")`, evento de descarte) para toda la cola retirada, por
+       stop, reap, repair, reconcile y launch fallido.
+  P11. **Estado durable ilegible ⇒ rechazo.** Si `_durable_run_state` no puede leer el
+       manifiesto (excepción), el enqueue se rechaza con un código propio (p. ej.
+       `run_state_unavailable`, 503) y no acredita actividad. Nada de fail-open.
+  P12. **La valla de resultado sobrevive a la retirada.** Un `store_result` sin instancia
+       acreditada, o de otra instancia, para un id despachado a un binding ya retirado se
+       rechaza; un run muerto no cierra comandos.
+  P13. **La compensación corre también cuando el rollback durable falla**: olvido de
+       `[inicio del intento, ahora]` y tumba, aunque `manifest.replace(target)` lance.
+  P14. **Recovery reparable.** `begin_release_owner` arma el fallo de recovery con el hash del
+       registro DURABLE (no del mutado en memoria que no se persistió): tras un `replace`
+       fallido el run sigue reparable por `repair_recovery_fault`.
+  P15. **Reconcile no deja runs que la recuperación no pueda acreditar**: `admin_reconcile`
+       no produce STARTING → RUNNING_IDLE sin acreditación (el siguiente arranque del daemon lo
+       convertía en fault global vía `daemon.py:114-131`, que NO tocas: se arregla en el
+       productor).
+  P16. **Hints sin efectos y coherentes**: el hint de `run_not_owned` no ordena
+       `dayz_test_run mode=client run_id=...` (retira el binding vivo y lanza un segundo
+       cliente): nombra la adopción sin efectos o no ordena nada ejecutable; el hint
+       «stop it with dayz_test_stop» no se emite para STARTING/STOPPING (que `dayz_test_stop`
+       rechaza con `run_not_active`); el hint «retry with wait_for_box_s» no se emite para
+       UNRECONCILED con proceso vivo.
+  P17. **El basal de un proceso lanzado por este daemon es un sello más**: en una extensión
+       (cliente sobre run existente) el basal entra como `max` con el sello anterior; la caja
+       no publica `stale` segundos después de lanzar.
+  P18. **La salida durable a EXITED limpia los residuos por `run_id`** (`_last_activity`,
+       tumbas, `_fenced_runs`, `_compensating_runs`) — un `run_id` reutilizado no hereda nada.
+
+Sigue en pie todo lo anterior (G: P1-P8 y sus primas; H: H1-H5, D1-D4).
+
+LO QUE NO ES EL PRODUCTO: el gate, los oráculos, el ledger, este brief (defecto ahí →
+`DISPUTAS`); `server.py`; `daemon.py`; `dayz_test_tool.py` salvo P16 si el hint vive ahí (di
+en HECHO dónde vive cada texto); perf del caché de sondas; la etiqueta `foreign` de la caja
+«ocupada sin filas» (backlog); refactors.
+
+===============================================================================
+§1. LOS CUATRO ROJOS DEL ORÁCULO DE G (42 checks)
+===============================================================================
+
+**N30-CREDITO-EN-VUELO** — enqueue aceptado, hilo bloqueado en `record_command_activity`
+(seam: atributo de instancia que el loopback resuelve por getattr), release en medio → el run
+`RUNNING_IDLE` publica `recent`. Tiene que publicar `unknown`.
+**N31-RETIRE-CIERRA-LO-QUE-DESCARTA** — exec_enforce encolado, `stop_run` → sin
+`exec_audit('discarded')` para su id. Tiene que estar.
+**N32-ESTADO-ILEGIBLE-RECHAZA** — `manifest.get` lanza durante el enqueue → 200 y crédito.
+Tiene que rechazar sin crédito.
+**N34-RESULTADO-TARDIO-TRAS-RETIRE** — comando entregado por poll, `stop_run`,
+`store_result(..., instance=None)` → 200. Tiene que rechazar.
+
+===============================================================================
+§2. LO QUE NO TIENE CHECK. Lo cierro yo al recibir
+===============================================================================
+
+  (A) P13: fallo inyectado en el `replace` del rollback → el crédito del intento no sobrevive
+      (fixture adoptar-y-extender, como en tus tests anteriores). Rojo-antes.
+  (B) P14: `begin_release_owner` con `replace` fallido → `repair_recovery_fault` acepta y repara
+      con el hash que quedó armado. Rojo-antes.
+  (C) P15: `admin_reconcile` sobre un run STARTING no acreditado → no publica `RUNNING_IDLE`
+      (o lo deja en un estado que `recover_after_restart` acredita). Rojo-antes.
+  (D) P16: tres tests de texto de hint (búsqueda del texto prohibido / presencia del correcto)
+      por estado. Rojo-antes donde aplique.
+  (E) P17: extensión con cliente sobre run con sello viejo → tras el launch, `recent`.
+      Rojo-antes (hoy `stale`).
+  (F) P18: tras EXITED, un `start_run` con el mismo `run_id` (id_fn fijo) publica `unknown`, no
+      la actividad del run anterior. Rojo-antes.
+  (G) Preservación: los 38 checks previos de G y los 40 de H siguen verdes; en particular N20
+      (adopt rehabilita) y N26 (poll revalida).
+
+===============================================================================
+§3. EL GATE (doble)
+===============================================================================
+
+    bash gate/run.sh                                      -> oráculo del lote H (40): 40/40
+    (cd tools && PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 <python> ../../gate-extra/oracle_lote_g.py)
+                                                          -> oráculo de G (42): ORACULO-VERDE
+    bash gate/suite.sh                                    -> once módulos: SUITE-ACOTADA OK
+
+Ahora mismo: gate/run.sh (H): ORACULO: PASS=40 FAIL=0 UNMET=0 de 40 · gate-extra (G, 42 checks, SHA-256 4c48642a5a2fea0a…): ORACULO: PASS=38 FAIL=4 UNMET=0 de 42 — rojos N30, N31, N32, N34 · gate/suite.sh: SUITE-ACOTADA OK. **Los verdes son la línea que no se puede romper.**
+Guarda anti-vacuidad: un `UNMET` no es tu código; si tu diseño deja un check sin alcance,
+`DISPUTAS` con el motivo. `gate/` y `gate-extra/` están sellados por hash y son de sólo lectura.
+
+===============================================================================
+§4. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/process_lifecycle.py
+    tools/dayz_mcp/loopback.py
+    tools/dayz_mcp/dayz_test_tool.py       (SÓLO si el texto del hint de P16 vive ahí)
+    tools/tests/test_box_occupancy.py
+    tools/tests/test_process_lifecycle.py
+    tools/tests/test_loopback.py
+    tools/tests/test_dayz_test_tool.py     (SÓLO por P16)
+
+PROHIBIDO: `gate/`; `gate-extra/`; `addon/`; `server.py`; `daemon.py`; `runtime_state.py`;
+debilitar o borrar validaciones existentes; tocar el anillo o el sobre más allá de P16; usar
+red; correr la suite completa.
+
+⚠ **Data-crítico**. Locks: `_operation_lock → (ServerState._lock | _activity_lock)`; nunca el
+inverso; ninguna lectura toma `_operation_lock`. El crédito bajo el lock del loopback (P9) NO
+puede llamar a nada que tome `_operation_lock`.
+
+Escribe tests para lo que entregas y córrelos ANTES de tu cambio contra
+`../../ws-frozen-r3/tools/` (copia temporal tuya bajo /tmp).
+
+===============================================================================
+§5. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — P9-P18 con `path:line`; dónde vive cada texto de hint.
+    ## GATE             — la salida literal de los TRES gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea de FAIL contra `ws-frozen-r3`, o
+                          «preservación». Los de §2 (A)-(F) obligatorios.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si un criterio del gate está mal, aquí, con el argumento.

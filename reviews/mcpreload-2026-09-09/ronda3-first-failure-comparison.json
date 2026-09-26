@@ -1,0 +1,11 @@
+{
+  "reference": "ronda2-full-suite.log",
+  "current": "ronda3-full-suite-pre-nonblocking.log",
+  "reference_header_count": 81,
+  "current_header_count": 83,
+  "added": [
+    "FAIL: tests.test_install_mcp.PublicToolCountDocsTest.test_architecture_tool_count_matches_instantiated_app",
+    "FAIL: tests.test_install_mcp.PublicToolCountDocsTest.test_readme_tool_count_matches_instantiated_app"
+  ],
+  "removed": []
+}

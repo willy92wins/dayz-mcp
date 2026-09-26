@@ -1,0 +1,68 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+TERCERA REVISIÓN DELTA. Tu segunda delta dio 1 MEDIA: el rechazo de P19' vivía en
+`ServerState._retired_run_ids`, memoria volátil que muere con el daemon justo cuando hacía
+falta, y que además crecía por run. Reproducida (N41) y cerrada en una ronda más cambiando la
+PREGUNTA (LL-421: cuatro cierres del mismo hallazgo cayendo por ataques distintos): ya no se
+pregunta «¿se retiró el binding?» (pasado, memoria) sino «¿qué acredita HOY el estado durable?».
+Dictamen sobre el DELTA (`process_lifecycle.py` +37/−22, `loopback.py` +7/−6) y sus consecuencias.
+
+Producto: `../ws/tools/dayz_mcp/process_lifecycle.py` (SHA-256 ae28b78c635603d0ae46f71869666bb7961530f1b430d7a1c886a8aa62abfef4),
+`../ws/tools/dayz_mcp/loopback.py` (SHA-256 16d22129cd9017001d9b1606177ca002bb43d0588470b02bbc53b69059556dc3), `../ws/tools/dayz_mcp/dayz_test_tool.py`
+sin cambios (SHA-256 bca97e26e3a7d9cef96846bee6559eebc938dbbd90e46b3eab6b0f75019f4b5d). El
+producto que revisaste está congelado en `../ws-frozen-r6/tools/` (sólo lectura).
+
+===============================================================================
+§0. QUÉ SE REVISA
+===============================================================================
+
+  P19''.   `adopt_run` exige al menos un proceso registrado `owned` según el guard (identidad
+           del manifiesto: pid + creación + hashes). Sin ninguno (todos `gone`/`foreign`) →
+           `run_processes_gone` (409) con `hint` al reap/recovery. `unknown` sigue rechazando
+           como antes. Un `owned` junto a `gone`/`foreign` sigue adoptable. Durable: no depende
+           de nada en memoria; sobrevive al reinicio.
+  P19''-b. La marca volátil desaparece: `_retired_run_ids`, `run_bindings_retired`,
+           `_bindings_retired_pending_reap`, `binding_retired_pending_reap` y su hint, fuera.
+  P19''-c. El `ok` de `adopt_run` declara `dispatchable: <bool>` calculado del `ServerState`
+           presente (`run_has_bound_binding`: algún binding del run en estado BOUND; STARTING
+           no cuenta); con `False`, `hint` que dice que los bindings no sobreviven al reinicio
+           del daemon y que el run admite `stop_run` y relanzar. `bindings is None` →
+           `dispatchable: False`. Motivo de no rechazar el run vivo sin binding: `stop_run`
+           exige ser el adoptante (`run_not_adopted`); un rechazo dejaría procesos huérfanos
+           que sólo `admin_reconcile` podría cerrar.
+  Y todo lo anterior (G P1-P22', H H1-H5, D1-D4).
+
+**LO QUE NO ES EL PRODUCTO**: gates, oráculos, ledgers, briefs; `server.py`; `daemon.py`;
+`dayz_test_tool.py`; `runtime_state.py`; refactors, estilo, tipado.
+
+===============================================================================
+§1. LO QUE QUIERO DE TI
+===============================================================================
+
+  - P19'': ¿el predicado «≥1 owned» es realmente restart-proof en TODOS los caminos que llegan
+    a `adopt_run` (HTTP `/lifecycle/adopt`, `dayz_test_tool`)? ¿Queda algún estado durable
+    adoptable donde el guard diga `owned` y aun así el run no exista como proceso nuestro
+    (pid reutilizado con identidad completa igual, snapshot cacheado)? ¿`gone` + `foreign`
+    mezclados sin `owned` → rechazo?
+  - P19''-c: ¿`dispatchable` se calcula bajo el orden `_operation_lock → ServerState._lock` y
+    nunca al revés? ¿Puede decir `True` y que la primera mutación no despache (binding BOUND
+    pero run cercado, tumba, `_fenced_runs`, lifecycle sin estado)? ¿Puede decir `False` y
+    despachar? ¿El `hint` con `False` es correcto en el caso `bindings is None` (no es un
+    reinicio)? ¿Algún consumidor (`dayz_test_tool.py`, `server.py`) rompe por la clave nueva?
+  - P19''-b: ¿queda alguna vía por la que el reinicio o el reap dejen un run RUNNING_IDLE con
+    proceso vivo y binding retirado que ahora se adopte con `dispatchable: True`?
+  - Regresiones del delta sobre P1-P22' y sobre el anillo/sobre de H. Validaciones
+    desaparecidas respecto a `ws-frozen-r6`.
+
+Reglas duras: **enseña, no cuentes** (código literal con `path:line`); **escribe el fallo
+concreto**; **la tolerancia no es un defecto**; cero hallazgos es una respuesta legítima y, en
+una tercera delta sobre un diff de 70 líneas, plausible. Ejecuta los tres gates y pega su última línea.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrarlo?
+    ## HALLAZGOS      — por severidad: título, path:line, código pegado, fallo concreto.
+    ## FAMILIAS       — ¿familia nueva o visitada?
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.

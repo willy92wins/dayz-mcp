@@ -1,0 +1,248 @@
+--- tools/dayz_mcp/loopback.py	2026-09-03 01:28:18.394692300 +0200
++++ C:/Users/guill/AppData/Local/Temp/claude/C--Users-guill-OneDrive-Documentos-DayZ-Projects/938664ff-361c-4575-aa56-c7c06c7ca2a8/scratchpad/lote-C/ws/tools/dayz_mcp/loopback.py	2026-09-03 11:05:37.280446100 +0200
+@@ -635,29 +635,35 @@
+     ),
+     "ui_tree": _command_schema(
+         _schema_variant(
+-            optional=("path", "limit"),
++            optional=("path", "limit", "root"),
+             validators={
+                 "path": _is_string,
+                 "limit": _integer_in_range(minimum=1, maximum=512),
++                "root": _is_non_empty_string,
+             },
+         )
+     ),
+     "ui_set_text": _command_schema(
+         _schema_variant(
+             required=("path", "text"),
++            optional=("root",),
+             validators={
+                 "path": _is_non_empty_string,
+                 "text": _is_string,
++                "root": _is_non_empty_string,
+             },
+         )
+     ),
+     "ui_click": _command_schema(
+         _schema_variant(
+             required=("path",),
+-            optional=("button",),
++            optional=("button", "mode", "bubble", "root"),
+             validators={
+                 "path": _is_non_empty_string,
+                 "button": _integer_in_range(minimum=0, maximum=2),
++                "mode": _one_of("direct", "complete"),
++                "bubble": _is_strict_bool,
++                "root": _is_non_empty_string,
+             },
+         )
+     ),
+@@ -694,7 +700,11 @@
+     "ui_focus": _command_schema(
+         _schema_variant(
+             required=("path",),
+-            validators={"path": _is_non_empty_string},
++            optional=("root",),
++            validators={
++                "path": _is_non_empty_string,
++                "root": _is_non_empty_string,
++            },
+         )
+     ),
+     "ui_dialog": _command_schema(delegated=_validate_ui_dialog_args),
+--- tools/tests/test_loopback.py	2026-09-03 02:23:34.094814500 +0200
++++ C:/Users/guill/AppData/Local/Temp/claude/C--Users-guill-OneDrive-Documentos-DayZ-Projects/938664ff-361c-4575-aa56-c7c06c7ca2a8/scratchpad/lote-C/ws/tools/tests/test_loopback.py	2026-09-03 11:05:37.266366500 +0200
+@@ -1671,5 +1671,76 @@
+                 self.assertLessEqual(len(names), loopback.POLL_CAPS_MAX_NAMES)
+ 
+ 
++class UiIngressSchemaTest(unittest.TestCase):
++    """Approved UI ingress contract. Cases are written out, not read from the table."""
++
++    def test_accepts_contracted_payloads(self) -> None:
++        cases = (
++            ("ui_tree", {}),
++            ("ui_tree", {"path": "a/b"}),
++            ("ui_tree", {"path": "a/b", "limit": 8}),
++            ("ui_tree", {"root": "MyMenu"}),
++            ("ui_tree", {"root": "MyMenu", "path": "a/b"}),
++            ("ui_set_text", {"path": "a/b", "text": "x"}),
++            ("ui_set_text", {"path": "a/b", "text": ""}),
++            ("ui_set_text", {"path": "a/b", "text": "x", "root": "MyMenu"}),
++            ("ui_click", {"path": "a/b"}),
++            ("ui_click", {"path": "a/b", "button": 1}),
++            ("ui_click", {"path": "a/b", "mode": "direct"}),
++            ("ui_click", {"path": "a/b", "mode": "complete"}),
++            ("ui_click", {"path": "a/b", "bubble": True}),
++            ("ui_click", {"path": "a/b", "bubble": False}),
++            ("ui_click", {"path": "a/b", "root": "MyMenu"}),
++            (
++                "ui_click",
++                {
++                    "path": "a/b",
++                    "root": "MyMenu",
++                    "mode": "direct",
++                    "bubble": True,
++                    "button": 0,
++                },
++            ),
++            ("ui_focus", {"path": "a/b"}),
++            ("ui_focus", {"root": "MyMenu", "path": "a/b"}),
++        )
++        for command, args in cases:
++            with self.subTest(command=command, args=args):
++                self.assertEqual(
++                    loopback.validate_command_args(command, args),
++                    (True, None),
++                )
++
++    def test_rejects_uncontracted_fields_and_values(self) -> None:
++        cases = (
++            ("ui_click", {"path": "a/b", "wiggle": 1}),
++            ("ui_click", {"path": "a/b", "mode": "sideways"}),
++            ("ui_click", {"path": "a/b", "mode": ""}),
++            ("ui_click", {"path": "a/b", "bubble": "true"}),
++            ("ui_click", {"path": "a/b", "bubble": 1}),
++            ("ui_click", {}),
++            ("ui_click", {"path": "a/b", "root": ""}),
++            ("ui_click", {"path": "a/b", "root": 123}),
++            ("ui_set_text", {"path": "a/b", "text": "x", "mode": "direct"}),
++            ("ui_set_text", {"path": "a/b", "text": "x", "bubble": True}),
++            ("ui_tree", {"mode": "direct"}),
++            ("ui_focus", {"path": "a/b", "bubble": True}),
++            ("ui_focus", {"path": "a/b", "button": 1}),
++            ("ui_tree", {"root": 5}),
++            ("ui_set_text", {"path": "a/b"}),
++            ("ui_tree", {"root": ""}),
++            ("ui_tree", {"bubble": True}),
++            ("ui_set_text", {"path": "a/b", "text": "x", "root": ""}),
++            ("ui_focus", {"path": "a/b", "mode": "direct"}),
++            ("ui_focus", {"path": "a/b", "root": ""}),
++        )
++        for command, args in cases:
++            with self.subTest(command=command, args=args):
++                self.assertEqual(
++                    loopback.validate_command_args(command, args),
++                    (False, "bad_args"),
++                )
++
++
+ if __name__ == "__main__":
+     unittest.main()
+--- tools/tests/test_validate_command_args_table.py	2026-08-29 01:03:15.278423100 +0200
++++ C:/Users/guill/AppData/Local/Temp/claude/C--Users-guill-OneDrive-Documentos-DayZ-Projects/938664ff-361c-4575-aa56-c7c06c7ca2a8/scratchpad/lote-C/ws/tools/tests/test_validate_command_args_table.py	2026-09-03 11:05:37.277439400 +0200
+@@ -352,12 +352,24 @@
+     "ui_tree": (
+         ("valid_empty", {}, (True, None)),
+         ("valid_with_optional", {"path": "Root", "limit": 512}, (True, None)),
++        ("valid_root", {"root": "MyMenu"}, (True, None)),
++        ("valid_root_and_path", {"root": "MyMenu", "path": "a/b"}, (True, None)),
+         ("extra_key", {"extra": None}, (False, "bad_args")),
+         ("path_wrong_type", {"path": 1}, (False, "bad_args")),
+         ("limit_below_range", {"limit": 0}, (False, "bad_args")),
++        ("root_empty", {"root": ""}, (False, "bad_args")),
++        ("root_wrong_type", {"root": 5}, (False, "bad_args")),
++        ("mode_leaks", {"mode": "direct"}, (False, "bad_args")),
++        ("bubble_leaks", {"bubble": True}, (False, "bad_args")),
+     ),
+     "ui_set_text": (
+         ("valid", {"path": "Root.Label", "text": "Ready"}, (True, None)),
++        ("valid_empty_text", {"path": "Root.Label", "text": ""}, (True, None)),
++        (
++            "valid_root",
++            {"path": "Root.Label", "text": "Ready", "root": "MyMenu"},
++            (True, None),
++        ),
+         (
+             "extra_key",
+             {"path": "Root.Label", "text": "Ready", "extra": None},
+@@ -365,6 +377,21 @@
+         ),
+         ("missing_text", {"path": "Root.Label"}, (False, "bad_args")),
+         ("empty_path", {"path": "", "text": "Ready"}, (False, "bad_args")),
++        (
++            "root_empty",
++            {"path": "Root.Label", "text": "Ready", "root": ""},
++            (False, "bad_args"),
++        ),
++        (
++            "mode_leaks",
++            {"path": "Root.Label", "text": "Ready", "mode": "direct"},
++            (False, "bad_args"),
++        ),
++        (
++            "bubble_leaks",
++            {"path": "Root.Label", "text": "Ready", "bubble": True},
++            (False, "bad_args"),
++        ),
+     ),
+     "ui_click": (
+         ("valid_without_button", {"path": "Root.Button"}, (True, None)),
+@@ -373,6 +400,26 @@
+             {"path": "Root.Button", "button": 2},
+             (True, None),
+         ),
++        ("valid_mode_direct", {"path": "Root.Button", "mode": "direct"}, (True, None)),
++        (
++            "valid_mode_complete",
++            {"path": "Root.Button", "mode": "complete"},
++            (True, None),
++        ),
++        ("valid_bubble_true", {"path": "Root.Button", "bubble": True}, (True, None)),
++        ("valid_bubble_false", {"path": "Root.Button", "bubble": False}, (True, None)),
++        ("valid_root", {"path": "Root.Button", "root": "MyMenu"}, (True, None)),
++        (
++            "valid_full",
++            {
++                "path": "Root.Button",
++                "root": "MyMenu",
++                "mode": "direct",
++                "bubble": True,
++                "button": 0,
++            },
++            (True, None),
++        ),
+         (
+             "extra_key",
+             {"path": "Root.Button", "extra": None},
+@@ -384,6 +431,20 @@
+             {"path": "Root.Button", "button": 3},
+             (False, "bad_args"),
+         ),
++        (
++            "mode_outside_enum",
++            {"path": "Root.Button", "mode": "sideways"},
++            (False, "bad_args"),
++        ),
++        ("mode_empty", {"path": "Root.Button", "mode": ""}, (False, "bad_args")),
++        (
++            "bubble_string",
++            {"path": "Root.Button", "bubble": "true"},
++            (False, "bad_args"),
++        ),
++        ("bubble_int", {"path": "Root.Button", "bubble": 1}, (False, "bad_args")),
++        ("root_empty", {"path": "Root.Button", "root": ""}, (False, "bad_args")),
++        ("root_wrong_type", {"path": "Root.Button", "root": 123}, (False, "bad_args")),
+     ),
+     "ui_reload_layout": (
+         ("valid_implicit_reload", {"path": "layout.gui"}, (True, None)),
+@@ -407,6 +468,7 @@
+     ),
+     "ui_focus": (
+         ("valid", {"path": "Root.EditBox"}, (True, None)),
++        ("valid_root", {"root": "MyMenu", "path": "Root.EditBox"}, (True, None)),
+         (
+             "extra_key",
+             {"path": "Root.EditBox", "extra": None},
+@@ -414,6 +476,10 @@
+         ),
+         ("missing_path", {}, (False, "bad_args")),
+         ("empty_path", {"path": ""}, (False, "bad_args")),
++        ("root_empty", {"path": "Root.EditBox", "root": ""}, (False, "bad_args")),
++        ("bubble_leaks", {"path": "Root.EditBox", "bubble": True}, (False, "bad_args")),
++        ("mode_leaks", {"path": "Root.EditBox", "mode": "direct"}, (False, "bad_args")),
++        ("button_leaks", {"path": "Root.EditBox", "button": 1}, (False, "bad_args")),
+     ),
+     "ui_dialog": (
+         (

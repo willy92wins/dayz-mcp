@@ -1,0 +1,21 @@
+APPROVE. No hay hallazgos bloqueantes ni cambios de producción.
+
+- Fichas 1–4: `test-viejo` correctamente. Las fixtures no modelaban el contrato posterior a #94. Los asertos de sugerencias, herramientas registradas, capacidades y fingerprints permanecen intactos en `tools/tests/test_fn_f1f5.py:82-96` y `:244-252`.
+- Ficha 5: clasificación correcta. El error ahora expone la receta pública de lease; la suite conserva comprobaciones independientes de `next_step=session_acquire_wait` en `tools/tests/test_fn_p0_small_model_loops.py:300-308`.
+- Fichas 6–10: `test-viejo`. Producción conserva `status_snapshot`; únicamente faltaba en el falso de `tools/tests/test_ui_error_diagnostics.py:146-154`. Los asertos wire originales no se modificaron.
+- Ficha 11: `test-viejo`. El bypass está limitado a la llamada bajo prueba en `tools/tests/test_python_backlog_fixes.py:301-308`; siguen comprobándose timeout, reap, cola vacía y descarte del resultado tardío.
+- Ficha 12: confirmada como `REGRESION-REAL`. `tools/dayz_mcp/server.py:2284-2290` calcula el deadline, pero ejecuta antes un probe con los 1,0 s definidos en `server.py:116-119`. El repro midió 1,0 s con `tool_timeout=0.4`; procede issue propio.
+- Ficha 13: `test-viejo`; solo corrige el loader para registrar el módulo durante `exec_module`. Los asertos funcionales permanecen.
+- Ficha 14: `test-viejo`; solo se exceptúa el nombre exacto del instalador. Las prohibiciones de `.ps1`, `powershell`, `pwsh`, `cmd.exe` y `remotesigned` siguen aplicándose.
+- Ficha 15: capa 1 correctamente arreglada en `tools/tests/test_a429_overlay.py:337-338`. La capa 2 es duplicado de #102: `FakePeer` no anuncia `caps/ach`; al inyectar exactamente ese censo, el test pasa.
+
+Verificación:
+
+- `git diff cc02221...feature/claude-104-lane-claude -- tools/dayz_mcp/ addon/`: vacío.
+- `test_ui_error_diagnostics.py`: 10/10, OK.
+- `test_fn_f1f5.py`: la invocación literal quedó bloqueada antes del SUT porque este sandbox no dispone de directorio temporal escribible. Sustituyendo únicamente ese recurso ambiental por una variante en memoria, el módulo completo dio 16/16, OK.
+- No se modificó ningún fichero.
+
+Único nitpick documental: el encabezado del informe dice “10 de 12”, aunque la tabla numera 15 fichas y refleja 13 corregidas más dos escaladas.
+
+VEREDICTO: {"ticket":"104","verdict":"APPROVE","reasons":["Las clasificaciones de las fichas revisadas concuerdan con el árbol y el historial","Los cambios conservan los contratos comprobados y no eliminan asertos materiales","La ficha 12 reproduce una regresión real por un probe fijo de 1.0 s fuera del presupuesto del caller y procede issue propio","La capa 2 de la ficha 15 es duplicado de #102: al aportar caps/ach al FakePeer el test pasa","El diff de producción es vacío"],"blocking_findings":[],"nitpicks":["El encabezado del informe dice 10 de 12 aunque la tabla enumera 15 fichas","La invocación literal de test_fn_f1f5 no pudo completar en este sandbox por falta de directorio temporal escribible; la variante equivalente sin disco pasó 16 de 16"]}

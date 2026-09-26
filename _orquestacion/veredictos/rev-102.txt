@@ -1,0 +1,16 @@
+CHANGES_REQUIRED.
+
+Hallazgo bloqueante:
+
+- El comando exigido para `test_arg_contract_hash.py` falla antes de ejecutar tests: `ModuleNotFoundError: No module named 'tests'` en [test_arg_contract_hash.py:17](C:/Users/guill/AppData/Local/hermes/cache/scratch/lane-102/tools/tests/test_arg_contract_hash.py:17). Lo reproduje tanto en `cc02221` como en la rama. Con `PYTHONPATH=tools`, las 18 pruebas sí dan `OK`, por lo que la lógica del guardián sigue intacta, pero el gate contractual no es autocontenido ni puede declararse verde con el comando pedido.
+
+El resto del fix es correcto:
+
+- [fence_helpers.py:171](C:/Users/guill/AppData/Local/hermes/cache/scratch/lane-102/tools/tests/fence_helpers.py:171) replica el wire real: servidor `caps+ach`, cliente solo `caps`. El smoke de parser/comparación produjo `state=match` para ambos peers. Los tests independientes de capabilities dieron servidor `9/9 OK` y cliente `8/8 OK`.
+- Diff de producción confirmado vacío: `PROD_DIFF_COUNT=0` para `tools/dayz_mcp/` y `addon/`.
+- `test_session_e2e.py` añade correctamente `ver=`, el census y el peer servidor; las dos aserciones modificadas solo agregan diagnóstico, sin cambiar condiciones.
+- Ambos playbooks anuncian `3c77a99c95fd05a4`, igual a `EXPECTED_SERVER_ARG_CONTRACT_HASH`.
+- C.1 convence: [test_session_e2e.py:364](C:/Users/guill/AppData/Local/hermes/cache/scratch/lane-102/tools/tests/test_session_e2e.py:364) lanza un world-read sin peers, y [server.py:2286](C:/Users/guill/AppData/Local/hermes/cache/scratch/lane-102/tools/dayz_mcp/server.py:2286) lo corta antes de `/enqueue`; es deuda previa ajena a #102 y no bloquea este fix.
+- `test_client_mode.py` quedó inconcluso en esta sesión porque el sandbox read-only impidió cualquier `TemporaryDirectory`; no observé un fallo atribuible a la rama.
+
+VEREDICTO: {"ticket":"102","verdict":"CHANGES_REQUIRED","reasons":["El wire de caps/ach es correcto y no hay cambios de producción.","El comando obligatorio aislado de test_arg_contract_hash.py falla antes de ejecutar el guardián; no puede confirmarse OK como exige la revisión."],"blocking_findings":[{"path":"tools/tests/test_arg_contract_hash.py","line":17,"what":"El import tests._addon_paths falla con ModuleNotFoundError al ejecutar exactamente unittest discover -s tools/tests -p \"test_arg_contract_hash.py\".","why":"El guardián de paridad Enforce-Python no ejecuta ninguna de sus pruebas con el comando contractual; solo pasa si se inyecta PYTHONPATH=tools o si otro módulo altera sys.path previamente."}],"nitpicks":[]}

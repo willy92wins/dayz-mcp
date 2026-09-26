@@ -1,0 +1,88 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+Primera revisión del LOTE H (DayZ-MCP, fichas 16 y 17 del paquete): el sobre estructurado de
+`dayz_test_stop` y los diagnósticos de runs retirados. Es un lote de SUPERFICIE NUEVA sobre un
+estado data-crítico (el manifiesto de runs), no un parche. Dictamen sobre el producto que hay:
+`../ws/tools/dayz_mcp/process_lifecycle.py` (SHA-256 b8271a4d51983e969c02207738f506f6d5a17185b1255add2e3c4e7f259ee549) y
+`../ws/tools/dayz_mcp/dayz_test_tool.py` (SHA-256 4b00de3f4cce4aec93202a25caaacba4093ce096bd820a6be5c8055e48a7d814). Hay un gate de 29 checks en
+`../ws/gate/` (29/29 verde) y una suite de 11 módulos (verde); el gate NO es el producto.
+
+===============================================================================
+§0. QUÉ SE REVISA. Sólo esto.
+===============================================================================
+
+  H1. Para un run PRESENTE, `status()`, `public_status()` y `box_occupancy` adjuntan a cada
+      fila `daemon_generation_at_launch`, `daemon_generation_current` y `generation_changed`.
+      La generación de lanzamiento se PERSISTE en `RunRecord` (campo nuevo, al final, default
+      `None`); `generation_changed = launch != current` sólo con lanzamiento acreditado; sin
+      él, `null`, NUNCA `false`.
+  H2. Para runs YA AUSENTES (retirados a EXITED por stop, reap, release, repair ×2,
+      reconcile), el status publica como máximo 32 `retired_run_diagnostics`, los más
+      recientes primero, cada uno con exactamente `run_id`, `daemon_generation_at_launch`,
+      `daemon_generation_current`, `generation_changed`, `event`, `reason`, `decision`,
+      `state`; SIN timestamps ni paths. Viven en un anillo EN MEMORIA de `ProcessLifecycle`;
+      tras un reinicio empieza vacío y eso se publica tal cual: NUNCA se reconstruye leyendo
+      `events.jsonl` (decisión del humano: en Windows leer el audit hace fallar su escritura).
+  H3. `execute_dayz_test_stop` toma UN snapshot pre-dispatch de status y clasifica el resultado
+      de `resolve_stop_run`: run presente pero no activo → dict `{"status":"failed",
+      "run_id", "error_code":"run_not_active"}` + los tres campos de generación COPIADOS del
+      snapshot (no recalculados); run podado/ausente con UN ÚNICO `retired_run_diagnostic`
+      exacto → el mismo dict con `error_code="run_not_found"`; UUID nunca visto o diagnóstico
+      ausente/ambiguo → `ToolError("run_not_found")` sin campos inventados. Stop sobre run
+      activo sigue igual. El sobre es un RETORNO de `execute_dayz_test_stop`
+      (`resolve_stop_run` sigue levantando; sus tests públicos lo exigen).
+  H4. `dayz_test_stop` público transporta ese dict íntegro; `retired_run_diagnostics` viaja
+      SÓLO en el status, nunca en el sobre.
+  H5. Un `lifecycle_stop_outcome` exitoso (`stopped/stopped/EXITED`) se distingue en el
+      diagnóstico de `manual_cleanup_required`, `partial_cleanup`, `RUNNING`, `STOPPING`,
+      `UNRECONCILED`; `run_reaped` acredita retirada sin terminación; un stop FALLIDO no
+      retira y no entra al anillo.
+
+Decisiones heredadas que no se renegocian: D1 la lectura no abre el audit; D2 compatibilidad
+del manifiesto (un `runs.json` anterior sin el campo carga y publica `null`; el campo
+sobrevive al round-trip `asdict→from_payload` de `_clone` y a `get/list_runs/replace`); D3 la
+actividad (`activity_state`, `last_activity_age_s`) NO es producto de este lote; D4 fail-closed.
+
+**LO QUE NO ES EL PRODUCTO**, y va a `BACKLOG`: el gate, el oráculo, el ledger, este brief;
+la actividad y el ciclo de vida del binding (lote G, en su propia revisión); `server.py`
+(el sobre cruza como retorno); refactors, estilo, tipado.
+**Prohibido justificar alcance con «es donde han salido cosas antes».**
+
+===============================================================================
+§1. LO QUE QUIERO DE TI
+===============================================================================
+
+  - **D2, el manifiesto (data-crítico, DZ-R9)**: ¿algún constructor posicional, `_clone`,
+    `from_payload`, `validate`, o escritor del manifiesto pierde o desplaza el campo nuevo?
+    ¿Un manifiesto escrito por ESTA versión lo lee la versión ANTERIOR sin `invalid_run_manifest`
+    (compatibilidad hacia atrás, no sólo hacia delante)? ¿`recover_after_restart` y
+    `quarantine_legacy_active` lo conservan?
+  - **El anillo**: ¿bajo qué lock se escribe y se lee, y en qué orden respecto a
+    `_operation_lock`/`_activity_lock`? ¿Puede publicarse un diagnóstico de un run que sigue
+    PRESENTE (retirada fallida a mitad)? ¿Puede un run entrar dos veces (dos caminos en la
+    misma retirada)? ¿El tope de 32 conserva los más recientes bajo concurrencia? ¿Se filtra
+    algún timestamp/path por un campo anidado (`reason`, `decision` con texto libre)?
+  - **La generación**: ¿`daemon_generation_current` es la del daemon vivo en el instante de la
+    lectura, y `generation_changed` se COPIA al sobre sin recalcular? ¿Un run heredado de otra
+    generación publica `launch` viejo + `current` nuevo + `changed=true`, y uno legacy sin
+    campo publica `null/null`? ¿Alguna ruta infiere el lanzamiento (p. ej. de la generación
+    actual) en vez de leerlo del manifiesto?
+  - **El sobre**: el snapshot pre-dispatch, ¿es UNO y se toma antes de despachar? ¿El
+    diagnóstico «único y exacto» se decide por `run_id` exacto y cardinalidad 1, y dos
+    diagnósticos del mismo run caen a `ToolError`? ¿Un `run_not_active` puede salir para un
+    run podado (convertir ausencia en presencia)? ¿El sobre arrastra el anillo entero o
+    campos de más?
+  - **Regresiones**: `resolve_stop_run` y sus tests públicos; el camino feliz del stop; la
+    reconciliación post-ejecución (`run_stop_failed`).
+  - **¿Ha debilitado el implementador alguna validación existente para pasar el gate?**
+
+Reglas duras: **enseña, no cuentes** (código literal con `path:line`); **escribe el fallo
+concreto**; **la tolerancia no es un defecto**; cero hallazgos es una respuesta legítima.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrarlo?
+    ## HALLAZGOS      — por severidad: título, path:line, código pegado, fallo concreto.
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.

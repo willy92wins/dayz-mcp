@@ -1,0 +1,434 @@
+{
+  "tickets": [
+    "fb-20260829-025754-f201",
+    "fb-20260829-104630-141e",
+    "fb-20260829-194752-d366"
+  ],
+  "module": "M13-EFFECTIVE-SCHEMA-CORE",
+  "packet": "inbox-20260831-v6",
+  "plans": [
+    "plans/inbox-20260830/11-fb-20260829-025754-f201.md",
+    "plans/inbox-20260830/18-fb-20260829-104630-141e.md",
+    "plans/inbox-20260830/26-fb-20260829-194752-d366.md"
+  ],
+  "gate_file": [
+    "gates/inbox-11-025754-f201.md (read only; no box flipped)",
+    "gates/inbox-18-104630-141e.md (read only; no box flipped)",
+    "gates/inbox-26-194752-d366.md (read only; no box flipped)"
+  ],
+  "ownership_addendum": "plans/inbox-20260830/physical-ownership-addendum-v1.md:61",
+  "dag_row": "plans/inbox-20260830/00-execution-dag.md:48",
+  "scope": "Acreditación de los bytes M13 que hay hoy: constructor puro, proyección ServerConfig→(profile,role), catálogo TARGET misión+C3, cinco fixtures y enumerador sintético existen; los tests no llaman build_app ni list_tools. No está congelada la batería completa de mutantes C3/rewrite/nueva-rama de 141e.9 ni los tres schema:<tool>:__extra__ del mínimo 0-arg. Calibración LL-378, adapters reales, app/wire y promoción CAS son M22/M23. Hashes y suite de esta hop INCONCLUSIVE (Shell rechazado); no se copian digest del censo M00.",
+  "owns": {
+    "tools/dayz_mcp/effective_schema.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Shell rechazado; no se calcula SHA-256/mtime/size en esta hop. No se transcribe el censo de arranque (tautología). Source leído entero este hop: tools/dayz_mcp/effective_schema.py:1-234.",
+      "prior_measurement_not_this_hop": {
+        "source": "reports/2026-08-30-inbox-implementation/M00/m00-git-inventory-v2.jsonl (git_state=?)",
+        "size_bytes": 8755,
+        "mtime_utc": "2026-09-01T04:01:12+00:00",
+        "note": "Medición ajena M00. Puede estar stale. No es el digest de esta hop."
+      }
+    },
+    "tools/dayz_mcp/effective_schema_catalog.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Shell rechazado. Source leído entero este hop: tools/dayz_mcp/effective_schema_catalog.py:1-127.",
+      "prior_measurement_not_this_hop": {
+        "source": "M00/m00-git-inventory-v2.jsonl",
+        "size_bytes": 4967,
+        "mtime_utc": "2026-08-31T22:58:04+00:00",
+        "note": "Medición ajena M00. No es el digest de esta hop."
+      }
+    },
+    "tools/dayz_mcp/effective_schema_runtime_validators.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Shell rechazado. Source leído entero este hop: tools/dayz_mcp/effective_schema_runtime_validators.py:1-85.",
+      "prior_measurement_not_this_hop": {
+        "source": "M00/m00-git-inventory-v2.jsonl",
+        "size_bytes": 3354,
+        "mtime_utc": "2026-08-31T22:55:03+00:00",
+        "note": "Medición ajena M00. No es el digest de esta hop."
+      }
+    },
+    "tools/tests/test_effective_schema.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Shell rechazado. Source leído entero este hop: tools/tests/test_effective_schema.py:1-303.",
+      "prior_measurement_not_this_hop": {
+        "source": "M00/m00-git-inventory-v2.jsonl",
+        "size_bytes": 11457,
+        "mtime_utc": "2026-09-01T04:00:04+00:00",
+        "note": "Medición ajena M00. No es el digest de esta hop."
+      }
+    },
+    "tools/tests/test_effective_schema_catalog.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Shell rechazado. Source leído entero este hop: tools/tests/test_effective_schema_catalog.py:1-204.",
+      "prior_measurement_not_this_hop": {
+        "source": "M00/m00-git-inventory-v2.jsonl",
+        "size_bytes": 12330,
+        "mtime_utc": "2026-08-31T23:27:27+00:00",
+        "note": "Medición ajena M00. No es el digest de esta hop."
+      }
+    },
+    "tools/tests/test_effective_schema_runtime_validators.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Shell rechazado. Source leído entero este hop: tools/tests/test_effective_schema_runtime_validators.py:1-69.",
+      "prior_measurement_not_this_hop": {
+        "source": "M00/m00-git-inventory-v2.jsonl",
+        "size_bytes": 2723,
+        "mtime_utc": "2026-08-31T23:14:13+00:00",
+        "note": "Medición ajena M00. No es el digest de esta hop."
+      }
+    },
+    "tools/tests/fixtures/effective_schema_v1/required_constraint_ids.json": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Shell rechazado. Source leído entero este hop: required_constraint_ids.json:1-14.",
+      "prior_measurement_not_this_hop": {
+        "source": "M00/m00-git-inventory-v2.jsonl",
+        "size_bytes": 398,
+        "mtime_utc": "2026-08-31T22:56:15+00:00",
+        "note": "Medición ajena M00. No es el digest de esta hop."
+      }
+    },
+    "tools/tests/fixtures/effective_schema_v5/instructions_required_concepts.json": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Shell rechazado. Source leído entero este hop: instructions_required_concepts.json:1-41.",
+      "prior_measurement_not_this_hop": {
+        "source": "M00/m00-git-inventory-v2.jsonl",
+        "size_bytes": 1426,
+        "mtime_utc": "2026-08-31T23:13:39+00:00",
+        "note": "Medición ajena M00. No es el digest de esta hop."
+      }
+    },
+    "tools/tests/fixtures/effective_schema_v5/profile_inventory.json": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Shell rechazado. Source leído entero este hop: profile_inventory.json:1-81.",
+      "prior_measurement_not_this_hop": {
+        "source": "M00/m00-git-inventory-v2.jsonl",
+        "size_bytes": 5656,
+        "mtime_utc": "2026-08-31T23:13:18+00:00",
+        "note": "Medición ajena M00. No es el digest de esta hop."
+      }
+    },
+    "tools/tests/fixtures/effective_schema_v5/validator_cases.json": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Shell rechazado. Source leído entero este hop: validator_cases.json:1-23.",
+      "prior_measurement_not_this_hop": {
+        "source": "M00/m00-git-inventory-v2.jsonl",
+        "size_bytes": 2820,
+        "mtime_utc": "2026-08-31T23:27:27+00:00",
+        "note": "Medición ajena M00. Puede estar stale: el accept de path sellado ya no es ExampleMod_Suite. No es el digest de esta hop."
+      }
+    },
+    "tools/tests/fixtures/effective_schema_v5/mutation_cases.json": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Shell rechazado. Source leído entero este hop: mutation_cases.json:1-17.",
+      "prior_measurement_not_this_hop": {
+        "source": "M00/m00-git-inventory-v2.jsonl",
+        "size_bytes": 830,
+        "mtime_utc": "2026-08-31T22:56:15+00:00",
+        "note": "Medición ajena M00. No es el digest de esta hop."
+      }
+    }
+  },
+  "plan_points": {
+    "f201.1_constructor_synthetic_and_fixture_structure": {
+      "plan_citation": "plans/inbox-20260830/11-fb-20260829-025754-f201.md:27",
+      "verdict": "IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "code": "tools/dayz_mcp/effective_schema.py:72-99 extract_tool_records sobre records sintéticos (name/description/input_schema|inputSchema, unicidad, sin reordenar); :129-174 build_payload inyecta profile/role/instructions/tools/fingerprint y catálogo opcional; :177-192 build_envelope {schema_version,payloads} ordenado. No importa server ni genera expected_tool_names.",
+      "tests": "tools/tests/test_effective_schema.py:15-44 (extracción sin reordenar); :46-69 (payload inyectado); :71-89 (orden standard/claude antes de exec_enforce/codex y duplicado rechazado); :91-128 (effect desconocido, identidad unknown, fingerprint corto/mayúsculas, campo extra). Ningún test llama build_app ni app.list_tools.",
+      "not_claimed": "Los tests no calculan SHA-256 de los cinco fixtures (ningún hashlib en test_effective_schema*.py). Congelar hashes de fichero queda para la medición del orquestador / rehash M23. build_payload(..., catalog=) :163-167 no tiene test que inyecte catálogo."
+    },
+    "f201.2_profile_inventory_four_closed_arrays": {
+      "plan_citation": "plans/inbox-20260830/11-fb-20260829-025754-f201.md:28",
+      "verdict": "IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "code": "tools/tests/fixtures/effective_schema_v5/profile_inventory.json:3-79 cuatro records únicos standard|exec_enforce × claude|codex; cada config es {enable_exec_enforce bool, client_platform role}; cada expected_tool_names incluye literalmente dayz_effective_schema, dayz_knowledge_status y dayz_knowledge_prepare; exec_enforce añade exec_enforce. Inspección de los cuatro arrays: sin nombres repetidos.",
+      "tests": "tools/tests/test_effective_schema_catalog.py:13-70 EXPECTED_PROFILE_TOOL_NAMES (oráculo Python independiente del extractor) y :151-161 igualdad exacta de pares, config y arrays. tools/tests/test_effective_schema.py:275-299 corrobora sólo las cuatro configs, no los nombres.",
+      "not_claimed": "El test no aserta unicidad con len(set)==len ni un baseline-menos-aditivos; la presencia de los tres nombres aditivos queda cubierta por igualdad al literal que ya los contiene. Hash de bytes del fixture no pinneado."
+    },
+    "f201.3_m22_serialize_instructions_tools_sidecar": {
+      "plan_citation": "plans/inbox-20260830/11-fb-20260829-025754-f201.md:29",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "plans/inbox-20260830/00-execution-dag.md:57 (único dueño de tools/dayz_mcp/server.py); physical-ownership-addendum-v1.md:72. utf8_bytes_v1/unicode_codepoints_v1/approx_tokens_chars4_v1 son sidecar M22/M23, prohibidos en JSON promovido y en criterio M13.",
+      "observed_readonly": "tools/dayz_mcp/effective_schema.py no emite esas tres métricas. No acredita serialización post-build."
+    },
+    "f201.4_six_instruction_concepts": {
+      "plan_citation": "plans/inbox-20260830/11-fb-20260829-025754-f201.md:30 y plans/inbox-20260830/06-fb-20260829-024747-55dd.md:26-37",
+      "verdict": "IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "code": "tools/tests/fixtures/effective_schema_v5/instructions_required_concepts.json:3-40 exactamente los seis IDs new_site_guard, spawn_y_provider, living_infected_flags, wait_log_sources, wait_default_lookback, action_use_target_contract con relation/value/source_anchor de la tabla 55dd. Catálogo declara los mismos como manual:* en effective_schema_catalog.py:67-89.",
+      "tests": "tools/tests/test_effective_schema_catalog.py:82-119 EXPECTED_CONCEPTS y :163-166 igualdad exacta contra el fixture (unicidad e identidad uno-a-uno por lista cerrada; sin aliases).",
+      "not_claimed": "Presencia semántica en app.instructions es M22 (f201.md:30)."
+    },
+    "f201.5_validator_cases_freeze": {
+      "plan_citation": "plans/inbox-20260830/11-fb-20260829-025754-f201.md:31 (filas de validator_cases.json)",
+      "verdict": "IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "code": "tools/tests/fixtures/effective_schema_v5/validator_cases.json:3-21 dieciocho casos: cuatro aliases, mission_sealed_path absoluto bajo DayZServer\\mpmissions\\dayzOffline.chernarusplus, mission_external_path reject, seat omitted/0/1/63 accept y bool/string/-1/64 reject con forward MCPArgs.seat=0 en seat_omitted, type_omitted/CivilianSedan/Boat_01_Blue/non-string con forward_absent MCPArgs.type y forward de classnames.",
+      "tests": "tools/tests/test_effective_schema_catalog.py:168-200: IDs cerrados, unicidad, type_omitted.forward_absent, y accept/reject del catálogo = agrupación del fixture.",
+      "not_claimed": "Ejecución contra adapters/boundaries reales es M22. El test no aserta el forward de seat_omitted (sí está en el fixture :10)."
+    },
+    "f201.5_mutation_cases_freeze": {
+      "plan_citation": "plans/inbox-20260830/11-fb-20260829-025754-f201.md:31 y 18-fb-20260829-104630-141e.md:41",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "why": "mutation_cases.json:3-16 congela 13 IDs genéricos (field_removed_from_app_schema … runtime_extra_after_alias) todos expected=reject. Faltan las filas nombradas en 141e:41: allowlist alias-only conservada en M19; rewrite del fixture para acomodarla; mutantes C3 (eliminar cada property, default seat=1, aceptar bool, máximo 64, ignorar o forzar MCPArgs.seat=0, quitar default vacío de expected_type, dejar de reenviar MCPArgs.type); y el mutante que añade una rama real de rechazo alcanzada por un accept_case sin tocar mapa/catálogo/fixture.",
+      "code": "tools/tests/fixtures/effective_schema_v5/mutation_cases.json:1-17",
+      "tests": "tools/tests/test_effective_schema_catalog.py:179-186 pinnea exactamente esos 13 IDs; un verde de esa aserción no cubre las filas ausentes."
+    },
+    "f201.6_m22_list_tools_vs_expected": {
+      "plan_citation": "plans/inbox-20260830/11-fb-20260829-025754-f201.md:32",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57; f201.md:27 (await app.list_tools queda en M22/M23)."
+    },
+    "f201.7_m23_five_canonicals": {
+      "plan_citation": "plans/inbox-20260830/11-fb-20260829-025754-f201.md:33",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M23-FINAL-SCHEMA-PROMOTION",
+      "authority": "00-execution-dag.md:58; physical-ownership-addendum-v1.md:73; d366.md:30-40."
+    },
+    "f201_amendment_m13_does_not_publish_fingerprint": {
+      "plan_citation": "plans/inbox-20260830/11-fb-20260829-025754-f201.md:51",
+      "verdict": "IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "code": "effective_schema.py:211-218 schema_sha256/canonical_json_bytes son helpers de envelope, no escriben reports/2026-08-30-inbox-implementation/M23/ ni tool-registry-fingerprint-v1.sha256. Los once OWNS M13 no incluyen promote_effective_schema.py.",
+      "tests": "ningún test M13 publica artefactos M23; la ausencia es el cumplimiento.",
+      "not_claimed": "Fingerprint final y marker son M23."
+    },
+    "identity_projection_serverconfig": {
+      "plan_citation": "plans/inbox-20260830/00-execution-dag.md:148-150 y plans/inbox-20260830/07-fb-20260829-024827-9b7b.md:28 (M13 define la proyección; 9b7b es ficha M14)",
+      "verdict": "IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "code": "tools/dayz_mcp/effective_schema.py:28-41 project_server_config_identity: keyword-only enable_exec_enforce/client_platform; True→exec_enforce, False→standard; role sólo si client_platform es claude|codex; cualquier otro tipo/valor → ('unknown','unknown'); no recibe tools.",
+      "tests": "tools/tests/test_effective_schema.py:132-164 (firma, Literal, no param tools); :166-194 cuatro pares positivos; :196-252 omitted/None/tipos/roles inválidos → unknown; :254-273 pureza."
+    },
+    "dag_separation_constructor_catalog_enumerator": {
+      "plan_citation": "plans/inbox-20260830/00-execution-dag.md:138-139 y 18-fb-20260829-104630-141e.md:33-34",
+      "verdict": "IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "code": "effective_schema.py:7-13 imports stdlib only; effective_schema_catalog.py:3-6 stdlib only; effective_schema_runtime_validators.py:7-9 stdlib only. Ninguno importa ni genera los otros. El constructor recibe catalog como iterable inyectado :136, no el módulo.",
+      "tests": "test_effective_schema.py importa sólo dayz_mcp.effective_schema; test_effective_schema_catalog.py sólo effective_schema_catalog + JSON; test_effective_schema_runtime_validators.py:1-7 declara que no se permiten imports de server/fixture y sólo importa el enumerador."
+    },
+    "141e.1_pure_constructor": {
+      "plan_citation": "plans/inbox-20260830/18-fb-20260829-104630-141e.md:33",
+      "verdict": "IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "code": "effective_schema.py:1-4 y :129-174: recibe profile/role ya fijados, fingerprint M14 como hex, tools finalizados y catálogo inyectado; no hay import re ni lectura de server.py.",
+      "tests": "test_effective_schema.py:46-69 y :109-128. No hay test que pase una app FastMCP real (correcto para Ola 2a)."
+    },
+    "141e.2_catalog_and_target_mission_c3": {
+      "plan_citation": "plans/inbox-20260830/18-fb-20260829-104630-141e.md:34",
+      "verdict": "IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "code": "effective_schema_catalog.py:9-14 CATALOG_RECORD_KEYS; :43-90 nueve records. schema:dayz_test_run:mission con accept de chernarus|livonia|sakhal|lfheli + mission_sealed_path y reject mission_external_path (:47-51). schema:vehicle_get_in_client:seat_index integer/default=0/minimum=0/maximum=63 (:52-58). schema:vehicle_get_in_client:expected_type string/default=\"\" (:59-65). validator_source misión = dayz_test_request.parse_dayz_test_request. Aliases del parser vivo: tools/dayz_mcp/dayz_test_request.py:40 _MISSION_ALIASES. Path sellado validator_cases.json:8 C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZServer\\mpmissions\\dayzOffline.chernarusplus está léxicamente bajo mission_roots.path del proyecto DayZ_MCP (y Utopia_PC, etc.) en tools/native-launchers/dayz-test-v1/request-policy.json:1.",
+      "tests": "test_effective_schema_catalog.py:127-143 forma+JSON Schema C3; :145-149 required_constraint_ids.json idéntico al catálogo; :168-200 casos y enlace accept/reject.",
+      "not_claimed": "Ningún expected se deriva de dayz_test_tool.build_run_request (los tests M13 no lo llaman). Que la fachada pre-M19 siga alias-only es RED temporal M19, no capability M13."
+    },
+    "141e.3_runtime_enumerator": {
+      "plan_citation": "plans/inbox-20260830/18-fb-20260829-104630-141e.md:35 (emisión schema:<tool>:<field>, manual:*, __extra__ condicionado)",
+      "verdict": "IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "code": "effective_schema_runtime_validators.py:31-76 enumerate_constraints: properties → schema:name:field; adapters key manual:* se copian; key∈tool_names → manual:key; additional_properties is False → schema:{key}:__extra__; dangling/duplicado → RuntimeValidatorError. No importa catálogo ni fixtures.",
+      "tests": "test_effective_schema_runtime_validators.py:11-34 (properties+manual, orden sorted); :36-45 extra sólo con additional_properties False; :47-58 dangling y nombre duplicado; :60-65 build_runtime_view."
+    },
+    "141e.3_zero_arg_extra_catalog_records": {
+      "plan_citation": "plans/inbox-20260830/18-fb-20260829-104630-141e.md:35 (mínimo obligatorio dayz_effective_schema, dayz_knowledge_prepare, dayz_knowledge_status con wrapper no-extra) y 00-execution-dag.md:140 (validator runtime no catalogado pone rojo)",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "why": "El catálogo y required_constraint_ids.json no declaran schema:dayz_effective_schema:__extra__, schema:dayz_knowledge_prepare:__extra__ ni schema:dayz_knowledge_status:__extra__. El enumerador puede emitirlos si M22 pasa additional_properties=false, pero M13 no congela esos IDs TARGET. Un M22 que instale los wrappers mínimos quedaría rojo en igualdad catálogo=fixture=runtime, o verde omitiendo el wrapper — las dos salidas rompen el contrato.",
+      "code": "effective_schema_catalog.py:43-90 (9 records, ninguno __extra__); required_constraint_ids.json:3-13 (mismos 9 IDs)."
+    },
+    "141e.3_m22_adapters_and_seam": {
+      "plan_citation": "plans/inbox-20260830/18-fb-20260829-104630-141e.md:35 (mapa de adapters reales, boundaries, seam M22/M14)",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57; addendum :72. El enumerador M13 no llama build_run_request ni parse_dayz_test_request ni app.call_tool."
+    },
+    "141e.4_m13_catalog_fixture_freeze_without_facades": {
+      "plan_citation": "plans/inbox-20260830/18-fb-20260829-104630-141e.md:36 (Ola 2a: catálogo↔fixture, no exigir fachadas pre-M19/pre-M22)",
+      "verdict": "IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "code": "Enlace catálogo IDs ↔ required_constraint_ids.json ↔ accept/reject de validator_cases, cubierto en test_effective_schema_catalog.py:145-200. Los tests M13 no invocan dayz_test_tool ni vehicle_get_in_client vivo.",
+      "tests": "mismos que 141e.2.",
+      "not_claimed": "Igualdad triple catalog.validator_sources == fixture.required_validator_sources == runtime_enumerator.sources es M22. El fixture v1 congela IDs, no un campo required_validator_sources."
+    },
+    "141e.4_m22_triple_equality_and_live_cases": {
+      "plan_citation": "plans/inbox-20260830/18-fb-20260829-104630-141e.md:36 (triple equality y casos via adapter real)",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57,67-71 (M13 en Ola 2a; M22 en Ola 3)."
+    },
+    "141e.5_v1_envelope_shape": {
+      "plan_citation": "plans/inbox-20260830/18-fb-20260829-104630-141e.md:37 y 00-execution-dag.md:151-156",
+      "verdict": "IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "code": "effective_schema.py:177-192 envelope {schema_version:1, payloads} ordenados por (profile,role); cada payload exactamente profile/role/instructions/tools/tool_registry_fingerprint. :102-126 cada tool name/description/input_schema/public_constraints/effect_verification.",
+      "tests": "test_effective_schema.py:46-89 y :109-128. El test de envelope usa dos payloads, no las cuatro parejas juntas.",
+      "not_claimed": "Publicar el artefacto canónico bajo M23/ es M23."
+    },
+    "141e.6_effect_verification_mandatory": {
+      "plan_citation": "plans/inbox-20260830/18-fb-20260829-104630-141e.md:38",
+      "verdict": "IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "code": "effective_schema.py:19 _EFFECTS={wire,in_game_required}; :117-119 rechaza cualquier otro (no hay default optimista). Catálogo :114-115 exige el mismo conjunto por record.",
+      "tests": "test_effective_schema.py:91-107 unknown effect → EffectiveSchemaError; test_effective_schema_catalog.py:137-139 cada record del catálogo tiene la clave.",
+      "not_claimed": "El catálogo no enumera effect_verification por cada tool del inventario de 60+ nombres; congela el campo en los 9 constraints TARGET y lo exige en cada tool record inyectado al constructor."
+    },
+    "141e.7_m22_register_schema_tool_and_seam": {
+      "plan_citation": "plans/inbox-20260830/18-fb-20260829-104630-141e.md:39",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57; addendum :72."
+    },
+    "141e.8_m22_list_tools_and_stdio_extra_reject": {
+      "plan_citation": "plans/inbox-20260830/18-fb-20260829-104630-141e.md:40",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57. mcp==1.27.2 y ClientSession son criterio M22/M23."
+    },
+    "141e.9_m13_mutant_rows": {
+      "plan_citation": "plans/inbox-20260830/18-fb-20260829-104630-141e.md:41",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M13-EFFECTIVE-SCHEMA-CORE",
+      "why": "Misma laguna que f201.5_mutation_cases_freeze: 13 mutantes genéricos sí; faltan rewrite-del-fixture, allowlist alias-only M19, los C3 nombrados y la rama real extra sobre un accept_case. El banco M13 no está completo respecto a este punto.",
+      "code": "mutation_cases.json:3-16",
+      "tests": "test_effective_schema_catalog.py:179-186"
+    },
+    "141e.9_m22_execute_mutants_on_real_boundaries": {
+      "plan_citation": "plans/inbox-20260830/18-fb-20260829-104630-141e.md:41 (banco llama boundaries reales; mutantes deben quedar rojos)",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57; f201.md:31 (M22 ejecuta casos contra adapters reales)."
+    },
+    "141e.10_ll378_calibration": {
+      "plan_citation": "plans/inbox-20260830/18-fb-20260829-104630-141e.md:42 y 00-execution-dag.md:142-147",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M23-FINAL-SCHEMA-PROMOTION",
+      "authority": "physical-ownership-addendum-v1.md:62 (efímero M13/M23) y d366.md:45 (M23 ejecuta la calibración bajo %TEMP%/dayz-mcp-schema-calibration/<txid> contra app/registry inyectados). M13-GREEN-FROZEN no construye app productiva (f201.md:15,42). Los once OWNS M13 no contienen PYTHONDONTWRITEBYTECODE, raíz TEMP, oracle aleatorio ni candidato snapshot.",
+      "observed_readonly": "Grep en test_effective_schema*.py: cero hits de schema-calibration / PYTHONDONTWRITEBYTECODE / snapshot."
+    },
+    "141e.11_m23_rehash_and_promote": {
+      "plan_citation": "plans/inbox-20260830/18-fb-20260829-104630-141e.md:43",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M23-FINAL-SCHEMA-PROMOTION",
+      "authority": "00-execution-dag.md:58; addendum :73."
+    },
+    "d366.1_to_10_promotion_cas_lock_calibration": {
+      "plan_citation": "plans/inbox-20260830/26-fb-20260829-194752-d366.md:42-53",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M23-FINAL-SCHEMA-PROMOTION",
+      "authority": "00-execution-dag.md:48 vs :58; physical-ownership-addendum-v1.md:61 (M13 crea el banco) vs :73 (M23 posee promote_effective_schema.py, test de promoción y reports/.../M23/). Los diez pasos DESIGN (lock OS, calibración TEMP, app M22 limpia, candidates, rehash, backups, journal, replace ordenado, recovery, mutantes de promoción) no son OWNS M13.",
+      "m13_bank_observed": "Los cinco miembros que d366.md:23 y addendum :74 dicen que M13 crea existen una vez en las rutas exactas del addendum :61. Eso no acredita promoción."
+    }
+  },
+  "verdict_counts": {
+    "IMPLEMENTED": 13,
+    "OUT-OF-SCOPE": 11,
+    "NOT-IMPLEMENTED": 3,
+    "INCONCLUSIVE": 0,
+    "note": "Conteos sobre las 27 entradas de plan_points (13+11+3+0=27). Hashes de owns y corrida unittest son INCONCLUSIVE aparte, no son puntos de plan."
+  },
+  "preexisting_suite_not_run": {
+    "files": [
+      "tools/tests/test_effective_schema.py",
+      "tools/tests/test_effective_schema_catalog.py",
+      "tools/tests/test_effective_schema_runtime_validators.py"
+    ],
+    "methods_visible": 20,
+    "methods": [
+      "test_effective_schema.py:15 extract_synthetic_records",
+      "test_effective_schema.py:46 build_canonical_payload",
+      "test_effective_schema.py:71 envelope_orders_and_rejects_duplicate",
+      "test_effective_schema.py:91 unknown_effect_verification",
+      "test_effective_schema.py:109 unknown_identity_bad_fingerprint_extra_payload",
+      "test_effective_schema.py:132 public_aliases_signature",
+      "test_effective_schema.py:166 four_positive_pairs",
+      "test_effective_schema.py:196 omitted_or_none_unknown",
+      "test_effective_schema.py:222 invalid_types_and_roles_unknown",
+      "test_effective_schema.py:254 projection_pure",
+      "test_effective_schema.py:275 inventory_four_configs",
+      "test_effective_schema_catalog.py:127 catalog_frozen_shape",
+      "test_effective_schema_catalog.py:145 required_constraint_fixture",
+      "test_effective_schema_catalog.py:151 profile_inventory_four_pairs",
+      "test_effective_schema_catalog.py:163 six_instruction_rows",
+      "test_effective_schema_catalog.py:168 case_fixtures_declarative",
+      "test_effective_schema_runtime_validators.py:11 enumerate_schema_and_manual",
+      "test_effective_schema_runtime_validators.py:36 extra_requires_wrapper_flag",
+      "test_effective_schema_runtime_validators.py:47 dangling_or_duplicate",
+      "test_effective_schema_runtime_validators.py:60 runtime_view_shape"
+    ],
+    "note": "Inventario de source, no resultado de unittest. El brief prohíbe inventar ran/failures. Estos tests son del lote (módulos create, git_state=? en M00), no una suite verde heredada anterior al lote."
+  },
+  "bugs_observed_not_fixed": [
+    {
+      "id": "mutation-bank-incomplete-vs-141e.9",
+      "location": "tools/tests/fixtures/effective_schema_v5/mutation_cases.json:3-16",
+      "problem": "El banco congela 13 mutantes genéricos y omite rewrite-del-fixture, allowlist alias-only, mutantes C3 de default/rango/forward y la rama real extra sobre accept_case.",
+      "action": "no parcheado; es el hueco de congelación M13."
+    },
+    {
+      "id": "zero-arg-extra-ids-absent-from-catalog",
+      "location": "tools/dayz_mcp/effective_schema_catalog.py:43-90 y required_constraint_ids.json:3-13",
+      "problem": "No hay records schema:dayz_effective_schema:__extra__ / dayz_knowledge_prepare / dayz_knowledge_status, mínimos de 141e:35.",
+      "action": "no parcheado."
+    }
+  ],
+  "not_touched": [
+    "tools/dayz_mcp/effective_schema.py (leído; no escrito)",
+    "tools/dayz_mcp/effective_schema_catalog.py (leído; no escrito)",
+    "tools/dayz_mcp/effective_schema_runtime_validators.py (leído; no escrito)",
+    "tools/tests/test_effective_schema.py (leído; no escrito)",
+    "tools/tests/test_effective_schema_catalog.py (leído; no escrito)",
+    "tools/tests/test_effective_schema_runtime_validators.py (leído; no escrito)",
+    "tools/tests/fixtures/effective_schema_v1/required_constraint_ids.json (leído; no escrito)",
+    "tools/tests/fixtures/effective_schema_v5/instructions_required_concepts.json (leído; no escrito)",
+    "tools/tests/fixtures/effective_schema_v5/profile_inventory.json (leído; no escrito)",
+    "tools/tests/fixtures/effective_schema_v5/validator_cases.json (leído; no escrito)",
+    "tools/tests/fixtures/effective_schema_v5/mutation_cases.json (leído; no escrito)",
+    "tools/dayz_mcp/server.py (no escrito; no leído entero)",
+    "tools/dayz_mcp/dayz_test_request.py:40 (leído _MISSION_ALIASES; no escrito)",
+    "tools/native-launchers/dayz-test-v1/request-policy.json:1 (leído mission_roots; no escrito)",
+    "GATES.md",
+    "gates/**",
+    "plans/**",
+    "product-spec.md",
+    "tools/.venv-mcp"
+  ]
+}

@@ -1,0 +1,178 @@
+[
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_runloss_diagnostics' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 14 tests in 0.982s",
+      "OK"
+    ],
+    "finished_utc": "2026-09-08T16:43:42.726335+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_wait_for' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 33 tests in 13.151s",
+      "OK"
+    ],
+    "finished_utc": "2026-09-08T16:44:28.575430+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_wait_for_launch_and_contract' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 29 tests in 6.338s",
+      "OK"
+    ],
+    "finished_utc": "2026-09-08T16:44:35.857228+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_wait_for_requires_a_live_run' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 3 tests in 0.043s",
+      "OK"
+    ],
+    "finished_utc": "2026-09-08T16:44:36.883725+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_wait_for_marker' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 5 tests in 1.160s",
+      "OK"
+    ],
+    "finished_utc": "2026-09-08T16:44:39.015526+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_instance_fence' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 64 tests in 2.017s",
+      "OK"
+    ],
+    "finished_utc": "2026-09-08T16:44:41.936944+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_process_lifecycle' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 200 tests in 3.660s",
+      "OK"
+    ],
+    "finished_utc": "2026-09-08T16:44:45.973719+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_loopback' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 74 tests in 0.989s",
+      "OK"
+    ],
+    "finished_utc": "2026-09-08T16:44:47.922177+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_enqueue_refusal_reaches_the_caller' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 13 tests in 0.155s",
+      "OK"
+    ],
+    "finished_utc": "2026-09-08T16:44:49.006337+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_client_mode' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 53 tests in 7.804s",
+      "OK"
+    ],
+    "finished_utc": "2026-09-08T16:44:57.772632+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_mcp_tools' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 51 tests in 8.367s",
+      "OK"
+    ],
+    "finished_utc": "2026-09-08T16:45:07.175162+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_mcp_host_timeouts' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 39 tests in 0.898s",
+      "OK (skipped=1)"
+    ],
+    "finished_utc": "2026-09-08T16:45:09.009676+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_fase4b_loopback' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 3 tests in 0.095s",
+      "OK"
+    ],
+    "finished_utc": "2026-09-08T16:45:09.363179+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_python_backlog_fixes' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 5 tests in 1.212s",
+      "OK"
+    ],
+    "finished_utc": "2026-09-08T16:45:11.509039+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_runloss_diagnostics' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 15 tests in 0.992s",
+      "OK"
+    ],
+    "finished_utc": "2026-09-08T16:46:21.593886+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-m' 'unittest' 'tests.test_instance_fence' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 0,
+    "summary": [
+      "Ran 64 tests in 2.144s",
+      "OK"
+    ],
+    "finished_utc": "2026-09-08T16:46:24.692436+00:00"
+  }
+]

@@ -1,0 +1,3 @@
+# medido por el orquestador (Claude Opus 5) el 2026-09-02T00:09:36.515904+00:00, no por la lane: Cursor rechaza shell en esta configuracion headless y la lane devolvio INCONCLUSIVE en vez de inventar cifras
+b06fa0ea85aad5e217730b9c1e42c5925cecd9b59abe436f732bb45af404ef7d  tools/mcp_capture.py
+dd635f3d79759956312943f4480385e5757cb3a9262735d001ace4d73164eeaf  tools/tests/test_mcp_capture.py

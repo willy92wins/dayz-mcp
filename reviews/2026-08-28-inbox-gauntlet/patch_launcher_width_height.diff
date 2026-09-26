@@ -1,0 +1,145 @@
+--- a/_ref/launcher_src/app_main.py
++++ b/_ref/launcher_src/app_main.py
+@@ -146,6 +146,119 @@
+ def _bundle_root() -> Path:
+     return Path(sys.executable).resolve(strict=True).parent.parent
+ 
+ 
++def _client_pid_from_status(status: object, run_id: object) -> int | None:
++    if not isinstance(status, dict) or not isinstance(run_id, str):
++        return None
++    runs = status.get("runs")
++    if not isinstance(runs, list):
++        return None
++    matching = [
++        item
++        for item in runs
++        if isinstance(item, dict) and item.get("run_id") == run_id
++    ]
++    if len(matching) != 1:
++        return None
++    processes = matching[0].get("processes")
++    if not isinstance(processes, list):
++        return None
++    pids: list[int] = []
++    for process in processes:
++        if not isinstance(process, dict) or process.get("role") != "client":
++            continue
++        pid = process.get("pid")
++        if type(pid) is int and pid > 0 and pid not in pids:
++            pids.append(pid)
++    if len(pids) != 1:
++        return None
++    return pids[0]
++
++
++def _toplevel_hwnd_for_pid(user32: object, pid: int) -> int | None:
++    import ctypes
++    from ctypes import wintypes
++
++    found: list[int] = []
++    ga_root = 2
++    out = wintypes.DWORD()
++
++    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
++    def _each(hwnd: int, _lparam: int) -> int:
++        if not user32.IsWindowVisible(hwnd):
++            return True
++        if user32.GetAncestor(hwnd, ga_root) != hwnd:
++            return True
++        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(out))
++        if int(out.value) == pid:
++            found.append(int(hwnd))
++        return True
++
++    user32.EnumWindows(_each, 0)
++    if len(found) != 1:
++        return None
++    return found[0]
++
++
++def _apply_client_window_size(pid: int, width: object, height: object) -> None:
++    """Resize the top-level window of the CLIENT pid only.
++
++    DayZDiag ignores -x/-y as render viewport (measured 1280x720 -> 846x461).
++    SetWindowPos on the host window is the workaround that actually works.
++
++    mode=all: the server process has no useful render window; never resize it.
++    Fallback: if this pid exposes no top-level window before the timeout,
++    leave the window alone (do not EnumWindows by title).
++    """
++    if type(width) is not int or type(height) is not int:
++        return
++    if width < 320 or height < 320 or width > 16384 or height > 16384:
++        return
++    import ctypes
++    from ctypes import wintypes
++
++    class RECT(ctypes.Structure):
++        _fields_ = [
++            ("left", ctypes.c_long),
++            ("top", ctypes.c_long),
++            ("right", ctypes.c_long),
++            ("bottom", ctypes.c_long),
++        ]
++
++    user32 = ctypes.WinDLL("user32", use_last_error=True)
++    swp_nomove = 0x0002
++    swp_nozorder = 0x0004
++    deadline = time.monotonic() + 10.0
++    hwnd = None
++    while time.monotonic() < deadline:
++        hwnd = _toplevel_hwnd_for_pid(user32, pid)
++        if hwnd is not None:
++            break
++        time.sleep(0.1)
++    if hwnd is None:
++        return
++    user32.SetWindowPos(hwnd, 0, 0, 0, width, height, swp_nomove | swp_nozorder)
++    rect = RECT()
++    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
++        return
++    if (rect.right - rect.left) != width or (rect.bottom - rect.top) != height:
++        user32.SetWindowPos(hwnd, 0, 0, 0, width, height, swp_nomove | swp_nozorder)
++
++
+ def _semantic_policies() -> tuple[dayz_test_request.RequestProjectPolicy, ...]:
+     raw = (_bundle_root() / "request-policy.json").read_bytes()
+     value = json.loads(raw.decode("utf-8"))
+@@ -262,7 +375,32 @@
+         try:
+             await cancel_task
+         except asyncio.CancelledError:
+             pass
++    # width/height: after a successful client-bearing launch, resize the
++    # top-level window of the CLIENT pid for this run_id. mode=server skips
++    # (no render window). mode=all still resizes only the client, never the
++    # server. If lifecycle status has no client pid, or that pid exposes no
++    # top-level window in 10s, skip (do not match windows by title).
++    if (
++        result.exit_code == 0
++        and isinstance(result.run_id, str)
++        and parsed.payload.get("mode") in {"all", "client", "offline"}
++    ):
++        try:
++            status = await broker.invoke(
++                native_broker_protocol.encode_request(
++                    native_broker_protocol.BrokerKind.LIFECYCLE_CLI,
++                    {
++                        "command": "status",
++                        "launch_operation_id": None,
++                        "run_id": result.run_id,
++                    },
++                )
++            )
++        except Exception:
++            status = None
++        client_pid = _client_pid_from_status(status, result.run_id)
++        if client_pid is not None:
++            _apply_client_window_size(
++                client_pid,
++                parsed.payload.get("width"),
++                parsed.payload.get("height"),
++            )
+     _write_worker_terminal(result.exit_code, result.run_id, None, False)
+     return result.exit_code

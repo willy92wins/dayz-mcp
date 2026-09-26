@@ -1,0 +1,251 @@
+{
+  "ticket": "fb-20260829-221423-b2c4",
+  "tickets": [
+    "fb-20260829-221423-b2c4",
+    "fb-20260829-023649-8f8c"
+  ],
+  "module": "M06-UI-INGRESS",
+  "packet": "inbox-20260831-v6",
+  "plan": "plans/inbox-20260830/28-fb-20260829-221423-b2c4.md",
+  "plans": [
+    "plans/inbox-20260830/28-fb-20260829-221423-b2c4.md",
+    "plans/inbox-20260830/05-fb-20260829-023649-8f8c.md"
+  ],
+  "gate_file": "gates/inbox-28-221423-b2c4.md y gates/inbox-05-023649-8f8c.md (read only; no box flipped)",
+  "ownership_addendum": "plans/inbox-20260830/physical-ownership-addendum-v1.md:53",
+  "dag_row": "plans/inbox-20260830/00-execution-dag.md:41",
+  "scope": "Acreditación del estado pre-lote en los tres OWNS de M06. Hay un validador de args y una tabla que clavan el contrato legado (ui_tree path/limit, ui_set_text path+text, ui_click path+button, ui_focus path; extra_key=bad_args). Cero puntos DESIGN del lote: ni root opcional, ni mode/bubble de ui_click, ni decode/retención de caps= en poll. Las suites heredadas no cubren el plan. Hashes y corrida unittest INCONCLUSIVE (esta lane no tiene shell; el orquestador fusiona la medición).",
+  "owns": {
+    "tools/dayz_mcp/loopback.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "El brief prohíbe calcular sha256 sin shell; Cursor rechaza Shell en esta hop (incluido el censo). No se transcribe el censo A (tautología). Source leído este hop: loopback.py:1-3399 (schemas UI :599-662, validate_command_args :705-720, record_poll :1712-1819, _handle_poll :2924-2953, store_result :2096-2172).",
+      "note": "No es un digest de esta hop."
+    },
+    "tools/tests/test_loopback.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Sin shell no hay SHA-256/mtime/size. Source leído: test_loopback.py:1-1460. Ningún test menciona caps, root, bubble, ambiguous_path ni widget_not_found. El único enqueue UI es ui_dialog (:1258-1294), verbo fuera de los cuatro core del DAG.",
+      "note": "No es un digest de esta hop."
+    },
+    "tools/tests/test_validate_command_args_table.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Sin shell no hay SHA-256/mtime/size. Source leído: test_validate_command_args_table.py:1-541. Los casos UI (:352-417) clavan el schema legado y tratan extra_key como bad_args; no hay fila root/mode=direct|complete/bubble.",
+      "note": "No es un digest de esta hop."
+    }
+  },
+  "plan_points": {
+    "b2c4_1_allowed_pairs_four_runtimes": {
+      "plan_citation": "plans/inbox-20260830/28-fb-20260829-221423-b2c4.md:29",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "plans/inbox-20260830/00-execution-dag.md:57; physical-ownership-addendum-v1.md:72 (server.py y tests públicos). b2c4.md:14 asigna los cuatro receptores a M22.",
+      "observed_readonly": "Los cuatro caminos Runtime.wait_for_result / probe_bridge_result / ClientRuntime._await_result / probe_bridge_result viven en tools/dayz_mcp/server.py, no en loopback.py. M06 no posee esos receptores."
+    },
+    "b2c4_2_resolution_errors_survive": {
+      "plan_citation": "plans/inbox-20260830/28-fb-20260829-221423-b2c4.md:30",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57; addendum :72; b2c4.md:14.",
+      "observed_readonly": "widget_not_found / ambiguous_path como payload ok=0 son contrato de publicación M22. loopback.py no contiene esos literales. M05 produce el error Enforce; M06 no reinterpreta el JSON de /result (store_result :2096-2172 copia body), y eso no acredita el RED de los cuatro caminos."
+    },
+    "b2c4_3_forbidden_matrix_48": {
+      "plan_citation": "plans/inbox-20260830/28-fb-20260829-221423-b2c4.md:31",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57; addendum :72. La allowlist (verb,error) es contrato M22 (DAG:121-124; b2c4.md:25 DESIGN).",
+      "observed_readonly": "Ninguna tupla (verb,error) ni las 12 celdas prohibidas existen en loopback.py ni en test_loopback.py / test_validate_command_args_table.py."
+    },
+    "b2c4_4_code_mutants": {
+      "plan_citation": "plans/inbox-20260830/28-fb-20260829-221423-b2c4.md:32",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "El punto exige mutantes tras materializar M22, sobre copias temporales de código M22. DAG:57.",
+      "observed_readonly": "M06 no tiene allowlist por (verb,error) ni poda de players/telemetry."
+    },
+    "b2c4_5_infra_toolerror": {
+      "plan_citation": "plans/inbox-20260830/28-fb-20260829-221423-b2c4.md:33",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57. El punto pide ToolError fail-closed en los cuatro caminos Runtime, no el 400 HTTP de /enqueue.",
+      "observed_readonly": "El ingress M06 sí rechaza args inválidos con HTTP 400 bad_args (loopback.py:1431-1433 vía validate_command_args :705-720; test_loopback.py:355-371 cubre object_delete/notify_players, no los cuatro verbos UI core). Eso no es el ToolError de los cuatro receptores."
+    },
+    "b2c4_6_m06_invalid_schema_reject": {
+      "plan_citation": "plans/inbox-20260830/28-fb-20260829-221423-b2c4.md:34",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M06-UI-INGRESS",
+      "why": "El punto 6 asigna a M06 rechazar schema inválido del contrato DAG (root opcional; ui_click mode/bubble) y a M22 la allowlist (verb,error). El validador vivo clava el schema PRE-lote: extra keys fallan, y por eso un payload válido del lote (root, mode=direct|complete, bubble) es hoy bad_args. Rechazar el contrato nuevo no es implementarlo.",
+      "code": "loopback.py:599-606 ui_tree optional=(path,limit) sin root; :608-615 ui_set_text required path+text sin root; :617-625 ui_click required path, optional button, sin root/mode/bubble; :657-661 ui_focus required path sin root. _matches_schema_variant :697 rechaza keys - required - optional. validate_command_args :705-720. El EXACT de 20be.md:27 cita las mismas líneas :617-625 y sigue siendo cierto.",
+      "tests": "test_validate_command_args_table.py:352-358 ui_tree extra_key; :359-367 ui_set_text extra_key; :369-386 ui_click extra_key (no hay caso mode/bubble/root); :408-417 ui_focus extra_key. test_loopback.py no cubre los cuatro verbos core. La tabla heredada pasaría en verde y fallaría si se añadiera el schema del lote sin reescribirla: suite verde ≠ punto hecho.",
+      "preexisting_not_the_plan": "El fail-closed de extra_key y los casos valid/missing/type de la tabla son el contrato legado. No se marca IMPLEMENTED."
+    },
+    "b2c4_6_m22_allowlist_and_prune": {
+      "plan_citation": "plans/inbox-20260830/28-fb-20260829-221423-b2c4.md:34",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "DAG:57 y :121-124; addendum :72 (result_prune.py es OWNS M22). b2c4.md:14 y :34: M22 introduce la allowlist por (verb,error) y llama prune_unfilled_fields; M06 no edita result_prune.py.",
+      "observed_readonly": "loopback.py no importa result_prune ni clasifica errores UI por verbo."
+    },
+    "b2c4_7_pbo_consumer": {
+      "plan_citation": "plans/inbox-20260830/28-fb-20260829-221423-b2c4.md:35",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M24-PBO-BUILD-DEPLOY / M25-EVIDENCE-CLOSE",
+      "authority": "b2c4.md:15; DAG:59-60; addendum :75-77.",
+      "observed_readonly": "Gate in-game contra consumidor real. M06 no posee PBO ni evidencia de cierre."
+    },
+    "8f8c_1_wait_for_retry_stale_only": {
+      "plan_citation": "plans/inbox-20260830/05-fb-20260829-023649-8f8c.md:32",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "8f8c.md:13 módulo M18→M19→M22→M23; execute_wait_for es server.py (DAG:57)."
+    },
+    "8f8c_2_fail_fast_other_reasons": {
+      "plan_citation": "plans/inbox-20260830/05-fb-20260829-023649-8f8c.md:33",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "DAG:57."
+    },
+    "8f8c_3_timeout_ceiling_and_deadline": {
+      "plan_citation": "plans/inbox-20260830/05-fb-20260829-023649-8f8c.md:34",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "DAG:57. WAIT_FOR_MAX_TIMEOUT_S y execute_wait_for no están en loopback.py."
+    },
+    "8f8c_4_launch_readiness_projection": {
+      "plan_citation": "plans/inbox-20260830/05-fb-20260829-023649-8f8c.md:35",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M19-TOOL-READINESS (cálculo) / M22 (transporte)",
+      "authority": "8f8c.md:14; DAG:54 y :57."
+    },
+    "8f8c_5_run_id_error_codes": {
+      "plan_citation": "plans/inbox-20260830/05-fb-20260829-023649-8f8c.md:36",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M18-REQUEST-CONTRACT / M19-TOOL-READINESS",
+      "authority": "8f8c.md:14; DAG:53-54. dayz_test_request.py / dayz_test_tool.py no son OWNS M06 (addendum :53 vs :67-68)."
+    },
+    "8f8c_6_action_use_classname_docs": {
+      "plan_citation": "plans/inbox-20260830/05-fb-20260829-023649-8f8c.md:37",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "DAG:57. Descripción pública de action_use en server.py."
+    },
+    "8f8c_7_no_player_connected": {
+      "plan_citation": "plans/inbox-20260830/05-fb-20260829-023649-8f8c.md:38",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "DAG:57. entities_query reason en server.py."
+    },
+    "8f8c_8_enforce_caps_announce": {
+      "plan_citation": "plans/inbox-20260830/05-fb-20260829-023649-8f8c.md:39",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M03-ENTITIES / M05-UI-ENFORCE",
+      "authority": "8f8c.md:16 OWNS BONUS; DAG:38 y :40 (MCPBridge.c / MCPClientBridge.c y tests de capabilities). M06 no posee addon."
+    },
+    "8f8c_9_m06_caps_poll_decode": {
+      "plan_citation": "plans/inbox-20260830/05-fb-20260829-023649-8f8c.md:40",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M06-UI-INGRESS",
+      "why": "El punto 9 es el único DESIGN de 8f8c que OWNS M06: extender record_poll y _handle_poll para decode de caps=, máximo 64 nombres ASCII [a-z][a-z0-9_]{0,63}, sin duplicados, 4096 bytes totales; conservar sólo el último anuncio de un poll acreditado por peer y generación; ausente/legacy/inválido/oversized/no acreditado no bloquea comandos y queda unknown; jamás hereda otra generación.",
+      "code": "record_poll loopback.py:1712-1719 firma (peer, version, instance, source_pid, source_creation_time) sin caps. El cuerpo :1738-1819 actualiza _poll_versions, colas y bind; no hay decode, lista, generación de anuncio ni estado unknown/match. _handle_poll :2924-2937 lee qs peer/ver/inst y llama record_poll sin caps; qs no se consulta por 'caps' (únicos qs.get en Handler: key :2560, id :2892, remove :2900, peer :2925, inst :2927 y :2962). Grep de loopback.py: cero hits de caps=/announced/capability como anuncio de comandos.",
+      "tests": "test_loopback.py llama record_poll en higiene/versión (:792, :866, :1090-1181) sin argumento caps y sin aserto de anuncio. test_validate_command_args_table.py no toca poll. No hay test de 64 nombres, duplicados, oversized, legacy, generación cruzada ni unknown.",
+      "exact_still_true": "8f8c.md:40 cita loopback.py:1712-1719 y :2924-2937; esas líneas existen y no hacen el trabajo del DESIGN."
+    },
+    "8f8c_10_m22_capabilities_fixture": {
+      "plan_citation": "plans/inbox-20260830/05-fb-20260829-023649-8f8c.md:41",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "DAG:57; addendum :72 (bridge_capabilities_v1.json y tests públicos). 8f8c.md:16."
+    },
+    "8f8c_11_m22_fixture_discriminators": {
+      "plan_citation": "plans/inbox-20260830/05-fb-20260829-023649-8f8c.md:42",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "DAG:57; 8f8c.md:16. Comparar anuncio contra app.list_tools() es M22, no M06."
+    },
+    "8f8c_12_m24_pbo_caps_gate": {
+      "plan_citation": "plans/inbox-20260830/05-fb-20260829-023649-8f8c.md:43",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M24-PBO-BUILD-DEPLOY",
+      "authority": "DAG:59; 8f8c.md:16 (M24 sólo build/deploy/evidencia)."
+    },
+    "dag_schema_ui_optional_root": {
+      "plan_citation": "plans/inbox-20260830/00-execution-dag.md:101-105; 29-fb-20260829-230535-f4f2.md:32 (propagar root/path por M06); 47c9.md:14 (schema ingress de f4f2/20be/2762 pertenece a M06). No es un paso numerado de los dos planes del brief; el DAG:41 nombra 'schema UI' como trabajo M06.",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M06-UI-INGRESS",
+      "why": "root opcional en los cuatro verbos core. Con root, el nombre acota el scope; sin root y con path, workspace completo. Hoy root no es campo opcional: es extra_key.",
+      "code": "loopback.py:599-661: ninguno de ui_tree/ui_set_text/ui_click/ui_focus lista root en required ni optional. :697 rechaza cualquier clave extra.",
+      "tests": "test_validate_command_args_table.py:352-417 no tiene caso root; extra_key espera (False, bad_args). test_loopback.py:0 hits de 'root' como argumento UI."
+    },
+    "dag_schema_ui_click_mode_bubble": {
+      "plan_citation": "plans/inbox-20260830/00-execution-dag.md:125-128; 25-fb-20260829-184952-20be.md:42-43 (M06 compone root opcional de f4f2 con mode/bubble opcionales; ausencia=direct/false, nunca un tercer modo; negativos de valor/tipo en M06).",
+      "verdict": "NOT-IMPLEMENTED",
+      "owner": "M06-UI-INGRESS",
+      "why": "ui_click debe aceptar mode in {direct,complete} y bubble bool, y rechazar tercer modo/tipo. El schema vivo sólo admite path y button. 20be.md:27 [EXACT] lo midió en loopback.py:617-625 y esas líneas no han cambiado.",
+      "code": "loopback.py:617-625 optional=('button',) validators path+_is_non_empty_string y button 0..2. No hay _one_of('direct','complete') ni _is_strict_bool para bubble (el helper _is_strict_bool :307-308 existe y no se usa en UI).",
+      "tests": "test_validate_command_args_table.py:369-386 valid_without_button / valid_with_button / extra_key / missing_path / button_above_range. Cero casos mode o bubble. Un {'path':'X','mode':'direct'} caería en extra_key, que es el FAIL del plan (perder/redefinir mode)."
+    },
+    "dag_schema_ui_echo_passthrough": {
+      "plan_citation": "plans/inbox-20260830/33-fb-20260830-112422-2762.md:33 ('M06 conserva el JSON sin reinterpretarlo'). DAG:106-119; 47c9.md:14.",
+      "verdict": "INCONCLUSIVE",
+      "owner": "M06-UI-INGRESS",
+      "why": "El código de /result copia el body y añade meta _server; no poda ui_request. Eso es el comportamiento legado de passthrough, no un test del sobre ui_request del lote. Sin aserto de requested_path/requested_root/matched_path no se puede marcar IMPLEMENTED (el brief exige path:line de código Y de test). Esta ficha no estaba en la lista de planes del brief.",
+      "code": "store_result loopback.py:2105 stored=dict(body); :2171-2172 stored['_server']=meta; self._results[command_id]=stored. No hay clave ui_request en loopback.py.",
+      "tests": "test_loopback.py no aserta conservación de ui_request ni de requested_root. ResultCapTests :1433- cap de resultados, no ecos UI."
+    }
+  },
+  "verdict_counts": {
+    "IMPLEMENTED": 0,
+    "OUT-OF-SCOPE": 18,
+    "NOT-IMPLEMENTED": 4,
+    "INCONCLUSIVE": 1,
+    "note": "Conteos sobre las 23 entradas de plan_points (0+18+4+1=23). Las tres owns.sha256 y la corrida unittest son INCONCLUSIVE aparte, no son puntos de plan. Las 3 entradas dag_schema_ui_* cubren el 'schema UI' de DAG:41 / 47c9.md:14, que el brief nombra pero no lista como fichero de plan aparte de b2c4/8f8c."
+  },
+  "preexisting_suite_not_the_plan": {
+    "test_validate_command_args_table.py_ui_cases": {
+      "ui_tree": ["valid_empty:353", "valid_with_optional:354", "extra_key:355", "path_wrong_type:356", "limit_below_range:357"],
+      "ui_set_text": ["valid:360", "extra_key:361", "missing_text:366", "empty_path:367"],
+      "ui_click": ["valid_without_button:370", "valid_with_button:371", "extra_key:376", "missing_path:381", "button_above_range:382"],
+      "ui_focus": ["valid:409", "extra_key:410", "missing_path:415", "empty_path:416"],
+      "note": "Clavan path/button/text/limit. Un verde aquí acredita el contrato anterior al lote."
+    },
+    "test_loopback.py_ui": {
+      "only_ui_enqueue": "test_ui_dialog_enqueue_well_formed_and_rejects_seven_fields:1258",
+      "note": "ui_dialog no es uno de los cuatro verbos públicos del DAG:101. record_poll se usa en StaleCommandHygieneTest y version_blocked, nunca con caps."
+    }
+  },
+  "bugs_observed_not_fixed": [
+    {
+      "id": "lote-ui-fields-rejected-as-extra-key",
+      "location": "tools/dayz_mcp/loopback.py:617-625 y :697",
+      "problem": "Un ui_click del lote con root/mode/bubble es bad_args. El mismo predicado extra_key que el plan necesita para basura rechaza hoy los campos aprobados.",
+      "action": "no parcheado; es el hueco de schema UI."
+    },
+    {
+      "id": "caps-poll-absent",
+      "location": "tools/dayz_mcp/loopback.py:1712-1719 y :2924-2937",
+      "problem": "Ni record_poll ni _handle_poll conocen caps=. No hay último anuncio por peer/generación ni estado unknown. El BONUS 8f8c no puede consumirse en M22 aunque M03/M05 anunciaran.",
+      "action": "no parcheado."
+    }
+  ],
+  "not_touched": [
+    "tools/dayz_mcp/loopback.py (leído; no escrito)",
+    "tools/tests/test_loopback.py (leído; no escrito)",
+    "tools/tests/test_validate_command_args_table.py (leído; no escrito)",
+    "tools/dayz_mcp/server.py (no escrito; M22)",
+    "tools/dayz_mcp/result_prune.py (no escrito; M22)",
+    "addon/scripts/5_Mission/MCPClientBridge.c (no escrito; M05)",
+    "addon/scripts/5_Mission/MCPBridge.c (no escrito; M03)",
+    "GATES.md",
+    "gates/**",
+    "plans/**",
+    "product-spec.md",
+    "tools/.venv-mcp"
+  ]
+}

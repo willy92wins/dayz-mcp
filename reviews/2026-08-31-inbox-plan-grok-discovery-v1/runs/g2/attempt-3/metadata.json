@@ -1,0 +1,27 @@
+{
+  "attempt": "attempt-3",
+  "errors": [
+    "cursor process rc=1",
+    "init event count=0",
+    "result event count=0",
+    "model mismatch: None",
+    "cursor result is not success/is_error=false",
+    "session id missing or differs",
+    "result is not one JSON object"
+  ],
+  "group": "G2",
+  "group_verdict": null,
+  "is_error": null,
+  "open_findings": null,
+  "process_rc": 1,
+  "prompt_sha256": "57bb5e4b81dcf08b089b29cca470b673e96e817833b54bf992ed57e92a890561",
+  "requested_model": "cursor-grok-4.6-medium",
+  "result_subtype": null,
+  "route": "cursor-agent",
+  "schema_version": 1,
+  "served_model": null,
+  "session_id": null,
+  "stderr_sha256": "8ff0717d29fe71e4f94a4fb808c2f2b8cc497fc33e30990659fc3c89d964fb7c",
+  "stream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "valid_transport_and_schema": false
+}

@@ -1,0 +1,250 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobacion, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar o hasta agotar los turnos.
+Si te bloqueas, escribe el bloqueo en STATE.md y sigue con lo que no dependa de el.
+
+===============================================================================
+S0. EL PRODUCTO - y solo el producto
+===============================================================================
+
+Tu encargo son CINCO productos observables en el wire del servidor MCP de DayZ, todos en
+`tools/dayz_mcp/server.py`. En los cinco, la capa de abajo YA hace el trabajo y la tool
+publica no lo reenvia o no lo publica. Tu cierras ese eslabon.
+
+  P1. `pipeline_resolve` acepta un tercer argumento opcional `evidence_ref` (cadena, max 240
+      caracteres, no requerido) y lo propaga a `inbox.append_resolution(...)`, que ya lo valida
+      y lo persiste. `required` sigue siendo exactamente ["feedback_id", "resolution"].
+  P2. `dayz_knowledge_status` y `dayz_knowledge_prepare` publican un schema de CERO
+      argumentos cerrado: `properties == {}`, `required == []`, `additionalProperties: false`.
+      Una llamada con cualquier argumento extra falla con `bad_args: unexpected arguments`
+      (in-process y por una sesion cliente real: `CallToolResult.isError is True`). La llamada
+      con `{}` sigue funcionando.
+  P3. `capture_screenshot` gana `crop_space: str` (default = `mcp_capture.DEFAULT_CROP_SPACE`,
+      es decir "client") y lo reenvia a `mcp_capture.capture_dual(...)`. La tool devuelve
+      SIEMPRE `[Image, json.dumps(meta)]`, tambien con `save_fullres=False` (hoy esa rama
+      devuelve solo la imagen). `meta` es el `meta` del helper mas `fullres_path`. Un
+      `crop_space` fuera del enum llega al cliente como error que contiene `bad_crop_space`
+      (el helper ya lo devuelve antes de capturar; basta con no tragarselo).
+  P4. `ui_click.mode` publica `enum: ["direct", "complete"]` y `ui_reload_layout.mode` publica
+      `enum: ["reload", "close"]` (tipo `Literal`, como ya hace `ui_dialog`). `ui_click.button`
+      pasa a `StrictInt` (rango 0..2 se conserva): `true`, `"1"` y `1.0` se rechazan nombrando
+      `button`. La descripcion registrada de `ui_click` nombra `mode_not_implemented` como el
+      codigo con el que el bridge rechaza hoy `mode="complete"`.
+  P5. `dayz_test_run.mode` publica un enum DERIVADO de la autoridad M12
+      (`dayz_test_modes.public_mode_names()`), nunca una lista escrita a mano: anadir un modo
+      publico en `dayz_test_modes.py` tiene que aparecer en el wire sin tocar `server.py`.
+      `offline` no aparece (es rol interno). La descripcion registrada dice que `extra_mods`
+      acepta cualquier carpeta bajo los `mod_roots` del proyecto (un probe desechable no
+      necesita darse de alta como proyecto).
+
+  P0 (transversal, decision del dueno): TODA tool tocada en este lote (las siete:
+      pipeline_resolve, capture_screenshot, ui_click, ui_reload_layout, dayz_knowledge_status,
+      dayz_knowledge_prepare, dayz_test_run) declara `additionalProperties: false` en su schema
+      publicado Y rechaza un argumento desconocido con `bad_args: unexpected arguments` antes de
+      ejecutar nada. Hoy un argumento inventado se descarta en silencio y la tool se ejecuta.
+
+LO QUE NO ES EL PRODUCTO, y por tanto no es tu trabajo aunque tengas razon:
+
+  - El oraculo de `gate/`, su calibracion o su diseno. Si crees que el gate esta mal,
+    escribelo en STATE.md bajo `DISPUTAS` y sigue. NO lo edites.
+  - Refactorizar, renombrar, reorganizar o "mejorar de paso" nada. Ni limpiar comprobaciones
+    del cuerpo que queden redundantes con el schema: dejalas.
+  - Cualquier fichero fuera del write-set del S5.
+  - Documentacion, informes, ADRs, ledgers. Nada de eso cierra este lote.
+
+Si terminas los cinco productos y te sobra turno, PARA. Ampliar el alcance es el modo de
+fallo que este encargo esta disenado para evitar.
+
+===============================================================================
+S1. ENTORNO - verificado hoy, no lo asumas de otra forma
+===============================================================================
+
+  - Workspace: el directorio en el que estas. Contiene `tools/`, `gate/` y `addon/`. El
+    `addon/` esta SOLO para que los tests que leen `MCPBridge.c` encuentren su raiz: es de
+    solo lectura y nada de este lote lo modifica.
+  - Interprete, exacto y sin alternativa:
+      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+  - **Esa venv NO tiene pytest.** La suite es `unittest`. Un test escrito como funcion suelta
+    `def test_*` a nivel de modulo NO se colecciona: escribe clases `unittest.TestCase` /
+    `unittest.IsolatedAsyncioTestCase`.
+  - Para importar el paquete: `cd tools` y `PYTHONPATH=.`
+    Ejemplo:  cd tools && PYTHONPATH=. "<interprete>" -m unittest tests.test_mcp_tools
+  - Versiones: mcp 1.27.2 (FastMCP), pydantic 2.13.4.
+  - No hay red, no hay juego corriendo, no hay PBO, no hay daemon. Ninguna tool de este lote
+    necesita el bridge para lo que se te pide; las de UI fallan cerrado antes de encolar.
+  - Tope de tiempo de la corrida: ~100 turnos. Escribe por tramos: cada producto que
+    termines, dejalo en disco y anota en STATE.md antes de empezar el siguiente.
+
+===============================================================================
+S2. HECHOS VERIFICADOS - los abri yo con Read, no son de memoria
+===============================================================================
+
+Mecanica de FastMCP que ya usa este fichero (te ahorra descubrirla):
+  - `server.py:1718-1731` `_patch_public_argument_alias(app, tool_name, internal, public)`:
+    coge la tool con `app._tool_manager.get_tool(name)`, edita `tool.parameters` (el schema
+    que se publica en `list_tools`) y envuelve `tool.fn_metadata.call_fn_with_arg_validation`
+    para interceptar los argumentos ANTES de la validacion pydantic. `Tool.run` (mcp 1.27.2)
+    llama exactamente a ese metodo, asi que un wrapper ahi ve toda llamada, in-process o por
+    sesion cliente. Es el precedente para P0/P2: un helper generico que ponga
+    `additionalProperties: False` y rechace claves fuera de `properties` con
+    `ToolError("bad_args: unexpected arguments")`. Se aplica DESPUES del registro: las tools
+    de knowledge las registra `register_knowledge_tools(app)` en `server.py:2732`
+    (definidas en `knowledge.py:656` y `:665`, fuera del write-set).
+  - `server.py:22` ya importa `Field, StrictBool, StrictInt`. `server.py:4249` usa
+    `bubble: StrictBool = False` y esa restriccion SI viaja al schema. `ui_dialog` usa
+    `Literal[...]` y publica `enum`. Medido por un revisor con estas versiones: `Literal`
+    publica exactamente `enum: [...]` y rechaza `""` y `3` antes de entrar en el cuerpo.
+  - `_bad_args(field, value, requirement)` en `server.py:1622-1623` -> `"bad_args: <field>
+    <value!r> must <requirement>"`.
+  - `_wire_safe_error` (`server.py:239+`) conserva el token anterior al primer `:` si tiene
+    forma de identificador: `bad_crop_space` viaja tal cual.
+
+P1, ficha fb-20260902-235123-f6fa + fb-20260829-024848-c7ca:
+  - Tool: `server.py:4516-4531` `async def pipeline_resolve(feedback_id: str, resolution: str)`;
+    llama `inbox.append_resolution(feedback_id, resolution, platform=_pipeline_platform())` y
+    traduce `ValueError` con prefijo `bad_args` a `ToolError(message)`.
+  - Helper: `inbox.py:121-146` `append_resolution(feedback_id, resolution, *, platform,
+    evidence_ref=None)`; `inbox.py:30-46` `_validate_evidence_ref` (1..240 chars, ASCII, bajo
+    reviews|gates|reports|research, sin `..`); `:144-145` lo persiste; `:185-187` last-wins.
+  - Test existente: `tests/test_pipeline_feedback.py:246-281` comprueba las firmas
+    registradas y exige `required == {feedback_id, resolution}`; no prohibe un tercer
+    parametro opcional. Ese fichero redirige el buzon parcheando `inbox.INBOX_DIR` (`:23`).
+
+P2, ficha fb-20260829-135727-782b (mitad M22):
+  - Medido hoy: `dayz_knowledge_status` publica `{"properties": {}, "title": ..., "type":
+    "object"}` sin `additionalProperties` ni `required`; `app.call_tool("dayz_knowledge_status",
+    {"repo": "Y"})` NO falla y devuelve el payload.
+  - Sesion cliente real sin stdio: `mcp.shared.memory.create_connected_server_and_client_session(
+    app._mcp_server)` da una `ClientSession` en memoria; `await session.call_tool(name, args)`
+    devuelve `CallToolResult` con `.isError` y `.content`. Existe en esta venv (verificado).
+
+P3, ficha fb-20260828-224835-268a (mitad M22):
+  - Helper: `mcp_capture.py:640-645` `capture_dual(..., crop_space: str = DEFAULT_CROP_SPACE)`;
+    `:103-104` `CROP_SPACES = ("client", "window")`, `DEFAULT_CROP_SPACE = "client"`;
+    `:671` devuelve `_error(ERROR_BAD_CROP_SPACE)` (= "bad_crop_space") ANTES de capturar;
+    `:705-745` construye `meta` (crop_space, window_surface, client_surface, effective_surface,
+    frame_sha256, fullres_file_sha256...) y devuelve `{inline, fullres_path, meta}`.
+  - Tool: `server.py:3938-3948` firma sin `crop_space`; `:3997-4010` llama a `capture_dual`
+    sin reenviarlo; `:4027-4031` devuelve `image` a secas con `save_fullres=False` y
+    `[image, json.dumps(meta)]` con True.
+  - Patron de test publico con doble: `tests/test_d05_capture_targets_run_client.py:55-100`
+    (`patch.object(server.mcp_capture, "capture_dual", side_effect=...)` y
+    `runtime.lifecycle_status = AsyncMock(...)`).
+
+P4, fichas fb-20260903-184023-52cf, fb-20260903-184006-14ab, fb-20260902-194914-b12d:
+  - `server.py:4241-4262` `ui_click(path, button: int = 0, root: str = None, mode: str =
+    "direct", bubble: StrictBool = False, timeout_s=...)`; el cuerpo excluye `bool` de `button`
+    (`:4253-4254`) pero pydantic ya convirtio `true`/"1"/1.0 a 1 antes de entrar.
+  - `server.py:4281-4300` `ui_reload_layout(path="", mode: str = "reload", ...)` con enum
+    {"reload", "close"} solo en el cuerpo.
+  - El bridge cliente rechaza `mode="complete"` con `mode_not_implemented`
+    (`addon/scripts/5_Mission/MCPClientBridge.c:1451`, fuera de este lote): es lo que la
+    descripcion tiene que decir.
+  - El comentario de `:4244-4246` explica por que `root: str = None` y no `str | None`:
+    conservalo tal cual.
+
+P5, fichas fb-20260829-194823-ffc7 / fb-20260830-010517-9d46 / fb-20260831-004409-1ad0:
+  - `server.py:2901-2903` `dayz_test_run(project: str, mode: str, ...)`; descripcion en
+    `:2870-2900` con el texto a mano "mode is server|all|client".
+  - Autoridad: `dayz_test_modes.py:215` `public_mode_names(records=None) -> tuple[str, ...]`
+    y `:220` `request_mode_names(...)`. `offline` es `public=False` (`:137`).
+  - `Literal[tuple(...)]` construido en tiempo de import a nivel de modulo es un `Literal`
+    valido para pydantic y publica `enum`.
+  - `extra_mods` se valida en `dayz_test_tool._valid_public_mod` (`dayz_test_tool.py:90-93`):
+    acepta un nombre de carpeta relativo dentro de los `mod_roots` del proyecto.
+
+===============================================================================
+S3. PRECISIONES QUE TE AHORRAN UNA RONDA
+===============================================================================
+
+  - P0: rechaza claves que no esten en `properties` del schema publicado (tras cualquier
+    alias). `scene_raycast` lleva un alias `from` <- `from_pos` por `_patch_public_argument_alias`
+    (`server.py:4557`); tu helper no debe romper ese alias ni aplicarse a tools no tocadas.
+  - P1: `evidence_ref` puede publicarse como `string` con `maxLength: 240` o como
+    `anyOf[string(maxLength 240), null]`; las dos valen. Lo que no vale: que un `evidence_ref`
+    invalido (ruta absoluta, >240, fuera de las cuatro raices) pase sin error que nombre
+    `evidence_ref`, ni que el campo entre en `required`.
+  - P3: la meta que devuelves con `save_fullres=False` lleva `fullres_path: None`. No toques
+    `mcp_capture.py`: ya hace todo.
+  - P4: con `Literal`, la cadena vacia ya no llega al cuerpo; las comprobaciones del cuerpo
+    quedan redundantes y se dejan. Si algun test existente pinea que `mode=""` o `button=true`
+    producen el mensaje del CUERPO a traves de la tool publica, actualiza ESE test al rechazo
+    de schema y dilo en STATE.md con el path:line viejo y el nuevo.
+  - P5: `tests/test_mcp_tools.py:286, :308, :345, :375, :662` llaman a la tool publica con
+    `{"project": "ExampleMod", "mode": "offline"}` con `execute_dayz_test_run` SIMULADO: no
+    prueban `offline`, solo necesitan un modo que pase. Con el enum publicado ese valor deja
+    de entrar; cambialos a un modo publico (`"server"`) y anotalo en STATE.md. Si algun otro
+    test espera el texto del cuerpo (`bad_dayz_test_request:mode expected ...`) a traves de la
+    tool PUBLICA, pasa a esperar el rechazo de schema y anotalo. El texto del cuerpo para la
+    FACHADA (`dayz_test_tool.build_run_request`) no es tuyo y no cambia.
+  - Tests nuevos: `unittest`, en ficheros nuevos `tools/tests/test_lote_m_*.py` o en los dos
+    existentes del write-set. Cada producto lleva al menos un caso positivo y uno negativo, y
+    los negativos de P0/P2 pasan por la sesion cliente en memoria (isError) ademas de por
+    `app.call_tool`.
+
+===============================================================================
+S4. EL GATE
+===============================================================================
+
+    bash gate/run.sh      -> G1, el oraculo de producto
+    bash gate/suite.sh    -> G2, los ficheros de test que cubren las siete tools
+
+Estado de partida MEDIDO de G1 (no es una amenaza, es el punto de arranque):
+
+    PASS=16  FAIL=34  UNMET=0  de 50
+    PASS: P0-count, P0-required-* (7), P0-scene_raycast-alias, P1-D-legacy-two-args,
+          P2-B2-inprocess-empty-ok, P2-C2-wire-empty-ok, P3-C-shape-fullres=True,
+          P4-B-empty-mode-rejected, P4-C2-button-range-kept, P5-C-offline-rejected
+    FAIL: los 34 restantes (sin additionalProperties, sin evidence_ref, sin crop_space,
+          sin enum, extras aceptados en silencio)
+
+Los FAIL son tu trabajo. **Los PASS son la linea que no puedes romper.** Terminas cuando G1
+dice `ORACULO-VERDE` y G2 dice `SUITE-ACOTADA OK`.
+
+`gate/` es de solo lectura. Esta sellado por hash y compruebo el sello al recibir. Editarlo
+-incluido "arreglar" el oraculo- invalida la entrega entera.
+
+===============================================================================
+S5. FRONTERAS - write-set cerrado
+===============================================================================
+
+PUEDES editar:
+  - tools/dayz_mcp/server.py   EXCEPTO la funcion `dayz_test_stop` (~:3039-3063) y cualquier
+    linea de `resolve_stop_run`: otra sesion las tiene en vuelo. No las toques ni para
+    reformatear.
+  - tools/tests/test_mcp_tools.py
+  - tools/tests/test_pipeline_feedback.py
+  - ficheros NUEVOS tools/tests/test_lote_m_*.py
+  - STATE.md (en la raiz del workspace)
+
+NO puedes tocar (se comprueba por mtime y por hash al recibir):
+  - gate/ entero
+  - tools/dayz_mcp/inbox.py, knowledge.py, dayz_test_*.py, loopback.py, daemon.py,
+    process_lifecycle.py, native_bundle.py, tool_registry_fingerprint.py, effective_schema*.py
+  - tools/mcp_capture.py
+  - tools/tests/fixtures/** y cualquier otro test existente que no este arriba
+  - addon/** (esta en el workspace solo para que los tests lo lean)
+
+Prohibido: `git` (el workspace no es un repo), pip, red, borrar ficheros, crear ficheros fuera
+de tools/tests/ y STATE.md.
+
+===============================================================================
+S6. CIERRE - STATE.md en la raiz del workspace
+===============================================================================
+
+Escribelo y actualizalo por tramos. Secciones, en este orden:
+
+    ## HECHO
+    Por producto (P0..P5): que cambiaste, path:line del cambio, y que test lo cubre.
+
+    ## GATES
+    La salida literal de `bash gate/run.sh` y `bash gate/suite.sh` en tu ultima corrida.
+
+    ## TESTS EXISTENTES QUE CAMBIASTE
+    path:line viejo -> nuevo y por que (solo los del S3). Si ninguno: "Ninguno."
+
+    ## LO QUE NO PUDE VERIFICAR
+    Sin excusas. Vacio en una entrega real es senal de alarma.
+
+    ## DISPUTAS
+    Si crees que el gate o este brief estan mal en algo concreto: que, donde, y que harias.
+    Si no hay ninguna: "Ninguna."

@@ -1,0 +1,74 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar.
+
+RONDA 2 DEL LOTE D. Encargo pequeño y cerrado. Tus dos productos están ENTREGADOS y el
+oráculo los da los doce en verde. Esto no es un rechazo de tu trabajo.
+
+===============================================================================
+LO QUE PASÓ, Y DE QUIÉN ERA EL FALLO
+===============================================================================
+
+Levantaste dos disputas. Las dos eran correctas y las dos eran defectos MÍOS:
+
+1. El `EXPECT` del ledger fijaba `de 11` y el total depende de la topología. Tenías razón:
+   con la costura presente el oráculo emite doce checks. **Arreglado por mí**: el `EXPECT`
+   ya no cuenta checks, es el marcador estable `ORACULO-VERDE`.
+
+2. Mi fake `_drive` devolvía `ok=True, run_id=None` con `preflight=False`, que viola la
+   invariante que el árbol ya envía en `_validate_terminal_context`
+   (`dayz_test_tool.py:524`): `preflight != (terminal.run_id is None)` es `terminal_invalid`.
+   Un fixture incoherente no es un gate duro, es una exigencia de que producción se
+   afloje para aceptarlo. **Arreglado por mí en el oráculo**, de dos formas:
+     - el terminal falso lleva `run_id` cuando `preflight=False`;
+     - el caso de preflight usa `mode="all"` sin `run_id`, porque `preflight=True` con
+       `mode="client"` y un `run_id` de petición es una combinación contradictoria bajo
+       esa misma invariante. `mode="all"` está en {client, all}, así que sigue siendo el
+       caso que SÍ consultaría Steam, que es lo que preflight tiene que suprimir.
+
+===============================================================================
+TU ENCARGO, QUE ES UNO SOLO
+===============================================================================
+
+Tu test `test_steam_session_is_not_consulted_for_preflight_or_server`
+(`tools/tests/test_dayz_test_tool.py:892`) heredó ese mismo fixture incoherente mío.
+Arréglalo del mismo modo, y con eso desaparece la razón del parche de producción.
+
+**Ya he revertido yo el parche de producción** de `tools/dayz_mcp/dayz_test_tool.py:613-619`:
+`_validate_terminal_context` vuelve a llamarse siempre, sin `skip_run_id_context`. Con mi
+oráculo arreglado, los doce checks siguen en verde SIN ese parche — lo he medido. No lo
+vuelvas a introducir: debilitar una validación de producción para que pase un test es un
+agujero, aunque el test tenga buena intención.
+
+Estado exacto ahora mismo, medido por mí:
+
+    bash gate/run.sh    -> ORACULO: PASS=12 FAIL=0 UNMET=0 de 12 / ORACULO-VERDE   (RC=0)
+    bash gate/suite.sh  -> SUITE-ACOTADA ROJA
+        test_dayz_test_tool : Ran 41 tests, FAILED (errors=2)
+        Los dos errores son ese único test tuyo, en sus dos ramas (label='preflight' y la
+        otra). Todo lo demás verde.
+
+Terminas cuando los dos digan:
+
+    bash gate/run.sh    -> ORACULO-VERDE
+    bash gate/suite.sh  -> SUITE-ACOTADA OK
+
+===============================================================================
+FRONTERAS
+===============================================================================
+
+WRITE-SET de esta ronda, y nada más:
+    tools/tests/test_dayz_test_tool.py
+
+PROHIBIDO: volver a tocar `tools/dayz_mcp/dayz_test_tool.py` o `server.py` (tu trabajo ahí
+está aceptado y verificado); tocar `gate/`; debilitar `_validate_terminal_context` o
+cualquier otra validación; borrar el test en vez de arreglarlo.
+
+Si al arreglar el fixture descubres que el test ya no prueba nada útil, dilo en STATE.md
+bajo DISPUTAS en vez de dejar un test vacío que pasa.
+
+===============================================================================
+CIERRE
+===============================================================================
+
+Reescribe `STATE.md` con las mismas secciones (HECHO / GATE / CONTROL POSITIVO /
+LO QUE NO PUDE VERIFICAR / DISPUTAS), pegando la salida literal de los dos gates.

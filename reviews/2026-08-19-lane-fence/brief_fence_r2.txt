@@ -1,0 +1,88 @@
+CONTINUACION (ronda 2). Te quedaste sin turnos, no sin trabajo. Sigues en el mismo
+workspace y con las mismas fronteras del encargo anterior; nada de eso cambia.
+
+Donde estabas, medido por mi desde fuera (no me fio de la narracion, mire el disco):
+
+  - Tocaste 8 ficheros de produccion (3 Enforce + 5 Python), creaste
+    `instance_fence.py`, `tests\fence_helpers.py` y `tests\test_instance_fence.py`,
+    y modificaste 23 ficheros de test ya existentes.
+  - `red_first.log`: 1645 tests, 29 rojos. Los 23 nuevos ROJOS ANTES de implementar:
+    ese gate lo pasaste, no son tautologicos.
+  - `green_partial.log`: 1645 tests, 24 rojos. Ahi te cortaron.
+
+Tu ultimo mensaje decia: "los tests nuevos pasan, ahora mido que tests de la suite base
+se rompen al exigir binding en las mutaciones". Eso es exactamente lo que falta, y es la
+parte que decide si esto vale o no vale.
+
+
+== LO UNICO QUE TIENES QUE HACER EN ESTA RONDA ==
+
+Reconciliar los rojos de la base, terminar `green.log` y cerrar el informe.
+
+
+== COMO SE RECONCILIA CADA ROJO (esto es el encargo, leelo despacio) ==
+
+Los rojos que quedan no son ruido: casi todos son `test_task7_*` — autoridad de
+despacho, fencing de exec, fencing de cleanup — mas `test_x5_*`,
+`test_security_runtime_audit` y el centinela. Son las regresiones que blindan garantias
+ganadas en su dia contra bugs reales.
+
+Para CADA test rojo, clasificalo en A o B y dilo en el informe:
+
+  A. **El test codificaba el mundo VIEJO** (colas por rol, mutacion entregada sin
+     identidad). Entonces se adapta, y en el informe escribes tres cosas:
+       - que aserto exactamente ANTES,
+       - que asertas AHORA,
+       - **QUE GARANTIA PROTEGIA Y DONDE VIVE ESA GARANTIA AHORA** (que test la cubre
+         hoy, por nombre). Si la respuesta es "ya no la cubre nadie", NO es una
+         adaptacion: es una perdida, y la marcas como tal.
+
+  B. **El test esta destapando un defecto de tu implementacion.** Entonces se arregla el
+     CODIGO, no el test.
+
+PROHIBIDO: relajar un assert, subir un timeout, envolver en try/except, marcar
+`skipTest`, o borrar un caso para que la suite pase. Si un test de autoridad de despacho
+se pone verde porque le quitaste el assert, has convertido un gate en decorado. Antes
+hagalo rojo y dilo: un PARCIAL honesto vale mas que un verde comprado.
+
+Sospecha de ti mismo en este punto concreto: tienes 23 ficheros de test ya modificados de
+la ronda anterior. Revisa esas modificaciones con el mismo criterio A/B y desharas las que
+no lo pasen. Si alguna la hiciste "para que pasara", dila.
+
+Caso especial ya decidido, no lo toques:
+  - `test_task9_spawn_phase_markers` (`test_full_source_hash_is_frozen` y
+    `test_removing_only_marker_lines_restores_frozen_source_hash`) TIENE que quedarse
+    ROJO: es el centinela de `MCPBridge.c` y su rojo es la senal de que el PBO no ha
+    pasado el gate in-game. No re-congeles hashes.
+
+Ojo con un rojo que NO es tuyo:
+  - `test_bug046_startup_deadlock.DaemonStartupElectionProcessTest` salio rojo en tu
+    `red_first.log` pero VERDE en mi baseline medido justo antes de darte el workspace
+    (`baseline_suite.log`: `Ran 1622 tests - OK (skipped=6)`). Levanta daemons reales con
+    timeouts de 12 s, asi que puede caerse por carga de maquina. Si lo ves rojo, re-corre
+    ESE modulo solo y en reposo antes de tocar nada; si en reposo pasa, es flake de carga
+    y lo dices en el informe, no lo "arreglas".
+
+
+== ENTREGABLES DE ESTA RONDA ==
+
+  1. `green.log` en la raiz del lane: suite COMPLETA final.
+     Objetivo: 1645 verdes menos el centinela. Cualquier otro rojo va explicado, uno por
+     uno, en el informe.
+     Comando (guarda en UTF-8, no en UTF-16 — la redireccion de PowerShell escribe UTF-16
+     y tus logs de la ronda 1 salieron asi):
+       cd "C:\Users\guill\AppData\Local\Temp\mcp-laneFENCE-20260818\DayZ Projects\DayZ_MCP_dev\tools"
+       .\.venv-mcp\Scripts\python.exe -m unittest discover -s tests -t . 2>&1 | Out-File -FilePath "..\..\..\green.log" -Encoding utf8
+
+  2. `laneFENCE-report.md` COMPLETO. Ya tiene el plan (seccion 1); faltan las secciones 2
+     a 7 del encargo original, y ademas:
+       - la tabla A/B de CADA test base que tocaste o que quedo rojo;
+       - la seccion 5 (LO QUE NO PUDE VERIFICAR) sin adornos. La spec trae su propia lista
+         de NO VERIFICADO en su seccion 10: di cuales siguen abiertos y si tu
+         implementacion los ha vuelto mas o menos peligrosos.
+
+  3. Recibo corto por stdout (maximo 30 lineas), como en el encargo original.
+
+No empieces nada nuevo. No implementes nada de la seccion 9 de la spec. No toques el
+sellado del venv. Si te vuelves a quedar corto de turnos, deja el informe al dia ANTES de
+seguir tocando codigo: prefiero un informe honesto a medias que codigo sin explicar.

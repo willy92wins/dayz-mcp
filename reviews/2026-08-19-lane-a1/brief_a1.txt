@@ -1,0 +1,170 @@
+ENCARGO — Agujero 1 del coordinador: el dueño de la caja no puede pagar la saturación de tombstones.
+
+Trabajas SOLO dentro de este espacio aislado. Es una copia. No es el árbol real.
+
+  RAIZ  : C:\Users\guill\AppData\Local\Temp\mcp-laneA1-20260819
+  CODIGO: <RAIZ>\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\
+  TESTS : <RAIZ>\DayZ Projects\DayZ_MCP_dev\tools\tests\
+  SPEC  : <RAIZ>\spec-coordinador.md   <-- el contrato. Leelo entero antes de tocar nada.
+
+===============================================================================
+0. CAVEATS DE ENTORNO (no heredas el CLAUDE.md de nadie; esto es todo lo que hay)
+===============================================================================
+
+- PROHIBIDO escribir en C:\Users\guill\OneDrive\... — es el árbol real y hay otra
+  sesión trabajando en él ahora mismo. Se fotografiaron 541 ficheros antes de
+  arrancarte y se van a re-fotografiar al terminar. Un solo byte cambiado ahí
+  invalida la entrega entera.
+- El venv de la copia ya está sellado: su finder editable apunta a la copia, no
+  al original. No lo reinstales, no hagas `pip install -e`, no toques
+  site-packages. Si lo haces, los tests empiezan a importar el árbol real en
+  silencio.
+- Suite: desde <RAIZ>\DayZ Projects\DayZ_MCP_dev\tools ejecuta
+      .\.venv-mcp\Scripts\python.exe -m unittest discover -s tests -t .
+  Tarda ~4-5 min y son ~1620 tests. Para un módulo suelto:
+      .\.venv-mcp\Scripts\python.exe -m unittest tests.test_session_acquire_wait -v
+- Windows / PowerShell 5.1: `&&` y `||` NO existen (error de sintaxis). Encadena
+  con `;` o `if ($?) { ... }`. No redirijas `2>&1` sobre un .exe nativo: en 5.1
+  eso convierte cada línea de stderr en un ErrorRecord y aborta.
+- No hay juego, no hay DayZ, no hay servidor. Cero verificación de runtime.
+  Todo lo que entregues se demuestra con la suite.
+
+===============================================================================
+1. QUE HAY QUE HACER
+===============================================================================
+
+Implementa el **Agujero 1** del spec (sección "## Agujero 1 — Tombstones",
+líneas 26-143 de spec-coordinador.md). NADA MAS. Los agujeros 2 y 3 del mismo
+documento están BLOQUEADOS por otro trabajo sin promocionar: si los tocas, la
+entrega se tira entera.
+
+El defecto, en una frase: el chequeo de saturación de tombstones corre ANTES de
+mirar si el cliente ya ocupa la caja o tiene el lease, así que con 128
+tombstones acuñados por extraños que abandonaron su espera, el dueño legítimo
+de la caja recibe un 503 `operation_tombstones_saturated` y se queda sin poder
+tomar lease ni arrancar un run durante los 600 s de su propio claim.
+
+La invariante que hay que dejar escrita en código:
+
+  Un cliente que ya tiene el claim de la caja o el lease activo nunca recibe
+  `operation_tombstones_saturated`. Ese 503 queda para admisión *unseen* de
+  quien no ocupa ninguno de los dos.
+
+El spec trae el diseño ya arbitrado: helper `_admission_privileged_locked`,
+helper `_tombstone_saturated_error_locked`, la regla de saturación que
+sustituye al `if len >= MAX` en `acquire` y en `enqueue`, y la receta que
+viaja hasta el modelo pequeño (`ControlClientError.hint` ->
+`public_error_code`). Sigue el spec. Si algo del spec te parece equivocado,
+PARALO y dilo en el informe con la cita — no improvises una alternativa.
+
+===============================================================================
+2. ORDEN OBLIGATORIO: los tests ROJOS primero
+===============================================================================
+
+Esto es lo que se mide, así que no lo saltes ni lo reordenes.
+
+PASO A — escribe los 4 tests del spec §5 ANTES de tocar producción, con los
+nombres EXACTOS que da el spec:
+
+  1. test_box_claimer_enqueue_is_not_fenced_when_tombstones_saturated
+  2. test_box_claimer_acquire_with_new_operation_id_is_not_fenced_when_saturated
+  3. test_saturated_error_tells_stranger_to_wait_then_retry
+  4. test_session_acquire_wait_toolerror_includes_tombstone_recipe
+
+PASO B — ejecútalos contra el código SIN TOCAR y guarda la salida en
+<RAIZ>\red_first.log. Los cuatro tienen que salir ROJOS. Un test que ya sale
+verde antes de tu arreglo no está midiendo el defecto: reescríbelo hasta que
+falle por la razón correcta, y di en el informe por qué fallaba mal.
+
+  ⚠ Un test que llega al escenario por un atajo (inyectar estado a mano,
+  cortocircuitar la admisión, fabricar un tombstone saltándose
+  `cancel_operation`) NO vale. Este proyecto ya se comió ese fallo dos veces:
+  el test pasaba por un camino que producción nunca recorre, y el bug vivía
+  justo en el trozo que el atajo se saltaba. Los 128 tombstones se acuñan
+  llamando a `cancel_operation` como lo haría un cliente real, y el claim de
+  caja se toma con `box_wait_touch(..., claim=True)`.
+
+PASO C — implementa producción.
+
+PASO D — suite ENTERA verde. Guarda la salida en <RAIZ>\green.log.
+
+===============================================================================
+3. LO QUE NO SE TOCA
+===============================================================================
+
+- `MAX_OPERATION_TOMBSTONES` (128), el TTL (120 s), y la clave
+  `(ClientIdentity, operation_id)`. No subas el tope. No metas LRU. No
+  desalojes tombstones de extraños: un cancel tardío podría publicar.
+- El 503 para el extraño *unseen*. Ese comportamiento se queda igual.
+- El código de error `operation_tombstones_saturated` (`server.py:118`). No lo
+  renombres: hay consumidores que comparan `.code`.
+- Formato de `coordination.json` / `runs.json`, protocolo del puente,
+  `MCP_BRIDGE_VERSION`.
+- `_box_tombstones` / `box_queue_saturated` — es OTRO presupuesto, el de la cola
+  de caja. No lo mezcles.
+- Los ficheros del fencing sin promocionar: `loopback.py`, `process_lifecycle.py`,
+  `daemon.py`, `MCPBridge.c`, `MCPClientBridge.c`, `MCPMessages.c`. Ni los leas
+  para copiar patrones: el árbol que ves NO los tiene parcheados.
+
+Tres tests de caracterización que YA pasan y tienen que seguir pasando:
+
+  test_tombstone_capacity_fences_unseen_operations_and_recovers_after_ttl
+  test_tombstone_saturation_does_not_block_cleanup_of_admitted_operation
+  test_timeout_tombstones_exact_operation_and_clears_state
+
+Si alguno se pone rojo, tu privilegio está mal puesto. NO lo ablandes, no le
+cambies el assert, no lo marques skip: arregla producción.
+
+===============================================================================
+4. LOS TRES MODOS DE FALLO QUE VIGILA EL REVISOR
+===============================================================================
+
+El spec §6 los nombra y los va a comprobar una revisión a ciegas:
+
+a) Privilegio demasiado ancho: dar el pase a cualquiera que esté en `_box_queue`
+   en vez de solo a `_box_claiming`. Eso deja que un waiter de caja salte el
+   tope y pise al dueño.
+b) Privilegio puesto en `acquire` pero olvidado en `enqueue` (o al revés).
+   `session_acquire_wait` va por `enqueue`: si falta ahí, el camino real sigue
+   roto y solo "funciona" el acquire viejo.
+c) Receta solo en el JSON del HTTP y no en lo que ve el modelo. Si el agente
+   sigue recibiendo el código desnudo, reintenta en bucle y acuña tombstones
+   para siempre. La receta tiene que llegar a `str(error)` / al `ToolError`.
+
+Demuestra en el informe que los tres están cerrados, cada uno con el test que
+lo mide.
+
+===============================================================================
+5. QUE ENTREGAS
+===============================================================================
+
+Escribe <RAIZ>\laneA1-report.md con:
+
+  1. Los ficheros de producción tocados, con `path:line` de cada cambio.
+  2. El log rojo: qué test, con qué mensaje, contra el código sin tocar.
+  3. El log verde: número de tests, `Ran N tests`, `OK`.
+  4. Los tres modos de fallo del punto 4, cada uno con el test que lo cierra.
+  5. Cualquier sitio donde el spec no cuadra con el código real, con la cita
+     `path:line`. Ya se sabe de uno: el spec dice en su sección B que el fencing
+     no toca `server.py`, y sí lo toca (4 hunks, líneas 86-221). No afecta a
+     este trabajo, pero si encuentras más discrepancias, dilas.
+  6. Lo que NO verificaste y por qué.
+
+No promociones nada. No copies nada fuera de la RAIZ. No hagas git commit ni
+git push. Cuando termines, para.
+
+===============================================================================
+6. ROJOS QUE NO SON TUYOS
+===============================================================================
+
+Antes de arrancarte se lanzo la suite entera contra el codigo sin tocar. Si al
+llegar al PASO D encuentras un test rojo que NO es de los cuatro tuyos y que ya
+fallaba antes de tu cambio, NO lo arregles y NO lo ablandes: anotalo en el
+informe con su nombre y su traza. Lo que se mide es que no AÑADAS rojos, no que
+dejes la suite perfecta. Un rojo preexistente que "desaparece" tras tu cambio es
+tan sospechoso como uno nuevo: dilo tambien.
+
+Para saber si un rojo es preexistente, guardalo aparte y compruebalo con
+`git stash` NO — este arbol no es un repo tuyo. Comprueba asi: copia el fichero
+de produccion que tocaste a un .bak ANTES de editarlo, y si dudas, restaura el
+.bak, corre ese test suelto, y vuelve a poner tu version.

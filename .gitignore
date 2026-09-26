@@ -52,3 +52,57 @@ tools/_session_coordination/*preflight*.json
 
 # Default stage folder of pack-addon.ps1 when P: maps to the clone.
 /temp/dayz-pack-stage/
+
+# --- Repo hygiene (2026-09-26): backups de sesion y artefactos desechables nunca versionados ---
+*.bak-*
+*.bak_*
+*_bak_*
+*.bak
+*.BEFORE
+*.before
+*.CANDIDATE
+*.before/
+*.BEFORE/
+.superpowers/
+out.md
+_next-session*
+compile.log
+# Scratch dirs de sesiones y fases antiguas (todo su contenido es desechable)
+/_backups/
+/_compile/
+/_fase1/
+/_fase2/
+/_fase3/
+/_gamemaster_h0_build/
+/_gamemaster_h0_deploy_*/
+/_gamemaster_h0_release/
+/_poc/
+/_restore/
+/_s0/
+/_step0/
+/tools/_delegation/
+/tools/_fase4a/
+/tools/_mcp_config/
+/tools/_restore/
+/tools/spike0/
+/tools/publish/
+# Logs de review gigantes (el veredicto md/json queda versionado, el log crudo no)
+reviews/**/*.log
+reviews/**/suite-failures*.txt
+reviews/**/suite-summary.txt
+reviews/**/*-hashes*.json
+# Evidencias binarias pesadas
+tools/fase3-evidence-*.png
+
+reviews/**/cursor-home/
+reviews/**/scratch-workspaces*/
+reviews/2026-09-04-reserva/
+reviews/2026-09-07-reserva-cierre/
+reviews/2026-08-31-inbox-plan-grok-v1/
+reviews/**/reserva*/
+
+# Artefactos crudos voluminosos de runs de review (los md/json resumen si quedan)
+reviews/**/runs/**/*.raw
+reports/**/*.jsonl
+reviews/**/*.png
+reviews/**/*.raw

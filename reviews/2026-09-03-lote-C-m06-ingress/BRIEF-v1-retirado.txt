@@ -1,0 +1,104 @@
+MODO NO INTERACTIVO. EJECUTA DE PRINCIPIO A FIN. No hay nadie al otro lado para aprobar nada:
+este brief ES la aprobacion. No preguntes y no pares a confirmar. Si algo es ambiguo, elige la
+opcion conservadora, hazla, y anota la decision y su motivo en el informe. Terminar sin
+REVIEW-CODEX.md escrito en disco cuenta como no haber hecho el encargo.
+
+REVISION CRUZADA — lote C, schema UI del ingress (modulo M06-UI-INGRESS)
+
+Eres el revisor de OTRA familia. La implementacion la hizo Grok 4.6; tu no la escribiste y no
+tienes que defenderla. Sesion nueva: no heredas nada.
+
+## 1. Que se cambio, y por que
+
+`tools/dayz_mcp/loopback.py` validaba los cuatro verbos UI contra un schema anterior al lote:
+`ui_click` solo admitia `path` y `button`, y ningun verbo admitia `root`. La comprobacion
+`keys - required - optional` (`:734`) convertia en `bad_args` cualquier campo no declarado.
+
+Mientras tanto el lado Enforce YA consume esos campos desde el commit `117730b`
+(`addon/scripts/5_Mission/MCPMessages.c:63` `string mode`, `:70` `string root`, `:71` `bool bubble`).
+Habia por tanto capacidad entregada e inalcanzable: el ingress era el eslabon que cortaba.
+
+El contrato aprobado, literal (`plans/inbox-20260830/00-execution-dag.md`, seccion UI):
+- verbos publicos exactamente `ui_tree`, `ui_set_text`, `ui_click`, `ui_focus`;
+- `root` OPCIONAL en los cuatro;
+- `mode` (enum `direct` | `complete`) y `bubble` (booleano) SOLO en `ui_click`;
+- todo lo demas sigue siendo `bad_args`.
+
+## 2. Que tienes delante
+
+Todo dentro de este directorio (`reviews/2026-09-03-lote-C-m06-ingress/`):
+
+- `DIFF.patch` — el diff completo de los tres ficheros, contra el arbol vivo.
+- `oracle_ui_schema.py` — MI oraculo, el que vio el implementador (18 aceptar / 15 rechazar).
+- `heldout_oracle.py` — MI oraculo RETENIDO, que el implementador nunca vio (8 / 16).
+- `GROK-REPORT.md` — lo que dice el implementador. Trátalo como afirmacion, no como hecho.
+
+El arbol vivo esta en el workdir: puedes abrir cualquier fichero para verificar una cita.
+
+## 3. Lo que ya he medido yo (verificalo, no te lo creas)
+
+- Antes del cambio: oraculo visible ROJO con 10 de 18 aceptaciones incumplidas y 0 de 15
+  rechazos rotos; retenido ROJO con 8 de 8 y 0 de 16.
+- Despues: los dos VERDES. Tests propios del modulo 85 -> 87 (subTest parametrizados), en OK.
+- Calibracion por mutantes sobre el codigo entregado, BASE verde y los cuatro mutantes rojos:
+  M1 fail-open en `_matches_schema_variant`; M2 `bubble` declarado sin validador;
+  M3 `mode`/`bubble` filtrados a `ui_focus`; M4 `root` admite cadena vacia.
+- Hueco YA CONOCIDO de mi instrumento, no hace falta que me lo cuentes salvo que veas mas:
+  el mutante M4 deja el oraculo RETENIDO en verde, porque su lista de rechazo no tiene ningun
+  caso de `root` vacio. Lo caza el visible.
+
+## 4. Tu encargo
+
+Busca defectos REALES en:
+
+(a) **el cambio de produccion** — que acepte algo que el contrato no da, que rechace algo que si
+    da, que rompa un verbo no-UI, o que debilite el fail-closed;
+(b) **los tests entregados** — la pregunta util no es si pasan, sino si podrian FALLAR. Un test
+    cuyas expectativas salen de la tabla que vigila no comprueba nada;
+(c) **mis dos oraculos y mi calibracion** — atacalos con la misma dureza. En la revision de anoche
+    sobre este mismo modulo, los CUATRO hallazgos bloqueantes fueron contra mis guardianes y
+    ninguno contra codigo productivo. Es el sitio donde historicamente aparecen.
+
+## 5. Regla de parada, fijada ANTES de esta ronda
+
+- Esta ficha es clase C1 y su tope es **UNA ronda**. No hay ronda 2.
+- Un hallazgo **BLOQUEA solo si trae un repro ejecutable**: un comando concreto que, corrido hoy,
+  reproduce el defecto Y deja roja una de las puertas de producto (los dos oraculos o los dos
+  ficheros de test). Escribe el comando literal.
+- Un hallazgo sin repro ejecutable **no bloquea**: va a backlog, con su nombre y su razon. Eso no
+  es un demerito, es donde debe estar.
+- Si crees que hace falta otra ronda, no la pidas: escribe `ORCHESTRATOR_NEEDED` con el motivo.
+
+## 6. Casilla obligatoria: la premisa
+
+Antes de valorar nada, contesta: **¿que puede estar mal en la premisa de este encargo?**
+Puedes conservar los hechos y refutar la inferencia. Ejemplos del tipo de cosa que quiero saber:
+que el contrato que cito no diga lo que digo que dice; que declarar los campos en el ingress no
+baste para que la capacidad sea alcanzable de verdad; que el alcance de tres ficheros deje fuera
+algo que este cambio rompe. Si la premisa te parece sana, dilo y explica por que.
+
+## 7. Entregable
+
+Escribe `REVIEW-CODEX.md` EN ESTE MISMO DIRECTORIO. Estructura:
+
+    ## Premisa
+    ## Hallazgos BLOQUEANTES (con repro ejecutable)
+    ## Backlog (sin repro)
+    ## Lo que no pude verificar
+    ## Veredicto: CLEAN | FINDINGS | ORCHESTRATOR_NEEDED
+
+Cada hallazgo con `path:line` que hayas ABIERTO. Una cita plausible pero inventada invalida el
+hallazgo entero.
+
+## 8. Limites del entorno, que son mios darte
+
+- **No edites ningun fichero salvo `REVIEW-CODEX.md`.** El arbol vivo lo comparten otras sesiones.
+- **No corras la suite completa** (`unittest discover`): tarda ~4 min y arrastra dos rojos ajenos
+  del centinela de M03 que no son de este lote.
+- Si quieres ejecutar algo, el interprete es
+  `C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/tools/.venv-mcp/Scripts/python.exe`.
+  El codigo YA ENTREGADO no esta en el arbol vivo todavia: vive en
+  `C:/Users/guill/AppData/Local/Temp/claude/C--Users-guill-OneDrive-Documentos-DayZ-Projects/938664ff-361c-4575-aa56-c7c06c7ca2a8/scratchpad/lote-C/ws/`
+  y ahi puedes correr los oraculos y los tests. No escribas en ese directorio.
+- No hay juego corriendo, no uses MCP, no gestiones procesos. Nada de esto lo necesita.
+- Tope de reloj: unos 25 minutos.

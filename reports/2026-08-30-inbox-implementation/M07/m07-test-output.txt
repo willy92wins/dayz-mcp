@@ -1,0 +1,17 @@
+# medido por el orquestador (Claude Opus 5) el 2026-09-02T00:09:36.515904+00:00, no por la lane: Cursor rechaza shell en esta configuracion headless y la lane devolvio INCONCLUSIVE en vez de inventar cifras
+# comando: -m unittest tests.test_mcp_capture -v
+# cwd: tools
+
+test_capture_dual_reports_the_selected_frames_identity_and_hashes (tests.test_mcp_capture.MCPCaptureTest.test_capture_dual_reports_the_selected_frames_identity_and_hashes) ... ok
+test_capture_window_not_found_returns_is_error (tests.test_mcp_capture.MCPCaptureTest.test_capture_window_not_found_returns_is_error) ... ok
+test_downscale_to_budget_builds_image_content (tests.test_mcp_capture.MCPCaptureTest.test_downscale_to_budget_builds_image_content) ... ok
+test_grab_self_test_covers_client_area_liveness_contract (tests.test_mcp_capture.MCPCaptureTest.test_grab_self_test_covers_client_area_liveness_contract) ... ok
+test_png_format_is_still_selectable (tests.test_mcp_capture.MCPCaptureTest.test_png_format_is_still_selectable) ... ok
+test_stable_frame_accepts_nonblack_client_area (tests.test_mcp_capture.MCPCaptureTest.test_stable_frame_accepts_nonblack_client_area) ... ok
+test_stable_frame_rejects_titlebar_only_client_area (tests.test_mcp_capture.MCPCaptureTest.test_stable_frame_rejects_titlebar_only_client_area) ... ok
+test_stable_frame_rejects_unverified_client_stats (tests.test_mcp_capture.MCPCaptureTest.test_stable_frame_rejects_unverified_client_stats) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 1.255s
+
+OK

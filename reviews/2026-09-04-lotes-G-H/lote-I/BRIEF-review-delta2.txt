@@ -1,0 +1,59 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+SEGUNDA REVISIÓN DELTA DEL LOTE I (ronda 3). Tu delta sobre la ronda 2 dio 2 ALTA + 1 MEDIA:
+F-05 el helper leía `coordinator._active` en crudo (un lease caducado era dueño RUNNING); F-06 el
+detector colapsaba las ramas de un `if` (split-branch sobrevivía); F-07 el helper de adopt del e2e
+no observaba `dispatchable`. Las tres reproducidas en el oráculo (T5 reloj > TTL; T6 mutante
+split-branch; T7 mutante `dispatchable: False` sobre el e2e, con control positivo) y cerradas en
+una ronda más. Dictamen sobre el DELTA (`../ws-frozen-r2/tools/tests/` → `../ws/tools/tests/`).
+
+Producto: `../ws/tools/tests/fence_helpers.py` (SHA-256 b4a271e419e0773eb61969da96c5ad52c1a4c889ddc34c6173dcb9c944f4cf9f),
+`../ws/tools/tests/test_instance_fence.py` (SHA-256 c3389c760b078128a99ec5c72ad3f8e6f70fdfdb463d301706305634ab9aa65f), `../ws/tools/tests/test_daemon.py`
+(SHA-256 eeb14a7815378f1172599b15ba4e6a9f6ec3520c58eca0c1791aa241892843d6), `../ws/tools/tests/test_client_mode.py` (SHA-256 e11c5bbcb82ca6262b10167cd61f0976c551b35b03f04043150e59a3945464f5),
+`../ws/tools/tests/test_session_e2e.py` (SHA-256 eb721efb058402a49265f194a4d5299e63558a9386671927d47b0c9a6e523ce7, sin trackear, no se commitea). El
+código sigue congelado: `bash ../ws/gate/product_frozen.sh`.
+
+===============================================================================
+§0. QUÉ SE REVISA
+===============================================================================
+
+  P-I6. El titular activo lo dice el coordinador por una operación PÚBLICA que expira bajo su lock
+        (`status(client)` u otra que llame a `_expire_due()`); nunca `_active`. Lease vencido →
+        sin dueño (RUNNING_IDLE sin owner o sin registrar).
+  P-I7. El detector propaga CONJUNTOS de salidas (`fall`/`retire`/`bad`); un `if` es la unión de
+        sus ramas; una rama `retire` no borra una rama `fall`; el split-branch es el tercer control
+        permanente del propio test.
+  P-I8. `SessionE2ETest.adopt_run` afirma `dispatchable is True` tras el `ok`.
+  P-I9. `owner=` explícito: contrastado con el titular activo si lo hay; si no lo hay, el docstring
+        prohíbe liberar/adoptar después en ese fixture.
+  Y todo lo anterior (C1-C5, R1-R6, P-I1..P-I5).
+
+===============================================================================
+§1. LO QUE QUIERO DE TI
+===============================================================================
+
+  - P-I6: ¿la operación usada expira de verdad bajo el lock? ¿Qué pasa con un lease en estado
+    `releasing` o con un grant en vuelo (`_grant_inflight`)? ¿El `session` truncado del payload
+    público se contrasta bien con la identidad completa?
+  - P-I7: ataca el detector con un mutante NUEVO, distinto de bypass, orden y split-branch (p. ej.
+    `try/except` con retirada sólo en el `except`; bucle `for` con `break` antes de retirar;
+    retirada en un `with` y persist tras él; `EXITED` asignado dos veces con retirada sólo entre
+    ambas). Copia temporal, nunca `../ws`.
+  - P-I8/P-I9: ¿el `owner=` explícito puede seguir escondiendo C2 en algún caller?
+  - Regresiones: aserciones cambiadas sin C-item; `skip`/`expectedFailure`; tests borrados o
+    renombrados; `allowed_red.txt` tocado; lectura de atributos privados del coordinador.
+
+Reglas duras: **enseña, no cuentes** (diff literal con `path:line`); **escribe el fallo
+concreto**; **la tolerancia no es un defecto**; cero hallazgos es una respuesta legítima y, en una
+segunda delta sobre un diff de tests, plausible. Ejecuta los tres gates y pega su última línea; si
+tu sandbox vuelve a dar los ERROR ambientales de path authority / launcher nativo /
+`psutil.AccessDenied` en la suite completa, dilo y no lo atribuyas al diff.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrar estos tests?
+    ## HALLAZGOS      — por severidad: título, path:line, diff pegado, fallo concreto.
+    ## ASERCIONES CAMBIADAS — tabla: test, antes, después, C-item (o «ninguno»).
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.

@@ -1,0 +1,29 @@
+{
+  "ticket": "fb-20260829-135727-782b",
+  "milestone": "M09-KNOWLEDGE",
+  "generated_utc": "2026-09-01T06:47:37+00:00",
+  "environment": {
+    "host": "WSL2 (no WSLInterop); project venv tools/.venv-mcp is Windows-only and unreachable from this session",
+    "interpreter": "/tmp/m09-venv311 (disposable Linux venv, Python 3.11.16; not the IPython kernel, not the repo)",
+    "packages": "mcp 1.27.2 (matches tools/.venv-mcp mcp-1.27.2.dist-info), pydantic 2.13.4, pillow",
+    "msvcrt_shim": "/tmp/m09-shim2/msvcrt.py maps Windows LK_NBLCK/LK_UNLCK byte-range locking to POSIX fcntl record locks (per-process, non-blocking, OSError on contention); fake _winapi keeps stdlib subprocess importable; ctypes.WinDLL stubbed import-only",
+    "multiprocessing": "barrier test uses spawn on Windows, fork on POSIX"
+  },
+  "commands": [
+    "/tmp/m09-venv311/bin/python /tmp/m09-run-tests.py tests.test_knowledge_extract tests.test_knowledge_pack_install tests.test_knowledge_tools",
+    "repeat x3 of test_prepare_operations_are_exclusive_and_atomic_between_windows_processes",
+    "py_compile over dayz_mcp/knowledge.py dayz_mcp/knowledge_pack.py and the three test files"
+  ],
+  "results": {
+    "tests.test_knowledge_extract": "4 tests OK (3 original + validator tie-in)",
+    "tests.test_knowledge_pack_install": "13 tests OK (includes two-process barrier, both arms)",
+    "tests.test_knowledge_tools": "19 tests OK",
+    "combined_final_run": "36 tests OK",
+    "concurrency_flake_check": "3x OK",
+    "py_compile": "OK"
+  },
+  "caveats": [
+    "msvcrt.locking real byte-range path must be re-confirmed by the Windows-native suite (tools/.venv-mcp) at REVIEW-GROK; shim semantics match the per-process LK_NBLCK/LK_UNLCK contract.",
+    "tools/.venv-mcp was not modified; no dependency was installed into the repo or the IPython kernel."
+  ]
+}

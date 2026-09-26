@@ -1,0 +1,142 @@
+{
+  "ficha": "12-fb-20260829-030056-d73b",
+  "bug": "BUG-086",
+  "module": "M22-SERVER-INTEGRATION",
+  "disposicion": "EVIDENCIA",
+  "measured_at_utc": "2026-09-03T00:2Z",
+  "verdict": "PASS",
+  "verdict_scope": "Cierra la ficha 12 (EVIDENCIA de BUG-086). NO cierra M22 como modulo: ver m22_module_blocked.",
+  "why_not_inherited": "El PASS no se hereda de la ficha 251d. Los tres casos miden el ORDEN accion -> respuesta durable -> marker, que ningun test previo probaba: todos escriben la needle antes de que wait_for exista, asi que una implementacion que tomase el marker en EOF -- el defecto original -- los pasaria igual.",
+  "owns_respected": {
+    "written": [
+      "tools/tests/test_wait_for.py"
+    ],
+    "productive_code_touched": [],
+    "note": "OWNS de la ficha es exactamente ese fichero mas la evidencia; nada mas se toco."
+  },
+  "cases": [
+    {
+      "name": "test_response_durable_before_the_marker_is_still_seen",
+      "point": 1,
+      "claim": "La accion hace flush+fsync+close antes de retornar; el marker nace despues. Default lookback 200 -> satisfied=true. Los offsets acreditan el orden, no el reloj."
+    },
+    {
+      "name": "test_lookback_zero_reads_the_file_and_does_not_match",
+      "point": 2,
+      "claim": "Control lookback_lines=0 con timeout 1.1 > poll efectivo 0.5. Exige probes>=1 y scanned.lines_total>=1 con la entrada readable, porque desde fuera 'lei y no caso' y 'nunca abri el fichero' son el mismo veredicto."
+    },
+    {
+      "name": "test_window_edge_is_inclusive_at_two_hundred",
+      "point": 3,
+      "claim": "EDGE-200 (guard+needle+199 fillers) satisface; OUTSIDE-201 (guard+needle+200) vence; ambos escanean exactamente 200 lineas. Veredictos de una tabla literal, no derivados de los helpers de offsets/markers que el caso ejercita."
+    }
+  ],
+  "mutants": {
+    "harness": "Copia desechable de dayz_mcp/ + tests/test_wait_for.py; tests byte-identicos en las cuatro corridas; PYTHONDONTWRITEBYTECODE=1.",
+    "table": [
+      {
+        "mutant": "BASE (sin mutar)",
+        "expected": "verde",
+        "observed": "verde",
+        "reds": []
+      },
+      {
+        "mutant": "borrar solo la rama lookback_lines<=0 (server.py:1866-1867)",
+        "expected": "verde",
+        "observed": "verde",
+        "reds": [],
+        "note": "Mutante EQUIVALENTE: _offset_before_last_lines_in_window tambien devuelve EOF para <=0 (:1809-1810), asi que la conducta no cambia. La ficha lo rechaza explicitamente como acreditacion, y aqui se ejecuta para demostrar que lo es."
+      },
+      {
+        "mutant": "borrar la rama Y tratar 0 como el default positivo 200",
+        "expected": "rojo",
+        "observed": "rojo",
+        "reds": [
+          "test_lookback_zero_reads_the_file_and_does_not_match",
+          "test_log_matches_ignores_preexisting_lines",
+          "test_log_matches_lookback_zero_misses_preexisting_line"
+        ]
+      },
+      {
+        "mutant": "_marker_rewound(path, lookback_lines + 1) (server.py:1871)",
+        "expected": "rojo",
+        "observed": "rojo",
+        "reds": [
+          "test_window_edge_is_inclusive_at_two_hundred"
+        ],
+        "note": "Lo caza SOLO el caso nuevo de cardinalidad; ningun test anterior lo ve. Ahi esta el valor discriminante de esta ficha."
+      }
+    ],
+    "setup_failure_caught": "La primera corrida de esta tabla salio roja incluso en BASE, por un entorno recortado en el runner y no por los mutantes. Lo caza el control BASE, que existe para eso; un rojo sin causa comprobada no se distingue de un instrumento que no toco al sujeto."
+  },
+  "suite": {
+    "command": "cd tools && ./.venv-mcp/Scripts/python.exe -m unittest discover -s tests -t .",
+    "interpreter": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe",
+    "interpreter_required_by": "tools/dayz_mcp/daemon.py:186-198",
+    "tree": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "result": [
+      "----------------------------------------------------------------------",
+      "Ran 2271 tests in 254.729s",
+      "FAILED (failures=2, skipped=6)"
+    ],
+    "baseline_before": "Ran 2268 tests, FAILED (failures=2, skipped=6)",
+    "delta": "2268 -> 2271: exactamente el alta de estos tres casos.",
+    "inherited_reds": [
+      "tests.test_task9_spawn_phase_markers.Task9SpawnPhaseMarkerTests.test_full_source_hash_is_frozen",
+      "tests.test_task9_spawn_phase_markers.Task9SpawnPhaseMarkerTests.test_removing_only_marker_lines_restores_frozen_source_hash"
+    ],
+    "inherited_reds_ticket": "fb-20260902-194845-bd90 (centinela de fichero entero de M03 sobre MCPBridge.c)",
+    "stdout_sha256": "7E287B4225FCFB3F08B77827E1F9AEC836253243C9FF81F6FC854832DCFFC50D"
+  },
+  "pyz_gate": {
+    "applicable": false,
+    "reason": "Cambio solo de tests. tools/tests/ no entra en el bundle del launcher (PACKAGED_MODULES son modulos de dayz_mcp), asi que el app.pyz desplegado no cambia y ejecutarlo no acreditaria nada nuevo."
+  },
+  "m22_module_blocked": {
+    "state": "M22 NO se cierra con esta ficha y no se promete alcance.",
+    "missing_inputs_measured_2026_09_03": [
+      {
+        "owner": "M19-TOOL-READINESS",
+        "contract": "LaunchReadinessProjection",
+        "measured": "ausente del arbol (grep -rl en tools/ -> 0 ficheros)",
+        "needed_by": "ficha 05/8f8c punto 4: M22 solo TRANSPORTA la terna, no la calcula."
+      },
+      {
+        "owner": "M06-UI-INGRESS",
+        "contract": "ingesta de caps en record_poll/_handle_poll",
+        "measured": "loopback.py -> 0 ocurrencias de caps",
+        "needed_by": "ficha 05/8f8c puntos 9-11: sin ingesta no hay entrada para la comparacion de capabilities ni para la fixture bridge_capabilities_v1.json.",
+        "note": "El lado Enforce SI anuncia: MCPBridge.c y MCPClientBridge.c con 2 hits cada uno (lote A, commits 1118329 y 117730b)."
+      }
+    ],
+    "forbidden": "M22 es dueño unico de tools/dayz_mcp/server.py y nada mas; crear esas entradas seria escribir fuera de su write-set."
+  },
+  "artifacts": {
+    "test_file": {
+      "path": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_wait_for.py",
+      "exists": true,
+      "size": 17743,
+      "sha256": "FC17673A63AAE21C0B9DC4AEC033FD16E2FD7DD0EF6E96A117A54170E57DD6E5"
+    },
+    "server_py": {
+      "path": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py",
+      "exists": true,
+      "size": 179733,
+      "sha256": "67FC6260C77990ECD5E83D11A03959B21D374D1988F843430D2A41A3B4CB3558"
+    },
+    "log_tail_py": {
+      "path": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\log_tail.py",
+      "exists": true,
+      "size": 7734,
+      "sha256": "19B675ABA11DCB663B7B91DC67F7319845151CB5388362AC31BE1A0B71CA5F30"
+    }
+  },
+  "provenance": {
+    "branch": "work/inbox-20260830-modules",
+    "commit": "48298d1384de8253c72d8e0bad5b215d0ec525dc",
+    "commit_subject": "M22/BUG-086: evidencia propia de wait_for, calibrada por mutantes",
+    "baseline": "cf7f08b",
+    "tracked_changes_after_commit": "(ninguno)"
+  },
+  "remaining_gate": "Falta la revision de otra familia con repro-o-backlog (tope 2 rondas) y el pipeline_resolve citando commit + suite + veredicto. El criterio de cierre es el adoptado tras el ABANDON."
+}

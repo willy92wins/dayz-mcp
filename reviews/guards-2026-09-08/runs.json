@@ -1,0 +1,651 @@
+[
+  {
+    "phase": "red",
+    "module": "tests.test_guards_bridge",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\n$env:GUARDS_SOURCE_DIR = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\guards-2026-09-08'\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_guards_bridge -v",
+    "summary": [
+      "Ran 8 tests in 0.046s",
+      "FAILED (failures=6)"
+    ],
+    "exit_code": 1
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_guards_bridge",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_guards_bridge -v",
+    "summary": [
+      "Ran 8 tests in 0.064s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests._addon_paths",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests._addon_paths -v",
+    "summary": [
+      "Ran 0 tests in 0.000s"
+    ],
+    "exit_code": 5
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_action_use",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_action_use -v",
+    "summary": [
+      "Ran 3 tests in 0.098s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_addon_tree_has_no_write_artifacts",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_addon_tree_has_no_write_artifacts -v",
+    "summary": [
+      "Ran 5 tests in 0.003s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_batch6",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_batch6 -v",
+    "summary": [
+      "Ran 13 tests in 0.148s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_bridge_client_capabilities",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_bridge_client_capabilities -v",
+    "summary": [
+      "Ran 8 tests in 0.003s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_bridge_server_capabilities",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_bridge_server_capabilities -v",
+    "summary": [
+      "Ran 9 tests in 0.011s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_d09_d10_spawn_timeout_object_id",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_d09_d10_spawn_timeout_object_id -v",
+    "summary": [
+      "Ran 2 tests in 0.017s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_effective_schema_catalog",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_effective_schema_catalog -v",
+    "summary": [
+      "Ran 5 tests in 0.004s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_entities_has_cargo",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_entities_has_cargo -v",
+    "summary": [
+      "Ran 5 tests in 0.006s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_entities_query_cargo",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_entities_query_cargo -v",
+    "summary": [
+      "Ran 12 tests in 0.362s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_instance_fence",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_instance_fence -v",
+    "summary": [
+      "Ran 64 tests in 2.054s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_inventory_give",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_inventory_give -v",
+    "summary": [
+      "Ran 5 tests in 0.088s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_key_press",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_key_press -v",
+    "summary": [
+      "Ran 6 tests in 0.174s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_loopback",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_loopback -v",
+    "summary": [
+      "Ran 74 tests in 0.934s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_mcp_tools",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_mcp_tools -v",
+    "summary": [
+      "Ran 51 tests in 8.743s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_object_anim",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_object_anim -v",
+    "summary": [
+      "Ran 4 tests in 0.091s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_object_inspect",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_object_inspect -v",
+    "summary": [
+      "Ran 4 tests in 0.081s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_player_respawn",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_player_respawn -v",
+    "summary": [
+      "Ran 4 tests in 0.084s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_player_teleport",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_player_teleport -v",
+    "summary": [
+      "Ran 9 tests in 0.421s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_poll_key_reload_contract",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_poll_key_reload_contract -v",
+    "summary": [
+      "Ran 2 tests in 0.001s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_poll_watchdog_contract",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_poll_watchdog_contract -v",
+    "summary": [
+      "Ran 8 tests in 0.002s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_restore_gameplay_contract",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_restore_gameplay_contract -v",
+    "summary": [
+      "Ran 12 tests in 0.584s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_surface_query",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_surface_query -v",
+    "summary": [
+      "Ran 4 tests in 0.080s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_task9_spawn_phase_markers",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_task9_spawn_phase_markers -v",
+    "summary": [
+      "Ran 7 tests in 0.001s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_ui_click_scriptview",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_ui_click_scriptview -v",
+    "summary": [
+      "Ran 6 tests in 0.002s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_ui_enforce_contract",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_ui_enforce_contract -v",
+    "summary": [
+      "Ran 15 tests in 0.009s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_ui_error_diagnostics",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_ui_error_diagnostics -v",
+    "summary": [
+      "Ran 10 tests in 0.610s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_ui_reload_layout",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_ui_reload_layout -v",
+    "summary": [
+      "Ran 10 tests in 0.078s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_vehicle_prepare_fixture",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_vehicle_prepare_fixture -v",
+    "summary": [
+      "Ran 4 tests in 0.087s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_vehicle_telemetry_contract",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_vehicle_telemetry_contract -v",
+    "summary": [
+      "Ran 10 tests in 0.031s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_vehicle_trace_contract",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_vehicle_trace_contract -v",
+    "summary": [
+      "Ran 7 tests in 0.084s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_world_spawn_ground_contract",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_world_spawn_ground_contract -v",
+    "summary": [
+      "Ran 2 tests in 0.001s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_action_use",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_action_use -v",
+    "summary": [
+      "Ran 3 tests in 0.108s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_addon_tree_has_no_write_artifacts",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_addon_tree_has_no_write_artifacts -v",
+    "summary": [
+      "Ran 5 tests in 0.002s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_batch6",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_batch6 -v",
+    "summary": [
+      "Ran 13 tests in 0.213s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_bridge_client_capabilities",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_bridge_client_capabilities -v",
+    "summary": [
+      "Ran 8 tests in 0.003s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_bridge_server_capabilities",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_bridge_server_capabilities -v",
+    "summary": [
+      "Ran 9 tests in 0.024s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_d09_d10_spawn_timeout_object_id",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_d09_d10_spawn_timeout_object_id -v",
+    "summary": [
+      "Ran 2 tests in 0.025s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_effective_schema_catalog",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_effective_schema_catalog -v",
+    "summary": [
+      "Ran 5 tests in 0.002s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_entities_has_cargo",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_entities_has_cargo -v",
+    "summary": [
+      "Ran 5 tests in 0.006s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_entities_query_cargo",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_entities_query_cargo -v",
+    "summary": [
+      "Ran 12 tests in 0.408s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_instance_fence",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_instance_fence -v",
+    "summary": [
+      "Ran 64 tests in 2.098s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_inventory_give",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_inventory_give -v",
+    "summary": [
+      "Ran 5 tests in 0.106s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_key_press",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_key_press -v",
+    "summary": [
+      "Ran 6 tests in 0.200s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_loopback",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_loopback -v",
+    "summary": [
+      "Ran 74 tests in 0.943s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_mcp_tools",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_mcp_tools -v",
+    "summary": [
+      "Ran 51 tests in 22.735s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_object_anim",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_object_anim -v",
+    "summary": [
+      "Ran 4 tests in 0.141s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_object_inspect",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_object_inspect -v",
+    "summary": [
+      "Ran 4 tests in 0.141s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_player_respawn",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_player_respawn -v",
+    "summary": [
+      "Ran 4 tests in 0.091s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_player_teleport",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_player_teleport -v",
+    "summary": [
+      "Ran 9 tests in 0.474s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_poll_key_reload_contract",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_poll_key_reload_contract -v",
+    "summary": [
+      "Ran 2 tests in 0.001s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_poll_watchdog_contract",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_poll_watchdog_contract -v",
+    "summary": [
+      "Ran 8 tests in 0.003s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_restore_gameplay_contract",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_restore_gameplay_contract -v",
+    "summary": [
+      "Ran 12 tests in 0.632s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_surface_query",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_surface_query -v",
+    "summary": [
+      "Ran 4 tests in 0.094s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_task9_spawn_phase_markers",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_task9_spawn_phase_markers -v",
+    "summary": [
+      "Ran 7 tests in 0.001s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_ui_click_scriptview",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_ui_click_scriptview -v",
+    "summary": [
+      "Ran 6 tests in 0.002s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_ui_enforce_contract",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_ui_enforce_contract -v",
+    "summary": [
+      "Ran 15 tests in 0.008s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_ui_error_diagnostics",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_ui_error_diagnostics -v",
+    "summary": [
+      "Ran 10 tests in 0.640s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_ui_reload_layout",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_ui_reload_layout -v",
+    "summary": [
+      "Ran 10 tests in 0.094s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_vehicle_prepare_fixture",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_vehicle_prepare_fixture -v",
+    "summary": [
+      "Ran 4 tests in 0.096s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_vehicle_telemetry_contract",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_vehicle_telemetry_contract -v",
+    "summary": [
+      "Ran 10 tests in 0.027s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_vehicle_trace_contract",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_vehicle_trace_contract -v",
+    "summary": [
+      "Ran 7 tests in 0.112s",
+      "OK"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "regression",
+    "module": "tests.test_world_spawn_ground_contract",
+    "command": "Set-Location -LiteralPath 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools'\n$env:PYTHONPATH = 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'\n$env:PYTHONDONTWRITEBYTECODE = '1'\n$env:PYTHONIOENCODING = 'utf-8'\nRemove-Item Env:GUARDS_SOURCE_DIR -ErrorAction SilentlyContinue\n& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -m unittest tests.test_world_spawn_ground_contract -v",
+    "summary": [
+      "Ran 2 tests in 0.001s",
+      "OK"
+    ],
+    "exit_code": 0
+  }
+]

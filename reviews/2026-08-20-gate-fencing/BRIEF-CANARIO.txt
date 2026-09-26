@@ -1,0 +1,125 @@
+TAREA: escribir la SONDA SINTETICA que sustituye al canario del fencing (gate D-55.9).
+Codigo + tests, todo OFFLINE. Tu NO la ejecutas contra el sistema vivo: eso lo hago yo.
+
+Workspace (copia, ya al dia con el arbol real):
+  C:\Users\guill\AppData\Local\Temp\mcp-laneCOORD-20260819\DayZ Projects\DayZ_MCP_dev\tools
+
+=====================================================================
+POR QUE EXISTE ESTO: el canario viejo es INEJECUTABLE
+=====================================================================
+
+`reviews\2026-08-19-lane-fence\canario\canary_fence.py` lanzaba un SEGUNDO DayZ con una
+copia del `dayz_mcp.json` del cliente para que presentara el MISMO `instance`. No se puede:
+los dos clientes comparten Steam ID, no pueden estar conectados a la vez, y al conectar el
+segundo **se desconecta el primero**. Nunca hay dos PIDs vivos presentando el mismo
+instance, que es literalmente la condicion de AMBIGUOUS. NO intentes arreglar ese guion.
+
+=====================================================================
+EL MECANISMO, YA VERIFICADO POR MI (no lo re-investigues; confirmalo y usalo)
+=====================================================================
+
+El fence se decide en el DAEMON, no en el juego, y no comprueba que quien sondea sea DayZ:
+
+1. `ServerState.resolve_poll_pid` (dayz_mcp\loopback.py) resuelve el PID detras del socket
+   con `_lookup_connected_pid(sock)` — tabla TCP. **Cero validacion de que el proceso sea
+   DayZDiag.**
+2. En la transicion de binding (dayz_mcp\loopback.py, busca `BINDING_AMBIGUOUS`):
+       identity_mismatch = source_pid != binding.pid
+       ...
+       binding.state = BINDING_AMBIGUOUS
+   Es decir: **basta UN poll con el mismo `inst=` desde OTRO PID** para volcar el binding a
+   AMBIGUOUS. No hacen falta dos clientes DayZ.
+
+Localiza ambos por simbolo (grep) y verifica la firma antes de apoyarte en ellos (G2).
+
+=====================================================================
+QUE TIENES QUE ESCRIBIR
+=====================================================================
+
+A) `tools\checks\fence_canary_probe.py` — la sonda.
+   - Lee el `instance` del `dayz_mcp.json` del perfil de cliente que se le indique.
+   - Emite UN `/poll` al daemon con ese `inst=`, el `peer` y el `ver=` correctos, desde el
+     proceso de la sonda (PID distinto del bound: eso es todo el tratamiento).
+   - Lee `/status` ANTES y DESPUES y devuelve un veredicto estructurado.
+   - **Auth y forma del payload, MEDIDOS por mi hoy — no los adivines:**
+       * la clave viaja como QUERY PARAM: `http://127.0.0.1:<port>/status?key=<key>`
+       * `/status` devuelve claves PLANAS: `client_peer`, `server_peer`, `fence`,
+         `coordination`, `lifecycle`, `daemon_modules`. **NO existe `peers`.**
+         El canario viejo leia `status["peers"]["client"]` y por eso su
+         `client_binding_state` era None SIEMPRE y no podia ver AMBIGUOUS jamas.
+       * puerto por defecto 8765; clave por defecto de `tools\.dayz_mcp.key`.
+   - Criterio del gate, que la sonda debe evaluar y reportar:
+       * `client_peer.binding_state` pasa de `BOUND` a `AMBIGUOUS`
+       * `fence.mutation_rejects_by_code.instance_ambiguous` incrementa cuando se
+         intenta una mutacion estando AMBIGUOUS
+       * `fence.unaccredited_mutation_enqueues` NO incrementa
+   - TRES veredictos, no dos: `PASS`, `FAIL` y **`UNMEASURABLE`**. Si el binding de partida
+     no es `BOUND`, o no hay peer, o el daemon no responde, el veredicto es UNMEASURABLE y
+     NUNCA PASS. El gate anterior murio precisamente por no distinguir "no vi el fallo" de
+     "no habia nada que ver".
+
+B) `tools\tests\test_fence_canary_probe.py` — los tests, contra un `ServerState` EN PROCESO.
+   NO contra el daemon vivo: tus tests no deben abrir un socket al 8765 ni tocar estado real.
+   Mira `tools\tests\test_instance_fence.py` y `tools\tests\fence_helpers.py`: ya hay
+   utilidades para montar bindings (`install_bound_peer`, `record_poll(..., instance=,
+   source_pid=)`) y ahi tienes el patron exacto.
+   Cubre al menos:
+       * un poll con el mismo instance desde OTRO source_pid deja el binding AMBIGUOUS
+       * estando AMBIGUOUS, una mutacion se rechaza con `instance_ambiguous`
+       * el parser del veredicto lee `client_peer` y NO `peers` (test de regresion del
+         defecto que mato al canario viejo: debe ponerse rojo si alguien lo cambia)
+       * binding de partida distinto de BOUND -> UNMEASURABLE, nunca PASS
+
+C) **CONTROL NEGATIVO — esto es lo que hace que el gate valga algo.**
+   Un test que demuestre que la sonda se pondria ROJA si el fence estuviera desactivado.
+   O sea: monta el escenario con el discriminador roto (por ejemplo forzando que
+   `resolve_poll_pid` devuelva siempre el mismo PID, que es como se comportaba antes de
+   arreglar BUG-101) y comprueba que el veredicto NO es PASS.
+   Un gate que no sabe fallar certifica una invariante que nadie comprueba.
+
+=====================================================================
+CRITERIO DE HECHO
+=====================================================================
+
+- MIDE TU LINEA BASE PRIMERO y guardala en `basecan.log`. Debe dar **1734 tests,
+  failures=2**. Esos 2 (`test_task9_spawn_phase_markers`, dos mitades) son CENTINELAS
+  ROJOS A PROPOSITO: NO los toques, NO recongeles ese hash. Si tu cifra no es esa, dilo y
+  PARA — la ultima vez ese gate ahorro horas de diagnostico falso.
+- ROJO PRIMERO con log (`redcan.log`), verde despues (`greencan.log`).
+- MUTACION (`mutcan.log`). Ataca el CABLEADO, no solo el cuerpo: si un doble de test puede
+  estar suplantando al `ServerState` o al lector de `/status`, comprueba que el test se ata
+  al codigo de PRODUCCION. Una mutacion que sobrevive es una rama sin test: o le escribes el
+  test o la borras y lo justificas.
+- Suite completa (`suitecan.log`): 1734 + tus tests, failures=2.
+- La sonda tiene que poder ejecutarse a mano con argumentos claros (`--port`, `--key`,
+  `--client-profiles`, `--json-out`), porque **la voy a disparar yo** contra el daemon vivo.
+  Documenta la invocacion exacta en su docstring.
+
+=====================================================================
+FRONTERAS
+=====================================================================
+
+- Escribe SOLO dentro de C:\Users\guill\AppData\Local\Temp\mcp-laneCOORD-20260819\
+- NO toques nada bajo C:\Users\guill\OneDrive\ ni P:\ — tengo hashes.
+- **NO ejecutes la sonda contra el daemon vivo (8765).** Volcaria un binding real a
+  AMBIGUOUS y me romperia una sesion. Tus tests van contra ServerState en proceso.
+- NO lances ni mates procesos DayZ. NO llames a herramientas MCP. NO subagentes.
+- NO rm, NO Remove-Item, NO git push.
+- OJO: esto ENTRA en el repo publico (`tools\checks\` y `tools\tests\` estan dentro de la
+  frontera de publicacion). Nada de rutas privadas, nombres de mods ajenos ni claves en el
+  codigo ni en los comentarios.
+
+## RECEIPT
+```json
+{
+  "status": "ok|failed",
+  "probe": "ruta",
+  "tests": ["..."],
+  "negative_control": "que test demuestra que la sonda sabe fallar, y como lo monta",
+  "mutations": [{"name": "...", "killed_by": "...", "survived": false}],
+  "invocation": "la linea exacta con la que la disparo yo contra el daemon vivo",
+  "baseline": {"ran": 0, "failures": 0},
+  "suite_final": {"ran": 0, "failures": 0},
+  "not_verified": ["..."]
+}
+```

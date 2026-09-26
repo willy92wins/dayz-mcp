@@ -1,0 +1,4 @@
+Ran 2642 tests in 231.540s
+FAILED (failures=2, skipped=6)
+FAIL: test_full_source_hash_is_frozen (tests.test_task9_spawn_phase_markers.Task9SpawnPhaseMarkerTests.test_full_source_hash_is_frozen)
+FAIL: test_removing_only_marker_lines_restores_frozen_source_hash (tests.test_task9_spawn_phase_markers.Task9SpawnPhaseMarkerTests.test_removing_only_marker_lines_restores_frozen_source_hash)

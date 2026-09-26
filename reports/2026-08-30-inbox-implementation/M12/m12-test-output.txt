@@ -1,0 +1,17 @@
+# medido por el orquestador (Claude Opus 5) el 2026-09-02T00:09:36.515904+00:00, no por la lane: Cursor rechaza shell en esta configuracion headless y la lane devolvio INCONCLUSIVE en vez de inventar cifras
+# comando: -m unittest tests.test_dayz_test_modes -v
+# cwd: tools
+
+test_canonical_records_are_immutable_and_have_external_contract (tests.test_dayz_test_modes.DayzTestModesTests.test_canonical_records_are_immutable_and_have_external_contract) ... ok
+test_default_resolution_rejects_zero_or_multiple_defaults (tests.test_dayz_test_modes.DayzTestModesTests.test_default_resolution_rejects_zero_or_multiple_defaults) ... ok
+test_lookup_is_exact_and_unknown_fails_closed (tests.test_dayz_test_modes.DayzTestModesTests.test_lookup_is_exact_and_unknown_fails_closed) ... ok
+test_module_record_view_can_be_replaced_between_calls (tests.test_dayz_test_modes.DayzTestModesTests.test_module_record_view_can_be_replaced_between_calls) ... ok
+test_step_factories_produce_immutable_typed_steps (tests.test_dayz_test_modes.DayzTestModesTests.test_step_factories_produce_immutable_typed_steps) ... ok
+test_supplied_view_replaces_order_steps_roots_and_run_id_source (tests.test_dayz_test_modes.DayzTestModesTests.test_supplied_view_replaces_order_steps_roots_and_run_id_source) ... ok
+test_supplied_view_with_duplicate_names_fails_closed_everywhere (tests.test_dayz_test_modes.DayzTestModesTests.test_supplied_view_with_duplicate_names_fails_closed_everywhere) ... ok
+test_views_are_read_from_supplied_records_each_call (tests.test_dayz_test_modes.DayzTestModesTests.test_views_are_read_from_supplied_records_each_call) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.005s
+
+OK

@@ -1,0 +1,59 @@
+{
+ "status": "ok",
+ "probe": "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\DayZ Projects\\DayZ_MCP_dev\\tools\\checks\\fence_canary_probe.py",
+ "tests": [
+  "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_fence_canary_probe.py"
+ ],
+ "negative_control": "test_negative_control_collapsed_resolve_poll_pid_is_not_pass: install_bound_peer + patch de resolve_poll_pid para que devuelva siempre el PID bound (colapso tipo BUG-101). El poll de la sonda no marca AMBIGUOUS; el veredicto no es PASS.",
+ "mutations": [
+  {
+   "name": "parser_reads_peers",
+   "killed_by": "test_reads_client_peer_not_nested_peers",
+   "survived": false
+  },
+  {
+   "name": "skip_record_poll",
+   "killed_by": "test_run_probe_calls_production_record_poll",
+   "survived": false
+  },
+  {
+   "name": "public_status_raw_snapshot",
+   "killed_by": "test_public_status_has_client_peer_not_peers",
+   "survived": false
+  },
+  {
+   "name": "evaluate_skips_starting_bound_gate",
+   "killed_by": "test_starting_not_bound_is_unmeasurable_never_pass",
+   "survived": false
+  },
+  {
+   "name": "ignore_explicit_source_pid",
+   "killed_by": "test_other_source_pid_marks_binding_ambiguous",
+   "survived": false
+  },
+  {
+   "name": "loopback_identity_mismatch_always_false",
+   "killed_by": "test_other_source_pid_marks_binding_ambiguous",
+   "survived": false
+  },
+  {
+   "name": "skip_unaccredited_check",
+   "killed_by": "test_unaccredited_increment_is_fail",
+   "survived": false
+  }
+ ],
+ "invocation": ".\\.venv-mcp\\Scripts\\python.exe checks\\fence_canary_probe.py --client-profiles <client-profiles-dir> --port 8765 --key <daemon-key> --json-out fence-canary-verdict.json",
+ "baseline": {
+  "ran": 1734,
+  "failures": 2
+ },
+ "suite_final": {
+  "ran": 1758,
+  "failures": 2
+ },
+ "not_verified": [
+  "run_http_probe contra el daemon vivo en 8765 (prohibido en este encargo; volcaría un binding real a AMBIGUOUS)",
+  "resolve_poll_pid por tabla TCP real de urllib: los tests in-process pasan source_pid a record_poll o parchean resolve_poll_pid",
+  "acquire+release de lease en un daemon con coordinación ocupada (si /enqueue devuelve lease_required y no hay lease libre, el veredicto es UNMEASURABLE, no PASS)"
+ ]
+}

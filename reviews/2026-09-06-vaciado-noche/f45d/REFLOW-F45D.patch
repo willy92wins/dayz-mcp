@@ -1,0 +1,34 @@
+--- /dev/fd/63	2026-09-06 22:05:35.000000000 +0200
++++ /c/Users/guill/AppData/Local/Temp/claude/C--Users-guill-OneDrive-Documentos-DayZ-Projects/2adef081-e055-49c6-9d06-f5c167808be8/scratchpad/wt-f45d/tools/dayz_mcp/server.py	2026-09-06 22:04:44.694172200 +0200
+@@ -205,7 +205,8 @@
+ 
+ 
+ def _carriable_hint(payload: object) -> str | None:
+-    """Accredited-daemon prose travels only beside a whitelist code, bounded; it never replaces the code."""
++    """Accredited-daemon prose travels only beside a whitelist code, bounded; it
++    never replaces the code."""
+     if not isinstance(payload, dict):
+         return None
+     hint = payload.get("hint")
+@@ -756,7 +757,9 @@
+ ) -> str:
+     """Map a remote enqueue payload to the caller-facing ToolError string.
+ 
+-    A known code with a valid hint travels as "<code>: <hint>"; a known code without a hint stays bare; an unknown code stays the bare token remote_error even when a hint is present.
++    A known code with a valid hint travels as "<code>: <hint>"; a known code
++    without a hint stays bare; an unknown code stays the bare token remote_error
++    even when a hint is present.
+     """
+     code = _remote_error_code(payload)
+     if code == "retail_quarantine":
+@@ -4883,7 +4886,9 @@
+             "game_not_ready:reason=server_poll_stale is retried until "
+             "timeout_s (not_ready_probes, last_error in the response); any "
+             "other not-ready reason aborts on the first probe. "
+-            "A probe refused with run_not_owned (the run has no owner) aborts on the first probe with the daemon's hint: adopt the run with session_acquire_wait first. "
++            "A probe refused with run_not_owned (the run has no owner) aborts on "
++            "the first probe with the daemon's hint: adopt the run with "
++            "session_acquire_wait first. "
+             "scanned reports which log files were read and how many "
+             "lines each gave, so a no-match is visible as a no-match."
+         )

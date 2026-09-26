@@ -1,0 +1,19 @@
+{
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py": {
+    "bytes": 226274,
+    "sha256": "79a902ba2778b08b348cc04f3e257dac166a23afe4962dea9af32a0bd905aef3"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\instance_fence.py": {
+    "bytes": 5912,
+    "sha256": "c089636ad350807849fffb1ae2d905d25431e117111dab523858042ea99ba2a9"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\process_lifecycle.py": {
+    "bytes": 181050,
+    "sha256": "cfa0c268eef4b44825cd3f8b2c0a749d581564f5aa326cbc6a64858a3989366e"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\loopback.py": {
+    "bytes": 155642,
+    "sha256": "9c3c270e84813013fc5396d26d0326d19aee073557e6b2e6a57acc9cf4f20936"
+  },
+  "index_sha256": "a056b737566f6431880bc88e9506a454709d303c5e6df76ffbc9ebdae717fae4"
+}

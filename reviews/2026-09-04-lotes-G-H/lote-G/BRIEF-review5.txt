@@ -1,0 +1,77 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+Cuarta revisión de este lote. Las tres anteriores dieron 5, 4 y 5 hallazgos; **reproduje todos
+y todos se arreglaron**. Ésta es la ronda 5, y es la de cierre si sale limpia.
+
+===============================================================================
+§0. QUÉ SE REVISA. Sólo esto.
+===============================================================================
+
+  P1. **La actividad no se cachea.** `activity_state` / `last_activity_age_s` se recalculan en
+      CADA lectura desde la memoria viva. Ninguna respuesta puede llevar una actividad que ya
+      no es cierta, ni siquiera la de quien perdió una carrera contra una mutación.
+  P2. **El contador de revisión sube en TODA mutación que cambie la caja**: alta del
+      provisional en `STARTING`, stop, adopt, release, reconcile, repair, reap.
+  P3. **Sin binding acreditado no se acredita frescura a nadie, y tampoco se deja envejecer**:
+      se publica `unknown`.
+  P4. **La frescura no retrocede**: una escritura tardía con epoch más viejo no sustituye a
+      una más reciente.
+
+Sigue en pie: actividad en memoria por `(daemon_generation, run_id)`; el audit registra pero
+**no manda** (corromper o borrar `events.jsonl` no cambia la respuesta); sticky que una
+escritura buena no limpia; atribución por el `run_id` del binding; la basal sella el proceso
+que este daemon lanzó; nada de actividad en un rechazo ni en un enqueue interno; fail-closed a
+`unknown`/null; y **la actividad es diagnóstico, no autoridad**.
+
+**LO QUE NO ES EL PRODUCTO**, y va a `BACKLOG`: el gate, el oráculo, el ledger, este brief;
+el sobre de `dayz_test_stop`; `runtime_state.py`; `README-mcp.md`; refactors, estilo, tipado.
+**Prohibido justificar alcance con «es donde han salido cosas antes».**
+
+===============================================================================
+§1. LO QUE YA SÉ. Ataca sus consecuencias, no lo redescubras
+===============================================================================
+
+Arreglado en esta ronda, todo con rojo-antes que verifiqué yo contra el árbol anterior:
+  - El alta del provisional en `STARTING` ya invalida (era tu familia: publicaba la caja
+    LIBRE con DayZ arrancando, y aguas abajo bloqueaba al dueño hasta `BOX_CLAIM_TTL_S`=600 s).
+  - Un `start_run` rechazado ya no deja frescura en el run heredado que restaura.
+  - `stop`, `adopt`, `release`, `reconcile` y `repair` suben la revisión: de 3 call-sites a ~20.
+  - Sin binding se publica `unknown` (decisión mía, escrita: ni acreditar por cardinalidad ni
+    dejar envejecer; lo único fail-closed).
+  - Guarda monótona en `_last_activity`.
+  - La actividad se recalcula por lectura, así que quien pierde la carrera devuelve lo vivo.
+
+===============================================================================
+§2. LO QUE QUIERO DE TI
+===============================================================================
+
+  - **La coherencia de la caja, ahora que la revisión sube en ~20 sitios.** ¿Queda alguna
+    mutación que cambie `occupied`, `runs` o `foreign` sin subirla? Y al revés: ¿alguna que la
+    suba dentro de `_operation_lock` en un orden que pueda invertirse con `_activity_lock`?
+  - **La atribución por binding**: ¿algún estado donde el `run_id` del binding no sea el run
+    comandado (retirado, reciclado, de otro rol, de un run muerto o de otra generación)?
+  - **El `unknown` sin binding**: ¿lo he puesto donde toca, o hay un camino legítimo que ahora
+    se queda mudo sin motivo?
+  - **La frontera de generación** y **fail-closed de verdad**: cada rama que devuelve una edad,
+    ¿puede sostenerla?
+  - **La invariante «la actividad no es autoridad»**: `occupied`, stop, reap.
+
+Y una pregunta de proceso que necesito contestada, en su propia sección:
+
+  **¿Los hallazgos que encuentres son de una familia NUEVA, o de una que ya hemos visitado
+  (coherencia de caché, identidad del destino, frontera de generación)?** Llevo tres rondas
+  de revisión y la cuenta no baja de forma limpia. Si lo que queda son instancias nuevas de
+  una familia vieja, dilo con esas palabras: significa que el problema no es el parche.
+
+Reglas duras: **enseña, no cuentes** (código literal con `path:line`); **escribe el fallo
+concreto**; **la tolerancia no es un defecto**; cero hallazgos es una respuesta legítima y
+mejor que rellenar — y en una cuarta revisión es un resultado plausible.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrarlo?
+    ## HALLAZGOS      — por severidad: título, path:line, código pegado, fallo concreto.
+    ## FAMILIAS       — la pregunta de proceso del §2.
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.

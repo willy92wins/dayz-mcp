@@ -1,0 +1,39 @@
+{
+  "ticket": "fb-20260829-135727-782b",
+  "milestone": "M09-KNOWLEDGE",
+  "generated_utc": "2026-09-01T07:51:26+00:00",
+  "environment": {
+    "host": "Windows native Willy",
+    "interpreter": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe",
+    "python": "3.14.3 (tags/v3.14.3:323c59a, Feb  3 2026, 16:04:56) [MSC v.1944 64 bit (AMD64)]",
+    "msvcrt_shim": null,
+    "msvcrt": "<module 'msvcrt' (built-in)>",
+    "multiprocessing": "spawn"
+  },
+  "commands": [
+    "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe -m unittest tests.test_knowledge_extract tests.test_knowledge_pack_install tests.test_knowledge_tools",
+    "repeat x3 of test_prepare_operations_are_exclusive_and_atomic_between_windows_processes",
+    "py_compile over knowledge.py knowledge_pack.py and the three test files"
+  ],
+  "results": {
+    "combined_final_run": {
+      "run": 36,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "ok": true
+    },
+    "tests.test_knowledge_extract": "4 tests loaded",
+    "tests.test_knowledge_pack_install": "13 tests loaded",
+    "tests.test_knowledge_tools": "19 tests loaded",
+    "concurrency_flake_check": "3x OK",
+    "py_compile": "OK"
+  },
+  "caveats": [
+    "Did not modify tools/.venv-mcp; no pip install.",
+    "Did not flip GATES.md; did not start M08.",
+    "Live dayz_mcp --client processes were left running."
+  ],
+  "elapsed_sec": 12.406,
+  "disposition": "PASS"
+}

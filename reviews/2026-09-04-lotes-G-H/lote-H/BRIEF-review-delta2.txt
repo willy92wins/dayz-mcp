@@ -1,0 +1,58 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+SEGUNDA REVISIÓN DELTA. Tu primera delta dio 1 ALTA + 2 MEDIA (`lifecycle is None` como
+permiso; la rama `not ok` del escritor sin frontera; `adopt_run` tras persistencia terminal
+fallida con binding retirado). Las tres reproducidas con checks propios (N38, N39, N40) y
+cerradas en una ronda más: P22' sin lifecycle no despacha (enqueue, exec, poll); P20' la
+frontera vale para el fallo; P19' la adopción RECHAZA y dirige al reap (decisión: no reconstruir
+a ciegas). Dictamen sobre el DELTA (`process_lifecycle.py` +26/−1, `loopback.py` +43/−3) y sus
+consecuencias.
+
+Producto: `../ws/tools/dayz_mcp/process_lifecycle.py` (SHA-256 ba8fe6eaa33c1573c9de75787ebd57cee2ab0e07f48025802b675b44ef2f4e97),
+`../ws/tools/dayz_mcp/loopback.py` (SHA-256 cc8fbbcc65bcdf8fe9df93be1ea2537ac62fe34537bcc0bf1c90131e526e55cb), `../ws/tools/dayz_mcp/dayz_test_tool.py`
+sin cambios (SHA-256 bca97e26e3a7d9cef96846bee6559eebc938dbbd90e46b3eab6b0f75019f4b5d). El
+producto que revisaste está congelado en `../ws-frozen-r5/tools/` (sólo lectura).
+
+===============================================================================
+§0. QUÉ SE REVISA
+===============================================================================
+
+  P22'. Con `state.lifecycle is None`, enqueue y `exec_enforce` dirigidos a un `run_id`
+        acreditado devuelven `run_state_unavailable` (503) y el poll retiene; la cola legacy
+        sin binding sigue como compatibilidad no mutante.
+  P20'. En `_write_command_activity`, la rama `not ok` compara `epoch` con la tumba antes de
+        añadir sticky `unknown`; un fallo posterior a la frontera sí deja sticky.
+  P19'. `adopt_run` rechaza (código que dirige al reap/recovery) cuando el binding terminal del
+        run fue retirado por una persistencia fallida; el siguiente reap converge.
+  Y todo lo anterior (G P1-P22, H H1-H5, D1-D4).
+
+**LO QUE NO ES EL PRODUCTO**: gates, oráculos, ledgers, briefs; `server.py`; `daemon.py`;
+`dayz_test_tool.py`; `runtime_state.py`; refactors, estilo, tipado.
+
+===============================================================================
+§1. LO QUE QUIERO DE TI
+===============================================================================
+
+  - P22': ¿queda alguna vía (rama normal, `exec_enforce`, poll, cola legacy CON `run_id`,
+    `store_result`) que con `lifecycle is None` despache o acredite? ¿La cola legacy sin
+    binding sigue funcionando en el modo embedded (sin lifecycle) para lo NO mutante?
+  - P20': ¿la comparación usa la tumba correcta (misma generación) y no bloquea un fallo
+    legítimo posterior? ¿Interacción con `_compensating_runs`?
+  - P19': ¿`run_bindings_retired` se limpia cuando el reap converge o al reiniciar, y no deja
+    un run adoptable-nunca? ¿La adopción legítima (release normal → adopt) sigue funcionando
+    (N20)? ¿Un `stop_run` sobre ese run pendiente de reap se comporta?
+  - Regresiones del delta sobre P1-P22 y sobre el anillo/sobre de H. Orden de locks. Validaciones
+    desaparecidas respecto a `ws-frozen-r5`.
+
+Reglas duras: **enseña, no cuentes** (código literal con `path:line`); **escribe el fallo
+concreto**; **la tolerancia no es un defecto**; cero hallazgos es una respuesta legítima y, en
+una segunda delta sobre un diff de 70 líneas, plausible. Ejecuta los tres gates y pega su última línea.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrarlo?
+    ## HALLAZGOS      — por severidad: título, path:line, código pegado, fallo concreto.
+    ## FAMILIAS       — ¿familia nueva o visitada?
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.

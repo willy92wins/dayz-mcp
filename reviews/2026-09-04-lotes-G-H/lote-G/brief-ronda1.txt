@@ -1,0 +1,140 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+===============================================================================
+§0. EL PRODUCTO
+===============================================================================
+
+Dos cosas observables, y una regla que las gobierna.
+
+  P1. La ocupación del box publica, por run, `activity_state` (`recent` / `stale` /
+      `unknown`, umbral 900 s) y `last_activity_age_s`.
+  P2. `occupancy_error_fields` los PROYECTA al error público `active_run_exists`, junto al
+      `age_s` que ya lleva. Dejarlos sólo en `box.runs` no vale: la ficha lo nombra como
+      mutante que debe quedar rojo.
+  P3. La regla: la actividad se alimenta de un evento nuevo `run_command_activity` escrito
+      en el audit jsonl en el enqueue ACEPTADO de las DOS ramas, con **memoria sticky de
+      fallo de escritor** por `(daemon_generation, run_id)` que fuerza `unknown`.
+
+LO QUE NO ES EL PRODUCTO, y no es tu trabajo aunque tengas razón:
+  - El oráculo, el gate, el ledger, los mutantes, la calibración, el workspace, este brief.
+    Si ves un defecto ahí, va a `DISPUTAS` en STATE.md. NO lo edites.
+  - **El sobre estructurado de `dayz_test_stop`**, los `retired_run_diagnostic` y la
+    desambiguación de `lifecycle_stop_outcome`. Son los bloques PASS 3 y 4 de esta misma
+    ficha y van en OTRO lote, a propósito. No los empieces.
+  - Refactorizar, renombrar o mejorar de paso nada.
+
+===============================================================================
+§1. ENTORNO — medido hoy
+===============================================================================
+
+  - Intérprete, exacto y sin alternativa:
+      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+  - **Esa venv NO tiene pytest.** La suite es `unittest`:
+      cd tools && PYTHONPATH=. "<intérprete>" -m unittest tests.test_box_occupancy
+  - Sin red, sin juego, sin PBO.
+
+===============================================================================
+§2. HECHOS VERIFICADOS — los abrí yo, y varios te ahorran horas
+===============================================================================
+
+Dónde vive cada cosa:
+  - `occupancy_error_fields` construye el payload público en
+    `tools/dayz_mcp/process_lifecycle.py:238-244` (literal inicial) y lo enriquece desde el
+    box en `:255-274`. Ahí van los dos campos nuevos, junto a `age_s`.
+  - `_box_occupancy_uncached` arma cada fila de run en `:2465-2474` con
+    `run_id, mod, label, age_s, owner_session, state`. Ahí van también.
+  - Las dos ramas de enqueue: `LoopbackServer.enqueue_command` (`loopback.py:1281`) y
+    `_enqueue_exec_enforce` (`:1567`).
+  - **El precedente exacto del hook que necesitas ya existe**: `exec_audit` se inyecta en
+    `loopback.py:819,831` y se llama en las DOS decisiones, `:1585` (denegado) y `:1612`
+    (permitido). Cópialo, no inventes otro mecanismo.
+  - `self.state.lifecycle` es alcanzable desde el loopback (`:2873`, `:2973`), y
+    `self.state.daemon_generation` también (`:2818`).
+  - El escritor del audit es `JsonlAuditWriter` (`runtime_state.py:244`), con rotación por
+    `AUDIT_MAX_BYTES` = 5 MB en `:344` y `_rotate_locked` en `:351`.
+
+TRES TRAMPAS QUE YA PAGUÉ YO en la calibración, para que no las pagues tú:
+  1. **`box_occupancy(now=...)` toma un EPOCH ABSOLUTO, no un desplazamiento.**
+     `_run_age_s` hace `now - min(stamps)` sobre `creation_time_utc` de los procesos
+     (`:171-179`), que son epochs de ~1,78e9. Pasar `899.0` da negativo y `max(0.0, ...)` lo
+     aplasta a cero: el umbral mediría una constante. Los tests entregados NUNCA usan esa
+     costura, así que no hay precedente que copiar.
+  2. **Sin snapshot del guard para el pid lanzado, `start_run` falla con
+     `identity_unavailable`** y el run queda `EXITED`: el box sale vacío y no mides nada.
+  3. `box_occupancy(now=...)` **saltea la caché** cuando se le pasa `now` (`:2425`). Con
+     `now=None` la respuesta puede venir cacheada.
+
+===============================================================================
+§3. EL CONTRATO, punto por punto
+===============================================================================
+
+(a) `activity_state` es exactamente uno de `recent`, `stale`, `unknown`. El umbral es 900 s:
+    a 899 s de la última actividad es `recent`; a 901 s es `stale`.
+(b) `last_activity_age_s` es un número, o `null` cuando el estado es `unknown`.
+(c) Un comando posterior **reinicia la edad sólo para SU run**. Un evento de otro run no
+    contamina.
+(d) FAIL-CLOSED a `unknown`/null en todos estos: timestamp futuro, fallo del escritor,
+    ausencia legacy (no hay evento), rotación del audit, o JSON inválido. Nunca se inventa
+    una edad.
+(e) **STICKY, y es el corazón del lote.** Si el escritor falló para
+    `(daemon_generation, run_id)`, ese par se queda en `unknown` **aunque después haya una
+    escritura buena**, mientras no cambie la generación. Un reinicio del daemon trae
+    generación nueva: entonces `unknown` heredado → actividad durable de la nueva generación
+    → `recent`.
+(f) El evento se escribe SÓLO en el enqueue ACEPTADO. **Un rechazo no registra actividad**,
+    en ninguna de las dos ramas.
+(g) La proyección al error público es obligatoria. Dejar los campos sólo en `box.runs` es un
+    mutante que la ficha nombra.
+
+===============================================================================
+§4. EL GATE
+===============================================================================
+
+    bash gate/run.sh      -> G1, el oráculo de producto
+    bash gate/suite.sh    -> G2, los tests de lifecycle, ocupación y loopback
+
+Ahora mismo: `PASS=4 FAIL=7 UNMET=0 de 11`. Los 7 FAIL son tu trabajo.
+
+**Los 4 PASS son la línea que no puedes romper**, y uno importa más que los otros: **un PID
+owned antiguo sigue ocupando la caja**. Si el cálculo de actividad se cuela en la DECISIÓN
+de ocupación, un run viejo deja de ocupar y otro arranque pisa una sesión viva. La actividad
+es diagnóstico, no autoridad.
+
+Terminas cuando `gate/run.sh` diga `ORACULO-VERDE` y `gate/suite.sh` diga `SUITE-ACOTADA OK`.
+
+`gate/` está sellado por hash y es de sólo lectura. Compruebo el sello al recibir.
+
+===============================================================================
+§5. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/process_lifecycle.py
+    tools/dayz_mcp/loopback.py
+    tools/dayz_mcp/daemon.py
+    tools/tests/test_box_occupancy.py
+    tools/tests/test_process_lifecycle.py
+
+PROHIBIDO: `gate/`; `addon/`; `server.py`; `dayz_test_tool.py`; debilitar o borrar cualquier
+validación existente; borrar tests; usar red; correr la suite completa.
+
+⚠ **Este lote es data-crítico**: toca el audit jsonl y el estado del lifecycle. No cambies el
+formato de un evento existente, no toques la rotación, y no hagas que un fallo de escritura
+tumbe una operación: el audit informa, no autoriza. Después del gate hay una auditoría
+independiente por ángulos antes de aceptar esto.
+
+Escribe tests para lo que entregas, y córrelos ANTES de tu cambio para comprobar que fallan.
+
+===============================================================================
+§6. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — qué entregaste, con `path:line`.
+    ## GATE             — la salida literal de los dos gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea que demuestra que fallaba antes.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si crees que un criterio del gate está mal, aquí, con el argumento.

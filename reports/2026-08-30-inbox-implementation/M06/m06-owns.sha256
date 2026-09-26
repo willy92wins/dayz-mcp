@@ -1,0 +1,4 @@
+# medido por el orquestador (Claude Opus 5) el 2026-09-02T00:09:36.515904+00:00, no por la lane: Cursor rechaza shell en esta configuracion headless y la lane devolvio INCONCLUSIVE en vez de inventar cifras
+511dd9093a7f607365678bf3d185afddf08c43d86f2d7affe83b42ca83a5e3b8  tools/dayz_mcp/loopback.py
+c08470241f2765cf516706af96846d8a26276eee27c5b3f8340e6251fa782772  tools/tests/test_loopback.py
+0b9f788e4346e7743d7c0f874d651b57648f40ef49c9c75b18f7e874d176a097  tools/tests/test_validate_command_args_table.py

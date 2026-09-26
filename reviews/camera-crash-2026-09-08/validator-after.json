@@ -1,0 +1,27 @@
+{
+  "addon_root": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\addon\\scripts\\5_Mission\\MCPClientBridge.c",
+  "status": "WARN",
+  "errors": [],
+  "warnings": [
+    {
+      "check": "ES-GETTYPE-EXACT-MATCH",
+      "file": "MCPClientBridge.c",
+      "line": 2026,
+      "message": "[WARN] MCPClientBridge.c line 2026: `.GetType()` compared with `==`/`!=`. Exact match fails on inherited or modded variants; the server may silently reject actions whose client check uses IsKindOf (pitfalls-advanced.md:257-274, SKILL.md rules 31-32). Use `obj.IsKindOf(\"TypeName\")` for full inheritance-chain checks.",
+      "severity": "WARN",
+      "rule_id": "ES-GETTYPE-EXACT-MATCH"
+    },
+    {
+      "check": "ES-GETTYPE-EXACT-MATCH",
+      "file": "MCPClientBridge.c",
+      "line": 2746,
+      "message": "[WARN] MCPClientBridge.c line 2746: `.GetType()` compared with `==`/`!=`. Exact match fails on inherited or modded variants; the server may silently reject actions whose client check uses IsKindOf (pitfalls-advanced.md:257-274, SKILL.md rules 31-32). Use `obj.IsKindOf(\"TypeName\")` for full inheritance-chain checks.",
+      "severity": "WARN",
+      "rule_id": "ES-GETTYPE-EXACT-MATCH"
+    }
+  ],
+  "info": {
+    "files_scanned": 1,
+    "elapsed_ms": 4404
+  }
+}

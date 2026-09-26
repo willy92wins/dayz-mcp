@@ -1,0 +1,207 @@
+--- base/MCPClientBridge.c
++++ composer_VOID/MCPClientBridge.c
+@@ -102,6 +102,7 @@
+ 	protected const int DRIVE_CLIENT_PHASE_REPORT = 4;
+ 	protected const int UI_TREE_DEFAULT_LIMIT = 256;
+ 	protected const int UI_TREE_MAX_LIMIT = 512;
++	protected const float ACTION_USE_DEFAULT_RADIUS = 5.0;
+ 
+ 	protected static ref MCPClientBridge m_Instance;
+ 
+@@ -563,6 +564,10 @@
+ 		{
+ 			postNow = DispatchUiClick(command, result);
+ 		}
++		else if (command.cmd == "action_use")
++		{
++			postNow = DispatchActionUse(command, result);
++		}
+ 		else
+ 		{
+ 			result.ok = false;
+@@ -1140,6 +1145,185 @@
+ 
+ 		result.ok = true;
+ 		return true;
++	}
++
++	protected bool DispatchActionUse(MCPCommand command, MCPResult result)
++	{
++		result.started = false;
++
++		if (!command.args || command.args.action == "")
++		{
++			result.ok = false;
++			result.error = "bad_args";
++			return true;
++		}
++
++		PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
++		if (!player)
++		{
++			result.ok = false;
++			result.error = "no_player";
++			return true;
++		}
++
++		ActionManagerClient amc = ActionManagerClient.Cast(player.GetActionManager());
++		if (!amc)
++		{
++			result.ok = false;
++			result.error = "no_action_manager";
++			return true;
++		}
++
++		string wantedAction = command.args.action;
++		ActionBase action;
++		if (ActionManagerBase.m_ActionsArray)
++		{
++			int actionIndex = 0;
++			while (actionIndex < ActionManagerBase.m_ActionsArray.Count() && !action)
++			{
++				ActionBase candidate = ActionManagerBase.m_ActionsArray.Get(actionIndex);
++				if (candidate && candidate.Type().ToString() == wantedAction)
++				{
++					action = candidate;
++				}
++
++				actionIndex = actionIndex + 1;
++			}
++		}
++
++		if (!action)
++		{
++			result.ok = false;
++			result.error = "action_not_found";
++			return true;
++		}
++
++		result.action = action.Type().ToString();
++
++		vector searchPos;
++		if (command.args.pos && command.args.pos.Count() > 0)
++		{
++			if (!ArrayToVector(command.args.pos, searchPos))
++			{
++				result.ok = false;
++				result.error = "bad_args";
++				return true;
++			}
++		}
++		else
++		{
++			searchPos = player.GetPosition();
++		}
++
++		float searchRadius = ACTION_USE_DEFAULT_RADIUS;
++		if (command.args.radius > 0.0 && IsFiniteFloat(command.args.radius))
++		{
++			searchRadius = command.args.radius;
++		}
++
++		string classFilter = command.args.classname;
++		Object targetObj = FindNearestObjectNearClient(searchPos, searchRadius, classFilter, player);
++		if (!targetObj)
++		{
++			result.ok = false;
++			result.error = "target_not_found";
++			return true;
++		}
++
++		// cursorHitPos must be a real point on the target; CCTCursor.Can measures
++		// DistanceSq from GetCursorHitPos (4_world/.../cctcursor.c:30-33). vector.Zero
++		// (~10 km from Chernarus play space) always fails the distance gate.
++		vector cursorHitPos = targetObj.GetPosition();
++		ActionTarget actionTarget = new ActionTarget(targetObj, null, -1, cursorHitPos, 0);
++
++		result.classname = targetObj.ClassName();
++		result.pos_real = new array<float>();
++		VectorToArray(cursorHitPos, result.pos_real);
++		result.distance = vector.Distance(player.GetPosition(), cursorHitPos);
++
++		if (amc.GetRunningAction() != null)
++		{
++			result.ok = false;
++			result.error = "action_in_progress";
++			return true;
++		}
++
++		if (!amc.ActionPossibilityCheck(player.GetCurrentCommandID()))
++		{
++			result.ok = false;
++			result.error = "not_possible";
++			return true;
++		}
++
++		if (!ScriptInputUserData.CanStoreInputUserData())
++		{
++			result.ok = false;
++			result.error = "input_busy";
++			return true;
++		}
++
++		// Item is null: ActionInteractBase.UseMainItem() is false (actioninteractbase.c:71-74).
++		if (!action.Can(player, actionTarget, null))
++		{
++			result.ok = false;
++			result.error = "condition_failed";
++			return true;
++		}
++
++		// Returns immediately after local dispatch; server ack is async (actionbase.c:1146-1148).
++		amc.PerformActionStart(action, actionTarget, null, NULL);
++		result.started = true;
++		result.ok = true;
++		return true;
++	}
++
++	protected Object FindNearestObjectNearClient(vector pos, float radius, string classFilter, Object skip)
++	{
++		m_ReadyObjects.Clear();
++		m_ReadyProxyCargos.Clear();
++		GetGame().GetObjectsAtPosition3D(pos, radius, m_ReadyObjects, m_ReadyProxyCargos);
++
++		Object best;
++		float bestDist = 0.0;
++		int i = 0;
++		while (i < m_ReadyObjects.Count())
++		{
++			Object found = m_ReadyObjects.Get(i);
++			if (found && found != skip)
++			{
++				bool classOk = classFilter == "";
++				if (!classOk)
++				{
++					if (found.GetType() == classFilter)
++					{
++						classOk = true;
++					}
++					else if (found.ClassName() == classFilter)
++					{
++						classOk = true;
++					}
++				}
++
++				if (classOk)
++				{
++					float distSq = vector.DistanceSq(pos, found.GetPosition());
++					if (!best)
++					{
++						best = found;
++						bestDist = distSq;
++					}
++					else if (distSq < bestDist)
++					{
++						best = found;
++						bestDist = distSq;
++					}
++				}
++			}
++
++			i = i + 1;
++		}
++
++		return best;
+ 	}
+ 
+ 	protected Widget ResolveUiRoot(MCPArgs args, out string error)

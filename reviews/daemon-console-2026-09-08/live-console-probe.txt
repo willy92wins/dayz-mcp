@@ -1,0 +1,57 @@
+daemon processes found: 4
+  pid=28500 ppid=35796 created=/Date(1788800210052)/
+  cmdline="C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m dayz_mcp --daemon --port 8765 --keyfile "C:\Users\guill\On
+  pid=20568 ppid=28500 created=/Date(1788800210060)/
+  cmdline="C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m dayz_mcp --daemon --port 8765 --keyfile "C:\Users\guill\On
+  pid=61576 ppid=27916 created=/Date(1788827028814)/
+  cmdline="C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m dayz_mcp --daemon --port 60001 --keyfile C:\Users\guill\Ap
+  pid=47756 ppid=61576 created=/Date(1788827028819)/
+  cmdline="C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m dayz_mcp --daemon --port 60001 --keyfile C:\Users\guill\Ap
+
+{
+  "pid": 28500,
+  "attached": false,
+  "win32_error": 6
+}
+{
+  "pid": 20568,
+  "attached": true,
+  "console_members": [
+    57280,
+    20568
+  ],
+  "console_hwnd": 62915548,
+  "hwnd_is_window": true,
+  "hwnd_is_visible": true,
+  "hwnd_class": "PseudoConsoleWindow",
+  "hwnd_title": "",
+  "hwnd_owner_pid": 20568
+}
+{
+  "pid": 61576,
+  "attached": true,
+  "console_members": [
+    57280,
+    47756,
+    61576,
+    27916,
+    49452,
+    44212,
+    27016
+  ],
+  "console_hwnd": null
+}
+{
+  "pid": 47756,
+  "attached": true,
+  "console_members": [
+    57280,
+    47756,
+    61576,
+    27916,
+    49452,
+    44212,
+    27016
+  ],
+  "console_hwnd": null
+}

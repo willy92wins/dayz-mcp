@@ -1,0 +1,14 @@
+Lote V — commits en work/inbox-20260830-modules (DayZ_MCP_dev):
+  cd53f7c  ronda 1 (Composer 2.5): five ergonomics fixes on public surfaces          5 ficheros, +234 -22
+  0eff49e  rondas 2+3 (orquestador): entities_query claims no_player_connected only on
+           a real empty list; wait_for sleep bounded by its deadline; dayz_test_run
+           publishes the mode/run_id matrix (ficha 17)                                 4 ficheros, +101 -7
+  (bdeb87f, de otra sesión, está entre los dos y no toca estos ficheros)
+
+Suite completa en el árbol vivo tras integrar rondas 2+3 (= bytes de 0eff49e), intérprete
+tools/.venv-mcp/Scripts/python.exe:
+  Ran 2538 tests in 243.226s
+  FAILED (failures=2, skipped=6)
+  los 2 rojos: test_task9_spawn_phase_markers (centinela de MCPBridge.c, ficha bd90), los mismos por
+  nombre que la baseline 2309/00d4303; ninguno nuevo.
+G-PYZ: pyz import closure verified (16/15); server.py no está en PACKAGED_MODULES.

@@ -1,0 +1,20 @@
+diff --git a/tools/tests/test_vpp_preflight.py b/tools/tests/test_vpp_preflight.py
+index 5096458..f424bb8 100644
+--- a/tools/tests/test_vpp_preflight.py
++++ b/tools/tests/test_vpp_preflight.py
+@@ -1227,7 +1227,15 @@ class VppPreflightRound4Test(unittest.TestCase):
+         # either is text the engine never reads as an assignment. An unterminated
+         # quote swallows the rest of the file, and the gate refuses rather than
+         # guesses where the engine would have stopped.
++        #
++        # The FIRST row is the delta-2 repro literally: with the ; INSIDE the
++        # string the round-3 scanner read a live 1 and the whole preflight went
++        # green. The next row is the same defect with the ; outside, which round
++        # 3 already refused -- but for the wrong reason: _VPP_VALUE captured the
++        # closing quote into the value, not because the string was dead ground.
++        # It is a control, not the red-first case.
+         for label, body in (
++            ("delta2_repro_semicolon_inside_the_string", "motd='vppDisablePassword=1;';\n"),
+             ("only_in_single_quotes", "motd = 'vppDisablePassword = 1';\n"),
+             ("single_quoted_then_live_zero", "motd = 'vppDisablePassword = 1';\nvppDisablePassword = 0;\n"),
+             ("unterminated_single_quote", "motd = 'vppDisablePassword = 1;\nvppDisablePassword = 1;\n"),

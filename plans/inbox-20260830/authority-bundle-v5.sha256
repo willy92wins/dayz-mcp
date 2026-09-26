@@ -1,0 +1,8 @@
+# generation=20260830-ledger-v2
+# graph_version=inbox-20260830-v5
+9535ae24e11a93044f8dbcee338fd1660bd4628b478194eca8d53646ec7ab31f  product-spec.md
+2ff13365b313780f5be0a71bad106cde4b2a34426e7bced41fff55f522018783  plans/2026-08-30-pipeline-inbox-closure-design.md
+a676359f39e848cb5bd8c34368263e161e6573699bbbbada15a9ea9c48c938f8  plans/inbox-20260830/00-execution-dag.md
+6d3ea99e79c8f69a7a784db905b9246156beef584c61ab6d8039d7ba8e6e0504  plans/inbox-20260830/physical-ownership-addendum-v1.md
+453f84bff71103fa359841fb0d49a7cfbbd9e1541bb95108999e5f62c4f1d895  research/2026-08-30-pipeline-inbox-triage-codex.md
+6bd1b25410bf72357ad9e627b0713ea8824e7528f50e8d2972979a2d94528fc1  C:/Users/guill/.agents/skills/gates-ledger/scripts/gate-check.mjs

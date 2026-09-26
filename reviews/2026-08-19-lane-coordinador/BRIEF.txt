@@ -1,0 +1,194 @@
+TAREA: implementar los AGUJEROS 2 y 3 del coordinador DayZ-MCP siguiendo el spec ya
+escrito, EN ESE ORDEN (2 primero, 3 despues). Codigo + tests. NO toques el agujero 1:
+ya esta implementado y promocionado.
+
+Trabajas SOLO dentro de este workspace, que es una copia:
+  C:\Users\guill\AppData\Local\Temp\mcp-laneCOORD-20260819\DayZ Projects\DayZ_MCP_dev\tools
+
+=====================================================================
+CARGA INICIAL (lee en este orden)
+=====================================================================
+
+1. C:\Users\guill\ObsidianVault\AI\10_Projects\DayZ_MCP\reviews\2026-08-19-triaje-nocturno\spec-coordinador.md
+   SOLO estas secciones (el resto es del agujero 1, ya hecho):
+     - lineas 144-250  -> "Agujero 2 - BUG-046: cada /session/* persiste a disco"
+     - lineas 251-393  -> "Agujero 3 - El reaper no despierta al coordinador"
+     - lineas 394-469  -> secciones A (orden), B (interaccion con fencing), C (lo no
+                          verificado), Forward contract, Garantias ya ganadas
+   Es tu contrato. Trae el invariante, el escenario, el arreglo [DESIGN], que NO tocar,
+   los tests con su "falla si...", y los modos de fallo del propio arreglo.
+
+2. <workspace>\dayz_mcp\loopback.py -> `_persist_coordination` y `_handle_session`
+   (agujero 2 vive aqui)
+
+3. <workspace>\dayz_mcp\session_coordination.py -> `wait`, `_box_leave_locked`,
+   `snapshot_payload`, `_bump_revision_locked` (agujeros 2 y 3 añaden metodos aqui)
+
+4. <workspace>\dayz_mcp\process_lifecycle.py -> `_reap_run_locked` y
+   `_retire_run_bindings` (el hook del agujero 3 va justo despues del retire)
+
+5. <workspace>\dayz_mcp\runtime_state.py -> `write_coordination` /
+   `_write_coordination_locked` (de ahi sale `persisted_revision`)
+
+6. <workspace>\tests\test_session_http.py y <workspace>\tests\test_run_reaper.py
+   -> donde van los tests nuevos, y donde estan los de caracterizacion que NO deben
+   romperse.
+
+=====================================================================
+AVISO CRITICO SOBRE LAS CITAS DEL SPEC
+=====================================================================
+
+El spec se escribio cuando el FENCING aun no estaba promocionado, asi que cita lineas
+de una copia vieja:
+  C:\Users\guill\AppData\Local\Temp\mcp-laneFENCE-20260818\...
+
+ESA COPIA YA NO ES LA VERDAD. El fencing SI esta promocionado; el codigo que cita vive
+ahora en tu workspace, con los MISMOS cuerpos pero en OTRAS LINEAS.
+
+=> Localiza cada sitio por NOMBRE DE SIMBOLO (grep), NUNCA por numero de linea.
+=> Antes de escribir cualquier firma o nombre de metodo, abre el fichero y verifica que
+   existe tal cual (G2, cite-then-verify). El spec marca [EXACT] lo verificado y
+   [DESIGN] lo que es pseudocodigo tuyo por escribir.
+=> Si un [DESIGN] del spec no encaja con el codigo real, MANDA EL CODIGO REAL: apuntalo
+   en el RECEIPT en `spec_divergences` y explica que hiciste en su lugar.
+
+Ademas hoy se arreglo BUG-105 en `loopback.py` (`_seed_bridge_config`) y en
+`daemon.py` (`config_port`). NO lo toques y NO lo "limpies": es codigo bueno y reciente.
+
+=====================================================================
+ENTORNO YA RESUELTO (no lo adivines)
+=====================================================================
+
+Interprete (usa SIEMPRE este, no el python del sistema):
+  "C:\Users\guill\AppData\Local\Temp\mcp-laneCOORD-20260819\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe"
+
+Suite completa (desde el directorio `tools` del workspace, SIEMPRE con ese cwd):
+  cd "C:\Users\guill\AppData\Local\Temp\mcp-laneCOORD-20260819\DayZ Projects\DayZ_MCP_dev\tools"
+  .\.venv-mcp\Scripts\python.exe -m unittest discover -s tests -t .
+
+Un solo modulo (mucho mas rapido para iterar):
+  .\.venv-mcp\Scripts\python.exe -m unittest tests.test_session_http
+  .\.venv-mcp\Scripts\python.exe -m unittest tests.test_run_reaper
+
+LINEA BASE MEDIDA DE ESTE WORKSPACE, antes de que tu toques nada:
+  Ran 1702 tests, FAILED (failures=2, skipped=4)
+  Log completo: C:\Users\guill\AppData\Local\Temp\mcp-laneCOORD-20260819\BASELINE.log
+  Coincide exactamente con el arbol real. Tu cifra final debe ser 1702 + tus tests
+  nuevos, y failures=2.
+Los DOS unicos rojos esperados son `test_task9_spawn_phase_markers` (dos mitades):
+son CENTINELAS ROJOS A PROPOSITO, marcan que el fencing esta en produccion sin su
+gate in-game. NO los arregles, NO recongeles ese hash. Si los tocas, la entrega se
+rechaza entera.
+
+Cualquier OTRO rojo que veas al empezar es un artefacto de mi copia, no tuyo:
+reportalo en el RECEIPT y sigue; no lo arregles.
+
+=====================================================================
+QUE TIENES QUE ENTREGAR
+=====================================================================
+
+AGUJERO 2 - no persistir a disco si no hay revision nueva.
+  Metodos nuevos (nombres del Forward contract del spec, respetalos):
+    - `SessionCoordinator.durable_revision`
+    - `CoordinationSnapshotStore.persisted_revision`
+    - y el skip dentro de `_persist_coordination`
+  Tests nuevos que HOY salen ROJOS:
+    1. test_session_status_without_revision_change_does_not_write_coordination
+    2. test_box_wait_refresh_does_not_write_coordination
+    3. (regresion, verde hoy y debe seguir verde) acquire que concede lease SI escribe
+
+AGUJERO 3 - el reaper despierta al coordinador y suelta el claim de caja.
+  Metodos nuevos:
+    - `SessionCoordinator.note_run_reaped`
+    - `SessionCoordinator._box_leave_session_locked`
+    - la llamada desde `_reap_run_locked`, DESPUES de `_retire_run_bindings`, con
+      `owner_session_id` capturado ANTES de que se anule
+    - audit `event = "run_reaped_wake"`
+  Tests nuevos que HOY salen ROJOS:
+    1. test_note_run_reaped_wakes_condition_waiters
+    2. test_reap_drops_box_claim_of_owner_session
+    3. test_reap_does_not_drop_active_lease   (contra `note_run_reaped`, no contra el
+       reaper de hoy: contra el reaper de hoy ya pasaria y no probaria nada)
+    4. test_reap_wake_is_audited
+
+NO auto-liberes el lease al reapar (D-48: el lease no es la vida del juego). Solo el
+claim de CAJA.
+
+Cuidado con el deadlock que el propio spec avisa: `note_run_reaped` toma `_condition`
+DESPUES del trabajo de manifest. Orden: manifest.replace -> retire bindings -> (sin
+locks del coordinador) -> note_run_reaped.
+
+=====================================================================
+CRITERIO DE HECHO (esto es lo que se te va a medir)
+=====================================================================
+
+1. ROJO PRIMERO, con prueba. Escribe los tests ANTES del arreglo y guarda la salida en
+   C:\Users\guill\AppData\Local\Temp\mcp-laneCOORD-20260819\red_first.log
+   Un test que no sale rojo antes del arreglo no prueba nada: si alguno sale verde
+   nada mas escribirlo, esta mal escrito - arreglalo o dilo.
+
+2. VERDE despues, salida en
+   C:\Users\guill\AppData\Local\Temp\mcp-laneCOORD-20260819\green.log
+
+3. MUTACION - este es el gate de verdad del proyecto. Por cada arreglo, rompe a
+   proposito la garantia que protege y demuestra que un test se pone ROJO. Minimo:
+     - agujero 2: invertir el `<=` del skip; y quitar el skip entero
+     - agujero 3: quitar el `notify_all`; quitar el soltado del claim de caja;
+       capturar `owner_session_id` DESPUES de que se anule (debe dar None)
+   Revierte cada mutacion antes de la siguiente. Salida en
+   C:\Users\guill\AppData\Local\Temp\mcp-laneCOORD-20260819\mutations.log
+   Una mutacion que SOBREVIVE (todo verde con la garantia rota) es una rama sin test:
+   o le escribes el test, o la borras y lo justificas. No la dejes pasar en silencio.
+
+4. SUITE COMPLETA al final: ni un rojo nuevo respecto a la linea base. Los 2 centinelas
+   siguen rojos y eso es correcto. Salida en
+   C:\Users\guill\AppData\Local\Temp\mcp-laneCOORD-20260819\suite_final.log
+
+5. DZ-R7 (propagacion de invariante): cuando cambies un contrato, grep TODOS los sitios
+   que lo asumian y arreglalos o justifica por que quedan fuera. Este proyecto ya se
+   ha comido tres bugs por fix local sin propagar. En concreto: `_persist_coordination`
+   lo llaman tambien `_handle_enqueue` y `_handle_lifecycle`; `_reap_run_locked` lo
+   alcanzan el hilo reaper Y el `reap_dead_run` de HTTP.
+
+=====================================================================
+FRONTERAS (no negociables)
+=====================================================================
+
+- NO salgas de C:\Users\guill\AppData\Local\Temp\mcp-laneCOORD-20260819\ para ESCRIBIR.
+  Leer el spec del vault (ruta de arriba) si esta permitido; escribir alli, no.
+- NO toques NADA bajo C:\Users\guill\OneDrive\ ni bajo P:\ - ese es el arbol real y
+  tengo hashes de sus 167 ficheros .py de antes de lanzarte. Si aparece un byte
+  cambiado, la entrega se rechaza entera sin leerla.
+- NO lances ni mates procesos DayZ (DayZDiag, DayZServer). El ciclo in-game es mio.
+- NO arranques el daemon MCP ni llames a herramientas MCP.
+- NO uses rm, Remove-Item ni git push.
+- NO lances subagentes.
+- NO toques los centinelas `test_task9_spawn_phase_markers`.
+- NO cambies el formato de coordination.json ni el schema de runs.json ni el protocolo
+  del puente. El spec lo dice en cada seccion "Que NO se toca"; respetalo.
+- Un solo encargo: agujeros 2 y 3. Si ves otra cosa que arreglar, ANOTALA en el
+  RECEIPT y no la toques.
+
+=====================================================================
+SALIDA EN CHAT - SOLO ESTO
+=====================================================================
+
+No pegues el codigo en el chat. El codigo va a disco, en el workspace.
+
+## RECEIPT
+```json
+{
+  "status": "ok|failed",
+  "agujero_2": {"done": true, "files": ["..."], "tests_added": ["..."]},
+  "agujero_3": {"done": true, "files": ["..."], "tests_added": ["..."]},
+  "logs": ["...\\red_first.log", "...\\green.log", "...\\mutations.log", "...\\suite_final.log"],
+  "mutations": [{"name": "...", "killed_by": "test_...", "survived": false}],
+  "suite_final": {"ran": 0, "failures": 0, "expected_sentinels": 2},
+  "spec_divergences": ["donde el [DESIGN] no encajaba con el codigo real y que hice"],
+  "propagation_dzr7": ["call-sites que revise por el cambio de contrato"],
+  "verified": ["lo que comprobaste ejecutando"],
+  "not_verified": ["lo que NO pudiste comprobar - se explicito, esta seccion es la que
+                    separa un hallazgo de una conjetura"],
+  "noticed_but_untouched": ["cosas fuera de alcance que viste"]
+}
+```

@@ -1,0 +1,2284 @@
+
+ERROR: test_compact_module_client_with_equals_value_is_not_a_blocker (tests.test_bug046_startup_deadlock.DaemonStartupElectionProcessTest.test_compact_module_client_with_equals_value_is_not_a_blocker)
+``-mdayz_mcp`` without ``-I`` is scanned as a client, not a writer.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\_pswindows.py", line 768, in cmdline
+    return cext.proc_cmdline(self.pid, use_peb=True)
+           ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [WinError 5] Acceso denegado: '(originated from OpenProcess)'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\_pswindows.py", line 666, in wrapper
+    return fun(self, *args, **kwargs)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\_pswindows.py", line 684, in wrapper
+    return fun(self, *args, **kwargs)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\_pswindows.py", line 771, in cmdline
+    return cext.proc_cmdline(self.pid, use_peb=False)
+           ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [WinError 5] Acceso denegado: '(originated from OpenProcess)'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\identity_migration.py", line 734, in scan_dayz_mcp_processes
+    argv = process.cmdline()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\__init__.py", line 748, in cmdline
+    return self._proc.cmdline()
+           ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\_pswindows.py", line 668, in wrapper
+    raise convert_oserror(err, pid=self.pid, name=self._name) from err
+psutil.AccessDenied: (pid=27620, name='python.exe')
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_bug046_startup_deadlock.py", line 783, in test_compact_module_client_with_equals_value_is_not_a_blocker
+    self._assert_real_client_is_not_a_blocker(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        ["-mdayz_mcp", "--client", "--task-label=-nightly"]
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_bug046_startup_deadlock.py", line 753, in _assert_real_client_is_not_a_blocker
+    self.assertNotIn(child.pid, scan_dayz_mcp_processes())
+                                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\identity_migration.py", line 738, in scan_dayz_mcp_processes
+    raise RunsBackupGateError("process_scan_incomplete") from error
+dayz_mcp.identity_migration.RunsBackupGateError: process_scan_incomplete
+
+======================================================================
+ERROR: test_isolated_dash_I_client_argv_is_not_a_blocker (tests.test_bug046_startup_deadlock.DaemonStartupElectionProcessTest.test_isolated_dash_I_client_argv_is_not_a_blocker)
+``-Imdayz_mcp`` is an argv classifier, not copy accreditation.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\_pswindows.py", line 768, in cmdline
+    return cext.proc_cmdline(self.pid, use_peb=True)
+           ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [WinError 5] Acceso denegado: '(originated from OpenProcess)'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\_pswindows.py", line 666, in wrapper
+    return fun(self, *args, **kwargs)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\_pswindows.py", line 684, in wrapper
+    return fun(self, *args, **kwargs)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\_pswindows.py", line 771, in cmdline
+    return cext.proc_cmdline(self.pid, use_peb=False)
+           ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [WinError 5] Acceso denegado: '(originated from OpenProcess)'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\identity_migration.py", line 734, in scan_dayz_mcp_processes
+    argv = process.cmdline()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\__init__.py", line 748, in cmdline
+    return self._proc.cmdline()
+           ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\_pswindows.py", line 668, in wrapper
+    raise convert_oserror(err, pid=self.pid, name=self._name) from err
+psutil.AccessDenied: (pid=27620, name='python.exe')
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_bug046_startup_deadlock.py", line 772, in test_isolated_dash_I_client_argv_is_not_a_blocker
+    self._assert_real_client_is_not_a_blocker(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        ["-Imdayz_mcp", "--client", "--idle-timeout", "-1"]
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_bug046_startup_deadlock.py", line 753, in _assert_real_client_is_not_a_blocker
+    self.assertNotIn(child.pid, scan_dayz_mcp_processes())
+                                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\identity_migration.py", line 738, in scan_dayz_mcp_processes
+    raise RunsBackupGateError("process_scan_incomplete") from error
+dayz_mcp.identity_migration.RunsBackupGateError: process_scan_incomplete
+
+======================================================================
+ERROR: test_module_main_entrypoint_is_observed_as_real_writer_process (tests.test_bug046_startup_deadlock.DaemonStartupElectionProcessTest.test_module_main_entrypoint_is_observed_as_real_writer_process)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\_pswindows.py", line 768, in cmdline
+    return cext.proc_cmdline(self.pid, use_peb=True)
+           ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [WinError 5] Acceso denegado: '(originated from OpenProcess)'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\_pswindows.py", line 666, in wrapper
+    return fun(self, *args, **kwargs)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\_pswindows.py", line 684, in wrapper
+    return fun(self, *args, **kwargs)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\_pswindows.py", line 771, in cmdline
+    return cext.proc_cmdline(self.pid, use_peb=False)
+           ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [WinError 5] Acceso denegado: '(originated from OpenProcess)'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\identity_migration.py", line 734, in scan_dayz_mcp_processes
+    argv = process.cmdline()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\__init__.py", line 748, in cmdline
+    return self._proc.cmdline()
+           ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Lib\site-packages\psutil\_pswindows.py", line 668, in wrapper
+    raise convert_oserror(err, pid=self.pid, name=self._name) from err
+psutil.AccessDenied: (pid=27620, name='python.exe')
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_bug046_startup_deadlock.py", line 828, in test_module_main_entrypoint_is_observed_as_real_writer_process
+    observed = scan_dayz_mcp_processes()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\identity_migration.py", line 738, in scan_dayz_mcp_processes
+    raise RunsBackupGateError("process_scan_incomplete") from error
+dayz_mcp.identity_migration.RunsBackupGateError: process_scan_incomplete
+
+======================================================================
+ERROR: test_fixture_accredits_live_request_paths (tests.test_build_native_launcher_policy.FixturePolicyBehaviorTest.test_fixture_accredits_live_request_paths)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_build_native_launcher_policy.py", line 410, in test_fixture_accredits_live_request_paths
+    with request_path_authority.accredit_request_paths(
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        parsed,
+        ^^^^^^^
+        policies=sealed,
+        ^^^^^^^^^^^^^^^^
+    ) as accredited:
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 585, in accredit_request_paths
+    raise ValueError("invalid_dayz_test_path_authority") from None
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_a_held_writer_lock_does_not_hold_up_the_caller (tests.test_daemon_spawn_branch.DaemonEventRecordTest.test_a_held_writer_lock_does_not_hold_up_the_caller)
+F-03: swallowing exceptions is not enough. The audit writer serialises
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_daemon_spawn_branch.py", line 436, in test_a_held_writer_lock_does_not_hold_up_the_caller
+    with TemporaryDirectory() as temporary:
+         ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Python314\Lib\tempfile.py", line 971, in __exit__
+    self.cleanup()
+    ~~~~~~~~~~~~^^
+  File "C:\Python314\Lib\tempfile.py", line 975, in cleanup
+    self._rmtree(self.name, ignore_errors=self._ignore_cleanup_errors)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\tempfile.py", line 955, in _rmtree
+    _shutil.rmtree(name, onexc=onexc)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\shutil.py", line 852, in rmtree
+    _rmtree_impl(path, dir_fd, onexc)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\shutil.py", line 711, in _rmtree_unsafe
+    onexc(os.rmdir, path, err)
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\shutil.py", line 707, in _rmtree_unsafe
+    os.rmdir(path)
+    ~~~~~~~~^^^^^^
+OSError: [WinError 145] El directorio no est� vac�o: 'C:\\Users\\guill\\AppData\\Local\\Temp\\tmp1ywuw36a'
+
+======================================================================
+ERROR: test_lifecycle_status_forwards_exact_run_after_erasing_inherited_secrets (tests.test_dayz_test_app.DayzTestAppTerminalTests.test_lifecycle_status_forwards_exact_run_after_erasing_inherited_secrets)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 61, in test_lifecycle_status_forwards_exact_run_after_erasing_inherited_secrets
+    app = _load_app()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 40, in _load_app
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 755, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 892, in get_code
+  File "<frozen importlib._bootstrap_external>", line 950, in get_data
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\app_main.py'
+
+======================================================================
+ERROR: test_main_maps_unknown_exception_to_internal_failure (tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_maps_unknown_exception_to_internal_failure)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 213, in test_main_maps_unknown_exception_to_internal_failure
+    app = _load_app()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 40, in _load_app
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 755, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 892, in get_code
+  File "<frozen importlib._bootstrap_external>", line 950, in get_data
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\app_main.py'
+
+======================================================================
+ERROR: test_main_serializes_known_worker_failure_without_exception_text (tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) (code='readiness_failed')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 167, in test_main_serializes_known_worker_failure_without_exception_text
+    app = _load_app()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 40, in _load_app
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 755, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 892, in get_code
+  File "<frozen importlib._bootstrap_external>", line 950, in get_data
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\app_main.py'
+
+======================================================================
+ERROR: test_main_serializes_known_worker_failure_without_exception_text (tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) (code='readiness_probe_failed')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 167, in test_main_serializes_known_worker_failure_without_exception_text
+    app = _load_app()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 40, in _load_app
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 755, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 892, in get_code
+  File "<frozen importlib._bootstrap_external>", line 950, in get_data
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\app_main.py'
+
+======================================================================
+ERROR: test_main_serializes_known_worker_failure_without_exception_text (tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) (code='readiness_run_not_running')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 167, in test_main_serializes_known_worker_failure_without_exception_text
+    app = _load_app()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 40, in _load_app
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 755, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 892, in get_code
+  File "<frozen importlib._bootstrap_external>", line 950, in get_data
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\app_main.py'
+
+======================================================================
+ERROR: test_main_serializes_known_worker_failure_without_exception_text (tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) (code='readiness_server_pid_dead')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 167, in test_main_serializes_known_worker_failure_without_exception_text
+    app = _load_app()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 40, in _load_app
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 755, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 892, in get_code
+  File "<frozen importlib._bootstrap_external>", line 950, in get_data
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\app_main.py'
+
+======================================================================
+ERROR: test_main_serializes_known_worker_failure_without_exception_text (tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) (code='readiness_server_process_invalid')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 167, in test_main_serializes_known_worker_failure_without_exception_text
+    app = _load_app()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 40, in _load_app
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 755, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 892, in get_code
+  File "<frozen importlib._bootstrap_external>", line 950, in get_data
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\app_main.py'
+
+======================================================================
+ERROR: test_main_serializes_known_worker_failure_without_exception_text (tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) (code='readiness_status_invalid')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 167, in test_main_serializes_known_worker_failure_without_exception_text
+    app = _load_app()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 40, in _load_app
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 755, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 892, in get_code
+  File "<frozen importlib._bootstrap_external>", line 950, in get_data
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\app_main.py'
+
+======================================================================
+ERROR: test_main_serializes_known_worker_failure_without_exception_text (tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) (code='readiness_timeout')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 167, in test_main_serializes_known_worker_failure_without_exception_text
+    app = _load_app()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 40, in _load_app
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 755, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 892, in get_code
+  File "<frozen importlib._bootstrap_external>", line 950, in get_data
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\app_main.py'
+
+======================================================================
+ERROR: test_main_serializes_known_worker_failure_without_exception_text (tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) (code='readiness_udp_foreign_owner')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 167, in test_main_serializes_known_worker_failure_without_exception_text
+    app = _load_app()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 40, in _load_app
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 755, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 892, in get_code
+  File "<frozen importlib._bootstrap_external>", line 950, in get_data
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\app_main.py'
+
+======================================================================
+ERROR: test_main_serializes_known_worker_failure_without_exception_text (tests.test_dayz_test_app.DayzTestAppTerminalTests.test_main_serializes_known_worker_failure_without_exception_text) (code='readiness_udp_snapshot_invalid')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 167, in test_main_serializes_known_worker_failure_without_exception_text
+    app = _load_app()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 40, in _load_app
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 755, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 892, in get_code
+  File "<frozen importlib._bootstrap_external>", line 950, in get_data
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\app_main.py'
+
+======================================================================
+ERROR: test_success_terminal_has_exact_closed_schema (tests.test_dayz_test_app.DayzTestAppTerminalTests.test_success_terminal_has_exact_closed_schema)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 142, in test_success_terminal_has_exact_closed_schema
+    app = _load_app()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_test_app.py", line 40, in _load_app
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 755, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 892, in get_code
+  File "<frozen importlib._bootstrap_external>", line 950, in get_data
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\app_main.py'
+
+======================================================================
+ERROR: test_checker_accepts_recoverable_stalled_residue (tests.test_launcher_registry_update.AbortedPreparedRecoveryTest.test_checker_accepts_recoverable_stalled_residue)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_launcher_registry_update.py", line 971, in test_checker_accepts_recoverable_stalled_residue
+    code, output = _run_checker_against_fixture(
+                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        registry, lock, receipts, replacement
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_launcher_registry_update.py", line 1033, in _run_checker_against_fixture
+    code = checker.main()
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\checks\check_native_launcher_registry.py", line 126, in main
+    print(f"- launcher pe: {_digest(BUNDLE / RELATIVE_PATH)}")
+                            ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\checks\check_native_launcher_registry.py", line 21, in _digest
+    return hashlib.sha256(path.read_bytes()).hexdigest().upper()
+                          ~~~~~~~~~~~~~~~^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 777, in read_bytes
+    with self.open(mode='rb', buffering=0) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\dayz-test-launcher.exe'
+
+======================================================================
+ERROR: test_the_witness_hint_names_the_bundle_and_daemon_versions (tests.test_lifecycle_reconcile.LifecycleReconcileTest.test_the_witness_hint_names_the_bundle_and_daemon_versions)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_lifecycle_reconcile.py", line 1186, in test_the_witness_hint_names_the_bundle_and_daemon_versions
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                          ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\closure-manifest.json'
+
+======================================================================
+ERROR: test_addon_helper_after_builder_exit_fails_before_continue (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_addon_helper_after_builder_exit_fails_before_continue)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1123, in test_addon_helper_after_builder_exit_fails_before_continue
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_addon_helper_lifetime_cap_fails_closed (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_addon_helper_lifetime_cap_fails_closed)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1190, in test_addon_helper_lifetime_cap_fails_closed
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_announced_descendant_requires_exact_authority_before_continue (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_announced_descendant_requires_exact_authority_before_continue) (approved=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 927, in test_announced_descendant_requires_exact_authority_before_continue
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_announced_descendant_requires_exact_authority_before_continue (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_announced_descendant_requires_exact_authority_before_continue) (approved=False)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 927, in test_announced_descendant_requires_exact_authority_before_continue
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_cancellation_closes_liveness_before_job_without_writing_a_signal (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_cancellation_closes_liveness_before_job_without_writing_a_signal)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1456, in test_cancellation_closes_liveness_before_job_without_writing_a_signal
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_cancellation_without_exit_process_never_reports_clean_130 (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_cancellation_without_exit_process_never_reports_clean_130)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1542, in test_cancellation_without_exit_process_never_reports_clean_130
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_descendant_create_event_disarms_start_watchdog (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_descendant_create_event_disarms_start_watchdog)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 802, in test_descendant_create_event_disarms_start_watchdog
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_descendant_job_pid_mismatch_is_rejected_before_continue (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_descendant_job_pid_mismatch_is_rejected_before_continue)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1391, in test_descendant_job_pid_mismatch_is_rejected_before_continue
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_exact_helper_without_announcement_is_allowed_only_during_active_addon_builder (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_exact_helper_without_announcement_is_allowed_only_during_active_addon_builder)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1004, in test_exact_helper_without_announcement_is_allowed_only_during_active_addon_builder
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_failing_detail_capture_never_breaks_the_cleanup (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_failing_detail_capture_never_breaks_the_cleanup)
+Observability must not alter control flow.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1809, in test_failing_detail_capture_never_breaks_the_cleanup
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_gate_rejection_includes_resolved_image_path_when_available (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_gate_rejection_includes_resolved_image_path_when_available)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1887, in test_gate_rejection_includes_resolved_image_path_when_available
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_gate_rejection_preserves_fine_code_kind_and_pid (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_gate_rejection_preserves_fine_code_kind_and_pid)
+Gate rejections keep the stable code and surface the fine detail.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1739, in test_gate_rejection_preserves_fine_code_kind_and_pid
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_load_dll_requires_handle_accreditation_before_continue (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_load_dll_requires_handle_accreditation_before_continue) (approved=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1674, in test_load_dll_requires_handle_accreditation_before_continue
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_load_dll_requires_handle_accreditation_before_continue (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_load_dll_requires_handle_accreditation_before_continue) (approved=False)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1674, in test_load_dll_requires_handle_accreditation_before_continue
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_partial_pending_announcement_blocks_addon_helper_fallback (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_partial_pending_announcement_blocks_addon_helper_fallback)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1347, in test_partial_pending_announcement_blocks_addon_helper_fallback
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_rejected_descendant_closes_job_before_its_single_continue (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_rejected_descendant_closes_job_before_its_single_continue)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 884, in test_rejected_descendant_closes_job_before_its_single_continue
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_request_and_debug_events_finish_before_active_zero_and_return (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_request_and_debug_events_finish_before_active_zero_and_return)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 634, in test_request_and_debug_events_finish_before_active_zero_and_return
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_request_write_deadline_cancels_io_and_fails_closed (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_request_write_deadline_cancels_io_and_fails_closed)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1623, in test_request_write_deadline_cancels_io_and_fails_closed
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_request_write_error_still_closes_job_drains_and_waits_active_zero (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_request_write_error_still_closes_job_drains_and_waits_active_zero)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1421, in test_request_write_error_still_closes_job_drains_and_waits_active_zero
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_root_create_requires_pinned_hfile_identity_before_continue (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_root_create_requires_pinned_hfile_identity_before_continue)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 841, in test_root_create_requires_pinned_hfile_identity_before_continue
+    created = self._create(
+        backend,
+        fake,
+        root_image_approved=False,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_root_exit_without_descendant_preserves_exit_code_immediately (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_root_exit_without_descendant_preserves_exit_code_immediately)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 729, in test_root_exit_without_descendant_preserves_exit_code_immediately
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_second_announced_addon_builder_fails_before_continue (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_second_announced_addon_builder_fails_before_continue)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1248, in test_second_announced_addon_builder_fails_before_continue
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_second_simultaneous_addon_helper_fails_before_continue (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_second_simultaneous_addon_helper_fails_before_continue)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1065, in test_second_simultaneous_addon_helper_fails_before_continue
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_start_watchdog_times_out_when_root_create_event_is_absent (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_start_watchdog_times_out_when_root_create_event_is_absent)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 669, in test_start_watchdog_times_out_when_root_create_event_is_absent
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_started_cancellation_allows_cooperative_exit_before_job_close (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_started_cancellation_allows_cooperative_exit_before_job_close)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1489, in test_started_cancellation_allows_cooperative_exit_before_job_close
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_started_cancellation_cancels_blocked_request_write_without_stalling_debug (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_started_cancellation_cancels_blocked_request_write_without_stalling_debug)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1583, in test_started_cancellation_cancels_blocked_request_write_without_stalling_debug
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_successful_supervise_does_not_gain_gate_rejection_detail (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_successful_supervise_does_not_gain_gate_rejection_detail)
+Negative control: a non-rejected run keeps plain success, no gate attrs.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1943, in test_successful_supervise_does_not_gain_gate_rejection_detail
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_unannounced_helper_without_active_addon_builder_fails_before_continue (tests.test_native_launcher_backend.NativeDebugOwnershipTests.test_unannounced_helper_without_active_addon_builder_fails_before_continue)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 1294, in test_unannounced_helper_without_active_addon_builder_fails_before_continue
+    created = self._create(backend, fake)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 587, in _create
+    return backend._create_registered_launcher(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        opened,
+        ^^^^^^^
+    ...<3 lines>...
+        daemon_policy_json="{}",
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_single_create_call_has_atomic_job_exact_handles_and_closed_environment (tests.test_native_launcher_backend.NativeLauncherBackendTests.test_single_create_call_has_atomic_job_exact_handles_and_closed_environment)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 665, in _create_registered_launcher
+    environment_block = _environment_buffer(
+        identity_json=identity_json,
+    ...<3 lines>...
+        daemon_policy_json=daemon_policy_json,
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 535, in _environment_buffer
+    user_profile = str(Path.home().resolve(strict=True))
+                       ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 938, in resolve
+    return self.with_segments(os.path.realpath(self, strict=strict))
+                              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen ntpath>", line 694, in realpath
+PermissionError: [WinError 5] Acceso denegado: 'C:\\Users\\guill'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_backend.py", line 320, in test_single_create_call_has_atomic_job_exact_handles_and_closed_environment
+    created = backend._create_registered_launcher(
+        opened,
+    ...<3 lines>...
+        daemon_policy_json="{}",
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\native_launcher_backend.py", line 714, in _create_registered_launcher
+    raise NativeLauncherBackendError("native_launcher_create_failed") from error
+dayz_mcp.native_launcher_backend.NativeLauncherBackendError: native_launcher_create_failed
+
+======================================================================
+ERROR: test_cpp_addon_builder_binding_is_not_project_hardcoded (tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_cpp_addon_builder_binding_is_not_project_hardcoded)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_bundle.py", line 506, in test_cpp_addon_builder_binding_is_not_project_hardcoded
+    source = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
+  File "C:\Python314\Lib\pathlib\__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\launcher.cpp'
+
+======================================================================
+ERROR: test_cpp_addon_response_requires_a_fresh_regular_pbo (tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_cpp_addon_response_requires_a_fresh_regular_pbo)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_bundle.py", line 525, in test_cpp_addon_response_requires_a_fresh_regular_pbo
+    source = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
+  File "C:\Python314\Lib\pathlib\__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\launcher.cpp'
+
+======================================================================
+ERROR: test_cpp_broker_has_closed_protocol_and_single_process_boundary (tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_cpp_broker_has_closed_protocol_and_single_process_boundary)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_bundle.py", line 346, in test_cpp_broker_has_closed_protocol_and_single_process_boundary
+    source = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
+  File "C:\Python314\Lib\pathlib\__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\launcher.cpp'
+
+======================================================================
+ERROR: test_cpp_broker_preserves_full_frame_and_is_bidirectional (tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_cpp_broker_preserves_full_frame_and_is_bidirectional)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_bundle.py", line 462, in test_cpp_broker_preserves_full_frame_and_is_bidirectional
+    source = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
+  File "C:\Python314\Lib\pathlib\__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\launcher.cpp'
+
+======================================================================
+ERROR: test_cpp_broker_rejects_nested_private_and_invalid_responses (tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_cpp_broker_rejects_nested_private_and_invalid_responses)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_bundle.py", line 500, in test_cpp_broker_rejects_nested_private_and_invalid_responses
+    source = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
+  File "C:\Python314\Lib\pathlib\__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\launcher.cpp'
+
+======================================================================
+ERROR: test_cpp_broker_routes_exact_three_kinds_and_secrets_only_to_lifecycle (tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_cpp_broker_routes_exact_three_kinds_and_secrets_only_to_lifecycle)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_bundle.py", line 482, in test_cpp_broker_routes_exact_three_kinds_and_secrets_only_to_lifecycle
+    source = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
+  File "C:\Python314\Lib\pathlib\__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\launcher.cpp'
+
+======================================================================
+ERROR: test_cpp_child_creation_is_atomic_cancel_bounded_and_private_cwd (tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_cpp_child_creation_is_atomic_cancel_bounded_and_private_cwd)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_bundle.py", line 368, in test_cpp_child_creation_is_atomic_cancel_bounded_and_private_cwd
+    source = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
+  File "C:\Python314\Lib\pathlib\__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\launcher.cpp'
+
+======================================================================
+ERROR: test_cpp_child_output_keeps_bytes_when_pipe_closes_before_process_signal (tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_cpp_child_output_keeps_bytes_when_pipe_closes_before_process_signal)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_bundle.py", line 473, in test_cpp_child_output_keeps_bytes_when_pipe_closes_before_process_signal
+    source = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
+  File "C:\Python314\Lib\pathlib\__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\launcher.cpp'
+
+======================================================================
+ERROR: test_cpp_validates_private_and_lifecycle_payloads_byte_exactly (tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_cpp_validates_private_and_lifecycle_payloads_byte_exactly)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_bundle.py", line 420, in test_cpp_validates_private_and_lifecycle_payloads_byte_exactly
+    source = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
+  File "C:\Python314\Lib\pathlib\__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\launcher.cpp'
+
+======================================================================
+ERROR: test_generated_addon_roots_table_accepts_sealed_temp_and_rejects_foreign (tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_generated_addon_roots_table_accepts_sealed_temp_and_rejects_foreign)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_bundle.py", line 623, in test_generated_addon_roots_table_accepts_sealed_temp_and_rejects_foreign
+    source = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
+  File "C:\Python314\Lib\pathlib\__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\launcher.cpp'
+
+======================================================================
+ERROR: test_private_worker_inherits_liveness_and_awaits_cancel_cleanup (tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_private_worker_inherits_liveness_and_awaits_cancel_cleanup)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_bundle.py", line 389, in test_private_worker_inherits_liveness_and_awaits_cancel_cleanup
+    cpp = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
+  File "C:\Python314\Lib\pathlib\__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\launcher.cpp'
+
+======================================================================
+ERROR: test_private_worker_uses_debugger_safe_blocking_read (tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_private_worker_uses_debugger_safe_blocking_read)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_bundle.py", line 130, in test_private_worker_uses_debugger_safe_blocking_read
+    source = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
+  File "C:\Python314\Lib\pathlib\__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\launcher.cpp'
+
+======================================================================
+ERROR: test_worker_failure_still_emits_generic_terminal (tests.test_native_launcher_bundle.NativeLauncherBundleTest.test_worker_failure_still_emits_generic_terminal)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_bundle.py", line 152, in test_worker_failure_still_emits_generic_terminal
+    source = (BUNDLE_DIR / "src" / "app_main.py").read_text(encoding="utf-8")
+  File "C:\Python314\Lib\pathlib\__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\pathlib\__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1\\src\\app_main.py'
+
+======================================================================
+ERROR: test_consumer_failure_still_releases_and_verifies_terminal_status (tests.test_native_launcher_transaction.NativeLauncherTransactionTests.test_consumer_failure_still_releases_and_verifies_terminal_status)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Python314\Lib\asyncio\runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 180, in test_consumer_failure_still_releases_and_verifies_terminal_status
+    sealed, raw = self._fixture(Path(temporary))
+                  ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 89, in _fixture
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_heartbeat_failure_cancels_consumer_before_release (tests.test_native_launcher_transaction.NativeLauncherTransactionTests.test_heartbeat_failure_cancels_consumer_before_release)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Python314\Lib\asyncio\runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 264, in test_heartbeat_failure_cancels_consumer_before_release
+    sealed, raw = self._fixture(Path(temporary))
+                  ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 89, in _fixture
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_invalid_schema_or_path_identity_sends_no_control_request (tests.test_native_launcher_transaction.NativeLauncherTransactionTests.test_invalid_schema_or_path_identity_sends_no_control_request) (label='schema')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 151, in test_invalid_schema_or_path_identity_sends_no_control_request
+    sealed, raw = self._fixture(root)
+                  ~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 89, in _fixture
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_invalid_schema_or_path_identity_sends_no_control_request (tests.test_native_launcher_transaction.NativeLauncherTransactionTests.test_invalid_schema_or_path_identity_sends_no_control_request) (label='identity')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 151, in test_invalid_schema_or_path_identity_sends_no_control_request
+    sealed, raw = self._fixture(root)
+                  ~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 89, in _fixture
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_malformed_active_grant_with_token_is_released_before_error (tests.test_native_launcher_transaction.NativeLauncherTransactionTests.test_malformed_active_grant_with_token_is_released_before_error)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Python314\Lib\asyncio\runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 202, in test_malformed_active_grant_with_token_is_released_before_error
+    sealed, raw = self._fixture(Path(temporary))
+                  ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 89, in _fixture
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_non_terminal_status_turns_success_into_cleanup_error (tests.test_native_launcher_transaction.NativeLauncherTransactionTests.test_non_terminal_status_turns_success_into_cleanup_error)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Python314\Lib\asyncio\runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 296, in test_non_terminal_status_turns_success_into_cleanup_error
+    sealed, raw = self._fixture(Path(temporary))
+                  ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 89, in _fixture
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_repeated_task_cancellation_cannot_skip_consumer_cleanup_or_release (tests.test_native_launcher_transaction.NativeLauncherTransactionTests.test_repeated_task_cancellation_cannot_skip_consumer_cleanup_or_release)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Python314\Lib\asyncio\runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 329, in test_repeated_task_cancellation_cannot_skip_consumer_cleanup_or_release
+    sealed, raw = self._fixture(Path(temporary))
+                  ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 89, in _fixture
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_schema_and_paths_precede_acquire_then_supervise_consumer (tests.test_native_launcher_transaction.NativeLauncherTransactionTests.test_schema_and_paths_precede_acquire_then_supervise_consumer)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Python314\Lib\asyncio\runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 119, in test_schema_and_paths_precede_acquire_then_supervise_consumer
+    sealed, raw = self._fixture(Path(temporary))
+                  ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_native_launcher_transaction.py", line 89, in _fixture
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_intermediate_reparse_point_is_rejected (tests.test_request_path_authority.RequestPathAuthorityTests.test_intermediate_reparse_point_is_rejected)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_request_path_authority.py", line 344, in test_intermediate_reparse_point_is_rejected
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_leaf_directory_symlink_is_rejected (tests.test_request_path_authority.RequestPathAuthorityTests.test_leaf_directory_symlink_is_rejected)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_request_path_authority.py", line 320, in test_leaf_directory_symlink_is_rejected
+    sealed = authority._seal_project_policy_for_test(
+        policy, allow_mod_root_junctions=(policy.mod_roots[0],)
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_leaf_mount_point_under_allowed_root_accredits_destination_identity (tests.test_request_path_authority.RequestPathAuthorityTests.test_leaf_mount_point_under_allowed_root_accredits_destination_identity)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_request_path_authority.py", line 256, in test_leaf_mount_point_under_allowed_root_accredits_destination_identity
+    sealed = authority._seal_project_policy_for_test(
+        policy, allow_mod_root_junctions=(policy.mod_roots[0],)
+    )
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_leaf_mount_point_under_disallowed_root_is_rejected (tests.test_request_path_authority.RequestPathAuthorityTests.test_leaf_mount_point_under_disallowed_root_is_rejected)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_request_path_authority.py", line 294, in test_leaf_mount_point_under_disallowed_root_is_rejected
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_mcp_absolute_mod_inside_mod_roots_is_accepted (tests.test_request_path_authority.RequestPathAuthorityTests.test_mcp_absolute_mod_inside_mod_roots_is_accepted)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_request_path_authority.py", line 376, in test_mcp_absolute_mod_inside_mod_roots_is_accepted
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_mcp_absolute_mod_outside_mod_roots_is_rejected (tests.test_request_path_authority.RequestPathAuthorityTests.test_mcp_absolute_mod_outside_mod_roots_is_rejected)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_request_path_authority.py", line 361, in test_mcp_absolute_mod_outside_mod_roots_is_rejected
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_regular_tree_is_pinned_until_context_exit (tests.test_request_path_authority.RequestPathAuthorityTests.test_regular_tree_is_pinned_until_context_exit)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_request_path_authority.py", line 99, in test_regular_tree_is_pinned_until_context_exit
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_relative_mod_must_resolve_under_exactly_one_root (tests.test_request_path_authority.RequestPathAuthorityTests.test_relative_mod_must_resolve_under_exactly_one_root)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_request_path_authority.py", line 149, in test_relative_mod_must_resolve_under_exactly_one_root
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_replaced_root_identity_fails_closed (tests.test_request_path_authority.RequestPathAuthorityTests.test_replaced_root_identity_fails_closed)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_request_path_authority.py", line 132, in test_replaced_root_identity_fails_closed
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+ERROR: test_semantic_policy_cannot_be_mixed_with_foreign_sealed_roots (tests.test_request_path_authority.RequestPathAuthorityTests.test_semantic_policy_cannot_be_mixed_with_foreign_sealed_roots)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_request_path_authority.py", line 163, in test_semantic_policy_cannot_be_mixed_with_foreign_sealed_roots
+    sealed = authority._seal_project_policy_for_test(policy)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 361, in _seal_project_policy_for_test
+    mod_roots = tuple(
+                ^^^^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 362, in <genexpr>
+    _capture_root_for_test(
+    ~~~~~~~~~~~~~~~~~~~~~~^
+        path,
+        ^^^^^
+        allow_root_junction=_normal_path(path) in allowed,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 323, in _capture_root_for_test
+    item = _open_directory(prefix, follow_root_reparse=False)
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 203, in _open_directory
+    _invalid()
+    ~~~~~~~~^^
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\dayz_mcp\request_path_authority.py", line 123, in _invalid
+    raise ValueError("invalid_dayz_test_path_authority")
+ValueError: invalid_dayz_test_path_authority
+
+======================================================================
+FAIL: test_run_daemon_candidate_wave_and_cross_port_publish_one_generation (tests.test_bug046_startup_deadlock.DaemonStartupElectionProcessTest.test_run_daemon_candidate_wave_and_cross_port_publish_one_generation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_bug046_startup_deadlock.py", line 998, in test_run_daemon_candidate_wave_and_cross_port_publish_one_generation
+    self.assertEqual(len(payloads), 1, errors)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 != 1 : ['pid=35392;rc=75;stderr=DAEMON: startup election is owned but no healthy daemon is available\n', 'pid=38180;rc=75;stderr=DAEMON: startup election is owned but no healthy daemon is available\n', 'pid=2252;rc=1;stderr=Traceback (most recent call last):\n  File "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Lib\\site-packages\\psutil\\_pswindows.py", line 768, in cmdline\n    return cext.proc_cmdline(self.pid, use_peb=True)\n           ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^\nPermissionError: [WinError 5] Acceso denegado: \'(originated from OpenProcess)\'\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Lib\\site-packages\\psutil\\_pswindows.py", line 666, in wrapper\n    return fun(self, *args, **kwargs)\n  File "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Lib\\site-packages\\psutil\\_pswindows.py", line 684, in wrapper\n    return fun(self, *args, **kwargs)\n  File "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Lib\\site-packages\\psutil\\_pswindows.py", line 771, in cmdline\n    return cext.proc_cmdline(self.pid, use_peb=False)\n           ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^\nPermissionError: [WinError 5] Acceso denegado: \'(originated from OpenProcess)\'\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\identity_migration.py", line 734, in scan_dayz_mcp_processes\n    argv = process.cmdline()\n  File "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Lib\\site-packages\\psutil\\__init__.py", line 748, in cmdline\n    return self._proc.cmdline()\n           ~~~~~~~~~~~~~~~~~~^^\n  File "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Lib\\site-packages\\psutil\\_pswindows.py", line 668, in wrapper\n    raise convert_oserror(err, pid=self.pid, name=self._name) from err\npsutil.AccessDenied: (pid=27620, name=\'python.exe\')\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File "<frozen runpy>", line 198, in _run_module_as_main\n  File "<frozen runpy>", line 88, in _run_code\n  File "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\__main__.py", line 7, in <module>\n    raise SystemExit(run())\n                     ~~~^^\n  File "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py", line 5403, in run\n    return daemon.run_daemon(config)\n           ~~~~~~~~~~~~~~~~~^^^^^^^^\n  File "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\fixtures\\dayz_mcp\\sitecustomize.py", line 182, in fixture_run_daemon\n    return original_run_daemon(config)\n  File "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\daemon.py", line 1445, in run_daemon\n    _ensure_identity_migration_after_candidate_drain(\n    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        config, deadline=startup_deadline\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\daemon.py", line 252, in _ensure_identity_migration_after_candidate_drain\n    _ensure_identity_migration(config)\n    ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^\n  File "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\fixtures\\dayz_mcp\\sitecustomize.py", line 138, in fixture_migration\n    for pid in scan_dayz_mcp_processes(identity, ancestor)\n               ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^\n  File "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\identity_migration.py", line 738, in scan_dayz_mcp_processes\n    raise RunsBackupGateError("process_scan_incomplete") from error\ndayz_mcp.identity_migration.RunsBackupGateError: process_scan_incomplete\n', 'pid=5192;rc=75;stderr=DAEMON: startup election is owned but no healthy daemon is available\n', 'pid=39612;rc=75;stderr=DAEMON: startup election is owned but no healthy daemon is available\n', 'pid=14860;rc=75;stderr=DAEMON: startup election is owned but no healthy daemon is available\n']
+
+======================================================================
+FAIL: test_require_names_every_tried_tools_root_when_none_exist (tests.test_dayz_tools_paths.DayZToolsPathsTest.test_require_names_every_tried_tools_root_when_none_exist)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_dayz_tools_paths.py", line 165, in test_require_names_every_tried_tools_root_when_none_exist
+    self.assertIn(str(DEFAULT_TOOLS_ROOT), message)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ Tools' not found in 'dayz_tools_not_found: tried E:\\Missing\\DayZ Tools; c:\\program files (x86)\\steam\\steamapps\\common\\DayZ Tools; set DAYZ_TOOLS_PATH to the DayZ Tools directory'
+
+======================================================================
+FAIL: test_architecture_tool_count_matches_instantiated_app (tests.test_install_mcp.PublicToolCountDocsTest.test_architecture_tool_count_matches_instantiated_app)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_install_mcp.py", line 1334, in test_architecture_tool_count_matches_instantiated_app
+    self.assertIn(formula, architecture)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: '61 tools (+ `exec_enforce` when an allowlist is configured)' not found in '# DayZ-MCP � Arquitectura (end-goal)\n\n> **Objetivo:** un servidor MCP que expone DayZ (DayZDiag) como **tools tipadas**, para que un\n> agente conduzca el juego y extraiga datos estructurados � server-authoritative, **sin teclas\n> SO ni OCR**. (La captura visual es engine-native SI `MakeScreenshot` funciona en el exe diag;\n> si no, cae a window-grab del cliente � ver �6 y el caveat T165276.)\n> **Base:** 2 workflows de investigaci�n (\u22482.5M tokens) + spot-check directo de Claude sobre\n> cada API load-bearing (le�das en el source vanilla bajo `<vanilla scripts root>`).\n> Generado 2026-06-06 como documento de dise�o. **Implementado y en produccion desde\n> entonces**: el servidor expone hoy 60 tools y el puente va por `MCP_BRIDGE_VERSION = "10"`.\n> Esto queda como el dise�o original � util para entender por que las piezas son como son,\n> no como descripcion del estado actual. Para eso, `README.md` (superficie de tools) y el\n> bloque LIVE-STATE de `HANDOFF.md`.\n\n---\n\n## Resultado del probe in-game (2026-06-06) � `MakeScreenshot` descartado\n\n> **Verificado end-to-end por Claude** (no solo T165276): mod client-side `@MCPTest`\n> (`modded MissionGameplay`) cargado en el **exe diag** v�a filepatching, player in-game\n> (`SurvivorM_Francis`), `MakeScreenshot("$profile:mcpshot.dds")` + default llamados 2� \u2192\n> **cero `.dds`** en barrido exhaustivo (`%localappdata%\\DayZ`, Documents, profiles cliente/\n> server, game dir; ni la carpeta `ScreenShots` se crea). **`MakeScreenshot` es no-op tambi�n\n> en DayZDiag**, no solo en retail.\n> \u2192 **Decisi�n cerrada:** la captura visual del MCP usa **window-grab del cliente renderizado**\n> (screen-grab del SO / computer-use, *pasivo* � leer pixeles, no inyectar input). NO afecta al\n> control ni a los datos (siguen engine-native); solo a la captura.\n> **RenderTarget descartado como alternativa (verificado en source):** `RenderTargetWidget`\n> (enwidgets.c:236) es display-only � solo `SetRefresh`/`SetResolutionScale`, **sin readback a\n> archivo**; el wrapper `RenderTarget` (rendertarget.c) es `#ifdef GAME_TEMPLATE`. Un barrido del\n> source confirma que `MakeScreenshot` (proto.c:142, roto) era la **�nica** captura-a-disco del\n> engine. \u2192 **window-grab del cliente renderizado es la �nica v�a visual.**\n> **RestApi tampoco (misma ra�z):** `RestContext.POST` env�a un `string` y `ReadFile`\n> (ensystem.c:425) lee bytes raw del disco � el transporte existe; pero **ninguna API de script\n> materializa la vista renderizada** como archivo/bytes (`MakeScreenshot` roto, `RenderTargetWidget`\n> sin readback). El framebuffer est� fuera del alcance del script \u2192 por eso el window-grab es\n> **externo** (SO), no script. El RestApi s� es la columna ideal para todo lo NO-visual (datos/telemetr�a/raycast \u2192 JSON).\n> El probe qued� reutilizable en `MCPTest/` (mod + `mcp-shot-test.ps1`) como\n> plantilla de "test client-side aut�nomo".\n>\n> **Window-grab CONFIRMADO viable (probe 2026-06-06):** `Graphics.CopyFromScreen` (PowerShell,\n> sin grant ni computer-use) captur� el display con contenido real (meanB 65, nbRatio 0.999) con el\n> cliente in-game \u2192 la captura visual del MCP **es viable**. **Pendiente afinar la selecci�n de\n> ventana**: el primer intento us� `MainWindowHandle` y cogi� la ventana equivocada (rect 868�517,\n> captur� parte del escritorio, no solo el render). Fix: enumerar las top-level windows del proceso\n> cliente y elegir la de t�tulo "DayZ"/tama�o de juego, **o** `PrintWindow(hwnd)` (caveat: apps\n> DirectX a veces devuelven negro con PrintWindow). Mecanismo validado; queda la punter�a.\n\n---\n\n## 1. El modelo mental correcto: 3 actores (no 1)\n\nEl error tentador es pensar "un peer server-authoritative que hace todo". **No.** El render de\nDayZ es client-only, as� que hay **tres** actores y el mod-puente cose dos de ellos:\n\n| Actor | Qu� es | Qu� ejecuta |\n|---|---|---|\n| **MCP server** | Proceso externo (Python+FastMCP, stdio). Es adem�s el **HTTP server** al que el mod llama. | Traduce tools MCP \u2194 comandos; mantiene la sesi�n; convierte DDS\u2192PNG. |\n| **CONTROL peer** | `MissionServer` (server diag) | spawn/seat/drive/world/weather � **sin renderer** |\n| **CAPTURE peer** | `DayZDiag_x64` cliente (renderer activo) | c�mara + captura + scene-query visual |\n\nImplicaci�n dura: **una build server-only (CI headless) NO puede capturar** � `MakeScreenshot`/\n`SetCamera` no producen nada sin renderer. La captura exige un cliente renderizado. Los datos\n(spawn, telemetr�a, raycast) s� salen server-only.\n\n---\n\n## 2. Cimientos verificados (Claude ley� el source esta sesi�n)\n\nTodas con cita `file:line`. Guard: `�` = unguarded (vanilla); `DIAG` = requiere `DayZDiag_x64 -define=DIAG_DEVELOPER`.\n\n**Llegar a un player controlable** (CONTROL):\n- `proto native int Connect(UIScriptedMenu parent, string IpAddress, int port, string password)` � game.c:251 `�`\n- `OnClientNewEvent(PlayerIdentity, vector pos, ParamsReadContext)` � missionserver.c:536 `�`\n- `CreateCharacter(PlayerIdentity, vector pos, ParamsReadContext, string name)` � missionserver.c:486 `�`\n- `InvokeOnConnect(PlayerBase, PlayerIdentity)` � missionserver.c:422 `�` (gate de "controlable")\n\n**Escenario** (CONTROL):\n- `CreateObjectEx(string type, vector pos, int iFlags, int iRotation)` � game.c:702 `�`\n- `World.SetDate(...)` � usado en tu autospawn_init.c:15 � `World.SetTimeMultiplier(float)` � world.c:19 `�`\n- `WeatherPhenomenon` � weather.c:28 `�`\n\n**Veh�culo** (CONTROL):\n- `StartCommand_Vehicle(Transport, posIdx, seat, bool)` � human.c:1492 `�` (asiento conductor = `(t,0,0)`)\n- `Car.SetThrottle/SetSteering/SetBrake/ShiftTo` � car.c:202/196/214/271 `�`\n- `IsGettingIn()` / `IsGettingOut()` � human.c:705/706 `�` (predicado de "ya sentado")\n\n**C�mara + captura** (CAPTURE � client-only):\n- `SetCameraEx(int cam, const vector mat[4])` � enworld.c:56 `�` (pose por matriz)\n- `GetCamera(int cam, out vector mat[4])` � enworld.c:59 `�` (lee pose, conserva roll)\n- `MakeScreenshot(string name)` � proto.c:142 `�` \u26a0\ufe0f **el proto existe pero el runtime se reporta ROTO** ([T165276](https://feedback.bistudio.com/T165276): crea solo carpeta vac�a en cliente retail, reproducido hasta 1.19; quiz� solo el exe **diag**). **NO asumir funcional** � fallback de captura en �6.\n- `SetWidgetWorld(RenderTargetWidget, world, int camera)` � enwidgets.c:705 `�` (render off-screen multi-cam; salida a textura, extracci�n a archivo tambi�n a validar)\n\n**Transporte + serializaci�n + escape**:\n- `RestContext.GET(RestCallback, request)` / `POST(RestCallback, request, data)` � restapi.c:103/123 `�` (**async, no bloqueante**)\n- `RestContext.GET_now/POST_now` � restapi.c:108/128 `�` (**bloqueante � NO usar en el tick**)\n- `class RestCallback : Managed` � restapi.c:50 `�`\n- `JsonFileLoader<T>.JsonLoadFile/JsonSaveFile` � jsonfileloader.c:105/134 `�` � `JsonSerializer` � gameplay.c:49 `�`\n- `ExecuteEnforceScript(string expr, string mainFnName)` � game.c:776 `�` (send), pero el **resultado** del script-console es `DIAG`\n- Tick hook del loop de comandos: `MissionGameplay.TickScheduler(float)` � missiongameplay.c:216 `�`\n\n---\n\n## 3. Arquitectura de transporte\n\n```\nClaude \u2500\u2500stdio/JSON-RPC\u2500\u2500> MCP server (Python+FastMCP)\n                              \u2502  (es tambi�n un HTTP server local en 127.0.0.1)\n              mod hace HTTP async \u2191 pull comandos / push resultados\n                              \u2502\n   @DayZ_MCP_Bridge (Enforce) \u2500\u2500 dispatch en TickScheduler \u2500\u2500> CONTROL APIs (server)\n                              \u2514\u2500\u2500 reenv�a a \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500> CAPTURE APIs (client, v�a RPC/SyncVar)\n```\n\n- **MCP\u2194Claude:** stdio (JSON-RPC, single-user local, cero red, patr�n Blender/Unreal MCP).\n- **MCP\u2194mod:** HTTP v�a `RestApi`, pero el lado in-game usa los callbacks **async** `GET()/POST()`\n  (restapi.c:103/123), **nunca** `*_now` dentro del tick (son *thread-blocking* � congelar�an el\n  sim 60 Hz por el RTT). El mod **pull**ea comandos y **push**ea resultados; el MCP server es el\n  HTTP endpoint.\n- **Fallback:** file-bridge (`OpenFile`/`FGets`/`FPrintln`, ensystem.c) para 100% offline/CI.\n  Ojo regla OneDrive race del proyecto: el file-bridge va fuera de OneDrive.\n\n---\n\n## 4. Tool surface (60 tools (+ `exec_enforce` when an allowlist is configured))\n\nEl recuento sale de `tools/tests/test_install_mcp.py::PublicToolCountDocsTest`:\n`build_app` \u2192 `app._tool_manager.list_tools()`, sin descartar tools del n�mero\np�blico. El dise�o de 2026-06-06 abajo\nera 11 tools / 6 dominios; eso ya no es la superficie instanciada.\n\n`dayz_test_run` no espera a que el juego est� listo para �parecer �xito�: un arranque\nque no confirma devuelve `status=failed` y `error_code` (no un campo `error`). El\nc�digo concreto viaja en `error_code` (p.ej. `instance_config_missing`); `run_id` no\nes se�al de �xito. No hace falta que cada conductor reinvente un poll de 120 s.\n\nMapeadas a las APIs verificadas. 9 unguarded, 2 `DIAG`. (superficie inicial, 2026-06-06)\n\n- **session:** `session_connect` (Connect + OnClientNewEvent) � `session_status` (player listo?) � `session_disconnect`\n- **world:** `world_spawn` (CreateObjectEx) � `world_time_set` (SetDate/SetTimeMultiplier) � `world_weather_set` (WeatherPhenomenon)\n- **vehicle:** `vehicle_enter` (StartCommand_Vehicle) � `vehicle_drive` (Car.SetThrottle/SetSteering/SetBrake)\n- **scene:** `scene_raycast` (DayZPhysics.RaycastRVProxy + GetCrosshairObject) � "ver" sin pixeles\n- **camera+capture:** `camera_set`/`camera_get` (SetCameraEx/GetCamera) � `capture_screenshot` (MakeScreenshot **o** window-grab fallback \u2192 PNG\u2192base64 ImageContent � ver �6)\n- **exec (breakglass, `DIAG`):** `exec_enforce` (ExecuteEnforceScript) � **solo** para lo no mapeado, con whitelist\n- **telemetry:** `telemetry_read` (XML/CSV del AutoTestFixture / JSON-lines)\n\nPatr�n de dise�o (de prior-art Blender/Unreal MCP): `get_property`/`set_property` gen�ricos donde\nquepa, `status()` antes de mutar, errores de negocio v�a MCP `isError` (no excepci�n de protocolo).\n\n### 4.1 Familia UI (2026-08-19; runs `08343f0c`, `fdf07db7`)\n\nVerbos: `ui_tree`, `ui_set_text`, `ui_click`, `ui_dialog`, `ui_reload_layout`, `ui_focus`.\n`ui_focus` da el foco de teclado a un widget por nombre y responde `ok` solo si\n`GetFocus()` devuelve el que se pidio; un widget sin inputs contesta `found` con\n`focus_not_taken`. Existe porque el relleno del estado Focus de\n`ButtonWidget/EmptyHighlight` no se puede observar de ninguna otra forma sin\nun humano al teclado, y `ui_click` no da foco: llama `OnClick` directamente.\nMedido in-game, no re-derivado.\n\n`ui_reload_layout` recarga un `.layout` desde `$profile:` en el cliente vivo y\ndevuelve los rects del motor. El fichero se relee en **cada** llamada. El prefijo\nde addon lo sirve el PBO y **solo** el PBO. `FileExist` guarda contra un CTD\ndentro de `CreateWidgets`. Un segundo `CreateWidgets` apila en vez de reemplazar.\n\n---\n\n## 5. Readiness protocol (resuelve "�ya est� listo?")\n\nMCP es petici�n/respuesta; DayZ es tick-based y as�ncrono. Cada comando devuelve un **job-id** y el\nmodelo consulta hasta que el **predicado de completitud** se cumple (el mod los eval�a en el tick):\n\n| Comando | Predicado de "listo" |\n|---|---|\n| spawn player | entity existe **AND** `InvokeOnConnect` disparado |\n| seat | `IsGettingIn()==false` + 1-2 ticks de asentamiento |\n| drive | delta de posici�n/`GetSpeedometer()` > umbral |\n| screenshot | archivo existe **AND** size>0 **AND** `GetCamera` == pose comandada |\n\nSin esto, el agente hace blind-poll o `sleep` fijo \u2192 fr�gil. El POC debe traer ya este protocolo.\n\n---\n\n## 6. Pipeline visual (la parte incierta � ver caveat MakeScreenshot)\n\n1. **Condicionar** escena: `SetDate` + `SetTimeMultiplier(0)` + weather despejado \u2192 frame reproducible.\n   \u26a0\ufe0f `SetTimeMultiplier(0)` **congela TODA** la simulaci�n (animaciones incluidas). No congelar\n   mientras se espera una animaci�n (p.ej. get-in) o se deadlockea: condicionar **despu�s** de sentar.\n2. **Encuadrar:** `SetCameraEx(pose)` por �ngulo (orbital), `GetCamera` para medir/registrar.\n3. **Capturar � INCIERTO:** intentar `MakeScreenshot` \u2192 **DDS** (salida observada en\n   `%localappdata%\\DayZ\\ScreenShots\\`, nombre con timestamp, no determinista). \u26a0\ufe0f **Reportado\n   no-funcional** en cliente retail (crea la carpeta vac�a, [T165276](https://feedback.bistudio.com/T165276));\n   incierto en el exe **diag** (un reporte sugiere que solo ah� funcionaba). **Fallback fiable si\n   falla: captura de ventana externa** del cliente renderizado (screen-grab nativo / computer-use) �\n   reintroduce dependencia de ventana, pero NO de teclas SO. **El POC visual decide cu�l sirve; no\n   construir la fase visual sobre `MakeScreenshot` hasta confirmarlo in-game.**\n4. **Entregar:** si la fuente es DDS \u2192 conversi�n **out-of-band** en el host (Pillow/ImageMagick):\n   DDS\u2192PNG, downscale <1 MB (l�mite ImageContent), base64 \u2192 MCP `ImageContent`. Si es window-grab,\n   ya es PNG. No hay encoder PNG in-engine.\n5. **Multi-cam off-screen** (a validar): `SetWidgetWorld` + `RenderTargetWidget` para varias c�maras\n   sin mover la del player � pero la extracci�n de esa textura a archivo tambi�n est� sin verificar.\n\nRiesgo de **stale-frame**: el render puede ir 1-2 frames por detr�s del `SetCameraEx`; gate por\nestabilidad antes de capturar o la imagen "medida" miente.\n\n### 6.1 Resoluci�n entregable y zoom (upgrade 2026-06-28)\n\nEl techo de ~25k tokens por respuesta de tool (CONFLICT-1, Claude Code #9152) limita el **payload\nbase64**, no los p�xeles. Calibrado offline sobre un grab real (`fase3-evidence-subject.png`,\n1302�776 nativo):\n\n| V�a | Ancho �til dentro de 25k tokens |\n|---|---|\n| PNG (legacy) | **199 px** \u2190 por esto las capturas eran ilegibles |\n| JPEG q82 (default nuevo) | **588 px** |\n| JPEG q70 | ~704 px |\n\nCuatro palancas, todas dentro del mismo presupuesto:\n\n1. **JPEG en vez de PNG** (default). Un frame foto-realista comprime ~5-8� mejor. `image/jpeg`\n   es v�lido como ImageContent; PNG sigue seleccionable (`fmt="png"`).\n2. **`crop`** (`"center"`, `"center:0.4"`, o bbox normalizada `"l,t,r,b"`) � recorta ANTES del\n   downscale a presupuesto \u2192 gasta todo el presupuesto en el sujeto (zoom de software). Fail-open:\n   spec inv�lida devuelve el frame entero, nunca se pierde la captura.\n3. **Zoom �ptico in-game** v�a `camera_set(fov=...)`. **Patr�n de dos disparos**: wide (`fov\u224870`)\n   para verdict de encuadre/orientaci�n + tight (`fov\u224825-35` o acercar `cam_pos`) para detalle.\n   El tight llena el frame con el sujeto a resoluci�n nativa antes de cualquier downscale \u2192\n   detalle sin p�rdida por compresi�n. Mejor que `crop` cuando el sujeto es peque�o en el wide.\n4. **Canal dual (`save_fullres=True`)** � escribe el frame full-res a disco y devuelve su ruta en\n   un bloque de texto JSON junto al thumbnail inline. El cap de 25k es solo sobre la salida del\n   tool; el agente abre el JPEG full-res por el canal de lectura de imagen normal \u2192 **detalle\n   ilimitado para el verdict fino**, thumbnail min�sculo para el vistazo r�pido. Destino:\n   `save_dir` > `$DAYZ_MCP_CAPTURE_DIR` > `<temp>/dayz_mcp_captures` (ruta absoluta).\n\nDefault sin `save_fullres` devuelve un �nico `Image` (ahora JPEG) � backward-compatible.\n\n---\n\n## 7. Seguridad � fail-closed desde el d�a 1 (no fase final)\n\n`RestApi` habla con URLs arbitrarias **sin auth**, y el send-path de `ExecuteEnforceScript`\n(playerbase.c:5698) ejecuta Enforce arbitrario server-side. Combinado = agujero de\nserver-takeover. Por R6 (fail-closed), de salida:\n\n- **Bind 127.0.0.1** (nunca 0.0.0.0); fallar si no se puede constatar el binding.\n- **API-key/token** por request (header `Authorization`); rechazar si falta.\n- **Whitelist de comandos**; `exec_enforce` solo con allowlist de s�mbolos, tratado como breakglass\n  auditado, no como tool universal (invita al modelo a saltarse las tools tipadas \u2192 mutaciones no auditables).\n- Pinear un **snapshot de `ERPCs`** + hash de versi�n DayZ y validar en el handshake (los opcodes RPC\n  son posicionales; un parche vanilla que inserte un enum desplaza todos y misrutea en silencio).\n\n---\n\n## 8. Plan de build por fases\n\n| Fase | Entrega | Esfuerzo | Desbloquea |\n|---|---|---|---|\n| **0. POC** \u2b50 | round-trip **async no bloqueante** + readiness ACK, server-only: `query_player_state` \u2192 mod despacha por callback `RestApi` desde TickScheduler \u2192 devuelve posici�n con correlation-id | ~1 sem | de-risca lo cr�tico: transporte sin bloquear el tick + protocolo de readiness |\n| 1. Control | `world_spawn` + `vehicle_enter` (con `IsGettingIn`) + `vehicle_drive` | med | escenario + conducir sin input SO |\n| 2. Observaci�n | `scene_raycast` + `telemetry_read` (verdict sin pixeles) | low | tests headless |\n| 3. Visual | c�mara + `capture_screenshot` � **primero resolver MakeScreenshot vs window-grab** (ver �6); necesita cliente renderizado | med\u2192alto | "ver" multi-�ngulo |\n| 4. MCP completo | tool surface entera + security + packaging/install | med | el end-goal |\n\n**El POC (fase 0) es el de mayor leverage**: si el round-trip async + readiness funciona sin\nestancar el sim, el resto es ingenier�a sobre APIs ya verificadas. Es el primer in-game test real.\n**Mover la decisi�n MakeScreenshot/window-grab a un mini-test temprano** (barato: una llamada +\nmirar la carpeta) para no dise�ar la fase 3 sobre una API rota.\n\n---\n\n## 9. Riesgos y l�mites honestos\n\n- **`MakeScreenshot` reportado roto** ([T165276](https://feedback.bistudio.com/T165276)): carpeta vac�a en retail \u2192 la captura puede tener que caer a **window-grab externo** (rompe el "sin captura de ventana"; control/datos siguen native). Confirmar en un mini-test antes de la fase 3.\n- **Bloqueo del loop:** `*_now` en el tick congela 60 Hz por el RTT \u2192 usar callbacks async. (decidido)\n- **Headless no captura:** server-only no rinde \u2192 la fase visual exige cliente con renderer.\n- **Time-freeze deadlock:** `SetTimeMultiplier(0)` para animaciones pendientes \u2192 ordenar conditioning.\n- **DIAG_DEVELOPER asim�trico:** el *resultado* de `exec_enforce` (script-console) es `#ifdef DIAG_DEVELOPER` (scriptconsoleenfscripttab.c:208) aunque el send sea `#ifdef DEVELOPER` \u2192 el harness exige build `DIAG_DEVELOPER`.\n- **Stale-frame** en screenshots (best-of-N por frame-diff: `choose_stable_frame` elige el frame de menor delta adyacente; no hay umbral de rechazo).\n- **Version drift** de opcodes RPC (pinear + validar en handshake).\n- **BattlEye / filePatching** en loops de hot-reload (0x00020005) � ya cubierto por tu infra diag.\n- **Concurrencia:** una instancia DayZDiag = un due�o; sin lock, dos tool-calls corrompen estado/c�mara.\n\n---\n\n## 10. Nivel de verificaci�n\n\n- **Verificado por Claude** (le�do en source esta sesi�n, el proto existe): TODAS las APIs de �2 � Connect, OnClientNewEvent/CreateCharacter/InvokeOnConnect, CreateObjectEx, SetTimeMultiplier, StartCommand_Vehicle, Car setters, IsGettingIn, SetCameraEx/GetCamera, SetWidgetWorld, RestApi GET/POST async y `*_now`, RestCallback, JsonFileLoader/JsonSerializer, ExecuteEnforceScript, TickScheduler. **`MakeScreenshot`: el proto existe (proto.c:142) pero su RUNTIME se reporta roto � ver abajo.**\n- **De W2 (subagentes) + prior-art web, NO re-verificado por m�:** los patrones MCP (Blender/Unreal/Unity/Godot), l�mites de ImageContent (<1 MB), y los comportamientos runtime (latencia por tick, frame-lag de captura, `WeatherPhenomenon.Set`).\n- **Reportado roto por fuente externa (verificado por el usuario):** `MakeScreenshot` � feedback tracker [T165276](https://feedback.bistudio.com/T165276) (carpeta vac�a en retail hasta 1.19; posible solo en diag). El dise�o lleva fallback window-grab.\n- **A confirmar in-game (no verificable offline):** latencia del round-trip async; que el cliente diag spawnee controlable v�a `Connect` program�tico; que la captura refleje la pose sin lag; y **si `MakeScreenshot` funciona en el exe diag** (mini-test temprano).\n\nEl primer gate real es el **POC (fase 0)**; la inc�gnita `MakeScreenshot` se resuelve con un mini-test aparte antes de la fase 3.\n'
+
+======================================================================
+FAIL: test_readme_tool_count_matches_instantiated_app (tests.test_install_mcp.PublicToolCountDocsTest.test_readme_tool_count_matches_instantiated_app)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_install_mcp.py", line 1292, in test_readme_tool_count_matches_instantiated_app
+    self.assertIn(formula, readme)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+AssertionError: '61 tools (+ `exec_enforce` when an allowlist is configured)' not found in '# DayZ-MCP\n\n**An MCP server that puts an agent\'s hands on a running DayZ: build a mod, launch the\ngame, put the world into a state, act, and read back what the engine did � 60 typed\ntools, server-authoritative, no keyboard, no OCR.**\n\nTwo things fall out of that, and both are new for this game:\n\n- **The autonomous mod-development loop closes.** Editing Enforce Script, config.cpp\n  and models is file work; packing a PBO is a command. What could not be automated was\n  the part that decides whether the change actually works � getting the game up with\n  the mod loaded, putting a player, a vehicle or an object into the exact situation the\n  change is about, and reading the result. That step was a human at the client.\n  DayZ-MCP makes it tool calls: an agent can now change, build, run, measure and fix a\n  mod on its own.\n- **An agent can run a server.** The same verbs that set up a test scene are the ones\n  an event director or an admin needs: see every player, teleport one, spawn or remove\n  something, change time and weather, message everyone, watch the log, wait for a\n  condition � all through `MissionServer`, all serialized behind one daemon with leases\n  and an audit trail. Point an agent at a server and it can *operate* it, not just\n  query it.\n\nThe verbs are also useful one at a time � spawn a car and read its telemetry, grab a\nframe, raycast a placement, record a 20 Hz drive trace as a regression fixture\n(`tools/dayz_mcp/vehicle_trace.py:17`).\n\n## The development loop, as tools\n\n| Step | Tool(s) | What it does |\n|---|---|---|\n| **Build + launch** | `dayz_test_run(project, mode, build=True, �)` | Packs the mod with AddonBuilder, starts a diag server and/or client with it loaded, waits for readiness. Managed run, returns a `run_id`. |\n| **Set up the scene** | `world_spawn`, `player_teleport`, `vehicle_enter`, `inventory_give`, `world_time_set`, `world_weather_set`, `engine_set` | Put the world into the state the test needs � deterministically, from script. |\n| **Act** | `vehicle_control`, `object_anim`, `camera_set`, `notify_players` | Drive, animate, frame the shot. |\n| **Iterate the UI** | `ui_reload_layout`, `ui_tree`, `ui_dialog`, `capture_screenshot` | Reload a `.layout` written into the client\'s profile directory and read back the rectangles the engine computed for it. The file is re-read on every call, so a panel can be edited and re-measured in seconds instead of one repack-and-boot per change. `ui_dialog` is the client modal (acknowledge/confirm/form) for the local player. |\n| **Observe** | `wait_for`, `logs_since`, `query_player_state`, `object_inspect`, `vehicle_telemetry`, `vehicle_trace`, `scene_raycast`, `surface_query`, `capture_screenshot` | Structured state from the server, log tails since a cursor, 20 Hz vehicle traces, raycasts, frames. Data an agent can assert on, not pixels to squint at. |\n| **Reset + repeat** | `restore_gameplay`, `dayz_test_stop`, `session_acquire_wait`, `session_release`, `session_status` | Return the world to normal, stop the managed run, hand the game to the next session. |\n\nAn agent that can call these can iterate on a mod the way it iterates on code: change,\nbuild, run, measure, fix � the way this repo itself was developed and gated.\n\n## The server, as tools\n\n| Need | Tool(s) |\n|---|---|\n| Who is online, where, in what state | `query_all_players`, `query_player_state`, `object_inspect` |\n| Move, equip, stage | `player_teleport`, `inventory_give`, `world_spawn`, `object_delete`, `object_anim`, `vehicle_prepare_fixture` |\n| Set the stage | `world_time_set`, `world_weather_set`, `engine_set` |\n| Talk to players | `notify_players` |\n| Watch | `logs_since` (tail from a cursor), `wait_for` (block on a condition or a log substring), `telemetry_read`, `vehicle_telemetry` |\n| Undo, hand over | `restore_gameplay`, `session_acquire_wait` / `session_release` / `session_status` |\n\nEverything server-side works against a headless server � it returns data, not frames.\nVisual capture (`capture_screenshot`, `camera_get`, `camera_set`) needs a rendered\nclient on the same machine. Several agents can share one running game: the daemon\nowns the port, hands out one lease at a time and audits what each holder did.\n\n## How it works\n\nControl and data are **engine-native and server-authoritative**: `CreateObjectEx`,\n`StartCommand_Vehicle`, the `Car` setters, `RaycastRVProxy`, `SetTimeMultiplier`,\nread back in `MissionServer`. No synthesised keystrokes, no OCR. The one exception is\nvisual capture � `MakeScreenshot` is broken in the diag build (T165276), so frames\ncome from an external window grab of the rendered client, which only reads pixels.\n\n**60 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,\nvehicle, camera, telemetry, lifecycle, knowledge and session coordination:\n`action_use`, `bridge_status`, `camera_get`, `camera_set`, `capture_screenshot`,\n`dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `infected_drive`, `inventory_give`, `key_press`,\n`lease_acquire`, `list_projects`, `logs_since`, `notify_players`, `object_anim`,\n`object_delete`, `object_inspect`, `pipeline_feedback`, `pipeline_inbox`,\n`pipeline_resolve`, `playbook_run`, `player_respawn`, `player_teleport`, `query_all_players`, `query_get_in_condition`,\n`query_player_state`, `restore_gameplay`, `scene_raycast`, `session_acquire`,\n`session_acquire_wait`, `session_cancel`, `session_heartbeat`, `session_release`,\n`session_status`, `session_wait`, `surface_query`, `telemetry_read`, `ui_click`, `ui_dialog`, `ui_focus`, `ui_reload_layout`,\n`ui_set_text`, `ui_tree`, `vehicle_control`, `vehicle_enter`, `vehicle_get_in_client`,\n`vehicle_prepare_fixture`, `vehicle_release`, `vehicle_telemetry`, `vehicle_trace`,\n`wait_for`, `world_spawn`, `world_time_set`, `world_weather_set`.\nSeveral agent sessions can share one running game through a single daemon that owns\nthe port and hands out leases. The full surface, the transport and the security\nmodel are in [`dayz-mcp-architecture.md`](dayz-mcp-architecture.md);\nthe acceptance contract is in [`product-spec.md`](product-spec.md).\n\n## In-game numbers\n\n**A1.** `query_player_state` against an independent mission marker (`target=marker`): **0.0313 m**, pass line < 0.5 m (`product-spec.md:42`).\n\n**A2.** Python held `/poll` for 600 ms; `ticks_in_flight` = **4741** (run_045213). Pass line \u2265 5 (`product-spec.md:43`).\n\n**Infected heading.** `infected_drive` at 90�: authoritative heading **92.1�** (error 2.1�). Run `1a1cb6e1-7230-43c4-9164-41ab3b0be936` (`tools/tests/test_task9_spawn_phase_markers.py:101-105`). Same run: 76.6 m away from a player at 0.95 m; 270� measured **270.1�**, 41.7 m in 46 s, 0.02 m lateral; `mode="release"` returns vanilla AI (171.7�, 0.25 m/s).\n\n**B3.** Fixture ready, throttle 1.0, PHYSICS: `engine_on_server=1`, `speedo\u22480`, `pos_delta\u22480` (`product-spec.md:56`). `ActionStartEngine` returns on `INSTANCETYPE_SERVER` when PHYSICS (`actionstartengine.c:51-58`). Cars are not driven from `MissionServer` (`product-spec.md:325`). Cars move from the owning client (`vehicle_control`).\n\n## What this cannot do, and why\n\n### What this is NOT\n\nDayZ-MCP is a local control and observation surface, not a hosted knowledge service.\n\n- It does not require embeddings, a vector store, or a paid service.\n- It does not use OCR to interpret the game.\n- It does not call `SendInput` or synthesize operating-system keystrokes.\n- It sends no usage analytics or other telemetry; runtime game telemetry is read locally.\n- It includes no integrated knowledge database.\n\n**Visual capture is not engine-native.** `MakeScreenshot` exists as a proto (`proto.c:142`) and is a no-op on DayZDiag as well as retail ([T165276](https://feedback.bistudio.com/T165276)). Probe 2026-06-06: `MakeScreenshot("$profile:mcpshot.dds")` twice, zero `.dds` anywhere, `ScreenShots` folder never created (`dayz-mcp-architecture.md:17-24`). `RenderTargetWidget` is display-only � no readback to file or bytes (`dayz-mcp-architecture.md:28-32`). Frames come from an external window-grab of the rendered client (`Graphics.CopyFromScreen`; first probe meanB 65, nbRatio 0.999 � `dayz-mcp-architecture.md:41-42`). That grab is the only non-native piece in the stack. A headless server returns data, not pixels (`dayz-mcp-architecture.md:62-64`; `product-spec.md:162-163`).\n\n**The API key cannot go in an HTTP header.** `RestContext.SetHeader(string)` sets Content-Type only (`restapi.c:135-141`; `tools/README-mcp.md:7`). The key travels as `?key=` (`addon/scripts/5_Mission/MCPBridge.c:226`). The listener binds `127.0.0.1`; there is no `0.0.0.0` mode and no remote mode (`product-spec.md:168`).\n\n**`SetTimeMultiplier(0)` freezes the entire simulation**, animations included (`world.c:19`; `dayz-mcp-architecture.md:185-187`). Condition lighting and weather after seating and animations have finished, not before a pending get-in.\n\n**`infected_drive` `speed` is not metres per second.** `speed=3` measured **0.91 m/s** (`tools/tests/test_task9_spawn_phase_markers.py:105`). The scale is uncalibrated.\n\n**PHYSICS cars do not move from the server.** See the B3 probe above. `vehicle_control` is the client-owner path.\n\n**`exec_enforce` does not execute on a headless diag server.** `ExecuteEnforceScript` is marked Developer-only (`game.c:776`) and returned `false` under `NO_GUI`, including with the vanilla script-console wrapper (`product-spec.md:171-177`). Allowlist gating and JSONL audit are verified in-game; script effect is not a contract. The tool is opt-in breakglass, not a general interpreter (`product-spec.md:167`).\n\n**`wait_for` and `logs_since` read script logs and `.RPT` only.** Player chat is not in those files. With `-adminlog`, chat lands in a profiles `.ADM` that no tool reads (`tools/README-mcp.md:128`). `wait_for` on timeout still returns `ok: true` with `satisfied: false` � gate on `satisfied` (`tools/README-mcp.md:124`). Its `pattern` is a plain substring, never a regex: `[DayZ-MCP]`, not `\\[DayZ-MCP\\]` (`tools/README-mcp.md:126`). For a line printed at mission start, pass `lookback_from="launch"`; `lookback_lines` cannot reach that far back.\n\n**Synchronous RestApi calls block the sim.** `POST_now` is documented as a thread-blocking operation (`restapi.c:125-128`). The bridge uses callback `GET`/`POST` only (`dayz-mcp-architecture.md` �9, "Bloqueo del loop").\n\n**No OS keystrokes, no OCR, no second game process.** Control is `CreateObjectEx` / `StartCommand_Vehicle` (`dayz-mcp-architecture.md:79`, `dayz-mcp-architecture.md:84`) / `MissionServer` reads. No OS input (`product-spec.md:160-161`). Several agent sessions share one running instance through one daemon (`product-spec.md:164-166`).\n\n**Not tested:**\n\n- Navmesh follow: `AIWorld.FindPath`, `RaycastNavMesh`, `SampleNavmeshPosition`, `PGFilter.SetCost` (all in `aiworld.c`; the four protos are adjacent but none has been driven). `AIWorld` has a private constructor (`aiworld.c`, `private void AIWorld()`); `new PGFilter()` has not been instantiated in-game.\n- Survivor locomotion overrides: `HumanInputController.OverrideMovementSpeed` / `OverrideMovementAngle` / `OverrideAimChangeX` / `OverrideAimChangeY` (`human.c:234-243`) and the vanilla bot FSM under `4_world/systems/bot/`. Whether a synthetic survivor population is viable is open.\n- Calibrating `infected_drive` `speed` to m/s.\n\n## What you need\n\n- Windows, with DayZ and DayZ Tools installed (the server talks to `DayZDiag_x64`)\n- Python **3.11 or newer**\n- A DayZ server you are allowed to run mods on. The daemon binds `127.0.0.1` only and\n  sits on the same machine as the game it drives � there is no remote mode and no\n  multi-user mode, by design. The reference deployment is a local DayZDiag server plus\n  a client for visual capture; the server-side verbs need only the bridge mod loaded.\n\nChoose the setup that matches the agent:\n\n- **Experienced DayZ modder:** install DayZ-MCP by itself. The MCP exposes the live\n  engine without adding a knowledge layer.\n- **New to DayZ modding:** use the paired installer. It installs DayZ-MCP with the\n  [DayZ Modding Knowledge Pack](https://github.com/willy92wins/DayZ-Modding-Knowledge-Pack)\n  by default; pass `-SkipKnowledgePack` to opt out.\n- **Agent with its own DayZ knowledge:** DayZ-MCP also works by itself. Its runtime\n  responses remain actionable: `bad_args` names the rejected field and expected unit\n  or scale; `wait_for` reports `satisfied`, `timed_out`, `observed`, and `scanned` so\n  the next step follows evidence; `bridge_status.reason` names the readiness cause.\n\n## Two halves\n\n| | |\n|---|---|\n| [`addon/`](addon/) | The in-game bridge, in Enforce Script. A `modded class MissionServer` that dispatches commands on `OnUpdate` and answers over HTTP. Build it into a PBO, or run it with file patching. Tracked in git; the development tree sparse-excludes it, so it exists in a full clone but not in every checkout. |\n| [`tools/`](tools/) | The Python MCP server, its installer, and the offline gates. |\n\nThe mod **pulls** commands and **pushes** results; the Python side is a passive\nendpoint. Nothing is client-authoritative: positions and state are read in\n`MissionServer`.\n\n## Install\n\nThe usual installer does not need a CLI pin. It registers by calling\n`claude mcp add` / `codex.cmd mcp add` directly, so an npm `.cmd` shim is fine:\n\n```powershell\ncd tools\n.\\install-mcp.ps1 -Register\n```\n\nIt creates `tools\\.venv-mcp`, installs the pinned dependencies plus this package,\ngenerates an API key, and writes the client configuration. `-Register` also\nregisters the server with your MCP client.\n\nThe hardened Python path is different: `python install_mcp.py --register` talks\nonly to native x64 `claude.exe` / `codex.exe` recorded on this machine. Pin those\nfirst (writes under `%LOCALAPPDATA%\\DayZ_MCP\\security\\`):\n\n```powershell\ncd tools\npython install_mcp.py --pin-clis\npython install_mcp.py --register\n```\n\nIf `claude` / `codex` on PATH are shims (`.cmd` / `.ps1`), pass the native x64\nexecutables with `--claude-exe` and `--codex-exe`. Re-run `--pin-clis` after those\nbinaries change. `.\\install-mcp.ps1 -Register` does not read that pin.\n\nThree run modes (`python -m dayz_mcp`; `tools/dayz_mcp/server_cli.py:66-88`):\n\n- `--client` � what the installer registers. Does not bind; proxies to the daemon\n  and starts it lazily. Lets several agent sessions share one running game.\n- `--daemon` � the single owner of the port; the only process that talks to the game.\n- no flag � embedded single-session mode.\n\n## Security model\n\nFail-closed from the first line: the listener binds `127.0.0.1` only, every request\ncarries an API key, and commands outside the whitelist are rejected. The key\ntravels as a query parameter because the engine\'s `RestContext.SetHeader()` only\nsets `Content-Type` � with a loopback bind the exposure stays local, and the key\nis generated per install and never committed.\n\n## What is deliberately not in this repo � and how to generate it\n\nThree pieces are machine-local by design. Each one is generated on your machine,\nin this order:\n\n1. **The launcher policy.** The builder reads a host file outside the repo and\n   never loads the published example. Copy `tools/launcher-policy.example.json`\n   to `%LOCALAPPDATA%\\DayZ_MCP\\launcher-policy.json` and replace `ExampleMod`\n   and every path with trees that exist on your machine �\n   [tools/README-mcp.md](tools/README-mcp.md) ("Native launcher host policy")\n   walks each field.\n2. **The built native launcher.** Its source is under\n   `tools/native-launchers/dayz-test-v1/src/`; the build output is 40+ MB of\n   compiled launcher and embedded CPython, sealed against the\n   machine that built it (`.gitignore:15-16`). The shipped dependency lock pins the author\'s MSVC\n   and Windows SDK, so re-pin it to yours, then build:\n\n   ```powershell\n   cd tools\n   .\\.venv-mcp\\Scripts\\python.exe relock_toolchain.py\n   .\\.venv-mcp\\Scripts\\python.exe build_native_launcher.py --verify-reproducible\n   ```\n\n   The relock rewrites only the toolchain description; every shipped\n   supply-chain pin (vendored psutil wheel, embedded CPython URL and hash)\n   stays byte-identical. The build downloads the pinned CPython once, verifies\n   it against the lock, and builds twice to prove the output reproducible.\n3. **The launcher registry.** Only the empty baseline ships. Seed the live\n   registry from it, then install the bundle you just built:\n\n   ```powershell\n   .\\.venv-mcp\\Scripts\\python.exe -m dayz_mcp.launcher_registry_update bootstrap\n   .\\.venv-mcp\\Scripts\\python.exe -m dayz_mcp.launcher_registry_update install-dayz-test-v1 --expected-sha256 <sha printed by bootstrap>\n   ```\n\n## Tests\n\nThe MCP server and its test suite are Windows-only.\n\n```powershell\ncd tools\n.\\.venv-mcp\\Scripts\\python.exe -m unittest discover -s tests -t .\n```\n\nTests that need a built launcher, an installed registry or development-only\nevidence skip with the reason named. Everything else passes on a fresh clone, so\nanything red is worth reporting.\n\nThe virtualenv has to be the one the installer creates, at `tools/.venv-mcp`:\nthe daemon resolves that path when it checks its own identity, and an environment\nsomewhere else fails at startup rather than falling back.\n\n## Licence\n\nMIT � see [LICENSE](LICENSE).\n\nDayZ is a trademark of Bohemia Interactive. This project is not affiliated with or\nendorsed by Bohemia Interactive, and ships none of their game data.\n'
+
+======================================================================
+FAIL: test_both_request_parser_hashes_are_printed_in_the_same_case (tests.test_lifecycle_reconcile.LifecycleReconcileTest.test_both_request_parser_hashes_are_printed_in_the_same_case)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests\test_lifecycle_reconcile.py", line 1261, in test_both_request_parser_hashes_are_printed_in_the_same_case
+    self.assertGreaterEqual(len(found), 2, hint)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 1 not greater than or equal to 2 : replace_witness_missing: superseding a live client needs the witness of the gate that authorised it, carried in the sealed request. Nothing was terminated and nothing was launched. launcher bundle unreadable (module-tree manifest C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\native-launchers\dayz-test-v1\closure-manifest.json) dayz_test_request_sha256=unreadable; running daemon dayz_test_request_sha256=35bdb90dc8d0cc136b9f029f34a2a81f53f66437370fa722d5320addb61ddb10. The launcher bundle and this daemon carry different dayz_test_request.py hashes, so the bundle may be older than this daemon. Rebuild and reinstall app.pyz only if that mismatch is the cause, not an orphan binding.
+
+----------------------------------------------------------------------
+Ran 3313 tests in 258.372s
+
+FAILED (failures=5, errors=79, skipped=28)
+Exit code: 1

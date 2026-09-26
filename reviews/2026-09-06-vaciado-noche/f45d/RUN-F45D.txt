@@ -1,0 +1,52 @@
+=== 0. runner ===
+cursor-grok-4.6-xhigh
+RC=0
+"model":"Cursor Grok 4.6 Extra High"
+=== 1. write-set (ficheros de ws modificados o creados tras STARTED) ===
+STATE.md
+tools/dayz_mcp/server.py
+tools/tests/test_enqueue_refusal_reaches_the_caller.py
+tools/tests/test_wait_for.py
+=== 2. hashes entregados (ws, LF) y de partida (wt HEAD 4e264bb) ===
+tools/dayz_mcp/server.py  ws(LF)=5641ec1485f7f013  wt=47fded3015df6ba6  CRLF=0
+n/a
+tools/tests/test_wait_for.py  ws(LF)=571dba41ef55b15b  wt=3aba7e1b18e27746  CRLF=0
+n/a
+tools/tests/test_enqueue_refusal_reaches_the_caller.py  ws(LF)=6143cefab178a716  bytes=9025
+=== 3. diffs LF-normalizados ===
+product: 31 lineas +/-
+test_wait_for: 11 lineas +/-
+new module: 235 lineas
+=== 4. tests ejecutados aqui (ws) ===
+Ran 12 tests in 0.177s
+
+OK
+Ran 23 tests in 9.495s
+
+OK
+Ran 337 tests in 28.196s
+
+OK
+=== 5. STATE.md (cabecera y secciones) ===
+13057 /c/Users/guill/AppData/Local/Temp/claude/C--Users-guill-OneDrive-Documentos-DayZ-Projects/2adef081-e055-49c6-9d06-f5c167808be8/scratchpad/lote-f45d/ws/STATE.md
+1:# STATE.md — lote f45d (enqueue refusal reason)
+7:## Qué cambió
+9:### `tools/dayz_mcp/server.py`
+21:### `tools/tests/test_wait_for.py`
+26:### `tools/tests/test_enqueue_refusal_reaches_the_caller.py` (nuevo)
+32:## FRASES REESCRITAS
+34:### `tools/dayz_mcp/server.py:197` (comentario nuevo)
+39:### `tools/dayz_mcp/server.py:207-208` (docstring nuevo)
+44:### `tools/dayz_mcp/server.py:757-760` (docstring)
+56:### `tools/dayz_mcp/server.py:4885-4886` (descripción de `wait_for`)
+61:## Censo T2 (ordenado)
+93:## Ejecuciones
+98:### Rojo primero (producto sin el arreglo; tests ya escritos)
+143:### Verde final (tras el arreglo)
+168:### Regresión
+185:## Mutantes
+191:### (a) quitar `"run_not_owned"` de `_REMOTE_ERROR_CODES`
+198:### (b) volver a `return code` sin hint al final de `_public_enqueue_error`
+205:### (c) quitar `code != "remote_error"` (el hint viaja también con código desconocido)
+212:## sha256 final del write-set
+220:## LO QUE NO PUDE VERIFICAR

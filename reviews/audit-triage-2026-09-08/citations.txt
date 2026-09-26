@@ -1,0 +1,239 @@
+../scripts/1_core/proto/enscript.c:907: 	proto bool Insert(TKey key, TValue value);
+../scripts/1_core/proto/enwidgets.c:219: class MultilineTextWidget extends TextWidget
+../scripts/5_mission/gui/ingamemenu.c:348: 		g_Game.RespawnPlayer();
+AUDITORIA_MCP_2026-09-07.md:274: 1. `tests/helpers_{wait_for,authority,client_runtime}.py`, prohibir `from tests.test_* import` (T-DUP-04/05/06). 2. Fusionar quarantine/registry/docs (T-DUP-01/02, T-ARC-03). 3. `tests/contracts/` único + una fuente trace/telemetry (T-CON-01/02). 4. Etiquetar `slow`, quitar `venv`/Popen/stdio vivo del path unit (T-OPT-01/02/03). 5. Borrar 26 `.bak`, mover logs (T-CON-04). 6. Cablear `mutation_gate` por contrato (T-CON-05).
+AUDITORIA_MCP_2026-09-07.md:295: | Bridge servidor (`MCPBridge.c`) | **6,5** | Dispatch por verbos claro, `MAX_DISPATCH_PER_TICK`, pending acotado, límites JSONL | 70% duplicado con cliente; `IsSpawnReady` por tick; `GetGame()` sin cachear; `Shutdown` frágil; `pollHz` sin cota |
+GATES.md:3: Este ledger raíz gobierna la cadena completa. Las 35 entradas conservan identidad en
+addon/config.cpp:21: 		dependencies[] = {"World", "Mission"};
+addon/gui/layouts/mcp_dialog.layout:26: 				MultilineTextWidgetClass Title {
+addon/gui/layouts/mcp_dialog.layout:61: 				FrameWidgetClass Row0 {
+addon/scripts/4_World/MCP_CarScript.c:155: 		if (s_TraceId != "")
+addon/scripts/4_World/MCP_CarScript.c:160: 		if (sampleHz < 20 || sampleHz > 60 || maxSamples < 2 || maxSamples > 8192)
+addon/scripts/4_World/MCP_CarScript.c:207: 		if (!s_Active || car != s_Car)
+addon/scripts/4_World/MCP_CarScript.c:252: 		bool wheelZone = zoneName.IndexOf("wheel") >= 0;
+addon/scripts/4_World/MCP_CarScript.c:655: 				SetThrottle(throttle);
+addon/scripts/4_World/MCP_CarScript.c:663: 		MCPVehicleTrace.Capture(this, dt);
+addon/scripts/5_Mission/MCPBridge.c:85: 		m_TelemetryFixtureLinePool = new array<ref MCPTelemetryFixtureLine>();
+addon/scripts/5_Mission/MCPBridge.c:105: 		m_Tick = m_Tick + 1;
+addon/scripts/5_Mission/MCPBridge.c:114: 		ProcessJobs();
+addon/scripts/5_Mission/MCPBridge.c:130: 		float wait = interval + m_Backoff;
+addon/scripts/5_Mission/MCPBridge.c:139: 	protected void TryInit()
+addon/scripts/5_Mission/MCPBridge.c:153: 		MCPConfig cfg = new MCPConfig();
+addon/scripts/5_Mission/MCPBridge.c:195: 		if (cfg.pollHz > 0.0)
+addon/scripts/5_Mission/MCPBridge.c:225: 	protected void StartPoll()
+addon/scripts/5_Mission/MCPBridge.c:235: 		request = request + "&caps=" + EncodeQueryValue(SERVER_CAPABILITIES);
+addon/scripts/5_Mission/MCPBridge.c:279: 		bool deferFromWorldSpawn = false;
+addon/scripts/5_Mission/MCPBridge.c:335: 		if (m_Pending.Count() >= MAX_PENDING)
+addon/scripts/5_Mission/MCPBridge.c:550: 		Log("spawn phase id=" + command.id + " phase=validate_begin");
+addon/scripts/5_Mission/MCPBridge.c:579: 		m_Jobs.Insert(job.id, job);
+addon/scripts/5_Mission/MCPBridge.c:812: 		{
+addon/scripts/5_Mission/MCPBridge.c:1088: 		World world = GetGame().GetWorld();
+addon/scripts/5_Mission/MCPBridge.c:1699: 		if (!command.args || command.args.expr == "")
+addon/scripts/5_Mission/MCPBridge.c:1706: 		bool sent = GetGame().ExecuteEnforceScript(command.args.expr, command.args.main_fn);
+addon/scripts/5_Mission/MCPBridge.c:2067: 			m_PollVersion = pollVersion;
+addon/scripts/5_Mission/MCPBridge.c:2134: 		m_Players.Clear();
+addon/scripts/5_Mission/MCPBridge.c:2336: 			telemetry.last_valid.fixture_id = parsed.fixture_id;
+addon/scripts/5_Mission/MCPBridge.c:2490: 	protected bool IsFiniteFloat(float value)
+addon/scripts/5_Mission/MCPBridge.c:2748: 		while (collected.Count() > 0 && nearest.Count() < limit)
+addon/scripts/5_Mission/MCPBridge.c:2769: 	protected Transport FindTransportNear(vector pos)
+addon/scripts/5_Mission/MCPBridge.c:2821: 	protected void ProcessJobs()
+addon/scripts/5_Mission/MCPBridge.c:2839: 				if (IsJobReady(job))
+addon/scripts/5_Mission/MCPBridge.c:2846: 				else if (job.kind == "drive_probe" && ProcessDriveProbe(job))
+addon/scripts/5_Mission/MCPBridge.c:2860: 				else if (m_ElapsedS > job.deadline_s)
+addon/scripts/5_Mission/MCPBridge.c:2884: 		return false;
+addon/scripts/5_Mission/MCPBridge.c:2953: 	protected bool IsVehicleFixtureReady(CarScript car)
+addon/scripts/5_Mission/MCPBridge.c:3101: 		car.SetHandbrake(0);
+addon/scripts/5_Mission/MCPBridge.c:3436: 		if (!m_Configured || !m_Ctx)
+addon/scripts/5_Mission/MCPBridge.c:3441: 		JsonSerializer serializer = new JsonSerializer();
+addon/scripts/5_Mission/MCPCallbacks.c:10: 	override void OnSuccess(string data, int dataSize)
+addon/scripts/5_Mission/MCPClientBridge.c:15: 	override void OnSuccess(string data, int dataSize)
+addon/scripts/5_Mission/MCPClientBridge.c:20: 			if (!m_Bridge.IsActivePollCallback(this))
+addon/scripts/5_Mission/MCPClientBridge.c:267: 			m_JobRunner.Tick(timeslice, this);
+addon/scripts/5_Mission/MCPClientBridge.c:282: 		DrainPending();
+addon/scripts/5_Mission/MCPClientBridge.c:317: 	protected void TryInit()
+addon/scripts/5_Mission/MCPClientBridge.c:371: 		if (cfg.pollHz > 0.0)
+addon/scripts/5_Mission/MCPClientBridge.c:403: 	protected void StartPoll()
+addon/scripts/5_Mission/MCPClientBridge.c:423: 		request = request + "&caps=" + EncodeQueryValue(CLIENT_POLL_CAPS);
+addon/scripts/5_Mission/MCPClientBridge.c:512: 	// Poll shares the results RestContext (same URL). GetRestContext caches by
+addon/scripts/5_Mission/MCPClientBridge.c:812: 	protected bool DispatchPlayerRespawn(MCPCommand command, MCPResult result)
+addon/scripts/5_Mission/MCPClientBridge.c:1065: 		if (throttle < 0.0 || throttle > 1.0 || !IsFiniteFloat(throttle))
+addon/scripts/5_Mission/MCPClientBridge.c:1990: 	protected Object FindNearestObjectNearClient(vector pos, float radius, string classFilter, Object skip)
+addon/scripts/5_Mission/MCPClientBridge.c:2138: 	protected void CountUiWidgetsNamed(Widget scope, string name, MCPUiNameMatch match)
+addon/scripts/5_Mission/MCPClientBridge.c:2165: 			CountUiWidgetsNamed(child, name, match);
+addon/scripts/5_Mission/MCPClientBridge.c:2488: 				int scriptCalled = g_Game.GameScript.CallFunctionParams(scriptInst, "OnClick", scriptConsumed, new Param4<Widget, int, int, int>(target, 0, 0, mouseButton));
+addon/scripts/5_Mission/MCPClientBridge.c:2555: 				m_Dialog.Tick(m_JobRunner.GetElapsedS());
+addon/scripts/5_Mission/MCPClientBridge.c:2561: 		return false;
+addon/scripts/5_Mission/MCPClientBridge.c:3101: 		MCPCarDrive.Set(car, throttle, 0.0, 0.0, 0.0, GetGame().GetTickTime() + DRIVE_CLIENT_DEADMAN_S);
+addon/scripts/5_Mission/MCPClientBridge.c:3165: 	protected bool IsDriveClientVehicleFixtureReady(CarScript car)
+addon/scripts/5_Mission/MCPClientBridge.c:3901: 		mission.PlayerControlDisable(INPUT_EXCLUDE_ALL);
+addon/scripts/5_Mission/MCPClientBridge.c:3926: 			mission.PlayerControlEnable(true);
+addon/scripts/5_Mission/MCPClientBridge.c:3977: 		if (!m_Configured || !m_Ctx)
+addon/scripts/5_Mission/MCPClientBridge.c:3982: 		JsonSerializer serializer = new JsonSerializer();
+addon/scripts/5_Mission/MCPClientBridge.c:4098: 		MCPVehicleTrace.Abort("shutdown");
+addon/scripts/5_Mission/MCPDialogController.c:30: 	protected const int MAX_FIELDS = 6;
+addon/scripts/5_Mission/MCPDialogController.c:230: 		m_Kind = spec.kind;
+addon/scripts/5_Mission/MCPDialogController.c:262: 		Print(string.Format("[MCP-DIALOG] open kind=%1 field_count=%2 ids=%3", m_Kind, m_FieldCount, idList));
+addon/scripts/5_Mission/MCPDialogController.c:266: 	void Tick(float now)
+addon/scripts/5_Mission/MCPDialogController.c:454: 		if (!Class.CastTo(titleW, m_Root.FindAnyWidget("Title")))
+addon/scripts/5_Mission/MCPDialogController.c:885: 				mission.PlayerControlDisable(INPUT_EXCLUDE_ALL);
+addon/scripts/5_Mission/MCPDialogController.c:902: 					mission.PlayerControlEnable(false);
+addon/scripts/5_Mission/MCPDialogController.c:944: 	protected bool DeadlineReached(float now)
+addon/scripts/5_Mission/MCPJobRunner.c:80: 	void AddJob(MCPJob job)
+addon/scripts/5_Mission/MCPJobRunner.c:90: 	void Tick(float timeslice, MCPJobRunnerOwner owner)
+addon/scripts/5_Mission/MCPJobRunner.c:122: 				if (owner.MCP_ProcessJob(job) || owner.MCP_IsJobReady(job))
+addon/scripts/5_Mission/MCPJobRunner.c:135: 				else if (m_ElapsedS > job.deadline_s)
+addon/scripts/5_Mission/MCPMessages.c:143: 		sample_hz = 20;
+addon/scripts/5_Mission/MissionGameplay.c:19: 	override void OnUpdate(float timeslice)
+addon/scripts/5_Mission/MissionGameplay.c:26: 			bridge.OnTick(timeslice);
+addon/scripts/5_Mission/MissionServer.c:19: 	override void OnUpdate(float timeslice)
+addon/scripts/5_Mission/MissionServer.c:26: 			bridge.OnTick(timeslice);
+product-spec.md:42: | A1 | `query_player_state` devuelve la **posición autoritativa** del player | pos devuelta == coord del **spawn determinista de la mission de test** (no la tool `world_spawn`; la mission *setea* la coord, el POC la *lee*), error < 0.5 m | ✓ **in-game 2026-06-07 (re-cert X.5)** — bridge vs marker independiente = **0.0313 m** < 0.5 m (`target`=marker, fallback a `playerReadyPos` eliminado) |
+product-spec.md:43: | A2 | El round-trip **no bloquea el tick** `[intent: el RTT no debe congelar el sim]` | el tick avanza durante un GET async en vuelo: `tick_poll_callback − tick_poll_sent` ≥ 5 con `/poll` retrasado por el server | ✓ **in-game 2026-06-07** (ticks_in_flight=4741 con delay 600ms; run_045213) |
+product-spec.md:44: | A3 | **Correlation-id** casa pedido↔resultado | 2 comandos encolados resuelven cada uno a su propio resultado, sin cruce | ✓ **in-game 2026-06-07** (ids 9,10, pos_distance 0.0) |
+product-spec.md:54: | B1 | `world_spawn` crea la entidad pedida en la pos pedida | entidad existe server-side post-spawn (enumeración / raycast) | ✓ **in-game 2026-06-08** (id=22 `Hatchback_02` found=1, pos_real verificado; + negativos unknown_type/bad_pos×2/bad_flags/args-no-dict→400) |
+product-spec.md:56: | B3 | `vehicle_drive` mueve el vehículo | PROBE de decisión completado **in-game 2026-06-08**: motor controlable server-side (`engine_on_server=1`) pero **movimiento client-authoritative** (speedo≈0 / pos_delta≈0 con throttle 1.0, fixture_ready=true, net=PHYSICS — confirma `actionstartengine.c:51-58`). Conducir desde el server **descartado**. | ✓ probe (client-auth); **conducción DIFERIDA a fase client-peer** → retomada por el **grupo G** (fase 5, peer owner) |
+product-spec.md:57: | B4 | Control UI e input engine-native | La superficie pública conduce teclas y widgets sin input del SO. Una búsqueda ambigua falla cerrada o se acota por raíz; cada respuesta identifica la petición y, si existe, el match, y `ui_click` identifica además el handler cuando aplique. El modo completo entrega coordenadas del widget y secuencia `down→up→click`, con bubbling explícito. Gates independientes: una tecla cambia el estado del consumidor y el control no; un `ScriptView` muta estado; homónimos sin raíz devuelven `ambiguous_path`; auth/validación/readiness siguen siendo errores fail-closed. | ❓ |
+product-spec.md:90: | E5 | Superficie autocontenida, interpretable y auditable | El Knowledge Pack se prepara desde MCP usando solo el pack instalado y rutas selladas, valida un índice no vacío antes de reemplazar y conserva el anterior ante fallo. El esquema efectivo se obtiene post-registro/aliases/perfiles, materializa validadores públicos y produce un fingerprint canónico; una sesión con registro obsoleto indica `reopen_mcp_client` sin reiniciar el daemon. Instrucciones y descripciones distinguen classname Enforce de texto visible, transporte `ok` de efecto observado y explican el contrato C4; las resoluciones de inbox conservan JSONL legacy y añaden edad derivada más referencia durable acotada. Mutantes independientes de tool/parámetro/modo cambian el veredicto; snapshots, contadores o expected derivados del mismo input no acreditan PASS. | ❓ |
+product-spec.md:107: | F5 | Reclaim no mata un daemon sano; recupera el puerto de un holder no-responsivo | `test_daemon`: `try_reclaim_unresponsive_listener` aborta si `/status` responde sano, reclama solo un dayz_mcp no-responsivo; C1 (embedded orphan) sigue cubierto por `test_port_reclaim` | ✓ offline |
+product-spec.md:120: | G1 | Verbos de control en el peer **cliente**: `engine_set`, `vehicle_control` (throttle/steer/brake/handbrake **sostenido + bounded/deadman**), `vehicle_telemetry`, `vehicle_release`. **No existe ni se exige un verbo público `gear_shift`.** | gate A: acelera/gira/frena y se observa progresión automática de marcha bajo throttle; el held-state se reaplica cada tick; `vehicle_release` **y** un TTL/deadman auto-sueltan; fail-closed por **rango Y NaN/Inf**. La marcha se observa en telemetría, no se ordena mediante una tool inexistente. | ❓ |
+product-spec.md:122: | G3 | `vehicle_trace` owner-client entrega un stream atómico pull, append-only y lease-gated del mismo coche/reloj: 20–60 Hz, ≤8192 muestras, chunks ≤64, control solicitado+aplicado, pose/velocidad/dirección, 4 ruedas, engine/marcha, `IsOwner()`/net id y `OnContact` raw no-wheel; release/expiry/shutdown limpia trace+control; artefacto host determinista con hashes calculados | fixtures adversariales RED→GREEN + suite host; source-contract y bridge v6; PACKONLY; control live `CivilianSedan` ≥2 s y ≥20 Hz efectivos con owner/net id estable, readback ≤0,001 y al menos un contacto corporal observado en owner client; bundle repetido byte-idéntico; ausencia de callback/overflow/gap/cleanup/lifecycle limpio = RED | ❓ |
+product-spec.md:123: | G4 | `restore_gameplay` devuelve al jugador local simulación, input y HUD tras control de cámara; `vehicle_get_in_client` aplica el mismo restore idempotente antes del get-in | contratos offline de whitelist/args/peer/tool/dispatch y orden del guard; PACKONLY; gate in-game freecam→restore y freecam→get-in sin `not_seated`. No implica desactivar/borrar la cámara activa | ❓ |
+product-spec.md:139: | H4 | Cola FIFO estricta, `acquire` idempotente, TTL exacto 120 s y promoción sólo con `session_wait` vivo | A→B→C, ticket duplicado no duplica posición, reloj inyectable 119/120/121 s; release/expiry sin `session_wait` vivo no conceden leases | ✓ offline |
+product-spec.md:141: | H6 | Lifecycle solo opera sobre runs registrados y revalida PID + creation time + executable/command-line fingerprint | mismo mod en dos agentes no confunde ownership; PID reutilizado, foreign, legacy o identidad incompleta quedan intactos | ✓ offline |
+product-spec.md:144: | H9 | Adquisición en espera request-bound y liveness de cola | `session_acquire_wait` request-bound nunca devuelve `queued`; timeout/cancel no deja ticket/lease oculto; sólo `session_wait` vivo promueve cabeza; release/expiry no hacen grant ciego; launcher nativo/neutral respecto al consumidor, registrado (path+SHA, sin identidad/token), no autoriza PowerShell ni `.ps1`; gate local `fifo_grants_without_live_wait=0`; gate real 2 Claude+2 Codex abierto hasta proveniencia externa | [verify] offline ✓; falta gate real 2 Claude + 2 Codex |
+product-spec.md:145: | H10 | Acreditación pre-request del daemon y confidencialidad del control | Todo cliente HTTP autenticado acredita sobre el socket loopback ya conectado un owner PID único y estable, executable/argv/cwd canónicos y dos snapshots nativos v2 idénticos **antes de emitir el primer byte HTTP**, incluido `?key` y cualquier body con identidad/lease; listener foreign, rebind, PID reuse/drift o identidad parcial/ambigua fallan cerrados con `http_bytes_sent=0` y `key_disclosed=0`. Gate de routing sobre ClientRuntime, doctor, admin y lifecycle, más fixtures foreign/rebind | ✓ offline |
+product-spec.md:147: | H12 | Recuperación de credencial obsoleta en clientes MCP vivos | Ante un 401 de un daemon ya acreditado, bridge y control revalidan la misma policy/keyfile/provenance, releen la credencial mediante el lector endurecido y reintentan exactamente una vez el mismo request bajo el deadline original. Un segundo 401, una fuente no acreditada o un fallo de acreditación fallan cerrados con código estable y sin secretos. El mecanismo es común a todas las tools, seguro bajo concurrencia, no inicia/reemplaza daemons por un fallo de autenticación y no crea, adopta, libera ni altera leases, tickets, runs u ownership. Un cambio de `daemon_generation` conserva la invalidación H2/H5 | ✓ offline + E2E multiproceso aislado |
+product-spec.md:148: | H13 | Diagnóstico seguro de lifecycle y runs compartidos | Preflight detecta `Steam ActiveProcess` obsoleto antes de lanzar, devuelve PID registrado/vivos acotados más remedio seguro y readiness no equivale a PID vivo; reattach `mode=client` conserva el run y los errores de la matriz `mode × run_id` nombran la restricción concreta; ocupación y `active_run_exists` informan edad/actividad, y el audit existente explica generation de runs activos o retirados sin preemptar. Gates pos/neg/inconclusos prueban cada cláusula y todo fallo de identidad, path, proceso o fuente falla cerrado. | ❓ |
+product-spec.md:169: - **Build headless-only para la fase visual**: la captura exige un cliente con renderer; una
+product-spec.md:174: - **`exec_enforce` como tool universal**: es breakglass auditado con allowlist, no la vía normal.
+tools/_session_coordination/h8_distributed_codex_gate.py:22: from h8_real_codex_gate import (
+tools/_session_coordination/h8_real_codex_gate.py:1: """Real H8 gate using four fresh Codex-mode MCP stdio proxies and one DayZ game.
+tools/build_native_launcher.py:53: PACKAGED_MODULES = (
+tools/checks/check_native_launcher_registry.py:27:     Lives outside tests/ on purpose: the suite must not pin the PE hash as a
+tools/dayz_mcp/accredited_daemon_transport.py:1: """Authenticated daemon HTTP after accrediting the owner of the exact socket."""
+tools/dayz_mcp/control_client.py:257:     async def session_status(self) -> dict[str, object]:
+tools/dayz_mcp/control_client.py:580:             await asyncio.sleep(0.05)
+tools/dayz_mcp/control_client.py:586:     def _require_recovery_idle_status(
+tools/dayz_mcp/control_client.py:674:         delayed_cancellation: asyncio.CancelledError | None = None
+tools/dayz_mcp/control_client.py:690:     async def session_acquire_wait(
+tools/dayz_mcp/daemon.py:526:         retail_probe=orphan_guard.snapshot_retail_processes,
+tools/dayz_mcp/daemon.py:873:     interval_s: float = REAP_INTERVAL_S,
+tools/dayz_mcp/daemon.py:884:     def _loop() -> None:
+tools/dayz_mcp/daemon.py:1591:     # Block until idle shutdown or external termination. No parent-death watchdog:
+tools/dayz_mcp/daemon.py:1646:     detached = _CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP
+tools/dayz_mcp/daemon_credential.py:186:     def _retry_after_daemon_replacement(
+tools/dayz_mcp/daemon_credential.py:213:             retry_status, retry_body = self._send(
+tools/dayz_mcp/daemon_credential.py:234:         if retry_status == 401:
+tools/dayz_mcp/daemon_policy.py:319: def load_normal_daemon_policy() -> AccreditedDaemonPolicy:
+tools/dayz_mcp/daemon_policy_contract.py:1: """Non-launching immutable daemon authority value shared by all clients."""
+tools/dayz_mcp/dayz_test_tool.py:1442:                     steam_remediation_reason = getattr(steam, "steam_remediation_reason", None)
+tools/dayz_mcp/effective_schema.py:29: def resolve_effective_schemas() -> dict[str, dict]:
+tools/dayz_mcp/effective_schema_catalog.py:1: """Independent declarative catalog for M13 public constraints."""
+tools/dayz_mcp/effective_schema_catalog.py:9: CATALOG_RECORD_KEYS = frozenset(
+tools/dayz_mcp/effective_schema_core.py:1: """Pure M13 constructor for the effective MCP schema.
+tools/dayz_mcp/effective_schema_runtime_validators.py:31: def enumerate_constraints(
+tools/dayz_mcp/host_config.py:122: def require_matching_keyfile(value: object, expected: str) -> str:
+tools/dayz_mcp/launcher_registry.py:181: def _open_pinned_read(path: Path) -> BinaryIO:
+tools/dayz_mcp/launcher_registry_update.py:77: def _read_pinned(path: Path) -> tuple[bytes, dict[str, object]]:
+tools/dayz_mcp/lease_supervisor.py:103:     async def _run(self) -> None:
+tools/dayz_mcp/lease_supervisor.py:104:         next_due = self._monotonic() + HEARTBEAT_INTERVAL_S
+tools/dayz_mcp/lease_supervisor.py:152: def validate_terminal_session_status(status: object) -> None:
+tools/dayz_mcp/lease_supervisor.py:185: async def protected_release_and_verify(
+tools/dayz_mcp/log_tail.py:172:             start = 0 if (marker is None or rotated) else marker.offset
+tools/dayz_mcp/loopback.py:1864:         main_fn = args.get("main_fn", "")
+tools/dayz_mcp/loopback.py:1868:         if self.exec_allowlist is None or self.exec_audit is None:
+tools/dayz_mcp/loopback.py:1893:             command_id = self._next_id
+tools/dayz_mcp/native_launcher_backend.py:1280:     def take_announcement(
+tools/dayz_mcp/native_launcher_backend.py:1286:                 time.sleep(0.001)
+tools/dayz_mcp/native_launcher_transaction.py:250: def effective_mod_entries(payload: dict[str, object]) -> tuple[str, ...]:
+tools/dayz_mcp/native_launcher_transaction.py:677: async def execute_native_launcher_transaction(
+tools/dayz_mcp/native_process_guard.py:16: if TYPE_CHECKING:
+tools/dayz_mcp/native_process_guard.py:184:     def _identity_matches(expected: object, actual: dict[str, object]) -> bool:
+tools/dayz_mcp/native_process_guard.py:194:     def terminate(self, expected: ProcessRecord) -> dict[str, object]:
+tools/dayz_mcp/normal_daemon_policy.py:158: def load_normal_daemon_policy() -> AccreditedDaemonPolicy:
+tools/dayz_mcp/orphan_guard.py:378:             ["netstat", "-ano", "-p", "TCP"],
+tools/dayz_mcp/orphan_guard.py:380:             timeout=10,
+tools/dayz_mcp/orphan_guard.py:389: _DAYZ_IMAGE_NAMES = frozenset(
+tools/dayz_mcp/orphan_guard.py:664: def try_reclaim_port(
+tools/dayz_mcp/orphan_guard.py:696:     from dayz_mcp.process_lifecycle import ProcessLifecycle
+tools/dayz_mcp/orphan_guard.py:990:     Health, not ancestry, is the discriminator (a daemon outlives its spawner).
+tools/dayz_mcp/process_lifecycle.py:23: from dayz_mcp import dayz_test_storage
+tools/dayz_mcp/process_lifecycle.py:49: _DAYZ_IMAGE_NAMES = frozenset(
+tools/dayz_mcp/process_lifecycle.py:2730:     def _identity_matches(record: ProcessRecord, actual: object) -> bool:
+tools/dayz_mcp/process_lifecycle.py:2741:     def _classify_registered_process(self, record: ProcessRecord) -> tuple[str, str]:
+tools/dayz_mcp/process_lifecycle.py:2820:                 time.sleep(self._role_release_interval_s)
+tools/dayz_mcp/process_lifecycle.py:3895:             result = self.port_probe()
+tools/dayz_mcp/process_lifecycle.py:4144:                 if (
+tools/dayz_mcp/secure_launcher.py:53:         index = 0
+tools/dayz_mcp/secure_launcher.py:74:             del pending[:index]
+tools/dayz_mcp/secure_launcher.py:78: async def execute_secure_launcher_request(
+tools/dayz_mcp/secure_launcher.py:115:         del accredited_paths, heartbeat_supervisor
+tools/dayz_mcp/server.py:78: POLL_INTERVAL_S = 0.05
+tools/dayz_mcp/server.py:79: WAIT_FOR_MAX_TIMEOUT_S = 600.0
+tools/dayz_mcp/server.py:1121:         if (
+tools/dayz_mcp/server.py:1287:             retryable = (
+tools/dayz_mcp/server.py:1302:     async def session_acquire(self, purpose: str) -> dict[str, Any]:
+tools/dayz_mcp/server.py:1343:     async def session_status(self) -> dict[str, Any]:
+tools/dayz_mcp/server.py:2491:                 carry = carry[start:]
+tools/dayz_mcp/server.py:2640:     poll_interval_s = max(poll_value, WAIT_FOR_MIN_POLL_INTERVAL_S)
+tools/dayz_mcp/server.py:2691:             if marker_state is None and lookback_from == "launch":
+tools/dayz_mcp/server.py:3058:     while True:
+tools/dayz_mcp/server.py:3091:                 status = await client.session_box_status(wait=True, ticket=ticket)
+tools/dayz_mcp/server.py:3187:     # Numeric tool annotations are strict at FastMCP ingress: handler guards
+tools/dayz_mcp/steam_preflight.py:407:     matched = _wait_until(
+tools/fixtures/vehicle-trace-civilian-sedan-control-v1.json:2:   "schema": "dayz-mcp-vehicle-trace-course-v1",
+tools/g0_abba_gate.py:4: Drives an already-running broker daemon through raw authenticated HTTP. It does
+tools/g0_abba_gate.py:801:     def session_acquire_wait(self, purpose: str, max_wait_s: float = 300.0) -> dict:
+tools/g0_site_gate.py:15: CERTIFY (session lease): for the most open finalists, the place_safely
+tools/lote_harness/mutation_gate.py:2: """Re-run a reviewer's mutation from the receiving side and check the control now dies.
+tools/lote_harness/mutation_gate.py:15:   2. the mutation must match EXACTLY ONCE in the file, or the run aborts untouched;
+tools/lote_harness/mutation_gate.py:38: def _run(python: str, cwd: pathlib.Path, modules: list[str]) -> tuple[bool, str]:
+tools/mcp_capture.py:880:         proc = subprocess.run(
+tools/process-guard.ps1:18: function Get-IdentityFromProcess([System.Diagnostics.Process]$proc) {
+tools/schemas/vehicle-trace-v1.json:3:   "$id": "dayz-mcp-vehicle-trace-v1",
+tools/tests/fixtures/vehicle_trace/negative_mutations.json:3:   "mutations": [
+tools/tests/test_bug046_startup_deadlock.py:1411:             created = subprocess.run(
+tools/tests/test_client_credential_rotation_e2e.py:199:                 child = subprocess.Popen(
+tools/tests/test_client_credential_rotation_e2e.py:557:                 async with stdio_client(
+tools/tests/test_command_validation_coverage.py:1: """Anti-regression: every whitelisted verb must survive validate_command_args.
+tools/tests/test_daemon_contract.py:36:                 self.assertEqual(
+tools/tests/test_daemon_contract.py:73:         self.assertIs(daemon.build_daemon_argv, contract.build_daemon_argv)
+tools/tests/test_daemon_contract.py:115:     def test_host_config_consumes_only_the_pure_contract(self) -> None:
+tools/tests/test_dependency_lock.py:207:     def test_all_existing_file_artifacts_match_live_bytes(self) -> None:
+tools/tests/test_docs_truth.py:335:     def test_readme_path_line_cites_resolve_in_tree(self) -> None:
+tools/tests/test_docs_truth.py:345:         result = mod.check(readme=_doc_path("README.md"), repo=REPO)
+tools/tests/test_g0_abba_verdict.py:1: """Pure-logic tests for the G0 ABBA in-game diagnostic driver."""
+tools/tests/test_h8_distributed_gate.py:40:     def test_external_roster_binds_exact_task_and_unique_ids(self) -> None:
+tools/tests/test_install_mcp.py:1264:     def test_readme_tool_count_matches_instantiated_app(self) -> None:
+tools/tests/test_launcher_registry_update.py:1001: def _run_checker_against_fixture(
+tools/tests/test_loopback.py:92:     def _assert_retail_quarantine_reason(
+tools/tests/test_messages_contract.py:22: def _without_comments(source: str) -> str:
+tools/tests/test_no_literal_drive_letters.py:177:     def test_published_package_has_no_literal_drive_letters(self) -> None:
+tools/tests/test_p0s_gate.py:233:         def timeout_runner(_argv: list[str], **_kwargs: object) -> object:
+tools/tests/test_packaging_declarations.py:47:     def test_declared_packaging_targets_exist(self) -> None:
+tools/tests/test_parent_watchdog.py:151:         time.sleep(0.05)
+tools/tests/test_process_lifecycle.py:1992:     def test_quarantine_blocks_lifecycle_before_manifest_or_guard(self) -> None:
+tools/tests/test_registry_lock.py:46:     def test_shared_readers_coexist_and_exclusive_is_fail_fast(self) -> None:
+tools/tests/test_retail_quarantine.py:136:     def test_retail_present_allows_read_but_rejects_mutation_without_enqueue(self) -> None:
+tools/tests/test_secure_launcher.py:40:     def test_canonical_registry_contains_only_native_dayz_test_and_public_route_accepts_only_id(self) -> None:
+tools/tests/test_server_response_truth.py:48:     def test_enqueue_error_explains_how_retail_quarantine_clears(self) -> None:
+tools/tests/test_session_e2e.py:49:         self.httpd = loopback.create_http_server(
+tools/tests/test_session_e2e.py:72:         self.thread.join(timeout=2.0)
+tools/tests/test_session_e2e.py:75: class GamePeer:
+tools/tests/test_sources_are_statically_analysable.py:36:     for path in TOOLS_DIR.rglob("*.py"):
+tools/tests/test_sources_are_statically_analysable.py:44:     def test_no_python_source_starts_with_a_utf8_bom(self) -> None:
+tools/tests/test_sources_are_statically_analysable.py:68:                 ast.parse(source, filename=str(path))
+tools/tests/test_task7_final_authority_regressions.py:12: from tests.test_task7_review_regressions import (
+tools/tests/test_task7_final_lifecycle_regressions.py:9: from tests.test_lifecycle_cli import TtyInput
+tools/tests/test_tool_registry_fingerprint.py:5: KNOWN_MARKER_BYTES = b'{"artifact_txid":"0123456789abcdef0123456789abcdef","artifact_version":5,"fingerprint_sha256":"6c3593ab43c4115b98ac0ef186dcf024fe1b9c6acd837a522fe04f2ae43310fd","generator":{"name":"m14-oracle","version":"1"},"payloads":[{"instructions":"instructions:standard|claude","profile":"standard","role":"claude","tool_registry_fingerprint":"377d5e7de29cb26be681528676456e7eacf653a5efba1662c6c17b872f40aea5","tools":[{"description":"literal standard|claude","effect_verification":"wire","input_schema":{"properties":{},"type":"object"},"name":"standard_claude","public_constraints":["constraint:standard_claude"]}]},{"instructions":"instructions:standard|codex","profile":"standard","role":"codex","tool_registry_fingerprint":"8efd0a8edbb8c53ba561a9c5add1866c3026d1a0b14c4d1f1c70864128227f6a","tools":[{"description":"literal standard|codex","effect_verification":"wire","input_schema":{"properties":{},"type":"object"},"name":"standard_codex","public_constraints":["constraint:standard_codex"]}]},{"instructions":"instructions:exec_enforce|claude","profile":"exec_enforce","role":"claude","tool_registry_fingerprint":"007ebb66da4ad2d17ac2c4fa81df5d2750381573698cce65a8e007d29f17d130","tools":[{"description":"literal exec_enforce|claude","effect_verification":"wire","input_schema":{"properties":{},"type":"object"},"name":"exec_enforce_claude","public_constraints":["constraint:exec_enforce_claude"]}]},{"instructions":"instructions:exec_enforce|codex","profile":"exec_enforce","role":"codex","tool_registry_fingerprint":"a84fe92e285aaabd80740989be22eebe9915cb03d1fb866f886c698a2fbee4a1","tools":[{"description":"literal exec_enforce|codex","effect_verification":"wire","input_schema":{"properties":{},"type":"object"},"name":"exec_enforce_codex","public_constraints":["constraint:exec_enforce_codex"]}]}],"producers":[{"path":"tools/approved-launchers.json","sha256":"fcb04047ad1606d8f0647dc2d22304298398eb11acbd10619f82b8d567f14d61"},{"path":"tools/approved-launchers.receipts/fedcba9876543210fedcba9876543210/committed.json","sha256":"04a7c5590bec79006bfea28dbc01ba1f1d2d2cf82ca0131c0ed89ed2345681d0"},{"path":"tools/approved-launchers.receipts/fedcba9876543210fedcba9876543210/prepared.json","sha256":"1109782140dc8aaf2ba784c0cdb15570631e4dc01807c4159cee9d4dc6232965"},{"path":"tools/dayz_mcp/dayz_test_modes.py","sha256":"0b6d35975ef2db3cc8460fec3f1e12714f32defab491173fdef4762297912d09"},{"path":"tools/dayz_mcp/dayz_test_request.py","sha256":"41da13f92bc21c5711c3546c85fdc0567a1bda302a21fcd932290da9894196b2"},{"path":"tools/dayz_mcp/effective_schema_catalog.py","sha256":"28007dba3ef1c1eddc93a2223fb2ad54724571614d1e457d1177b42816fac7ef"},{"path":"tools/dayz_mcp/effective_schema_core.py","sha256":"d8be16a8a425177c9d388e850d455a22153548ba99d2c2427712c65a3eacbbde"},{"path":"tools/dayz_mcp/effective_schema_runtime_validators.py","sha256":"153a605bb9cc1febf6f50f4bed8d6eef8d79a497213b6aa543295d2bf91f6800"},{"path":"tools/dayz_mcp/knowledge.py","sha256":"768212e799bec5f92a193db9026c881a13de5f5a1ab2f7fad29155d65f126a8b"},{"path":"tools/dayz_mcp/server.py","sha256":"e80e5251e9e59e8432b352cd3e9cbf3dc67d22423fa37fbd9ad1011b0ba180e9"},{"path":"tools/dayz_mcp/tool_registry_fingerprint.py","sha256":"d96e2e7567ca7804d1da23ba59bbfc24ae4339f230a1b454920b67ee9dc39bf5"},{"path":"tools/mcp_capture.py","sha256":"f10f1cf5b5d2b21d7856383976032e9115ac4d0bb968409787518948063c439f"},{"path":"tools/native-launchers/dayz-test-v1/app.pyz","sha256":"ce1f8417e6a74d66b7e2e8e196461bd43abada8d34070c2c41e3f5dfe90550cf"},{"path":"tools/native-launchers/dayz-test-v1/closure-manifest.json","sha256":"87c5255a53d9375fd077c22b8972c3f3af96a6c6620172a69e7ba0aa8c41a30c"},{"path":"tools/promote_effective_schema.py","sha256":"b19c683bfccd884e7f6216d031f93c91303f8f96f06f592d9154d2d2c7a6676f"},{"path":"tools/pyproject.toml","sha256":"f9ed8a0b21dff2822e4e73c521adfde8018efe73021056b55f863065d31402b6"},{"path":"tools/requirements-mcp.txt","sha256":"ae0989dbc1d3f192881adae446c638780e9bd39bc7518a3c2210f209b9f53ccb"},{"path":"tools/tests/fixtures/effective_schema_v1/required_constraint_ids.json","sha256":"979e395f1cad3364bbf51f622e70b306d40239989dccf64d58f42cdb9576af9a"},{"path":"tools/tests/fixtures/effective_schema_v5/instructions_required_concepts.json","sha256":"aa4b8e3b1602a69fcdf4ef682819e888d5b4c9fbc78185ad9885b0a9f7b3c583"},{"path":"tools/tests/fixtures/effective_schema_v5/mutation_cases.json","sha256":"88cd0e8975a8703993203ee4775af9f81b28b4640ba9e5ac6fde16f5aef1783b"},{"path":"tools/tests/fixtures/effective_schema_v5/profile_inventory.json","sha256":"e7d7be819d32f59d8c160a592d66a6038e0708aaf9d06acc11ec8772bfd34a9e"},{"path":"tools/tests/fixtures/effective_schema_v5/validator_cases.json","sha256":"dc2bd69e325b445287c1680fda3067c676cb85f7662e61fab7d20b88b86897fc"},{"path":"tools/tests/test_effective_schema_promotion.py","sha256":"9aed45cc2613b3bb84d51123b326f1569af0963ab99932dffb5244c2518093d7"}],"producers_sha256":"c281d3719dcadeb5872310685a4b04ab90a7c47c1539c68961706b915d7c93f8","schema_version":1,"verdict_sha256":"722591a0b5f4c8be3abc4305ced9d7d07f0f2c11f891969b626ec1a6fd81049d"}'
+tools/tests/test_vehicle_prepare_fixture.py:42:     def test_command_is_whitelisted_and_routes_only_to_server(self) -> None:
+tools/tests/test_vehicle_prepare_fixture.py:62:     def test_ingress_rejects_non_dict_near_matches_and_non_finite_numbers(self) -> None:
+tools/tests/test_vehicle_telemetry_contract.py:15: TELEMETRY_REGION_SHA256 = (
+tools/tests/test_vehicle_trace.py:22: FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "vehicle_trace"
+tools/tests/test_vehicle_trace.py:23: SCHEMA_PATH = TOOLS_DIR / "schemas" / "vehicle-trace-v1.json"
+tools/tests/test_vehicle_trace.py:261:     def test_named_negative_mutations_are_not_false_green(self) -> None:
+tools/tests/test_wait_for_launch_and_contract.py:38: from tests.test_wait_for import (
+tools/tests/test_wait_for_launch_and_contract.py:46: def _live_process(pid: int = 4242) -> dict:
+tools/tests/test_wait_for_requires_a_live_run.py:32: from tests.test_wait_for_launch_and_contract import (
+tools/tramoA_verbs_gate.py:36:     ppos = wait_ready(d)
+tools/tramoB_getin_gate.py:36:     ppos = wait_ready(d)

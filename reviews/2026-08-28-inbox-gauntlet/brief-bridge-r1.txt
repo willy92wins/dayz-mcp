@@ -1,0 +1,45 @@
+ENCARGO: fix del leak de callbacks del poll en el bridge cliente de DayZ-MCP (ficha fb-20260828-125854-964f). Un solo fichero editable. Enforce Script (DayZ), no C++.
+
+WORKSPACE
+- MCPClientBridge.c  -> EDITABLE, tu objetivo (copia del arbol vivo: ya lleva el hotfix PollContextUrl y el watchdog del poll)
+- _ref\MCPBridge.c, _ref\MCPCallbacks.c, _ref\MCPMessages.c  -> READ-ONLY para comparar patrones. PROHIBIDO editarlos.
+
+SINTOMA MEDIDO (in-game, 2026-08-28, sesion de ~80 min)
+Al cerrar el cliente, el shutdown de Enforce reporta: Leaked 'MCPClientPollCallback' script instance (11798x), MCPClientResultCallback (17x), MCPClientBridge (1x). 11798 en ~80 min ~= 2.5/s con poll_hz=5. Los polls funcionaron verdes toda la sesion: es degradation (crecimiento lineal), no rotura.
+
+HECHOS VERIFICADOS POR EL ORQUESTADOR (cita estos anclajes; verifica los numeros de linea en TU copia antes de editar)
+- El watchdog ya existe: POLL_WATCHDOG_S = 30.0 (:160), chequeo m_PollInFlightS >= POLL_WATCHDOG_S (:264) -> log "client poll watchdog no callback in_flight_s=... poll_refs=..." (:271) + AbandonInFlightPoll() (:272) + OnPollFail("watchdog") (:273).
+- La linea :271 YA imprime un conteo poll_refs — mira que variable lo alimenta; si no es m_PollCallbackRefs.Count(), ajustalo como parte del fix.
+- Diseno actual: StartPoll crea UNA instancia nueva de MCPClientPollCallback por poll y la inserta en m_PollCallbackRefs (la ficha cita :379-380). m_TickPollSent se fija en :390.
+- ReleaseCallback busca y remueve en m_CallbackRefs y m_PollCallbackRefs (la ficha cita :3407-3441) y el flujo de exito lo llama antes del check de generacion.
+- AbandonInFlightPoll esta en :506; el comentario :492 explica que el abandono deja el callback descartado por generacion, no un segundo contexto.
+- Sospechosos del reporte: (a) retencion engine-side de los RestCallback pasados a GET sobre el contexto compartido, (b) el Remove no ejecutandose en el camino real, (c) AbandonInFlightPoll dejando refs vivas.
+
+TAREA
+1. Lee el flujo COMPLETO del poll: StartPoll -> OnPollSuccess/OnPollFail -> ReleaseCallback -> AbandonInFlightPoll -> descarte por m_PollGeneration. Traza donde queda viva cada instancia (array propio vs retencion engine).
+2. Decide la causa mas defendible SIN motor (no puedes ejecutar el juego) y declarala con el rastro de codigo.
+3. Implementa el fix minimo. Candidato preferente (del reporte, y regla Enforce de este pipeline: NADA de new en caminos periodicos): UN callback de poll PERSISTENTE reutilizado en todos los polls, invalidado/reciclado por m_PollGeneration al abandonar — en vez de instancia nueva por poll a 5 Hz. Restricciones del fix:
+   - El descarte por m_PollGeneration (la proteccion real del watchdog) queda INTACTO: un callback tardio de una generacion vieja debe seguir siendo ignorado. Si reutilizas una instancia, la generacion debe viajar en el estado del callback o comprobarse al despachar — demuestra en el informe que el caso "callback del poll abandonado llega tarde y pisa al nuevo" NO puede pasar.
+   - MCPClientResultCallback (17x) NO es tu objetivo: no toques su flujo salvo que el fix lo exija; si ves la misma causa alli, DOCUMENTALO en el informe sin implementarlo.
+   - Manten el log del watchdog informativo (conteo de refs vivas).
+4. Si tras el analisis el candidato persistente NO es seguro (p.ej. el engine exige instancia fresca por request), implementa la alternativa que si lo sea (p.ej. remove garantizado en todos los caminos + pool acotado) y justifica.
+
+REGLAS ENFORCE (obligatorias — el revisor las comprobara)
+- Sin operadores ternarios. Tipado explicito siempre. Campos miembro con prefijo m_.
+- Condiciones booleanas de una linea (nada de && / || partidos en varias lineas).
+- Logs: componer el string en variable local y pasarla (nada de Print(string.Format(TAG + ...)) inline compuesto dentro de la llamada).
+- Null-check de todo resultado de Cast/Find antes de usarlo.
+- No introduzcas new dentro de OnTick/caminos por-poll: esa es la meta del fix.
+- Comentarios en ingles, tono impersonal (que + por que), sin narrativa ni fechas.
+
+GATE MECANICO (sin compilador disponible — declaralo)
+1. Conteo de llaves { } del fichero antes y despues: deben quedar balanceadas; pega ambos conteos.
+2. Greps de anclaje post-edit: 0 ocurrencias de "new MCPClientPollCallback" en caminos por-poll (la construccion queda solo en init/regeneracion), y el descarte por generacion sigue presente.
+3. NO puedes compilar Enforce ni ejecutar el juego: el informe lo declara en LO QUE NO PUDE VERIFICAR (compilacion diag + leak real re-medido in-game quedan para el ciclo del orquestador).
+
+FRONTERAS
+- SOLO MCPClientBridge.c. PROHIBIDO: _ref\, ficheros nuevos salvo INFORME.md, borrar codigo no relacionado, reformatear, subagentes, git. Diffs minimos.
+- Techo: 25 turnos.
+
+ENTREGA
+INFORME.md en la raiz del workspace: CAUSA (con rastro fichero:linea), FIX (que cambiaste y por que es minimo), PRUEBA DE NO-REGRESION del descarte por generacion (el caso tardio, razonado paso a paso), GATES (llaves pre/post, greps), LO QUE NO PUDE VERIFICAR. Ultima respuesta: solo "DONE" + ruta del informe.

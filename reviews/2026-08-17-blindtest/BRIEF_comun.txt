@@ -1,0 +1,247 @@
+TAREA: implementar el verbo `action_use` del puente DayZ-MCP en los DOS ficheros
+Enforce copiados al workspace de abajo. Solo esos dos. Es una tarea de ESCRITURA EN DISCO.
+
+`action_use` hace que el jugador local ejecute una accion de usuario de DayZ sin que
+nadie toque el teclado. El caso que la motiva: abrir el panel del ATM de LFPowerGrid
+disparando la accion `LFPG_ActionOpenBTCAtm`.
+
+=======================================================================
+ESCRITURA OBLIGATORIA
+=======================================================================
+Edita EN SITIO estos cuatro ficheros (rutas absolutas Windows):
+
+  C:\Users\guill\AppData\Local\Temp\blindtest\ws_composer\MCPMessages.c
+  C:\Users\guill\AppData\Local\Temp\blindtest\ws_composer\MCPClientBridge.c
+
+- Usa `search_replace`. NO es `write` ni `Write`: esos no son tool IDs.
+- NO pegues el cuerpo de los ficheros en el chat. Solo el RECEIPT del final.
+- NO crees ficheros nuevos. NO renombres. NO reformatees lo que no toques.
+- NO escribas NADA fuera de C:\Users\guill\AppData\Local\Temp\blindtest\ws_composer\.
+
+=======================================================================
+FRONTERAS (duras)
+=======================================================================
+- PROHIBIDO ABRIR NADA FUERA DEL WORKSPACE: ni leer, ni grep, ni ls. En particular
+  el arbol "C:\Users\guill\OneDrive\Documentos\DayZ Projects\..." esta VETADO:
+  contiene una implementacion de referencia de ESTA MISMA tarea y consultarla ANULA
+  la corrida. Todo lo que necesitas —las 17 firmas vanilla con path:line— ya esta en
+  este brief. Si te falta un dato, decide y anotalo en not_verified; no salgas a
+  buscarlo.
+- NO toques codigo de LFPowerGrid. Ese mod es solo lectura y solo referencia.
+- NO lances ni mates procesos DayZ (DayZDiag_x64.exe / DayZServer). El ciclo in-game
+  es del orquestador via el lease dayz-mcp.
+- NO lances subagentes.
+- Un solo entregable: el verbo `action_use`. Nada de "y ya de paso arreglo X".
+
+=======================================================================
+CONTEXTO: como viaja un comando por el puente
+=======================================================================
+@app.tool en server.py -> se encola por NOMBRE en loopback.py (CLIENT_COMMANDS +
+validacion de args) -> el juego lo saca en su poll -> if/else en MCPClientBridge.c
+-> responde por PostResult.
+
+El nombre `action_use` tiene que ser IDENTICO en los tres sitios. Un desajuste da
+`not_whitelisted` o `unknown_command`.
+
+Todo campo de args nuevo hay que DECLARARLO en la clase `MCPArgs` de MCPMessages.c:
+las claves JSON no declaradas se descartan EN SILENCIO al deserializar.
+
+El ejemplo mas cercano a copiar en forma es `ui_click`. Esta en los cuatro ficheros
+(busca "ui_click"). Imita su forma: validacion en loopback, @app.tool en server.py,
+DispatchUiClick en el bridge.
+
+=======================================================================
+ANCLAJES VERIFICADOS POR EL ORQUESTADOR (fiate de estos, NO los re-derives)
+=======================================================================
+Todos leidos directamente del arbol el 2026-08-17. Raiz vanilla:
+  C:\Users\guill\OneDrive\Documentos\DayZ Projects\scripts\
+
+[A1] ActionManagerClient.PerformActionStart(ActionBase action, ActionTarget target,
+     ItemBase item, Param extra_data = NULL)
+     -> 4_world\classes\useractionscomponent\actionmanagerclient.c:762
+     PUBLICO. En multiplayer hace ActionStart(action, target, item, extra_data) (:772).
+     ESTE es el punto de entrada.
+
+[A2] ATENCION - TRAMPA YA PISADA:
+     `PerformAction(int user_action_id, ...)` en actionmanagerclient.c:756 esta DENTRO
+     de un bloque `#ifdef BOT` (abre en :754, cierra en :760). `BOT` no se define en
+     ningun sitio del arbol vanilla. Ese simbolo NO EXISTE en esta build. NO lo uses.
+
+[A3] ATENCION - SEGUNDA TRAMPA YA PISADA:
+     `ForceTarget(Object)` en actionmanagerclient.c:460 construye
+       m_ForceTarget = new ActionTarget(targetObject, parent, -1, vector.Zero, -1);   (:466)
+     con cursorHitPos = vector.Zero. Y `m_ForceTarget` solo lo consume
+     `FindActionTarget()` (:476-479), al que PerformActionStart NUNCA llama.
+     NO USES ForceTarget/ClearForceTarget. Construye tu el ActionTarget (ver [A4]).
+
+[A4] ActionTarget(Object object, Object parent, int componentIndex, vector cursorHitPos,
+     float utility)
+     -> 4_world\classes\useractionscomponent\actiontargets.c:113
+
+[A5] CCTCursor.Can(PlayerBase player, ActionTarget target)
+     -> 4_world\classes\useractionscomponent\targetconditionscomponents\cctcursor.c:15-34
+     Mide distancia asi (:30-33):
+       distanceRoot = vector.DistanceSq(target.GetCursorHitPos(), player.GetPosition())
+       distanceHead = vector.DistanceSq(target.GetCursorHitPos(), playerHeadPos)
+       return (distanceRoot <= maxSq || distanceHead <= maxSq)
+     NO hace raycast y NO comprueba hacia donde mira el jugador. Solo distancia desde
+     cursorHitPos. Por eso el cursorHitPos TIENE que ser una posicion real sobre el
+     objetivo (usa targetObj.GetPosition()), y por eso vector.Zero de [A3] falla
+     siempre: en Chernarus el origen esta a ~10 km del jugador.
+
+[A6] ActionBase.Can(PlayerBase player, ActionTarget target, ItemBase item)
+     -> 4_world\classes\useractionscomponent\actionbase.c:912
+     Encadena (via el overload de :873): mascara de stance/rolling (:875), dueño de la
+     entidad (:882-888), m_ConditionTarget.Can (:891), m_ConditionItem.Can (:895),
+     ActionCondition (:898). Es EXACTAMENTE lo que re-evalua el servidor, asi que
+     llamarlo en cliente antes de disparar es un pre-check fiel.
+
+[A7] ActionManagerBase.ActionPossibilityCheck(int pCurrentCommandID)
+     -> 4_world\classes\useractionscomponent\actionmanagerbase.c:244
+     PUBLICO. Falla si sprinting / inconsciente / emote / rolling / arma ocupada /
+     inventario procesando, y exige que el commandID sea ACTION, MOVE, SWIM, LADDER
+     o VEHICLE.
+
+[A8] ActionManagerBase.m_ActionsArray -> `static ref array<ref ActionBase>`
+     -> actionmanagerbase.c:50 (publico, static, poblado en el ctor :78-81)
+     Es el registro de TODAS las acciones. Recorrelo para resolver por nombre:
+     candidate.Type().ToString() == nombre_pedido.
+     NO existe conversion string->typename en Enforce, asi que esta es la via.
+
+[A9] ActionManagerBase.GetRunningAction() -> actionmanagerbase.c:91 (publico)
+
+[A10] PlayerBase.GetActionManager() -> 4_world\entities\manbase\playerbase.c:1829
+      Devuelve ActionManagerBase; en cliente hay que ActionManagerClient.Cast(...).
+
+[A11] ActionBase.WriteToContext -> actionbase.c:438-492
+      En :454-465 serializa targetObject, targetParent, componentIndex y cursorHitPos
+      TAL CUAL. El servidor reconstruye TU target; no rehace ningun raycast. Por eso
+      un ActionTarget fabricado a mano llega intacto.
+
+[A12] ActionBase.UseAcknowledgment() devuelve true -> actionbase.c:1146-1148
+      El arranque NO es local: el cliente pide permiso y el servidor re-evalua.
+
+[A13] ActionManagerServer.StartDeliveredAction -> actionmanagerserver.c:115
+      Puerta del servidor en :142:
+        !GetCommandModifier_Action() && !GetCommand_Action() && !IsSprinting()
+        && pickedAction.Can(m_Player, target, item)
+
+[A14] La accion objetivo del caso de uso: LFPG_ActionOpenBTCAtm
+      -> LFPowerGrid\scripts\4_World\LFPG_ActionOpenBTCAtm.c:26-67
+      Extiende ActionInteractBase. m_ConditionTarget = new CCTCursor(LFPG_INTERACT_DIST_M)
+      con LFPG_INTERACT_DIST_M = 5.0 (LFPG_Defines.c:548).
+
+[A15] ATENCION - TERCERA TRAMPA:
+      `m_ConditionItem = new CCINone` NO significa "manos vacias". CCINone.Can()
+      devuelve `true` incondicionalmente
+      (4_world\classes\useractionscomponent\itemconditioncomponents\ccinone.c).
+      Significa "sin condicion de item". Las manos pueden llevar lo que sea.
+      NO metas ninguna comprobacion de manos vacias.
+
+[A16] ActionInteractBase.UseMainItem() devuelve false
+      -> 4_world\classes\useractionscomponent\actions\actioninteractbase.c:71-74
+      => se pasa `null` como ItemBase.
+
+[A17] Patron ya existente en el bridge para localizar objetos cerca del cliente:
+      FindTransportNearClient (MCPClientBridge.c, busca ese nombre) usa
+      GetGame().GetObjectsAtPosition3D(pos, radius, objects, proxyCargos).
+      Imitalo; reutiliza los arrays miembro que ya tenga la clase si existen.
+
+=======================================================================
+DISEÑO QUE DEBES IMPLEMENTAR
+=======================================================================
+Argumentos del verbo (nombre JSON -> campo en MCPArgs):
+  action        (string, OBLIGATORIO)  -> campo NUEVO `action` en MCPArgs
+  classname     (string, opcional)     -> YA EXISTE en MCPArgs. Filtro de clase del
+                                          objetivo. Vacio = cualquier objeto.
+  pos           (array<float>, opc.)   -> YA EXISTE. Centro de busqueda.
+                                          Vacio = posicion del jugador.
+  radius        (float, opcional)      -> YA EXISTE. Radio de busqueda. Default 5.0.
+
+El unico campo NUEVO en MCPArgs es `action`. NO añadas los otros: ya estan.
+
+Secuencia dentro de DispatchActionUse (bridge, lado cliente):
+
+ 1. player = PlayerBase.Cast(GetGame().GetPlayer()); si no -> error "no_player".
+ 2. amc = ActionManagerClient.Cast(player.GetActionManager()); si no -> "no_action_manager".
+ 3. Resolver la accion por nombre recorriendo ActionManagerBase.m_ActionsArray [A8].
+    No encontrada -> "action_not_found".
+ 4. Resolver el objeto objetivo con GetObjectsAtPosition3D [A17]: el MAS CERCANO al
+    centro que case con `classname` (si viene). Ninguno -> "target_not_found".
+    Descarta al propio jugador.
+ 5. Construir el ActionTarget [A4]:
+      new ActionTarget(targetObj, null, -1, targetObj.GetPosition(), 0)
+    El cursorHitPos DEBE ser targetObj.GetPosition(), nunca vector.Zero [A3][A5].
+ 6. Pre-checks, cada uno con su codigo de error propio (esto es lo que hace el fallo
+    legible en vez de silencioso):
+      amc.GetRunningAction() != null            -> "action_in_progress"
+      !amc.ActionPossibilityCheck(player.GetCurrentCommandID()) -> "not_possible"
+      !ScriptInputUserData.CanStoreInputUserData()               -> "input_busy"
+      !action.Can(player, actionTarget, null)                    -> "condition_failed"
+ 7. Disparar: amc.PerformActionStart(action, actionTarget, null, NULL);
+ 8. Rellenar el resultado y ok = true.
+
+Campos de resultado (clase MCPResult en MCPMessages.c). Añade SOLO los que falten;
+reutiliza los que ya existan con la misma semantica:
+  action     (string) - nombre de la accion resuelta
+  classname  (string) - YA EXISTE. Clase del objetivo resuelto.
+  pos_real   (array<float>) - YA EXISTE. Posicion del objetivo (= cursorHitPos usado).
+  distance   (float)  - distancia jugador<->cursorHitPos. Es la que decide CCTCursor,
+                        asi que devolverla convierte un "condition_failed" en algo
+                        diagnosticable de un vistazo.
+  started    (bool)   - true si se llamo a PerformActionStart.
+
+CONTRATO ASINCRONO - decision ya tomada por el orquestador, impleméntala tal cual:
+`action_use` devuelve EN CUANTO despacha en local. NO espera el ack del servidor.
+`started:true` significa "aceptada localmente y enviada", NO "ejecutada".
+Motivo: el despacho ocurre dentro del tick del juego y bloquear ahi congela la
+simulacion; ademas UseAcknowledgment()==true [A12] mete un round-trip al servidor.
+Quien llame confirma la ejecucion real con
+`wait_for(condition="log_matches", pattern=...)`.
+NO inventes espera, NO bloquees, NO uses Sleep.
+
+=======================================================================
+REGLAS DE ENFORCE SCRIPT QUE MUERDEN (no hay compilador offline)
+=======================================================================
+El unico gate real es arrancar el juego, asi que estas se respetan a rajatabla:
+- NADA de operador ternario `? :`.
+- NINGUNA condicion booleana partida en varias lineas. Un `if` con && o || va en UNA
+  sola linea, por larga que quede.
+- Tipo EXPLICITO en cada variable local. Nada de inferencia.
+- NADA de `new` en rutas que corren por tick.
+- `Print(string.Format(TAG + ...))` es trampa de parseo: no concatenes dentro del
+  string.Format.
+- NINGUN fichero con BOM. Los dos entran sin BOM y tienen que salir sin BOM.
+- Respeta el estilo del fichero: tabuladores en los .c de Enforce.
+
+Comentarios en INGLES, impersonales, estilo cabecera vanilla DayZ. Sin primera
+persona, sin fechas, sin narrativa. Documenta el POR QUE cuando no sea obvio
+(especialmente: por que cursorHitPos no puede ser vector.Zero, y por que el verbo no
+espera el ack). Cita el path:line vanilla cuando ancles un comportamiento.
+
+=======================================================================
+CRITERIO DE HECHO
+=======================================================================
+- Los dos ficheros existen y siguen sin BOM.
+- "action_use" es el string del if/else de MCPClientBridge.c.
+- `action` esta declarado en MCPArgs.
+- El bridge NO usa PerformAction(int,...) [A2] ni ForceTarget [A3].
+- El cursorHitPos que se pasa al ActionTarget es targetObj.GetPosition().
+- No hay ternarios ni condiciones booleanas multilinea en el codigo que has añadido.
+- No has tocado nada fuera del workspace.
+
+=======================================================================
+SALIDA EN CHAT (solo esto, sin el cuerpo de los ficheros)
+=======================================================================
+## RECEIPT
+```json
+{
+  "status": "ok|failed",
+  "paths": ["..."],
+  "summary": "una linea",
+  "verified": ["que comprobaste tu y como"],
+  "not_verified": ["que NO pudiste comprobar"]
+}
+```
+Y despues, fuera del JSON, una seccion "## DECISIONES" de como mucho 10 lineas con
+cualquier punto donde te hayas separado de este brief y por que.

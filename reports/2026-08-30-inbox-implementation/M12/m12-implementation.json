@@ -1,0 +1,307 @@
+{
+  "ticket": "fb-20260830-010517-9d46",
+  "tickets": ["fb-20260830-010517-9d46", "fb-20260829-194823-ffc7"],
+  "module": "M12-MODE-AUTHORITY",
+  "packet": "inbox-20260831-v6",
+  "plans": [
+    "plans/inbox-20260830/31-fb-20260830-010517-9d46.md",
+    "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md"
+  ],
+  "plan": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md (9d46) + plans/inbox-20260830/27-fb-20260829-194823-ffc7.md (ffc7); materialización M12 compartida",
+  "gate_file": "gates/inbox-31-010517-9d46.md y gates/inbox-27-194823-ffc7.md (leídos; ninguna casilla volteada; IMPLEMENTED/REVIEW-GROK/RESOLVED siguen pending)",
+  "ownership_addendum": "plans/inbox-20260830/physical-ownership-addendum-v1.md:60",
+  "dag_row": "plans/inbox-20260830/00-execution-dag.md:47",
+  "scope": "Solo la autoridad leaf M12: records inmutables all/server/client/offline, resolvers de vista viva y tests propios. Una frase honesta: el leaf del lote SÍ está en disco (no es el caso M07 de suite verde anterior). Los puntos M18/M19/M20/M22/M23 de ambas fichas son OUT-OF-SCOPE; M18 ya importa el módulo (no se acredita aquí), M19/M20/M22 conservan las copias locales del [EXACT]. Hashes y suite de esta hop INCONCLUSIVE (lane sin shell).",
+  "lote_vs_preexisting": "A diferencia del módulo de control (ficheros pre-lote con suite heredada), M00 inventarió estos dos paths como git_state='?' (untracked, no baseline vanilla). Eso no acredita el plan por sí solo; el veredicto sale de leer MODE_RECORDS/resolvers contra ffc7:1 y 9d46:1, no de que el fichero exista.",
+  "owns": {
+    "tools/dayz_mcp/dayz_test_modes.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Lane de acreditación sin shell; no se calcula SHA-256/mtime/size en esta hop. El orquestador fusiona digest/suite. No se transcribe censo-A ni el inventario M00 (tautología). Source leído entero este hop: tools/dayz_mcp/dayz_test_modes.py:1-240.",
+      "prior_measurement_not_this_hop": {
+        "source": "reports/2026-08-30-inbox-implementation/M00/m00-git-inventory-v2.jsonl (git_state=?, 2026-08-31)",
+        "size_bytes": 7938,
+        "mtime_utc": "2026-08-31T22:20:28+00:00",
+        "note": "Medición ajena. No es el digest de esta hop. Sin sha256 en ese inventario."
+      }
+    },
+    "tools/tests/test_dayz_test_modes.py": {
+      "sha256": null,
+      "sha256_status": "INCONCLUSIVE",
+      "size_bytes": null,
+      "mtime_utc": null,
+      "reason": "Lane de acreditación sin shell; no se calcula SHA-256/mtime/size en esta hop. Source leído entero este hop: tools/tests/test_dayz_test_modes.py:1-216.",
+      "prior_measurement_not_this_hop": {
+        "source": "reports/2026-08-30-inbox-implementation/M00/m00-git-inventory-v2.jsonl (git_state=?, 2026-08-31)",
+        "size_bytes": 8756,
+        "mtime_utc": "2026-08-31T22:36:05+00:00",
+        "note": "Medición ajena. No es el digest de esta hop. Sin sha256 en ese inventario."
+      }
+    }
+  },
+  "plan_points": {
+    "ffc7_1_m12_leaf_authority": {
+      "plan_citation": "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md:35",
+      "verdict": "IMPLEMENTED",
+      "owner": "M12-MODE-AUTHORITY",
+      "code": "tools/dayz_mcp/dayz_test_modes.py:18-82 (ModeStep/ModeRecord @dataclass frozen+slots); :85-99 fábricas adopt_supplied/start/readiness; :102-149 MODE_RECORDS en orden all, server, client, offline. all: public/request_visible, start(server,_server,new)→readiness(current)→start(client,_client,current), roots (_server,_client), starts_client=true, único default_when_omitted=true (:103-115). server: start(server,_server,new), roots (_server,), starts_client=false, sin adopt (:116-124). client: adopt_supplied(required=true)→start(client,_client,supplied), roots (_client,), starts_client=true (:125-136). offline: public=false request_visible=true, adopt_supplied(required=false)→start(offline,_client,supplied_or_new), roots (_client,), starts_client=true (:137-148). Resolvers sobre la vista recibida: _validated_view :152-173; mode_records relee MODE_RECORDS :176-179; resolve_mode lookup exacto o ModeAuthorityError('unknown mode') :186-193; resolve_default_mode exige exactamente un default marcado y request-visible :200-212; public_mode_names/request_mode_names derivan la tupla en cada llamada :215-222. Imports del leaf :8-11 solo dataclasses+typing (cero consumidores). No existe DEFAULT_MODE ni frozenset de modos en este módulo.",
+      "tests": "tools/tests/test_dayz_test_modes.py:12-92 (oráculo literal externo de las cuatro secuencias, visibilidad, raíces, default, public=('all','server','client'), request incluye offline, FrozenInstanceError); :94-97 unknown fail-closed; :99-125 cero/varios defaults y default no request-visible; :127-143 vista suplida gobierna public/request/default; :145-166 orden/pasos/raíces/run_id_source de la vista suplida; :168-180 nombres duplicados fail-closed en todos los resolvers; :182-198 sustituir MODE_RECORDS entre llamadas; :200-211 fábricas inmutables.",
+      "not_claimed": "Kill/preflight fuera de estas secuencias es contrato M20 (el leaf no las codifica). start() no enumera run_id_source∈{new,supplied,current,supplied_or_new} (sí lo hace readiness==current en :44-45); los records canónicos sí usan solo esos valores. Aislamiento de imports no tiene test. Suite no ejecutada esta hop."
+    },
+    "ffc7_2_m18_request_contract": {
+      "plan_citation": "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md:36",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M18-REQUEST-CONTRACT",
+      "authority": "plans/inbox-20260830/00-execution-dag.md:53; physical-ownership-addendum-v1.md:67; ffc7.md:15 (M18 writer exclusivo de ffc7)",
+      "observed_readonly": "No acredita M18. Leído: dayz_test_request.py:11 importa el módulo; :67-74 _request_mode_view() toma mode_records()+resolve_default_mode()+request_mode_names() por parse; :277 value.get('mode', default_mode) ya no es el literal 'all' del [EXACT] :260. Tokens :41-43 invalid_run_id/client_requires_run_id/server_all_forbid_run_id; UUID malformado :338-339; matriz :359-362 sin el guard 'if not preflight' del [EXACT]. test_dayz_test_request.py:12-14 ya sustituye MODE_RECORDS. Eso es OWNS de M18, no de esta hop."
+    },
+    "ffc7_3_m19_live_view_and_codes": {
+      "plan_citation": "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md:37",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M19-TOOL-READINESS",
+      "authority": "plans/inbox-20260830/00-execution-dag.md:54; physical-ownership-addendum-v1.md:68",
+      "observed_readonly": "dayz_test_tool.py no importa dayz_test_modes. Conserva _PUBLIC_MODES/_ACCEPTED_MODES :17-18, membership :132 y :619, catch genérico TypeError|ValueError→bad_dayz_test_request :172-177. Texto de error 'mode expected server|all|client' :133, :620. Firma/schema públicos y app.call_tool son M22."
+    },
+    "ffc7_4_m19_roots_stop_post_ack": {
+      "plan_citation": "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md:38",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M19-TOOL-READINESS",
+      "authority": "plans/inbox-20260830/00-execution-dag.md:54; addendum :68; ffc7.md:15 (M21 no reabre dayz_test_tool.py)",
+      "observed_readonly": "_artifact_paths :358-367 sigue if server / elif all / else→_client. _stop_artifacts :475-492 pide _artifact_paths(policy, 'all'). Post-ACK :575 public_mode in {'all','offline'} (omite client; el [EXACT] de ffc7:22)."
+    },
+    "ffc7_5_m20_record_interpreter": {
+      "plan_citation": "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md:39",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M20-WORKER-STORAGE",
+      "authority": "plans/inbox-20260830/00-execution-dag.md:55; physical-ownership-addendum-v1.md:69-70",
+      "observed_readonly": "dayz_test_worker.py:16 importa readiness/request/protocol, no M12. Dispatch :589-642 if/elif mode==server|client|offline|all y :592 mode in {'client','offline'} para adopt. else→runtime_policy_invalid :641-642. Kill :526-546 y preflight :547-552 siguen antes del dispatch (precedencia viva, no intérprete de records)."
+    },
+    "ffc7_6_m22_public_enum": {
+      "plan_citation": "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md:40",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "plans/inbox-20260830/00-execution-dag.md:57 (único dueño de server.py); addendum :72",
+      "observed_readonly": "server.py no importa dayz_test_modes. dayz_test_run mode: str :2688-2691. Descripción 'mode is server|all|client' :2675 (orden textual local, no tupla pública all→server→client). Sin parche de inputSchema.enum tras el registro."
+    },
+    "ffc7_7_m22_external_fixture_app_stdio": {
+      "plan_citation": "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md:41",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "00-execution-dag.md:57, :163-165 (app.list_tools y stdio son observaciones M22, no oracle del leaf). La fixture debe vivir fuera de dayz_test_modes.py y de sus consumidores; test_dayz_test_modes.py:84 tiene el literal ('all','server','client') como oráculo unitario M12, no como observación app/stdio.",
+      "observed_readonly": "No hay test_effective_schema_integration.py en OWNS de M12. M13/M22 no se acreditan."
+    },
+    "ffc7_8_m19_m22_public_offline_and_stop": {
+      "plan_citation": "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md:42",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M19-TOOL-READINESS / M22-SERVER-INTEGRATION",
+      "authority": "DAG :54 y :57; ffc7.md:15",
+      "observed_readonly": "execute_dayz_test_run rechaza no-públicos con _PUBLIC_MODES :619-620 (copia local, no record M12). execute_dayz_test_stop sella mode='offline' :679-685 y public_mode='stop' :692. No prueba pública app.call_tool en test_dayz_test_modes.py."
+    },
+    "ffc7_9_m18_m19_m20_m22_behavior_gates": {
+      "plan_citation": "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md:43",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M18-REQUEST-CONTRACT / M19-TOOL-READINESS / M20-WORKER-STORAGE / M22-SERVER-INTEGRATION",
+      "authority": "Cada writer en su OWNS (DAG :53-57). Los mutantes de vista M12 unitarios están en ffc7_1; este punto exige gates en request/tool/worker/app.",
+      "observed_readonly": "test_dayz_test_modes.py no cubre preflight×mode×run_id, traces de worker, raíces/stop/post-ACK de la façade ni app.call_tool."
+    },
+    "ffc7_10_m20_launcher_allowlists": {
+      "plan_citation": "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md:44",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M20-WORKER-STORAGE",
+      "authority": "DAG :55; addendum :69-70",
+      "observed_readonly": "build_native_launcher.py PACKAGED_MODULES :53-71 no lista dayz_test_modes.py. native_bundle.py _APP_PACKAGED_MODULES :65-81 y _HASHED_MODULES :59-64 tampoco; _MANIFEST_KEYS :46-57 sin dayz_test_modes_sha256. test_native_launcher_bundle.py:167-180 expected_keys sin esa key."
+    },
+    "ffc7_11_m20_reproducible_rebuild": {
+      "plan_citation": "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md:45",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M20-WORKER-STORAGE",
+      "authority": "DAG :55; addendum :69 (rebuild/reaprobación)"
+    },
+    "ffc7_12_m20_reapproval_existing_apis": {
+      "plan_citation": "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md:46",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M20-WORKER-STORAGE",
+      "authority": "addendum :70 (launcher_registry_update.py / launcher_registry.py son read para M20, no OWNS de M12)"
+    },
+    "ffc7_13_m20_failclosed_reapproval_flow": {
+      "plan_citation": "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md:47",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M20-WORKER-STORAGE",
+      "authority": "DAG :55; addendum :69-70"
+    },
+    "ffc7_14_m20_registry_update_tests": {
+      "plan_citation": "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md:48",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M20-WORKER-STORAGE",
+      "authority": "addendum :69 (test_launcher_registry_update.py)"
+    },
+    "ffc7_15_m23_promotion_precondition": {
+      "plan_citation": "plans/inbox-20260830/27-fb-20260829-194823-ffc7.md:49",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M23-FINAL-SCHEMA-PROMOTION",
+      "authority": "plans/inbox-20260830/00-execution-dag.md:58; addendum :73-74. M23 espera M20+M22."
+    },
+    "9d46_1_m12_records": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:32",
+      "verdict": "IMPLEMENTED",
+      "owner": "M12-MODE-AUTHORITY",
+      "code": "Misma materialización que ffc7_1: MODE_RECORDS :102-149; pasos tipados :18-45 y fábricas :85-99; lookup exacto resolve_mode/lookup_mode :186-197; default bajo demanda sin cache de nombre :200-212; public_mode_names tupla all→server→client :215-217; offline solo interno (public=false :137-139). Omisión raw no vive en este módulo (ningún value.get mode).",
+      "tests": "test_dayz_test_modes.py:12-92 contrato externo; :94-97 unknown; :99-125 defaults; :127-166 vista viva de visibilidad/orden/pasos/raíces/run_id_source; :182-198 rebind de MODE_RECORDS.",
+      "not_claimed": "Uso de esa tupla en manifest/fingerprint/enum wire (M20/M14/M22). 'nunca otro frozenset del consumidor' es prohibición M18/M19; el leaf no exporta frozenset de modos."
+    },
+    "9d46_2_phase_run_id_matrix": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:33",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M18-REQUEST-CONTRACT / M19-TOOL-READINESS / M20-WORKER-STORAGE",
+      "authority": "9d46.md:33 dice 'no como write de esta ficha sobre M18/M19'; la matriz kill/preflight/normal es comportamiento de esos writers. DAG :53-55.",
+      "observed_readonly": "La matriz en dayz_test_request.py:353-362 y el dispatch worker :526-552/:589-642 no son OWNS M12."
+    },
+    "9d46_3_m12_single_materialization": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:34 (cláusula M12: una sola edición de dayz_test_modes.py y test_dayz_test_modes.py)",
+      "verdict": "IMPLEMENTED",
+      "owner": "M12-MODE-AUTHORITY",
+      "code": "Un único módulo leaf tools/dayz_mcp/dayz_test_modes.py:1-240 y un único test tools/tests/test_dayz_test_modes.py:1-216. No hay segundo dayz_test_modes ni records paralelos en OWNS M12.",
+      "tests": "La suite propia es ese único fichero (8 métodos listados en preexisting_suite_not_run).",
+      "not_claimed": "txid/lock de la ventana serializada ffc7/9d46 (proceso, no bytes). Que M20/M22 compartan esa ventana."
+    },
+    "9d46_3_m18_m19_ffc7_exclusive_writer": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:34",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M18-REQUEST-CONTRACT / M19-TOOL-READINESS",
+      "authority": "9d46.md:14-15 y :34: 9d46 no crea ni modifica los cuatro paths M18/M19; ffc7/plan27 es el writer exclusivo. DAG :53-54; addendum :67-68.",
+      "observed_readonly": "dayz_test_request.py y test_dayz_test_request.py ya tocan M12 (fuera de esta hop). dayz_test_tool.py no."
+    },
+    "9d46_3_m20_m22_shared_window": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:34",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M20-WORKER-STORAGE / M22-SERVER-INTEGRATION",
+      "authority": "9d46.md:15 y :34 (única edición de dayz_test_worker.py, cierre nativo y test_effective_schema_integration.py). DAG :55, :57; addendum :69, :72."
+    },
+    "9d46_4_m20_interpreter": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:35",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M20-WORKER-STORAGE",
+      "authority": "DAG :55; addendum :69",
+      "observed_readonly": "Igual que ffc7_5: worker sin import M12; if/elif :589-642; mode in {'client','offline'} :592."
+    },
+    "9d46_5_m19_readonly_contract_m22_observer": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:36",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M19-TOOL-READINESS / M22-SERVER-INTEGRATION",
+      "authority": "9d46.md:36 (consumir M19 read-only; observer M22; unitarios de helpers siguen en plan27). DAG :54, :57."
+    },
+    "9d46_6_m22_live_enum": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:37",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "DAG :57; addendum :72",
+      "observed_readonly": "Igual que ffc7_6: server.py:2688-2691 mode: str; :2675 texto server|all|client; cero import de M12."
+    },
+    "9d46_7_m22_m18_observation_matrix": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:38",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M18-REQUEST-CONTRACT / M22-SERVER-INTEGRATION",
+      "authority": "9d46.md:38: omisión raw→all solo tests M18 de ffc7; app.call_tool con mode presente, rechazo FastMCP de mode ausente, extras legacy y dayz_test_stop son M22. 9d46 no añade tests M18/M19.",
+      "observed_readonly": "test_dayz_test_modes.py no llama app.call_tool ni parse_dayz_test_request."
+    },
+    "9d46_8_m20_m19_live_gates": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:39",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M20-WORKER-STORAGE / M19-TOOL-READINESS",
+      "authority": "9d46.md:39 (test_dayz_test_worker.py = única entrega M20; unitarios _artifact_paths/_stop_artifacts = plan27/M19). DAG :54-55; addendum :68-69."
+    },
+    "9d46_9_m12_view_mutants": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:40 (mutantes de vista/default/visibilidad/orden/pasos atribuibles al writer M12)",
+      "verdict": "IMPLEMENTED",
+      "owner": "M12-MODE-AUTHORITY",
+      "code": "Resolvers fallan cerrado con vista inválida: _validated_view :152-173; resolve_default_mode :200-212; resolve_mode :186-193.",
+      "tests": "test_dayz_test_modes.py:99-125 (cero/varios/invisible default); :127-143 (visibilidad+default suplidos); :145-166 (orden/pasos/raíces/run_id_source); :168-180 (duplicados); :182-198 (MODE_RECORDS entre llamadas). Expected de :19-62 es literal, no derivado de MODE_RECORDS productivos.",
+      "not_claimed": "Mutantes que exige el mismo ítem 9 en M18 (value.get literal, import por valor), M19 (frozenset local), M20 (mode in {client,offline} del worker) y M22 (dos builds)."
+    },
+    "9d46_9_m18_m19_mutants": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:40",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M18-REQUEST-CONTRACT / M19-TOOL-READINESS",
+      "authority": "9d46.md:40: ffc7/plan27 implementa mutantes de vista viva/default/omisión, guard preflight, catch/códigos, unknown→_client, roots/stop/post-ACK en M18/M19. DAG :53-54."
+    },
+    "9d46_9_m20_mutants": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:40",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M20-WORKER-STORAGE",
+      "authority": "9d46.md:40 (test_dayz_test_worker.py sustituye la tupla M12 y escribe expected mutante externo). DAG :55; addendum :69."
+    },
+    "9d46_9_m22_mutants": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:40",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION",
+      "authority": "9d46.md:40 (M22 calibra schema/texto; dos builds con vistas distintas). DAG :57."
+    },
+    "9d46_10_m20_native_closure": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:41",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M20-WORKER-STORAGE",
+      "authority": "9d46.md:41 (cierre nativo compartido con ffc7, un solo flujo). DAG :55; addendum :69. observed_readonly igual que ffc7_10: módulo ausente de ambas allowlists y del manifest."
+    },
+    "9d46_11_m22_m20_boundary_executions": {
+      "plan_citation": "plans/inbox-20260830/31-fb-20260830-010517-9d46.md:42",
+      "verdict": "OUT-OF-SCOPE",
+      "owner": "M22-SERVER-INTEGRATION / M20-WORKER-STORAGE / M18-REQUEST-CONTRACT",
+      "authority": "9d46.md:42: app.list_tools/tools/list y app.call_tool son M22; dispatch derivado M20; omisión raw→all solo M18 de plan27. No autoriza escribir M18/M19."
+    }
+  },
+  "verdict_counts": {
+    "IMPLEMENTED": 4,
+    "OUT-OF-SCOPE": 27,
+    "NOT-IMPLEMENTED": 0,
+    "INCONCLUSIVE": 0,
+    "note": "Conteos sobre las 31 entradas de plan_points (4+27+0+0=31). Hashes de owns y corrida unittest son INCONCLUSIVE aparte, no son puntos de plan. Las 4 IMPLEMENTED son la misma leaf compartida ffc7/9d46 (puntos 1 + cláusula M12 de 9d46:3 y mutantes M12 de 9d46:9), no cuatro implementaciones."
+  },
+  "preexisting_suite_not_run": {
+    "file": "tools/tests/test_dayz_test_modes.py",
+    "methods_visible": 8,
+    "methods": [
+      "test_canonical_records_are_immutable_and_have_external_contract:12",
+      "test_lookup_is_exact_and_unknown_fails_closed:94",
+      "test_default_resolution_rejects_zero_or_multiple_defaults:99",
+      "test_views_are_read_from_supplied_records_each_call:127",
+      "test_supplied_view_replaces_order_steps_roots_and_run_id_source:145",
+      "test_supplied_view_with_duplicate_names_fails_closed_everywhere:168",
+      "test_module_record_view_can_be_replaced_between_calls:182",
+      "test_step_factories_produce_immutable_typed_steps:200"
+    ],
+    "note": "Inventario de source, no resultado de unittest. El brief prohíbe inventar ran/failures. Que estos ocho métodos existan no acredita consumidores M18+."
+  },
+  "bugs_observed_not_fixed": [
+    {
+      "id": "start-run-id-source-not-enumerated",
+      "location": "tools/dayz_mcp/dayz_test_modes.py:36-40 vs :44-45",
+      "problem": "ModeStep.__post_init__ exige readiness.run_id_source=='current' pero start() acepta cualquier string no-None como run_id_source. El plan tipa new|supplied|current|supplied_or_new. Los four records canónicos sí usan solo esos valores (:107-143). La validación de forma del intérprete está asignada a M20 (ffc7:39 / 9d46:35).",
+      "action": "no parcheado; esta hop no escribe source."
+    },
+    {
+      "id": "consumers-still-parallel-authority",
+      "location": "tools/dayz_mcp/dayz_test_tool.py:17-18,358-367,575,619; tools/dayz_mcp/dayz_test_worker.py:592-642; tools/build_native_launcher.py:53-71; tools/dayz_mcp/native_bundle.py:46-81",
+      "problem": "El leaf existe, pero M19/M20/launcher no lo consumen: copias locales, if/elif y allowlists sin dayz_test_modes.py. No es un defecto del leaf; es el trabajo de esos módulos, aún no hecho.",
+      "action": "no parcheado; OUT-OF-SCOPE M19/M20."
+    }
+  ],
+  "not_touched": [
+    "tools/dayz_mcp/dayz_test_modes.py (leído; no escrito)",
+    "tools/tests/test_dayz_test_modes.py (leído; no escrito)",
+    "tools/dayz_mcp/dayz_test_request.py (leído :11,:41-43,:67-74,:277,:338-362 para OUT-OF-SCOPE; no escrito)",
+    "tools/tests/test_dayz_test_request.py (leído :12-14; no escrito)",
+    "tools/dayz_mcp/dayz_test_tool.py (leído :17-18,:132-133,:172-177,:358-367,:475-492,:575,:619-620,:663-697; no escrito)",
+    "tools/dayz_mcp/dayz_test_worker.py (leído :16,:526-552,:589-642; no escrito)",
+    "tools/dayz_mcp/server.py (leído :2675,:2688-2691; no escrito)",
+    "tools/build_native_launcher.py (leído :53-71; no escrito)",
+    "tools/dayz_mcp/native_bundle.py (leído :46-81; no escrito)",
+    "tools/tests/test_native_launcher_bundle.py (leído :160-180; no escrito)",
+    "GATES.md",
+    "gates/**",
+    "plans/**",
+    "product-spec.md",
+    "tools/.venv-mcp"
+  ]
+}

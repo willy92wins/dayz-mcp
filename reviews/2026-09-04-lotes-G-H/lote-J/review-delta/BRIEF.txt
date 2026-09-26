@@ -1,0 +1,49 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+REVISIÓN DELTA DEL LOTE J (ronda 2) del daemon del MCP de DayZ. Sesión nueva: no arrastras nada.
+La revisión completa de la ronda 1 (otra sesión de Codex, `../review1/REVIEW-CODEX.md`) dio tres
+hallazgos: F-01 ALTA (`adopt_run` sin frontera de excepción tras `_authorize`; `_adopt_on_grant` deja
+morir la respuesta con el lease ya concedido y una reserva huérfana), F-02 MEDIA (`list_runs` ilegible
+→ `adopted_run: null`), F-03 BAJA (nombre de test contrario a su aserción). El implementador entregó la
+ronda 2 sólo para esos tres. Dictamen sobre el DELTA `../ws-frozen-r1/tools/` → `../ws/tools/`.
+
+Producto: `../ws/tools/dayz_mcp/loopback.py` (SHA-256 a71bc82e279ec02519d2b8bba9ae7a6a98da944de7bf64f6f5d4d5ed09a1763d) y
+`../ws/tools/dayz_mcp/process_lifecycle.py` (SHA-256 2efbf05a80f365ff835184e8db824cdf939815bea3316a2339bc61fe0a27596c); resto de `dayz_mcp/` congelado
+(`bash ../ws/gate/product_frozen.sh`). Tests entregados: `../ws/tools/tests/test_daemon.py` (SHA-256 2166cef18f923329cc375a459d6e900639bfe0d86ee18d14cbd13761f6d78883), `../ws/tools/tests/test_process_lifecycle.py` (SHA-256 ae105e6c785067a6a7416a5b97a7678638f751335e0646a43bb5f5143d628ae1); `test_session_e2e.py`, `test_loopback.py`, `test_instance_fence.py` y `test_client_mode.py` no cambiaron respecto a r1. Ledger con las decisiones,
+el ruling de la DISPUTA de la ronda 1 y los tres hallazgos: `../ws/gate/GATES.md`. STATE.md del
+implementador: `../ws/STATE.md` (léelo DESPUÉS de formarte tu opinión del diff).
+
+===============================================================================
+§1. LO QUE QUIERO DE TI (ataca el delta; no reabras la ronda 1 salvo regresión)
+===============================================================================
+
+  F-01: ¿toda salida inesperada de `adopt_run` posterior a `_authorize` y anterior al commit cierra
+        la reserva por el camino que el coordinador espera (abort vs rechazo: mira
+        `session_coordination.py:1373-1448` y qué hace cada uno con `pending_authorizations`, el audit
+        y la revisión)? ¿Puede el cierre de la reserva lanzar a su vez y dejarla abierta? ¿La rama
+        idempotente y la rama normal comparten la misma frontera? ¿`_adopt_on_grant` puede propagar
+        por alguna vía (helper que lanza ANTES de llamar a adopt_run, `_persist_coordination` después)?
+        ¿Queda alguna reserva huérfana observable tras el fallo (heartbeat, release, un acquire
+        posterior de otra sesión)?
+  F-02: ¿`null` queda reservado a la enumeración válida sin candidato? ¿Un `list_runs` que devuelve
+        basura (no iterable, elementos sin `state`) cae en `run_state_unavailable` o en `null`?
+  F-03: renombrado sin tocar la lógica; ¿algún otro test o el oráculo lo referenciaba por el nombre viejo?
+  Regresiones: los 13 checks de la ronda 1 y los 12 tests nuevos siguen; aserciones cambiadas sin
+        F-item; `skip`/`expectedFailure`; tests nuevos tautológicos (que pasen también contra
+        `../ws-frozen-r1/tools/`).
+
+Reglas duras: **enseña, no cuentes** (diff literal con `path:line`); **escribe el fallo concreto**
+(entrada → salida errónea) con repro ejecutable si lo hay; **la tolerancia no es un defecto**; cero
+hallazgos es una respuesta legítima. Ejecuta los tres gates desde `../ws` y pega su última línea; si tu
+sandbox da los ERROR ambientales de path authority / launcher nativo / `psutil.AccessDenied`, dilo y no
+lo atribuyas al diff (la suite completa verde la corre el orquestador; el sello de `gate/` cubre
+`allowed_red.txt`).
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrar este producto?
+    ## HALLAZGOS      — por severidad: título, path:line, diff pegado, fallo concreto, repro (sí/no).
+    ## ASERCIONES CAMBIADAS — tabla: test, antes, después, F-item (o «ninguno»).
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.

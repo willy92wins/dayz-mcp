@@ -1,0 +1,80 @@
+{
+ "fecha": "2026-09-26",
+ "repo": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+ "head": "cc02221 (main = origin/main)",
+ "suite": "tools/tests, unittest discover, venv .venv-mcp (python 3.14.3)",
+ "resultado": "Ran 4174 tests — FAILED (failures=56, errors=5, skipped=10)",
+ "hallazgo_raiz": {
+  "titulo": "0878 (PR #94, 9af5cbf) rompio la familia de tests que esperan bridge-ready via GamePeer",
+  "mecanismo": [
+   "9af5cbf anadio a compute_bridge_ready el gate fail-closed de capabilities/ach (server.py:609-647)",
+   "El GamePeer de los fixtures HTTP (test_client_mode.py:66-105 y test_session_e2e.py:75) hace GET /poll SIN caps= NI ach=",
+   "Sin caps=, _record_poll_caps_locked guarda reason=absent (loopback.py:2962-2975) -> capabilities_view state=unknown",
+   "compute_bridge_ready devuelve capabilities_unknown para SIEMPRE -> _wait_bridge_ready falla por timeout",
+   "GamePeer.cs falso en los tests NO esta implicado: el cliente Enforce real SI manda caps= (MCPBridge.c:235, MCPClientBridge.c:423); el bug es de fixture, no de produccion"
+  ],
+  "prueba_ab": [
+   "worktree en 9af5cbf~1: test_all_players_read_is_not_blocked_by_another_sessions_lease OK (0.41 s)",
+   "worktree en 9af5cbf: el mismo test FAILED (failures=1, capabilities_unknown)"
+  ],
+  "alcance": "explica el bloque mayoritario de los 61 fallos (los modulos top test_mcp_tools/test_pleno_lease_and_orphans/test_client_mode/test_telemetry_read_modes/test_session_e2e/test_daemon_query_all_players usan GamePeer o list_tools) PERO no todos: test_pleno_lease_and_orphans falla por otro mecanismo distinto (ver segundo hallazgo)"
+ },
+ "hallazgo_2": {
+  "titulo": "0b85e9c (progressive disclosure) rompio test_pleno_lease_and_orphans test_t2*",
+  "mecanismo": [
+   "0b85e9c trunca descripciones a 80 chars en tools/list para clientes 8B sin lease (server.py:717-731)",
+   "session_acquire_wait describe 610 chars; truncado a 80 pierde la mencion de session_heartbeat",
+   "test_t2 exige assertIn('session_heartbeat', description) en las 4 lease tools (test:100-117)",
+   "El test construye el runtime sin lease -> disclosure activo -> descripcion truncada -> fallo",
+   "Colision de dos PRs (a81a34f contrato de renovacion vs 0b85e9c disclosure): ninguno miro al otro"
+  ],
+  "notas": "Falso negativo de FIXTURE: en produccion un cliente sin lease ve la descripcion truncada por diseno; el test supone catalogo completo. La solucion no es revertir disclosure sino que el test fuerce lease o catalogo completo."
+ },
+ "fichas_tickets": [],
+ "clasificacion_61_fallos": {
+  "familia_A_gate_caps_0878_GamePeer": {
+   "mods": [
+    "test_client_mode(8)",
+    "test_daemon_query_all_players(3)",
+    "test_playbook_runner(1)",
+    "test_fn_p0_small_model_loops(1)",
+    "test_weak_agent_consumer_ux(2)",
+    "parte de test_mcp_tools(10: 'condition not reached' en wait_bridge_ready)",
+    "test_session_e2e(3: binding_not_ready variante)"
+   ],
+   "causa": "PR #94 (9af5cbf) anadio el gate caps/ach a compute_bridge_ready; el fixture GamePeer no manda caps= -> capabilities_unknown permanente -> _wait_bridge_ready/game_not_ready",
+   "prueba": "A/B en worktrees: OK en 9af5cbf~1, FAILED en 9af5cbf",
+   "arreglo_propuesto": "GamePeer debe anunciar caps= y ach= (como el bridge Enforce real) O test_double con census sembrada via _record_poll_caps_locked como ya hace test_arg_contract_hash.py"
+  },
+  "familia_B_truncado_80chars_0b85e9c": {
+   "mods": [
+    "test_pleno_lease_and_orphans(9)",
+    "test_session_status_blocked_on(2)",
+    "test_wait_for_marker(1)"
+   ],
+   "causa": "PR 0b85e9c trunca descripciones a 80 chars en tools/list pre-lease; los tests exigen ver 'session_heartbeat'/'120'/'logs_since' en la descripcion",
+   "arreglo_propuesto": "los tests deben leer la descripcion del catalogo COMPLETO (tras lease o via _original_list_tools), o el truncao debe preservar sentencias clave"
+  },
+  "familia_C_keyError_catalogo_compactado": {
+   "mods": [
+    "test_playbook_reload(1)",
+    "test_session_acquire_wait(1)",
+    "test_telemetry_read_modes(4)"
+   ],
+   "causa": "KeyError en list_tools: las tools ausentes del catalogo compacto pre-lease (playbook_reload/session_cancel/telemetry_read) - misma raiz que familia B pero por nombre, no por texto"
+  },
+  "familia_D_otros": {
+   "mods": {
+    "test_a429_overlay(1)": "ToolError en bridge_status con counters historicos - revisar",
+    "test_fn_f1f5(4)": "suggested_calls None vs list - regla 'max 2 suggested_calls' de e72ff5b cambio el contrato",
+    "test_python_backlog_fixes(2)": "ToolError timeout no lanzado",
+    "test_task9_launcher_migration(1)": "'.ps1' aparece en documentacion del wrapper stdio",
+    "test_ui_dialog(1)": "mensaje lease_expired mas largo que el esperado",
+    "test_ui_error_diagnostics(3)": "AttributeError status_snapshot + texto not_handled",
+    "test_vehicle_prepare_fixture(2)": "AttributeError status_snapshot",
+    "test_w3_bug_verdicts(1)": "NoneType sin __dict__ (Bug111)"
+   },
+   "nota": "muchos parecen contrato-deriva tras los ultimos PRs (#94/#97/#98); no bloquean produccion in-game pero si el gate de la suite"
+  }
+ }
+}

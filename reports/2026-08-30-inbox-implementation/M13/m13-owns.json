@@ -1,0 +1,37 @@
+{
+  "module": "M13",
+  "measured_by": "orchestrator",
+  "generated_utc": "2026-09-02T00:09:36.515904+00:00",
+  "owns": {
+    "tools/dayz_mcp/effective_schema.py": {
+      "sha256": "36fdcc00c76a0b7b6063dc2647fcde16d8bd5b02063634f16c866fc8115d3f90",
+      "size_bytes": 8755,
+      "mtime_utc": "2026-09-01T04:01:12.893678+00:00"
+    },
+    "tools/dayz_mcp/effective_schema_catalog.py": {
+      "sha256": "8d35a5f51a1aef976ff21ddd456c29edad7b66cbf30d72eaca6a763f762b5a01",
+      "size_bytes": 4967,
+      "mtime_utc": "2026-08-31T22:58:04.579251+00:00"
+    },
+    "tools/dayz_mcp/effective_schema_runtime_validators.py": {
+      "sha256": "7167989dd5fd38c9da9f23f118bde7744114d5f60f3cfa84e557ac3992a068ec",
+      "size_bytes": 3354,
+      "mtime_utc": "2026-08-31T22:55:03.648402+00:00"
+    },
+    "tools/tests/test_effective_schema.py": {
+      "sha256": "5836bfecb8dda2059210f36e65a43546e29a463991ee2fcfc3a9e0069ec6ddb6",
+      "size_bytes": 11457,
+      "mtime_utc": "2026-09-01T04:00:04.624942+00:00"
+    },
+    "tools/tests/test_effective_schema_catalog.py": {
+      "sha256": "fd3c74c26319ea86351817a4603f4387b8bf6079b823ddff41951f47f3f00cdf",
+      "size_bytes": 12330,
+      "mtime_utc": "2026-08-31T23:27:27.239024+00:00"
+    },
+    "tools/tests/test_effective_schema_runtime_validators.py": {
+      "sha256": "476b2ce017c3a88ee15901c71b84e100ddd291d2e6625cf1f8ec0cc9e3298ff1",
+      "size_bytes": 2723,
+      "mtime_utc": "2026-08-31T23:14:13.273654+00:00"
+    }
+  }
+}

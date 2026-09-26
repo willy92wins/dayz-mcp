@@ -1,0 +1,11 @@
+# generation=20260831-ledger-v3
+# graph_version=inbox-20260831-v6
+# review_protocol=opus-only
+# live_gates=183
+b8cb82d8b798bb49d191777284d84ed3a9e8c898d9d9c2b46108bae55ed41571  product-spec.md
+f746df572eab06a5d0f6c25f389145ba66b7e7cf1bb4bfb13eb55623f3bbfb4b  plans/2026-08-30-pipeline-inbox-closure-design.md
+0a887a3a788d5ce1516b607659b4fa2f4a761ac7e0c6b7b69055b342d6d64493  plans/inbox-20260830/00-execution-dag.md
+e4945d125512e42072fe3212d8a44e012333111c3e654647332e4e70888ff027  plans/inbox-20260830/physical-ownership-addendum-v1.md
+453f84bff71103fa359841fb0d49a7cfbbd9e1541bb95108999e5f62c4f1d895  research/2026-08-30-pipeline-inbox-triage-codex.md
+7512248158c1b9745b30f653d4d0b5bc2b62c5003b9e516991fa157b235b0e1d  reports/2026-08-31-sonnet-retirement-manifest.md
+6bd1b25410bf72357ad9e627b0713ea8824e7528f50e8d2972979a2d94528fc1  C:/Users/guill/.agents/skills/gates-ledger/scripts/gate-check.mjs

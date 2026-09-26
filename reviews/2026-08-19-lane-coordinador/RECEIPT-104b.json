@@ -1,0 +1,79 @@
+{
+ "status": "ok",
+ "premisa_verificada": "Turno anterior: _reap_dead_runs_locked (2287) -> _run_all_dead / _partition_registered_processes / _classify_registered_process (solo guard.snapshot) / _diag_snapshot_registered (diag_probe) / _reap_run_locked (audit run_reaped, manifest.replace, _retire_run_bindings, note_run_reaped). Sin guard.terminate, _terminate_open_handle, Popen ni os.kill. El AST test_reap_dead_runs_locked_cannot_reach_terminate recorre ese grafo y ya pasaba en rojo.",
+ "files": [
+  "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\process_lifecycle.py",
+  "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_bug104_reap_under_quarantine.py",
+  "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\DayZ Projects\\DayZ_MCP_dev\\tools\\tests\\test_process_lifecycle.py"
+ ],
+ "tests_added": [
+  "test_reap_dead_runs_locked_cannot_reach_terminate",
+  "test_reap_dead_runs_does_not_early_return_under_quarantine",
+  "test_production_quarantined_reads_instance_retail_probe",
+  "test_reaper_retires_dead_run_under_retail_quarantine",
+  "test_reaper_does_not_reap_live_run_under_retail_quarantine",
+  "test_reaper_does_not_emit_quarantine_audit_when_retail_is_clear",
+  "test_quarantine_audit_failure_does_not_block_reap",
+  "test_run_reaped_audit_still_fail_closed_under_quarantine",
+  "test_agent_reap_dead_run_still_blocked_under_retail_quarantine"
+ ],
+ "ast_test": "test_reap_dead_runs_locked_cannot_reach_terminate",
+ "mutations": [
+  {
+   "name": "restore_quarantine_early_return",
+   "killed_by": "test_reap_dead_runs_does_not_early_return_under_quarantine",
+   "survived": false
+  },
+  {
+   "name": "remove_quarantine_audit_event",
+   "killed_by": "test_reaper_retires_dead_run_under_retail_quarantine",
+   "survived": false
+  },
+  {
+   "name": "quarantined_ignores_live_retail_processes",
+   "killed_by": "test_production_quarantined_reads_instance_retail_probe",
+   "survived": false
+  },
+  {
+   "name": "quarantined_ignores_retail_probe",
+   "killed_by": "test_production_quarantined_reads_instance_retail_probe",
+   "survived": false
+  },
+  {
+   "name": "locked_reaper_calls_guard_terminate",
+   "killed_by": "test_reap_dead_runs_locked_cannot_reach_terminate",
+   "survived": false
+  }
+ ],
+ "quarantine_call_sites": [
+  "start_run:1173,1273,1280,1343 — lanza DayZDiag; se deja",
+  "stop_run:1610,1691,1707,1732 — 1732 esta justo antes de guard.terminate; se deja",
+  "adopt_run:1865,1888,1895 — reclama un run vivo; se deja",
+  "repair_manifest_recovery:2168 — ese camino SI hace guard.terminate; se deja",
+  "reap_dead_runs:2310 — unico cambio: ya no return []; audita y sigue al locked",
+  "reap_dead_run:2339 (agente, singular) — sigue bloqueado; test_agent_reap_dead_run_still_blocked_under_retail_quarantine lo clava",
+  "status / public_status — solo reportan el flag; se deja",
+  "admin_reconcile:2589,2645,2657 — recovery TTY; se deja"
+ ],
+ "baseline": {
+  "ran": 1724,
+  "failures": 2
+ },
+ "suite_final": {
+  "ran": 1733,
+  "failures": 2,
+  "skipped": 4,
+  "seconds": 195.526
+ },
+ "not_verified": [
+  "No reexecute la linea base 1724/2 en este turno; el usuario la midio tras sincronizar architecture.md.",
+  "No reproduje el fantasma in-game (run e522c961). Offline only.",
+  "No compare hashes contra el arbol OneDrive."
+ ],
+ "noticed_but_untouched": [
+  "loopback.py:_retail_quarantined — otro simbolo; no es el reaper.",
+  "RunManifestStore al recargar poda EXITED: el test de persistencia lee el JSON en disco, no un store nuevo.",
+  "mut104_run.py — driver de mutacion; lo deje porque no borro ficheros.",
+  "Centinelas test_task9_spawn_phase_markers: no tocados."
+ ]
+}

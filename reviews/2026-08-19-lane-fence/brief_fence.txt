@@ -1,0 +1,172 @@
+ENCARGO: implementar la v1 del fencing por `instance` (DayZ-MCP) sobre una copia aislada.
+
+Eres un peer implementador. El entregable es CODIGO EN DISCO dentro del workspace, no un
+juicio por stdout. Trabajas solo dentro de:
+
+  C:\Users\guill\AppData\Local\Temp\mcp-laneFENCE-20260818
+
+Ese arbol es una COPIA. El arbol real (OneDrive, P:\) no se toca bajo ningun concepto.
+
+
+== 0. ESCRITURA OBLIGATORIA (lo primero, antes de razonar largo) ==
+
+Al terminar tienen que existir, en disco:
+
+  1. El codigo implementado dentro de `DayZ Projects\DayZ_MCP_dev\tools\` y
+     `DayZ Projects\DayZ_MCP\scripts\5_Mission\`.
+  2. `red_first.log`   en la raiz del lane: salida de la suite con los tests NUEVOS ya
+     escritos y el codigo TODAVIA sin cambiar (tienen que salir en ROJO).
+  3. `green.log`       en la raiz del lane: salida de la suite completa al final.
+  4. `laneFENCE-report.md` en la raiz del lane, con el formato de la seccion 6.
+
+stdout es solo un recibo corto (seccion 7). No pegues el cuerpo del informe por stdout.
+
+
+== 1. LA TAREA EN UNA LINEA ==
+
+Implementar la seccion "Spec: fencing por `instance` (D-55, v1)" del contrato que tienes en
+el workspace: un comando MUTANTE solo se entrega al proceso DayZ cuyo `instance` esta
+registrado para ese run_id, rol y PID; un peer sin binding, con `instance` vacio o que no
+casa, NO recibe mutaciones (si lecturas, si es legacy).
+
+Motivo, que no es teorico: hoy las colas del puente van por ROL (`VALID_PEERS`,
+`loopback.py:72`; `record_poll`, `:936`) y el 2026-08-17 un DayZ de otra sesion se llevo un
+`player_teleport` y lo ejecuto en SU mundo. Es correccion, no ergonomia.
+
+
+== 2. CARGA INICIAL (rutas absolutas; el porque de cada una) ==
+
+Todas cuelgan de `C:\Users\guill\AppData\Local\Temp\mcp-laneFENCE-20260818\DayZ Projects\`.
+
+  A. `DayZ_MCP_dev\plans\2026-08-18-fencing-instance-spec.md`  -- EL CONTRATO. Leelo ENTERO.
+     OJO: las lineas 1-112 son un ARBITRAJE del orquestador escrito DESPUES del cuerpo.
+     Donde la cabecera y el cuerpo discrepen, MANDA LA CABECERA. En particular la cabecera
+     acredita la atribucion por PID con una sonda ya ejecutada y anade dos precisiones de
+     implementacion (resolver dentro del handler con el socket vivo; cachear, no barrer la
+     tabla TCP en cada poll) que el cuerpo no recoge.
+  B. `DayZ_MCP_dev\tools\dayz_mcp\loopback.py`  -- el corazon: colas, `record_poll`,
+     `_handle_poll`, `_enqueue_command`, `store_result`, `status_snapshot`.
+  C. `DayZ_MCP_dev\tools\dayz_mcp\process_lifecycle.py`  -- `start_run` / `stop_run` /
+     `reap_dead_run*` / `adopt_run`, y donde se minta y se escribe el `instance`.
+  D. `DayZ_MCP_dev\tools\dayz_mcp\accredited_daemon_transport.py`, funcion
+     `_connected_server_pid` (aprox. :78-113)  -- el patron INVERSO de atribucion por socket
+     ya en produccion. Reusalo; no inventes otro.
+  E. `DayZ_MCP\scripts\5_Mission\MCPMessages.c`, `MCPBridge.c`, `MCPClientBridge.c`  -- el
+     lado Enforce. Los cambios son pequenos y aditivos (seccion 3 de la spec).
+  F. `DayZ_MCP_dev\tools\tests\test_loopback.py`  -- la higiene existente (TTL, flush de
+     reconexion). No se borra: se duplica sobre el camino legacy.
+  G. `DayZ_MCP_dev\tools\dayz_mcp\core.py` y `daemon.py`  -- solo para cablear; ver frontera.
+
+No leas los directorios de evidencia ni `_fase*`, `_poc`, `_s0` (no estan en la copia).
+
+
+== 3. FRONTERAS (no negociables) ==
+
+  - NO sales del workspace. Cero escrituras en `C:\Users\guill\OneDrive\...` y en `P:\`
+    (que es un symlink al mismo arbol). Si necesitas un scratch, usalo dentro del lane.
+  - NO lanzas ni matas procesos DayZ, ni tocas el daemon vivo de la maquina, ni invocas
+    herramientas MCP. Hay una sesion de trabajo real en marcha fuera de tu copia.
+  - NO subes `MCP_BRIDGE_VERSION` (esta en `"8"`) ni `EXPECTED_BRIDGE_VERSION` (`core.py:17`).
+    El despliegue es la OPCION A de la seccion 6 de la spec: el campo `inst=` se versiona
+    aparte. Subir la version es global a la maquina y tumbaria otras sesiones.
+  - NO tocas: `session_coordination.py` (lease, tombstones, FIFO), `dayz_test_worker.py`
+    (viaja SELLADO dentro de un bundle firmado; editarlo no cambia lo que corre),
+    `install_mcp.py`, el formato de `runs.json` / `RunRecord`, ni los ficheros de
+    `native-launchers`.
+  - NO implementas NADA de la seccion 9 de la spec ("Que NO entra en v1"). Si crees que algo
+    de ahi hace falta, lo dices en el informe y NO lo escribes.
+  - NO re-congelas el centinela SHA de `tools\tests\test_task9_spawn_phase_markers.py`. Al
+    tocar `MCPBridge.c` ese test SE PONE ROJO Y ASI TIENE QUE QUEDARSE: es la senal de que el
+    PBO todavia no ha pasado el gate in-game. Lo reportas como rojo esperado, no lo arreglas.
+  - NO validas el formato UUID en Enforce. El daemon valida; el puente declara.
+
+
+== 4. REGLAS DE LA CASA QUE APLICAN ==
+
+  - Cita-y-verifica (G2): antes de escribir el nombre de una funcion, firma o constante,
+    abre el fichero y comprueba la firma real. No te fies de la spec ni de tu memoria: la
+    spec dice que sus citas se reabrieron, pero tu implementacion se apoya en el fichero.
+  - Honestidad de verificacion (G3): al decir "verificado X", di QUE, COMO y que NO
+    verificaste. Un resultado perfecto sospechoso (un test que no puede fallar) es un bug.
+  - Enforce (ENF-R): las condiciones booleanas van en UNA sola linea (nada de `&&` / `||`
+    partidos en varias lineas: el compilador de Enforce muerde). Nada de `new` en un tick
+    periodico.
+  - Los tests tienen que poder ponerse ROJOS. Un test tautologico ya se colo una vez en este
+    proyecto y paso una revision. Por eso el `red_first.log` de la seccion 5 es obligatorio.
+
+
+== 5. COMO SE TRABAJA (orden exigido) ==
+
+  Paso 1. Lee A-G. Antes de tocar nada, escribe tu plan de implementacion como la primera
+          seccion de `laneFENCE-report.md`. Si encuentras una CONTRADICCION entre la spec y
+          el codigo real, la anotas ahi y sigues el CODIGO REAL, no la spec.
+
+  Paso 2. TESTS PRIMERO. Escribe los unitarios de la seccion 8.1 de la spec (son ~23; la
+          tabla dice, para cada uno, la frase de fallo que tiene que cubrir). Con el codigo
+          todavia SIN cambiar, corre la suite y guarda la salida:
+
+            cd "C:\Users\guill\AppData\Local\Temp\mcp-laneFENCE-20260818\DayZ Projects\DayZ_MCP_dev\tools"
+            .\.venv-mcp\Scripts\python.exe -m unittest discover -s tests -t . > "..\..\..\red_first.log" 2>&1
+
+          Los tests nuevos TIENEN que salir en rojo aqui. Uno que salga verde antes de
+          implementar nada no esta midiendo lo que dice medir: arreglalo antes de seguir.
+
+  Paso 3. Implementa: Python (seccion 4 de la spec) y Enforce (seccion 3). Respeta la
+          maquina de estados de la seccion 5 y los codigos de error accionables de 5.3 con
+          su texto de `hint` literal.
+
+  Paso 4. Corre la suite COMPLETA y guarda `green.log`. Criterio de aceptacion:
+          - todos los tests nuevos en verde;
+          - cero regresiones respecto a la suite base. LA BASE ESTA MEDIDA, no la supongas:
+            en esta copia, con el codigo sin tocar, la suite da **`Ran 1622 tests - OK
+            (skipped=6)`** en ~260 s (log completo en `baseline_suite.log`, raiz del lane).
+            NO hay rojos preexistentes: cualquier rojo que veas al final es TUYO.
+          - la UNICA excepcion admitida es el centinela `test_task9_spawn_phase_markers`,
+            rojo por diseno en cuanto toques `MCPBridge.c` (frontera de la seccion 3).
+          Si algo mas queda rojo, o lo arreglas o lo explicas en el informe. No lo escondas.
+
+  IMPORTANTE sobre el aislamiento de esta copia (no lo deshagas):
+          el venv `tools\.venv-mcp` traia un install editable de setuptools cuyo finder
+          (`site-packages\__editable___dayz_mcp_tools_0_0_0_finder.py`) apuntaba con ruta
+          ABSOLUTA al arbol real de OneDrive. Como `_EditableFinder` va el ultimo de
+          `sys.meta_path`, los procesos lanzados desde la copia resolvian bien, pero los
+          SUBPROCESOS que arrancan los tests (daemons reales) importaban el arbol REAL.
+          Ya esta sellado: el `MAPPING` apunta a esta copia. NO reinstales el paquete, no
+          corras `pip install -e`, y si ves algo raro de imports, comprueba primero con
+          `python -c "import dayz_mcp; print(dayz_mcp.__file__)"` DESDE UN CWD NEUTRO
+          (fuera de la copia) - debe caer dentro de `mcp-laneFENCE-20260818`. Si en algun
+          log aparece una ruta con `OneDrive`, para y dilo: has perdido el aislamiento.
+
+  Paso 5. Lista de ficheros tocados con su sha256. Tienes la foto previa en `baseline.csv`
+          (raiz del lane, formato `sha256,bytes,path`). Cualquier fichero que aparezca
+          modificado y no este en tu lista es un descuido tuyo: cazalo.
+
+
+== 6. `laneFENCE-report.md` (el informe) ==
+
+Secciones, en este orden:
+
+  1. Plan de implementacion (el del paso 1) y las desviaciones que acabaste haciendo.
+  2. Que quedo implementado, por fichero, con `path:line` de los puntos de entrada nuevos.
+  3. Tabla de tests: nombre | que falla si el test se rompe | rojo en `red_first` (si/no) |
+     verde en `green` (si/no). Si algun test de la spec NO lo escribiste, di por que.
+  4. Contradicciones entre la spec y el codigo real, con `path:line` de las dos versiones.
+  5. LO QUE NO PUDE VERIFICAR. Obligatoria y concreta. La spec ya trae su propia lista de
+     NO VERIFICADO (seccion 10): di cuales siguen abiertos y si tu implementacion los ha
+     vuelto mas o menos peligrosos.
+  6. Riesgo residual: que se rompe si me equivoque, y como se veria desde fuera.
+  7. Ficheros tocados con sha256.
+
+
+== 7. RECIBO POR STDOUT (corto) ==
+
+Maximo 30 lineas:
+  - estado: COMPLETO / PARCIAL / BLOQUEADO
+  - ruta absoluta de `laneFENCE-report.md`
+  - numero de ficheros tocados
+  - resultado de la suite: total / fallos / errores / skipped, y si el unico rojo es el
+    centinela
+  - los tres riesgos que mas te preocupan, una linea cada uno
+
+Si te bloqueas, di exactamente donde y que te falta. Un PARCIAL honesto vale mas que un
+COMPLETO que no corre.

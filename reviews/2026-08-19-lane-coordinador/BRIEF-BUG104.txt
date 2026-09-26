@@ -1,0 +1,109 @@
+TAREA: arreglar BUG-104 del proyecto DayZ-MCP. Un solo encargo, offline, codigo + tests.
+
+Workspace (es una COPIA, ya refrescada del arbol real hace un minuto):
+  C:\Users\guill\AppData\Local\Temp\mcp-laneCOORD-20260819\DayZ Projects\DayZ_MCP_dev\tools
+
+=====================================================================
+EL BUG
+=====================================================================
+
+SINTOMA DE CAMPO: un run terminado limpiamente se queda en `box.runs` como
+`RUNNING_IDLE` con los PIDs ya muertos, 17+ minutos. Contamina `box.occupied`, asi que
+la caja parece ocupada sin que haya juego. Reportado con repro completo: run `e522c961`,
+pids 28848/39316 confirmados muertos, `--- Termination successfully completed ---` en
+ambos RPT.
+
+MECANISMO, YA CONFIRMADO EN CODIGO (no lo re-investigues, verificalo y sigue):
+
+`reap_dead_runs` (dayz_mcp\process_lifecycle.py:2300-2310) hace
+
+    if self._quarantined():
+        return []
+
+ANTES de `_reap_dead_runs_locked()`. Bajo cuarentena no se inspecciona ni un solo run,
+por muertos que esten sus PIDs. No es latencia: el hilo reaper corre cada 30 s
+(`daemon.py`, `REAP_INTERVAL_S`).
+
+Y `_quarantined()` (process_lifecycle.py:895-907) NO es un flag persistido sino una
+SONDA VIVA que devuelve True si `retail_probe is None`, si lanza, si la forma no cuadra,
+**o si `result["processes"]` trae algo** — o sea, siempre que haya un DayZ RETAIL vivo.
+
+LA DESPROPORCION: la propia docstring de `reap_dead_runs` dice
+    "Safe by construction - reaps only zero-owned-process runs and never calls
+     terminate."
+Si el reaper no mata nada y solo retira runs con cero procesos propios, la cuarentena no
+lo esta protegiendo de nada. La reja es mas ancha de lo que necesita.
+
+=====================================================================
+QUE QUIERO
+=====================================================================
+
+1. VERIFICA la premisa antes de apoyarte en ella. Lee `_reap_dead_runs_locked` y todo lo
+   que alcanza, y comprueba tu mismo que en ese camino NO se llama a `terminate` ni se
+   toca ningun proceso. Si encuentras que SI toca procesos, PARA: el arreglo cambia por
+   completo y me lo dices en el RECEIPT en vez de improvisar.
+
+2. ARREGLO: dejar que `reap_dead_runs` corra bajo cuarentena, por ser demostrablemente
+   sin efectos sobre procesos. Prefiero este al minimo (solo registrar el salto) porque
+   el minimo deja el fantasma vivo.
+
+3. TRAZA IGUAL: aunque ahora corra, el camino tiene que quedar diagnosticable. Un evento
+   de audit cuando el reap corre bajo cuarentena, para que la proxima vez que aparezca un
+   fantasma se pueda separar esta causa de cualquier otra sin reproducirlo.
+
+4. EL TEST QUE IMPIDE LA REINCIDENCIA. Este proyecto ya tiene el patron: mira
+   `test_every_exited_path_retires_bindings` en tests\test_instance_fence.py — PARSEA EL
+   AST y exige la invariante en todo camino, con excepciones declaradas. Quiero el
+   equivalente aqui: un test que falle si algun dia aparece una llamada a `terminate` (o
+   equivalente que mate procesos) alcanzable desde `_reap_dead_runs_locked`. Sin eso, el
+   argumento que justifica quitar la reja ("no mata nada") deja de estar defendido en
+   cuanto alguien lo cambie.
+
+5. Y los tests de conducta: que un run con cero procesos vivos SE retire estando la
+   cuarentena activa. ROJO antes del arreglo.
+
+=====================================================================
+CRITERIO DE HECHO
+=====================================================================
+
+- MIDE TU LINEA BASE PRIMERO y guardala en base104.log. Debe dar 1724 tests con 2 rojos:
+  esos 2 (`test_task9_spawn_phase_markers`, dos mitades) son CENTINELAS ROJOS A PROPOSITO.
+  NO los toques, NO recongeles ese hash. Si tu cifra no es esa, dilo y PARA.
+- ROJO PRIMERO con log (red104.log), verde despues (green104.log).
+- MUTACION obligatoria (mut104.log). Como minimo: volver a poner el `return []` bajo
+  cuarentena, y quitar el evento de audit. Y muta tambien el CABLEADO, no solo el cuerpo:
+  si un doble de test puede estar suplantando a `retail_probe` o al manifest, comprueba
+  que el test se ata al codigo de PRODUCCION y no al doble. Una mutacion que sobrevive es
+  una rama sin test: o le escribes el test o la borras y lo justificas.
+- Suite completa al final (suite104.log): 1724 + tus tests nuevos, failures=2.
+- DZ-R7: `_quarantined()` lo usan mas sitios que el reaper. Grep TODOS y di en el RECEIPT
+  cuales revisaste y por que los dejas como estan. NO relajes la cuarentena en ningun
+  otro sitio: en los demas SI protege de algo.
+
+=====================================================================
+FRONTERAS
+=====================================================================
+
+- Escribe SOLO dentro de C:\Users\guill\AppData\Local\Temp\mcp-laneCOORD-20260819\
+- NO toques NADA bajo C:\Users\guill\OneDrive\ ni P:\ — tengo hashes del arbol real.
+- NO lances ni mates procesos DayZ. NO arranques el daemon. NO llames a herramientas MCP.
+  Estoy usando el juego AHORA MISMO en paralelo; si lo tocas me rompes una tanda in-game.
+- NO rm, NO Remove-Item, NO git push, NO subagentes.
+- Un solo encargo: BUG-104. Lo que veas de paso, al RECEIPT sin tocarlo.
+
+## RECEIPT
+```json
+{
+  "status": "ok|failed",
+  "premisa_verificada": "que leiste para confirmar que el camino del reap no mata procesos",
+  "files": ["..."],
+  "tests_added": ["..."],
+  "ast_test": "nombre del test que impide la reincidencia",
+  "mutations": [{"name": "...", "killed_by": "...", "survived": false}],
+  "quarantine_call_sites": ["cada uso de _quarantined() y por que lo dejas igual"],
+  "baseline": {"ran": 0, "failures": 0},
+  "suite_final": {"ran": 0, "failures": 0},
+  "not_verified": ["..."],
+  "noticed_but_untouched": ["..."]
+}
+```

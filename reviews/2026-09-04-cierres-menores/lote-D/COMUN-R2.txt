@@ -1,0 +1,47 @@
+===============================================================================
+CONTEXTO COMÚN — RONDA 2 del lote D (fb-20260904-114520-6927): lo que cambió tras vuestra primera ronda
+===============================================================================
+
+Lee también COMUN.txt (ronda 1) para el contexto de la ficha y las fronteras; este fichero solo cuenta el delta.
+Árbol vivo: C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev (rama work/inbox-20260830-modules, HEAD cdae732),
+cambios SIN commitear. Diff completo de la ronda 2 sobre HEAD en DIFF-D2.patch (6 ficheros de producto + 3 tests nuevos).
+Dictámenes de la ronda 1 en este directorio: REVIEW-CODEX.md (B-01), AUDIT-RACE.md (H-01 CRITICAL, H-02),
+AUDIT-ADMIN.md (H-01..H-04 MAJOR), AUDIT-LOSS.md (M-1..M-4, B-1, B-2). Suite completa de la ronda 2: SUITE-D2.txt.
+
+APLICADO EN LA RONDA 2 (cita path:line de lo que compruebes):
+1. Ventana sondeo→launcher (REVIEW B-01, RACE H-01, LOSS M-1): en `start_run`, tras `_prepare_instance` y justo antes
+   de `self.launcher(...)`, un segundo `_foreign_port_reason(registered_pids, requested_port)` FRESCO; si devuelve razón,
+   audita `lifecycle_start_rejected` con `stage="pre_launch"`, retira el minted y liquida por `_settle_failed_launch`
+   con `confirmed_error="active_run_exists"` (el mismo código público; el worker solo reconoce ese, ver
+   `dayz_test_worker.PRE_ADMISSION_REJECTION_CODES`). La ventana que queda es entre esa lectura y el bind de DayZ; el
+   README y la descripción de `dayz_test_run` ya NO dicen «never started on top of it»: dicen exactamente eso y que no
+   hay reserva de puerto. Test: `test_holder_appearing_before_the_launch_is_caught_by_the_pre_launch_read`.
+2. Atribución fallida = fail-closed (ADMIN H-04): un holder no registrado con `pid None` o `name None` → `start_run`
+   rechaza con audit `port_attribution_unknown`; la caja publica `port_scan_known:false` +
+   `port_scan_reason:"port_attribution_unknown"`. `snapshot_udp_port_holders` reintenta el nombre por PID con
+   `_toolhelp_lookup` antes de publicar `name None`. Tests: `test_nameless_holder_is_attribution_unknown_and_blocks`,
+   `test_named_non_dayz_holders_never_trip_attribution`, `test_a_pid_missing_from_the_bulk_snapshot_is_looked_up_once_more`.
+3. netstat: una fila que empieza por `UDP` y no se puede leer (truncada, sin puerto, puerto fuera de rango) invalida el
+   volcado entero → `None` → `known=False` (LOSS M-3); `laddr` tupla aceptada (LOSS B-1); timeout 3 s (RACE H-02).
+   Tests: `test_a_truncated_udp_row_makes_the_whole_dump_untrusted`, `test_tuple_laddr_is_accepted`,
+   `test_netstat_timeout_is_bounded_to_three_seconds`.
+4. `admin_reconcile --empty` (ADMIN H-02): `_diag_snapshot_empty` exige además tabla legible sin imagen DayZ ni holder sin
+   nombre (`port_scan_unknown` / `manual_cleanup_required` / `port_attribution_unknown`). Test:
+   `test_admin_empty_gate_needs_the_socket_table_too`.
+5. Diagnóstico al cliente (ADMIN H-03, REVIEW backlog-1, LOSS M-2): `_wait_hint` con `port_scan_known:false` da la receta
+   «waiting does not help»; `execute_wait_for_box` devuelve EN EL ACTO `{"ok": False, "error": "port_scan_unknown"}` si
+   la caja trae `port_scan_known:false` (y `dayz_test_run` lo mapea a `error_code="port_scan_unknown"`);
+   `_failed_active_run_result`/`_enrich_active_run_result` reciben `port=` y, si el puerto pedido está en
+   `ports_in_use` sin run activo, añaden `reason:"port_in_use_foreign"`, `port` y un hint que dice «pass another port=».
+   `ports_in_use` incluye ahora los holders no registrados de 2302-2320 sea cual sea la imagen (sin ocupar la caja).
+   Tests: tests/test_box_port_wait.py (4) y `test_wait_hint_names_an_unreadable_table`.
+6. `daemon.py`: `diag_probe` enumera también `DayZServer_x64.exe` (LOSS M-1 pre-bind). `loopback._box_payload`: los tres
+   fallbacks llevan `scan_known:false, port_scan_known:false` (REVIEW backlog-2). `_derive_box` publica `port_scan_reason`.
+
+NO APLICADO A PROPÓSITO (queda documentado para la resolución y el ledger): ADMIN H-01 (verbo TTY de reconciliación por
+puerto para un heredero huérfano: diseño nuevo, backlog); LOSS M-4 / cabd (un lanzador ajeno que arranca DESPUÉS: fuera del
+alcance del MCP, la mitad LFHeli la lleva otra sesión); LOSS B-2 (`port_probe` obligatorio: compatibilidad transitoria);
+REVIEW backlog-3 (test de wire de `port_scan_known` por sesión MCP). Un hallazgo repetido de esa lista no es bloqueante.
+
+FRONTERAS: las de COMUN.txt. Además: NO edites loopback.py/dayz_test_tool.py; mutantes solo en process_lifecycle.py /
+orphan_guard.py / server.py, restaurados a mano con sha256 antes/después.

@@ -1,0 +1,409 @@
+--- a/tools/dayz_mcp/server.py
++++ b/tools/dayz_mcp/server.py
+@@ -1916,6 +1916,8 @@
+         result["reliability"] = "player_in_bubble"
+     else:
+         result["reliability"] = "remote_unverified"
++    if isinstance(players_result, dict) and players_result.get("ok") and not players:
++        result["reason"] = "no_player_connected"
+     return result
+ 
+ 
+@@ -2269,6 +2271,8 @@
+     observed: Any,
+     satisfied: bool,
+     scanned: dict[str, Any] | None = None,
++    not_ready_probes: int = 0,
++    last_error: str | None = None,
+ ) -> dict[str, Any]:
+     response = {
+         # Timeout is a normal result, not a tool error. Gate on satisfied.
+@@ -2280,7 +2284,10 @@
+         "observed": observed,
+         "timed_out": not satisfied,
+         "tool": "wait_for",
++        "not_ready_probes": not_ready_probes,
+     }
++    if last_error is not None:
++        response["last_error"] = last_error
+     if scanned is not None:
+         response["scanned"] = scanned
+     return response
+@@ -2327,7 +2334,11 @@
+     timeout_value = _finite_float(timeout_s, "bad_args: timeout_s must be > 0")
+     if timeout_value <= 0.0:
+         raise ToolError("bad_args: timeout_s must be > 0")
+-    timeout_s = min(timeout_value, WAIT_FOR_MAX_TIMEOUT_S)
++    if timeout_value > WAIT_FOR_MAX_TIMEOUT_S:
++        raise ToolError(
++            f"bad_args: timeout_s must be <= {int(WAIT_FOR_MAX_TIMEOUT_S)}"
++        )
++    timeout_s = timeout_value
+     poll_value = _finite_float(poll_interval_s, "bad_args: poll_interval_s must be > 0")
+     if poll_value <= 0.0:
+         raise ToolError("bad_args: poll_interval_s must be > 0")
+@@ -2352,6 +2363,8 @@
+     started = time.monotonic()
+     deadline = started + timeout_s
+     probes = 0
++    not_ready_probes = 0
++    last_error: str | None = None
+     observed: Any = None
+     log_markers: dict[str, log_tail.TailMarker] = {}
+     seen_paths: list[str] = []
+@@ -2417,31 +2430,37 @@
+                     )
+                 except ToolError as exc:
+                     message = str(exc)
+-                    if message.startswith("timeout waiting for"):
++                    if message == "game_not_ready:reason=server_poll_stale":
++                        not_ready_probes += 1
++                        last_error = message
++                        satisfied = False
++                    elif message.startswith("timeout waiting for"):
+                         suffix = ""
+                         if "; " in message:
+                             suffix = "; " + message.split("; ", 1)[1]
+                         raise ToolError(
+                             f"wait_for timed out waiting for {condition}{suffix}"
+                         ) from None
+-                    if message.startswith("version_blocked") or message.startswith(
++                    elif message.startswith("version_blocked") or message.startswith(
+                         "game_not_ready"
+                     ) or message in {
+                         "daemon_unavailable",
+                         "version_blocked",
+                     }:
+                         raise
+-                    if "query_all_players" in message:
++                    elif "query_all_players" in message:
+                         raise ToolError(
+                             message.replace("query_all_players", "wait_for")
+                         ) from None
+-                    raise
+-                observed = _player_count(result)
+-                satisfied = (
+-                    observed >= value
+-                    if condition == "players_at_least"
+-                    else observed <= value
+-                )
++                    else:
++                        raise
++                else:
++                    observed = _player_count(result)
++                    satisfied = (
++                        observed >= value
++                        if condition == "players_at_least"
++                        else observed <= value
++                    )
+             else:
+                 probe_paths = await _wait_for_script_log_paths(runtime)
+                 lines, log_markers, counts = _new_log_lines(probe_paths, log_markers)
+@@ -2462,6 +2481,8 @@
+                 observed=observed,
+                 satisfied=True,
+                 scanned=scan_summary(),
++                not_ready_probes=not_ready_probes,
++                last_error=last_error,
+             )
+         # Sleep outside the lock. Do not wrap this loop in tool_lock.
+         await asyncio.sleep(poll_interval_s)
+@@ -2473,6 +2494,8 @@
+         observed=observed,
+         satisfied=False,
+         scanned=scan_summary(),
++        not_ready_probes=not_ready_probes,
++        last_error=last_error,
+     )
+ 
+ 
+@@ -2744,6 +2767,18 @@
+             "to join the box FIFO"
+         )
+     return None
++
++
++def _bridge_status_description() -> str:
++    """Publish the open ready.reason set from module authority at build time."""
++    reasons = sorted(READY_REASONS | set(_FENCE_BLOCK_READY.values()))
++    reason_list = "|".join(reasons)
++    return (
++        "Inspect peer liveness, version_state, and ready "
++        f"{{ready, reason is an OPEN set (today: {reason_list}): validate by shape "
++        "(ready: bool, reason: non-empty string), never against a whitelist}}. "
++        "daemon_modules.stale = source newer than daemon, not a crash."
++    )
+ 
+ 
+ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
+@@ -3732,7 +3767,8 @@
+             "player streaming the area: far from every player the engine "
+             "answers 0-or-cap with no error signal, so the result carries "
+             "nearest_player_m and reliability (player_in_bubble | "
+-            "remote_unverified)."
++            "remote_unverified). When the players probe succeeds with an empty "
++            "list, reason is no_player_connected."
+         )
+     )
+     async def entities_query(
+@@ -4102,14 +4138,7 @@
+             async with runtime.tool_lock:
+                 return await runtime.call_exec_enforce(args, _timeout(timeout_s))
+ 
+-    @app.tool(
+-        description=(
+-            "Inspect peer liveness, version_state, and ready "
+-            "{ready, reason=ready|no_run|server_poll_stale|client_not_polling|"
+-            "client_legacy_blocked|version_mismatch}. "
+-            "daemon_modules.stale = source newer than daemon, not a crash."
+-        )
+-    )
++    @app.tool(description=_bridge_status_description())
+     async def bridge_status() -> dict[str, Any]:
+         runtime.touch()
+         payload = await runtime.bridge_status_payload()
+@@ -4425,7 +4454,10 @@
+ 
+     @app.tool(description=(
+         f"{LEASE_TOOL_LINE} Start a DayZ user action on the local player "
+-        "without keyboard. Confirm with wait_for(condition=log_matches)."
++        "without keyboard. Confirm with wait_for(condition=log_matches). "
++        "action = the Enforce class name of the user action "
++        "(candidate.Type().ToString(), e.g. ActionOpenDoors), NOT the "
++        "visible/localized prompt text; classname = the target's GetType()."
+     ))
+     async def action_use(
+         action: str,
+@@ -4466,6 +4498,11 @@
+             "a line written before the caller's action and cause a false positive. "
+             "On timeout still returns "
+             "ok: true with satisfied: false -- gate on satisfied, not ok. "
++            "timeout_s <= 600 (bad_args above; never clamped). "
++            "players_* waits through server startup: a probe answered "
++            "game_not_ready:reason=server_poll_stale is retried until "
++            "timeout_s (not_ready_probes, last_error in the response); any "
++            "other not-ready reason aborts on the first probe. "
+             "scanned reports which log files were read and how many "
+             "lines each gave, so a no-match is visible as a no-match."
+         )
+--- a/tools/README-mcp.md
++++ b/tools/README-mcp.md
+@@ -134,7 +134,7 @@
+ 4. `wait_for(condition="players_at_least", value=1)` — at least one connected player.
+ 5. `query_all_players()` — `{ok: 1, players: [{uid, pos: [x, y, z], health (0..1), in_vehicle}]}`. An empty `players` list is success with zero players, not an error. `uid` is SteamID64 (`PlayerIdentity.GetPlainId()`).
+ 
+-`wait_for` on timeout still returns `ok: true` with `satisfied: false` and `timed_out: true`. Gate on `satisfied`, not `ok`. `timeout_s` is capped at 600. With the game off, the first probe aborts with `game_not_ready` (the daemon is up but the target peer is down, so the `version_blocked`/`lease_required` enqueue error is remapped to `game_not_ready:reason=...`); with no daemon at all it aborts with `daemon_unavailable`.
++`wait_for` on timeout still returns `ok: true` with `satisfied: false` and `timed_out: true`. Gate on `satisfied`, not `ok`. `timeout_s` above 600 is rejected up front with `bad_args: timeout_s must be <= 600` (never clamped). With the game off, the first probe aborts with `game_not_ready` (the daemon is up but the target peer is down, so the `version_blocked`/`lease_required` enqueue error is remapped to `game_not_ready:reason=...`); with no daemon at all it aborts with `daemon_unavailable`.
+ 
+ `pattern` is a plain **substring**, not a regex: pass `[DayZ-MCP]`, never `\[DayZ-MCP\]`. An escaped pattern matches nothing and reads exactly like a mod that printed nothing. `lookback_lines` (default 200, max 2000) rewinds the initial markers by N lines; `lookback_from="launch"` instead scans this launch's logs from byte 0, the only way to reach a line printed at mission start. Measured 2026-08-21: `config loaded` sat at line 20 of a 132,632-line `script_*.log`, and was absent from that launch's `.RPT` entirely (0 hits in 165,669 lines) because the RPT only starts mirroring `SCRIPT` output about 16 s in. Every result carries `scanned`: which files were read, how many lines each gave, `readable` per file, and `scan_truncated` when a launch scan hits its 64 MiB ceiling. `observed` is the last line seen, not proof of what was searched -- read `scanned` for that.
+ 
+--- a/tools/tests/test_wait_for.py
++++ b/tools/tests/test_wait_for.py
+@@ -45,13 +45,18 @@
+         self._counts = list(player_counts or [])
+         self._fallback = fallback
+         self.lifecycle_status = None
++        self.lock_acquisitions = 0
++        self.bridge_calls = 0
+ 
+     async def call_bridge(
+         self, cmd: str, args: dict, peer: str, timeout_s: float
+     ) -> dict:
++        self.bridge_calls += 1
+         if cmd != "query_all_players":
+             raise server.ToolError(f"unexpected:{cmd}")
+         count = self._counts.pop(0) if self._counts else self._fallback
++        if isinstance(count, str):
++            raise server.ToolError(count)
+         return {"ok": 1, "players": [{} for _ in range(count)]}
+ 
+ 
+@@ -111,6 +116,55 @@
+                 poll_interval_s=2.0,
+             )
+         self.assertIn("version_blocked", str(ctx.exception))
++
++    async def test_rejects_timeout_above_600_before_lock(self) -> None:
++        runtime = _FakeRuntime(player_counts=[1])
++        with self.assertRaises(server.ToolError) as ctx:
++            await server.execute_wait_for(
++                runtime, "players_at_least", value=1, timeout_s=601.0, poll_interval_s=0.5
++            )
++        self.assertIn("bad_args: timeout_s must be <= 600", str(ctx.exception))
++        self.assertEqual(runtime.bridge_calls, 0)
++
++    async def test_accepts_exactly_600(self) -> None:
++        runtime = _FakeRuntime(player_counts=[1])
++        result = await server.execute_wait_for(
++            runtime, "players_at_least", value=1, timeout_s=600.0, poll_interval_s=0.5
++        )
++        self.assertTrue(result["satisfied"])
++        self.assertEqual(runtime.bridge_calls, 1)
++
++    async def test_waits_through_server_poll_stale(self) -> None:
++        stale = "game_not_ready:reason=server_poll_stale"
++        runtime = _FakeRuntime(player_counts=[stale, stale, 1])
++        result = await server.execute_wait_for(
++            runtime, "players_at_least", value=1, timeout_s=10.0, poll_interval_s=0.2
++        )
++        self.assertTrue(result["satisfied"])
++        self.assertEqual(result["probes"], 3)
++        self.assertEqual(result["not_ready_probes"], 2)
++        self.assertEqual(runtime.bridge_calls, 3)
++
++    async def test_server_poll_stale_timeout_reports_last_error(self) -> None:
++        stale = "game_not_ready:reason=server_poll_stale"
++        runtime = _FakeRuntime(fallback=stale)
++        result = await server.execute_wait_for(
++            runtime, "players_at_least", value=1, timeout_s=1.2, poll_interval_s=0.3
++        )
++        self.assertTrue(result["ok"])
++        self.assertFalse(result["satisfied"])
++        self.assertTrue(result["timed_out"])
++        self.assertEqual(result["last_error"], stale)
++        self.assertGreaterEqual(result["not_ready_probes"], 2)
++
++    async def test_other_game_not_ready_aborts_first_probe(self) -> None:
++        runtime = _FakeRuntime(player_counts=["game_not_ready:reason=no_run", 1])
++        with self.assertRaises(server.ToolError) as ctx:
++            await server.execute_wait_for(
++                runtime, "players_at_least", value=1, timeout_s=5.0, poll_interval_s=0.2
++            )
++        self.assertIn("game_not_ready:reason=no_run", str(ctx.exception))
++        self.assertEqual(runtime.bridge_calls, 1)
+ 
+     async def test_sleep_does_not_hold_tool_lock(self) -> None:
+         # Fails if wait_for wraps its whole body in `async with runtime.tool_lock`.
+--- a/tools/tests/test_wave_fixes_20260824.py
++++ b/tools/tests/test_wave_fixes_20260824.py
+@@ -56,6 +56,7 @@
+         out = _annotate_entities_reliability(result, {"ok": 1, "players": []}, [0.0, 0.0, 0.0])
+         self.assertIsNone(out["nearest_player_m"])
+         self.assertEqual(out["reliability"], "remote_unverified")
++        self.assertEqual(out["reason"], "no_player_connected")
+ 
+     def test_failed_players_probe_is_remote_not_a_crash(self) -> None:
+         result = {"ok": 1}
+--- a/tools/tests/test_lote_v_products.py
++++ b/tools/tests/test_lote_v_products.py
+@@ -0,0 +1,120 @@
++"""Lote V product coverage: bridge_status open reason set, entities_query wire,
++wait_for timeout rejection, action_use class-name contract."""
++
++from __future__ import annotations
++
++import asyncio
++import json
++import sys
++import unittest
++from pathlib import Path
++from unittest.mock import AsyncMock, patch
++
++_TOOLS_DIR = Path(__file__).resolve().parents[1]
++if str(_TOOLS_DIR) not in sys.path:
++    sys.path.insert(0, str(_TOOLS_DIR))
++
++from dayz_mcp import server
++from dayz_mcp.server import ServerConfig, ToolError, build_app
++
++
++def _content_json(result) -> dict:
++    if isinstance(result, tuple):
++        result = result[0]
++    if isinstance(result, dict):
++        return result
++    return json.loads(result[0].text)
++
++
++def _tool_desc(app, name: str) -> str:
++    return app._tool_manager.get_tool(name).description or ""
++
++
++class BridgeStatusDescriptionTest(unittest.TestCase):
++    def test_description_lists_authority_and_declares_open_set(self) -> None:
++        app, _ = build_app(ServerConfig(key="k", port=0, log_sink=lambda _m: None))
++        desc = _tool_desc(app, "bridge_status")
++        reasons = sorted(server.READY_REASONS | set(server._FENCE_BLOCK_READY.values()))
++        for reason in reasons:
++            self.assertIn(reason, desc)
++        low = desc.lower()
++        self.assertIn("open set", low)
++        self.assertIn("whitelist", low)
++        self.assertIn("shape", low)
++
++    def test_fence_mutant_surfaces_in_new_app_only(self) -> None:
++        with patch.dict(server._FENCE_BLOCK_READY, {"ZZZ_PROBE": "zzz_fence_probe"}):
++            app_fence, _ = build_app(
++                ServerConfig(key="k", port=0, log_sink=lambda _m: None)
++            )
++            desc_fence = _tool_desc(app_fence, "bridge_status")
++        app_after, _ = build_app(
++            ServerConfig(key="k", port=0, log_sink=lambda _m: None)
++        )
++        desc_after = _tool_desc(app_after, "bridge_status")
++        self.assertIn("zzz_fence_probe", desc_fence)
++        self.assertNotIn("zzz_fence_probe", desc_after)
++
++
++class EntitiesQueryWireTest(unittest.IsolatedAsyncioTestCase):
++    async def test_empty_players_probe_names_reason(self) -> None:
++        app, runtime = build_app(
++            ServerConfig(key="k", port=0, log_sink=lambda _m: None)
++        )
++
++        async def fake_call(cmd, args, peer, timeout_s):
++            if cmd == "entities_query":
++                return {"ok": 1, "count_total": 0, "entities": []}
++            if cmd == "query_all_players":
++                return {"ok": 1, "players": []}
++            raise AssertionError(cmd)
++
++        with patch.object(runtime, "call_bridge", fake_call):
++            result = _content_json(
++                await app.call_tool(
++                    "entities_query",
++                    {"pos": [1.0, 2.0, 3.0], "radius": 10.0},
++                )
++            )
++        self.assertEqual(result["reason"], "no_player_connected")
++        self.assertEqual(result["reliability"], "remote_unverified")
++
++
++class WaitForWireTest(unittest.IsolatedAsyncioTestCase):
++    async def test_rejects_601_via_public_tool(self) -> None:
++        app, runtime = build_app(
++            ServerConfig(key="k", port=0, log_sink=lambda _m: None)
++        )
++        calls: list[str] = []
++
++        async def spy(cmd, args, peer, timeout_s):
++            calls.append(cmd)
++            return {"ok": 1, "players": [{}]}
++
++        with patch.object(runtime, "call_bridge", spy):
++            with self.assertRaises(ToolError) as ctx:
++                await app.call_tool(
++                    "wait_for",
++                    {
++                        "condition": "players_at_least",
++                        "value": 1,
++                        "timeout_s": 601,
++                        "poll_interval_s": 0.5,
++                    },
++                )
++        self.assertIn("timeout_s must be <= 600", str(ctx.exception))
++        self.assertEqual(calls, [])
++
++
++class ActionUseDescriptionTest(unittest.TestCase):
++    def test_description_names_class_name_contract(self) -> None:
++        app, _ = build_app(ServerConfig(key="k", port=0, log_sink=lambda _m: None))
++        desc = _tool_desc(app, "action_use")
++        low = desc.lower()
++        self.assertIn("class name", low)
++        self.assertIn("gettype()", low)
++        self.assertIn("not the visible", low)
++
++
++if __name__ == "__main__":
++    unittest.main()

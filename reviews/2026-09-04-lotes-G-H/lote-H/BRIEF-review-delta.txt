@@ -1,0 +1,71 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+REVISIÓN DELTA, la última: tu revisión final del producto fusionado (G+H) dio tres hallazgos
+(H-01 el método único del anillo persistía `EXITED` antes de retirar el binding; H-02 la limpieza
+terminal borraba la tumba y `_tombstone_run_activity` absorbía excepciones; H-03 `None` como
+permiso en `_durable_run_state`). Los tres los reproduje con checks propios (N35, N36, N37, rojos
+sobre aquel producto) y se cerraron en una ronda más. Otro revisor de otra familia aprobó aquel
+producto con dos BAJA (pasos post-persist no aislados; `/status` espera ~0,7 s el lock del
+store), incorporadas. Dictamen sobre el DELTA y sus consecuencias, no sobre todo otra vez.
+
+Producto: `../ws/tools/dayz_mcp/process_lifecycle.py`
+(SHA-256 c140bd23a5eb94544a572dbec66047d05312d9af28a8538425151d4cc8d80889),
+`../ws/tools/dayz_mcp/loopback.py`
+(SHA-256 d015c1a5d7eb421ec257512f224020ed34fbd75c6a999e0e8bce9f16033eacae),
+`../ws/tools/dayz_mcp/dayz_test_tool.py` sin cambios (SHA-256
+bca97e26e3a7d9cef96846bee6559eebc938dbbd90e46b3eab6b0f75019f4b5d).
+El producto que revisaste está congelado en `../ws-frozen-r4/tools/` (sólo lectura): el delta es
+`process_lifecycle.py` +64/−11 y `loopback.py` +21/−15 (LF).
+
+===============================================================================
+§0. QUÉ SE REVISA
+===============================================================================
+
+  P19. En toda retirada terminal, el binding se retira ANTES de persistir `EXITED`
+       (idempotente; `stop_run` ya llegaba retirado) y el diagnóstico se publica DESPUÉS de una
+       persistencia correcta; si no persistió, el binding queda retirado y NO hay diagnóstico;
+       los pasos post-persist son best-effort y nunca dejan el cerco levantado ni el anillo a
+       medias. Los seis caminos.
+  P20. La limpieza terminal (EXITED) limpia dato, `unknown` y compensación pero deja una
+       frontera (tumba) posterior a cualquier sello aceptable: un escritor que aceptó antes de
+       la retirada y aterriza después no reaparece; un `run_id` reutilizado no hereda nada y sus
+       créditos NUEVOS sí aterrizan.
+  P21. Elevar la tumba en una transición a `RUNNING_IDLE` no falla en silencio: o no puede
+       lanzar (dentro de `_activity_lock`, sin E/S) o la transición falla cerrada.
+  P22. Sólo `RUNNING`/`STARTING` autorizan el enqueue; ilegible, malformado, getter ausente o
+       `None` rechazan sin acreditar.
+  Y todo lo anterior sigue en pie (G P1-P18; H H1-H5, D1-D4).
+
+**LO QUE NO ES EL PRODUCTO**: gates, oráculos, ledgers, briefs; `server.py`; `daemon.py`;
+`dayz_test_tool.py`; `runtime_state.py`; refactors, estilo, tipado.
+
+===============================================================================
+§1. LO QUE QUIERO DE TI
+===============================================================================
+
+  - ¿El orden nuevo de `_commit_retirement` cierra tu H-01 en los SEIS caminos, y qué queda si
+    la persistencia falla DESPUÉS de retirar (run presente sin binding: ¿es reparable/adoptable,
+    o queda mudo)? ¿La idempotencia de la retirada previa rompe algo en `stop_run`?
+  - ¿La frontera terminal de P20 es posterior a TODO sello aceptable (incluido uno muestreado
+    bajo el lock del loopback justo antes de la retirada)? ¿Y no bloquea la basal/crédito de un
+    `run_id` reutilizado?
+  - P21: ¿queda alguna ruta donde elevar la tumba pueda lanzar y la transición continúe?
+  - P22: ¿alguna otra rama que trate `None`/malformado como permiso (poll, `exec_enforce`,
+    cola legacy)?
+  - Regresiones en el delta sobre P1-P18 y sobre el anillo/sobre de H (N.B.: el anillo se
+    alimenta sólo tras persistir; comprueba que P19 no lo movió).
+  - Orden de locks tras el delta; validaciones desaparecidas respecto a `ws-frozen-r4`.
+
+Reglas duras: **enseña, no cuentes** (código literal con `path:line`); **escribe el fallo
+concreto**; **la tolerancia no es un defecto**; cero hallazgos es una respuesta legítima. Ejecuta
+los tres gates (`bash ../ws/gate/run.sh`; desde `../ws/tools`: `PYTHONPATH=. python
+../../gate-extra/oracle_lote_g.py`; `bash ../ws/gate/suite.sh`) y pega su última línea.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrarlo?
+    ## HALLAZGOS      — por severidad: título, path:line, código pegado, fallo concreto.
+    ## FAMILIAS       — ¿familia nueva o visitada?
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.

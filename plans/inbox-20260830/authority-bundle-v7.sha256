@@ -1,0 +1,11 @@
+# generation=20260831-ledger-v3
+# graph_version=inbox-20260831-v6
+# review_protocol=grok-cursor-only
+# live_gates=183
+ccd509199e1faa5452e0d70ce1da8fa5e3ba2cab2b2b59c94ac2c44e8bb288f4  product-spec.md
+93b1d228ec0b9cf15366213301553d256cb2edda7b71a6a335efc24a51a77779  plans/2026-08-30-pipeline-inbox-closure-design.md
+58c679669cc1dc780be1a437dec7acaacdd38f0e2f35d0f24025afb328624a2f  plans/inbox-20260830/00-execution-dag.md
+6f49296ff71e98ee69352396f81bed5d4f4970bd124a6b4fc6bebd3eaa683160  plans/inbox-20260830/physical-ownership-addendum-v1.md
+453f84bff71103fa359841fb0d49a7cfbbd9e1541bb95108999e5f62c4f1d895  research/2026-08-30-pipeline-inbox-triage-codex.md
+573e24695eed38db9bc54b0147c832c63f92eebaea8ff8b14700d5ae67e170c7  reports/2026-08-31-reviewer-transition-grok-cursor.md
+6bd1b25410bf72357ad9e627b0713ea8824e7528f50e8d2972979a2d94528fc1  C:/Users/guill/.agents/skills/gates-ledger/scripts/gate-check.mjs

@@ -1,0 +1,40 @@
+[
+  {
+    "module": "test_leak_callback_lifetime",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_leak_callback_lifetime -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "FAIL: test_error_and_timeout_retire_identity_before_allowing_another_request (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_error_and_timeout_retire_identity_before_allowing_another_request) (owner='MCPBridge', event='Error')",
+      "FAIL: test_error_and_timeout_retire_identity_before_allowing_another_request (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_error_and_timeout_retire_identity_before_allowing_another_request) (owner='MCPBridge', event='Timeout')",
+      "FAIL: test_error_and_timeout_retire_identity_before_allowing_another_request (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_error_and_timeout_retire_identity_before_allowing_another_request) (owner='MCPClientBridge', event='Error')",
+      "FAIL: test_error_and_timeout_retire_identity_before_allowing_another_request (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_error_and_timeout_retire_identity_before_allowing_another_request) (owner='MCPClientBridge', event='Timeout')",
+      "FAIL: test_four_backlinks_are_weak_and_targets_have_managed_soft_links (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_four_backlinks_are_weak_and_targets_have_managed_soft_links) (kind='MCPPollCallback')",
+      "FAIL: test_four_backlinks_are_weak_and_targets_have_managed_soft_links (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_four_backlinks_are_weak_and_targets_have_managed_soft_links) (kind='MCPResultCallback')",
+      "FAIL: test_four_backlinks_are_weak_and_targets_have_managed_soft_links (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_four_backlinks_are_weak_and_targets_have_managed_soft_links) (kind='MCPClientPollCallback')",
+      "FAIL: test_four_backlinks_are_weak_and_targets_have_managed_soft_links (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_four_backlinks_are_weak_and_targets_have_managed_soft_links) (kind='MCPClientResultCallback')",
+      "FAIL: test_poll_completions_release_before_rejecting_old_identity (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_poll_completions_release_before_rejecting_old_identity) (kind='MCPPollCallback', event='Success')",
+      "FAIL: test_poll_completions_release_before_rejecting_old_identity (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_poll_completions_release_before_rejecting_old_identity) (kind='MCPPollCallback', event='Error')",
+      "FAIL: test_poll_completions_release_before_rejecting_old_identity (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_poll_completions_release_before_rejecting_old_identity) (kind='MCPPollCallback', event='Timeout')",
+      "FAIL: test_poll_completions_release_before_rejecting_old_identity (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_poll_completions_release_before_rejecting_old_identity)",
+      "FAIL: test_server_allocates_only_when_cached_poll_callback_is_absent (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_server_allocates_only_when_cached_poll_callback_is_absent)",
+      "FAIL: test_shutdown_detaches_cached_callback_even_when_pending_array_is_empty (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_shutdown_detaches_cached_callback_even_when_pending_array_is_empty) (owner='MCPBridge')",
+      "FAIL: test_shutdown_detaches_cached_callback_even_when_pending_array_is_empty (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_shutdown_detaches_cached_callback_even_when_pending_array_is_empty) (owner='MCPClientBridge')",
+      "FAIL: test_shutdown_detaches_cached_callback_even_when_pending_array_is_empty (tests.test_leak_callback_lifetime.CallbackLifetimeContractTest.test_shutdown_detaches_cached_callback_even_when_pending_array_is_empty)",
+      "Ran 6 tests in 0.019s",
+      "FAILED (failures=16)"
+    ],
+    "exit_code": 1
+  },
+  {
+    "module": "test_leak_callback_drain",
+    "command": "$env:PYTHONPATH='C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev'; $env:PYTHONDONTWRITEBYTECODE='1'; $env:PYTHONIOENCODING='utf-8'; & 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' -B -m unittest tests.test_leak_callback_drain -v",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "summary": [
+      "FAIL: test_3420_successful_polls_drain_and_allocate_one_callback (tests.test_leak_callback_drain.CallbackDrainTest.test_3420_successful_polls_drain_and_allocate_one_callback)",
+      "FAIL: test_late_error_generation_cannot_release_or_dispatch_current_poll (tests.test_leak_callback_drain.CallbackDrainTest.test_late_error_generation_cannot_release_or_dispatch_current_poll)",
+      "Ran 8 tests in 0.654s",
+      "FAILED (failures=2)"
+    ],
+    "exit_code": 1
+  }
+]

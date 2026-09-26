@@ -1,0 +1,63 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+REVISIÓN DELTA DEL LOTE I (ronda 2). Tu revisión de la ronda 1 dio 2 ALTA + 1 MEDIA + 1 BAJA
+(F-01 dueño inventado por el helper; F-02 detector AST por función; F-03 «without_lifecycle» sin
+su rama; F-04 nombre). Las cuatro reproducidas con un oráculo propio (T1a/T1b/T1c acoplamiento del
+dueño y procesos `owned` para el guard real; T2/T2b mutantes bypass y orden sobre copia temporal con
+control positivo; T3 mutante de la rama sin lifecycle; T4 nombre) y cerradas en una ronda más.
+Dictamen sobre el DELTA de los tests (`../ws-frozen-r1/tools/tests/` → `../ws/tools/tests/`).
+
+Producto: `../ws/tools/tests/fence_helpers.py` (SHA-256 fccb5e8c0a47614a6de32a43f15d1f6a07988ff76b350d8b2cbe8b57f7ed92ff),
+`../ws/tools/tests/test_instance_fence.py` (SHA-256 dc1863a3e14492589369a4bbe84b9e82e379e98ed86283a9ce34723b8dd2d9c9), `../ws/tools/tests/test_client_mode.py`
+(SHA-256 e11c5bbcb82ca6262b10167cd61f0976c551b35b03f04043150e59a3945464f5), `../ws/tools/tests/test_daemon.py` (SHA-256 28d9c472af3c1b0762cc55c4ff38162ed0e2e3d784f425fe5f188d9250fa865f),
+`../ws/tools/tests/test_session_e2e.py` (SHA-256 2a2429f8e0958902d18a43e6122f8b011a55414ac2499bf62895dcb37038fab2, sin trackear, no se commitea). El
+código (`../ws/tools/dayz_mcp/`) sigue congelado: `bash ../ws/gate/product_frozen.sh`.
+
+===============================================================================
+§0. QUÉ SE REVISA
+===============================================================================
+
+  P-I1. Con un lifecycle real, `bind_both_peers` registra el run sólo con el titular ACTIVO del
+        lease `lifecycle` del coordinador o con un `owner=(session_id, lease_id)` explícito; sin
+        ninguno, no inventa dueño. Los procesos registrados clasifican `owned` en el guard del
+        lifecycle (guard falso: snapshots sembrados; guard real: el propio intérprete).
+  P-I2. El e2e que libera A y sigue con B adopta con B antes de mutar (C2/C4).
+  P-I3. Detector sensible al camino: tras cada `state = "EXITED"`, ningún `return` ni
+        `manifest.replace` alcanzable precede a la retirada; mutantes bypass y orden como
+        controles permanentes del propio test.
+  P-I4. «without_lifecycle» ejecuta su rama (o se renombra y hay un test aparte que la ejecuta).
+  P-I5. Renombrado a `test_release_owner_fences_bound_binding_until_adopt`.
+  Y todo lo anterior (C1-C5; R1-R6 de la ronda 1).
+
+===============================================================================
+§1. LO QUE QUIERO DE TI
+===============================================================================
+
+  - P-I1: ¿el dueño que registra el helper es SIEMPRE uno que el test controla? ¿Cómo lee el
+    titular del coordinador (¿API pública o atributo privado?) y qué pasa si el lease caduca o
+    cambia después del bind? ¿El `owner` explícito puede desacoplarse del lease y volver a
+    esconder C2? ¿Los otros 25 módulos que usan `bind_both_peers` siguen midiendo lo mismo?
+  - P-I2: ¿los tests que liberan y siguen mutando adoptan de verdad (respuesta `ok` +
+    `dispatchable`)? ¿Alguno «adopta» con un atajo (escribir el manifiesto a mano, `owner` nuevo)?
+  - P-I3: ¿el detector es sensible al camino o vuelve a ser pertenencia con más pasos? Ataca con
+    un mutante nuevo, distinto del bypass y del orden (p. ej. retirada en una rama `if` y persist
+    en la otra; retirada tras un `return` condicional; `EXITED` en un helper llamado desde varios
+    sitios). Copia temporal, nunca `../ws`.
+  - P-I4: ¿la rama `lifecycle is None` se ejecuta de verdad (mutante `raise`)?
+  - Regresiones: aserciones cambiadas sin C-item; `skip`/`expectedFailure`; tests borrados o
+    renombrados fuera de P-I5; `allowed_red.txt` tocado.
+
+Reglas duras: **enseña, no cuentes** (diff literal con `path:line`); **escribe el fallo
+concreto**; **la tolerancia no es un defecto**; cero hallazgos es una respuesta legítima. Ejecuta
+los tres gates (`product_frozen.sh`, `run_oracle_tests.sh`, `suite_full.sh` ≈4 min) y pega su
+última línea. Si tu sandbox vuelve a dar los 48 ERROR de path authority / launcher nativo /
+`psutil.AccessDenied` en la suite completa, dilo y no lo atribuyas al diff.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrar estos tests?
+    ## HALLAZGOS      — por severidad: título, path:line, diff pegado, fallo concreto.
+    ## ASERCIONES CAMBIADAS — tabla: test, antes, después, C-item (o «ninguno»).
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.

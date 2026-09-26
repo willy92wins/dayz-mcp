@@ -1,0 +1,411 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+from dayz_mcp import (
+    dayz_test_request,
+    launcher_registry,
+    native_bundle,
+    native_launcher_backend,
+)
+from dayz_mcp.native_broker_protocol import BrokerKind, encode_request
+from dayz_mcp.native_launcher_backend import (
+    NativeLauncherBackendError,
+    launch_registered_native,
+)
+from dayz_mcp.normal_daemon_policy import (
+    load_normal_daemon_policy,
+    serialize_normal_daemon_policy,
+)
+from dayz_mcp.request_path_authority import _file_identity, _final_handle_path
+
+
+TOOLS_DIR = Path(__file__).resolve().parent
+BUNDLE_DIR = TOOLS_DIR / "native-launchers" / "dayz-test-v1"
+REGISTRY_PATH = TOOLS_DIR / "approved-launchers.json"
+OUTPUT_PBO = Path(r"P:\Mods\@Utopia_PC\Addons\Utopia_PC.pbo")
+
+
+class _RecordingAuthority:
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+        self.debug_images: list[dict[str, object]] = []
+        self.direct_processes: list[dict[str, object]] = []
+        self.helper_attempts: list[dict[str, object]] = []
+
+    def approve_debug_image(self, file_handle: int, *, event_kind: str) -> bool:
+        try:
+            path = _final_handle_path(file_handle)
+        except (OSError, ValueError):
+            path = None
+        approved = bool(
+            self._inner.approve_debug_image(file_handle, event_kind=event_kind)
+        )
+        self.debug_images.append(
+            {"approved": approved, "event_kind": event_kind, "path": path}
+        )
+        return approved
+
+    def approve_announced_process(self, file_handle: int, announcement: object) -> bool:
+        approved = bool(
+            self._inner.approve_announced_process(file_handle, announcement)
+        )
+        self.direct_processes.append(
+            {
+                "approved": approved,
+                "kind": getattr(getattr(announcement, "kind", None), "name", None),
+                "path": getattr(announcement, "announced_path", None),
+            }
+        )
+        return approved
+
+    def approve_addon_helper_process(self, file_handle: int) -> bool:
+        try:
+            path = _final_handle_path(file_handle)
+        except (OSError, ValueError):
+            path = None
+        approved = bool(self._inner.approve_addon_helper_process(file_handle))
+        self.helper_attempts.append({"approved": approved, "path": path})
+        return approved
+
+
+class _RecordingRootAuthority:
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+        self.path = inner.path
+        self.images: list[dict[str, object]] = []
+
+    def validate_native_pe(self) -> None:
+        self._inner.validate_native_pe()
+
+    def approve_root_debug_image(self, file_handle: int) -> bool:
+        try:
+            path = _final_handle_path(file_handle)
+            identity = _file_identity(file_handle)
+        except (OSError, ValueError):
+            path = None
+            identity = None
+        approved = bool(self._inner.approve_root_debug_image(file_handle))
+        expected = self._inner.file_identity
+        self.images.append(
+            {
+                "approved": approved,
+                "expected_file_id": expected.file_id,
+                "expected_volume": expected.volume_serial_number,
+                "observed_file_id": getattr(identity, "file_id", None),
+                "observed_volume": getattr(
+                    identity, "volume_serial_number", None
+                ),
+                "path": path,
+            }
+        )
+        return approved
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("mode", choices=("preflight", "pack-only", "normal"))
+    parser.add_argument("--source", type=Path)
+    parser.add_argument(
+        "--root-start",
+        choices=("planned", "debug-event"),
+        default="planned",
+    )
+    parser.add_argument("--cancel-after-s", type=int)
+    return parser
+
+
+def _canonical_request(
+    mode: str,
+    source: Path | None,
+    policies: tuple[dayz_test_request.RequestProjectPolicy, ...],
+) -> dayz_test_request.ParsedDayzTestRequest:
+    value: dict[str, object] = {
+        "dev_root": r"P:\Utopia_PC_Suite",
+        "mod": "Utopia_PC",
+        "mode": "server",
+        "no_base_mods": True,
+        "version": 1,
+    }
+    if mode == "preflight":
+        value["preflight"] = True
+    else:
+        if source is None:
+            raise ValueError("probe_source_required")
+        if not source.is_absolute() or not source.is_dir():
+            raise ValueError("probe_source_invalid")
+        value.update(
+            {
+                "build": True,
+                "clean": True,
+                "pack_only": mode == "pack-only",
+                "source": str(source),
+            }
+        )
+    raw = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return dayz_test_request.parse_dayz_test_request(raw, policies=policies)
+
+
+def _pbo_snapshot() -> dict[str, object] | None:
+    if not OUTPUT_PBO.is_file():
+        return None
+    raw = OUTPUT_PBO.read_bytes()
+    info = OUTPUT_PBO.stat()
+    return {
+        "file_id": int(info.st_ino),
+        "mtime_ns": int(info.st_mtime_ns),
+        "sha256": hashlib.sha256(raw).hexdigest().upper(),
+        "size": len(raw),
+    }
+
+
+async def _run(
+    mode: str,
+    source: Path | None,
+    root_start: str,
+    cancel_after_s: int | None,
+) -> dict[str, object]:
+    if root_start not in {"planned", "debug-event"}:
+        raise ValueError("probe_root_start_invalid")
+    if cancel_after_s is not None and not 1 <= cancel_after_s <= 120:
+        raise ValueError("probe_cancel_after_invalid")
+    if not BUNDLE_DIR.is_absolute() or not BUNDLE_DIR.is_dir():
+        raise ValueError("probe_bundle_invalid")
+    registry_before = REGISTRY_PATH.read_bytes()
+    pbo_before = _pbo_snapshot()
+    registry_payload = json.loads(registry_before)
+    if (
+        not isinstance(registry_payload, dict)
+        or registry_payload.get("format_version") != 1
+        or not isinstance(registry_payload.get("launchers"), list)
+    ):
+        raise ValueError("probe_registry_invalid")
+
+    entry = launcher_registry._create_registry_entry_for_test(
+        "dayz-test-v1",
+        BUNDLE_DIR,
+        "dayz-test-launcher.exe",
+    )
+    output: dict[str, bytearray] = {
+        "stdout": bytearray(),
+        "stderr": bytearray(),
+    }
+    debug_events: list[dict[str, object]] = []
+    broker_announcements: list[dict[str, object]] = []
+    result: dict[str, object]
+    with launcher_registry._open_registry_entry_for_test(entry) as opened:
+        opened.validate_native_pe()
+        with native_bundle.load_verified_bundle(opened) as verified:
+            policies = tuple(item.policy for item in verified.sealed_policies)
+            parsed = _canonical_request(mode, source, policies)
+            frame = encode_request(
+                BrokerKind.PRIVATE_WORKER,
+                {"request_sha256": parsed.sha256},
+                stdin=parsed.canonical_bytes,
+            )
+            authority = _RecordingAuthority(verified.debug_image_authority)
+            root_authority = _RecordingRootAuthority(opened)
+
+            def output_sink(channel: str, chunk: bytes) -> None:
+                if channel not in output or type(chunk) is not bytes:
+                    raise ValueError("invalid_probe_output")
+                if len(output[channel]) + len(chunk) > 16 * 1024:
+                    raise ValueError("probe_output_too_large")
+                output[channel].extend(chunk)
+
+            original_read_debug_event = (
+                native_launcher_backend._wait_debug_event
+            )
+            original_create_flags = native_launcher_backend.CREATE_FLAGS
+            original_feed_announcement = (
+                native_launcher_backend.ChildAnnouncementDecoder.feed
+            )
+
+            def read_debug_event() -> object:
+                event = original_read_debug_event()
+                if event is not None:
+                    debug_events.append(
+                        {
+                            "exit_code": event.exit_code,
+                            "kind": event.kind,
+                            "pid": event.pid,
+                            "tid": event.tid,
+                        }
+                    )
+                return event
+
+            def feed_announcement(decoder: object, chunk: bytes) -> list[object]:
+                values = original_feed_announcement(decoder, chunk)
+                broker_announcements.extend(
+                    {
+                        "kind": item.kind.name,
+                        "path": item.announced_path,
+                        "sequence": item.sequence,
+                    }
+                    for item in values
+                )
+                return values
+
+            try:
+                identity_json = (
+                    '{"pid":1,"platform":"unknown","ppid":1,'
+                    '"session_id":"00000000-0000-4000-8000-000000000001",'
+                    '"started_at_utc":"2026-07-22T00:00:00.000000Z",'
+                    '"task_label":"h9-native-preflight"}'
+                    if mode == "preflight"
+                    else "[0]"
+                )
+                native_launcher_backend._wait_debug_event = read_debug_event
+                native_launcher_backend.ChildAnnouncementDecoder.feed = (
+                    feed_announcement
+                )
+                if root_start == "debug-event":
+                    native_launcher_backend.CREATE_FLAGS = (
+                        original_create_flags
+                        & ~native_launcher_backend.CREATE_SUSPENDED
+                    )
+                try:
+                    cancel_event = asyncio.Event()
+                    cancel_timer = (
+                        asyncio.get_running_loop().call_later(
+                            cancel_after_s, cancel_event.set
+                        )
+                        if cancel_after_s is not None
+                        else None
+                    )
+                    daemon_policy_json = serialize_normal_daemon_policy(
+                        load_normal_daemon_policy()
+                    )
+                    exit_code = await launch_registered_native(
+                        root_authority,
+                        verified_bundle=SimpleNamespace(
+                            debug_image_authority=authority
+                        ),
+                        identity_json=identity_json,
+                        lease_token="h9-native-probe-no-secret",
+                        daemon_policy_json=daemon_policy_json,
+                        canonical_request=frame,
+                        cancel_event=cancel_event,
+                        output_sink=output_sink,
+                    )
+                    launch_error = None
+                except NativeLauncherBackendError as error:
+                    exit_code = None
+                    launch_error = str(error)
+                finally:
+                    if cancel_timer is not None:
+                        cancel_timer.cancel()
+            finally:
+                native_launcher_backend._wait_debug_event = (
+                    original_read_debug_event
+                )
+                native_launcher_backend.CREATE_FLAGS = original_create_flags
+                native_launcher_backend.ChildAnnouncementDecoder.feed = (
+                    original_feed_announcement
+                )
+
+            helper_names = {
+                Path(str(item["path"])).name.casefold()
+                for item in authority.helper_attempts
+                if item["approved"] is True and item["path"] is not None
+            }
+            result = {
+                "broker_announcements": broker_announcements,
+                "debug_images": authority.debug_images,
+                "direct_processes": authority.direct_processes,
+                "debug_events": debug_events,
+                "exit_code": exit_code,
+                "helper_attempts": authority.helper_attempts,
+                "launch_error": launch_error,
+                "mode": mode,
+                "root_start": root_start,
+                "output": {
+                    key: bytes(value).decode("utf-8", errors="replace")
+                    for key, value in output.items()
+                },
+                "pbo": _pbo_snapshot(),
+                "pbo_before": pbo_before,
+                "request_sha256": parsed.sha256,
+                "root_images": root_authority.images,
+            }
+            pbo_fresh = result["pbo"] is not None and result["pbo"] != pbo_before
+            result["pbo_fresh"] = pbo_fresh
+
+            probe_error = (
+                f"probe_native_gate_failed:{launch_error}"
+                if launch_error is not None
+                else None
+            )
+            if probe_error is None and cancel_after_s is not None:
+                lifecycle_seen = any(
+                    item["kind"] == "LIFECYCLE_CLI"
+                    for item in broker_announcements
+                )
+                if exit_code != 130 or pbo_fresh or lifecycle_seen:
+                    probe_error = "probe_cancellation_failed"
+            elif probe_error is None and mode == "preflight":
+                if exit_code != 0 or authority.helper_attempts:
+                    probe_error = "probe_preflight_failed"
+            elif probe_error is None:
+                if exit_code != 2 or not pbo_fresh:
+                    probe_error = "probe_build_failed"
+                if mode == "pack-only" and helper_names != {
+                    "binarize.exe",
+                    "filebank.exe",
+                }:
+                    probe_error = "probe_pack_helper_drift"
+                if mode == "normal" and not helper_names:
+                    probe_error = "probe_normal_helper_missing"
+                if not helper_names.issubset(
+                    {"binarize.exe", "cfgconvert.exe", "filebank.exe"}
+                ):
+                    probe_error = "probe_unknown_helper"
+            result["probe_error"] = probe_error
+
+    if REGISTRY_PATH.read_bytes() != registry_before:
+        raise RuntimeError("probe_registry_drift")
+    return result
+
+
+def main() -> int:
+    args = _parser().parse_args()
+    try:
+        result = asyncio.run(
+            _run(
+                args.mode,
+                args.source,
+                args.root_start,
+                args.cancel_after_s,
+            )
+        )
+    except TypeError as error:
+        print(
+            json.dumps(
+                {
+                    "error": f"probe_internal_error: {type(error).__name__}: {error}",
+                    "ok": False,
+                },
+                sort_keys=True,
+            )
+        )
+        return 1
+    except (OSError, ValueError, RuntimeError) as error:
+        print(json.dumps({"error": str(error), "ok": False}, sort_keys=True))
+        return 1
+    ok = result.get("probe_error") is None
+    print(json.dumps({"ok": ok, **result}, sort_keys=True))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

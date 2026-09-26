@@ -1,0 +1,102 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. Trabaja hasta emitir el dictamen y escríbelo en
+disco. Si algo te bloquea, dilo en el dictamen y sigue con el resto.
+
+===============================================================================
+§0. QUÉ REVISAS — lote B: un test nuevo y tres descripciones de tool (DayZ-MCP)
+===============================================================================
+
+Eres una sesión nueva. Revisas un diff pequeño, SIN COMMITEAR todavía, sobre el árbol vivo
+C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev (HEAD 2d069d2, rama
+work/inbox-20260830-modules). El diff exacto está en DIFF-B.patch junto a este brief. Dos ficheros:
+
+  tools/tests/test_wait_for.py  (+55): test `test_same_bytes_default_sees_and_zero_misses` en la
+      clase `WaitForBug086EvidenceTest` (ficha fb-20260829-025502-251d). Un solo fichero de log
+      (5 líneas de boot + una respuesta añadida de forma durable), y DOS llamadas a
+      `server.execute_wait_for` sobre esos MISMOS bytes: la primera con el default (lookback 200)
+      debe salir `satisfied`; la segunda con `lookback_from="lines", lookback_lines=0` debe salir
+      `timed_out` con `probes >= 1`. Se comprueba por sha256 que el fichero no cambió entre las dos.
+      Añade `import hashlib`.
+  tools/dayz_mcp/server.py  (+23 −3): SOLO texto de tres descripciones de tool (ficha
+      fb-20260904-123220-5930, puntos 1, 2 y 4):
+      - entities_query: «pos.y is used as given: nothing snaps it to the surface (player_teleport
+        y==0 does, this tool does not), so pass pos=[x, surface_query.y, z] …».
+      - logs_since: «The marker advances only to the end of the lines RETURNED, never to EOF:
+        without a marker, max_lines=1 marks one line INTO the launch tail … To mark 'now', read
+        with a large max_lines until a call returns 0 new lines … The mod probe writes to
+        script_<date>.log, not to the .RPT …».
+      - capture_screenshot: «window_surface and client_surface rects are PHYSICAL pixels
+        (DPI-aware) … at 150%: 1920 -> 1280 …».
+
+Tu producto es UN dictamen: ¿este diff es correcto y VERAZ contra el código, y puede commitearse
+tal cual? Bloqueante SOLO con repro que falle o con una afirmación de descripción que el código
+contradiga (cita path:line).
+
+===============================================================================
+§1. QUÉ COMPROBAR (todo ejecutable desde tools/ con el intérprete obligatorio)
+===============================================================================
+
+Intérprete OBLIGATORIO: C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+Desde tools/: $env:PYTHONPATH='.'; $env:PYTHONDONTWRITEBYTECODE='1'. Sin pytest: unittest.
+
+B-1 (test 251d). Corre `python -m unittest tests.test_wait_for -v` (22 tests esperados, OK). Después
+    ataca el test: ¿es un test de verdad o una tautología? Mutante obligatorio: en server.py cambia
+    el default `lookback_lines: int = 200` de `execute_wait_for` (busca `lookback_lines: int = 200`)
+    a `0` y comprueba que el test nuevo SE PONE ROJO (y cuál de los otros también); restaura el
+    fichero después (git checkout NO: el fichero lleva el diff sin commitear; revierte a mano el
+    literal o trabaja sobre una copia). Confirma que las dos llamadas comparten bytes (el sha256) y
+    que la segunda hizo al menos una sonda (`probes >= 1`), no un cortocircuito.
+B-2 (entities_query). Verifica en el código que la tool NO ajusta `pos[1]` a la superficie (sigue
+    `execute_entities_query` / la construcción de args del bridge) y que `player_teleport` SÍ
+    documenta/implementa el snap con y==0. Si entities_query en realidad ajustara y, la frase es
+    falsa → bloqueante con path:line.
+B-3 (logs_since). Verifica contra `dayz_mcp/log_tail.py::read_since` (docstring: «max_lines caps what
+    is RETURNED, and the returned marker advances only to the end of the lines actually handed
+    over») y contra `execute`/tool `logs_since` en server.py (busca `remaining = max_lines`) que
+    sin marker y con max_lines=1 el marker queda tras la PRIMERA línea de la ventana de lanzamiento,
+    no en EOF. Repro barato: fichero temporal con 10 líneas, `log_tail.read_since(path, None,
+    max_lines=1)` → offset del marker == len(primera línea)+1. Y comprueba que la receta «leer con
+    max_lines grande hasta 0 líneas nuevas deja el marker en EOF» es cierta con el mismo helper.
+    La frase sobre `script_<date>.log` vs .RPT: comprueba que el servidor lee AMBOS (script*.log y
+    *.RPT) en `_server`/`_client` profiles (busca los globs de logs en server.py) — si no leyera
+    script logs, la frase estaría mal colocada.
+B-4 (capture_screenshot). Verifica en `dayz_mcp/mcp_capture.py` (o donde viva la captura) que los
+    rects de `window_surface`/`client_surface` salen de la API Win32 en píxeles físicos (DPI-aware:
+    busca `SetProcessDpiAwareness`, `DPI_AWARENESS`, `GetDpiForWindow`, `PROCESS_PER_MONITOR_DPI_AWARE`
+    o equivalente). Si el proceso del servidor NO se declara DPI-aware, la frase «PHYSICAL pixels» es
+    una afirmación sin respaldo → bloqueante o, si no puedes decidirlo, dilo en LO QUE NO PUDE
+    VERIFICAR con lo que sí encontraste.
+B-5 (wire). Con una sesión cliente en memoria
+    (`mcp.shared.memory.create_connected_server_and_client_session(app._mcp_server)` +
+    `session.list_tools()`; `app, runtime = server.build_app(server.ServerConfig(key="k", port=0,
+    log_sink=lambda _m: None))`) comprueba que las tres descripciones llegan por el wire con el texto
+    nuevo y que `tests.test_docs_truth`, `tests.test_mcp_tools`, `tests.test_lote_v_products`,
+    `tests.test_effective_schema_catalog`, `tests.test_tool_registry_fingerprint` siguen verdes (el
+    orquestador midió 119 OK, 2 skips).
+
+===============================================================================
+§2. FRONTERAS
+===============================================================================
+
+- NO ejecutes DayZ, ni el daemon, ni nada de red. NO commitees. NO edites ficheros del árbol vivo
+  salvo el mutante de B-1, que RESTAURAS (verifica con `git diff --stat` que al terminar el diff
+  sigue siendo exactamente los dos ficheros con +75 −3).
+- No toques loopback.py, process_lifecycle.py, dayz_test_tool.py ni sus tests: son de otra sesión.
+- Evidencia = comandos ejecutados con su salida. Una lectura sin ejecutar se etiqueta como tal.
+
+===============================================================================
+§3. ENTREGABLE
+===============================================================================
+
+Escribe C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-B\REVIEW-CODEX.md con:
+
+## VEREDICTO
+BLOQUEANTES=N (0 si el diff puede commitearse tal cual).
+## B-1 … B-5
+Por cada uno: qué ejecutaste, salida literal recortada, conclusión. Para B-1 el resultado del
+mutante (rojo/verde) es obligatorio.
+## BLOQUEANTES
+Cada uno con repro literal [EXACT] y path:line.
+## BACKLOG
+Mejoras no bloqueantes (texto, tests que faltan).
+## LO QUE NO PUDE VERIFICAR
+Lista honesta.

@@ -1,0 +1,78 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+Tercera revisión de este lote. Las anteriores encontraron 5 y 4 hallazgos; **reproduje todos**
+y todos se arreglaron. Ésta es la ronda 4.
+
+===============================================================================
+§0. QUÉ SE REVISA. Sólo esto.
+===============================================================================
+
+  P1. **La actividad se acredita al run que el comando realmente comanda**, tomado del
+      `run_id` del binding, no reconstruido por dueño ni por cardinalidad.
+  P2. **La generación nueva no hereda sellos viejos**: extender un run heredado no importa el
+      timestamp de un proceso anterior a este daemon.
+  P3. **La caché nunca publica un estado que ya no es cierto**, ni tras sembrar la basal en un
+      arranque, ni tras una mutación ocurrida mientras alguien leía.
+
+Sigue en pie: la actividad vive en memoria por `(daemon_generation, run_id)`; el audit
+registra pero **no manda** (corromper o borrar `events.jsonl` no cambia la respuesta); sticky
+que una escritura buena no limpia; nada de actividad en un rechazo ni en un enqueue interno;
+fail-closed a `unknown`/null; y **la actividad es diagnóstico, no autoridad**.
+
+**LO QUE NO ES EL PRODUCTO**, y va a `BACKLOG`: el gate, el oráculo, el ledger, este brief;
+el sobre de `dayz_test_stop` y compañía; `runtime_state.py`; `README-mcp.md`; refactors.
+**Prohibido justificar alcance con «es donde han salido cosas antes».**
+
+===============================================================================
+§1. LO QUE YA SÉ. No lo redescubras; ataca sus consecuencias
+===============================================================================
+
+Arreglado en esta ronda, con su sitio:
+  - `_binding_run_id` (`loopback.py:223-227`), capturado en `:1569` (normal) y `:1677`
+    (`exec_enforce`), viaja por `_note_run_command_activity(..., run_id=...)` y
+    `record_box_command_activity` lo usa y **retorna** (`process_lifecycle.py:948-953`). El
+    respaldo por dueño/cardinalidad sólo queda para una cola sin binding.
+  - `_capture_start_activity(run, *, launched=...)` (`:912-932`); producción llama con
+    `launched=record` (`:1527`), así que sella el proceso que ESTE daemon lanzó.
+  - Contador de revisión de caja: `_bump_box_revision_locked` bajo `_activity_lock`; el lector
+    captura la revisión antes de calcular y sólo publica si no cambió.
+
+**Tres huecos que el implementador declaró él mismo. Quiero tu opinión sobre los tres:**
+
+  a. **N8 sólo impide publicar lo VIEJO.** Un lector que calcule la actividad *después* de una
+     mutación y publique un snapshot nuevo no está cubierto por el contador.
+  b. **Encolado real sin binding (cola legacy)**: el respaldo por dueño/cardinalidad sigue
+     vivo y no hay test de ese cableado. ¿Es alcanzable en producción? ¿Importa?
+  c. **Orden de locks sin estrés**: `_operation_lock → _activity_lock` no se invirtió, pero
+     nadie lo ha ejercitado bajo carga.
+
+Y un hueco de MI gate, que él encontró y agradezco: mi check N6 sólo caza el sello de
+2026-06-01, así que un arreglo con `max(stamps)` sobre todos los procesos lo pasaría aun
+quedándose con otro sello pre-daemon. El código real sí sella sólo `launched`. Si ves alguna
+forma de que un sello anterior a este daemon llegue a la clave de la generación viva, es
+hallazgo.
+
+===============================================================================
+§2. LO QUE QUIERO DE TI
+===============================================================================
+
+  - **La atribución, ahora que se toma del binding.** ¿Hay algún estado donde el `run_id` del
+    binding no sea el run comandado? ¿Un binding retirado, reciclado, de otro rol, o de un run
+    ya muerto? Acreditar frescura al run equivocado es tan malo como no acreditarla.
+  - **La coherencia de la caché**, incluida la variante (a) de arriba.
+  - **La frontera de generación**: cualquier camino por el que un sello o una marca cruce.
+  - **La invariante «la actividad no es autoridad»**: `occupied`, stop, reap.
+  - **Fail-closed de verdad**: cada rama que devuelve una edad, ¿puede sostenerla?
+
+Reglas duras: **enseña, no cuentes** (código literal con `path:line`); **escribe el fallo
+concreto** (entradas o estado ⇒ resultado incorrecto); **la tolerancia no es un defecto**;
+cero hallazgos es una respuesta legítima y mejor que rellenar.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrarlo?
+    ## HALLAZGOS      — por severidad: título, path:line, código pegado, fallo concreto.
+    ## LOS TRES HUECOS— tu opinión sobre (a), (b) y (c) del §1.
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.

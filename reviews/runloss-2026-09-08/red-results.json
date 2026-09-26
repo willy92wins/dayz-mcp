@@ -1,0 +1,73 @@
+[
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\runloss-2026-09-08\\before_unittest.py' 'tests.test_runloss_diagnostics' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 1,
+    "summary": [
+      "ERROR: test_eviction_falls_back_without_borrowing_another_role_cause (tests.test_runloss_diagnostics.RunlossRetirementTest.test_eviction_falls_back_without_borrowing_another_role_cause)",
+      "ERROR: test_latest_other_peer_retirement_does_not_overwrite_this_cause (tests.test_runloss_diagnostics.RunlossRetirementTest.test_latest_other_peer_retirement_does_not_overwrite_this_cause)",
+      "ERROR: test_new_bound_target_does_not_inherit_older_dead_run_cause (tests.test_runloss_diagnostics.RunlossRetirementTest.test_new_bound_target_does_not_inherit_older_dead_run_cause)",
+      "ERROR: test_offline_retirement_explains_both_peers (tests.test_runloss_diagnostics.RunlossRetirementTest.test_offline_retirement_explains_both_peers)",
+      "ERROR: test_reaped_owned_run_explains_process_loss_to_next_caller (tests.test_runloss_diagnostics.RunlossRetirementTest.test_reaped_owned_run_explains_process_loss_to_next_caller)",
+      "FAIL: test_pending_replacement_command_keeps_the_replacement_cause (tests.test_runloss_diagnostics.RunlossRetirementTest.test_pending_replacement_command_keeps_the_replacement_cause)",
+      "FAIL: test_reaped_pending_command_delivers_the_same_cause_via_await (tests.test_runloss_diagnostics.RunlossRetirementTest.test_reaped_pending_command_delivers_the_same_cause_via_await)",
+      "FAIL: test_role_replacement_is_not_reported_as_run_death (tests.test_runloss_diagnostics.RunlossRetirementTest.test_role_replacement_is_not_reported_as_run_death)",
+      "FAIL: test_stopped_is_distinct_from_reaped (tests.test_runloss_diagnostics.RunlossRetirementTest.test_stopped_is_distinct_from_reaped)",
+      "FAIL: test_unknown_reason_does_not_invent_death_or_echo_host_text (tests.test_runloss_diagnostics.RunlossRetirementTest.test_unknown_reason_does_not_invent_death_or_echo_host_text)",
+      "FAIL: test_fifteen_second_probe_does_not_claim_420_second_deadline (tests.test_runloss_diagnostics.RunlossWaitBudgetTest.test_fifteen_second_probe_does_not_claim_420_second_deadline)",
+      "FAIL: test_global_poll_age_is_labelled_as_station_snapshot (tests.test_runloss_diagnostics.RunlossWaitBudgetTest.test_global_poll_age_is_labelled_as_station_snapshot)",
+      "FAIL: test_probe_that_exhausts_global_budget_still_reports_timeout (tests.test_runloss_diagnostics.RunlossWaitBudgetTest.test_probe_that_exhausts_global_budget_still_reports_timeout)",
+      "Ran 14 tests in 1.009s",
+      "FAILED (failures=8, errors=5)"
+    ],
+    "finished_utc": "2026-09-08T16:40:54.229024+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\runloss-2026-09-08\\before_unittest.py' 'tests.test_runloss_diagnostics' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 1,
+    "summary": [
+      "FAIL: test_eviction_falls_back_without_borrowing_another_role_cause (tests.test_runloss_diagnostics.RunlossRetirementTest.test_eviction_falls_back_without_borrowing_another_role_cause)",
+      "FAIL: test_latest_other_peer_retirement_does_not_overwrite_this_cause (tests.test_runloss_diagnostics.RunlossRetirementTest.test_latest_other_peer_retirement_does_not_overwrite_this_cause)",
+      "FAIL: test_offline_retirement_explains_both_peers (tests.test_runloss_diagnostics.RunlossRetirementTest.test_offline_retirement_explains_both_peers)",
+      "FAIL: test_pending_replacement_command_keeps_the_replacement_cause (tests.test_runloss_diagnostics.RunlossRetirementTest.test_pending_replacement_command_keeps_the_replacement_cause)",
+      "FAIL: test_reaped_owned_run_explains_process_loss_to_next_caller (tests.test_runloss_diagnostics.RunlossRetirementTest.test_reaped_owned_run_explains_process_loss_to_next_caller)",
+      "FAIL: test_reaped_pending_command_delivers_the_same_cause_via_await (tests.test_runloss_diagnostics.RunlossRetirementTest.test_reaped_pending_command_delivers_the_same_cause_via_await)",
+      "FAIL: test_role_replacement_is_not_reported_as_run_death (tests.test_runloss_diagnostics.RunlossRetirementTest.test_role_replacement_is_not_reported_as_run_death)",
+      "FAIL: test_stopped_is_distinct_from_reaped (tests.test_runloss_diagnostics.RunlossRetirementTest.test_stopped_is_distinct_from_reaped)",
+      "FAIL: test_unknown_reason_does_not_invent_death_or_echo_host_text (tests.test_runloss_diagnostics.RunlossRetirementTest.test_unknown_reason_does_not_invent_death_or_echo_host_text)",
+      "FAIL: test_fifteen_second_probe_does_not_claim_420_second_deadline (tests.test_runloss_diagnostics.RunlossWaitBudgetTest.test_fifteen_second_probe_does_not_claim_420_second_deadline)",
+      "FAIL: test_global_poll_age_is_labelled_as_station_snapshot (tests.test_runloss_diagnostics.RunlossWaitBudgetTest.test_global_poll_age_is_labelled_as_station_snapshot)",
+      "FAIL: test_probe_that_exhausts_global_budget_still_reports_timeout (tests.test_runloss_diagnostics.RunlossWaitBudgetTest.test_probe_that_exhausts_global_budget_still_reports_timeout)",
+      "Ran 14 tests in 0.964s",
+      "FAILED (failures=12)"
+    ],
+    "finished_utc": "2026-09-08T16:41:37.845728+00:00"
+  },
+  {
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\runloss-2026-09-08\\before_unittest.py' 'tests.test_runloss_diagnostics' '-v'",
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+    "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+    "exit_code": 1,
+    "summary": [
+      "FAIL: test_eviction_falls_back_without_borrowing_another_role_cause (tests.test_runloss_diagnostics.RunlossRetirementTest.test_eviction_falls_back_without_borrowing_another_role_cause)",
+      "FAIL: test_failed_replacement_does_not_promise_a_successor (tests.test_runloss_diagnostics.RunlossRetirementTest.test_failed_replacement_does_not_promise_a_successor)",
+      "FAIL: test_latest_other_peer_retirement_does_not_overwrite_this_cause (tests.test_runloss_diagnostics.RunlossRetirementTest.test_latest_other_peer_retirement_does_not_overwrite_this_cause)",
+      "FAIL: test_offline_retirement_explains_both_peers (tests.test_runloss_diagnostics.RunlossRetirementTest.test_offline_retirement_explains_both_peers)",
+      "FAIL: test_pending_replacement_command_keeps_the_replacement_cause (tests.test_runloss_diagnostics.RunlossRetirementTest.test_pending_replacement_command_keeps_the_replacement_cause)",
+      "FAIL: test_reaped_owned_run_explains_process_loss_to_next_caller (tests.test_runloss_diagnostics.RunlossRetirementTest.test_reaped_owned_run_explains_process_loss_to_next_caller)",
+      "FAIL: test_reaped_pending_command_delivers_the_same_cause_via_await (tests.test_runloss_diagnostics.RunlossRetirementTest.test_reaped_pending_command_delivers_the_same_cause_via_await)",
+      "FAIL: test_role_replacement_is_not_reported_as_run_death (tests.test_runloss_diagnostics.RunlossRetirementTest.test_role_replacement_is_not_reported_as_run_death)",
+      "FAIL: test_stopped_is_distinct_from_reaped (tests.test_runloss_diagnostics.RunlossRetirementTest.test_stopped_is_distinct_from_reaped)",
+      "FAIL: test_unknown_reason_does_not_invent_death_or_echo_host_text (tests.test_runloss_diagnostics.RunlossRetirementTest.test_unknown_reason_does_not_invent_death_or_echo_host_text)",
+      "FAIL: test_fifteen_second_probe_does_not_claim_420_second_deadline (tests.test_runloss_diagnostics.RunlossWaitBudgetTest.test_fifteen_second_probe_does_not_claim_420_second_deadline)",
+      "FAIL: test_global_poll_age_is_labelled_as_station_snapshot (tests.test_runloss_diagnostics.RunlossWaitBudgetTest.test_global_poll_age_is_labelled_as_station_snapshot)",
+      "FAIL: test_probe_that_exhausts_global_budget_still_reports_timeout (tests.test_runloss_diagnostics.RunlossWaitBudgetTest.test_probe_that_exhausts_global_budget_still_reports_timeout)",
+      "Ran 15 tests in 1.003s",
+      "FAILED (failures=13)"
+    ],
+    "finished_utc": "2026-09-08T16:46:19.525002+00:00"
+  }
+]

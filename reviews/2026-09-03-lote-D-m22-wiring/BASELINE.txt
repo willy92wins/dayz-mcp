@@ -1,0 +1,9 @@
+BASELINE 2026-09-03, arbol vivo, HEAD 08e707a, rama work/inbox-20260830-modules
+interprete: DayZ_MCP_dev/tools/.venv-mcp/Scripts/python.exe
+comando:    cd tools && ./.venv-mcp/Scripts/python.exe -m unittest discover -s tests -t .
+salida:     Ran 2296 tests in 265.462s -- FAILED (failures=2, skipped=6)
+rojos por IDENTIDAD CERRADA (no por conteo):
+  FAIL tests.test_task9_spawn_phase_markers.Task9SpawnPhaseMarkerTests.test_full_source_hash_is_frozen
+  FAIL tests.test_task9_spawn_phase_markers.Task9SpawnPhaseMarkerTests.test_removing_only_marker_lines_restores_frozen_source_hash
+los dos = centinela de fichero entero de MCPBridge.c, ficha fb-20260902-194845-bd90, rojo por decision del usuario.
+NOTA: la venv NO tiene pytest. Cualquier brief que diga "pytest" es un brief roto.

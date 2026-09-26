@@ -1,0 +1,144 @@
+{
+  "ticket": "fb-20260829-135727-782b",
+  "milestone": "M09-KNOWLEDGE",
+  "packet": "inbox-20260831-v6",
+  "plan": {
+    "path": "plans/inbox-20260830/23-fb-20260829-135727-782b.md",
+    "sha256": "7b12ecb8ed16d1e53363f14354b6ba1433d060ce93f738d7c6a9ae75a53c3708",
+    "authority_bundle_sha256": "9a0679809c30831d353838165abbfdffef461c6f8531a83ca4b906026fba0b49"
+  },
+  "generated_utc": "2026-09-01T06:47:37+00:00",
+  "workspace": "orq-mut-mcp-ola1-m09 (mutating, junctions to DayZ_MCP_dev)",
+  "disposition": "CHANGE implemented (M09-KNOWLEDGE scope only)",
+  "owns": [
+    {
+      "path": "tools/dayz_mcp/knowledge.py",
+      "sha256": "087146b0a8ef53c63804c496437c504f8c07898cf858b522151d45e34aec3ea3",
+      "size": 24495,
+      "mtime_utc": "2026-08-31T22:54:49+00:00"
+    },
+    {
+      "path": "tools/tests/test_knowledge_extract.py",
+      "sha256": "f8f3178837d90b99e287f741f7291d67777982a46bfdf0dc4c409ff89006d12e",
+      "size": 7350,
+      "mtime_utc": "2026-09-01T06:44:35+00:00"
+    },
+    {
+      "path": "tools/tests/test_knowledge_pack_install.py",
+      "sha256": "3c01e6eee88e98fc4d9694ef75e99852a52c955ffec194558aa4a38d1c771dae",
+      "size": 18255,
+      "mtime_utc": "2026-09-01T06:41:57+00:00"
+    },
+    {
+      "path": "tools/tests/test_knowledge_tools.py",
+      "sha256": "ab8f6bdc562e3a8540c605996c9557c5dc9b907df9cc64534e90b5470d33158f",
+      "size": 25863,
+      "mtime_utc": "2026-09-01T06:44:24+00:00"
+    }
+  ],
+  "implementation_by_plan_point": [
+    {
+      "point": 1,
+      "summary": "Two public zero-argument operations dayz_knowledge_status and dayz_knowledge_prepare registered via FastMCP; no path/URL/repo/credential parameters. M22 owns server.py schema/wire; verified read-only that server.py registers the tools and that the frozen arrays in test_effective_schema_catalog.py already contain both names plus dayz_effective_schema.",
+      "citations": [
+        "tools/dayz_mcp/knowledge.py:615-694",
+        "tools/dayz_mcp/server.py:2538-2540",
+        "tools/tests/test_effective_schema_catalog.py:15-57"
+      ]
+    },
+    {
+      "point": 2,
+      "summary": "dayz_knowledge_status is read-only and publishes independent index_state/pack_state each in missing|invalid|valid, can_query=(index_state==valid), can_prepare=(pack_state==valid), effective paths, and bounded reason enums.",
+      "citations": [
+        "tools/dayz_mcp/knowledge.py:533-557",
+        "tools/dayz_mcp/knowledge.py:560-572",
+        "tools/dayz_mcp/knowledge.py:650-657"
+      ]
+    },
+    {
+      "point": 3,
+      "summary": "dayz_knowledge_prepare calls only knowledge_pack.resolve_pack_dir() and extract_pack(); ensure_pack/git/network are never reachable from MCP (test asserts ensure_pack raises if called).",
+      "citations": [
+        "tools/dayz_mcp/knowledge.py:659-694",
+        "tools/dayz_mcp/knowledge_pack.py:45-55",
+        "tools/dayz_mcp/knowledge_pack.py:86-105"
+      ]
+    },
+    {
+      "point": 4,
+      "summary": "validate_index enforces non-empty list root, object entries with non-empty name/source_file strings, non-empty evidence list, and evidence items with non-empty path string and positive integer line (bool rejected); optional fields keep the extract_pack() schema; load_index wraps JSON/Unicode errors into KnowledgeIndexError.",
+      "citations": [
+        "tools/dayz_mcp/knowledge.py:358-381",
+        "tools/dayz_mcp/knowledge.py:384-390"
+      ]
+    },
+    {
+      "point": 5,
+      "summary": "Publication takes a persistent sibling anchor <index>.prepare.lock pinned as a regular non-reparse file, holds a non-blocking exclusive OS byte-range lock (msvcrt.locking LK_NBLCK, fail-closed as knowledge_prepare_conflict), generates one 32-hex txid, creates only <index>.candidate.<txid> via os.open with O_WRONLY|O_CREAT|O_EXCL(+O_BINARY) mode 0o600, serializes deterministically, fsyncs, re-reads and re-validates with the independent validator, then publishes via os.replace; each exit cleans only its own exact candidate; any failure before replace leaves the previous index byte-identical.",
+      "citations": [
+        "tools/dayz_mcp/knowledge.py:444-471",
+        "tools/dayz_mcp/knowledge.py:490-531",
+        "tools/dayz_mcp/knowledge.py:575-612",
+        "plans/inbox-20260830/physical-ownership-addendum-v1.md:105-114"
+      ]
+    },
+    {
+      "point": 6,
+      "summary": "dayz_knowledge_find/show kept with same names/arguments/result and now read the published index; descriptions and both failure codes carry the remedy 'call dayz_knowledge_status, then dayz_knowledge_prepare'; no host command/path remains in any public surface.",
+      "citations": [
+        "tools/dayz_mcp/knowledge.py:36-38",
+        "tools/dayz_mcp/knowledge.py:622-628",
+        "tools/dayz_mcp/knowledge.py:630-648"
+      ]
+    },
+    {
+      "point": 7,
+      "summary": "Nine-cell cartesian matrix with exact codes: find/show depend only on the index axis; prepare depends only on the pack axis; conflict and pack failures leave the index untouched; show keeps unknown_api on a valid index.",
+      "citations": [
+        "tools/tests/test_knowledge_tools.py: test_status_covers_the_complete_independent_three_by_three_matrix",
+        "tools/tests/test_knowledge_tools.py: test_find_and_show_return_exact_invalid_index_remedy",
+        "tools/tests/test_knowledge_tools.py: test_missing_env_override_returns_typed_install_remedy"
+      ]
+    },
+    {
+      "point": 8,
+      "summary": "Functional pos/neg suite with {} calls: nine cells, legacy-style valid index, JSON/root/entry invalid mutants, empty extraction, extractor failure, replace failure, repeated deterministic prepare, find/show consume published index, two-process barrier (both arms) and lock hardening tests. No schema/list_tools/extras assertions before M22.",
+      "citations": [
+        "tools/tests/test_knowledge_tools.py",
+        "tools/tests/test_knowledge_pack_install.py"
+      ]
+    }
+  ],
+  "changes_this_hop": [
+    {
+      "path": "tools/tests/test_knowledge_pack_install.py",
+      "change": "Two-process barrier test now selects spawn on Windows (as authored) and fork on POSIX so the same contention contract is verifiable in both native environments."
+    },
+    {
+      "path": "tools/tests/test_knowledge_tools.py",
+      "change": "Added test_prepare_extractor_failure_is_rejected_without_replacing_index covering the plan point 8 extractor-failure cell."
+    },
+    {
+      "path": "tools/tests/test_knowledge_extract.py",
+      "change": "Added test_extract_pack_output_passes_the_strong_published_validator tying extract_pack output to validate_index (plan point 4)."
+    },
+    {
+      "path": "tools/dayz_mcp/knowledge.py",
+      "change": "Already materialized earlier in this change-set (mtime 2026-09-01 00:54 local, preceding conductor of the same wave); verified in this hop as conformant to all eight plan points; no further edit needed."
+    }
+  ],
+  "not_touched": [
+    "tools/dayz_mcp/server.py (M22 owns it)",
+    "tools/dayz_mcp/inbox.py",
+    "tools/dayz_mcp/steam_preflight.py",
+    "GATES.md (cwd copy, not flipped)",
+    "product-spec.md",
+    "tools/tests/test_mcp_tools.py (M22 owns it)"
+  ],
+  "pending_for_M22": [
+    "0-arg schema with properties={}, required=[], additionalProperties=false",
+    "raw-args wrapper returning bad_args: unexpected arguments before FastMCP drops extras",
+    "app.list_tools + in-process {} / extras checks + two stdio negatives with CallToolResult.isError"
+  ],
+  "verification_limitation": "The project venv tools/.venv-mcp is Windows-only and this WSL session has no WSLInterop, so the Windows-native interpreter could not be executed from this session. Functional verification ran on a disposable Linux venv (Python 3.11.16) with an msvcrt shim mapping LK_NBLCK/LK_UNLCK onto POSIX fcntl record locks (per-process, non-blocking, OSError on contention) and fork-based two-process isolation. The real msvcrt.locking byte-range path should be re-run in the Windows native environment at the REVIEW gate; this is the single environment caveat for this hop."
+}

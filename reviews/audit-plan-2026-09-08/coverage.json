@@ -1,0 +1,346 @@
+{
+  "mapping": {
+    "H2": [
+      "P-OPT-05"
+    ],
+    "D1": [
+      "T-DUP-05"
+    ],
+    "D2": [
+      "T-DUP-04"
+    ],
+    "D3": [
+      "T-ARC-05",
+      "T-CON-01"
+    ],
+    "N1": [
+      "E-TICK-03",
+      "E-DUP-01",
+      "E-DUP-02",
+      "E-DUP-03",
+      "E-DUP-04"
+    ],
+    "N2": [
+      "E-TICK-04",
+      "E-DUP-05",
+      "E-HOT-09",
+      "E-P06"
+    ],
+    "N3": [
+      "E-ERR-04",
+      "E-BUF-01",
+      "E-ERR-05",
+      "E-ERR-01",
+      "E-ERR-03",
+      "E-BUF-03a"
+    ],
+    "N4": [
+      "E-ERR-02",
+      "E-HOT-04"
+    ],
+    "N5": [
+      "E-TICK-02",
+      "E-HOT-01",
+      "E-HOT-02",
+      "E-HOT-03",
+      "E-HOT-05",
+      "E-HOT-07",
+      "E-HOT-10",
+      "E-BUF-04"
+    ],
+    "N6": [
+      "E-HOT-06",
+      "E-HOT-08"
+    ],
+    "N7": [
+      "E-HOT-11"
+    ],
+    "N8": [
+      "E-GUI-01",
+      "E-GUI-02"
+    ],
+    "N9": [
+      "S3",
+      "P-TICK-01",
+      "P-OPT-02",
+      "P-TICK-03"
+    ],
+    "N10": [
+      "P-ARC-02a",
+      "P-ARC-03a",
+      "P-ARC-05",
+      "P-ARC-06",
+      "P-TICK-02",
+      "P-TICK-05a"
+    ],
+    "N11": [
+      "P-OPT-04",
+      "P-TICK-04"
+    ],
+    "N12": [
+      "P-ARC-04",
+      "T-ARC-04",
+      "T-DUP-01",
+      "T-DUP-02"
+    ],
+    "N13": [
+      "P-ARC-07",
+      "T-DUP-03"
+    ],
+    "N14": [
+      "T-OPT-01",
+      "T-OPT-02",
+      "T-OPT-03a",
+      "T-CON-03",
+      "T-DUP-06"
+    ],
+    "N15": [
+      "T-CON-04a"
+    ],
+    "N16": [
+      "E-P05b"
+    ]
+  },
+  "props": [
+    [
+      "6.1-01",
+      "TickHub + BridgeBase + HttpUtil/callbacks/TryInit/finite/Shutdown",
+      "N1",
+      "Rechazar la unificación; guards concretos se juzgan además en N3."
+    ],
+    [
+      "6.1-02",
+      "DriveProbe + WorldQuery",
+      "N1",
+      "Rechazar la equivalencia de actores/selección."
+    ],
+    [
+      "6.1-03",
+      "Servidor adopta MCPJobRunner",
+      "N1",
+      "Sin evidencia de equivalencia de orden/actor."
+    ],
+    [
+      "6.1-04",
+      "Diálogo pierde su segundo reloj",
+      "N2",
+      "No quitar un deadline deliberado."
+    ],
+    [
+      "6.1-05",
+      "Clamp pollHz",
+      "N3",
+      "Cambio de config Enforce no cerrable aquí."
+    ],
+    [
+      "6.1-06",
+      "duplicate_id",
+      "N3",
+      "Insert nativo y alcanzabilidad sin demostrar."
+    ],
+    [
+      "6.1-07",
+      "unknown_job_kind fail-fast",
+      "N3",
+      "Kind interno, caso público no probado."
+    ],
+    [
+      "6.1-08",
+      "Log result dropped",
+      "N3",
+      "Rama real; no inventar un cierre del lifecycle."
+    ],
+    [
+      "6.1-09",
+      "Poll lento con backlog",
+      "N4",
+      "Mecanismo de inanición refutado."
+    ],
+    [
+      "6.1-10",
+      "Early-out OnInput",
+      "N5",
+      "Capture ya retorna en frío; beneficio sin medir."
+    ],
+    [
+      "6.1-11",
+      "ToLower en contactos",
+      "N5",
+      "Coste/semántica no acreditados."
+    ],
+    [
+      "6.1-12",
+      "Caps pre-codificadas",
+      "N5",
+      "Microoptimización sin presupuesto."
+    ],
+    [
+      "6.1-13",
+      "GetGame local",
+      "N5",
+      "No se ha medido impacto."
+    ],
+    [
+      "6.1-14",
+      "Borrar cuatro logs de spawn",
+      "N7",
+      "Señal diagnóstica sin sustitución."
+    ],
+    [
+      "6.1-15",
+      "Borrar pool de 64, usar scratch",
+      "N5",
+      "Mejora posible sin presión demostrada."
+    ],
+    [
+      "6.1-16",
+      "InputLock con refcount del diagrama",
+      "N2",
+      "No equivalencia de input/focus/restore."
+    ],
+    [
+      "6.2-01",
+      "SupervisorTick 1 s y waiters suscritos",
+      "N9",
+      "Budgets/actores y fallos no intercambiables."
+    ],
+    [
+      "6.2-02",
+      "HostInventory + PortSnapshotCache",
+      "N9",
+      "Ya hay caché; no usar observación para autorizar."
+    ],
+    [
+      "6.2-03",
+      "LogFollower por run",
+      "N9",
+      "No hay reescaneo completo por poll."
+    ],
+    [
+      "6.2-04",
+      "SessionClient + vistas/idle único",
+      "N11",
+      "Conservar lazy-spawn y recuperación estricta."
+    ],
+    [
+      "6.2-05",
+      "ProcessAuthority/identidad/PS1 delega",
+      "N10",
+      "Políticas de reclaim e identidad no equivalentes."
+    ],
+    [
+      "6.2-06",
+      "Colapsar launcher/DaemonAuthority, separar VPP",
+      "N10",
+      "Rechazado por fronteras H9/H10/bundle."
+    ],
+    [
+      "6.2-07",
+      "bundle_io y CLI fina",
+      "N10",
+      "Hash genérico no sustituye handles/pinning."
+    ],
+    [
+      "6.2-08",
+      "retry.py genérico",
+      "N11",
+      "H12 limita retries y deadline."
+    ],
+    [
+      "6.2-09",
+      "timeouts.py y overrides",
+      "N11, H2",
+      "Código rechazado; documentación aceptable."
+    ],
+    [
+      "6.2-10",
+      "GateHarness + mover gates/H8",
+      "N13",
+      "Proveniencia y paths sin equivalencia probada."
+    ],
+    [
+      "6.3-01",
+      "helpers wait_for/authority/client_runtime y prohibición global",
+      "D1, D2, N14",
+      "Decidir extracciones acotadas; veto global rechazado."
+    ],
+    [
+      "6.3-02",
+      "Fusionar quarantine/registry/docs",
+      "N12",
+      "No suprimir fronteras; docs ya delega."
+    ],
+    [
+      "6.3-03",
+      "Harness de contratos único y una fuente trace",
+      "N12, D3",
+      "Fusionar rechazado; índice documental es decisión separada."
+    ],
+    [
+      "6.3-04",
+      "slow y retirar Popen/venv/stdio del unit",
+      "N14, D3",
+      "No quitar E2E obligatorio; documentar efectos si se elige."
+    ],
+    [
+      "6.3-05",
+      "Borrar backups/mover logs",
+      "N15",
+      "Bytes no acreditados como versionados."
+    ],
+    [
+      "6.3-06",
+      "mutation_gate por contrato",
+      "D4",
+      "Recomendado uso puntual; alternativa piloto aislado, no CI automático."
+    ],
+    [
+      "7-01",
+      "Métrica Enforce cada 60 s",
+      "N5",
+      "Un contador no mide coste ni capacidad por sí solo."
+    ],
+    [
+      "7-02",
+      "depth<=32 en walks",
+      "N2",
+      "Truncamiento no puede fingir unicidad."
+    ],
+    [
+      "7-03",
+      "MCP_DEBUG global",
+      "N7",
+      "Macro incondicional no define release y puede ocultar señal."
+    ],
+    [
+      "7-04",
+      "Validar pollHz al leer JSON en daemon",
+      "N3",
+      "La ruta abierta escribe 5; consumidor real es el bridge."
+    ],
+    [
+      "7-05",
+      "netstat_spawns_total en doctor",
+      "N9",
+      "Proceso, ventana y agregación no definidos."
+    ],
+    [
+      "7-06",
+      "DAYZ_MCP_LIVE para todo Popen/venv/stdio",
+      "N14, D3",
+      "Confunde integración offline con juego."
+    ],
+    [
+      "7-07",
+      "Linter no-test-imports-test",
+      "N14, D1, D2",
+      "No activarlo sobre 68 referencias; extracciones parciales primero si se eligen."
+    ],
+    [
+      "7-08",
+      "Tabla de TTL en QUICKSTART",
+      "H2",
+      "Tabla por propósito en README técnico y enlace desde Quickstart."
+    ]
+  ]
+}

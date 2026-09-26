@@ -1,0 +1,98 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. Trabaja hasta emitir el dictamen y escríbelo en
+disco. Si algo te bloquea, dilo en el dictamen y sigue con el resto.
+
+===============================================================================
+§0. RONDA 2 — verificas los ARREGLOS de tus dos bloqueantes, y nada más como bloqueante
+===============================================================================
+
+Eres una sesión nueva. Tu predecesor revisó el lote V y dictaminó BLOQUEANTES=2; su dictamen
+entero está en C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-V\REVIEW-CODEX.md (léelo: contiene los dos repros literales, B-01 y B-02).
+El orquestador aplicó los dos arreglos y uno del backlog. Tu producto es UN dictamen sobre
+exactamente esto:
+
+  R-01 (B-01, V2): `_annotate_entities_reliability` (`tools/dayz_mcp/server.py`, busca
+       `players_raw`) conserva el valor crudo de `players` y añade `reason: "no_player_connected"`
+       SOLO si `isinstance(players_raw, list) and not players_raw`. Un `ok: 1` sin lista, con
+       `players: None` o con un no-list queda `remote_unverified` sin `reason`. Tests:
+       `tests/test_wave_fixes_20260824.py::test_ok_probe_without_players_list_claims_nothing`
+       (tres sondas) y el oráculo `V2-ok-probe-without-list-claims-nothing`. Verifica con TU repro
+       B-01 literal: debe salir exit 0 y el JSON sin `reason`.
+  R-02 (B-02, V4): el sleep del bucle de `execute_wait_for` (busca `remaining_sleep`) se acota
+       al tiempo restante del deadline único: `remaining_sleep = deadline - time.monotonic()`;
+       si es <= 0 se sale del bucle; si no, `asyncio.sleep(min(poll_interval_s, remaining_sleep))`.
+       Tests: `tests/test_wait_for.py::test_deadline_bounds_the_sleep` (timeout_s=0.1,
+       poll_interval_s=0.5, wall < 0.3, una sola sonda) y el oráculo `V4-deadline-bounds-the-sleep`.
+       Verifica con TU repro B-02 literal: debe salir exit 0 con wall ≈ 0.1. Comprueba también que
+       el acotado no rompe el contrato previo: `test_sleep_does_not_hold_tool_lock` y los tests de
+       reintento (`test_waits_through_server_poll_stale`, `test_server_poll_stale_timeout_reports_last_error`)
+       siguen verdes, y que con `timeout_s` grande y `poll_interval_s` pequeño el intervalo sigue
+       respetándose (no se convierte en busy-loop).
+  R-03 (nuevo en esta ronda, ficha fb-20260829-104625-7c88, petición documental): la matriz
+       mode/run_id de `dayz_test_run` se publica en las DOS propiedades del schema
+       (`_describe_run_id_matrix` en `server.py`, constantes `RUN_ID_MATRIX_MODE_DESCRIPTION` y
+       `RUN_ID_MATRIX_RUN_ID_DESCRIPTION`, aplicada en build_app justo tras
+       `_patch_mode_enum_from_authority`) y la prosa de la tool dice «mode=client requires run_id:
+       it reattaches only the client to a live run, preserving the server and the world state (no
+       server reboot); mode=server|all must NOT pass run_id». Test:
+       `tests/test_lote_v_products.py::RunIdMatrixDescriptionTest`; oráculo V6 (tres checks).
+       Verifica por sesión cliente real (`list_tools`) que `properties.mode.description`,
+       `properties.run_id.description` y `properties.mode.enum` llegan por el wire, y que ningún
+       test del árbol pinea «Mode»/«Run Id» como descripción. Bloqueante SOLO si rompe algo
+       reproducible (enum perdido, schema inválido, test rojo).
+  Backlog aplicado (no bloqueante, pero dilo si está mal): el comentario interno de `READY_REASONS`
+       (`server.py`, «Published ready.reason set...») ya no dice «Closed».
+  Backlog NO aplicado a propósito: el contador de skips de test_docs_truth (ambiental), la cobertura
+       del oráculo (aparato del orquestador; se amplió con los dos casos de arriba).
+
+Un hallazgo es BLOQUEANTE si y sólo si uno de los dos arreglos NO cierra su repro, o si un arreglo
+introduce una REGRESIÓN nueva reproducible en V1-V5 (definidos en el brief de la ronda 1:
+C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-V\BRIEF.txt §0). Todo lo demás → BACKLOG.
+Prohibido re-litigar el alcance de la ronda 1.
+
+===============================================================================
+§1. ENTORNO
+===============================================================================
+
+  - Workspace con los arreglos: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-V\ws
+    (los mismos bytes están integrados y commiteados en el árbol vivo; el commit lo cita §2).
+  - Diff de la ronda 2 SOLO (contra cd53f7c, lo que tu predecesor revisó): C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-V\DIFF-R2-delta.patch
+  - Diff acumulado del lote contra 00d4303: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-V\DIFF-V2.patch
+  - Árbol vivo (repo git): C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev — solo lectura
+    (ni git add, ni stash, ni checkout). Otra sesión commiteó bdeb87f (lifecycle) encima de cd53f7c;
+    no toca los ficheros de este lote.
+  - Oráculo sellado de la ronda 2: <ws>\gate\oracle.py (29 checks); se corre con
+    `cd <ws>\tools && PYTHONPATH=. "<intérprete>" ..\gate\oracle.py`.
+  - Intérprete, exacto y sin alternativa:
+      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+  - **Esa venv NO tiene pytest.** Suite unittest. Desde `<ws>\tools` con `PYTHONPATH=.`:
+      "<intérprete>" -m unittest tests.test_wait_for tests.test_wave_fixes_20260824 tests.test_lote_v_products
+  - El sandbox de Codex no ve el user-site de Python. Usa ese intérprete y ese PYTHONPATH.
+  - Sin juego, sin red, sin daemon.
+
+===============================================================================
+§2. HECHOS DEL ORQUESTADOR — refútalos si puedes
+===============================================================================
+
+  - Oráculo ronda 2 corrido por el orquestador en el workspace: PASS=29 FAIL=0 UNMET=0 de 29.
+  - El acotado del sleep también corrige el caso preexistente (antes de este lote el bucle ya
+    dormía el intervalo completo tras una sonda insatisfecha): ahora `elapsed_s` no supera
+    `timeout_s` más el coste de una sonda. Los tests de tiempo usan holguras (0.3 s para 0.1 s).
+  - Commit de la ronda 2 en work/inbox-20260830-modules: ver el fichero
+    C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-V\COMMIT-R2.txt (sha + suite completa medida).
+
+===============================================================================
+§3. ENTREGABLE
+===============================================================================
+
+Escribe tu dictamen en: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-V\REVIEW-CODEX-R2.md
+
+    ## VEREDICTO
+    Una línea: BLOQUEANTES=<n>.
+    ## R-01 / R-02
+    Por cada uno: CERRADO o ABIERTO, con tu repro literal y su salida ahora.
+    ## BLOQUEANTES
+    Solo regresiones nuevas reproducibles, uno por bloque: producto, path:line, comando, salida.
+    ## BACKLOG
+    Todo lo demás. Opinión completa.
+    ## LO QUE NO PUDE VERIFICAR
+    Sin excusas.

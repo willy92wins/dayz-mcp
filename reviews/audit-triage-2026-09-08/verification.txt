@@ -1,0 +1,10 @@
+cwd: C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev
+command: "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\audit-triage-2026-09-08\verify_report.py"
+audit_ids=79 missing=0 []
+verdict_entries=103 counts={'NO VERIFICABLE': 19, 'FALSO': 19, 'VIVO': 60, 'YA ARREGLADO': 2, 'MOVIDO': 3}
+explicit_unique_citations=239 invalid=0 []
+source_files_with_recorded_hash=88 changed_since_last_open=0 []
+citations_opened_now_not_in_range_log=22
+report_bytes=54918
+CHECK_SCOPE=report completeness, citation existence and source drift; NOT semantic proof or product test
+exit_code=0

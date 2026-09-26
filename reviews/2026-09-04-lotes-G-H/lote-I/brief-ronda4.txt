@@ -1,0 +1,122 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar. Tienes shell: úsalo.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+LOTE I, RONDA 4 — CAMBIO DE PREGUNTA, no otro parche. La segunda delta de Codex sobre tu ronda 3
+dio 3 ALTA: F-08 el helper escribe como dueño la sesión PÚBLICA truncada a 12 caracteres
+(`ClientIdentity.public_payload` recorta `session`), y `release_owner(sesión_completa, lease)`
+no encuentra el run; F-09 `_explicit_owner_matches_active` casa por PREFIJO (`abcdefghijkl-WRONG`
+pasa por `abcdefghijkl-ACTUAL`); F-10 el detector trata `break` como caída y un mutante con
+`for _ in (0,): break; self._retire_run_bindings(...)` sobrevive. Tres rondas, tres ataques
+distintos sobre las MISMAS dos preguntas: la pregunta estaba mal (LL-421). El producto
+(`tools/dayz_mcp/`) sigue CONGELADO POR HASH.
+
+===============================================================================
+§0. LAS DOS DECISIONES
+===============================================================================
+
+  P-I10. **El fixture NUNCA escribe un dueño.** `bind_both_peers` pierde el parámetro `owner=` y
+         toda inferencia (nada de `status()`, nada de `_active`, nada de prefijos). Con un
+         manifiesto real registra el run **RUNNING_IDLE** sin dueño, con procesos que el guard
+         del lifecycle clasifica `owned` (guard falso: snapshots sembrados; guard real: el propio
+         intérprete). La propiedad sólo se obtiene por operaciones del producto:
+         `adopt_run(identidad, lease_token, run_id)` con un lease REAL adquirido en el
+         coordinador (o `start_run`). Así la identidad del manifiesto es la que el lifecycle
+         autorizó: completa e infalsificable por construcción.
+         Consecuencias en los fixtures (P6 estricto: sin dueño no se despacha NADA, lecturas
+         incluidas):
+           - `test_daemon.py` (fixture de `DaemonHttpServer`): tras el bind, una identidad de
+             fixture adquiere el lease `lifecycle` en `state.lifecycle.coordinator` y adopta
+             `test-run` con `state.lifecycle.adopt_run(...)`. Los tests que necesiten que NO haya
+             titular (colas, `lease_required`, elección de daemon...) liberan ese lease en el
+             propio test o usan un fixture sin adopción; cada aserción que cambie por esto va a
+             STATE.md con su C-item.
+           - `test_client_mode.py` / `test_session_e2e.py`: los tests cuyo cliente adquiere lease
+             ADOPTAN tras adquirir (el e2e ya lo hace con `adopt_run`); los tests de lectura sin
+             lease necesitan que ALGUIEN posea el run: un titular de fixture que adquiere + adopta
+             y mantiene el lease durante el test (en producción una lectura sin lease sólo
+             despacha mientras otra sesión posee el run).
+  P-I11. **El detector estático abandona honestamente «todos los caminos».** Lo que sí prueba, y
+         nada más: (a) el conjunto EXACTO de funciones de `process_lifecycle.py` que asignan
+         `state = "EXITED"` (hoy: `_reap_run_locked`, `_settle_failed_launch`,
+         `begin_release_owner.cleanup`, `repair_manifest_recovery`, `repair_recovery_fault`,
+         `stop_run`) coincide con un mapa declarado en el test,
+             RETIREMENT_TESTED_EXITED_SITES = {
+                 "_reap_run_locked": "test_persist_failure_on_reap_retires_binding_and_rejects_late_result",
+                 "begin_release_owner.cleanup": "test_persist_failure_on_begin_release_retires_binding_and_rejects_late_result",
+                 "repair_recovery_fault": "test_persist_failure_on_repair_recovery_retires_binding_and_rejects_late_result",
+                 "repair_manifest_recovery": "test_persist_failure_on_manifest_recovery_retires_binding_and_rejects_late_result",
+                 "stop_run": "test_persist_failure_on_stop_retires_binding_and_rejects_late_result",
+                 "_settle_failed_launch": None,   # excepción declarada: start_run ya retiró el rol acuñado
+             }
+         (un dict literal con ese nombre exacto, a nivel de módulo o de clase — el oráculo lo lee
+         por AST), y (b) cada valor no nulo es un `def test_...` que EXISTE en
+         `tests/test_process_lifecycle.py` (ya existen los cinco). Un sitio EXITED nuevo sin test
+         runtime rompe el test hasta que se añada el test y la entrada. Se conserva la
+         comprobación textual de orden en `_commit_retirement` como heurística. Se RETIRAN los
+         mutantes bypass, split-branch y loop-break y todo el andamio de conjuntos de salidas.
+         El test se renombra `test_every_exited_site_has_a_runtime_retirement_order_test` y su
+         docstring declara: no prueba que todo camino retire; eso lo prueban los tests runtime de
+         cada camino real; un CFG no se intenta.
+
+Siguen en pie C1-C5, R1-R6, P-I3(retirado por P-I11), P-I4, P-I5, P-I8. P-I1/P-I6/P-I9 quedan
+SUSTITUIDOS por P-I10.
+
+===============================================================================
+§1. EL ORÁCULO (11 checks; 4 rojos hoy; T2 y T6 retirados con ABANDON)
+===============================================================================
+
+  T1a-PROPIEDAD-SOLO-POR-ADOPT — lifecycle real con A titular: tras el helper el run está
+      RUNNING_IDLE sin dueño; `adopt_run(A)` → ok, `dispatchable` True, dueño (A completo, lease).
+  T9-SESION-LARGA-RELEASE-ENCUENTRA-EL-RUN — identidad con `session_id` de 27 caracteres: helper →
+      adopt → `release_owner(sesión completa, lease)` devuelve `["test-run"]` y deja RUNNING_IDLE.
+  T10-SITIOS-EXITED-ENUMERADOS-CON-TEST-DE-ORDEN — el mapa declarado == los sitios reales, y cada
+      test nombrado existe en `test_process_lifecycle.py`.
+  T11-SIN-PARAMETRO-OWNER — `inspect.signature(bind_both_peers)` no tiene `owner`.
+  Se conservan: T1b, T1c, T2b (orden textual), T3, T4, T5, T7.
+
+===============================================================================
+§2. EL GATE (triple)
+===============================================================================
+
+    bash gate/product_frozen.sh       -> PRODUCTO-CONGELADO OK
+    bash gate/run_oracle_tests.sh     -> ORACULO-TESTS-VERDE      (11 checks)
+    bash gate/suite_full.sh           -> SUITE-COMPLETA OK         (rojos == los 2 permitidos)
+
+Ahora mismo: gate/product_frozen.sh: PRODUCTO-CONGELADO OK (63 ficheros) · gate/run_oracle_tests.sh: ORACULO-TESTS: PASS=7 FAIL=4 UNMET=0 de 11 — rojos T1a, T9, T10, T11 (T2 y T6 retirados con ABANDON; T2b, T3, T5, T7 verdes con controles positivos) · gate/suite_full.sh: SUITE-COMPLETA OK (Ran 2524, rojos = los 2 permitidos). **Los verdes son la línea que no se puede romper.**
+Guarda anti-vacuidad: un `UNMET` no es tu código; si un criterio del oráculo está mal, DISPUTAS.
+`gate/` está sellado por hash y es de sólo lectura.
+
+===============================================================================
+§3. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/tests/test_instance_fence.py
+    tools/tests/test_client_mode.py
+    tools/tests/test_daemon.py
+    tools/tests/test_session_e2e.py        (sin trackear: se reconcilia, no se commitea)
+    tools/tests/fence_helpers.py
+
+PROHIBIDO: `tools/dayz_mcp/`; `gate/`; `addon/`; `unittest.skip`/`expectedFailure`; borrar tests
+(renombrar sólo el de P-I11); tocar `allowed_red.txt`; leer atributos privados del coordinador;
+escribir dueños desde un fixture por cualquier vía (manifiesto a mano incluido); red.
+
+Intérprete: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`,
+desde `tools/` con `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1`. La versión anterior de los tests
+está en `../../ws-frozen-r3/tools/tests/`.
+
+===============================================================================
+§4. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — P-I10 y P-I11 con `path:line`; por fixture, quién adquiere y adopta.
+    ## ASERCIONES       — tabla `test → antes → después → C-item` de TODO lo que cambie por P-I10
+                          (colas, lease_required, elección de daemon, lecturas sin lease...).
+    ## GATE             — la salida literal de los TRES gates, pegada, no resumida.
+    ## CONTROL POSITIVO — un test de `test_daemon` o `test_client_mode` fallando ANTES de añadir el
+                          adopt del fixture (con el helper ya sin dueño), pegado literal.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si un criterio del oráculo o del brief está mal, aquí, con el argumento.

@@ -1,0 +1,70 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. Trabaja hasta emitir el dictamen y escríbelo en
+disco. Si algo te bloquea, dilo en el dictamen y sigue con el resto.
+
+===============================================================================
+§0. RONDA 2 — verificas los ARREGLOS de tus cuatro bloqueantes, y nada más como bloqueante
+===============================================================================
+
+Eres una sesión nueva. Tu predecesor revisó los lotes M y W y dictaminó BLOQUEANTES=4; su
+dictamen entero está en C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\REVIEW-CODEX.md (léelo: contiene los cuatro repros literales).
+El orquestador aplicó los cuatro arreglos y dos del backlog. Tu producto es UN dictamen sobre
+exactamente esto:
+
+  R-01 (B-01, P5): el enum de `dayz_test_run.mode` ya no es un `Literal` congelado al importar
+       `server.py`. Ahora `mode: str` + helper `_patch_mode_enum_from_authority` aplicado en
+       `build_app` (`tools/dayz_mcp/server.py`, busca el nombre): publica `enum` leyendo
+       `dayz_test_modes.public_mode_names()` al CONSTRUIR la app y rechaza en CADA llamada un
+       valor fuera de la autoridad viva con `bad_args: mode must be one of ...`, antes de
+       pydantic. Test de regresión: `tests/test_lote_m_products.py::
+       test_p5_enum_follows_a_substituted_authority_in_a_new_app` (tu mutante: sustituye
+       MODE_RECORDS por un solo record `offline` público y construye una app nueva).
+       Verifica con TU repro B-01 literal: debe salir exit 0 con `published_by_new_app ==
+       ['offline']`. Y comprueba que schema y validación cierran JUNTOS: con la autoridad
+       sustituida, `mode="server"` se rechaza y `mode="offline"` pasa la validación.
+  R-02 (B-02, W7): `self.assertIs(True, params["from"]["required"])`. Tu repro B-02 debe salir
+       exit 0 (el port vuelve a rechazar `required=1`).
+  R-03 (B-03, W8): `NATIVE_BUNDLE_MANIFEST_UNREADABLE` es `FAIL`; `tests/test_doctor.py::
+       NativeBundleClosureWiringTests` lo fija. Tu repro B-03 debe salir exit 0 (`rc != 0`).
+  R-04 (B-04, W8): la remediación ya no interpola `opened.sha256`; el token es el texto
+       `<sha256 of tools/approved-launchers.json after rollback-last>` y el call-site no pasa
+       `approved_sha256`. Comprueba que ningún hash de PE aparece en la remediación y que el
+       texto nombra el registro y `rollback-last`.
+  Backlog aplicado (no bloqueante, pero dilo si está mal): W9 `verdict` resuelve ambas rutas
+       (`Path(...).resolve()`) antes de `normcase`; la descripción de `capture_screenshot`
+       anuncia los dos bloques, `crop_space` y `frame_sha256` para detectar el frame congelado.
+  Backlog NO aplicado a propósito: composición alias+closed (conjuntos disjuntos hoy), el test
+       W6 laxo, `test_docs_truth` rojo ambiental en el workspace. No los cuentes de nuevo.
+
+Un hallazgo es BLOQUEANTE si y sólo si uno de los cuatro arreglos NO cierra su repro, o si un
+arreglo introduce una REGRESIÓN nueva reproducible en P0-P5 / W6-W12. Todo lo demás → BACKLOG.
+Prohibido re-litigar el alcance de la ronda 1.
+
+===============================================================================
+§1. ENTORNO
+===============================================================================
+
+  - Árbol con los arreglos (es el árbol vivo, ya integrado, SIN commit todavía o recién
+    commiteado; míralo por bytes, no por git): C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev
+    Solo LECTURA: no escribas ahí. Los workspaces de la ronda 1 (C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-M\ws, C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-W\ws) tienen
+    los mismos bytes de producto (hashes comparados por el orquestador).
+  - Diffs v2 contra HEAD d007838: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\DIFF-M-v2.patch y C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\DIFF-W-v2.patch
+  - Intérprete, exacto y sin alternativa:
+      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+  - Desde `<árbol>\tools` con `PYTHONPATH=.`; suite unittest (sin pytest).
+  - Sin juego, sin red, sin daemon. El sandbox no ve el user-site de Python.
+
+===============================================================================
+§2. ENTREGABLE
+===============================================================================
+
+Escribe tu dictamen en: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-MW\REVIEW-CODEX-R2.md
+
+    ## VEREDICTO
+    Una línea: BLOQUEANTES=<n>.
+    ## R-01 .. R-04
+    Por cada uno: el comando que corriste (tu repro de la ronda 1, adaptado al árbol vivo),
+    su salida hoy, y CERRADO / NO CERRADO.
+    ## BLOQUEANTES NUEVOS
+    Solo regresiones reproducibles introducidas por los arreglos.
+    ## BACKLOG
+    ## LO QUE NO PUDE VERIFICAR

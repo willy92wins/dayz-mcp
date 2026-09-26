@@ -1,0 +1,94 @@
+{
+ "ws_qwen": [
+  {
+   "id": "S1",
+   "sev": "GRAVE",
+   "clase": "regresion de trampa [A3]/[A5]",
+   "que": "cursorHitPos vuelve a vector.Zero: CCTCursor mide distancia desde ahi y en Chernarus el origen esta a ~10 km, asi que Can() falla SIEMPRE",
+   "old": "vector cursorHitPos = targetObj.GetPosition();",
+   "new": "vector cursorHitPos = vector.Zero;"
+  },
+  {
+   "id": "S2",
+   "sev": "GRAVE",
+   "clase": "guarda invertida",
+   "que": "pre-check invertido: da action_in_progress cuando NO hay accion corriendo, y deja pasar cuando si la hay",
+   "old": "if (amc.GetRunningAction() != null)",
+   "new": "if (amc.GetRunningAction() == null)"
+  },
+  {
+   "id": "S3",
+   "sev": "MEDIA",
+   "clase": "regla Enforce (booleana multilinea)",
+   "que": "condicion booleana partida en dos lineas: el brief lo prohibe expresamente",
+   "old": "if (command.args.radius > 0.0 && IsFiniteFloat(command.args.radius))",
+   "new": "if (command.args.radius > 0.0 &&\n\t\t\tIsFiniteFloat(command.args.radius))"
+  },
+  {
+   "id": "S4",
+   "sev": "GRAVE",
+   "clase": "fallo tragado",
+   "que": "la rama de objetivo no encontrado devuelve ok=true: el llamante lee exito donde no se hizo nada",
+   "old": "result.error = \"target_not_found\";",
+   "new": "result.error = \"target_not_found\";\n\t\t\tresult.ok = true;"
+  },
+  {
+   "id": "S5",
+   "sev": "MEDIA",
+   "clase": "desviacion numerica del contrato",
+   "que": "el radio por defecto pasa de 5.0 a 50.0: el brief fija 5.0 y CCTCursor de la accion objetivo usa 5.0 (LFPG_INTERACT_DIST_M)",
+   "old": "CAMERA_JOB_TIMEOUT_S = 5.0;",
+   "new": "CAMERA_JOB_TIMEOUT_S = 50.0;"
+  }
+ ],
+ "ws_composer": [
+  {
+   "id": "S1",
+   "sev": "GRAVE",
+   "clase": "regresion de trampa [A3]/[A5]",
+   "que": "cursorHitPos vuelve a vector.Zero: CCTCursor mide distancia desde ahi y en Chernarus el origen esta a ~10 km, asi que Can() falla SIEMPRE",
+   "old": "vector cursorHitPos = targetObj.GetPosition();",
+   "new": "vector cursorHitPos = vector.Zero;"
+  },
+  {
+   "id": "S2",
+   "sev": "GRAVE",
+   "clase": "guarda invertida",
+   "que": "pre-check invertido: da action_in_progress cuando NO hay accion corriendo, y deja pasar cuando si la hay",
+   "old": "if (amc.GetRunningAction() != null)",
+   "new": "if (amc.GetRunningAction() == null)"
+  },
+  {
+   "id": "S3",
+   "sev": "MEDIA",
+   "clase": "regla Enforce (booleana multilinea)",
+   "que": "condicion booleana partida en dos lineas: el brief lo prohibe expresamente",
+   "old": "if (command.args.radius > 0.0 && IsFiniteFloat(command.args.radius))",
+   "new": "if (command.args.radius > 0.0 &&\n\t\t\tIsFiniteFloat(command.args.radius))"
+  },
+  {
+   "id": "S4",
+   "sev": "GRAVE",
+   "clase": "fallo tragado",
+   "que": "la rama de objetivo no encontrado devuelve ok=true: el llamante lee exito donde no se hizo nada",
+   "old": "result.error = \"target_not_found\";",
+   "new": "result.error = \"target_not_found\";\n\t\t\tresult.ok = true;"
+  },
+  {
+   "id": "S5",
+   "sev": "MEDIA",
+   "clase": "desviacion numerica del contrato",
+   "que": "el radio por defecto pasa de 5.0 a 50.0: el brief fija 5.0 y CCTCursor de la accion objetivo usa 5.0 (LFPG_INTERACT_DIST_M)",
+   "old": "CAMERA_JOB_TIMEOUT_S = 5.0;",
+   "new": "CAMERA_JOB_TIMEOUT_S = 50.0;"
+  }
+ ],
+ "natural": [
+  {
+   "id": "N1",
+   "sev": "GRAVE",
+   "clase": "defecto natural (G43-01)",
+   "que": "result.ok/started = true justo tras PerformActionStart, que es void y puede morir en SetupAction sin ctx.Send (actionmanagerclient.c:638-643): fallo silencioso"
+  }
+ ]
+}

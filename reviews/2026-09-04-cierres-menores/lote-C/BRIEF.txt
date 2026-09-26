@@ -1,0 +1,87 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. Trabaja hasta emitir el dictamen y escríbelo en
+disco. Si algo te bloquea, dilo en el dictamen y sigue con el resto.
+
+===============================================================================
+§0. QUÉ REVISAS — lote C: un bridge ok:0 conserva sus diagnósticos en el mensaje (DayZ-MCP)
+===============================================================================
+
+Eres una sesión nueva. Revisas un diff pequeño, SIN COMMITEAR, sobre el árbol vivo
+C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev (rama work/inbox-20260830-modules).
+El diff exacto está en DIFF-C.patch junto a este brief. Ficha origen: fb-20260829-221423-b2c4
+(«ui_click LANZA excepción en ok:0 y tira handler/user_id: el diagnóstico existe en el bridge y nunca
+llega al llamante»). Dos ficheros:
+
+  tools/dayz_mcp/server.py: `_bridge_error(result)` (busca `def _bridge_error`) conserva el código
+      como cabeza del mensaje y, SOLO si el resultado trae `handler`/`user_id`/`clicked` o un
+      `ui_request` no vacío, añade «; handler='X' user_id=506 clicked=False; requested_path='…'
+      matched_path='…'» (helper nuevo `_bridge_error_detail`). Un resultado sin esas claves sigue
+      dando el código pelado («timeout», «bad_pos», «bridge_error»), porque hay tests que pinean esos
+      mensajes exactos y wait_for compara `game_not_ready:reason=server_poll_stale` por igualdad.
+      `object_id` sigue viajando como atributo. La descripción pública de `ui_click` anuncia el formato.
+  tools/tests/test_ui_error_diagnostics.py (nuevo): tres tests unitarios sobre `_bridge_error` y un test
+      de wire (`create_connected_server_and_client_session` + `session.call_tool("ui_click", …)`) con
+      `runtime.state.enqueue_command`/`take_result` parcheados para devolver un `not_handled` con campos:
+      el cliente recibe `isError` y el texto con `handler='LFPG_SorterView_TEST'` y `user_id=506`.
+
+Contexto verificado por el orquestador (cítalo solo si lo compruebas tú): el bridge Enforce rellena
+`result.user_id/handler/clicked` ANTES de decidir `not_handled`
+(addon/scripts/5_Mission/MCPClientBridge.c:1465-1480) y crea el eco `ui_request` al empezar cada verbo
+UI (:2199-2218; MCPMessages.c:415-419, :476-479). Las dos rutas Python que convierten ok:0 en ToolError
+son `wait_for_result` (runtime loopback) y `_await_result` (ClientRuntime), ambas por `_bridge_error`.
+
+Tu producto es UN dictamen: ¿el diff es correcto, no rompe ningún mensaje pineado y el diagnóstico llega
+de verdad por el wire? Bloqueante SOLO con repro que falle.
+
+===============================================================================
+§1. QUÉ COMPROBAR (desde tools/, intérprete obligatorio, PYTHONPATH=., unittest, sin pytest)
+===============================================================================
+
+Intérprete OBLIGATORIO: C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+
+C-1 Corre `python -m unittest tests.test_ui_error_diagnostics -v` (4 tests OK esperados) y después los
+    módulos que pinean mensajes de error de bridge: tests.test_d09_d10_spawn_timeout_object_id,
+    tests.test_boundary_values_are_pinned, tests.test_client_runtime_control_composition,
+    tests.test_wait_for, tests.test_mcp_tools, tests.test_weak_agent_consumer_ux, tests.test_docs_truth,
+    tests.test_lote_v_products, tests.test_tool_registry_fingerprint. Todos verdes o dime cuál no.
+C-2 Busca en TODO tools/ (código y tests) comparaciones por IGUALDAD o `startswith`/regex sobre
+    `str(ToolError)` de resultados de bridge que puedan traer `handler`/`user_id`/`clicked`/`ui_request`
+    (verbos ui_click, ui_focus, ui_set_text, ui_tree, ui_reload_layout, ui_dialog, key_press…). Un
+    consumidor que hiciera `message == "not_handled"` se rompería: si existe, es bloqueante con path:line.
+    Mira también playbooks (`tools/playbooks/` o donde vivan) y `README-mcp.md` por «not_handled».
+C-3 Mutantes obligatorios: (a) haz que `_bridge_error_detail` devuelva siempre "" → el test de wire y el
+    unitario deben ponerse ROJOS; (b) haz que `_bridge_error` anteponga el detalle al código → el test
+    `startswith("not_handled; ")` debe ponerse ROJO. Restaura después (revierte a mano; NO git checkout,
+    el fichero lleva el diff sin commitear) y confirma con `git diff --stat` que el diff final sigue siendo
+    exactamente server.py + el test nuevo.
+C-4 Wire real: además del test, comprueba con una sesión cliente en memoria que un `ok:0` de
+    `ui_set_text` con `ui_request={"requested_path":"Cmd","requested_text":"dump"}` y sin campos de click
+    llega como «<code>; requested_path='Cmd' requested_text='dump'», y que un `ok:0` de `world_spawn`
+    con `error:"timeout", object_id:7` llega como «timeout» pelado.
+C-5 Lee `_bridge_error_detail`: ¿algún valor del bridge podría meter contenido de host (rutas absolutas,
+    tokens) en el mensaje? Los campos son nombres de clase/widget e ints. Si ves un vector de fuga
+    razonable, dilo en BACKLOG (no bloqueante salvo repro).
+
+===============================================================================
+§2. FRONTERAS
+===============================================================================
+
+- NO ejecutes DayZ ni el daemon ni nada de red. NO commitees. NO edites el árbol vivo salvo los mutantes
+  de C-3, que RESTAURAS. No toques loopback.py, process_lifecycle.py, dayz_test_tool.py ni sus tests.
+- Evidencia = comandos ejecutados con su salida. Una lectura sin ejecutar se etiqueta como tal.
+
+===============================================================================
+§3. ENTREGABLE
+===============================================================================
+
+Escribe C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-C\REVIEW-CODEX.md con:
+
+## VEREDICTO
+BLOQUEANTES=N (0 si el diff puede commitearse tal cual).
+## C-1 … C-5
+Por cada uno: qué ejecutaste, salida literal recortada, conclusión (los mutantes de C-3 con su rojo/verde).
+## BLOQUEANTES
+Cada uno con repro literal [EXACT] y path:line.
+## BACKLOG
+Mejoras no bloqueantes.
+## LO QUE NO PUDE VERIFICAR
+Lista honesta.

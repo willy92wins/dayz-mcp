@@ -1,0 +1,17 @@
+﻿tokens used
+202.372
+VEREDICTO: REQUEST-CHANGES
+
+FINDINGS:
+
+1. P1 - A1: `OnError` recicla un slot cuyo GET aún puede reintentarse - MCPClientBridge.c:45 - `RestCallback.OnError` puede repetirse por retries (`restapi.c:53`), pero la primera llamada pone `m_Generation = 0` en `:57`; `AcquireIdlePollCallback` puede reutilizarlo y un callback tardío del GET anterior verá la generación nueva, despachará datos obsoletos y alterará el poll vivo - No reciclar ni cerrar el poll desde `OnError`; liberar únicamente tras evento terminal o cancelación demostrada mediante un contexto de poll independiente.
+
+2. P1 - A1: agotamiento del pool causa stall permanente - MCPClientBridge.c:417 - Tras dos GET sin callback, ambos slots quedan bound; `AcquireIdlePollCallback` retorna null sin activar `m_PollInFlight` ni otro watchdog. Con 5 Hz y backoffs de 1/2 s, el bridge queda sin polear aproximadamente a los 63,4 s y loguea cada frame - Mantener un estado watchdog para pool agotado, con log rate-limited y recuperación determinista mediante cancelación/reset de un contexto exclusivo de poll; aumentar el pool solo aplaza el fallo.
+
+3. P3 - A3: `Print` conserva composición inline prohibida - MCPClientBridge.c:3724 - `Print("[MCP-CLIENT] " + message)` incumple el contrato Enforce indicado - Construir el mensaje en una variable `string` local y pasarla a `Print`.
+
+A2: limpio
+
+A4: limpio
+
+A5: limpio

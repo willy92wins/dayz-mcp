@@ -1,0 +1,20 @@
+test_age_boundaries_are_derived_from_original_ts_without_persistence (tests.test_pipeline_feedback.InboxTest.test_age_boundaries_are_derived_from_original_ts_without_persistence) ... ok
+test_append_feedback_writes_parseable_jsonl (tests.test_pipeline_feedback.InboxTest.test_append_feedback_writes_parseable_jsonl) ... ok
+test_append_rejects_empty_body (tests.test_pipeline_feedback.InboxTest.test_append_rejects_empty_body) ... ok
+test_append_rejects_empty_title (tests.test_pipeline_feedback.InboxTest.test_append_rejects_empty_title) ... ok
+test_append_rejects_non_str_types (tests.test_pipeline_feedback.InboxTest.test_append_rejects_non_str_types) ... ok
+test_append_rejects_title_over_120 (tests.test_pipeline_feedback.InboxTest.test_append_rejects_title_over_120) ... ok
+test_append_rejects_unknown_kind (tests.test_pipeline_feedback.InboxTest.test_append_rejects_unknown_kind) ... ok
+test_latest_resolution_without_evidence_ref_clears_the_previous_ref (tests.test_pipeline_feedback.InboxTest.test_latest_resolution_without_evidence_ref_clears_the_previous_ref) ... ok
+test_malformed_line_is_counted (tests.test_pipeline_feedback.InboxTest.test_malformed_line_is_counted) ... ok
+test_read_inbox_newest_first_and_count (tests.test_pipeline_feedback.InboxTest.test_read_inbox_newest_first_and_count) ... ok
+test_resolution_evidence_ref_accepts_only_the_four_durable_roots (tests.test_pipeline_feedback.InboxTest.test_resolution_evidence_ref_accepts_only_the_four_durable_roots) ... ok
+test_resolve_hides_unless_included (tests.test_pipeline_feedback.InboxTest.test_resolve_hides_unless_included) ... ok
+test_resolve_last_wins (tests.test_pipeline_feedback.InboxTest.test_resolve_last_wins) ... ok
+test_feedback_tool_rejects_bad_kind (tests.test_pipeline_feedback.PipelineToolsTest.test_feedback_tool_rejects_bad_kind) ... ok
+test_tools_registered_signatures (tests.test_pipeline_feedback.PipelineToolsTest.test_tools_registered_signatures) ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in 0.236s
+
+OK

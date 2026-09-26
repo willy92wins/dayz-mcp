@@ -1,0 +1,22 @@
+test_accepts_only_registered_live_steam_process_with_active_user (test_steam_preflight.SteamPreflightTests.test_accepts_only_registered_live_steam_process_with_active_user) ... ok
+test_bounds_and_deduplicates_live_steam_pids (test_steam_preflight.SteamPreflightTests.test_bounds_and_deduplicates_live_steam_pids) ... ok
+test_pass_keeps_empty_or_foreign_enumeration_out_of_the_verdict (test_steam_preflight.SteamPreflightTests.test_pass_keeps_empty_or_foreign_enumeration_out_of_the_verdict) ... ok
+test_public_result_has_only_safe_contract_fields (test_steam_preflight.SteamPreflightTests.test_public_result_has_only_safe_contract_fields) ... ok
+test_rejects_absent_or_zero_active_user (test_steam_preflight.SteamPreflightTests.test_rejects_absent_or_zero_active_user) ... ok
+test_rejects_bool_and_string_registry_values (test_steam_preflight.SteamPreflightTests.test_rejects_bool_and_string_registry_values) ... ok
+test_rejects_failed_or_malformed_process_enumeration (test_steam_preflight.SteamPreflightTests.test_rejects_failed_or_malformed_process_enumeration) ... ok
+test_rejects_gone_registered_pid_even_when_another_steam_is_live (test_steam_preflight.SteamPreflightTests.test_rejects_gone_registered_pid_even_when_another_steam_is_live) ... ok
+test_rejects_non_string_image_path (test_steam_preflight.SteamPreflightTests.test_rejects_non_string_image_path) ... ok
+test_rejects_registered_process_with_non_steam_basename (test_steam_preflight.SteamPreflightTests.test_rejects_registered_process_with_non_steam_basename) ... ok
+test_rejects_registry_access_denied_and_partial_or_changing_snapshots (test_steam_preflight.SteamPreflightTests.test_rejects_registry_access_denied_and_partial_or_changing_snapshots) ... ok
+test_rejects_when_liveness_or_image_probe_raises (test_steam_preflight.SteamPreflightTests.test_rejects_when_liveness_or_image_probe_raises) ... ok
+test_unaccreditable_registered_pid_is_null_and_stale (test_steam_preflight.SteamPreflightTests.test_unaccreditable_registered_pid_is_null_and_stale) ... ok
+test_a_clean_shutdown_and_relaunch_reports_success (test_steam_preflight.SteamRemediationHostTest.test_a_clean_shutdown_and_relaunch_reports_success) ... ok
+test_a_relaunch_that_fails_reports_steam_left_down (test_steam_preflight.SteamRemediationHostTest.test_a_relaunch_that_fails_reports_steam_left_down) ... ok
+test_a_shutdown_that_never_finishes_does_not_relaunch (test_steam_preflight.SteamRemediationHostTest.test_a_shutdown_that_never_finishes_does_not_relaunch) ... ok
+test_an_unreadable_process_list_is_not_read_as_shut_down (test_steam_preflight.SteamRemediationHostTest.test_an_unreadable_process_list_is_not_read_as_shut_down) ... ok
+
+----------------------------------------------------------------------
+Ran 17 tests in 0.002s
+
+OK

@@ -1,0 +1,180 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+RONDA 3 del lote G. Tu ronda 2 quedó verde 16/16 y la acepté. **Esto no es un rechazo de tu
+trabajo: es un cambio de sustrato decidido por el humano** tras dos revisiones externas.
+
+===============================================================================
+§0. EL PRODUCTO
+===============================================================================
+
+  P1. **La actividad no se lee del audit.** Corromper o borrar `events.jsonl` no cambia la
+      respuesta de actividad. La actividad vive en estado del daemon, indexada por
+      `(daemon_generation, run_id)`.
+  P2. **El audit sigue registrando.** Un enqueue aceptado deja igual que ahora **un** evento
+      `run_command_activity`. Deja de ser la fuente de verdad; no deja de ser el rastro.
+  P3. **Se registra actividad para el run que se está comandando, y sólo para él.** Un run
+      sin dueño (`RUNNING_IDLE`) que recibe un comando aceptado SÍ registra actividad. Un
+      enqueue **interno** (el cleanup por expiración de lease) NO.
+
+Y sigue en pie todo lo anterior: sticky por `(daemon_generation, run_id)` que una escritura
+buena posterior no limpia; nada de actividad en un rechazo; fail-closed a `unknown`/null ante
+timestamp futuro, fallo de escritor o ausencia; y **la actividad es diagnóstico, no
+autoridad**: no decide `occupied` ni autoriza stop/reap.
+
+LO QUE NO ES EL PRODUCTO, y no es tu trabajo aunque tengas razón:
+  - El oráculo, el gate, el ledger, los mutantes, este brief. Defecto ahí → `DISPUTAS`.
+  - El sobre de `dayz_test_stop`, los `retired_run_diagnostic`, `lifecycle_stop_outcome`.
+  - Refactors o mejoras de paso.
+  - **La documentación de los dos campos nuevos en README-mcp.md**: la hago yo al integrar.
+
+===============================================================================
+§1. POR QUÉ CAMBIA EL SUSTRATO. Medido, no opinado
+===============================================================================
+
+**En Windows, LEER el audit hace FALLAR su escritura.** El escritor publica con `os.replace`;
+un lector con el fichero abierto lo bloquea con `PermissionError [WinError 5]`. Y un fallo de
+escritura marca sticky-`unknown`. O sea: **el mecanismo se envenena solo cuanto más se le
+consulta la ocupación.** Tu ronda 2 introdujo el primer lector en runtime del audit, así que
+el defecto nace ahí — pero la causa es la estrategia del escritor, no tu código.
+
+    control directo: os.replace con un handle de lectura abierto -> PermissionError [WinError 5]
+    3 lectores sobre un audit de 854.400 B -> 776 de 776 escrituras FALLIDAS (100 %)
+    (es un arnés de saturación; a cadencia realista el auditor midió 4 de 118)
+
+Al quitar el lector desaparecen **cinco** defectos de golpe, todos del lector: esa carrera, la
+rotación que dejaba la basal en `events.jsonl.1` sin leerla, la procedencia falsificable
+(cualquier evento con ese nombre contaba como comando), el `-Infinity` que publicaba
+`age = inf` (que ni siquiera es JSON válido), y el coste `O(runs × líneas del audit)`.
+
+**Esto se desvía a propósito de la línea 34 de la ficha 16**, que pedía leer «events.jsonl +
+backups». Decisión del humano, con este brief como registro.
+
+Lo que hace sólido el cambio: la memoria del daemon sólo la destruye un reinicio, que cambia
+la generación y **ya obliga a `unknown` por contrato**. La memoria es exactamente tan durable
+como el contrato necesita.
+
+===============================================================================
+§2. LOS CINCO ROJOS. Qué está mal hoy, con su sitio
+===============================================================================
+
+**N1 y N2 son la MISMA raíz**: `record_box_command_activity`
+(`process_lifecycle.py:934-956`) elige mal los objetivos, y en las dos direcciones.
+
+    if isinstance(owner_session, str) and owner_session:
+        owned = [run for run in active if run.owner_session_id == owner_session]
+        if len(owned) == 1:
+            targets = owned
+    elif len(active) == 1:
+        targets = active
+
+  - **N1**: con `owner_session` no vacía y el run **sin dueño** (`RUNNING_IDLE`, el estado
+    normal tras `release_owner` :711-714 o `recover_after_restart`), `owned` sale vacía y el
+    `elif` **no se evalúa** porque el `if` ya se tomó. No se registra NADA. El run se publica
+    `stale` con la edad del arranque mientras lo están pilotando — y `occupancy_error_fields`
+    le cuelga el hint «stop it with dayz_test_stop(...)». Otro arranque lee «lleva 1300 s
+    parado, mátalo» sobre una sesión viva. Es el daño más caro del lote.
+  - **N2**: el cleanup por expiración de lease encola `vehicle_release` con `internal=True`
+    (`loopback.py:2401`), llega a `_note_run_command_activity` (`:1566`, sin ninguna guarda
+    de `internal`) con `owner_client=None`, cae por el `elif` y **sí** marca actividad. El
+    instante en que el sistema detecta el abandono es el instante en que sella el run como
+    recién usado.
+
+**N3** — `_box_cache` (`:2612-2620`) no se invalida al mutar actividad. Sólo se anula en
+`:2473`. Tras un fallo de escritor que marca sticky, la lectura cacheada sigue publicando
+`stale`/`recent`. Y `loopback.py` llama al lector **sin `now`**, que es justo la rama
+cacheada. Cuidado al arreglarlo: no introduzcas orden inverso entre `_activity_lock` y
+`_operation_lock`.
+
+**N4** — el sustrato. Hoy `_latest_jsonl_activity_epoch` (`:991`) es la autoridad.
+
+**N5** — consecuencia de N1: un run heredado queda sin dueño y **nunca** vuelve a registrar
+actividad, así que la cláusula del contrato «`unknown` hasta una actividad durable nueva» es
+literalmente inalcanzable.
+
+===============================================================================
+§3. QUÉ QUITAR. No lo dejes muerto en el fichero
+===============================================================================
+
+Al caer el lector, queda huérfano un bloque entero. **Retíralo**, no lo dejes inalcanzable:
+
+    _latest_jsonl_activity_epoch   (:991)   el lector completo
+    _ensure_activity_persisted     (:979)   ya estaba huérfano desde la ronda 2, y es el
+                                            resto exacto del defecto de la ronda 1: escribe
+                                            `run_command_activity` con reason="activity_observed"
+    _jsonl_activity_written                 estado del lector
+    _activity_persist_attempted             si queda sin consumidores
+    _audit_jsonl_path              (:903)   si queda sin consumidores
+
+Comprueba por grep que cada uno queda sin call-sites ANTES de borrarlo, y dilo en STATE.md.
+Lo que siga teniendo consumidor, se queda.
+
+**Dos tests tuyos hay que rehacer**, y no por gusto: `test_rotated_jsonl_without_event_is_unknown`
+y `test_rotated_jsonl_without_commands_is_unknown` (`test_box_occupancy.py:640` y `:883`)
+**no rotan**: hacen `current_path.write_text("")`, que simula un ledger BORRADO, no una
+rotación. Prueban un lector que va a dejar de existir. Retíralos o reescríbelos contra el
+contrato nuevo. La clase `JsonlActivityLookupTest` (`:750`) entera está en la misma
+situación: lo que siga teniendo sentido, adáptalo; lo que pruebe el lector, fuera.
+
+===============================================================================
+§4. EL GATE
+===============================================================================
+
+    bash gate/run.sh      -> G1, el oráculo de producto
+    bash gate/suite.sh    -> G2, los tests de lifecycle, ocupación y loopback
+
+Ahora mismo: `PASS=13 FAIL=5 UNMET=0 de 18`. Tus cinco rojos:
+
+    N4-SUSTRATO   corromper o borrar events.jsonl no cambia la actividad
+    N1-SIN-DUENO  un run RUNNING_IDLE comandado SI registra actividad
+    N2-INTERNO    un enqueue interno (cleanup) NO registra actividad de comando
+    N3-CACHE      tras un fallo de escritor la lectura cacheada no dice recent/stale
+    N5-REINICIO   heredado es unknown y una actividad nueva lo lleva a recent
+
+**Los 13 verdes son la línea que no se puede romper.** Dos te vigilan de cerca en este
+rediseño: `R1-READONLY` (una lectura no escribe en el audit) y **`R5-RASTRO` (un comando
+aceptado sigue dejando UN evento en el audit)**. Si al quitar el lector te llevas también la
+escritura, R5 se pone rojo y con razón: el audit deja de ser autoridad, no deja de registrar.
+
+**Está probado que el núcleo es alcanzable**: prototipé el sustrato en memoria y la selección
+de objetivos, dio 16/18 sin romper ningún verde, y lo revertí. No te lo paso: si te diera mi
+solución estaría midiendo mi conjetura y no tu entrega. N2 y N3 no los prototipé, y te lo
+digo en vez de dejar que el 16/18 parezca una prueba completa.
+
+Terminas cuando `gate/run.sh` diga `ORACULO-VERDE` y `gate/suite.sh` diga `SUITE-ACOTADA OK`.
+
+`gate/` está sellado por hash y es de sólo lectura. Compruebo el sello al recibir.
+
+===============================================================================
+§5. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/process_lifecycle.py
+    tools/dayz_mcp/loopback.py
+    tools/tests/test_box_occupancy.py
+    tools/tests/test_process_lifecycle.py
+
+PROHIBIDO: `gate/`; `addon/`; `server.py`; `dayz_test_tool.py`; **`runtime_state.py`** (el
+escritor del audit y su rotación no se tocan en este lote); debilitar o borrar cualquier
+validación existente; usar red; correr la suite completa.
+
+⚠ **Data-crítico**: no cambies el formato de un evento existente, no toques la rotación, y
+que un fallo de escritura no tumbe una operación: el audit informa, no autoriza.
+
+Escribe tests para lo que entregas, y córrelos ANTES de tu cambio para comprobar que fallan.
+
+===============================================================================
+§6. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — qué entregaste, con `path:line`. Incluye la lista de lo que
+                          RETIRASTE y el grep que prueba que estaba sin consumidores.
+    ## GATE             — la salida literal de los dos gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea que demuestra que fallaba antes.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si crees que un criterio del gate está mal, aquí, con el argumento.
+                          En la ronda 1 usarlo fue lo correcto y cambió el lote entero.

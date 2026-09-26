@@ -1,0 +1,884 @@
+--- a/tools/dayz_mcp/playbook_tool.py
++++ b/tools/dayz_mcp/playbook_tool.py
+@@ -8,10 +8,15 @@
+ """
+ from __future__ import annotations
+ 
++import hashlib
++import importlib.machinery
+ import importlib.util
++import inspect
+ import math
+ import re
+ import sys
++import threading
++from contextlib import contextmanager
+ from pathlib import Path
+ from types import ModuleType
+ from typing import Any
+@@ -37,6 +42,7 @@
+         "session_cancel",
+         "session_heartbeat",
+         "playbook_run",
++        "playbook_reload",
+     }
+ )
+ _FILE_SCHEMA_FIELDS = frozenset(
+@@ -56,27 +62,129 @@
+ )
+ 
+ _runner: ModuleType | None = None
++RUNNER_MODULE = "dayz_playbook_runner"
++_runner_lock = threading.RLock()
++_active_runs = 0
++_runner_loading = False
++# A receipt for the exact source compiled by a successfully published loader.
++# Observers read this; reload never edits ServerSourceWatch's boot reference.
++_runner_source: tuple[ModuleType, Path, str] | None = None
++
++
++class _RunnerSourceLoader(importlib.machinery.SourceFileLoader):
++    def __init__(self, path: Path, source: bytes) -> None:
++        super().__init__(RUNNER_MODULE, str(path))
++        self.source = source
++
++    def get_code(self, fullname: str):
++        # Always compile these bytes: timestamp-based pyc caches can serve old
++        # code after a same-size save in the same second, even with Python -B.
++        return self.source_to_code(self.source, self.path)
++
++
++def _load_runner_locked() -> ModuleType:
++    """Construct separately; restore the import slot on every failed load."""
++    global _runner, _runner_source, _runner_loading
++    if _runner_loading:
++        raise ToolError("playbook_runner_busy: load_in_progress")
++    _runner_loading = True
++    previous = sys.modules.get(RUNNER_MODULE)
++    try:
++        path = PLAYBOOKS_DIR / "runner.py"
++        source = path.read_bytes()
++        loader = _RunnerSourceLoader(path, source)
++        spec = importlib.util.spec_from_file_location(RUNNER_MODULE, path, loader=loader)
++        if spec is None:
++            raise ToolError("playbook_runner_missing")
++        module = importlib.util.module_from_spec(spec)
++        # Module-level dataclasses/imports require the canonical import slot.
++        # The lock keeps runner consumers/observers outside this staging window.
++        sys.modules[RUNNER_MODULE] = module
++        loader.exec_module(module)
++        if (not callable(getattr(module, "load_playbook", None))
++                or not inspect.iscoroutinefunction(getattr(module, "_async_run", None))
++                or not all(
++                    isinstance(getattr(module, name, None), type)
++                    and issubclass(getattr(module, name), Exception)
++                    for name in ("SchemaError", "ToolCallError")
++                )):
++            raise ToolError("playbook_runner_invalid: required_api_missing")
++        if path.read_bytes() != source:
++            raise ToolError("playbook_runner_invalid: source_changed_during_load")
++        receipt = (module, path, hashlib.sha256(source).hexdigest())
++    except BaseException as exc:
++        if previous is None:
++            sys.modules.pop(RUNNER_MODULE, None)
++        else:
++            sys.modules[RUNNER_MODULE] = previous
++        if isinstance(exc, ToolError):
++            raise
++        if isinstance(exc, FileNotFoundError):
++            raise ToolError("playbook_runner_missing") from None
++        # Keep the previous module/receipt intact, even on a module-level exit.
++        raise ToolError(f"playbook_runner_load_failed: {type(exc).__name__}") from None
++    else:
++        _runner_source = receipt
++        _runner = module
++        return module
++    finally:
++        _runner_loading = False
+ 
+ 
+ def load_runner() -> ModuleType:
+     """Load ``playbooks/runner.py`` without adding a generic ``runner`` name."""
+-    global _runner
+-    if _runner is not None:
+-        return _runner
+-    path = PLAYBOOKS_DIR / "runner.py"
+-    if not path.is_file():
+-        raise ToolError("playbook_runner_missing")
+-    spec = importlib.util.spec_from_file_location("dayz_playbook_runner", path)
+-    if spec is None or spec.loader is None:
+-        raise ToolError("playbook_runner_missing")
+-    module = importlib.util.module_from_spec(spec)
+-    sys.modules[spec.name] = module
+-    try:
+-        spec.loader.exec_module(module)
+-    except OSError:
+-        raise ToolError("playbook_runner_missing") from None
+-    _runner = module
+-    return module
++    with _runner_lock:
++        if _runner_loading:
++            raise ToolError("playbook_runner_busy: load_in_progress")
++        return _runner if _runner is not None else _load_runner_locked()
++
++
++def runner_source_snapshot() -> tuple[ModuleType, Path, str] | None:
++    """Return only the receipt belonging to the currently published runner."""
++    # A slow/blocked import must not hold every MCP freshness observation.
++    # An unavailable receipt means unknown until publication completes.
++    if not _runner_lock.acquire(blocking=False):
++        return None
++    try:
++        if (_runner_loading or _runner_source is None
++                or _runner_source[0] is not _runner
++                or sys.modules.get(RUNNER_MODULE) is not _runner):
++            return None
++        return _runner_source
++    finally:
++        _runner_lock.release()
++
++
++def reload_runner(module: object) -> dict[str, Any]:
++    """Explicit one-entry allowlist; refuse instead of waiting for active runs."""
++    if not isinstance(module, str) or module != RUNNER_MODULE:
++        raise ToolError(f"playbook_reload_refused: module_not_allowed; allowed={RUNNER_MODULE}")
++    if not _runner_lock.acquire(blocking=False):
++        raise ToolError("playbook_reload_refused: load_in_progress")
++    try:
++        if _active_runs:
++            raise ToolError(f"playbook_reload_refused: playbook_in_flight; active_runs={_active_runs}")
++        _load_runner_locked()
++        return {"status": "reloaded", "module": RUNNER_MODULE, "scope": "current_mcp_process"}
++    finally:
++        _runner_lock.release()
++
++
++@contextmanager
++def _runner_execution():
++    global _active_runs
++    if not _runner_lock.acquire(blocking=False):
++        raise ToolError("playbook_runner_busy: load_in_progress")
++    try:
++        runner = load_runner()
++        _active_runs += 1
++    finally:
++        _runner_lock.release()
++    try:
++        yield runner
++    finally:
++        with _runner_lock:
++            _active_runs -= 1
+ 
+ 
+ def list_known_playbooks(playbooks_dir: Path | None = None) -> list[str]:
+@@ -244,28 +352,28 @@
+     ``MAX_PLAYBOOK_STEPS`` steps. ``certified`` is always false until a
+     FROZEN sidecar registry exists. Does not launch DayZ.
+     """
+-    runner = load_runner()
+-    root = Path(playbooks_dir or PLAYBOOKS_DIR)
+-    path = resolve_playbook_path(name, root)
+-    merged = coerce_params(params)
+-    label = str(name)
+-    try:
+-        playbook = runner.load_playbook(path)
+-    except runner.SchemaError as exc:
+-        raise map_schema_error(exc, label) from None
+-
+-    reject_unknown_params(label, playbook, merged)
+-    steps = playbook.get("steps") if isinstance(playbook.get("steps"), list) else []
+-    if len(steps) > MAX_PLAYBOOK_STEPS:
+-        raise ToolError(
+-            f"bad_args: playbook has {len(steps)} steps, max {MAX_PLAYBOOK_STEPS}"
+-        )
+-
+-    async def invoke(step_id: str, tool: str, arguments: Any) -> Any:
+-        return await invoke_registered(app, step_id, tool, arguments, runner)
+-
+-    try:
+-        verdict = await runner._async_run(playbook, merged, invoke, "live")
+-    except runner.SchemaError as exc:
+-        raise map_schema_error(exc, label) from None
+-    return attach_playbook_meta(verdict, label, playbook)
++    with _runner_execution() as runner:
++        root = Path(playbooks_dir or PLAYBOOKS_DIR)
++        path = resolve_playbook_path(name, root)
++        merged = coerce_params(params)
++        label = str(name)
++        try:
++            playbook = runner.load_playbook(path)
++        except runner.SchemaError as exc:
++            raise map_schema_error(exc, label) from None
++
++        reject_unknown_params(label, playbook, merged)
++        steps = playbook.get("steps") if isinstance(playbook.get("steps"), list) else []
++        if len(steps) > MAX_PLAYBOOK_STEPS:
++            raise ToolError(
++                f"bad_args: playbook has {len(steps)} steps, max {MAX_PLAYBOOK_STEPS}"
++            )
++
++        async def invoke(step_id: str, tool: str, arguments: Any) -> Any:
++            return await invoke_registered(app, step_id, tool, arguments, runner)
++
++        try:
++            verdict = await runner._async_run(playbook, merged, invoke, "live")
++        except runner.SchemaError as exc:
++            raise map_schema_error(exc, label) from None
++        return attach_playbook_meta(verdict, label, playbook)
+--- a/tools/dayz_mcp/server.py
++++ b/tools/dayz_mcp/server.py
+@@ -5335,6 +5335,21 @@
+         """
+         return await playbook_tool_mod.execute_playbook_run(app, name, params)
+ 
++    @app.tool(
++        description=(
++            "Explicitly reload only playbooks/runner.py in this MCP process: "
++            "module must be dayz_playbook_runner. Refuses while any playbook is "
++            "in flight or a load is in progress. Keeps the previous runner on "
++            "failure. Does not reload the tool registry, daemon or other clients. "
++            "The response may retain a freshness warning from call entry; check "
++            "bridge_status.server_modules on the next call."
++        )
++    )
++    async def playbook_reload(
++        module: Literal["dayz_playbook_runner"],
++    ) -> dict[str, Any]:
++        return await asyncio.to_thread(playbook_tool_mod.reload_runner, module)
++
+     _patch_mode_enum_from_authority(app, "dayz_test_run")
+     _describe_run_parameters(app, "dayz_test_run")
+     for _closed_tool in _CLOSED_SCHEMA_TOOLS:
+--- a/tools/dayz_mcp/server_freshness.py
++++ b/tools/dayz_mcp/server_freshness.py
+@@ -2,6 +2,7 @@
+ 
+ This is a source snapshot, not a bytecode attestation or a reload mechanism.
+ Capture it at server import, not at the first status request or each app build.
++The sole reloadable runner supplies a receipt for its actual compiled source.
+ """
+ 
+ from __future__ import annotations
+@@ -17,6 +18,8 @@
+ 
+ from mcp import types
+ from mcp.server.fastmcp import FastMCP
++
++from dayz_mcp import playbook_tool
+ 
+ REMEDIATION = "reopen_mcp_client"
+ MARKER = "server_code_freshness"
+@@ -77,6 +80,7 @@
+             if self._identities[name] is None or self._identities[name] != _stat_identity(path):
+                 self._hashes[name] = None
+         self._cached_hashes = dict(self._hashes)
++        self._runner_observed_source = playbook_tool.runner_source_snapshot()
+ 
+     def snapshot(self) -> dict[str, Any]:
+         # Concurrent to_thread observers must not pair a new identity with an
+@@ -85,16 +89,29 @@
+             return self._snapshot()
+ 
+     def _snapshot(self) -> dict[str, Any]:
++        runner_source = playbook_tool.runner_source_snapshot()
+         current = loaded_source_files()
+         files = {**current, **self._files}
+         stale: list[str] = []
+         unreadable: dict[str, str] = {}
+         for name, path in sorted(files.items()):
++            runner = name == playbook_tool.RUNNER_MODULE
++            baseline = self._hashes.get(name)
++            if runner:
++                if runner_source is None:
++                    unreadable[name] = "runner_load_unverified"
++                    continue
++                if runner_source[1] != path:
++                    unreadable[name] = "loaded_module_path_changed"
++                    continue
++                # Compare against the bytes actually compiled, never a baseline
++                # refreshed by the reload tool or by a late observation.
++                baseline = runner_source[2]
+             if name not in self._files:
+                 # A late import has no baseline. Reading it now cannot prove
+                 # which bytes were imported; never silently re-anchor it.
+                 unreadable[name] = "loaded_after_server_snapshot"
+-            elif self._hashes[name] is None:
++            elif baseline is None:
+                 unreadable[name] = "source_unreadable_at_server_snapshot"
+             elif name in current and current[name] != path:
+                 unreadable[name] = "loaded_module_path_changed"
+@@ -103,19 +120,30 @@
+                 digest = self._cached_hashes[name]
+                 if identity is None:
+                     digest = None
+-                elif identity != self._identities[name]:
++                elif (identity != self._identities[name]
++                      or (runner and runner_source is not self._runner_observed_source)):
+                     digest = _digest(path)
+                     if identity != _stat_identity(path):
+                         digest = None
+                     if digest is not None:
+-                        # Cache stale hashes too: the immutable boot hash still
+-                        # decides drift, without rereading a stale file per call.
++                        # Cache stale hashes too: the boot hash (or the
++                        # runner load receipt) still decides drift.
+                         self._identities[name] = identity
+                         self._cached_hashes[name] = digest
++                        if runner:
++                            self._runner_observed_source = runner_source
+                 if digest is None:
+                     unreadable[name] = "source_unreadable_now"
+-                elif digest != self._hashes[name]:
++                elif digest != baseline:
+                     stale.append(name)
++        if (playbook_tool.RUNNER_MODULE in files
++                and playbook_tool.runner_source_snapshot() is not runner_source):
++            # Do not mix an old receipt with disk observed after a concurrent
++            # publication (including a source edit reverted during that window).
++            name = playbook_tool.RUNNER_MODULE
++            if name in stale:
++                stale.remove(name)
++            unreadable[name] = "runner_changed_during_observation"
+         snapshot = {
+             "server_started_at": self.started_at,
+             "server_pid": self.pid,
+--- a/tools/tests/fixtures/effective_schema_v5/profile_inventory.json
++++ b/tools/tests/fixtures/effective_schema_v5/profile_inventory.json
+@@ -17,7 +17,7 @@
+         "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control", "vehicle_telemetry",
+         "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click", "ui_reload_layout",
+         "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects", "pipeline_feedback",
+-        "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema"
++        "pipeline_inbox", "pipeline_resolve", "playbook_run", "playbook_reload", "dayz_effective_schema"
+       ]
+     },
+     {
+@@ -36,7 +36,7 @@
+         "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control", "vehicle_telemetry",
+         "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click", "ui_reload_layout",
+         "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects", "pipeline_feedback",
+-        "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema"
++        "pipeline_inbox", "pipeline_resolve", "playbook_run", "playbook_reload", "dayz_effective_schema"
+       ]
+     },
+     {
+@@ -55,7 +55,7 @@
+         "exec_enforce", "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control",
+         "vehicle_telemetry", "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click",
+         "ui_reload_layout", "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects",
+-        "pipeline_feedback", "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema"
++        "pipeline_feedback", "pipeline_inbox", "pipeline_resolve", "playbook_run", "playbook_reload", "dayz_effective_schema"
+       ]
+     },
+     {
+@@ -74,7 +74,7 @@
+         "exec_enforce", "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control",
+         "vehicle_telemetry", "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click",
+         "ui_reload_layout", "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects",
+-        "pipeline_feedback", "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema"
++        "pipeline_feedback", "pipeline_inbox", "pipeline_resolve", "playbook_run", "playbook_reload", "dayz_effective_schema"
+       ]
+     }
+   ]
+--- a/tools/tests/test_effective_schema_catalog.py
++++ b/tools/tests/test_effective_schema_catalog.py
+@@ -23,7 +23,7 @@
+         "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control", "vehicle_telemetry",
+         "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click", "ui_reload_layout",
+         "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects", "pipeline_feedback",
+-        "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema",
++        "pipeline_inbox", "pipeline_resolve", "playbook_run", "playbook_reload", "dayz_effective_schema",
+     ],
+     ("standard", "codex"): [
+         "dayz_knowledge_find", "dayz_knowledge_show", "dayz_knowledge_status", "dayz_knowledge_prepare",
+@@ -37,7 +37,7 @@
+         "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control", "vehicle_telemetry",
+         "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click", "ui_reload_layout",
+         "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects", "pipeline_feedback",
+-        "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema",
++        "pipeline_inbox", "pipeline_resolve", "playbook_run", "playbook_reload", "dayz_effective_schema",
+     ],
+     ("exec_enforce", "claude"): [
+         "dayz_knowledge_find", "dayz_knowledge_show", "dayz_knowledge_status", "dayz_knowledge_prepare",
+@@ -51,7 +51,7 @@
+         "exec_enforce", "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control",
+         "vehicle_telemetry", "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click",
+         "ui_reload_layout", "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects",
+-        "pipeline_feedback", "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema",
++        "pipeline_feedback", "pipeline_inbox", "pipeline_resolve", "playbook_run", "playbook_reload", "dayz_effective_schema",
+     ],
+     ("exec_enforce", "codex"): [
+         "dayz_knowledge_find", "dayz_knowledge_show", "dayz_knowledge_status", "dayz_knowledge_prepare",
+@@ -65,7 +65,7 @@
+         "exec_enforce", "bridge_status", "vehicle_get_in_client", "engine_set", "vehicle_control",
+         "vehicle_telemetry", "vehicle_trace", "vehicle_release", "ui_tree", "ui_set_text", "ui_click",
+         "ui_reload_layout", "ui_focus", "ui_dialog", "action_use", "wait_for", "list_projects",
+-        "pipeline_feedback", "pipeline_inbox", "pipeline_resolve", "playbook_run", "dayz_effective_schema",
++        "pipeline_feedback", "pipeline_inbox", "pipeline_resolve", "playbook_run", "playbook_reload", "dayz_effective_schema",
+     ],
+ }
+ EXPECTED_CONSTRAINT_IDS = (
+--- a/tools/tests/test_playbook_tool.py
++++ b/tools/tests/test_playbook_tool.py
+@@ -379,18 +379,13 @@
+             )
+ 
+     async def test_missing_runner_is_typed_without_host_path(self) -> None:
+-        playbook_tool._runner = None
+-        original = playbook_tool.PLAYBOOKS_DIR
+-        with tempfile.TemporaryDirectory() as tmp:
+-            playbook_tool.PLAYBOOKS_DIR = Path(tmp)
+-            try:
+-                with self.assertRaises(ToolError) as ctx:
+-                    playbook_tool.load_runner()
+-                self.assertEqual(str(ctx.exception), "playbook_runner_missing")
+-                self.assertNotIn(tmp, str(ctx.exception))
+-            finally:
+-                playbook_tool.PLAYBOOKS_DIR = original
+-                playbook_tool._runner = None
++        with tempfile.TemporaryDirectory() as tmp, patch.object(
++            playbook_tool, "_runner", None
++        ), patch.object(playbook_tool, "PLAYBOOKS_DIR", Path(tmp)):
++            with self.assertRaises(ToolError) as ctx:
++                playbook_tool.load_runner()
++            self.assertEqual(str(ctx.exception), "playbook_runner_missing")
++            self.assertNotIn(tmp, str(ctx.exception))
+ 
+     async def test_registered_tool_dispatches_and_does_not_hold_lock(self) -> None:
+         app, _runtime = build_app(ServerConfig(log_sink=lambda _m: None))
+--- a/tools/tests/test_server_freshness.py
++++ b/tools/tests/test_server_freshness.py
+@@ -397,7 +397,7 @@
+         runner_path.with_name("fixture.toml").write_text('status = "DRAFT"\n', encoding="utf-8")
+         with patch.object(adapter, "PLAYBOOKS_DIR", runner_path.parent), patch.object(
+             adapter, "_runner", None
+-        ), patch.dict(sys.modules):
++        ), patch.object(adapter, "_runner_source", None), patch.dict(sys.modules):
+             loaded = adapter.load_runner()  # Real spec_from_file_location/cache path.
+             watch = ServerSourceWatch(loaded_source_files())
+             with patch.object(server, "_SERVER_SOURCES", watch):
+--- a/tools/tests/test_playbook_reload.py
++++ b/tools/tests/test_playbook_reload.py
+@@ -0,0 +1,422 @@
++"""Offline consumer tests for the one-runner reload contract; no live services."""
++from __future__ import annotations
++
++import asyncio
++import os
++import py_compile
++import sys
++import tempfile
++import threading
++import types as python_types
++import unittest
++from contextlib import ExitStack
++from pathlib import Path
++from unittest.mock import AsyncMock, patch
++
++from mcp import types
++from mcp.server.fastmcp.exceptions import ToolError
++from mcp.shared.memory import create_connected_server_and_client_session
++
++from dayz_mcp import playbook_tool as adapter, server, server_freshness as freshness
++from tests.test_client_mode import _fixture_client_runtime
++
++MODULE = "dayz_playbook_runner"
++TAIL = '''
++_IMPLEMENTATION = "old"
++_original_async_run = _async_run
++
++async def _async_run(*args, **kwargs):
++    verdict = await _original_async_run(*args, **kwargs)
++    return {**verdict, "implementation": _IMPLEMENTATION}
++'''
++PLAYBOOK = '''id = "fixture"
++version = "1"
++status = "DRAFT"
++requires_tools = ["query_all_players"]
++
++[[steps]]
++id = "S1"
++tool = "query_all_players"
++args = {}
++expect = []
++on_fail = { action = "STOP", reason = "fixture_failed" }
++'''
++
++
++class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
++    def setUp(self) -> None:
++        self.stack = ExitStack()
++        self.addCleanup(self.stack.close)
++        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
++        self.path = self.root / "runner.py"
++        real_source = (adapter.PLAYBOOKS_DIR / "runner.py").read_text(encoding="utf-8")
++        self.old_source = real_source + TAIL
++        self.new_source = self.old_source.replace('_IMPLEMENTATION = "old"', '_IMPLEMENTATION = "new"')
++        self.path.write_text(self.old_source, encoding="utf-8")
++        (self.root / "fixture.toml").write_text(PLAYBOOK, encoding="utf-8")
++        self.stack.enter_context(patch.dict(sys.modules))
++        for attr, value in (
++            ("PLAYBOOKS_DIR", self.root), ("_runner", None),
++            ("_runner_source", None), ("_active_runs", 0), ("_runner_loading", False),
++        ):
++            self.stack.enter_context(patch.object(adapter, attr, value))
++        self.old_runner = adapter.load_runner()
++        self.old_receipt = adapter.runner_source_snapshot()
++        self.watch = freshness.ServerSourceWatch(freshness.loaded_source_files())
++        self.stack.enter_context(patch.object(server, "_SERVER_SOURCES", self.watch))
++        self.app, self.runtime = self.build()
++        self.boot_hashes = dict(self.watch._hashes)
++
++    def build(self):
++        config = server.ServerConfig(
++            mode="client", key="fixture-key", port=12345,
++            client_platform="codex", auto_spawn_daemon=False,
++            log_sink=lambda _message: None,
++        )
++        runtime = _fixture_client_runtime(config)
++        runtime.bridge_status_payload = AsyncMock(return_value={"ready": True})
++        runtime.call_bridge = AsyncMock(return_value={"ok": 1, "players": []})
++        with patch.object(server, "ClientRuntime", return_value=runtime):
++            app, built = server.build_app(config)
++        self.assertIs(built, runtime)
++        return app, runtime
++
++    async def call(self, name, arguments=None, app=None):
++        request = types.CallToolRequest(
++            method="tools/call",
++            params=types.CallToolRequestParams(name=name, arguments=arguments or {}),
++        )
++        response = await (app or self.app)._mcp_server.request_handlers[types.CallToolRequest](request)
++        return types.CallToolResult.model_validate_json(response.root.model_dump_json(by_alias=True))
++
++    async def reload(self, app=None):
++        return await self.call("playbook_reload", {"module": MODULE}, app=app)
++
++    async def run_book(self, app=None):
++        return await self.call("playbook_run", {"name": "fixture"}, app=app)
++
++    def assert_preserved(self):
++        self.assertIs(adapter.load_runner(), self.old_runner)
++        self.assertIs(sys.modules[MODULE], self.old_runner)
++        self.assertIs(adapter.runner_source_snapshot(), self.old_receipt)
++        self.assertEqual(self.old_runner._IMPLEMENTATION, "old")
++        self.assertEqual(self.watch._hashes, self.boot_hashes)
++
++    async def test_wire_reload_changes_behavior_and_normal_status_without_reanchoring(self):
++        app2, _ = self.build()
++        handler = self.app._mcp_server.request_handlers[types.CallToolRequest]
++        runtime_identity = self.runtime.identity
++        schemas = await self.app.list_tools()
++        async with create_connected_server_and_client_session(self.app._mcp_server) as session:
++            first = await session.call_tool("playbook_run", {"name": "fixture"})
++            self.assertEqual(first.structuredContent["implementation"], "old")
++            self.path.write_text(self.new_source + "\n", encoding="utf-8")
++            stale = await session.call_tool("playbook_run", {"name": "fixture"})
++            self.assertEqual(stale.structuredContent["implementation"], "old")
++            self.assertEqual(stale.meta[freshness.MARKER]["stale"], [MODULE])
++            result = await session.call_tool("playbook_reload", {"module": MODULE})
++            self.assertFalse(result.isError)
++            self.assertEqual(result.structuredContent, {
++                "status": "reloaded", "module": MODULE, "scope": "current_mcp_process",
++            })
++            # The call started stale: preserving its entry warning is intentional.
++            self.assertEqual(result.meta[freshness.MARKER]["stale"], [MODULE])
++            status = await session.call_tool("bridge_status", {})
++            self.assertEqual(status.structuredContent["server_modules"]["status"], "fresh")
++            self.assertIs(status.structuredContent["tool_registry_source_stale"], False)
++            self.assertNotIn(freshness.MARKER, status.meta or {})
++            changed = await session.call_tool("playbook_run", {"name": "fixture"})
++            self.assertEqual(changed.structuredContent["implementation"], "new")
++            self.assertEqual(changed.structuredContent["overall"], "PASS")
++        self.assertEqual((await self.run_book(app2)).structuredContent["implementation"], "new")
++        self.assertEqual(schemas, await self.app.list_tools())
++        self.assertIs(self.app._mcp_server.request_handlers[types.CallToolRequest], handler)
++        self.assertIs(self.runtime.identity, runtime_identity)
++        self.assertIs(server._SERVER_SOURCES, self.watch)
++        self.assertEqual(self.watch._hashes, self.boot_hashes)
++
++    async def test_allowlist_rejects_all_other_targets_before_loading(self):
++        with patch.object(adapter, "_load_runner_locked", side_effect=AssertionError("must not load")):
++            for target in ("runner", "dayz_mcp.server", "dayz_mcp.playbook_tool",
++                           "dayz_mcp.control_client", "../runner.py", MODULE + " ", "", None, 1):
++                with self.subTest(target=target), self.assertRaisesRegex(ToolError, "module_not_allowed"):
++                    adapter.reload_runner(target)
++        self.assert_preserved()
++
++    async def test_wire_requires_exact_explicit_module(self):
++        tools = {tool.name: tool for tool in await self.app.list_tools()}
++        schema = tools["playbook_reload"].inputSchema
++        self.assertIn("module", schema["required"])
++        self.assertEqual(schema["properties"]["module"]["const"], MODULE)
++        for arguments in ({}, {"module": "dayz_mcp.server"}, {"module": "runner"},
++                          {"module": True}, {"module": None}, {"module": "../runner.py"}):
++            with self.subTest(arguments=arguments):
++                result = await self.call("playbook_reload", arguments)
++                self.assertTrue(result.isError)
++                self.assert_preserved()
++
++    async def test_in_flight_runs_across_apps_refuse_until_last_run_finishes(self):
++        app2, runtime2 = self.build()
++        entered = [asyncio.Event(), asyncio.Event()]
++        release = [asyncio.Event(), asyncio.Event()]
++
++        def hold(index):
++            async def callback(*_args, **_kwargs):
++                entered[index].set()
++                await release[index].wait()
++                return {"ok": 1, "players": []}
++            return callback
++
++        self.runtime.call_bridge.side_effect = hold(0)
++        runtime2.call_bridge.side_effect = hold(1)
++        tasks = [asyncio.create_task(self.run_book()), asyncio.create_task(self.run_book(app2))]
++        try:
++            for event in entered:
++                await asyncio.wait_for(event.wait(), 3)
++            self.path.write_text(self.new_source, encoding="utf-8")
++            refused = await asyncio.wait_for(self.reload(), 3)
++            self.assertTrue(refused.isError)
++            self.assertIn("playbook_in_flight; active_runs=2", refused.content[0].text)
++            self.assert_preserved()
++            release[0].set()
++            self.assertEqual((await tasks[0]).structuredContent["implementation"], "old")
++            refused = await self.reload(app2)
++            self.assertTrue(refused.isError)
++            self.assertIn("active_runs=1", refused.content[0].text)
++            release[1].set()
++            self.assertEqual((await tasks[1]).structuredContent["implementation"], "old")
++            self.assertFalse((await self.reload()).isError)
++        finally:
++            for event in release:
++                event.set()
++            await asyncio.gather(*tasks, return_exceptions=True)
++
++    async def test_cancellation_releases_execution_admission(self):
++        entered = asyncio.Event()
++
++        async def hold(*_args, **_kwargs):
++            entered.set()
++            await asyncio.Event().wait()
++
++        self.runtime.call_bridge.side_effect = hold
++        task = asyncio.create_task(self.run_book())
++        try:
++            await asyncio.wait_for(entered.wait(), 3)
++            self.assertTrue((await self.reload()).isError)
++        finally:
++            task.cancel()
++            with self.assertRaises(asyncio.CancelledError):
++                await task
++        self.assertEqual(adapter._active_runs, 0)
++        self.assertFalse((await self.reload()).isError)
++
++    async def test_schema_error_releases_execution_admission(self):
++        (self.root / "fixture.toml").write_text('status = "INVALID"\n', encoding="utf-8")
++        self.assertTrue((await self.run_book()).isError)
++        self.assertEqual(adapter._active_runs, 0)
++        self.assertFalse((await self.reload()).isError)
++
++    async def test_admission_covers_synchronous_playbook_loading(self):
++        load = self.old_runner.load_playbook
++
++        def during_load(path):
++            with self.assertRaisesRegex(ToolError, "playbook_in_flight; active_runs=1"):
++                adapter.reload_runner(MODULE)
++            return load(path)
++
++        with patch.object(self.old_runner, "load_playbook", side_effect=during_load):
++            self.assertFalse((await self.run_book()).isError)
++        self.assertEqual(adapter._active_runs, 0)
++
++    async def test_playbook_cannot_invoke_reload_as_a_step(self):
++        book = PLAYBOOK.replace("query_all_players", "playbook_reload").replace(
++            "args = {}", 'args = { module = "dayz_playbook_runner" }')
++        (self.root / "fixture.toml").write_text(book, encoding="utf-8")
++        result = await self.run_book()
++        self.assertEqual(result.structuredContent["overall"], "FAIL")
++        self.assertIn("not allowed inside a playbook", result.structuredContent["reason"])
++        self.assert_preserved()
++
++    async def test_mid_execution_failure_restores_module_and_allows_recovery(self):
++        self.path.write_text(self.new_source + '\n_IMPLEMENTATION = "partial"\nraise RuntimeError("fixture")\n',
++                             encoding="utf-8")
++        failed = await self.reload()
++        self.assertTrue(failed.isError)
++        self.assertIn("playbook_runner_load_failed: RuntimeError", failed.content[0].text)
++        self.assert_preserved()
++        self.assertEqual((await self.run_book()).structuredContent["implementation"], "old")
++        self.assertIn(MODULE, self.watch.snapshot()["stale"])
++        self.path.write_text(self.new_source, encoding="utf-8")
++        self.assertFalse((await self.reload()).isError)
++        self.assertEqual((await self.run_book()).structuredContent["implementation"], "new")
++
++    async def test_syntax_failure_preserves_old_runner(self):
++        self.path.write_text("def broken(:\n", encoding="utf-8")
++        result = await self.reload()
++        self.assertTrue(result.isError)
++        self.assertIn("SyntaxError", result.content[0].text)
++        self.assert_preserved()
++
++    async def test_missing_source_preserves_old_runner_and_reports_unknown(self):
++        self.path.unlink()
++        result = await self.reload()
++        self.assertTrue(result.isError)
++        self.assertIn("playbook_runner_missing", result.content[0].text)
++        self.assert_preserved()
++        self.assertEqual(self.watch.snapshot()["unreadable_reasons"][MODULE], "source_unreadable_now")
++
++    async def test_module_level_exit_is_an_error_and_keeps_old_runner(self):
++        self.path.write_text(self.new_source + "\nraise SystemExit(7)\n", encoding="utf-8")
++        result = await self.reload()
++        self.assertTrue(result.isError)
++        self.assertIn("SystemExit", result.content[0].text)
++        self.assert_preserved()
++
++    async def test_invalid_runner_api_is_not_published(self):
++        for suffix in ("_async_run = None", "SchemaError = lambda *args: None",
++                       "def _async_run(*args): return {}"):
++            with self.subTest(suffix=suffix):
++                self.path.write_text(self.new_source + "\n" + suffix + "\n", encoding="utf-8")
++                result = await self.reload()
++                self.assertTrue(result.isError)
++                self.assertIn("required_api_missing", result.content[0].text)
++                self.assert_preserved()
++
++    async def test_failed_first_load_cleans_import_slot_and_can_retry(self):
++        adapter._runner = None
++        adapter._runner_source = None
++        sys.modules.pop(MODULE)
++        self.path.write_text(self.old_source + "\nraise RuntimeError('fixture')\n", encoding="utf-8")
++        with self.assertRaisesRegex(ToolError, "RuntimeError"):
++            adapter.load_runner()
++        self.assertIsNone(adapter._runner)
++        self.assertNotIn(MODULE, sys.modules)
++        self.path.write_text(self.new_source, encoding="utf-8")
++        self.assertEqual(adapter.load_runner()._IMPLEMENTATION, "new")
++
++    async def test_reload_bypasses_valid_old_pyc_and_refreshes_same_stat_cache(self):
++        py_compile.compile(str(self.path), doraise=True)
++        before = self.path.stat()
++        self.path.write_text(self.new_source, encoding="utf-8")
++        os.utime(self.path, ns=(before.st_atime_ns, before.st_mtime_ns))
++        # Independent control: the default loader really does select the old pyc.
++        control = python_types.ModuleType("pyc_control")
++        control.__file__ = str(self.path)
++        adapter.importlib.machinery.SourceFileLoader(control.__name__, str(self.path)).exec_module(control)
++        self.assertEqual(control._IMPLEMENTATION, "old")
++        self.assertFalse((await self.reload()).isError)
++        self.assertEqual((await self.run_book()).structuredContent["implementation"], "new")
++        self.assertEqual(self.watch.snapshot()["status"], "fresh")
++        self.assertEqual(self.watch._hashes, self.boot_hashes)
++
++    async def test_source_change_during_exec_rejects_candidate(self):
++        execute = adapter._RunnerSourceLoader.exec_module
++
++        def edit_after_exec(loader, module):
++            execute(loader, module)
++            self.path.write_text(self.new_source + "\n# later edit\n", encoding="utf-8")
++
++        with patch.object(adapter._RunnerSourceLoader, "exec_module", edit_after_exec):
++            result = await self.reload()
++        self.assertTrue(result.isError)
++        self.assertIn("source_changed_during_load", result.content[0].text)
++        self.assert_preserved()
++
++    async def test_concurrent_reload_and_run_refuse_during_module_construction(self):
++        entered, release = threading.Event(), threading.Event()
++        execute = adapter._RunnerSourceLoader.exec_module
++
++        def paused(loader, module):
++            entered.set()
++            if not release.wait(5):
++                raise RuntimeError("fixture barrier timeout")
++            execute(loader, module)
++
++        with patch.object(adapter._RunnerSourceLoader, "exec_module", paused):
++            task = asyncio.create_task(asyncio.to_thread(adapter.reload_runner, MODULE))
++            try:
++                self.assertTrue(await asyncio.to_thread(entered.wait, 3))
++                status = await asyncio.wait_for(asyncio.to_thread(self.watch.snapshot), 1)
++                self.assertEqual(status["status"], "unknown")
++                self.assertEqual(status["unreadable_reasons"][MODULE], "runner_load_unverified")
++                refused = await asyncio.wait_for(self.reload(), 1)
++                self.assertTrue(refused.isError)
++                self.assertIn("load_in_progress", refused.content[0].text)
++                refused = await asyncio.wait_for(self.run_book(), 1)
++                self.assertTrue(refused.isError)
++                self.assertIn("load_in_progress", refused.content[0].text)
++            finally:
++                release.set()
++                result = await task
++        self.assertEqual(result["status"], "reloaded")
++        self.assertEqual(adapter._active_runs, 0)
++
++    async def test_generation_change_during_observation_is_unknown_then_fresh(self):
++        self.path.write_text(self.new_source + "\n", encoding="utf-8")
++        digest = freshness._digest
++        changed = False
++
++        def reload_at_read(path):
++            nonlocal changed
++            if path == self.path and not changed:
++                changed = True
++                adapter.reload_runner(MODULE)
++            return digest(path)
++
++        with patch.object(freshness, "_digest", reload_at_read):
++            status = self.watch.snapshot()
++        self.assertEqual(status["status"], "unknown")
++        self.assertEqual(status["unreadable_reasons"][MODULE], "runner_changed_during_observation")
++        self.assertEqual(self.watch.snapshot()["status"], "fresh")
++        self.assertEqual(self.watch._hashes, self.boot_hashes)
++
++    async def test_unaccredited_import_slot_replacement_cannot_turn_fresh(self):
++        replacement = python_types.ModuleType(MODULE)
++        replacement.__file__ = str(self.path)
++        sys.modules[MODULE] = replacement
++        status = self.watch.snapshot()
++        self.assertEqual(status["status"], "unknown")
++        self.assertEqual(status["unreadable_reasons"][MODULE], "runner_load_unverified")
++        sys.modules[MODULE] = self.old_runner
++        self.assertEqual(self.watch.snapshot()["status"], "fresh")
++
++    async def test_reload_does_not_clear_other_modules_drift(self):
++        path = self.root / "unrelated.py"
++        path.write_text("value = 1\n", encoding="utf-8")
++        module = python_types.ModuleType("dayz_mcp.unrelated_reload_fixture")
++        module.__file__ = str(path)
++        sys.modules[module.__name__] = module
++        watch = freshness.ServerSourceWatch(freshness.loaded_source_files())
++        path.write_text("value = 222\n", encoding="utf-8")
++        self.path.write_text(self.new_source + "\n", encoding="utf-8")
++        self.assertFalse((await self.reload()).isError)
++        self.assertEqual(watch.snapshot()["stale"], [module.__name__])
++
++    async def test_subsequent_edit_is_stale_and_second_reload_uses_latest_bytes(self):
++        self.path.write_text(self.new_source, encoding="utf-8")
++        self.assertFalse((await self.reload()).isError)
++        new_runner = adapter.load_runner()
++        self.path.write_text(self.new_source.replace('"new"', '"third"'), encoding="utf-8")
++        result = await self.run_book()
++        self.assertEqual(result.structuredContent["implementation"], "new")
++        self.assertEqual(result.meta[freshness.MARKER]["stale"], [MODULE])
++        self.assertFalse((await self.reload()).isError)
++        self.assertIsNot(adapter.load_runner(), new_runner)
++        self.assertEqual((await self.run_book()).structuredContent["implementation"], "third")
++        self.assertEqual(self.watch.snapshot()["status"], "fresh")
++
++    async def test_reload_supports_module_level_dataclasses(self):
++        self.path.write_text(
++            self.new_source + "\nfrom dataclasses import dataclass\n"
++            "@dataclass\nclass LoadRecord:\n    value: str = 'new'\n",
++            encoding="utf-8",
++        )
++        self.assertFalse((await self.reload()).isError)
++        runner = adapter.load_runner()
++        self.assertEqual(runner.LoadRecord().value, "new")
++        self.assertIs(sys.modules[runner.LoadRecord.__module__], runner)
++        self.assertEqual(self.watch.snapshot()["status"], "fresh")
++
++
++if __name__ == "__main__":
++    unittest.main()

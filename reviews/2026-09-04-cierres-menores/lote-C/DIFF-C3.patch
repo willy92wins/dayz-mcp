@@ -1,0 +1,372 @@
+diff --git a/tools/dayz_mcp/server.py b/tools/dayz_mcp/server.py
+index 9e48a28..c752f80 100644
+--- a/tools/dayz_mcp/server.py
++++ b/tools/dayz_mcp/server.py
+@@ -644,12 +644,58 @@ def _target_peer_down(
+     )
+ 
+ 
+-def _bridge_error(result: dict[str, Any]) -> ToolError:
+-    # The message stays a fixed code; the bridge's object_id (sent on a
++_UI_ECHO_VERBS = frozenset({"ui_click", "ui_focus", "ui_set_text", "ui_tree"})
++_UI_CLICK_DIAGNOSTIC_KEYS = ("handler", "user_id", "clicked")
++_UI_ECHO_KEYS = ("requested_path", "requested_root", "matched_path")
++
++
++def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
++    """Diagnostics the bridge filled BEFORE deciding the error, as message text.
++
++    ui_click sets user_id, handler and clicked before it settles on not_handled
++    (MCPClientBridge.c:1465-1480), and the four core UI verbs echo their request
++    (ui_request, MCPClientBridge.c:2199-2218). Only the message of a ToolError
++    crosses the MCP wire, so a bare code threw away the two fields that
++    discriminate the cause (fb-20260829-221423-b2c4).
++
++    The decision is by VERB, never by key presence: MCPResult is one flat class
++    (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
++    clicked=false, and a world_spawn timeout has to stay "timeout". The click
++    scalars are reported for ui_click only, an empty handler included -- no
++    handler ran, which is a different diagnosis from one that ran and declined.
++    The echo is whitelisted and empty values are omitted; requested_text stays
++    out on purpose, it would replay caller input (possibly sensitive, unbounded)
++    into an error message.
++    """
++    if cmd not in _UI_ECHO_VERBS:
++        return ""
++    parts: list[str] = []
++    if cmd == "ui_click":
++        fields = [
++            f"{key}={result[key]!r}" for key in _UI_CLICK_DIAGNOSTIC_KEYS if key in result
++        ]
++        if fields:
++            parts.append(" ".join(fields))
++    echo = result.get("ui_request")
++    if isinstance(echo, dict):
++        pairs = [
++            f"{key}={echo[key]!r}" for key in _UI_ECHO_KEYS if echo.get(key) not in (None, "")
++        ]
++        if pairs:
++            parts.append(" ".join(pairs))
++    return "; ".join(parts)
++
++
++def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
++    # The message head stays the fixed code; the bridge's object_id (sent on a
+     # spawn timeout, MCPBridge.c:3272) rides in a structured attribute so the
+     # caller can clean up instead of duplicating, without the message carrying
+-    # host content across the MCP wire.
+-    error = ToolError(str(result.get("error") or "bridge_error"))
++    # host content across the MCP wire. For the core UI verbs the diagnostics
++    # the bridge filled before the error follow the code after "; " -- see
++    # _bridge_error_detail; every other verb keeps the bare code.
++    code = str(result.get("error") or "bridge_error")
++    detail = _bridge_error_detail(result, cmd)
++    error = ToolError(f"{code}; {detail}" if detail else code)
+     object_id = result.get("object_id")
+     if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
+         error.object_id = object_id
+@@ -884,7 +930,7 @@ class Runtime:
+                 # matched a business error (`0 is False` is False) and surfaced
+                 # bridge failures as success. Treat any falsy ok as a ToolError.
+                 if not result.get("ok"):
+-                    raise _bridge_error(result)
++                    raise _bridge_error(result, cmd)
+                 return result_prune.prune_unfilled_fields(cmd, result)
+             await asyncio.sleep(POLL_INTERVAL_S)
+ 
+@@ -914,7 +960,7 @@ class Runtime:
+         if result is None:
+             return None
+         if not result.get("ok"):
+-            raise _bridge_error(result)
++            raise _bridge_error(result, cmd)
+         return result_prune.prune_unfilled_fields(cmd, result)
+ 
+     async def abandon_bridge(self, command_id: int, reason: str) -> None:
+@@ -1515,7 +1561,7 @@ class ClientRuntime:
+                 result = payload.get("result") or {}
+                 # Bridge serializes ok as int 0/1; treat any falsy ok as an error.
+                 if not result.get("ok"):
+-                    raise _bridge_error(result)
++                    raise _bridge_error(result, cmd)
+                 return result_prune.prune_unfilled_fields(cmd, result)
+             remaining = deadline - self._time_fn()
+             if remaining <= 0.0:
+@@ -1587,7 +1633,7 @@ class ClientRuntime:
+         if payload.get("status") == "done":
+             result = payload.get("result") or {}
+             if not result.get("ok"):
+-                raise _bridge_error(result)
++                raise _bridge_error(result, cmd)
+             return result_prune.prune_unfilled_fields(cmd, result)
+         return None
+ 
+@@ -4396,7 +4442,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
+     @app.tool(description=(
+         f"{LEASE_TOOL_LINE} Click a client widget by name. button is "
+         "0=left, 1=right, 2=middle. mode='direct' is the default; the bridge "
+-        "rejects mode='complete' with mode_not_implemented."
++        "rejects mode='complete' with mode_not_implemented. On failure the "
++        "error text keeps the bridge diagnostics after the code, e.g. "
++        "not_handled; handler='X' user_id=506 clicked=False; "
++        "requested_path='BtnCloseX' matched_path='...': an empty handler means "
++        "no handler ran, a named one ran and declined."
+     ))
+     async def ui_click(
+         path: str,
+diff --git a/tools/tests/test_ui_error_diagnostics.py b/tools/tests/test_ui_error_diagnostics.py
+new file mode 100644
+index 0000000..090baa0
+--- /dev/null
++++ b/tools/tests/test_ui_error_diagnostics.py
+@@ -0,0 +1,188 @@
++"""fb-20260829-221423-b2c4: a bridge ok:0 keeps the diagnostics it filled before the error.
++
++The bridge sets user_id, handler and clicked before it decides not_handled
++(MCPClientBridge.c:1465-1480) and echoes the request in ui_request; the Python
++layer used to raise ToolError("not_handled") and drop all of it. The message is
++the only thing that crosses the MCP wire, so the fields now ride in it after the
++code -- for the core UI verbs only. MCPResult is one flat class, so every wire
++result carries handler="", user_id=0, clicked=false: the decision is by verb,
++and a world_spawn timeout keeps the bare code the rest of the suite pins.
++"""
++from __future__ import annotations
++
++import unittest
++from types import SimpleNamespace
++from typing import Any
++from unittest.mock import PropertyMock, patch
++
++from mcp.shared.memory import create_connected_server_and_client_session
++
++from dayz_mcp import server
++from dayz_mcp.server import ServerConfig, build_app
++
++NOT_HANDLED: dict[str, Any] = {
++    "ok": 0,
++    "error": "not_handled",
++    "handler": "LFPG_SorterView_TEST",
++    "user_id": 506,
++    "clicked": False,
++    "ui_request": {
++        "requested_path": "BtnCloseX",
++        "requested_root": "",
++        "requested_text": "",
++        "matched_path": "LFPG_Sorter/BtnCloseX",
++    },
++}
++
++# The shape every result has on the wire: the flat MCPResult scalars ride along
++# unassigned (MCPMessages.c:423-479) and result_prune leaves falsy scalars alone.
++FLAT_TIMEOUT: dict[str, Any] = {
++    "ok": 0,
++    "error": "timeout",
++    "object_id": 7,
++    "handler": "",
++    "user_id": 0,
++    "clicked": False,
++    "ui_request": {},
++}
++
++# A non-UI result that LOOKS like it has diagnostics. The bridge never produces
++# it, but the test has to show that the verb decides, not the payload: without
++# the verb gate the allowed echo below would leak into a world_spawn error.
++LOADED_TIMEOUT: dict[str, Any] = {
++    "ok": 0,
++    "error": "timeout",
++    "object_id": 7,
++    "handler": "SomeHandler",
++    "user_id": 99,
++    "clicked": True,
++    "ui_request": {"requested_path": "A", "matched_path": "Root/A"},
++}
++
++
++class BridgeErrorDiagnosticsTest(unittest.TestCase):
++    def test_ui_click_fields_ride_in_the_message_after_the_code(self) -> None:
++        message = str(server._bridge_error(dict(NOT_HANDLED), "ui_click"))
++        self.assertEqual(
++            message,
++            "not_handled; handler='LFPG_SorterView_TEST' user_id=506 clicked=False; "
++            "requested_path='BtnCloseX' matched_path='LFPG_Sorter/BtnCloseX'",
++        )
++
++    def test_empty_handler_is_reported_as_no_handler_ran(self) -> None:
++        message = str(
++            server._bridge_error(
++                {"ok": 0, "error": "not_handled", "handler": "", "user_id": 0, "clicked": False},
++                "ui_click",
++            )
++        )
++        self.assertIn("handler=''", message)
++
++    def test_flat_scalars_do_not_enrich_non_ui_verbs(self) -> None:
++        # Codex C B-01 repro: the flat defaults must not turn "timeout" into
++        # "timeout; handler='' user_id=0 clicked=False".
++        error = server._bridge_error(dict(FLAT_TIMEOUT), "world_spawn")
++        self.assertEqual(str(error), "timeout")
++        self.assertEqual(error.object_id, 7)
++        self.assertEqual(str(server._bridge_error(dict(FLAT_TIMEOUT), None)), "timeout")
++        self.assertEqual(str(server._bridge_error({"ok": 0, "error": "bad_pos"}, "player_teleport")), "bad_pos")
++        self.assertEqual(str(server._bridge_error({"ok": 0}, "object_inspect")), "bridge_error")
++
++    def test_verb_gate_decides_not_the_payload(self) -> None:
++        # Codex C R2 B-02: a non-UI verb keeps the bare code even when the
++        # payload carries a non-empty allowed echo and non-empty click scalars.
++        # Dropping the verb gate makes this observable (the echo would leak).
++        for cmd in ("world_spawn", "player_teleport", "key_press", None):
++            with self.subTest(cmd):
++                error = server._bridge_error(dict(LOADED_TIMEOUT), cmd)
++                self.assertEqual(str(error), "timeout")
++                self.assertEqual(error.object_id, 7)
++
++    def test_other_ui_verbs_get_the_echo_but_not_the_click_scalars(self) -> None:
++        result = {
++            "ok": 0,
++            "error": "text_not_writable",
++            "handler": "",
++            "user_id": 0,
++            "clicked": False,
++            "ui_request": {
++                "requested_path": "Cmd",
++                "requested_root": "",
++                "requested_text": "dump secret-token",
++                "matched_path": "",
++            },
++        }
++        message = str(server._bridge_error(result, "ui_set_text"))
++        self.assertEqual(message, "text_not_writable; requested_path='Cmd'")
++        # requested_text replays caller input: it never enters an error message.
++        self.assertNotIn("secret-token", str(server._bridge_error(result, "ui_click")))
++
++    def test_echo_is_an_allowlist_not_an_iteration(self) -> None:
++        # A key the bridge may grow tomorrow must not be published by this
++        # message until someone decides it belongs there.
++        result = {
++            "ok": 0,
++            "error": "not_handled",
++            "handler": "H",
++            "user_id": 1,
++            "clicked": False,
++            "ui_request": {"requested_path": "A", "future_key": "x", "requested_text": "t"},
++        }
++        message = str(server._bridge_error(result, "ui_click"))
++        self.assertEqual(message, "not_handled; handler='H' user_id=1 clicked=False; requested_path='A'")
++
++    def test_empty_echo_keeps_the_bare_code_even_for_ui_verbs(self) -> None:
++        self.assertEqual(
++            str(server._bridge_error({"ok": 0, "error": "widget_not_found", "ui_request": {}}, "ui_focus")),
++            "widget_not_found",
++        )
++        self.assertEqual(
++            str(server._bridge_error({"ok": 0, "error": "widget_not_found", "ui_request": None}, "ui_tree")),
++            "widget_not_found",
++        )
++
++
++def _fake_state(result: dict[str, Any]) -> SimpleNamespace:
++    return SimpleNamespace(
++        enqueue_command=lambda *args, **kwargs: (200, {"id": 41}),
++        take_result=lambda command_id, remove=False: dict(result),
++        abandon_command=lambda *args, **kwargs: None,
++    )
++
++
++async def _wire_error_text(tool: str, arguments: dict[str, Any], result: dict[str, Any]) -> str:
++    """Error text a real MCP client receives, walking call_bridge -> wait_for_result -> _bridge_error."""
++    app, runtime = build_app(ServerConfig(key="k", port=0, log_sink=lambda _m: None))
++    with patch.object(runtime, "ensure_peer_allowed", return_value=None), patch.object(
++        type(runtime), "state", new_callable=PropertyMock, return_value=_fake_state(result)
++    ):
++        async with create_connected_server_and_client_session(app._mcp_server) as session:
++            call = await session.call_tool(tool, arguments)
++    assert call.isError, call
++    return " ".join(getattr(block, "text", "") for block in call.content)
++
++
++class UiClickWireTest(unittest.IsolatedAsyncioTestCase):
++    async def test_not_handled_reaches_the_client_with_its_diagnostics(self) -> None:
++        text = await _wire_error_text("ui_click", {"path": "BtnCloseX"}, NOT_HANDLED)
++        self.assertEqual(
++            text,
++            "Error executing tool ui_click: not_handled; handler='LFPG_SorterView_TEST' "
++            "user_id=506 clicked=False; requested_path='BtnCloseX' matched_path='LFPG_Sorter/BtnCloseX'",
++        )
++
++    async def test_world_spawn_timeout_with_flat_scalars_stays_bare(self) -> None:
++        text = await _wire_error_text(
++            "world_spawn", {"type": "SurvivorM_Mirek", "pos": [7500.0, 0.0, 7500.0]}, FLAT_TIMEOUT
++        )
++        self.assertEqual(text, "Error executing tool world_spawn: timeout")
++
++    async def test_world_spawn_with_a_loaded_payload_stays_bare(self) -> None:
++        text = await _wire_error_text(
++            "world_spawn", {"type": "SurvivorM_Mirek", "pos": [7500.0, 0.0, 7500.0]}, LOADED_TIMEOUT
++        )
++        self.assertEqual(text, "Error executing tool world_spawn: timeout")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tools/tests/test_lote_b_products.py b/tools/tests/test_lote_b_products.py
+new file mode 100644
+index 0000000..ecfd372
+--- /dev/null
++++ b/tools/tests/test_lote_b_products.py
+@@ -0,0 +1,56 @@
++"""Lote B products reach the client over the wire (Codex review B backlog).
++
++The three description edits of fb-20260904-123220-5930 and the ui_click failure
++contract of fb-20260829-221423-b2c4 are prose. A registry fingerprint catches a
++change but cannot say which sentence went missing; this pins the sentences an
++agent relies on, read through a real in-memory MCP session rather than the tool
++manager, so a wrapper that rewrote descriptions would fail here.
++"""
++from __future__ import annotations
++
++import unittest
++
++from mcp.shared.memory import create_connected_server_and_client_session
++
++from dayz_mcp import server
++from dayz_mcp.server import ServerConfig, build_app
++
++EXPECTED = {
++    "entities_query": (
++        "pos.y is used as given",
++        "nothing snaps it to the surface",
++        "pos=[x, surface_query.y, z]",
++        "nearest_player_m",
++    ),
++    "logs_since": (
++        "marker advances only to the end of the lines RETURNED, never to EOF",
++        "max_lines=1 marks one line INTO the launch tail",
++        "script_<date>.log",
++    ),
++    "capture_screenshot": (
++        "PHYSICAL pixels (DPI-aware)",
++        "SetProcessDpiAwareness",
++        "1920 -> 1280",
++    ),
++    "ui_click": (
++        "On failure the error text keeps the bridge diagnostics after the code",
++        "an empty handler means no handler ran, a named one ran and declined",
++    ),
++}
++
++
++class LoteBWireDescriptionsTest(unittest.IsolatedAsyncioTestCase):
++    async def test_description_sentences_reach_a_real_client_session(self) -> None:
++        app, _runtime = build_app(ServerConfig(key="k", port=0, log_sink=lambda _m: None))
++        async with create_connected_server_and_client_session(app._mcp_server) as session:
++            listed = await session.list_tools()
++        descriptions = {tool.name: tool.description or "" for tool in listed.tools}
++        for name, fragments in EXPECTED.items():
++            with self.subTest(name):
++                self.assertIn(name, descriptions)
++                for fragment in fragments:
++                    self.assertIn(fragment, descriptions[name], (name, fragment))
++
++
++if __name__ == "__main__":
++    unittest.main()

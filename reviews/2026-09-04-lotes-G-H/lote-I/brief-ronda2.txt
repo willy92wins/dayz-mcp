@@ -1,0 +1,119 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar. Tienes shell: úsalo.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+LOTE I, RONDA 2. Tu ronda 1 dejó el producto congelado, la suite completa verde y sólo dos
+ficheros tocados. La revisión ciega de Codex sobre esos TESTS dio 2 ALTA + 1 MEDIA + 1 BAJA, todos
+reproducidos con controles negativos. Esta ronda cierra los cuatro y nada más. El producto
+(`tools/dayz_mcp/`) sigue CONGELADO POR HASH.
+
+===============================================================================
+§0. LOS CUATRO HALLAZGOS Y EL PRODUCTO DE ESTA RONDA
+===============================================================================
+
+  F-01 ALTA — `fence_helpers.bind_both_peers` inventa un dueño ajeno al coordinador
+  (`fence-fixture-owner`/`fence-fixture-lease`) y pids sintéticos que el guard REAL clasifica
+  `process_not_found`. Consecuencia medida por Codex: `test_session_e2e.test_parallel_reads_and_
+  mutations_are_fifo_non_interleaved` libera a A (`:263`) y B muta sin adoptar (`:267`); pasa sólo
+  porque liberar A no cerca un run que no es de A. Con el dueño acoplado a A: `ToolError: remote_error`.
+    P-I1. **El dueño lo pone el test, nunca el helper.** Con un lifecycle real, `bind_both_peers`
+          registra el run RUNNING sólo con un dueño que el test controla: el titular ACTIVO del
+          lease `lifecycle` del coordinador (`session_id` y `lease_id` reales, leídos del
+          coordinador) o un `owner=(session_id, lease_id)` explícito. Sin ninguno de los dos, NO
+          registra un run con dueño inventado (deja el manifiesto como estaba, o lanza con un
+          mensaje claro). Los procesos registrados tienen que clasificar `owned` en el guard del
+          lifecycle: con guard falso (`snapshots` dict), siembra la identidad completa; con guard
+          real (`NativeProcessGuard`), registra un proceso VIVO (el propio intérprete,
+          `os.getpid()`) con la identidad que `guard.snapshot(pid)` devuelve.
+    P-I2. **El e2e que libera A y sigue con B adopta con B** (`adopt_run`/`lifecycle_adopt` vía el
+          cliente) antes de la mutación siguiente (C2/C4). Cualquier otro test de
+          `test_client_mode`/`test_daemon`/`test_session_e2e` que libere y siga mutando, igual.
+  F-02 ALTA — `test_every_exited_path_retires_bindings` agrega por función: «alguna llamada retira
+  en algún sitio» no es «todo camino desde cada EXITED retira antes de persistir o retornar». Un
+  mutante que añade a `admin_reconcile` la rama
+      if reason == "__mutant_bypass__":
+          run = self.manifest.get(run_id); run.state = "EXITED"; self.manifest.replace(run); return {...}
+  sobrevive; el de orden invertido en `_commit_retirement` sí muere.
+    P-I3. **Detector sensible al camino.** Para cada asignación `state = "EXITED"`: en el bloque
+          que la contiene y en los bloques que lo encierran, ningún `return` ni `manifest.replace`
+          que venga después de la asignación puede preceder a una llamada que retira —directa a
+          `_retire_run_bindings`, o a una función del módulo que retira ANTES de su propio
+          `manifest.replace`—. El mutante bypass y el de orden invertido pasan a ser controles
+          rojos PERMANENTES dentro del test (se aplican a una copia temporal del módulo bajo
+          `tempfile`, se parsean y se comprueba que el detector los rechaza).
+  F-03 MEDIA — `test_missing_creation_time_without_lifecycle_does_not_deliver` ya no ejecuta la
+  rama `lifecycle is None` de `_lookup_creation_time`: el helper instala el fake antes del poll;
+  sustituir esa rama por `raise` deja el test verde.
+    P-I4. El enqueue usa el fake que exige C1 y `state.lifecycle = None` se pone INMEDIATAMENTE
+          antes de `record_poll`; o se renombra a `..._without_guard_...` y se añade un test
+          aparte que sí recorre la rama `lifecycle is None` (y muere si la rama lanza).
+  F-04 BAJA — `test_release_owner_retires_bindings` afirma lo contrario de su cuerpo.
+    P-I5. Renómbralo `test_release_owner_fences_bound_binding_until_adopt`.
+
+Siguen en pie las reglas de la ronda 1 (R1-R6) y el contrato C1-C5.
+
+===============================================================================
+§1. EL ORÁCULO NUEVO (rojo-antes, sellado): gate/oracle_tests.py
+===============================================================================
+
+  T1a-DUENO-ACOPLADO — lifecycle real, coordinador con A titular del lease `lifecycle`,
+      `bind_both_peers(state, "test-run")` → el run del manifiesto tiene dueño (A.session_id,
+      lease_id de A). Hoy: `fence-fixture-owner`.
+  T1b-PROCESOS-OWNED-GUARD-REAL — lifecycle real con `NativeProcessGuard`: todos los procesos del
+      run registrado clasifican `owned` (`_partition_registered_processes`). Hoy: `gone`.
+  T1c-SIN-LEASE-NO-INVENTA-DUENO — lifecycle real, coordinador sin lease activo, sin `owner`:
+      tras el helper el manifiesto no tiene un run RUNNING con dueño desconocido. Hoy: lo tiene.
+  T2-MUTANTE-BYPASS-EXITED — copia temporal con la rama bypass en `admin_reconcile`: el test
+      detector tiene que FALLAR. Hoy pasa.
+  T2b-MUTANTE-ORDEN-INVERTIDO — copia temporal con retire↔replace invertidos en
+      `_commit_retirement`: el test detector falla (preservación; verde hoy).
+  T3-MUTANTE-RAMA-SIN-LIFECYCLE — copia temporal donde `if lifecycle is None: return None` pasa a
+      lanzar: `test_missing_creation_time_without_lifecycle_does_not_deliver` tiene que FALLAR.
+      Hoy pasa.
+  T4-NOMBRE-RELEASE — no existe `def test_release_owner_retires_bindings`; existe
+      `def test_release_owner_fences_bound_binding_until_adopt`. Hoy al revés.
+
+===============================================================================
+§2. EL GATE (triple)
+===============================================================================
+
+    bash gate/product_frozen.sh       -> PRODUCTO-CONGELADO OK
+    bash gate/run_oracle_tests.sh     -> ORACULO-TESTS-VERDE      (7 checks)
+    bash gate/suite_full.sh           -> SUITE-COMPLETA OK         (rojos == los 2 permitidos)
+
+Ahora mismo: gate/product_frozen.sh: PRODUCTO-CONGELADO OK (63 ficheros) · gate/run_oracle_tests.sh: ORACULO-TESTS: PASS=1 FAIL=6 UNMET=0 de 7 — rojos T1a, T1b, T1c, T2, T3, T4 (T2b verde, controles positivos verdes) · gate/suite_full.sh: SUITE-COMPLETA OK (Ran 2524, rojos = los 2 permitidos). **Los verdes son la línea que no se puede romper.**
+Guarda anti-vacuidad: un `UNMET` no es tu código; si un criterio del oráculo está mal, DISPUTAS.
+`gate/` está sellado por hash y es de sólo lectura.
+
+===============================================================================
+§3. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/tests/test_instance_fence.py
+    tools/tests/test_client_mode.py
+    tools/tests/test_daemon.py
+    tools/tests/test_session_e2e.py        (sin trackear: se reconcilia, no se commitea)
+    tools/tests/fence_helpers.py
+
+PROHIBIDO: `tools/dayz_mcp/`; `gate/`; `addon/`; `unittest.skip`/`expectedFailure`; borrar o
+renombrar tests salvo P-I5; tocar `allowed_red.txt`; red.
+
+Intérprete: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`,
+desde `tools/` con `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1`. Tus mutantes van a una copia bajo
+`%TEMP%`, nunca al workspace. La versión anterior de los tests está en `../../ws-frozen-r1/tools/tests/`.
+
+===============================================================================
+§4. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — P-I1..P-I5 con `path:line`; qué tests de e2e adoptan ahora y dónde.
+    ## GATE             — la salida literal de los TRES gates, pegada, no resumida.
+    ## CONTROL POSITIVO — los dos mutantes del detector (bypass y orden) como salida literal del
+                          test fallando sobre la copia temporal; la salida del test de P-I4 con la
+                          rama lanzando; el e2e de P-I2 fallando ANTES de añadir el adopt con el
+                          dueño ya acoplado.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si un criterio del oráculo o del brief está mal, aquí, con el argumento.

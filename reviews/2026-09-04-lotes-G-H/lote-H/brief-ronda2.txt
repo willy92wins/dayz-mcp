@@ -1,0 +1,139 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar. Tienes shell: úsalo.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+LOTE H, RONDA 2. Tu ronda 1 pasó el gate (29/29) y la suite, y dos revisiones ciegas
+encontraron cinco defectos reproducidos, todos en el ANILLO y en el SOBRE (D2, H1, H4 y el
+camino feliz aguantaron). Además, el lote G —del que este workspace partía— cerró su ronda 9
+y cambió `process_lifecycle.py`: esta ronda hace primero el REBASE y después los cinco arreglos.
+
+===============================================================================
+§0. EL REBASE (primero, y sin inventar nada)
+===============================================================================
+
+En este workspace hay tres ficheros con un hermano `.r9`:
+    tools/dayz_mcp/process_lifecycle.py      + process_lifecycle.py.r9
+    tools/tests/test_process_lifecycle.py    + test_process_lifecycle.py.r9
+    tools/tests/test_box_occupancy.py        + test_box_occupancy.py.r9
+El `.r9` es la versión FINAL del lote G (la base nueva). El fichero sin sufijo es TU entrega de
+la ronda 1 sobre la base vieja. Tu diff propio = `diff <base vieja> <tu fichero>`; la base
+vieja está en `../../../lote-G/ws-frozen-r8/tools/` (sólo lectura). Re-aplica TU diff sobre el
+`.r9`, deja el resultado en el fichero sin sufijo y BORRA los `.r9`. `loopback.py` y
+`test_loopback.py` ya son los de la 9 (este lote no los tocaba): no los toques.
+Lo que la 9 trae y que tienes que respetar (no re-decidir): P6 estricto (sin dueño no se
+despacha NADA; cerco lógico `_fenced_runs` bajo el lock del loopback antes de persistir
+`RUNNING_IDLE`, vía `_quiesce_then_release_owner`), P7' (cerco de compensación `_compensating`
+alrededor del rollback durable), P8. Tus seis caminos que alimentan el anillo coexisten con la
+retirada de bindings y con el quiesce: mantén el orden que fija el §1.1.
+
+Gate doble en esta ronda:
+    bash gate/run.sh                                      -> oráculo del lote H (ampliado)
+    bash gate/suite.sh                                    -> once módulos
+    (cd tools && PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 <python> ../../gate-extra/oracle_lote_g.py)
+                                                          -> oráculo del lote G, 35 checks,
+                                                             tiene que decir ORACULO-VERDE
+El `<python>` es el de `gate/run.sh`. `gate/` y `gate-extra/` son de sólo lectura, sellados.
+
+===============================================================================
+§1. EL PRODUCTO DE ESTA RONDA (los cinco arreglos)
+===============================================================================
+
+  1. **El anillo sólo afirma lo que el manifiesto confirmó.** `_retire_run_diagnostic(...)`
+     se llama SÓLO después de que `manifest.replace(...)` termine con éxito, en los SEIS
+     caminos (`stop_run` ya lo hace; `begin_release_owner`, `repair_recovery_fault`,
+     `repair_manifest_recovery`, `_reap_run_locked`, `admin_reconcile` no). Un fallo de
+     persistencia no consume posición del anillo. Medido en tu entrega: `OSError` en el
+     `replace` de un reap → `reaped=[]`, run presente en `RUNNING_IDLE`, y `run_reaped/EXITED`
+     en el anillo; con el reaper cada 30 s, 32 fallos del mismo run desalojaban TODO el anillo
+     en 16 min y el sobre `run_not_found` de un run legítimo desaparecía.
+  2. **El diagnóstico se valida antes del sobre.** `_copy_generation` (`dayz_test_tool.py:
+     ~785-813`) construía el sobre desde `dict.get()` y fabricaba tres `null` con un
+     diagnóstico `{"run_id": X}` incompleto. Regla: el sobre sólo se construye desde un
+     diagnóstico con las OCHO claves exactas (`run_id`, `daemon_generation_at_launch`,
+     `daemon_generation_current`, `generation_changed`, `event`, `reason`, `decision`,
+     `state`), `run_id` exacto, `state == "EXITED"` y tipos válidos; si no →
+     `DayzTestToolError("run_not_found")` pelado. (El prototipo del redactor del gate ya
+     validaba presencia: recupéralo.)
+  3. **`repair_recovery_fault` rechaza estados terminales y el anillo deduplica.** Precondición
+     sobre `run.state` (sólo los estados de recuperación previstos; `EXITED` → rechazo), y
+     un mismo `(run_id, launch_operation_id)` no entra dos veces en el anillo.
+  4. **Lectura rasgada.** `status()`/`public_status()` leen el manifiesto y el anillo en
+     instantes distintos. NO tomes `_operation_lock` en la lectura (bloquearía `/status`, el
+     discriminador de salud del daemon, durante un stop). Haz: sello de revisión
+     (`_box_revision`, que ya sube en toda retirada) antes y después; si cambió, reintenta
+     (tope acotado, p. ej. 3); y como última defensa, **un diagnóstico cuyo `run_id` figura en
+     `runs` del MISMO payload con una fila NO terminal no se publica**. La convivencia fila
+     `EXITED` + diagnóstico es NORMAL y se conserva (la ficha la exige para el sobre
+     `run_not_active`).
+  5. **`reason` es un código cerrado.** `admin_reconcile` copiaba el `reason` libre del
+     operador (paths, timestamps) al diagnóstico público. `reason="admin_reconciled"`; el
+     texto humano sigue yendo al audit privado.
+
+Sigue en pie H1-H5 y D1-D4 de la ronda 1 (gate/GATES.md).
+
+[DESIGN] Forma que dura: un único `_commit_retirement(run, event, reason, decision) -> bool`
+que persiste y, sólo si persistió, retira bindings y añade el diagnóstico (un solo sitio
+para el orden persistir→publicar, llamado desde los seis caminos); un
+`_validated_diagnostic(item) -> dict | None` en `dayz_test_tool.py` que es el único camino
+hacia el sobre; y un `_status_snapshot()` con el sello y el reintento, usado por `status()` y
+`public_status()`.
+
+LO QUE NO ES EL PRODUCTO: el gate, el oráculo, el ledger, este brief (defecto ahí →
+`DISPUTAS`); la actividad y el ciclo de vida del binding (lote G: no re-decidas P1-P8);
+`server.py`; refactors fuera de lo anterior.
+
+===============================================================================
+§2. LO QUE NO TIENE CHECK EN EL GATE. Lo cierro yo al recibir
+===============================================================================
+
+  (A) Fallo de persistencia en CADA uno de los seis caminos → cero diagnósticos nuevos y el
+      run sigue presente (el gate ampliado ejercita reap y repair; el resto, tests tuyos con
+      rojo-antes contra `../../ws-frozen-r1/tools/` — tu propia ronda 1).
+  (B) 33 pasadas de `reap_dead_runs()` con `replace` fallando siempre → anillo vacío, y un
+      diagnóstico legítimo anterior sigue ahí.
+  (C) `repair_recovery_fault` repetido → segunda llamada rechazada, un solo diagnóstico.
+  (D) Lectura rasgada con barrera sobre `manifest.list_runs` + reap concurrente → nunca fila
+      no terminal y diagnóstico del mismo run juntos; y preservación: stop OK + `status()` sin
+      recarga → fila `EXITED` y diagnóstico juntos.
+  (E) `admin_reconcile(reason="C:\\...\\x.mdmp @ 2026-...")` → el diagnóstico publicado no
+      contiene ni path ni timestamp; el audit sí lleva el texto.
+  (F) El rebase: los 35 checks del oráculo de G en verde (`gate-extra/oracle_lote_g.py`) y los
+      tests de la 9 (`test_*.r9`) íntegros dentro de tus ficheros fusionados.
+
+===============================================================================
+§3. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/process_lifecycle.py      (+ borrar el .r9 al fusionar)
+    tools/dayz_mcp/dayz_test_tool.py
+    tools/tests/test_process_lifecycle.py    (+ borrar el .r9)
+    tools/tests/test_box_occupancy.py        (+ borrar el .r9)
+    tools/tests/test_dayz_test_tool.py
+    tools/tests/test_run_reaper.py           (sólo si (B) exige tocar su fixture)
+
+PROHIBIDO: `gate/`; `gate-extra/`; `addon/`; `server.py`; `loopback.py`; `daemon.py`;
+`runtime_state.py`; debilitar o borrar validaciones existentes; leer `events.jsonl` en la
+ruta de lectura; tocar la actividad ni el cerco de G; usar red; correr la suite completa.
+
+⚠ **Data-crítico (DZ-R9)**: el manifiesto y el orden persistir→publicar. Locks:
+`_operation_lock → (lock del loopback | _activity_lock)`; nunca el inverso; ninguna lectura
+toma `_operation_lock`.
+
+Escribe tests para lo que entregas y córrelos ANTES de tu cambio contra
+`../../ws-frozen-r1/tools/` (copia temporal tuya bajo /tmp).
+
+===============================================================================
+§4. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — el rebase (qué fusionaste y que los .r9 ya no existen), y cada uno
+                          de los cinco arreglos con `path:line`; el método único de retirada y
+                          sus seis llamadas.
+    ## GATE             — la salida literal de los TRES gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea de FAIL contra `ws-frozen-r1`, o
+                          «preservación». Los de §2 (A)-(F) obligatorios.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si algo del gate o del brief te parece mal, aquí con el argumento.

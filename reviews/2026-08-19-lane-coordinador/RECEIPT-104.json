@@ -1,0 +1,41 @@
+{
+ "status": "failed",
+ "premisa_verificada": "Lei _reap_dead_runs_locked (process_lifecycle.py:2287-2298), _run_all_dead (2237-2251), _partition_registered_processes (1579-1594), _classify_registered_process (1556-1577), _identity_matches (1545-1554), _diag_snapshot_registered (2519-2543), _reap_run_locked (2253-2285), _audit (869-882), _retire_run_bindings (853-857), note_run_reaped (session_coordination.py:1903-1921). El camino solo clasifica con guard.snapshot/diag_probe y reescribe el manifiesto; no llama terminate ni mata procesos. El return [] bajo _quarantined() en reap_dead_runs:2308-2309 es el unico bloqueo. Si la linea base hubiera cerrado, el arreglo pedido (dejar correr el reap bajo cuarentena) seguia siendo el correcto.",
+ "files": [
+  "C:\\Users\\guill\\AppData\\Local\\Temp\\mcp-laneCOORD-20260819\\DayZ Projects\\DayZ_MCP_dev\\tools\\base104.log"
+ ],
+ "tests_added": [],
+ "ast_test": "",
+ "mutations": [],
+ "quarantine_call_sites": [
+  "start_run:1173,1273,1280,1343 — lanza DayZDiag; se deja",
+  "stop_run:1610,1691,1707,1732 — 1732 esta justo antes de guard.terminate; se deja",
+  "adopt_run:1865,1888,1895 — reclama un run vivo; se deja",
+  "repair_manifest_recovery:2168 — ese camino SI hace guard.terminate; se deja",
+  "reap_dead_runs:2308 — ESTE es BUG-104; no lo quite porque pare",
+  "reap_dead_run:2332 (agente, singular) — tampoco termina, pero no es el reaper del daemon; se deja (DZ-R7)",
+  "status:2361 y public_status:2378 — solo reportan el flag; se deja",
+  "admin_reconcile:2582,2638,2650 — recovery TTY de procesos potencialmente vivos; se deja"
+ ],
+ "baseline": {
+  "ran": 1724,
+  "failures": 3,
+  "skipped": 4,
+  "seconds": 210.715,
+  "python": ".venv-mcp\\Scripts\\python.exe"
+ },
+ "suite_final": {
+  "ran": 0,
+  "failures": 0
+ },
+ "not_verified": [
+  "No reexecute la suite del arbol OneDrive (frontera: no tocarlo).",
+  "No verifique si dayz-mcp-architecture.md del arbol real ya tiene la formula de 51 tools."
+ ],
+ "noticed_but_untouched": [
+  "test_architecture_tool_count_matches_instantiated_app: architecture.md vintage (11 tools) vs app de 51. README.md ya esta alineado. No es BUG-104.",
+  "loopback.py:_retail_quarantined — otro simbolo; gates de mutacion MCP, no el reaper.",
+  "test_reaper_skips_under_retail_quarantine (test_process_lifecycle.py:1099) documenta el contrato viejo; habria que invertirlo al arreglar.",
+  "Copia .bak_pre_fencing_20260819 y _restore/ — no las toque."
+ ]
+}

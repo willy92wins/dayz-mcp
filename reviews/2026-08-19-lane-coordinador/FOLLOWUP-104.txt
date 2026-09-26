@@ -1,0 +1,34 @@
+LA LINEA BASE YA ESTA LIMPIA. Hiciste bien en parar: el tercer rojo era real, pero era
+CULPA MIA, no del codigo.
+
+Que pasaba: `test_architecture_tool_count_matches_instantiated_app` lee
+`TOOLS_DIR.parent / "dayz-mcp-architecture.md"` (tests\test_install_mcp.py:1314), o sea un
+fichero que vive FUERA de `tools\`. Yo refresque el workspace copiando solo `dayz_mcp\` y
+`tests\`, asi que el codigo venia actualizado y el documento se quedo viejo. Verificado por
+mi: ese test esta VERDE en el arbol real y solo salia rojo en la copia. Ya he sincronizado
+el documento y lo he vuelto a correr en el workspace: OK.
+
+Tu nueva linea base es la que decia el brief: **1724 tests, failures=2** (los dos
+centinelas de `test_task9_spawn_phase_markers`, rojos a proposito - no los toques).
+
+ADELANTE con BUG-104 tal como lo pedia el brief original, sin cambios. Recuerda lo que ya
+tienes hecho y no lo repitas: ya leiste `_reap_dead_runs_locked` y su cierre transitivo, y
+ya inventariaste los 10 call-sites de `_quarantined()`. Eso vale; sigue desde ahi.
+
+Lo que falta:
+ 1. El arreglo: dejar que `reap_dead_runs` corra bajo cuarentena.
+ 2. La traza de audit cuando corre bajo cuarentena.
+ 3. El test AST que impide la reincidencia (que falle si algun dia aparece un `terminate`
+    alcanzable desde `_reap_dead_runs_locked`), al estilo de
+    `test_every_exited_path_retires_bindings`.
+ 4. Tests de conducta: un run con cero procesos vivos SE retira con la cuarentena activa.
+    ROJO antes del arreglo (red104.log), verde despues (green104.log).
+ 5. Mutacion (mut104.log), incluyendo el CABLEADO y no solo el cuerpo: si un doble de test
+    puede estar suplantando a `retail_probe` o al manifest, comprueba que el test se ata al
+    codigo de PRODUCCION. Una mutacion que sobrevive es una rama sin test.
+ 6. Suite completa (suite104.log): 1724 + tus tests, failures=2.
+
+Mismas fronteras: solo el workspace, nada bajo OneDrive ni P:\, sin procesos DayZ, sin
+subagentes, sin tocar los centinelas.
+
+Mismo RECEIPT que pedia el brief original.

@@ -1,0 +1,78 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni propongas un plan.
+Trabaja hasta terminar.
+
+RONDA 2 DEL LOTE E. Encargo de un solo punto. Tu entrega está casi entera: 17 de 20 checks
+en verde y la suite acotada OK. Esto no es un rechazo.
+
+===============================================================================
+TUS DOS DISPUTAS: resueltas, y una a tu favor
+===============================================================================
+
+**Disputa 2 — TIENES RAZÓN, y no toques nada.** Lo medí: `server.py:263-269`
+(`_is_safe_error_token`) rechaza a propósito punto, dos puntos, separador, espacio y
+comilla, para que un mensaje de stdlib quede mudo. El `isidentifier()` del test no es un
+descuido: es esa misma política. Tu solución —identity mappings en el mapa, y el prefijo
+emitido por la fachada— es la correcta. Y lo comprobé de punta a punta: la cadena con dos
+puntos **llega intacta al cliente** por la tool pública:
+
+    client sin run_id  -> bad_dayz_test_request:client_requires_run_id
+    server con run_id  -> bad_dayz_test_request:server_all_forbid_run_id
+
+Así que el mapa se queda como está. Lo que apuntaste sobre las dos formas según el camino
+queda anotado para el revisor; no lo arregles tú.
+
+**Disputa 1 — el conflicto era real y el defecto era MÍO, pero la resolución es la
+contraria a la que elegiste.** Mi oráculo importaba `_INVALID_RUN_ID`, que es el token
+INTERNO del parser, y exigía que el cliente lo viera. Derivar de la fuente no vale si es la
+fuente equivocada. El código público correcto es `bad_run_id`, y no me lo invento: ya está
+enviado en `dayz_test_tool.py:200`, en `_exact_run`, para el UUID malformado del camino de
+stop/extensión.
+
+Tú mismo lo dijiste en la disputa: emitir `invalid_run_id` deja **dos códigos públicos para
+la misma clase de error**. Eso es peor que la opacidad que esta ficha viene a arreglar.
+
+**He corregido el oráculo**: E1-UUID y E1-PREC esperan ahora `bad_run_id`.
+
+===============================================================================
+TU ENCARGO, QUE ES UNO SOLO
+===============================================================================
+
+Que un UUID malformado llegue al cliente como `bad_run_id`, por la fachada y por la tool
+pública, con `preflight` en los dos valores. Y que siga venciendo a la combinación
+mode/run_id: `mode=server` con un UUID malformado da `bad_run_id`, no
+`server_all_forbid_run_id`.
+
+Estado exacto ahora mismo, medido por mí con el oráculo ya corregido:
+
+    bash gate/run.sh    -> ORACULO: PASS=17 FAIL=3 UNMET=0 de 20
+      [FAIL] E1-UUID preflight=False   esperaba 'bad_run_id'
+      [FAIL] E1-UUID preflight=True    esperaba 'bad_run_id'
+      [FAIL] E1-PREC el UUID malformado vence a la combinacion mode/run_id
+    bash gate/suite.sh  -> SUITE-ACOTADA OK
+
+Los otros 17 están verdes y **no pueden dejar de estarlo**.
+
+Terminas cuando `gate/run.sh` diga `ORACULO-VERDE` y `gate/suite.sh` diga `SUITE-ACOTADA OK`.
+
+===============================================================================
+FRONTERAS
+===============================================================================
+
+WRITE-SET de esta ronda:
+    tools/dayz_mcp/dayz_test_tool.py
+    tools/dayz_mcp/server.py
+    tools/tests/test_dayz_test_tool.py
+    tools/tests/test_mcp_tools.py
+
+PROHIBIDO: `gate/`; `tests/test_client_mode.py`; `dayz_test_worker.py`;
+`dayz_test_request.py`; debilitar `_is_safe_error_token`, `isidentifier()` o cualquier otra
+validación; borrar tests.
+
+Actualiza el test que fije el código del UUID, y córrelo antes del cambio para ver que falla.
+
+===============================================================================
+CIERRE
+===============================================================================
+
+Reescribe `STATE.md` con las secciones de siempre (HECHO / GATE / CONTROL POSITIVO /
+LO QUE NO PUDE VERIFICAR / DISPUTAS), pegando la salida literal de los dos gates.

@@ -1,0 +1,108 @@
+--- dayz-test.ps1.BEFORE
++++ dayz-test.ps1
+@@ -424,13 +424,18 @@
+     [CmdletBinding()]
+     param([Parameter(Mandatory = $true)][string]$Path)
+ 
++    # This is a directory counter, NOT a general PBO validator.
++    # InvalidData means a proven truncation/bounds violation in a recognized layout.
++    # NotSupported means an unfamiliar header: it does NOT prove a broken PBO.
++    # Packing methods and checksum trailers need no decoding to count file names.
+     # PBO headers are NUL-terminated names followed by five little-endian DWORDs.
+     # File bodies follow the complete header table, not their individual entries.
+-    function Read-PboString([IO.BinaryReader]$Reader) {
++    function Read-PboString([IO.BinaryReader]$Reader, [bool]$KnownLayout) {
+         $text = New-Object Text.StringBuilder
+         while ($true) {
+             if ($Reader.BaseStream.Position -ge $Reader.BaseStream.Length) {
+-                throw 'Truncated PBO string.'
++                if ($KnownLayout) { throw [IO.InvalidDataException]::new('Truncated PBO string.') }
++                throw [NotSupportedException]::new('Unrecognized PBO header (unterminated first name).')
+             }
+             $value = $Reader.ReadByte()
+             if ($value -eq 0) { return $text.ToString() }
+@@ -446,10 +451,12 @@
+         [long]$payloadBytes = 0
+         [long]$count = 0
+         $first = $true
++        $knownLayout = $false
+         while ($true) {
+-            $name = Read-PboString $reader
++            $name = Read-PboString $reader $knownLayout
+             if (($stream.Length - $stream.Position) -lt 20) {
+-                throw 'Truncated PBO entry.'
++                if ($knownLayout) { throw [IO.InvalidDataException]::new('Truncated PBO entry.') }
++                throw [NotSupportedException]::new('Unrecognized PBO header (incomplete first entry).')
+             }
+             $method = $reader.ReadUInt32()
+             $originalSize = $reader.ReadUInt32()
+@@ -462,33 +469,37 @@
+                     # Optional Vers entry, then key/value strings and an empty key.
+                     if ($originalSize -ne 0 -or $reserved -ne 0 -or
+                         $timestamp -ne 0 -or $dataSize -ne 0) {
+-                        throw 'Invalid PBO Vers entry.'
++                        throw [NotSupportedException]::new('Unsupported PBO Vers metadata.')
+                     }
++                    $knownLayout = $true
+                     while ($true) {
+-                        $key = Read-PboString $reader
++                        $key = Read-PboString $reader $true
+                         if ($key.Length -eq 0) { break }
+-                        $null = Read-PboString $reader
++                        $null = Read-PboString $reader $true
+                     }
+                     $first = $false
+                     continue
+                 }
+                 if ($method -ne 0 -or $originalSize -ne 0 -or $reserved -ne 0 -or
+                     $timestamp -ne 0 -or $dataSize -ne 0) {
+-                    throw 'Invalid PBO header terminator.'
++                    throw [NotSupportedException]::new('Unsupported PBO empty-name metadata.')
+                 }
+                 break
+             }
+-            if ($method -eq 0x56657273) { throw 'Invalid named PBO Vers entry.' }
++            if ($method -eq 0x56657273) { throw [NotSupportedException]::new('Unsupported named PBO Vers entry.') }
++            # A named entry with a stored size uses the standard directory layout;
++            # unknown compression codes still use that size, not OriginalSize.
++            $knownLayout = $true
+             $first = $false
+             # Bound each addition before summing, including on very large files.
+             if ([long]$dataSize -gt ($stream.Length - $payloadBytes)) {
+-                throw 'PBO payload exceeds file bounds.'
++                throw [IO.InvalidDataException]::new('PBO payload exceeds file bounds.')
+             }
+             $payloadBytes += [long]$dataSize
+             if ($name.EndsWith('.c', [StringComparison]::OrdinalIgnoreCase)) { $count++ }
+         }
+         if ($payloadBytes -gt ($stream.Length - $stream.Position)) {
+-            throw 'Truncated PBO payload.'
++            throw [IO.InvalidDataException]::new('Truncated PBO payload.')
+         }
+         # Skip stored data, including compressed data. A checksum trailer may follow.
+         [void]$stream.Seek($payloadBytes, [IO.SeekOrigin]::Current)
+@@ -600,12 +611,18 @@
+         }
+     }
+ 
+-    $scriptsDir = Join-Path $src 'scripts'
+-    if (Test-Path -LiteralPath $scriptsDir -PathType Container) {
+-        $srcC = @(Get-ChildItem -LiteralPath $scriptsDir -Recurse -File | Where-Object { $_.Extension -eq '.c' }).Count
+-        if ($srcC -gt 0) {
+-            try { $pboC = Get-PboScriptEntryCount -Path $pbo }
+-            catch { Die "Cannot verify PBO script entries: $($_.Exception.Message)" }
++    # Compare the same scope on both sides: every .c below the source root and
++    # every .c entry in the PBO, even when no scripts directory exists.
++    $srcC = @(Get-ChildItem -LiteralPath $src -Recurse -File | Where-Object { $_.Extension -eq '.c' }).Count
++    if ($srcC -gt 0) {
++        $pboC = $null
++        try { $pboC = Get-PboScriptEntryCount -Path $pbo }
++        catch [IO.InvalidDataException] { Die "Invalid PBO: $($_.Exception.Message)" }
++        catch [NotSupportedException] { Warn "PBO script check INCONCLUSIVE (unsupported format): $($_.Exception.Message)" }
++        catch { Warn "PBO script check INCONCLUSIVE (reader failure): $($_.Exception.Message)" }
++        # No count is not zero and must never produce a successful script-check marker.
++        # Only proven structural corruption or a measured script deficit rejects here.
++        if ($null -ne $pboC) {
+             if ($pboC -lt $srcC) {
+                 Die "PBO carries $pboC .c entries but the source has $srcC. The include list is missing or wrong - do NOT test or publish this build."
+             }

@@ -1,0 +1,14 @@
+{
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\addon\\scripts\\5_Mission\\MCPCallbacks.c": {
+    "bytes": 1147,
+    "sha256": "ed05f17a26a71e2de2705f52d57205a70f7fb16175e30139eafea578d2bdc82c"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\addon\\scripts\\5_Mission\\MCPBridge.c": {
+    "bytes": 81651,
+    "sha256": "3c9fd0dac6c1f9bab0e54cfabafce6c60ac38b797097ff86313760b7481d0772"
+  },
+  "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\addon\\scripts\\5_Mission\\MCPClientBridge.c": {
+    "bytes": 94351,
+    "sha256": "384ed3c83765c7bada59258f2cb064a4e8a626eb27bb93f0a86668e6ce596722"
+  }
+}

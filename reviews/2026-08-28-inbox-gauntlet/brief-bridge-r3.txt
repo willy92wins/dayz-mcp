@@ -1,0 +1,12 @@
+RONDA 3 — un unico finding del re-revisor, ACEPTADO con direccion cerrada. Cambio quirurgico.
+
+FINDING (P1): un GET puede terminar en error/timeout SIN OnSuccess posterior; su slot queda en -1 para siempre. Tras 8 fallos terminales (p.ej. daemon caido varios minutos: timeout -> retiro -> replenish -> ... hasta el techo), el pool queda agotado PERMANENTEMENTE: al volver el daemon no hay idle y el techo bloquea new. La recuperacion del caso 4 dependia de un OnSuccess que esos GETs jamas emitiran.
+
+DIRECCION CERRADA (no hay cancelacion por-request en RestApi y el contexto separado del poll es inalcanzable — no lo intentes): CUARENTENA TEMPORAL.
+1. Retire() guarda el instante del retiro (usa la fuente de tiempo que el bridge ya use en el tick; no introduzcas APIs de tiempo nuevas si ya hay una).
+2. AcquireIdlePollCallback: ademas de generacion==0, acepta un slot retirado (-1) cuya edad de retiro >= POLL_CALLBACK_QUARANTINE_S = 60.0, reseteandolo a idle antes de adquirirlo. Justificacion (ponla en el informe): el contrato vanilla documenta retries de OnError como mecanismo inmediato del request en curso; no hay evidencia de eventos diferidos a decenas de segundos. 60 s de cuarentena deja la ventana de F1 en "retry retenido mas de un minuto", sin evidencia de que exista — residuo declarado, igual que el residuo success->error de la ronda 2.
+3. El techo de 8 se mantiene, pero con la cuarentena deja de ser mortal: los retirados maduran de vuelta. Verifica que el camino techo-alcanzado + todos-en-cuarentena sigue en OnPollFail con backoff (sin stall silencioso, sin log por tick) y que a los <=60 s el poleo SIEMPRE puede retomar.
+4. Anade a la prueba de no-regresion el CASO 5: daemon caido 10 min (fallos terminales continuos) -> techo -> daemon vuelve -> primer intento tras madurar una cuarentena readquiere slot -> poleo retoma. Y re-verifica el caso 1 (retry-error doble) con la cuarentena en juego: el retry llega en segundos, el slot sigue en cuarentena (edad < 60), no despacha y NO se readquiere.
+5. Actualiza INFORME.md (fix, tabla de leak — el techo sigue siendo 8 vivos —, prueba con caso 5, gates re-medidos: llaves, hits de new sin cambios, greps de cuarentena) y LO QUE NO PUDE VERIFICAR (anade el residuo del retry >60 s).
+
+Nada mas cambia. Ultima respuesta: "DONE" + ruta del informe.

@@ -1,0 +1,178 @@
+tools/dayz_mcp/*.py: 64
+tools/*.py: 17
+tools/tests/test_*.py: 187
+tools/tests/*.bak*: 26
+gates/*.md: 37
+TEST IMPORTS (AST, each ImportFrom/Import alias sourcing tests.test_*):
+count=68
+tools/tests/test_authority_invariants_are_gated.py:32: tests.test_session_coordination
+tools/tests/test_box_occupancy.py:34: tests.test_mcp_tools
+tools/tests/test_box_occupancy.py:35: tests.test_process_lifecycle
+tools/tests/test_box_occupancy.py:1914: tests.test_client_mode
+tools/tests/test_box_occupancy.py:1986: tests.test_client_mode
+tools/tests/test_box_occupancy.py:2011: tests.test_client_mode
+tools/tests/test_box_occupancy.py:2029: tests.test_client_mode
+tools/tests/test_box_occupancy.py:2091: tests.test_client_mode
+tools/tests/test_box_port_occupancy.py:33: tests.test_box_occupancy
+tools/tests/test_box_port_occupancy.py:34: tests.test_process_lifecycle
+tools/tests/test_box_port_wait.py:14: tests.test_box_occupancy
+tools/tests/test_bug046_audit_fault_recovery.py:24: tests.test_session_coordination
+tools/tests/test_bug046_authority_fence.py:8: tests.test_session_coordination
+tools/tests/test_bug046_lease_queue_liveness.py:8: tests.test_session_coordination
+tools/tests/test_bug104_reap_under_quarantine.py:18: tests.test_process_lifecycle
+tools/tests/test_client_mode.py:22: tests.test_daemon
+tools/tests/test_client_mode.py:23: tests.test_mcp_tools
+tools/tests/test_client_platform_alias.py:27: tests.test_daemon
+tools/tests/test_client_runtime_control_composition.py:421: tests.test_control_client
+tools/tests/test_d05_capture_targets_run_client.py:28: tests.test_client_mode
+tools/tests/test_dayz_test_tool_modes.py:24: tests.test_dayz_test_tool
+tools/tests/test_db05_preflight_diagnostics.py:12: tests.test_steam_preflight
+tools/tests/test_enqueue_refusal_reaches_the_caller.py:15: tests.test_client_mode
+tools/tests/test_fase4b_tools.py:11: tests.test_mcp_tools
+tools/tests/test_lifecycle_reconcile.py:34: tests.test_dayz_test_tool
+tools/tests/test_lifecycle_reconcile.py:43: tests.test_process_lifecycle
+tools/tests/test_lifecycle_reconcile.py:1154: tests.test_daemon
+tools/tests/test_logs_since_marker_roundtrip.py:16: tests.test_client_mode
+tools/tests/test_logs_since_marker_roundtrip.py:17: tests.test_mcp_tools
+tools/tests/test_lote2_t2_steam.py:6: tests.test_steam_preflight
+tools/tests/test_lote_v_products.py:176: tests.test_client_mode
+tools/tests/test_lote_v_products.py:246: tests.test_client_mode
+tools/tests/test_mcp_tools.py:199: tests.test_client_mode
+tools/tests/test_mcp_tools.py:270: tests.test_client_mode
+tools/tests/test_mcp_tools.py:332: tests.test_client_mode
+tools/tests/test_mcp_tools.py:382: tests.test_client_mode
+tools/tests/test_mcp_tools.py:702: tests.test_client_mode
+tools/tests/test_mcp_tools.py:796: tests.test_client_mode
+tools/tests/test_mcp_tools.py:797: tests.test_dayz_test_tool
+tools/tests/test_mcp_tools.py:859: tests.test_client_mode
+tools/tests/test_mcp_tools.py:860: tests.test_dayz_test_tool
+tools/tests/test_mcp_tools.py:927: tests.test_client_mode
+tools/tests/test_run_reaper.py:19: tests.test_process_lifecycle
+tools/tests/test_server_response_truth.py:10: tests.test_mcp_tools
+tools/tests/test_session_acquire_wait.py:16: tests.test_session_coordination
+tools/tests/test_session_acquire_wait.py:17: tests.test_client_mode
+tools/tests/test_session_e2e.py:24: tests.test_daemon
+tools/tests/test_session_e2e.py:25: tests.test_client_mode
+tools/tests/test_session_status_blocked_on.py:17: tests.test_client_mode
+tools/tests/test_session_status_blocked_on.py:18: tests.test_mcp_tools
+tools/tests/test_task7_final_authority_regressions.py:12: tests.test_task7_review_regressions
+tools/tests/test_task7_final_authority_regressions.py:18: tests.test_task7_rereview_regressions
+tools/tests/test_task7_final_lifecycle_regressions.py:9: tests.test_lifecycle_cli
+tools/tests/test_task7_final_lifecycle_regressions.py:10: tests.test_task7_review_regressions
+tools/tests/test_task7_rereview_regressions.py:33: tests.test_task7_review_regressions
+tools/tests/test_telemetry_read_names_the_bad_field.py:29: tests.test_client_mode
+tools/tests/test_ui_dialog.py:16: tests.test_client_mode
+tools/tests/test_ui_enforce_contract.py:16: tests.test_vehicle_telemetry_contract
+tools/tests/test_vehicle_telemetry_contract.py:270: tests.test_vehicle_telemetry_contract
+tools/tests/test_wait_for.py:22: tests.test_client_mode
+tools/tests/test_wait_for.py:23: tests.test_mcp_tools
+tools/tests/test_wait_for_launch_and_contract.py:38: tests.test_wait_for
+tools/tests/test_wait_for_marker.py:19: tests.test_client_mode
+tools/tests/test_wait_for_marker.py:20: tests.test_mcp_tools
+tools/tests/test_wait_for_requires_a_live_run.py:32: tests.test_wait_for_launch_and_contract
+tools/tests/test_weak_agent_consumer_ux.py:20: tests.test_client_mode
+tools/tests/test_weak_agent_consumer_ux.py:21: tests.test_mcp_tools
+tools/tests/test_x5_tools.py:11: tests.test_mcp_tools
+DIRECT IMPORT GRAPH:
+tools/dayz_mcp/orphan_guard.py:25: from __future__ import annotations
+tools/dayz_mcp/orphan_guard.py:27: import json
+tools/dayz_mcp/orphan_guard.py:28: import http.client
+tools/dayz_mcp/orphan_guard.py:29: import locale
+tools/dayz_mcp/orphan_guard.py:30: import math
+tools/dayz_mcp/orphan_guard.py:31: import os
+tools/dayz_mcp/orphan_guard.py:32: import ntpath
+tools/dayz_mcp/orphan_guard.py:33: import socket
+tools/dayz_mcp/orphan_guard.py:34: import subprocess
+tools/dayz_mcp/orphan_guard.py:35: import sys
+tools/dayz_mcp/orphan_guard.py:36: import threading
+tools/dayz_mcp/orphan_guard.py:37: import time
+tools/dayz_mcp/orphan_guard.py:38: import urllib.error
+tools/dayz_mcp/orphan_guard.py:39: import urllib.parse
+tools/dayz_mcp/orphan_guard.py:40: import urllib.request
+tools/dayz_mcp/orphan_guard.py:41: from typing import Callable
+tools/dayz_mcp/orphan_guard.py:43: from dayz_mcp.native_process_guard import NativeProcessGuard, identity_hashes
+tools/dayz_mcp/orphan_guard.py:44: from dayz_mcp.daemon_contract import argv_targets_port, classify_dayz_argv
+tools/dayz_mcp/orphan_guard.py:45: from dayz_mcp.accredited_daemon_transport import MAX_AUTHENTICATED_RESPONSE_BYTES, verified_daemon_http_request
+tools/dayz_mcp/orphan_guard.py:49: from dayz_mcp.native_process_snapshot import command_argv_of, full_image_path_of, same_path as _same_path, working_directory_of
+tools/dayz_mcp/orphan_guard.py:57: import psutil
+tools/dayz_mcp/orphan_guard.py:91: import ctypes
+tools/dayz_mcp/orphan_guard.py:92: from ctypes import wintypes
+tools/dayz_mcp/orphan_guard.py:695: from dayz_mcp.native_process_guard import NativeProcessGuard, identity_hashes
+tools/dayz_mcp/orphan_guard.py:696: from dayz_mcp.process_lifecycle import ProcessLifecycle
+tools/dayz_mcp/orphan_guard.py:1005: from dayz_mcp.native_process_guard import NativeProcessGuard, identity_hashes
+tools/dayz_mcp/orphan_guard.py:1006: from dayz_mcp.process_lifecycle import ProcessLifecycle
+tools/dayz_mcp/process_lifecycle.py:1: from __future__ import annotations
+tools/dayz_mcp/process_lifecycle.py:6: import dataclasses
+tools/dayz_mcp/process_lifecycle.py:7: import hashlib
+tools/dayz_mcp/process_lifecycle.py:8: import json
+tools/dayz_mcp/process_lifecycle.py:9: import math
+tools/dayz_mcp/process_lifecycle.py:10: import os
+tools/dayz_mcp/process_lifecycle.py:11: import subprocess
+tools/dayz_mcp/process_lifecycle.py:12: import threading
+tools/dayz_mcp/process_lifecycle.py:13: import time
+tools/dayz_mcp/process_lifecycle.py:14: import uuid
+tools/dayz_mcp/process_lifecycle.py:15: from collections import deque
+tools/dayz_mcp/process_lifecycle.py:16: from contextlib import contextmanager
+tools/dayz_mcp/process_lifecycle.py:17: from dataclasses import dataclass, field
+tools/dayz_mcp/process_lifecycle.py:18: from datetime import datetime
+tools/dayz_mcp/process_lifecycle.py:19: from pathlib import Path
+tools/dayz_mcp/process_lifecycle.py:20: from types import MappingProxyType
+tools/dayz_mcp/process_lifecycle.py:21: from typing import Callable, Mapping, TypeVar
+tools/dayz_mcp/process_lifecycle.py:23: from dayz_mcp import dayz_test_storage
+tools/dayz_mcp/process_lifecycle.py:24: from dayz_mcp.instance_fence import BindingPrepareError
+tools/dayz_mcp/process_lifecycle.py:25: from dayz_mcp.runtime_state import RuntimePaths, atomic_write_bytes
+tools/dayz_mcp/process_lifecycle.py:26: from dayz_mcp.session_coordination import AuthorizationDecision, CleanupDisposition, ClientIdentity, SessionCoordinator
+tools/dayz_mcp/process_lifecycle.py:87: from dayz_mcp.native_process_snapshot import command_argv_of
+tools/dayz_mcp/process_lifecycle.py:393: from dayz_mcp.launcher_registry import open_approved_launcher
+tools/dayz_mcp/native_process_guard.py:1: from __future__ import annotations
+tools/dayz_mcp/native_process_guard.py:3: import hashlib
+tools/dayz_mcp/native_process_guard.py:4: import json
+tools/dayz_mcp/native_process_guard.py:5: import math
+tools/dayz_mcp/native_process_guard.py:6: import ntpath
+tools/dayz_mcp/native_process_guard.py:7: from collections import deque
+tools/dayz_mcp/native_process_guard.py:8: from datetime import UTC, datetime
+tools/dayz_mcp/native_process_guard.py:9: from typing import TYPE_CHECKING, Any
+tools/dayz_mcp/native_process_guard.py:12: import psutil
+tools/dayz_mcp/native_process_guard.py:17: from dayz_mcp.process_lifecycle import ProcessRecord
+COMMAND: git ls-files --error-unmatch tools/tests/test_h8_distributed_gate.py tools/tests/test_process_job_spike.py tools/tests/test_task7_final_authority_regressions.py tools/tests/test_task7_final_lifecycle_regressions.py tools/tests/test_task9_protocol_docs.py
+tools/tests/test_h8_distributed_gate.py
+tools/tests/test_process_job_spike.py
+tools/tests/test_task7_final_authority_regressions.py
+tools/tests/test_task7_final_lifecycle_regressions.py
+tools/tests/test_task9_protocol_docs.py
+
+
+exit_code=0
+COMMAND: git ls-files tools/tests/*.bak*
+
+
+exit_code=0
+COMMAND: git ls-files --error-unmatch AUDITORIA_MCP_2026-09-07.md
+
+error: pathspec 'AUDITORIA_MCP_2026-09-07.md' did not match any file(s) known to git
+Did you forget to 'git add'?
+
+exit_code=1
+ADDON vs SIBLING:
+addon/config.cpp: bytes=536, identical=True
+addon/gui/layouts/mcp_dialog.layout: bytes=7922, identical=True
+addon/scripts/4_World/MCP_CarScript.c: bytes=15127, identical=True
+addon/scripts/5_Mission/MCPBridge.c: bytes=80958, identical=True
+addon/scripts/5_Mission/MCPCallbacks.c: bytes=1147, identical=True
+addon/scripts/5_Mission/MCPClientBridge.c: bytes=93901, identical=True
+addon/scripts/5_Mission/MCPDialogController.c: bytes=17138, identical=True
+addon/scripts/5_Mission/MCPJobRunner.c: bytes=1941, identical=True
+addon/scripts/5_Mission/MCPMessages.c: bytes=10475, identical=True
+addon/scripts/5_Mission/MissionGameplay.c: bytes=443, identical=True
+addon/scripts/5_Mission/MissionServer.c: bytes=409, identical=True
+
+CLOSING INVENTORY UTC 2026-09-08T01:18:43.142107+00:00
+tools/tests/*.py: 193
+tools/tests/*.log: 0
+
+tools/tests/_tmp_captures: 1
+tools\tests\_tmp_captures
+tools/tests/*helpers*.py: 1
+tools\tests\fence_helpers.py
+non-test python files: fence_helpers.py, _addon_paths.py, _bundle_paths.py, _settlement_flake_probe.py, _tree_identity.py, __init__.py
+audit bytes=52205 sha256=4826f922da710b4f4db5eeaed106d9b63c75d49619ad7364e64274a3bb8543ef

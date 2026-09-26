@@ -1,0 +1,57 @@
+PASS QA sample 4 VIVO + 4 FALSO + 4 NO VERIFICABLE
+PASS QA 12 explicit judgments
+PASS 60 live entries covered exactly once
+PASS 22 decision units: H=2 D=4 N=16
+PASS exactly three plan categories
+PASS mapping row H2
+PASS mapping row D1
+PASS mapping row D2
+PASS mapping row D3
+PASS mapping row N1
+PASS mapping row N2
+PASS mapping row N3
+PASS mapping row N4
+PASS mapping row N5
+PASS mapping row N6
+PASS mapping row N7
+PASS mapping row N8
+PASS mapping row N9
+PASS mapping row N10
+PASS mapping row N11
+PASS mapping row N12
+PASS mapping row N13
+PASS mapping row N14
+PASS mapping row N15
+PASS mapping row N16
+PASS 40 proposal components 16/10/6/8
+PASS proposal table matches decisions manifest
+PASS H1 required decision fields
+PASS H2 required decision fields
+PASS D1 required decision fields
+PASS D2 required decision fields
+PASS D3 required decision fields
+PASS D4 required decision fields
+PASS N1 required decision fields
+PASS N2 required decision fields
+PASS N3 required decision fields
+PASS N4 required decision fields
+PASS N5 required decision fields
+PASS N6 required decision fields
+PASS N7 required decision fields
+PASS N8 required decision fields
+PASS N9 required decision fields
+PASS N10 required decision fields
+PASS N11 required decision fields
+PASS N12 required decision fields
+PASS N13 required decision fields
+PASS N14 required decision fields
+PASS N15 required decision fields
+PASS N16 required decision fields
+PASS citation paths and bounds: 96 checked, invalid=[]
+FAIL source snapshots stable: 77 checked, drift=[('C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\control_client.py', 'changed')]
+PASS HEAD unchanged since inventory
+PASS staged path list unchanged since inventory
+PASS QA-TRIAJE.md UTF-8 without BOM/replacement character
+PASS PLAN.md UTF-8 without BOM/replacement character
+DOCUMENT_CHECKS=55 FAIL=1
+Exit code: 1

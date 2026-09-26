@@ -1,0 +1,124 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar. Tienes shell: úsalo.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+CIERRE 2 (lote H ronda 5 = lote G ronda 12), sobre el árbol fusionado. La revisión final ciega
+de Codex sobre tu ronda anterior encontró tres cosas, todas reproducidas, y las tres nacen de la
+COMPOSICIÓN de los dos lotes: el método único del anillo (H) cambió el orden que el cerco de G
+exigía; la limpieza de residuos (H/G) borró la frontera que el crédito demorado de G necesitaba;
+y una rama fail-open preexistente quedó al lado de la que sí cerraste. Esta ronda cierra las
+tres. No abras nada nuevo.
+
+===============================================================================
+§0. EL PRODUCTO
+===============================================================================
+
+  P19. **En toda retirada terminal, el binding se retira ANTES de persistir `EXITED`, y el
+       diagnóstico se publica DESPUÉS de persistir.** `_commit_retirement` hoy hace
+       `manifest.replace` → `_retire_run_bindings` → diagnóstico: en la ventana entre la
+       persistencia y la retirada, un `store_result` tardío para un comando ya despachado se
+       acepta como genuino (la base de G retiraba antes: `ws-frozen-r8:2566`). Orden nuevo:
+       retirar (idempotente: `stop_run` ya llega retirado) → persistir → si persistió,
+       diagnóstico y residuos; si NO persistió, el binding queda retirado (degradación segura
+       de P4: un run sin binding) y NO hay diagnóstico. Los seis caminos. Los pasos POST-persist
+       (diagnóstico, residuos) no lanzan: best-effort con registro, y nunca dejan el cerco
+       levantado ni el anillo a medias (nota BAJA de la revisión Opus).
+  P20. **La limpieza terminal deja una frontera.** `_forget_run_residues` limpia dato,
+       `unknown` y compensación, pero CONSERVA (o recrea) una tumba posterior a cualquier sello
+       aceptable en el instante de la retirada: un escritor que aceptó el comando antes de la
+       retirada y aterriza después NO reaparece. Un `run_id` reutilizado sigue sin heredar nada
+       (una basal/crédito NUEVO tiene época posterior a la frontera y aterriza).
+  P21. **Elevar la tumba en una transición no puede fallar en silencio.** Si
+       `_tombstone_run_activity` (o el método del lifecycle que invoca) lanza, la transición a
+       `RUNNING_IDLE` NO continúa como si nada: falla cerrada (se revierte el cerco y se
+       devuelve error), o la tumba se eleva dentro del mismo `_activity_lock` sin E/S para que
+       no pueda lanzar. Hoy `loopback.py:~1166` absorbe la excepción y el crédito demorado se
+       publica como `recent`.
+  P22. **Un estado durable MALFORMADO no es permiso.** `_durable_run_state` devuelve `None`
+       para un registro sin `state: str` (y cuando no hay getter), y `_enqueue_run_rejection`
+       trata `None` como autorización. Regla: sólo `RUNNING`/`STARTING` autorizan; cualquier
+       otra cosa —ilegible, malformado, getter ausente, `None`— rechaza (`run_state_unavailable`
+       o `binding_retired` según el caso) y no acredita. Es la hermana de N32.
+
+Sigue en pie todo lo anterior (G P1-P18; H H1-H5, D1-D4).
+
+[DESIGN] `_commit_retirement(run, event, reason, decision) -> bool` conserva su firma y sus seis
+callers; sólo cambia el ORDEN interno y el desenlace de fallo. `_forget_run_residues` pasa a
+`_seal_terminal(run_id, at)` que limpia y fija la frontera. La cabecera ya dice «the fence
+precedes the durable transition»: añade «and so does binding retirement; the diagnostic follows
+a successful persist».
+
+LO QUE NO ES EL PRODUCTO: el gate, los oráculos, el ledger, este brief (defecto ahí →
+`DISPUTAS`); `server.py`; `daemon.py`; `dayz_test_tool.py`; refactors.
+
+===============================================================================
+§1. LOS TRES ROJOS DEL ORÁCULO DE G (45 checks)
+===============================================================================
+
+**N35-RETIRAR-ANTES-DE-PERSISTIR** — comando entregado por poll; reap con la barrera en
+`manifest.replace` justo después de persistir `EXITED`; `store_result(..., instance=None)` en
+la ventana → hoy 200. Tiene que rechazar.
+**N36-FRONTERA-TERMINAL** — escritor bloqueado en `record_command_activity`; reap a `EXITED`;
+se suelta el escritor → hoy `_last_activity` vuelve a tener el sello de `run-1`. No tiene que
+reaparecer. (Caja blanca: si renombras `_last_activity`, el check da UNMET; dilo en DISPUTAS.)
+**N37-ESTADO-MALFORMADO-RECHAZA** — `manifest.get` devuelve un registro con `state=None` →
+hoy 200 y crédito. Tiene que rechazar sin crédito.
+
+===============================================================================
+§2. LO QUE NO TIENE CHECK. Lo cierro yo al recibir
+===============================================================================
+
+  (A) P19 en los seis caminos con fallo de persistencia inyectado: el binding queda retirado,
+      no hay diagnóstico, y un `store_result` tardío se rechaza. Rojo-antes en los cinco
+      caminos que hoy persisten primero.
+  (B) P21: `_tombstone_run_activity` que lanza → la transición a `RUNNING_IDLE` no continúa
+      fail-open. Rojo-antes.
+  (C) P22: getter ausente (`lifecycle` sin `manifest`) → rechazo. Rojo-antes si hoy autoriza.
+  (D) Preservación: N34 (result tardío tras stop), N30, N31, N32, N28, N26, N20; H 40/40.
+
+===============================================================================
+§3. EL GATE (doble)
+===============================================================================
+
+    bash gate/run.sh                                      -> oráculo del lote H (40): 40/40
+    (cd tools && PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 <python> ../../gate-extra/oracle_lote_g.py)
+                                                          -> oráculo de G (45): ORACULO-VERDE
+    bash gate/suite.sh                                    -> once módulos: SUITE-ACOTADA OK
+
+Ahora mismo: gate/run.sh (H): ORACULO: PASS=40 FAIL=0 UNMET=0 de 40 · gate-extra (G, 45 checks, SHA-256 9c4b482d8e4c2eac…): ORACULO: PASS=42 FAIL=3 UNMET=0 de 45 — rojos N35, N36, N37 · gate/suite.sh: SUITE-ACOTADA OK (456 tests). **Los verdes son la línea que no se puede romper.**
+Guarda anti-vacuidad: un `UNMET` no es tu código; si tu diseño deja un check sin alcance,
+`DISPUTAS` con el motivo. `gate/` y `gate-extra/` están sellados por hash y son de sólo lectura.
+
+===============================================================================
+§4. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/process_lifecycle.py
+    tools/dayz_mcp/loopback.py
+    tools/tests/test_box_occupancy.py
+    tools/tests/test_process_lifecycle.py
+    tools/tests/test_loopback.py
+
+PROHIBIDO: `gate/`; `gate-extra/`; `addon/`; `server.py`; `daemon.py`; `dayz_test_tool.py`;
+`runtime_state.py`; debilitar o borrar validaciones existentes; usar red; correr la suite completa.
+
+⚠ **Data-crítico**. Locks: `_operation_lock → (ServerState._lock | _activity_lock)`; nunca el
+inverso; ninguna lectura toma `_operation_lock`.
+
+Escribe tests para lo que entregas y córrelos ANTES de tu cambio contra
+`../../ws-frozen-r4/tools/` (copia temporal tuya bajo /tmp).
+
+===============================================================================
+§5. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — P19-P22 con `path:line`; el orden final de `_commit_retirement` y sus
+                          seis callers; la frontera terminal; el desenlace de fallo de la tumba.
+    ## GATE             — la salida literal de los TRES gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea de FAIL contra `ws-frozen-r4`, o
+                          «preservación». Los de §2 (A)-(C) obligatorios.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si un criterio del gate está mal, aquí, con el argumento.

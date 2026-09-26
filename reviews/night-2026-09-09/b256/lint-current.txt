@@ -1,0 +1,39 @@
+& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' 'C:\Users\guill\DayZ-Modding-Knowledge-Pack\tools\dayz-script-validator\scripts\script_validator.py' 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews\night-2026-09-09\b256\lint-current'
+
+{
+  "addon_root": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\night-2026-09-09\\b256\\lint-current",
+  "status": "WARN",
+  "errors": [],
+  "warnings": [
+    {
+      "check": "ES-GETTYPE-EXACT-MATCH",
+      "file": "MCPBridge.c",
+      "line": 1051,
+      "message": "[WARN] MCPBridge.c line 1051: `.GetType()` compared with `==`/`!=`. Exact match fails on inherited or modded variants; the server may silently reject actions whose client check uses IsKindOf (pitfalls-advanced.md:257-274, SKILL.md rules 31-32). Use `obj.IsKindOf(\"TypeName\")` for full inheritance-chain checks.",
+      "severity": "WARN",
+      "rule_id": "ES-GETTYPE-EXACT-MATCH"
+    },
+    {
+      "check": "ES-GETTYPE-EXACT-MATCH",
+      "file": "MCPBridge.c",
+      "line": 1626,
+      "message": "[WARN] MCPBridge.c line 1626: `.GetType()` compared with `==`/`!=`. Exact match fails on inherited or modded variants; the server may silently reject actions whose client check uses IsKindOf (pitfalls-advanced.md:257-274, SKILL.md rules 31-32). Use `obj.IsKindOf(\"TypeName\")` for full inheritance-chain checks.",
+      "severity": "WARN",
+      "rule_id": "ES-GETTYPE-EXACT-MATCH"
+    },
+    {
+      "check": "ES-GETTYPE-EXACT-MATCH",
+      "file": "MCPBridge.c",
+      "line": 2288,
+      "message": "[WARN] MCPBridge.c line 2288: `.GetType()` compared with `==`/`!=`. Exact match fails on inherited or modded variants; the server may silently reject actions whose client check uses IsKindOf (pitfalls-advanced.md:257-274, SKILL.md rules 31-32). Use `obj.IsKindOf(\"TypeName\")` for full inheritance-chain checks.",
+      "severity": "WARN",
+      "rule_id": "ES-GETTYPE-EXACT-MATCH"
+    }
+  ],
+  "info": {
+    "files_scanned": 1,
+    "elapsed_ms": 2962
+  }
+}
+
+exit code: 2

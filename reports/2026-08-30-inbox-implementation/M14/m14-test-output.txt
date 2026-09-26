@@ -1,0 +1,29 @@
+# medido por el orquestador (Claude Opus 5) el 2026-09-02T00:09:36.515904+00:00, no por la lane: Cursor rechaza shell en esta configuracion headless y la lane devolvio INCONCLUSIVE en vez de inventar cifras
+# comando: -m unittest tests.test_tool_registry_fingerprint -v
+# cwd: tools
+
+test_each_blob_none_is_unknown (tests.test_tool_registry_fingerprint.AuthorityBundleTests.test_each_blob_none_is_unknown) ... ok
+test_literal_bundle_is_known_for_each_pair (tests.test_tool_registry_fingerprint.AuthorityBundleTests.test_literal_bundle_is_known_for_each_pair) ... ok
+test_manifest_spacing_order_and_digest_mutations (tests.test_tool_registry_fingerprint.AuthorityBundleTests.test_manifest_spacing_order_and_digest_mutations) ... ok
+test_marker_shape_and_payload_order_mutations (tests.test_tool_registry_fingerprint.AuthorityBundleTests.test_marker_shape_and_payload_order_mutations) ... ok
+test_noncanonical_json_and_utf8_are_unknown (tests.test_tool_registry_fingerprint.AuthorityBundleTests.test_noncanonical_json_and_utf8_are_unknown) ... ok
+test_payload_tool_and_hash_sidecars_must_stay_linked (tests.test_tool_registry_fingerprint.AuthorityBundleTests.test_payload_tool_and_hash_sidecars_must_stay_linked) ... ok
+test_producer_union_validator_sources_and_approval (tests.test_tool_registry_fingerprint.AuthorityBundleTests.test_producer_union_validator_sources_and_approval) ... ok
+test_receipts_and_digest_only_incomplete_parser (tests.test_tool_registry_fingerprint.AuthorityBundleTests.test_receipts_and_digest_only_incomplete_parser) ... ok
+test_verdict_member_result_and_external_table_mutations (tests.test_tool_registry_fingerprint.AuthorityBundleTests.test_verdict_member_result_and_external_table_mutations) ... ok
+test_independent_oracle_reproduces_known_blobs_and_pair_table (tests.test_tool_registry_fingerprint.OracleReproductionTests.test_independent_oracle_reproduces_known_blobs_and_pair_table) ... ok
+test_four_pairs_match_external_bytes_and_sha (tests.test_tool_registry_fingerprint.RegistryCanonTests.test_four_pairs_match_external_bytes_and_sha) ... ok
+test_invalid_records_and_sequences_yield_fully_unknown_snapshots (tests.test_tool_registry_fingerprint.RegistryCanonTests.test_invalid_records_and_sequences_yield_fully_unknown_snapshots) ... ok
+test_json_illegal_values_are_unknown_or_error (tests.test_tool_registry_fingerprint.RegistryCanonTests.test_json_illegal_values_are_unknown_or_error) ... ok
+test_mutating_each_field_changes_digest (tests.test_tool_registry_fingerprint.RegistryCanonTests.test_mutating_each_field_changes_digest) ... ok
+test_nfc_positive_and_post_nfc_collisions (tests.test_tool_registry_fingerprint.RegistryCanonTests.test_nfc_positive_and_post_nfc_collisions) ... ok
+test_record_order_does_not_change_digest_constraint_order_does (tests.test_tool_registry_fingerprint.RegistryCanonTests.test_record_order_does_not_change_digest_constraint_order_does) ... ok
+test_four_pairs_known_and_session_does_not_enter_digest (tests.test_tool_registry_fingerprint.SnapshotComparatorTests.test_four_pairs_known_and_session_does_not_enter_digest) ... ok
+test_invalid_identity_is_fully_unknown (tests.test_tool_registry_fingerprint.SnapshotComparatorTests.test_invalid_identity_is_fully_unknown) ... ok
+test_manual_incoherent_dataclasses_are_unknown (tests.test_tool_registry_fingerprint.SnapshotComparatorTests.test_manual_incoherent_dataclasses_are_unknown) ... ok
+test_same_pair_distinct_registries_and_cross_pair_digest_copy (tests.test_tool_registry_fingerprint.SnapshotComparatorTests.test_same_pair_distinct_registries_and_cross_pair_digest_copy) ... ok
+
+----------------------------------------------------------------------
+Ran 20 tests in 0.044s
+
+OK

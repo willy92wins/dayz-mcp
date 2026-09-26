@@ -1,0 +1,34 @@
+{
+  "tools/dayz_mcp/host_config.py": {
+    "bytes": 46293,
+    "sha256": "8a892a350a04ac18ce36c9c79bbd32c6478c7926b548b710731b0b0231eeb489"
+  },
+  "tools/dayz_mcp/control_client.py": {
+    "bytes": 31868,
+    "sha256": "3599e1dfd2694695151a1fb7adb0d6cf1fba11f108a17268c2a20c30cd6dd59a"
+  },
+  "tools/dayz_mcp/daemon_policy.py": {
+    "bytes": 13400,
+    "sha256": "4e70e065e677b95c80e914cad7776aab14001d02ff529f38109e328e1afacc32"
+  },
+  "tools/tests/test_provenance_gate.py": {
+    "bytes": 12339,
+    "sha256": "d4f9ce918ee138a2a6406dba86c1ad487bd210d93161a3edfb792128c4df8a40"
+  },
+  "tools/tests/test_mcp_host_timeouts.py": {
+    "bytes": 42504,
+    "sha256": "d8088ff99ff1852fc5ef44d7929ba53871490739c57140cda89e1209cc631e64"
+  },
+  "tools/tests/test_native_launcher_bundle.py": {
+    "bytes": 36034,
+    "sha256": "d73f9b323af99b92c22421f251f1db581286b24082c615002b3fe735261a7197"
+  },
+  "tools/build_native_launcher.py": {
+    "bytes": 47468,
+    "sha256": "e1a8b657c7c223700ced4f628375764b7b3459b81750aa6646561d9902bc100c"
+  },
+  ".git/index": {
+    "bytes": 43966,
+    "sha256": "78da50fa6f567fcffbd8ac942797a14e0b86a05beadb67714a41c74bb21a1e6c"
+  }
+}

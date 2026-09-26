@@ -1,0 +1,5 @@
+b6f09309ac31964092c770d4e9c6c7d2ab86d78f35005ef28309f055e02f5752  gate/GATES.md
+3cf92ec87dc475a125d2255e5e62d709c3fefdf552f0a889ca514b7ce6624ddf  gate/oracle_ui_schema.py
+# SUPERSEDE b6f09309ac319640 -> a919a7f27e12a211  gate/GATES.md
+# motivo: G3 marcada ABANDON por el orquestador; el delegado nunca la tuvo que correr.
+a919a7f27e12a211f293efcd016223d0b59f0319fc6944ec6f8a85a1ee753c67  gate/GATES.md (vigente)

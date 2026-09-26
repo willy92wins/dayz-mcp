@@ -1,0 +1,90 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+Quinta revisión de este lote, y la de cierre. Las cuatro anteriores dieron 5, 4, 5 y 6
+hallazgos; **reproduje todos y todos se arreglaron o se disolvieron por construcción**. Tu
+cuarta revisión contestó la pregunta de proceso: «familias ya visitadas, no una familia nueva».
+Esta ronda cambió la FORMA del componente en vez de parchearlo. Dictamen sobre el producto que
+hay, en `../ws/tools/dayz_mcp/process_lifecycle.py` (SHA-256 2195ca23cc57b011e856950f0bd7769ba99ba7ea0e5dc58fcf6dc85b3541ea04) y
+`../ws/tools/dayz_mcp/loopback.py` (SHA-256 52ee08f83cb79f59c8343f4ce24b8c792a3dd8f4404ef5c865c706674c8651cb).
+
+===============================================================================
+§0. QUÉ SE REVISA. Sólo esto.
+===============================================================================
+
+  P1. **La caja publicada no mezcla instantes.** `box_occupancy` toma UNA foto (manifiesto por
+      `list_runs()` + actividad/`unknown`/revisión bajo `_activity_lock`, sin E/S entre las
+      dos lecturas), suelta, sondea fuera, y deriva `runs`, `activity_state`,
+      `last_activity_age_s` y `occupied` SÓLO de la foto. Nunca relee memoria viva después.
+      No toma `_operation_lock` en la ruta de lectura.
+  P2. **Las filas no se cachean.** Sólo las sondas (`foreign`, `ports_in_use`, `scan_known`)
+      con TTL. Una mutación durable del manifiesto sin incremento del contador se publica igual.
+  P3. **Una observación sin binding no borra un sello posterior** (high-water mark), y una
+      observación sin binding POSTERIOR sigue publicando `unknown`.
+  P4. **Ningún binding despachable sobrevive a la salida durable de RUNNING**: la retirada
+      precede a la transición durable en stop (desde `STOPPING`), release, repair (los dos),
+      reap y reconcile.
+  P5. **La actividad acreditada durante un intento de arranque que no llega a durable no
+      sobrevive al rollback**: el run restaurado publica `unknown`.
+
+Sigue en pie: actividad en memoria por `(daemon_generation, run_id)`; el audit registra pero
+no manda; sticky que una escritura buena no limpia; atribución por el `run_id` del binding;
+basal que sella el proceso lanzado por este daemon; nada de actividad en un rechazo ni en un
+enqueue interno; fail-closed a `unknown`/null; frescura monótona; **la actividad es
+diagnóstico, no autoridad**.
+
+**LO QUE NO ES EL PRODUCTO**, y va a `BACKLOG`: el gate, el oráculo, el ledger, este brief;
+el sobre de `dayz_test_stop`; `runtime_state.py`; `README-mcp.md`; refactors, estilo, tipado.
+**Prohibido justificar alcance con «es donde han salido cosas antes».**
+
+===============================================================================
+§1. LO QUE YA SÉ. Ataca sus consecuencias, no lo redescubras
+===============================================================================
+
+Tus seis hallazgos de la ronda 5 y cómo se han tratado:
+  - H1 (el lector pierde una carrera): disuelto por P1. **Residuo declarado por mí**: la
+    atomicidad estricta entre `list_runs()` y la foto de actividad no se garantiza; la
+    ventana es de nanosegundos y sin E/S. Si encuentras una intercalación REAL en esa ventana
+    con daño concreto, es hallazgo; si sólo es la ventana teórica, es el residuo y ya consta.
+  - H2 (pop sin comparar épocas): P3.
+  - H3 (start rechazado deja frescura por la ventana BOUND): P5 por compensación, no
+    retrasando el BOUND — decisión mía, escrita en el ledger con su motivo.
+  - H4 (stop publica EXITED antes de retirar el binding): P4, trazado a los seis caminos.
+  - H5 y H6 (repair/cuarentena sin incremento): disueltos por P2.
+
+===============================================================================
+§2. LO QUE QUIERO DE TI
+===============================================================================
+
+  - **La foto**: ¿hay alguna lectura de `_last_activity`, `_activity_unknown`, `_box_revision`
+    o del manifiesto DESPUÉS de tomarla, en cualquier rama (cacheada, no cacheada, `now=`)?
+    ¿Alguna E/S dentro del lock? ¿Se toma `_operation_lock` en la lectura, o hay inversión
+    `_activity_lock → _operation_lock`?
+  - **El caché de sondas**: ¿puede un `foreign`/`ports` viejo cambiar `occupied` de forma no
+    acotada o no fail-closed? El residuo acotado (≤1,5 s, con `start_run` rescaneando) ya
+    consta; busca lo que NO esté acotado.
+  - **P4 en los seis caminos**: por cada uno, la línea de la retirada y la línea de la
+    transición durable, en ese orden. Y el fallo intermedio: si la transición durable falla
+    DESPUÉS de retirar, ¿en qué estado queda el run y es seguro?
+  - **P5**: ¿qué sellos olvida exactamente la compensación, y puede borrar uno legítimo
+    anterior al intento? ¿Y si el intento se solapa con un comando legítimo del run heredado?
+  - **P3**: el high-water mark, ¿compara con la época correcta (la del sello acreditado) y
+    respeta el sticky?
+  - **¿Ha debilitado el implementador alguna validación existente para pasar el gate?**
+    Diff mental contra el contrato: cualquier `assert`/`raise`/rechazo que haya desaparecido.
+
+Y la pregunta de proceso, en su propia sección: **¿lo que encuentres es de una familia NUEVA
+o de las tres ya visitadas (coherencia de caché, identidad del destino, frontera de
+generación)?** Si la forma nueva ha cerrado las familias viejas, dilo con esas palabras.
+
+Reglas duras: **enseña, no cuentes** (código literal con `path:line`); **escribe el fallo
+concreto**; **la tolerancia no es un defecto**; cero hallazgos es una respuesta legítima y
+mejor que rellenar — y en una quinta revisión sobre un rediseño es un resultado plausible.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrarlo?
+    ## HALLAZGOS      — por severidad: título, path:line, código pegado, fallo concreto.
+    ## FAMILIAS       — la pregunta de proceso del §2.
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.

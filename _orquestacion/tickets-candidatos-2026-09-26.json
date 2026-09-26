@@ -1,0 +1,46 @@
+[
+ {
+  "id": "T1",
+  "titulo": "0878 rompio la suite: GamePeer no anuncia caps=/ach= -> capabilities_unknown permanente",
+  "severidad": "P1",
+  "evidencia": [
+   "tools/dayz_mcp/server.py:609-647 (gate fail-closed caps/ach en compute_bridge_ready, PR #94 9af5cbf)",
+   "tools/tests/test_client_mode.py:66-105 (GamePeer hace GET /poll sin caps ni ach)",
+   "tools/tests/test_session_e2e.py:75 (mismo GamePeer)",
+   "tools/dayz_mcp/loopback.py:2962-2975 (sin caps= -> reason=absent -> state=unknown)"
+  ],
+  "prueba_ab": "worktree 9af5cbf~1: OK; worktree 9af5cbf: FAILED (capabilities_unknown)",
+  "impacto": "61 fallos de suite (familia A ~25-28): el gate de la suite es ROJO desde el 25-sep sin que nadie lo cerrara",
+  "fix": "GamePeer anuncia caps=/ach= como el bridge Enforce real, o sembrar census via _record_poll_caps_locked (patron test_arg_contract_hash.py:162)"
+ },
+ {
+  "id": "T2",
+  "titulo": "Disclosure 80-char rompe tests de contrato de descripcion (colision a81a34f vs 0b85e9c)",
+  "severidad": "P2",
+  "evidencia": [
+   "tools/dayz_mcp/server.py:674-697 (_INITIAL_CATALOG_NAMES + _INITIAL_DESCRIPTION_LIMIT=80)",
+   "tools/dayz_mcp/server.py:717-731 (_compact_initial_catalog trunca)",
+   "tools/tests/test_pleno_lease_and_orphans.py:100-117 (assertIn session_heartbeat)",
+   "tools/tests/test_session_status_blocked_on.py (assertIn '120')",
+   "tools/tests/test_wait_for_marker.py (assertIn 'logs_since')"
+  ],
+  "impacto": "~12 fallos (familias B y C)",
+  "fix": "los tests de contrato leen catalogo completo (post-lease), o _compact_initial_catalog preserva las sentencias de contrato clave",
+  "nota": "el comportamiento de produccion (truncar a 80 para clientes 8B) es INTENCIONAL (PR 0b85e9c); lo roto es el test que asume catalogo completo"
+ },
+ {
+  "id": "T3",
+  "titulo": "Deriva de contrato en suggested_calls/lease_expired/status_snapshot tras #94/#97/#98",
+  "severidad": "P3",
+  "evidencia": [
+   "test_fn_f1f5 (suggested_calls None vs list, regla 'max 2' de e72ff5b)",
+   "test_ui_dialog (mensaje lease_expired mas largo)",
+   "test_ui_error_diagnostics + test_vehicle_prepare_fixture (AttributeError status_snapshot)",
+   "test_python_backlog_fixes (ToolError timeout no lanzado)",
+   "test_w3_bug_verdicts (NoneType sin __dict__)",
+   "test_task9_launcher_migration ('.ps1' en doc del wrapper)"
+  ],
+  "impacto": "~12 fallos residuales; ninguno bloquea in-game pero si el gate",
+  "fix": "triaje por ficha: o el test actualiza contrato nuevo, o hay regresion real (status_snapshot huele a bug genuino)"
+ }
+]

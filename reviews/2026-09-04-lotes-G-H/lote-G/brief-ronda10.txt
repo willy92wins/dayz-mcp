@@ -1,0 +1,131 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar. Tienes shell: úsalo.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+RONDA 10, la última de estructura. Tu ronda 9 pasó el gate (35/35) y las cinco sondas de las
+revisiones anteriores dejaron de reproducir. La revisión ciega de Codex sobre la 9 encontró
+cuatro cosas, todas reproducidas: una ALTA que es EXACTAMENTE el hueco que la 9 decía haber
+cerrado («la invariante se ató a los call-sites, no a la transición»: `repair_manifest_recovery`
+llama a `recover_after_restart` sin cerco), dos MEDIA y una BAJA. Esta ronda cierra las cuatro
+sin abrir nada nuevo.
+
+===============================================================================
+§0. EL PRODUCTO
+===============================================================================
+
+  P6''. **El cerco se ata a la TRANSICIÓN, no a los callers.** Toda transición del manifiesto
+      hacia `RUNNING_IDLE` —`RunManifestStore.release_owner`, `recover_after_restart`
+      (llamado en caliente por `repair_manifest_recovery`), `release_all_running_owners`, y la
+      escritura directa de `admin_reconcile`— pasa por el método único de quiesce:
+      `fence + drain` bajo `ServerState._lock` → transición persistente → confirmar, o
+      `unfence` si la persistencia falla. Ningún caller productivo puede producir
+      `RUNNING_IDLE` por otra vía (si un productor del store no tiene caller, se documenta y se
+      protege igual). Y `record_poll` REVALIDA cerco y estado durable al retomar el lock, antes
+      de comprometer la entrega: hoy sólo revalida identidad y prefijo de la cola.
+  P7''. **Mientras un run está compensando, la lectura publica `unknown`.** `_activity_for_run_id`
+      (y la derivación de la caja) consultan `_compensating_runs`: un sello del intento que
+      existía al entrar no se publica durante la ventana. La tumba sigue siendo la frontera del
+      rollback; ahora también lo es para el LECTOR.
+  P6'''. **Retirar físicamente un run borra su cerco.** `retire_run` descarta el `run_id` de
+      `_fenced_runs` dentro del mismo `ServerState._lock`, aunque ya no queden entradas en
+      `_role_index`. Reap, reconcile sin supervivientes y repairs terminales no acumulan.
+  P6''''. **`exec_enforce` que pierde la carrera con un release devuelve `run_not_owned`.** La
+      segunda validación conserva el `fence_error_code` y responde con
+      `_fence_reject_response(...)`; `enqueue_cancelled` queda para stop/retirada.
+
+Sigue en pie todo lo anterior (P1-P5, P6 estricto, P7 tumbas, P7' cerco de compensación, P8).
+
+[DESIGN] Forma que dura: un único `_transition_to_idle(runs, persist: Callable[[], T]) -> T`
+en el lifecycle que encierra CUALQUIER persistencia que pueda dejar un run en `RUNNING_IDLE`
+(release, recover, reconcile), con `fence` antes y `confirm/unfence` después; y en el loopback
+un único punto de decisión de entrega en `record_poll` que se evalúa DESPUÉS de retomar el lock.
+Documenta en cabecera: «Every transition into RUNNING_IDLE goes through the fence; the poll
+re-validates after re-acquiring the lock.»
+
+LO QUE NO ES EL PRODUCTO: el gate, el oráculo, el ledger, este brief (defecto ahí →
+`DISPUTAS`); el sobre de `dayz_test_stop` y el anillo (otro lote); `runtime_state.py`; refactors.
+
+===============================================================================
+§1. LOS TRES ROJOS DEL GATE
+===============================================================================
+
+**N26-POLL-REVALIDA** — `record_poll` (`loopback.py:~2096-2130`) copia la cola bajo el lock,
+lo suelta (`expire_due`, sondas) y al retomarlo sólo revalida identidad y prefijo de la cola;
+si en esa ventana `repair_manifest_recovery` (`process_lifecycle.py:~2505-2570`) hace
+`restored.recover_after_restart()` (`:816-848`: RUNNING con dueño → `RUNNING_IDLE`, persiste)
+sin `_fence_runs`, el poll entrega un `world_spawn` copiado con dueño a un run que ya no lo
+tiene. El check bloquea al poll en esa ventana (envuelve `loopback.command_requires_lease`),
+repara en medio y mide la entrega; cablea `lifecycle.bindings` al `ServerState` (N25 también
+lo hace ahora): el cerco de verdad es visible. Las DOS mitades cierran el rojo: la transición
+de repair pasa por el cerco, Y el poll revalida al retomar el lock.
+
+**N28-CERCO-NO-SE-ACUMULA** — `retire_run` (`loopback.py:~1015-1021`) retira instancias y no
+toca `_fenced_runs`; tras release + reap, `run-1` sigue cercado. Caja blanca: lee
+`_fenced_runs`; si lo renombras, el check da UNMET y hay que decirlo en DISPUTAS.
+
+**N29-EXEC-ENFORCE-RUN-NOT-OWNED** — segunda validación de `exec_enforce` (`loopback.py:~1790-
+1839`): con el `exec_audit` bloqueado entre las dos validaciones y un release en medio,
+devuelve `enqueue_cancelled` en vez de `run_not_owned`.
+
+===============================================================================
+§2. LO QUE NO TIENE CHECK EN EL GATE. Lo cierro yo al recibir
+===============================================================================
+
+  (A) P6'': el poll revalida tras retomar el lock. Test con barrera dentro de la ventana sin
+      lock del poll (entre la copia de la cola y la entrega) y un release/repair en medio →
+      `commands: []`. Rojo-antes.
+  (B) P6'': `admin_reconcile` con supervivientes y `release_all_running_owners` (si tiene o
+      llega a tener caller) pasan por el método único: test por productor, rojo-antes donde
+      aplique, «preservación» donde ya cerque.
+  (C) P7'': lector entre el `replace` durable del rollback y `_forget_attempt_activity` publica
+      `unknown` (fixture adoptar-y-extender + fallo inyectado + `box_occupancy` desde otro hilo
+      con barrera en el `replace` del rollback). Rojo-antes: hoy publica `recent`.
+  (D) Preservación: N20 (adopt rehabilita), N25 (release), los tests de la 9.
+
+===============================================================================
+§3. EL GATE
+===============================================================================
+
+    bash gate/run.sh      -> G1, el oráculo de producto (38 checks)
+    bash gate/suite.sh    -> G2, los tests de lifecycle, ocupación y loopback
+
+Ahora mismo: `PASS=35 FAIL=3 UNMET=0 de 38` (rojos N26, N28, N29; N25 recableado con `lifecycle.bindings` y verde en la 9). **Los verdes son la línea que no se puede romper.**
+Guarda anti-vacuidad: un `UNMET` no es tu código; si tu diseño deja un check sin alcance,
+`DISPUTAS` con el motivo. Terminas cuando `gate/run.sh` diga `ORACULO-VERDE` y `gate/suite.sh`
+diga `SUITE-ACOTADA OK`. `gate/` está sellado por hash y es de sólo lectura.
+
+===============================================================================
+§4. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/process_lifecycle.py
+    tools/dayz_mcp/loopback.py
+    tools/tests/test_box_occupancy.py
+    tools/tests/test_process_lifecycle.py
+    tools/tests/test_loopback.py
+
+PROHIBIDO: `gate/`; `addon/`; `server.py`; `dayz_test_tool.py`; `runtime_state.py`;
+debilitar o borrar validaciones existentes; usar red; correr la suite completa.
+
+⚠ **Data-crítico**. Locks: `_operation_lock → (ServerState._lock | _activity_lock)`; nunca el
+inverso; ninguna lectura toma `_operation_lock`.
+
+Escribe tests para lo que entregas y córrelos ANTES de tu cambio contra
+`../ws-frozen-r9/tools/` (copia temporal tuya bajo /tmp).
+
+===============================================================================
+§5. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — el método único de transición y TODOS sus callers (grep de
+                          `RUNNING_IDLE` en los dos ficheros como prueba de que no queda otro
+                          productor), la revalidación del poll, el lector durante compensación,
+                          la baja del cerco en retire, el código de exec_enforce; con `path:line`.
+    ## GATE             — la salida literal de los dos gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea de FAIL contra `ws-frozen-r9`, o
+                          «preservación». Los de §2 (A)-(C) obligatorios.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si un criterio del gate está mal, aquí, con el argumento.

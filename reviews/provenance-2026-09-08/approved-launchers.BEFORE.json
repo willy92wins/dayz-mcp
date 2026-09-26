@@ -1,0 +1,15 @@
+{
+  "format_version": 1,
+  "launchers": [
+    {
+      "id": "dayz-test-v1",
+      "relative_path": "dayz-test-launcher.exe",
+      "root": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\native-launchers\\dayz-test-v1",
+      "root_file_id": {
+        "file_id": "00000000000000000325000000036709",
+        "volume_serial_number": 14582687742868402597
+      },
+      "sha256": "9EFA885238B0F3A9C2E97BB9C02829A3B2B69E6208858F5122F30BB60284F28E"
+    }
+  ]
+}

@@ -1,0 +1,180 @@
+--- base/MCPClientBridge.c
++++ composer/MCPClientBridge.c
+@@ -563,6 +563,10 @@
+ 		{
+ 			postNow = DispatchUiClick(command, result);
+ 		}
++		else if (command.cmd == "action_use")
++		{
++			postNow = DispatchActionUse(command, result);
++		}
+ 		else
+ 		{
+ 			result.ok = false;
+@@ -1139,6 +1143,166 @@
+ 		}
+ 
+ 		result.ok = true;
++		return true;
++	}
++
++	//! Dispatches a registered user action against the nearest matching world object.
++	//! cursorHitPos must be the target position (actiontargets.c:113); vector.Zero
++	//! fails CCTCursor distance checks (cctcursor.c:30-33) because the origin is far
++	//! from Chernarus. Returns immediately after PerformActionStart (actionmanagerclient.c:762);
++	//! UseAcknowledgment actions need a separate log_matches wait (actionbase.c:1146-1148).
++	protected bool DispatchActionUse(MCPCommand command, MCPResult result)
++	{
++		if (!command.args || command.args.action == "")
++		{
++			result.ok = false;
++			result.error = "bad_args";
++			return true;
++		}
++
++		PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
++		if (!player)
++		{
++			result.ok = false;
++			result.error = "no_player";
++			return true;
++		}
++
++		ActionManagerClient amc = ActionManagerClient.Cast(player.GetActionManager());
++		if (!amc)
++		{
++			result.ok = false;
++			result.error = "no_action_manager";
++			return true;
++		}
++
++		string actionName = command.args.action;
++		ActionBase action = null;
++		array<ref ActionBase> actionsArray = ActionManagerBase.m_ActionsArray;
++		int actionIdx = 0;
++		while (actionIdx < actionsArray.Count())
++		{
++			ActionBase candidate = actionsArray.Get(actionIdx);
++			if (candidate && candidate.Type().ToString() == actionName)
++			{
++				action = candidate;
++				break;
++			}
++			actionIdx = actionIdx + 1;
++		}
++
++		if (!action)
++		{
++			result.ok = false;
++			result.error = "action_not_found";
++			return true;
++		}
++
++		vector searchCenter;
++		float searchRadius = 5.0;
++		if (command.args.pos && command.args.pos.Count() == 3)
++		{
++			if (!ArrayToVector(command.args.pos, searchCenter))
++			{
++				result.ok = false;
++				result.error = "bad_args";
++				return true;
++			}
++		}
++		else
++		{
++			searchCenter = player.GetPosition();
++		}
++
++		if (command.args.radius > 0.0 && IsFiniteFloat(command.args.radius))
++		{
++			searchRadius = command.args.radius;
++		}
++
++		m_ReadyObjects.Clear();
++		m_ReadyProxyCargos.Clear();
++		GetGame().GetObjectsAtPosition3D(searchCenter, searchRadius, m_ReadyObjects, m_ReadyProxyCargos);
++
++		string classnameFilter = command.args.classname;
++		Object targetObj = null;
++		float bestDistSq = float.MAX;
++		int objIdx = 0;
++		while (objIdx < m_ReadyObjects.Count())
++		{
++			Object found = m_ReadyObjects.Get(objIdx);
++			if (found == player)
++			{
++				objIdx = objIdx + 1;
++				continue;
++			}
++
++			if (classnameFilter != "" && found.ClassName() != classnameFilter)
++			{
++				objIdx = objIdx + 1;
++				continue;
++			}
++
++			float distSq = vector.DistanceSq(found.GetPosition(), searchCenter);
++			if (distSq < bestDistSq)
++			{
++				bestDistSq = distSq;
++				targetObj = found;
++			}
++			objIdx = objIdx + 1;
++		}
++
++		if (!targetObj)
++		{
++			result.ok = false;
++			result.error = "target_not_found";
++			return true;
++		}
++
++		vector cursorHitPos = targetObj.GetPosition();
++		ActionTarget actionTarget = new ActionTarget(targetObj, null, -1, cursorHitPos, 0);
++
++		if (amc.GetRunningAction() != null)
++		{
++			result.ok = false;
++			result.error = "action_in_progress";
++			return true;
++		}
++
++		if (!amc.ActionPossibilityCheck(player.GetCurrentCommandID()))
++		{
++			result.ok = false;
++			result.error = "not_possible";
++			return true;
++		}
++
++		if (!ScriptInputUserData.CanStoreInputUserData())
++		{
++			result.ok = false;
++			result.error = "input_busy";
++			return true;
++		}
++
++		if (!action.Can(player, actionTarget, null))
++		{
++			result.ok = false;
++			result.error = "condition_failed";
++			result.action = actionName;
++			result.classname = targetObj.ClassName();
++			result.pos_real = new array<float>();
++			VectorToArray(cursorHitPos, result.pos_real);
++			result.distance = vector.Distance(player.GetPosition(), cursorHitPos);
++			return true;
++		}
++
++		amc.PerformActionStart(action, actionTarget, null, NULL);
++
++		result.ok = true;
++		result.action = actionName;
++		result.classname = targetObj.ClassName();
++		result.pos_real = new array<float>();
++		VectorToArray(cursorHitPos, result.pos_real);
++		result.distance = vector.Distance(player.GetPosition(), cursorHitPos);
++		result.started = true;
+ 		return true;
+ 	}
+ 

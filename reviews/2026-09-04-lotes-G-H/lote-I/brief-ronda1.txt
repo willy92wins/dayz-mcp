@@ -1,0 +1,129 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar. Tienes shell: úsalo.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+LOTE I, RONDA 1: reconciliar los tests EXTERNOS con el contrato que los lotes G y H acaban de
+cerrar en `tools/dayz_mcp/process_lifecycle.py` y `loopback.py`. Al integrar ese producto en el
+árbol del repo, la suite COMPLETA da 30 rojos nuevos en cuatro módulos que el gate acotado no
+cubría; sobre un árbol limpio sin ese producto sólo fallan 2 tests conocidos. Todos los rojos son
+fixtures que presentan estados imposibles en producción bajo el contrato nuevo. El producto está
+CONGELADO POR HASH: este lote sólo toca tests.
+
+===============================================================================
+§0. EL CONTRATO QUE LOS TESTS TIENEN QUE RESPETAR (ya revisado y cerrado; no se discute aquí)
+===============================================================================
+
+  C1. Un binding BOUND despacha sólo si el manifiesto del lifecycle conoce su `run_id` con estado
+      RUNNING o STARTING (`loopback.py` `_enqueue_run_rejection` / `_durable_run_state`):
+        - run ausente del manifiesto → `binding_retired` (409);
+        - RUNNING_IDLE (sin dueño) o run cercado → `run_not_owned` (409);
+        - `state.lifecycle is None`, o lifecycle sin `manifest.get`, o `get` que lanza →
+          `run_state_unavailable` (503).
+      En producción el daemon cablea `state.lifecycle = lifecycle` y `bindings=state`
+      (`daemon.py:530-536`) y todo binding lo acuña `start_run` sobre un run del manifiesto.
+  C2. El release del dueño NO retira el binding: cerca el run (`_fenced_runs`) bajo el lock del
+      loopback antes de persistir RUNNING_IDLE; la mutación siguiente es `run_not_owned`; el poll
+      acreditado devuelve `commands: []`; `adopt_run` rehabilita el MISMO binding y la siguiente
+      mutación es 200 (P6 estricto, check N20).
+  C3. Toda transición terminal (reap, stop, admin_reconcile, recovery repair, manifest recovery,
+      launch fallido) retira los bindings ANTES de persistir EXITED, por `_commit_retirement`
+      (que llama a `_retire_run_bindings` y después a `manifest.replace`).
+  C4. `adopt_run` exige ≥1 proceso registrado `owned` según el guard; responde
+      `{ok, run_id, state, dispatchable}` (+ `hint` si `dispatchable` es False). Los tests que
+      comparan esa respuesta con un dict exacto añaden la clave.
+  C5. Sin lifecycle: `install_bound_peer` instala `_BoundPeerDispatchable` como lifecycle sólo si
+      `state.lifecycle is None`; con un lifecycle real NO registra nada en el manifiesto.
+
+===============================================================================
+§1. LOS 30 ROJOS Y SU CAUSA MEDIDA (todos reproducidos por el orquestador)
+===============================================================================
+
+  A. `test_client_mode` (14 nombres) y `test_session_e2e` (5) y `test_daemon.
+     test_enqueue_ok_when_version_matches`: el fixture `_daemon`/`DaemonHttpServer` levanta un
+     `ProcessLifecycle` REAL con manifiesto vacío y `bind_both_peers(state, run_id="test-run")`
+     (`tests/fence_helpers.py:10`) acredita peers para `test-run` → toda orden es
+     `binding_retired` (C1, run ausente). Arreglo: el fixture registra en el manifiesto real un
+     `RunRecord("test-run", <dueño>, <lease>, "RUNNING", ...)` con un `ProcessRecord` cuya
+     identidad el guard del daemon reconozca (o el guard falso del fixture), ANTES de la primera
+     orden. Si lo haces en `fence_helpers.bind_both_peers` (registro automático cuando
+     `state.lifecycle` tiene un `manifest` real con `add`), los otros ocho módulos que lo usan
+     tienen que seguir verdes; el gate lo mide.
+  B. `test_instance_fence.LifecycleFenceTest` (5: admin_reconcile / client_relaunch /
+     release_owner / repair_manifest_recovery / repair_recovery_fault ...retires_bindings):
+     `ServerState("k")` recibe `bindings=self.state` pero el fixture NO hace
+     `self.state.lifecycle = self.lifecycle` → `run_state_unavailable` 503 (C1). Arreglo: cablear
+     las dos direcciones como el daemon. Después, `test_release_owner_retires_bindings` seguirá
+     rojo por su ASERCIÓN: codifica el contrato viejo y lo supersede C2 → se reescribe para
+     afirmar C2 (binding sigue BOUND tras el release; mutación `run_not_owned`; poll `commands: []`;
+     adopt rehabilita; mutación 200) y se lista en STATE.md con el P-item.
+  C. `test_instance_fence.ProductionAttributionFenceTest.test_second_socket_same_instance_does_
+     not_receive_mutation`, `Round4FenceRegressionTest` (4) y `Round5FenceRegressionTest` (1):
+     `ServerState("k")` sin lifecycle, o con `state.lifecycle = SimpleNamespace(guard=guard)` sin
+     `manifest.get` → 503 (C1). Arreglo: el lifecycle falso expone `manifest.get(run_id)` que
+     devuelve un objeto con `state = "RUNNING"` para el run del binding (el propio
+     `_BoundPeerDispatchable` sirve: `SimpleNamespace(guard=guard, manifest=_BoundPeerDispatchable(run_id))`
+     o equivalente), sin tocar lo que cada test afirma.
+  D. `test_instance_fence.ExitedBindingInvariantTest.test_every_exited_path_retires_bindings`
+     (AST): el visitante sólo cuenta llamadas directas a `_retire_run_bindings` dentro de la
+     función que asigna EXITED; hoy esos caminos llaman a `_commit_retirement` (C3). Arreglo: el
+     visitante acepta como retirada una llamada a una función cuyo cuerpo (en el mismo módulo)
+     llama a `_retire_run_bindings`, y AÑADE la comprobación de orden: en `_commit_retirement`
+     la llamada a `_retire_run_bindings` precede a `manifest.replace`. Se amplía; no se relaja.
+
+===============================================================================
+§2. REGLAS
+===============================================================================
+
+  R1. Fixture antes que aserción: si el rojo es un estado imposible, arregla el fixture y la
+      aserción queda byte a byte igual.
+  R2. Una aserción sólo cambia si un punto de §0 la supersede, y va a STATE.md como
+      `test → aserción vieja → aserción nueva → C-item`. Sin C-item: DISPUTAS, y el test se deja
+      rojo (no se marca skip, no se borra).
+  R3. Un detector estático se amplía, nunca se relaja (D).
+  R4. NADA de `tools/dayz_mcp/` cambia. Si un test sólo puede ponerse verde tocando el producto,
+      eso es un defecto del producto: DISPUTAS con el test exacto y el motivo.
+  R5. `tests/test_session_e2e.py` está sin trackear en el repo: se reconcilia igual y se declara
+      en STATE.md que no se commiteará.
+  R6. Prohibido: `unittest.skip`, borrar tests, `expectedFailure`, ampliar `gate/allowed_red.txt`,
+      tocar `gate/`, `addon/`, red.
+
+===============================================================================
+§3. EL GATE
+===============================================================================
+
+    bash gate/product_frozen.sh     -> PRODUCTO-CONGELADO OK   (hash de todo dayz_mcp/*.py)
+    bash gate/suite_full.sh         -> SUITE-COMPLETA OK        (rojos == allowlist exacta: los 2 conocidos)
+
+Ahora mismo: gate/product_frozen.sh: PRODUCTO-CONGELADO OK (63 ficheros) · gate/suite_full.sh: SUITE-COMPLETA ROJA — 30 rojos no permitidos, 0 permitidos que ya no fallan (Ran 2524 tests). **El verde del producto congelado es la línea que no se puede
+romper; el rojo de la suite es el trabajo.** La suite completa tarda ~4 min: córrela por módulo
+mientras trabajas (`python -m unittest tests.test_instance_fence`, etc.) y entera al final.
+
+===============================================================================
+§4. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/tests/test_instance_fence.py
+    tools/tests/test_client_mode.py
+    tools/tests/test_daemon.py
+    tools/tests/test_session_e2e.py
+    tools/tests/fence_helpers.py
+
+Intérprete: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`,
+desde `tools/` con `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1`.
+
+===============================================================================
+§5. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — por módulo, qué fixtures cambiaron (path:line) y qué aserciones (R2, tabla).
+    ## GATE             — la salida literal de los DOS gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada aserción reescrita (R2), la línea de FAIL que daba antes y por
+                          qué el C-item la supersede; para D, un mutante: si `_commit_retirement`
+                          persistiera ANTES de retirar, el test tiene que ponerse rojo (pruébalo en
+                          una copia temporal del producto bajo /tmp, nunca en el workspace).
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — tests que no se pueden reconciliar sin tocar el producto (R4) o sin
+                          C-item (R2), con el argumento.

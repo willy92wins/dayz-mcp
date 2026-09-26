@@ -1,0 +1,9 @@
+{
+  "command": "\"C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe\" -m unittest tests.test_docs_truth -v",
+  "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+  "PYTHONPATH": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+  "PYTHONDONTWRITEBYTECODE": "1",
+  "exit_code": 0,
+  "map_sha256": "e2928ea64e544a3d9fb8effde6682ef144994e4b74d56410257ab3b7cc2a3b0e",
+  "timestamp_normalized_sha256": "0aabe28fd46d305b19e2dbcd650e683961ec3d66f332ecde5acb3cd17cbcc2f8"
+}

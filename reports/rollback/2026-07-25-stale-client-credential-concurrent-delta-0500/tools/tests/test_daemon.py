@@ -1,0 +1,1428 @@
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import os
+import socket
+import sys
+import threading
+import time
+import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
+
+# Make tools/ importable whether run via discover or by module name.
+_TOOLS_DIR = Path(__file__).resolve().parents[1]
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+from dayz_mcp import core, daemon, daemon_credential, loopback, orphan_guard
+from dayz_mcp.native_process_guard import identity_hashes
+from dayz_mcp.server import ServerConfig
+
+
+IDENTITY = {
+    "platform": "codex",
+    "pid": 11,
+    "ppid": 1,
+    "started_at_utc": "2026-07-14T10:00:00Z",
+    "session_id": "daemon-test",
+    "task_label": "daemon",
+}
+
+
+def _http(
+    base,
+    method,
+    path,
+    key,
+    payload=None,
+    query=None,
+    timeout=2.0,
+    headers=None,
+):
+    params = dict(query or {})
+    if key is not None:
+        params["key"] = key
+    url = base + path + "?" + urllib.parse.urlencode(params)
+    data = None
+    request_headers = dict(headers or {})
+    if payload is not None:
+        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        request_headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(
+        url, data=data, headers=request_headers, method=method
+    )
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return int(response.status), json.loads(response.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            return int(exc.code), json.loads(exc.read().decode("utf-8") or "{}")
+        finally:
+            exc.close()
+
+
+def _free_port() -> int:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+    finally:
+        sock.close()
+
+
+class DaemonHttpServer:
+    """A daemon-style loopback (version validator + status_provider) on a port."""
+
+    def __init__(self, config: ServerConfig, port: int = 0) -> None:
+        self.key = config.key
+        self.runtime_dir = TemporaryDirectory()
+        with patch.dict(os.environ, {"LOCALAPPDATA": self.runtime_dir.name}), patch.object(
+            daemon.orphan_guard,
+            "snapshot_retail_processes",
+            return_value={"known": True, "processes": []},
+        ), patch.object(daemon, "_ensure_identity_migration", return_value=None):
+            self.state = daemon.build_server_state(
+                config, self.key, activate_coordination=True
+            )
+        provider = daemon.make_status_provider(config, self.state)
+        self.httpd = loopback.create_http_server(
+            port, self.state, log_sink=lambda _m: None, reclaim_orphans=False, status_provider=provider
+        )
+        self.port = int(self.httpd.server_address[1])
+        self.base = f"http://127.0.0.1:{self.port}"
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+
+    def _serve(self) -> None:
+        # Swallow the benign serve_forever/server_close teardown race on Windows so
+        # test output stays clean (the threading excepthook would print otherwise).
+        try:
+            self.httpd.serve_forever(poll_interval=0.01)
+        except Exception:
+            pass
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=2.0)
+        self.runtime_dir.cleanup()
+
+
+def _config(**kw) -> ServerConfig:
+    base = dict(mode="daemon", key="dkey", port=0, log_sink=lambda _m: None)
+    base.update(kw)
+    return ServerConfig(**base)
+
+
+class DaemonEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.servers: list[DaemonHttpServer] = []
+
+    def tearDown(self) -> None:
+        for srv in self.servers:
+            srv.stop()
+
+    def _daemon(self, **kw) -> DaemonHttpServer:
+        srv = DaemonHttpServer(_config(**kw))
+        srv.start()
+        self.servers.append(srv)
+        return srv
+
+    def test_retry_marker_records_only_ephemeral_sanitized_telemetry(self) -> None:
+        srv = self._daemon(key="credential-b")
+        marker = {
+            daemon_credential.CREDENTIAL_RETRY_HEADER:
+                daemon_credential.CREDENTIAL_RETRY_VALUE
+        }
+        rejected_status, rejected = _http(
+            srv.base,
+            "GET",
+            "/status",
+            "credential-a",
+            headers=marker,
+        )
+        recovered_status, recovered = _http(
+            srv.base,
+            "GET",
+            "/status",
+            "credential-b",
+            headers=marker,
+        )
+
+        self.assertEqual(rejected_status, 401)
+        self.assertEqual(rejected, {"error": "unauthorized"})
+        self.assertEqual(recovered_status, 200)
+        self.assertIn("credential_refresh", recovered)
+        telemetry = recovered["credential_refresh"]
+        self.assertEqual(
+            set(telemetry),
+            {
+                "recovered_count",
+                "rejected_count",
+                "last_outcome",
+                "last_outcome_age_s",
+            },
+        )
+        self.assertEqual(telemetry["recovered_count"], 1)
+        self.assertEqual(telemetry["rejected_count"], 1)
+        self.assertEqual(telemetry["last_outcome"], "recovered")
+        self.assertGreaterEqual(telemetry["last_outcome_age_s"], 0.0)
+        rendered = json.dumps(telemetry, sort_keys=True)
+        self.assertNotIn("credential-a", rendered)
+        self.assertNotIn("credential-b", rendered)
+        self.assertNotIn("session", rendered.casefold())
+        self.assertNotIn("token", rendered.casefold())
+
+    def test_credential_telemetry_expires_without_resetting_saturating_counts(
+        self,
+    ) -> None:
+        now = [100.0]
+        state = loopback.ServerState("credential", time_fn=lambda: now[0])
+        self.assertTrue(hasattr(state, "record_credential_retry"))
+        self.assertTrue(hasattr(state, "credential_refresh_snapshot"))
+        self.assertTrue(hasattr(loopback, "CREDENTIAL_TELEMETRY_TTL_S"))
+        state.record_credential_retry("recovered")
+        fresh = state.credential_refresh_snapshot()
+        self.assertEqual(fresh["last_outcome"], "recovered")
+        self.assertEqual(fresh["last_outcome_age_s"], 0.0)
+
+        now[0] += loopback.CREDENTIAL_TELEMETRY_TTL_S + 0.001
+        expired = state.credential_refresh_snapshot()
+        self.assertEqual(expired["recovered_count"], 1)
+        self.assertEqual(expired["rejected_count"], 0)
+        self.assertIsNone(expired["last_outcome"])
+        self.assertIsNone(expired["last_outcome_age_s"])
+
+    def test_rejected_retry_telemetry_is_rate_limited(self) -> None:
+        now = [100.0]
+        state = loopback.ServerState("credential", time_fn=lambda: now[0])
+        self.assertTrue(
+            hasattr(loopback, "CREDENTIAL_REJECTED_TELEMETRY_RATE_LIMIT_S")
+        )
+        state.record_credential_retry("rejected")
+        state.record_credential_retry("rejected")
+        state.record_credential_retry("rejected")
+        self.assertEqual(
+            state.credential_refresh_snapshot()["rejected_count"], 1
+        )
+
+        now[0] += loopback.CREDENTIAL_REJECTED_TELEMETRY_RATE_LIMIT_S + 0.001
+        state.record_credential_retry("rejected")
+        self.assertEqual(
+            state.credential_refresh_snapshot()["rejected_count"], 2
+        )
+
+    def test_recovery_does_not_change_active_lease_or_run_ownership(self) -> None:
+        from tests.test_control_client import _policy
+
+        class LifecycleFixture:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.run = {
+                    "run_id": "run-stable",
+                    "owner_session_id": IDENTITY["session_id"],
+                    "owner_lease_id": "lease-owned-by-coordinator",
+                    "state": "RUNNING_IDLE",
+                }
+
+            def status(self, client) -> dict[str, object]:
+                self.calls += 1
+                self.run["observed_session_id"] = client.session_id
+                return {"runs": [dict(self.run)]}
+
+        srv = self._daemon(key="credential-b")
+        lifecycle = LifecycleFixture()
+        srv.state.lifecycle = lifecycle
+        acquire_status, acquired = _http(
+            srv.base,
+            "POST",
+            "/session/acquire",
+            "credential-b",
+            payload={
+                "identity": IDENTITY,
+                "purpose": "credential recovery ownership fixture",
+                "operation_id": str(uuid.uuid4()),
+            },
+        )
+        self.assertEqual(acquire_status, 200)
+        self.assertEqual(acquired["status"], "active")
+        lifecycle.run["owner_lease_id"] = acquired["lease_token"]
+        before_status, before = _http(
+            srv.base,
+            "POST",
+            "/session/status",
+            "credential-b",
+            payload={"identity": IDENTITY},
+        )
+        self.assertEqual(before_status, 200)
+
+        keyfile = Path(srv.runtime_dir.name) / "daemon.key"
+        keyfile.write_text("credential-b", encoding="utf-8")
+        credential = daemon_credential.RefreshingDaemonCredential(
+            policy=_policy(keyfile),
+            initial_key="credential-a",
+        )
+
+        def request(**kwargs: object) -> tuple[int, bytes]:
+            payload = (
+                None
+                if kwargs["body"] is None
+                else json.loads(bytes(kwargs["body"]).decode("utf-8"))
+            )
+            status, response = _http(
+                srv.base,
+                kwargs["method"],
+                kwargs["path"],
+                kwargs["key"],
+                payload=payload,
+                query=kwargs["query"],
+                headers=kwargs["headers"],
+            )
+            return status, json.dumps(
+                response, separators=(",", ":")
+            ).encode("utf-8")
+
+        lifecycle_status, lifecycle_body = credential.exchange(
+            request_fn=request,
+            method="POST",
+            path="/lifecycle/status",
+            query={},
+            body=json.dumps(
+                {"identity": IDENTITY}, separators=(",", ":")
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            deadline=time.monotonic() + 5.0,
+        )
+        after_status, after = _http(
+            srv.base,
+            "POST",
+            "/session/status",
+            "credential-b",
+            payload={"identity": IDENTITY},
+        )
+
+        self.assertEqual(lifecycle_status, 200)
+        self.assertEqual(
+            json.loads(lifecycle_body),
+            {
+                "runs": [
+                    {
+                        **lifecycle.run,
+                        "observed_session_id": IDENTITY["session_id"],
+                    }
+                ]
+            },
+        )
+        self.assertEqual(lifecycle.calls, 1)
+        self.assertEqual(after_status, 200)
+        for field in ("lease_id", "client", "purpose", "state"):
+            self.assertEqual(before["owner"][field], after["owner"][field])
+        self.assertGreater(after["owner"]["expires_in_s"], 0.0)
+        self.assertLessEqual(
+            after["owner"]["expires_in_s"], before["owner"]["expires_in_s"]
+        )
+        self.assertEqual(before["self"], after["self"])
+        self.assertEqual(before["queue"], after["queue"])
+        self.assertEqual(
+            acquired["lease_token"], lifecycle.run["owner_lease_id"]
+        )
+
+    def test_live_isolated_client_recovers_rotation_without_restart(self) -> None:
+        from tests.test_control_client import _policy
+
+        srv = self._daemon(key="credential-a")
+        keyfile = Path(srv.runtime_dir.name) / "daemon.key"
+        keyfile.write_text("credential-a", encoding="utf-8")
+        credential = daemon_credential.RefreshingDaemonCredential(
+            policy=_policy(keyfile)
+        )
+        client_object_id = id(credential)
+        server_thread_id = srv.thread.ident
+        process_id = os.getpid()
+        calls: list[dict[str, object]] = []
+
+        def request(**kwargs: object) -> tuple[int, bytes]:
+            calls.append(dict(kwargs))
+            payload = (
+                None
+                if kwargs["body"] is None
+                else json.loads(bytes(kwargs["body"]).decode("utf-8"))
+            )
+            status, response = _http(
+                srv.base,
+                kwargs["method"],
+                kwargs["path"],
+                kwargs["key"],
+                payload=payload,
+                query=kwargs["query"],
+                headers=kwargs["headers"],
+            )
+            return status, json.dumps(
+                response, separators=(",", ":")
+            ).encode("utf-8")
+
+        initial_status, _initial_body = credential.exchange(
+            request_fn=request,
+            method="GET",
+            path="/status",
+            query={},
+            body=None,
+            headers={},
+            deadline=time.monotonic() + 5.0,
+        )
+        self.assertEqual(initial_status, 200)
+        calls.clear()
+
+        replacement = keyfile.with_suffix(".next")
+        replacement.write_text("credential-b", encoding="utf-8")
+        replacement.replace(keyfile)
+        with srv.state._lock:
+            srv.state.key = "credential-b"
+
+        recovered_status, recovered_body = credential.exchange(
+            request_fn=request,
+            method="GET",
+            path="/status",
+            query={},
+            body=None,
+            headers={},
+            deadline=time.monotonic() + 5.0,
+        )
+        recovered_payload = json.loads(recovered_body)
+
+        self.assertEqual(recovered_status, 200)
+        self.assertEqual(
+            [call["key"] for call in calls], ["credential-a", "credential-b"]
+        )
+        self.assertEqual(
+            recovered_payload["credential_refresh"]["recovered_count"], 1
+        )
+        self.assertEqual(id(credential), client_object_id)
+        self.assertEqual(srv.thread.ident, server_thread_id)
+        self.assertTrue(srv.thread.is_alive())
+        self.assertEqual(os.getpid(), process_id)
+
+    def test_status_endpoint_returns_rich_payload(self) -> None:
+        srv = self._daemon()
+        status, body = _http(srv.base, "GET", "/status", srv.key)
+        self.assertEqual(status, 200)
+        self.assertIn("server_peer", body)
+        self.assertIn("client_peer", body)
+        self.assertEqual(body["server_version"], core.EXPECTED_BRIDGE_VERSION)
+        self.assertIn("daemon_generation", body)
+        self.assertTrue(hasattr(srv.state, "daemon_generation"))
+        self.assertEqual(body["daemon_generation"], srv.state.daemon_generation)
+        self.assertIn("coordination", body)
+        self.assertIsNotNone(srv.state.coordination)
+        self.assertIsNotNone(srv.state.coordination_store)
+        self.assertNotIn("lease_token", json.dumps(body, separators=(",", ":")))
+        # require_version False + no poll → "legacy" (not blocked).
+        self.assertEqual(body["server_peer"]["version_state"], "legacy")
+
+    def test_status_requires_key(self) -> None:
+        srv = self._daemon()
+        status, body = _http(srv.base, "GET", "/status", None)
+        self.assertEqual(status, 401)
+        self.assertEqual(body, {"error": "unauthorized"})
+
+    def test_enqueue_version_blocked_when_require_version(self) -> None:
+        srv = self._daemon(require_version=True)
+        status, body = _http(
+            srv.base,
+            "POST",
+            "/enqueue",
+            srv.key,
+            {"identity": IDENTITY, "cmd": "query_player_state", "args": {}},
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(body["error"], "version_blocked")
+        self.assertEqual(body["state"], "legacy_blocked")
+
+    def test_enqueue_ok_when_version_matches(self) -> None:
+        srv = self._daemon(require_version=True, expected_game_version="1.29.0")
+        _http(srv.base, "GET", "/poll", srv.key, query={"peer": "server", "ver": f"{core.EXPECTED_BRIDGE_VERSION}~1.29.0"})
+        status, body = _http(
+            srv.base,
+            "POST",
+            "/enqueue",
+            srv.key,
+            {"identity": IDENTITY, "cmd": "query_player_state", "args": {}},
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("id", body)
+
+    def test_enqueue_version_mismatch_blocked(self) -> None:
+        srv = self._daemon(require_version=True, expected_game_version="1.29.0")
+        _http(srv.base, "GET", "/poll", srv.key, query={"peer": "server", "ver": f"{core.EXPECTED_BRIDGE_VERSION}~9.9.9"})
+        status, body = _http(
+            srv.base,
+            "POST",
+            "/enqueue",
+            srv.key,
+            {"identity": IDENTITY, "cmd": "query_player_state", "args": {}},
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(body["state"], "version_mismatch")
+
+    def test_touch_client_advances_idle_metric(self) -> None:
+        srv = self._daemon()
+        self.assertIsNone(srv.state.status_snapshot().get("last_client_request_at"))
+        _http(srv.base, "GET", "/status", srv.key)
+        self.assertIsNotNone(srv.state.status_snapshot().get("last_client_request_at"))
+
+
+class ProbeStatusHealthyTest(unittest.TestCase):
+    EXECUTABLE = r"C:\Python\python.exe"
+    ARGV = [
+        EXECUTABLE, "-m", "dayz_mcp", "--daemon", "--port", "8765",
+    ]
+    CWD = r"C:\DayZ_MCP\tools"
+
+    def _probe(self, key: str, request_fn) -> bool:
+        return orphan_guard.probe_status_healthy(
+            8765,
+            key,
+            deadline=12.0,
+            expected_executable=self.EXECUTABLE,
+            expected_argv=list(self.ARGV),
+            expected_cwd=self.CWD,
+            request_fn=request_fn,
+        )
+
+    def setUp(self) -> None:
+        self.servers: list[DaemonHttpServer] = []
+
+    def tearDown(self) -> None:
+        for srv in self.servers:
+            srv.stop()
+
+    def test_healthy_daemon_probes_true_bad_key_false(self) -> None:
+        payload = StrictDaemonProbeTest._payload()
+
+        def request(**kwargs: object) -> tuple[int, bytes]:
+            status = 200 if kwargs["key"] == "pk" else 401
+            return status, json.dumps(payload).encode("utf-8")
+
+        self.assertTrue(self._probe("pk", request))
+        self.assertFalse(self._probe("wrong", request))
+
+    def test_no_listener_probes_false(self) -> None:
+        def refused(**_kwargs: object) -> tuple[int, bytes]:
+            raise ConnectionRefusedError
+
+        self.assertFalse(self._probe("k", refused))
+
+    def test_status_with_many_exited_runs_between_64k_and_transport_limit_is_healthy(self) -> None:
+        srv = DaemonHttpServer(_config(key="pk"))
+        srv.state.lifecycle = SimpleNamespace(
+            public_status=lambda: {
+                "runs": [
+                    {
+                        "run_id": f"exited-{index:04d}",
+                        "owner_session_id": None,
+                        "owner_lease_id": None,
+                        "state": "EXITED",
+                        "label": "completed-regression-run",
+                        "mod": r"P:\Mods\@LF_VStorage",
+                        "profiles": r"C:\DayZ\profiles",
+                        "mission": "dayzOffline.chernarusplus",
+                        "processes": [],
+                        "launch_operation_id": None,
+                        "launch_request_sha256": None,
+                        "launch_acknowledged": True,
+                    }
+                    for index in range(512)
+                ],
+                "retail_quarantine": False,
+            }
+        )
+        srv.start()
+        self.servers.append(srv)
+        observed_sizes: list[int] = []
+
+        def request(**kwargs: object) -> tuple[int, bytes]:
+            url = (
+                f"{srv.base}/status?"
+                + urllib.parse.urlencode({"key": str(kwargs["key"])})
+            )
+            with urllib.request.urlopen(url, timeout=2.0) as response:
+                body = response.read(int(kwargs["max_response_bytes"]) + 1)
+                if len(body) > int(kwargs["max_response_bytes"]):
+                    raise ValueError("daemon_response_too_large")
+                observed_sizes.append(len(body))
+                return int(response.status), body
+
+        self.assertTrue(self._probe(srv.key, request))
+        self.assertEqual(
+            orphan_guard.MAX_STATUS_BODY_BYTES,
+            orphan_guard.MAX_AUTHENTICATED_RESPONSE_BYTES,
+        )
+        self.assertGreater(observed_sizes[0], 64 * 1024)
+        self.assertLess(observed_sizes[0], 4 * 1024 * 1024)
+
+    def test_status_over_authenticated_transport_limit_is_unhealthy(self) -> None:
+        payload = StrictDaemonProbeTest._payload()
+        payload["padding"] = "x" * (4 * 1024 * 1024)
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        limits: list[int] = []
+
+        def request(**kwargs: object) -> tuple[int, bytes]:
+            limits.append(int(kwargs["max_response_bytes"]))
+            return 200, body
+
+        self.assertFalse(self._probe("pk", request))
+        self.assertEqual(limits, [orphan_guard.MAX_AUTHENTICATED_RESPONSE_BYTES])
+
+    def test_responsive_probe_treats_foreign_key_as_alive(self) -> None:
+        # A daemon answering 401 (wrong key) is NOT healthy to us but IS responsive —
+        # the reclaim guard must read it as a live server (B-1) and never kill it.
+        srv = DaemonHttpServer(_config(key="pk"))
+        srv.start()
+        self.servers.append(srv)
+        self.assertFalse(
+            self._probe("wrong", lambda **_kwargs: (401, b'{}'))
+        )
+        self.assertTrue(orphan_guard.probe_listener_responsive(srv.port, timeout=2.0))
+
+    def test_responsive_probe_false_when_no_listener(self) -> None:
+        port = _free_port()  # nobody is listening here
+        self.assertFalse(orphan_guard.probe_listener_responsive(port, timeout=0.5))
+
+
+class StrictDaemonProbeTest(unittest.TestCase):
+    EXECUTABLE = r"C:\Python\python.exe"
+    ARGV = [
+        EXECUTABLE,
+        "-m",
+        "dayz_mcp",
+        "--daemon",
+        "--port",
+        "8765",
+        "--keyfile",
+        r"C:\runtime\key.txt",
+    ]
+
+    class Response:
+        def __init__(self, payload: object, status: int = 200) -> None:
+            self.status = status
+            self._body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int = -1) -> bytes:
+            return self._body
+
+    class Guard:
+        def __init__(self, snapshot: dict[str, object]) -> None:
+            self.snapshot_payload = snapshot
+            self.calls: list[int] = []
+
+        def snapshot(self, pid: int) -> dict[str, object]:
+            self.calls.append(pid)
+            return dict(self.snapshot_payload)
+
+    def _identity(self, argv: list[str] | None = None) -> dict[str, object]:
+        return {
+            "pid": 4321,
+            "creation_time_utc": "2026-07-22T00:00:00.000000Z",
+            **identity_hashes(self.EXECUTABLE, argv or self.ARGV),
+            "identity_scheme": "psutil-argv-v2",
+            "identity_complete": True,
+            "exit_code": 0,
+        }
+
+    @staticmethod
+    def _payload(generation: str = "generation-a") -> dict[str, object]:
+        coordination = {"revision": 7}
+        return {
+            "daemon_generation": generation,
+            "coordination": coordination,
+            "daemon_status": {
+                "schema": "dayz-mcp-daemon-status-v1",
+                "product": "dayz_mcp",
+                "mode": "daemon",
+                "daemon_generation": generation,
+                "coordination_revision": 7,
+            },
+        }
+
+    def _probe(
+        self,
+        payload: object,
+        *,
+        expected_generation: str | None = None,
+        argv: list[str] | None = None,
+        urlopen_calls: list[str] | None = None,
+        strict_argv: bool = True,
+    ) -> bool:
+        calls = urlopen_calls if urlopen_calls is not None else []
+        observed_argv = list(argv if argv is not None else self.ARGV)
+        expected_argv = self.ARGV if strict_argv else observed_argv
+
+        def request_fn(**kwargs: object) -> tuple[int, bytes]:
+            if observed_argv != kwargs["expected_argv"]:
+                raise ConnectionError("daemon_identity_unverified")
+            calls.append("authenticated-request")
+            return 200, json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+        return orphan_guard.probe_status_healthy(
+            8765,
+            "secret-do-not-log",
+            deadline=10.25,
+            expected_generation=expected_generation,
+            expected_executable=self.EXECUTABLE,
+            expected_argv=list(expected_argv),
+            expected_cwd=r"C:\DayZ_MCP\tools",
+            request_fn=request_fn,
+        )
+
+    def test_foreign_listener_identity_blocks_before_key_request(self) -> None:
+        calls: list[str] = []
+        foreign = [self.EXECUTABLE, "-m", "http.server", "8765"]
+
+        self.assertFalse(self._probe(self._payload(), argv=foreign, urlopen_calls=calls))
+        self.assertEqual(calls, [])
+
+    def test_equivalent_daemon_argv_order_keeps_exact_observed_fingerprint(self) -> None:
+        reordered = [
+            self.EXECUTABLE,
+            "-m",
+            "dayz_mcp",
+            "--keyfile",
+            r"C:\runtime\key.txt",
+            "--daemon",
+            "--port",
+            "8765",
+        ]
+        self.assertTrue(
+            self._probe(self._payload(), argv=reordered, strict_argv=False)
+        )
+
+    def test_exact_identity_and_closed_status_schema_are_required(self) -> None:
+        self.assertTrue(
+            self._probe(self._payload(), expected_generation="generation-a")
+        )
+
+        malformed = self._payload()
+        malformed["daemon_status"] = {"product": "dayz_mcp", "mode": "daemon"}
+        self.assertFalse(self._probe(malformed))
+
+        extra = self._payload()
+        extra["daemon_status"] = dict(extra["daemon_status"], unexpected=True)
+        self.assertFalse(self._probe(extra))
+
+        inconsistent = self._payload()
+        inconsistent["coordination"] = {"revision": 8}
+        self.assertFalse(self._probe(inconsistent))
+
+        self.assertFalse(
+            self._probe(self._payload("generation-b"), expected_generation="generation-a")
+        )
+
+    def test_key_is_not_exposed_by_probe_diagnostics(self) -> None:
+        calls: list[str] = []
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertFalse(
+                self._probe({"not": "a daemon"}, urlopen_calls=calls)
+            )
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("secret-do-not-log", stderr.getvalue())
+
+    def test_listener_pid_uses_native_structured_table_without_child(self) -> None:
+        connection = SimpleNamespace(
+            status="LISTEN",
+            laddr=SimpleNamespace(ip="127.0.0.1", port=8765),
+            pid=4321,
+        )
+        native = SimpleNamespace(
+            CONN_LISTEN="LISTEN",
+            net_connections=lambda *, kind: [connection] if kind == "tcp" else [],
+        )
+        with (
+            patch.object(orphan_guard, "psutil", native),
+            patch.object(orphan_guard.subprocess, "run") as child,
+        ):
+            self.assertEqual(orphan_guard._native_listener_pid_for_port(8765), 4321)
+        child.assert_not_called()
+
+
+class StatusProviderMarkerTest(unittest.TestCase):
+    def test_producer_emits_marker_consistent_with_coordination(self) -> None:
+        snapshot = {
+            "peers": {
+                "server": {
+                    "last_poll_age_s": None,
+                    "queue_depth": 0,
+                    "version": None,
+                },
+                "client": {
+                    "last_poll_age_s": None,
+                    "queue_depth": 0,
+                    "version": None,
+                },
+            },
+            "results_pending": 0,
+        }
+        state = SimpleNamespace(
+            daemon_generation="generation-a",
+            coordination=SimpleNamespace(
+                snapshot_payload=lambda: {"revision": 7}
+            ),
+            lifecycle=None,
+            status_snapshot=lambda: snapshot,
+        )
+
+        payload = daemon.make_status_provider(_config(), state)()
+
+        self.assertEqual(
+            payload["daemon_status"],
+            {
+                "schema": "dayz-mcp-daemon-status-v1",
+                "product": "dayz_mcp",
+                "mode": "daemon",
+                "daemon_generation": "generation-a",
+                "coordination_revision": 7,
+            },
+        )
+
+    def test_generation_accreditation_has_injectable_bounded_timing(self) -> None:
+        now = [10.0]
+        sleeps: list[float] = []
+        probes: list[float] = []
+
+        def sleep(duration: float) -> None:
+            sleeps.append(duration)
+            now[0] += duration
+
+        def probe(*_args: object, **kwargs: object) -> bool:
+            probes.append(float(kwargs["deadline"]))
+            return False
+
+        self.assertFalse(
+            daemon._status_accredits_generation(
+                8765,
+                "fixture-key",
+                "generation-a",
+                deadline=10.2,
+                expected_executable=r"C:\Python\python.exe",
+                expected_argv=[
+                    r"C:\Python\python.exe", "-m", "dayz_mcp", "--daemon",
+                    "--port", "8765",
+                ],
+                expected_cwd=r"C:\DayZ_MCP\tools",
+                probe_fn=probe,
+                time_fn=lambda: now[0],
+                sleep_fn=sleep,
+            )
+        )
+        self.assertAlmostEqual(now[0], 10.2)
+        self.assertTrue(probes)
+        self.assertEqual(set(probes), {10.2})
+        self.assertTrue(sleeps)
+
+        for invalid in (float("nan"), float("inf"), 0.0, -1.0):
+            with self.subTest(invalid=invalid):
+                self.assertFalse(
+                    daemon._status_accredits_generation(
+                        8765,
+                        "fixture-key",
+                        "generation-a",
+                        deadline=invalid,
+                        expected_executable=r"C:\Python\python.exe",
+                        expected_argv=[
+                            r"C:\Python\python.exe", "-m", "dayz_mcp",
+                            "--daemon", "--port", "8765",
+                        ],
+                        expected_cwd=r"C:\DayZ_MCP\tools",
+                        probe_fn=lambda *_args, **_kwargs: self.fail(
+                            "invalid timeout must not probe"
+                        ),
+                    )
+                )
+
+
+class ConnectedSocketAuthenticationTest(unittest.TestCase):
+    EXECUTABLE = r"C:\Python\python.exe"
+    CWD = r"C:\DayZ_MCP\tools"
+    ARGV = [
+        EXECUTABLE,
+        "-m",
+        "dayz_mcp",
+        "--daemon",
+        "--port",
+        "8765",
+        "--keyfile",
+        r"C:\runtime\key.txt",
+    ]
+
+    class Socket:
+        def getsockname(self):
+            return ("127.0.0.1", 50000)
+
+        def getpeername(self):
+            return ("127.0.0.1", 8765)
+
+    class Response:
+        status = 200
+
+        def read(self, _limit: int = -1) -> bytes:
+            return b'{"ok":true}'
+
+    class Connection:
+        def __init__(self, events: list[object], sock: object | None = None) -> None:
+            self.events = events
+            self.sock = None
+            self._connected_socket = sock or ConnectedSocketAuthenticationTest.Socket()
+
+        def connect(self) -> None:
+            self.events.append("connect")
+            self.sock = self._connected_socket
+
+        def request(
+            self,
+            method: str,
+            target: str,
+            body: bytes | None = None,
+            headers: dict[str, str] | None = None,
+        ) -> None:
+            self.events.append(("request", method, target, body, headers))
+
+        def getresponse(self):
+            self.events.append("response")
+            return ConnectedSocketAuthenticationTest.Response()
+
+        def close(self) -> None:
+            self.events.append("close")
+
+    class Guard:
+        def __init__(self, argv: list[str]) -> None:
+            self.snapshot_payload = {
+                "pid": 4321,
+                "creation_time_utc": "2026-07-22T00:00:00.000000Z",
+                **identity_hashes(
+                    ConnectedSocketAuthenticationTest.EXECUTABLE, argv
+                ),
+                "identity_scheme": "psutil-argv-v2",
+                "identity_complete": True,
+                "exit_code": 0,
+            }
+
+        def snapshot(self, _pid: int) -> dict[str, object]:
+            return dict(self.snapshot_payload)
+
+    def _connections(self):
+        return [
+            SimpleNamespace(
+                status="ESTABLISHED",
+                laddr=SimpleNamespace(ip="127.0.0.1", port=8765),
+                raddr=SimpleNamespace(ip="127.0.0.1", port=50000),
+                pid=4321,
+            )
+        ]
+
+    def _request(
+        self,
+        observed_argv: list[str] | None = None,
+        events: list[object] | None = None,
+        *,
+        socket_object: object | None = None,
+        connections_fn=None,
+        get_executable=None,
+        get_argv=None,
+        get_cwd=None,
+        guard=None,
+    ):
+        observed_events = events if events is not None else []
+        argv = observed_argv or self.ARGV
+        result = orphan_guard.verified_daemon_http_request(
+            host="127.0.0.1",
+            port=8765,
+            key="secret-connected-only",
+            method="GET",
+            path="/status",
+            query={},
+            body=None,
+            headers={},
+            deadline=11.0,
+            expected_executable=self.EXECUTABLE,
+            expected_argv=list(self.ARGV),
+            expected_cwd=self.CWD,
+            connection_factory=lambda _host, _port, timeout: self.Connection(
+                observed_events, socket_object
+            ),
+            connections_fn=connections_fn or self._connections,
+            get_executable=get_executable or (lambda _pid: self.EXECUTABLE),
+            get_argv=get_argv or (lambda _pid: list(argv)),
+            get_cwd=get_cwd or (lambda _pid: self.CWD),
+            guard=guard or self.Guard(argv),
+            time_fn=lambda: 10.0,
+        )
+        return result, observed_events
+
+    def _assert_fails_before_http(self, **kwargs: object) -> None:
+        events: list[object] = []
+        with self.assertRaises(ConnectionError):
+            self._request(events=events, **kwargs)
+        self.assertEqual(events[0], "connect")
+        self.assertFalse(
+            any(isinstance(event, tuple) and event[0] == "request" for event in events)
+        )
+        self.assertNotIn("secret-connected-only", repr(events))
+
+    def test_key_is_written_only_after_connected_socket_owner_is_accredited(self) -> None:
+        (status, body), events = self._request()
+
+        self.assertEqual((status, body), (200, b'{"ok":true}'))
+        self.assertEqual(events[0], "connect")
+        request_index = next(
+            index
+            for index, event in enumerate(events)
+            if isinstance(event, tuple) and event[0] == "request"
+        )
+        self.assertGreater(request_index, 0)
+        self.assertIn("key=secret-connected-only", events[request_index][2])
+
+    def test_foreign_connected_owner_receives_zero_http_bytes(self) -> None:
+        foreign = [self.EXECUTABLE, "-m", "http.server", "8765"]
+        events: list[object] = []
+        with self.assertRaises(ConnectionError):
+            self._request(foreign, events)
+        self.assertFalse(
+            any(isinstance(event, tuple) and event[0] == "request" for event in events)
+        )
+
+    def test_provenance_arguments_are_mandatory_and_exact(self) -> None:
+        events: list[object] = []
+        with self.assertRaises((TypeError, ValueError, ConnectionError)):
+            orphan_guard.verified_daemon_http_request(
+                host="127.0.0.1",
+                port=8765,
+                key="secret-connected-only",
+                method="GET",
+                path="/status",
+                query={},
+                body=None,
+                headers={},
+                deadline=11.0,
+                expected_executable=self.EXECUTABLE,
+                expected_argv=None,
+                expected_cwd=self.CWD,
+                connection_factory=lambda _host, _port, timeout: self.Connection(events),
+                connections_fn=self._connections,
+                get_executable=lambda _pid: self.EXECUTABLE,
+                get_argv=lambda _pid: list(self.ARGV),
+                get_cwd=lambda _pid: self.CWD,
+                guard=self.Guard(self.ARGV),
+                time_fn=lambda: 10.0,
+            )
+        self.assertFalse(
+            any(isinstance(event, tuple) and event[0] == "request" for event in events)
+        )
+
+    def test_connection_closed_between_accreditations_receives_zero_http_bytes(self) -> None:
+        class ClosedSocket(self.Socket):
+            def __init__(self) -> None:
+                self.peer_reads = 0
+
+            def getpeername(self):
+                self.peer_reads += 1
+                if self.peer_reads > 1:
+                    raise OSError("closed")
+                return super().getpeername()
+
+        self._assert_fails_before_http(socket_object=ClosedSocket())
+
+    def test_connection_rebind_between_accreditations_receives_zero_http_bytes(self) -> None:
+        tables = [self._connections(), self._connections(), []]
+        self._assert_fails_before_http(connections_fn=lambda: tables.pop(0))
+
+    def test_connected_owner_pid_drift_receives_zero_http_bytes(self) -> None:
+        second = self._connections()
+        second[0].pid = 9876
+        tables = [self._connections(), second]
+        self._assert_fails_before_http(connections_fn=lambda: tables.pop(0))
+
+    def test_argv_drift_receives_zero_http_bytes(self) -> None:
+        observed = [list(self.ARGV), [self.EXECUTABLE, "-m", "http.server"]]
+        self._assert_fails_before_http(get_argv=lambda _pid: observed.pop(0))
+
+    def test_cwd_drift_receives_zero_http_bytes(self) -> None:
+        observed = [self.CWD, r"C:\Foreign"]
+        self._assert_fails_before_http(get_cwd=lambda _pid: observed.pop(0))
+
+    def test_fingerprint_drift_receives_zero_http_bytes(self) -> None:
+        parent = self
+
+        class DriftGuard(self.Guard):
+            def __init__(self) -> None:
+                super().__init__(parent.ARGV)
+                self.reads = 0
+
+            def snapshot(self, _pid: int) -> dict[str, object]:
+                self.reads += 1
+                payload = dict(self.snapshot_payload)
+                if self.reads > 1:
+                    payload["creation_time_utc"] = "2026-07-22T00:00:01.000000Z"
+                return payload
+
+        self._assert_fails_before_http(guard=DriftGuard())
+
+
+class IdleMetricTest(unittest.TestCase):
+    def test_daemon_idle_includes_client_requests(self) -> None:
+        state = loopback.ServerState("k")
+        idle_fn = daemon._make_idle_seconds(state, time.monotonic() - 100.0)
+        self.assertGreater(idle_fn(), 90.0)  # no game polls, no client requests
+        state.touch_client()
+        self.assertLess(idle_fn(), 1.0)  # a client request resets the metric
+
+
+class TryReclaimUnresponsiveTest(unittest.TestCase):
+    """The daemon reclaim discriminator is HEALTH, not ancestry: never kill a
+    holder that answers /status; reclaim only an unresponsive dayz_mcp orphan."""
+
+    def _reclaim(self, *, healthy, image, cmdline, killed, responsive=False):
+        executable = r"C:\Python\python.exe"
+        expected_argv = "python -m dayz_mcp --daemon --port 8765".split()
+        snapshot = {
+            "pid": 4321,
+            "creation_time_utc": "2026-07-22T00:00:00.000000Z",
+            **identity_hashes(executable, expected_argv),
+            "identity_scheme": "psutil-argv-v2",
+            "identity_complete": True,
+            "exit_code": 0,
+        }
+
+        class Guard:
+            def snapshot(self, _pid):
+                return dict(snapshot)
+
+            def terminate(self, record):
+                killed.append(record.pid)
+                return {"terminated": True}
+
+        return orphan_guard.try_reclaim_unresponsive_listener(
+            8765,
+            deadline=11.0,
+            is_healthy=healthy if callable(healthy) else lambda: healthy,
+            is_responsive=(
+                responsive if callable(responsive) else lambda: responsive
+            ),
+            sleep=lambda _s: None,
+            time_fn=lambda: 10.0,
+            find_listener=lambda _p: 4321,
+            get_image=lambda _p: image,
+            get_argv=lambda _p: cmdline.split(),
+            guard=Guard(),
+            wait_free=lambda _p: True,
+            expected_executable=executable,
+            expected_argv=expected_argv,
+        )
+
+    def test_healthy_holder_is_never_reclaimed(self) -> None:
+        killed: list[int] = []
+        result = self._reclaim(healthy=True, image="python.exe",
+                               cmdline="python -m dayz_mcp --daemon --port 8765", killed=killed)
+        self.assertFalse(result)
+        self.assertEqual(killed, [])
+
+    def test_unresponsive_dayz_mcp_orphan_is_reclaimed(self) -> None:
+        killed: list[int] = []
+        result = self._reclaim(healthy=False, image="python.exe",
+                               cmdline="python -m dayz_mcp --daemon --port 8765", killed=killed)
+        self.assertTrue(result)
+        self.assertEqual(killed, [4321])
+
+    def test_unresponsive_non_dayz_holder_is_not_killed(self) -> None:
+        killed: list[int] = []
+        result = self._reclaim(healthy=False, image="python.exe",
+                               cmdline="python -m something_else --port 8765", killed=killed)
+        self.assertFalse(result)
+        self.assertEqual(killed, [])
+
+    def test_non_python_holder_is_not_killed(self) -> None:
+        killed: list[int] = []
+        result = self._reclaim(healthy=False, image="node.exe", cmdline="node app.js", killed=killed)
+        self.assertFalse(result)
+        self.assertEqual(killed, [])
+
+    def test_responsive_foreign_key_holder_is_preserved(self) -> None:
+        # B-1: a daemon answering 401 (foreign key) is alive — not_healthy but responsive
+        # — and must NOT be killed even though it is a python -m dayz_mcp listener.
+        killed: list[int] = []
+        result = self._reclaim(healthy=False, responsive=True, image="python.exe",
+                               cmdline="python -m dayz_mcp --daemon --port 8765", killed=killed)
+        self.assertFalse(result)
+        self.assertEqual(killed, [])
+
+    def test_holder_that_becomes_responsive_mid_window_is_preserved(self) -> None:
+        # A-1: a freshly-elected winner whose serve loop has not started answering yet
+        # flips to responsive within the re-probe window and must NOT be killed.
+        killed: list[int] = []
+        responses = iter([False, True])
+        result = self._reclaim(
+            healthy=False,
+            responsive=lambda: next(responses),
+            image="python.exe",
+            cmdline="python -m dayz_mcp --daemon --port 8765",
+            killed=killed,
+        )
+        self.assertFalse(result)
+        self.assertEqual(killed, [])
+
+
+class DaemonCoordinationActivationTest(unittest.TestCase):
+    def test_startup_recovery_finishes_unacknowledged_before_exposure(self) -> None:
+        from types import SimpleNamespace
+        from dayz_mcp.session_coordination import CleanupDisposition
+
+        run = SimpleNamespace(
+            run_id="R",
+            owner_session_id="S",
+            owner_lease_id="L",
+            launch_operation_id="OP",
+            launch_acknowledged=False,
+            state="RUNNING",
+        )
+
+        class Manifest:
+            def list_runs(self):
+                return [run]
+
+        calls: list[tuple[str, str]] = []
+        terminal = threading.Event()
+        terminal.set()
+
+        class Lifecycle:
+            def begin_release_owner(self, session_id, lease_id):
+                calls.append((session_id, lease_id))
+                return CleanupDisposition(
+                    True, terminal, {"terminal_safe": True, "runs_released": ["R"]}
+                )
+
+        recovered = daemon.recover_unacknowledged_before_listen(
+            Lifecycle(), Manifest(), deadline=time.monotonic() + 1.0
+        )
+        self.assertEqual(recovered, ["R"])
+        self.assertEqual(calls, [("S", "L")])
+
+    def test_cleanup_begin_composes_state_cleanup_into_lifecycle_disposition(self) -> None:
+        terminal = threading.Event()
+        terminal_result: dict[str, object] = {}
+
+        class State:
+            def cleanup_owner(self, session_id, lease_id, reason, vehicle_active):
+                return {"cancelled": 2, "vehicle_release_enqueued": int(vehicle_active)}
+
+        class Lifecycle:
+            def begin_release_owner(self, session_id, lease_id):
+                from dayz_mcp.session_coordination import CleanupDisposition
+
+                return CleanupDisposition(True, terminal, terminal_result)
+
+        disposition = daemon.cleanup_begin(
+            State(), Lifecycle(), "S", "L", "owner_release", True
+        )
+        self.assertTrue(disposition.fence_required)
+        self.assertEqual(disposition.terminal_result["cancelled"], 2)
+        self.assertEqual(disposition.terminal_result["vehicle_release_enqueued"], 1)
+
+    def test_cleanup_begin_manifest_exception_keeps_release_fenced(self) -> None:
+        class State:
+            def cleanup_owner(self, *_args):
+                return {"cancelled": 1}
+
+        class Lifecycle:
+            def begin_release_owner(self, *_args):
+                raise ValueError("sensitive manifest detail")
+
+        disposition = daemon.cleanup_begin(
+            State(), Lifecycle(), "S", "L", "owner_release", False
+        )
+
+        self.assertIsInstance(disposition, daemon.CleanupDisposition)
+        self.assertTrue(disposition.fence_required)
+        self.assertTrue(disposition.terminal_event.is_set())
+        self.assertIs(disposition.terminal_result["terminal_safe"], False)
+        self.assertEqual(disposition.terminal_result["error"], "run_manifest_failed")
+
+    def _run_losing_candidate(self, localappdata: str) -> int:
+        with (
+            patch.dict(os.environ, {"LOCALAPPDATA": localappdata}),
+            patch.object(orphan_guard, "probe_status_healthy", return_value=False),
+            patch.object(daemon, "_ensure_identity_migration", return_value=None),
+            patch.object(daemon, "_bind_with_reclaim", return_value=None),
+        ):
+            return daemon.run_daemon(_config(port=8765, idle_timeout_s=0.0))
+
+    def test_build_state_can_be_inert_or_explicitly_activated(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary) / "DayZ_MCP"
+            with patch.dict(os.environ, {"LOCALAPPDATA": temporary}), patch.object(
+                daemon, "_ensure_identity_migration", return_value=None
+            ):
+                inert = daemon.build_server_state(
+                    _config(),
+                    "k",
+                    daemon_generation="inert-generation",
+                    activate_coordination=False,
+                )
+                self.assertIsNone(inert.coordination)
+                self.assertIsNone(inert.coordination_store)
+                self.assertFalse(root.exists())
+
+                active = daemon.build_server_state(
+                    _config(),
+                    "k",
+                    daemon_generation="active-generation",
+                    activate_coordination=True,
+                )
+                self.assertIsNotNone(active.coordination)
+                self.assertIsNotNone(active.coordination_store)
+                self.assertIsNotNone(active.lifecycle_recovery_fault_store)
+                self.assertTrue((root / "coordination.json").exists())
+
+    def test_corrupt_manifest_arms_repair_fence_and_restart_does_not_mutate_it(self) -> None:
+        from dayz_mcp.session_coordination import ClientIdentity
+
+        identity = ClientIdentity.from_payload(
+            {
+                "platform": "unknown",
+                "pid": 123,
+                "ppid": 45,
+                "started_at_utc": "2026-07-22T00:00:00Z",
+                "session_id": "12345678-1234-4234-8234-1234567890ab",
+                "task_label": "manifest-recovery-test",
+            }
+        )
+        with TemporaryDirectory() as temporary, patch.dict(
+            os.environ, {"LOCALAPPDATA": temporary}
+        ), patch.object(daemon, "_ensure_identity_migration", return_value=None):
+            first = daemon.build_server_state(
+                _config(),
+                "k",
+                daemon_generation="manifest-checkpoint-generation",
+                activate_coordination=True,
+            )
+            self.assertIsNotNone(first.lifecycle)
+            runs_path = Path(temporary) / "DayZ_MCP" / "runs.json"
+            runs_path.write_bytes(b"corrupt-manifest")
+
+            fenced = daemon.build_server_state(
+                _config(),
+                "k",
+                daemon_generation="manifest-fenced-generation",
+                activate_coordination=True,
+            )
+            status = fenced.coordination.status(identity)
+            fault = status["lifecycle_recovery_fault"]
+            self.assertEqual(fault["fault"]["scope"], "manifest")
+            self.assertFalse(status["claimable"])
+            self.assertEqual(runs_path.read_bytes(), b"corrupt-manifest")
+
+            restarted = daemon.build_server_state(
+                _config(),
+                "k",
+                daemon_generation="manifest-restart-generation",
+                activate_coordination=True,
+            )
+            self.assertEqual(runs_path.read_bytes(), b"corrupt-manifest")
+            restarted_status = restarted.coordination.status(identity)
+            self.assertFalse(restarted_status["claimable"])
+            queued_status, queued = restarted.coordination.acquire(
+                identity, "manifest-repair-wait"
+            )
+            self.assertEqual(queued_status, 202)
+            active_fault = restarted_status["lifecycle_recovery_fault"]
+            repair_status, repair = loopback._repair_lifecycle_recovery_fault(
+                restarted,
+                active_fault["fault"]["fault_id"],
+                active_fault["pointer"]["head_event_sha256"],
+            )
+            self.assertEqual((repair_status, repair["repaired"]), (200, True))
+            granted_status, granted = restarted.coordination.wait(
+                identity, queued["ticket"], 0.0
+            )
+            self.assertEqual((granted_status, granted["status"]), (200, "active"))
+            self.assertEqual(runs_path.read_bytes(), b'{"version":1,"runs":[]}\n')
+
+    def test_losing_candidate_creates_no_coordination_files(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary) / "DayZ_MCP"
+            self.assertEqual(
+                self._run_losing_candidate(temporary),
+                daemon.DAEMON_STARTUP_CONTENDED,
+            )
+            self.assertEqual(
+                sorted(path.name for path in root.iterdir()),
+                [".daemon-startup.lock"],
+            )
+            self.assertFalse((root / "coordination.json").exists())
+            self.assertFalse((root / "runs.json").exists())
+            self.assertFalse((root / "audit").exists())
+
+    def test_losing_candidate_leaves_existing_coordination_and_audit_identical(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary) / "DayZ_MCP"
+            audit_path = root / "audit" / "events.jsonl"
+            coordination_path = root / "coordination.json"
+            audit_path.parent.mkdir(parents=True)
+            coordination_before = (
+                json.dumps(
+                    {
+                        "daemon_generation": "existing-generation",
+                        "revision": 7,
+                        "active": None,
+                        "releasing": None,
+                        "queue": [],
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8")
+            audit_before = b'{"event":"existing"}\n'
+            coordination_path.write_bytes(coordination_before)
+            audit_path.write_bytes(audit_before)
+
+            self.assertEqual(
+                self._run_losing_candidate(temporary),
+                daemon.DAEMON_STARTUP_CONTENDED,
+            )
+            self.assertEqual(coordination_path.read_bytes(), coordination_before)
+            self.assertEqual(audit_path.read_bytes(), audit_before)
+
+
+class BuildDaemonArgvTest(unittest.TestCase):
+    def test_forwards_policy_flags(self) -> None:
+        config = ServerConfig(
+            mode="client", port=8765, keyfile="K", expected_game_version="1.29.0",
+            require_version=True, idle_timeout_s=1800.0, enable_exec_enforce=True, exec_allowlist="A.json",
+        )
+        argv = daemon.build_daemon_argv(config, python="py.exe")
+        self.assertEqual(argv[:5], ["py.exe", "-m", "dayz_mcp", "--daemon", "--port"])
+        self.assertIn("--keyfile", argv)
+        self.assertIn("--require-version", argv)
+        self.assertIn("--expected-game-version", argv)
+        self.assertIn("--enable-exec-enforce", argv)
+        self.assertIn("--exec-allowlist", argv)
+
+
+if __name__ == "__main__":
+    unittest.main()

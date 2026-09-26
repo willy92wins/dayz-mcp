@@ -1,0 +1,104 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar. Tienes shell: úsalo.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+CIERRE 3 (lote H ronda 6 = lote G ronda 13). La revisión delta de Codex sobre tu cierre 2 dio
+1 ALTA y 2 MEDIA, todas reproducidas y todas continuación de sus tres anteriores: la rama
+`lifecycle is None` de P22 quedó sin endurecer; la rama `not ok` (audit fallido) del escritor
+no compara con la frontera terminal; y la adopción tras una persistencia terminal fallida da
+`ok` sobre un binding retirado. Esta ronda cierra las tres y nada más.
+
+===============================================================================
+§0. EL PRODUCTO
+===============================================================================
+
+  P22'. **Sin lifecycle no hay estado durable: un binding BOUND no despacha.** Con
+        `state.lifecycle is None`, enqueue y `exec_enforce` dirigidos a un `run_id` acreditado
+        devuelven `run_state_unavailable` (503) y el poll retiene (`commands: []`). Ningún
+        módulo de producción acuña bindings sin lifecycle, así que ningún modo real pierde
+        nada; la cola legacy SIN binding (sin `run_id`) sigue como compatibilidad, no mutante.
+  P20'. **La frontera terminal vale también para el fallo.** En `_write_command_activity`, la
+        rama `not ok` (audit fallido) compara el `epoch` con la tumba ANTES de añadir sticky
+        `unknown`: un intento con `epoch ≤ tumba` se descarta sin recrear `unknown`; un fallo
+        posterior a la frontera conserva el comportamiento sticky de siempre.
+  P19'. **Adoptar no entrega un run mudo.** Si la persistencia terminal falló tras retirar el
+        binding (el manifiesto restauró el registro previo, el binding sigue retirado),
+        `adopt_run` NO responde `ok` con ese binding: o rechaza con un código que dirija al
+        reap/recovery (p. ej. `binding_retired_pending_reap`), o reconstruye el binding de
+        forma ACREDITADA (prepare/confirm con la identidad real del proceso) antes de decir
+        `ok`. Nunca restaurar el binding previo a ciegas.
+
+Sigue en pie todo lo anterior (G P1-P22, H H1-H5, D1-D4).
+
+LO QUE NO ES EL PRODUCTO: el gate, los oráculos, el ledger, este brief (defecto ahí →
+`DISPUTAS`); `server.py`; `daemon.py`; `dayz_test_tool.py`; refactors.
+
+===============================================================================
+§1. LOS TRES ROJOS DEL ORÁCULO DE G (48 checks)
+===============================================================================
+
+**N38-SIN-LIFECYCLE-NO-DESPACHA** — `ServerState` con un peer BOUND para `run-1` y
+`lifecycle=None`: `camera_get` → 200 y el poll lo entrega. Tiene que rechazar y retener.
+**N39-FRONTERA-TAMBIEN-PARA-EL-FALLO** — escritor bloqueado en el audit que DEVUELVE False
+tras la retirada (reap a EXITED): `_activity_unknown` vuelve a tener `run-1`. No tiene que
+reaparecer. (Caja blanca: lee `_activity_unknown`; si lo renombras, UNMET y DISPUTAS.)
+**N40-ADOPCION-TRAS-PERSISTENCIA-FALLIDA** — reap con `OSError` en el `replace` terminal (run
+restaurado a `RUNNING_IDLE`, binding retirado), `adopt_run` → `ok` y el siguiente enqueue
+`binding_retired`. No puede ser `ok` + mudo.
+
+===============================================================================
+§2. LO QUE NO TIENE CHECK. Lo cierro yo al recibir
+===============================================================================
+
+  (A) P22' en `exec_enforce` y en el poll con lifecycle ausente (N38 mide enqueue + poll
+      genérico): test para la rama exec. Rojo-antes.
+  (B) P20': un fallo de audit POSTERIOR a la frontera sí deja sticky (preservación).
+  (C) P19': si eliges rechazar, el mensaje dirige al reap/recovery y el siguiente reap converge;
+      si eliges reconstruir, el binding nuevo despacha y el viejo no. Rojo-antes.
+  (D) Preservación: N34/N35 (results tardíos), N30, N36, N37, N32; H 40/40.
+
+===============================================================================
+§3. EL GATE (doble)
+===============================================================================
+
+    bash gate/run.sh                                      -> oráculo del lote H (40): 40/40
+    (cd tools && PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 <python> ../../gate-extra/oracle_lote_g.py)
+                                                          -> oráculo de G (48): ORACULO-VERDE
+    bash gate/suite.sh                                    -> once módulos: SUITE-ACOTADA OK
+
+Ahora mismo: gate/run.sh (H): ORACULO: PASS=40 FAIL=0 UNMET=0 de 40 · gate-extra (G, 48 checks, SHA-256 977ab3677fb6aa77…): ORACULO: PASS=45 FAIL=3 UNMET=0 de 48 — rojos N38, N39, N40 · gate/suite.sh: SUITE-ACOTADA OK. **Los verdes son la línea que no se puede romper.**
+Guarda anti-vacuidad: un `UNMET` no es tu código; si tu diseño deja un check sin alcance,
+`DISPUTAS` con el motivo. `gate/` y `gate-extra/` están sellados por hash y son de sólo lectura.
+
+===============================================================================
+§4. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/process_lifecycle.py
+    tools/dayz_mcp/loopback.py
+    tools/tests/test_box_occupancy.py
+    tools/tests/test_process_lifecycle.py
+    tools/tests/test_loopback.py
+
+PROHIBIDO: `gate/`; `gate-extra/`; `addon/`; `server.py`; `daemon.py`; `dayz_test_tool.py`;
+`runtime_state.py`; debilitar o borrar validaciones existentes; usar red; correr la suite completa.
+
+⚠ **Data-crítico**. Locks: `_operation_lock → (ServerState._lock | _activity_lock)`; nunca el
+inverso; ninguna lectura toma `_operation_lock`.
+
+Escribe tests para lo que entregas y córrelos ANTES de tu cambio contra
+`../../ws-frozen-r5/tools/` (copia temporal tuya bajo /tmp).
+
+===============================================================================
+§5. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — P22', P20', P19' con `path:line`, y la decisión tomada en P19'.
+    ## GATE             — la salida literal de los TRES gates, pegada, no resumida.
+    ## CONTROL POSITIVO — por cada test nuevo, la línea de FAIL contra `ws-frozen-r5`, o
+                          «preservación». Los de §2 (A)-(C) obligatorios.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si un criterio del gate está mal, aquí, con el argumento.

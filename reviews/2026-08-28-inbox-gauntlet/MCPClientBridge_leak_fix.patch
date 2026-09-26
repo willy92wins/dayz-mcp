@@ -1,0 +1,486 @@
+diff --git "a/C:\\Users\\guill\\AppData\\Local\\Temp\\grok_inbox_bridge\\_review\\MCPClientBridge_ORIGINAL.c" "b/C:\\Users\\guill\\AppData\\Local\\Temp\\grok_inbox_bridge\\MCPClientBridge.c"
+index a2f72cb..a7616ec 100644
+--- "a/C:\\Users\\guill\\AppData\\Local\\Temp\\grok_inbox_bridge\\_review\\MCPClientBridge_ORIGINAL.c"
++++ "b/C:\\Users\\guill\\AppData\\Local\\Temp\\grok_inbox_bridge\\MCPClientBridge.c"
+@@ -1,10 +1,23 @@
+ class MCPClientPollCallback : RestCallback
+ {
+-	protected ref MCPClientBridge m_Bridge;
++	// Weak on purpose: RestContext.GET may retain this instance after script
++	// recycle. A strong ref would pin the bridge for as long as the engine holds
++	// the callback. Generation: 0 idle, >0 bound to that poll, -1 retired.
++	// restapi.c OnError may fire more than once (RetryCount > 1). Error, timeout
++	// and abandon retire the slot so it cannot be re-acquired while the engine
++	// still holds events. Only OnSuccess (terminal GET completion) may idle it
++	// immediately. A retired slot may return to idle after POLL_CALLBACK_QUARANTINE_S
++	// (AcquireIdle), because a GET that never emits OnSuccess would otherwise
++	// pin the pool forever. m_RetiredAt is -1 until Retire stamps the tick clock.
++	protected MCPClientBridge m_Bridge;
++	protected int m_Generation;
++	protected float m_RetiredAt;
+ 
+ 	void MCPClientPollCallback(MCPClientBridge bridge)
+ 	{
+ 		m_Bridge = bridge;
++		m_Generation = 0;
++		m_RetiredAt = -1.0;
+ 	}
+ 
+ 	void DetachBridge()
+@@ -12,41 +25,74 @@ class MCPClientPollCallback : RestCallback
+ 		m_Bridge = null;
+ 	}
+ 
+-	override void OnSuccess(string data, int dataSize)
++	void SetGeneration(int generation)
++	{
++		m_Generation = generation;
++	}
++
++	int GetGeneration()
+ 	{
++		return m_Generation;
++	}
++
++	void Retire()
++	{
++		m_Generation = -1;
++		m_RetiredAt = -1.0;
+ 		if (m_Bridge)
+ 		{
+-			m_Bridge.ReleaseCallback(this);
+-			if (!m_Bridge.IsActivePollCallback(this))
+-			{
+-				return;
+-			}
++			m_RetiredAt = m_Bridge.GetPollElapsedS();
++		}
++	}
++
++	float GetRetiredAt()
++	{
++		return m_RetiredAt;
++	}
++
++	override void OnSuccess(string data, int dataSize)
++	{
++		if (!m_Bridge)
++		{
++			return;
++		}
++
++		bool active = m_Bridge.IsCurrentPollGeneration(m_Generation);
++		if (active)
++		{
+ 			m_Bridge.OnPollSuccess(data, dataSize);
+ 		}
++		m_Generation = 0;
+ 	}
+ 
+ 	override void OnError(int errorCode)
+ 	{
+-		if (m_Bridge)
++		if (!m_Bridge)
++		{
++			m_Generation = -1;
++			return;
++		}
++
++		bool active = m_Bridge.IsCurrentPollGeneration(m_Generation);
++		Retire();
++		if (active)
+ 		{
+-			m_Bridge.ReleaseCallback(this);
+-			if (!m_Bridge.IsActivePollCallback(this))
+-			{
+-				return;
+-			}
+ 			m_Bridge.OnPollError(errorCode);
+ 		}
+ 	}
+ 
+ 	override void OnTimeout()
+ 	{
+-		if (m_Bridge)
++		if (!m_Bridge)
++		{
++			m_Generation = -1;
++			return;
++		}
++
++		bool active = m_Bridge.IsCurrentPollGeneration(m_Generation);
++		Retire();
++		if (active)
+ 		{
+-			m_Bridge.ReleaseCallback(this);
+-			if (!m_Bridge.IsActivePollCallback(this))
+-			{
+-				return;
+-			}
+ 			m_Bridge.OnPollTimeout();
+ 		}
+ 	}
+@@ -158,12 +204,22 @@ class MCPClientBridge extends MCPJobRunnerOwner
+ 	// disk is re-read.
+ 	protected const float KEY_RELOAD_BACKOFF_S = 4.0;
+ 	protected const float POLL_WATCHDOG_S = 30.0;
++	// Initial idle slots. Growth is replenish-on-empty only (error / timeout /
++	// abandon), never on the successful 5 Hz path. Cap is live instances created
++	// for this bridge, not polls.
++	protected const int POLL_CALLBACK_POOL_SIZE = 2;
++	protected const int POLL_CALLBACK_POOL_MAX = 8;
++	protected const float POLL_POOL_EXHAUSTED_LOG_S = 5.0;
++	protected const float POLL_CALLBACK_QUARANTINE_S = 60.0;
+ 	protected float m_Backoff;
+ 	protected int m_Tick;
+ 	protected int m_TickPollSent;
+ 	protected int m_TickPollCallback;
+ 	protected bool m_PollInFlight;
+ 	protected float m_PollInFlightS;
++	protected int m_PollGeneration;
++	protected float m_ElapsedS;
++	protected float m_PoolExhaustedLogAt;
+ 	protected bool m_Configured;
+ 	protected bool m_InitFailureLogged;
+ 	protected bool m_ControlsSuppressed;
+@@ -197,6 +253,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
+ 		m_PeerInstance = "";
+ 		m_PollInFlight = false;
+ 		m_PollInFlightS = 0.0;
++		m_PollGeneration = 0;
++		m_ElapsedS = 0.0;
++		m_PoolExhaustedLogAt = 0.0;
+ 		m_Configured = false;
+ 		m_InitFailureLogged = false;
+ 		m_ControlsSuppressed = false;
+@@ -204,6 +263,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
+ 		m_ActiveCamOwned = false;
+ 		m_CallbackRefs = new array<ref RestCallback>();
+ 		m_PollCallbackRefs = new array<ref RestCallback>();
++		EnsurePollCallbackPool();
+ 		m_Pending = new array<ref MCPCommand>();
+ 		m_JobRunner = new MCPJobRunner();
+ 		m_ReadyObjects = new array<Object>();
+@@ -238,6 +298,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
+ 	void OnTick(float timeslice)
+ 	{
+ 		m_Tick = m_Tick + 1;
++		m_ElapsedS = m_ElapsedS + timeslice;
+ 
+ 		if (m_JobRunner)
+ 		{
+@@ -263,12 +324,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
+ 			m_PollInFlightS = m_PollInFlightS + timeslice;
+ 			if (m_PollInFlightS >= POLL_WATCHDOG_S)
+ 			{
+-				int pollRefs = 0;
+-				if (m_PollCallbackRefs)
+-				{
+-					pollRefs = m_PollCallbackRefs.Count();
+-				}
+-				Log("client poll watchdog no callback in_flight_s=" + m_PollInFlightS + " poll_refs=" + pollRefs);
++				int pollRefs = CountBoundPollCallbacks();
++				int pollRetired = CountRetiredPollCallbacks();
++				string watchdogMsg = "client poll watchdog no callback in_flight_s=" + m_PollInFlightS + " poll_refs=" + pollRefs + " poll_retired=" + pollRetired;
++				Log(watchdogMsg);
+ 				AbandonInFlightPoll();
+ 				OnPollFail("watchdog");
+ 			}
+@@ -360,6 +419,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
+ 
+ 		m_Ctx.SetHeader("application/json");
+ 		m_PollCtx.SetHeader("application/json");
++		EnsurePollCallbackPool();
+ 		m_Configured = true;
+ 		m_Backoff = 0.0;
+ 		m_Accum = 0.0;
+@@ -379,54 +439,215 @@ class MCPClientBridge extends MCPJobRunnerOwner
+ 
+ 	protected void StartPoll()
+ 	{
++		MCPClientPollCallback cb;
++		string request;
++		string skipMsg;
++		float now;
++
+ 		if (!m_PollCtx)
+ 		{
+ 			return;
+ 		}
+ 
++		cb = AcquireIdlePollCallback();
++		if (!cb)
++		{
++			cb = ReplenishPollCallback();
++		}
++
++		if (!cb)
++		{
++			if (GetGame())
++			{
++				now = GetGame().GetTickTime();
++				if (now - m_PoolExhaustedLogAt >= POLL_POOL_EXHAUSTED_LOG_S)
++				{
++					m_PoolExhaustedLogAt = now;
++					skipMsg = "client poll callback pool exhausted bound=" + CountBoundPollCallbacks() + " retired=" + CountRetiredPollCallbacks();
++					Log(skipMsg);
++				}
++			}
++
++			OnPollFail("poll_callback_pool_exhausted");
++			return;
++		}
++
+ 		m_Accum = 0.0;
+ 		m_PollInFlight = true;
+ 		m_PollInFlightS = 0.0;
++		m_PollGeneration = m_PollGeneration + 1;
+ 		m_TickPollSent = m_Tick;
+-
+-		EnsurePollCallback();
+-		HoldPollCallback();
+-		string request = "poll?peer=client&key=" + m_Key;
++		cb.SetGeneration(m_PollGeneration);
++		m_PollCallback = cb;
++		request = "poll?peer=client&key=" + m_Key;
+ 		request = request + "&ver=" + GetPollVersion();
+ 		if (m_PeerInstance != "")
+ 		{
+ 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
+ 		}
+-		m_PollCtx.GET(m_PollCallback, request);
++		m_PollCtx.GET(cb, request);
+ 	}
+ 
+-	protected void EnsurePollCallback()
++	protected void EnsurePollCallbackPool()
+ 	{
+-		if (!m_PollCallback)
++		MCPClientPollCallback slot;
++		int n;
++
++		if (!m_PollCallbackRefs)
+ 		{
+-			m_PollCallback = new MCPClientPollCallback(this);
++			m_PollCallbackRefs = new array<ref RestCallback>();
++		}
++
++		n = m_PollCallbackRefs.Count();
++		while (n < POLL_CALLBACK_POOL_SIZE)
++		{
++			slot = new MCPClientPollCallback(this);
++			m_PollCallbackRefs.Insert(slot);
++			n = n + 1;
+ 		}
+ 	}
+ 
+-	protected void HoldPollCallback()
++	protected MCPClientPollCallback ReplenishPollCallback()
+ 	{
+-		if (!m_PollCallbackRefs || !m_PollCallback)
++		MCPClientPollCallback slot;
++		int n;
++
++		if (!m_PollCallbackRefs)
+ 		{
+-			return;
++			m_PollCallbackRefs = new array<ref RestCallback>();
+ 		}
+ 
+-		int i = 0;
+-		while (i < m_PollCallbackRefs.Count())
++		n = m_PollCallbackRefs.Count();
++		if (n >= POLL_CALLBACK_POOL_MAX)
++		{
++			return null;
++		}
++
++		slot = new MCPClientPollCallback(this);
++		m_PollCallbackRefs.Insert(slot);
++		return slot;
++	}
++
++	protected MCPClientPollCallback AcquireIdlePollCallback()
++	{
++		MCPClientPollCallback slot;
++		int i;
++		int n;
++		float now;
++		float retiredAt;
++		float age;
++
++		if (!m_PollCallbackRefs)
++		{
++			return null;
++		}
++
++		now = m_ElapsedS;
++		i = 0;
++		n = m_PollCallbackRefs.Count();
++		while (i < n)
+ 		{
+-			if (m_PollCallbackRefs.Get(i) == m_PollCallback)
++			slot = MCPClientPollCallback.Cast(m_PollCallbackRefs.Get(i));
++			if (slot)
+ 			{
+-				return;
++				if (slot.GetGeneration() == 0)
++				{
++					return slot;
++				}
++			}
++
++			i = i + 1;
++		}
++
++		i = 0;
++		while (i < n)
++		{
++			slot = MCPClientPollCallback.Cast(m_PollCallbackRefs.Get(i));
++			if (slot)
++			{
++				if (slot.GetGeneration() < 0)
++				{
++					retiredAt = slot.GetRetiredAt();
++					if (retiredAt >= 0.0)
++					{
++						age = now - retiredAt;
++						if (age >= POLL_CALLBACK_QUARANTINE_S)
++						{
++							slot.SetGeneration(0);
++							return slot;
++						}
++					}
++				}
++			}
++
++			i = i + 1;
++		}
++
++		return null;
++	}
++
++	protected int CountBoundPollCallbacks()
++	{
++		MCPClientPollCallback slot;
++		int bound;
++		int i;
++		int n;
++
++		bound = 0;
++		if (!m_PollCallbackRefs)
++		{
++			return bound;
++		}
++
++		i = 0;
++		n = m_PollCallbackRefs.Count();
++		while (i < n)
++		{
++			slot = MCPClientPollCallback.Cast(m_PollCallbackRefs.Get(i));
++			if (slot)
++			{
++				if (slot.GetGeneration() > 0)
++				{
++					bound = bound + 1;
++				}
+ 			}
+ 
+ 			i = i + 1;
+ 		}
+ 
+-		m_PollCallbackRefs.Insert(m_PollCallback);
++		return bound;
++	}
++
++	protected int CountRetiredPollCallbacks()
++	{
++		MCPClientPollCallback slot;
++		int retired;
++		int i;
++		int n;
++
++		retired = 0;
++		if (!m_PollCallbackRefs)
++		{
++			return retired;
++		}
++
++		i = 0;
++		n = m_PollCallbackRefs.Count();
++		while (i < n)
++		{
++			slot = MCPClientPollCallback.Cast(m_PollCallbackRefs.Get(i));
++			if (slot)
++			{
++				if (slot.GetGeneration() < 0)
++				{
++					retired = retired + 1;
++				}
++			}
++
++			i = i + 1;
++		}
++
++		return retired;
+ 	}
+ 
+ 	void OnPollSuccess(string data, int dataSize)
+@@ -480,16 +701,26 @@ class MCPClientBridge extends MCPJobRunnerOwner
+ 		}
+ 	}
+ 
+-	bool IsActivePollCallback(MCPClientPollCallback cb)
++	bool IsCurrentPollGeneration(int generation)
++	{
++		if (generation <= 0)
++		{
++			return false;
++		}
++
++		return generation == m_PollGeneration;
++	}
++
++	float GetPollElapsedS()
+ 	{
+-		return cb == m_PollCallback;
++		return m_ElapsedS;
+ 	}
+ 
+ 	// Poll shares the results RestContext (same URL). GetRestContext caches by
+ 	// exact string, so a distinct poll base is unreachable, and stripping the
+ 	// trailing slash makes the engine concatenate base+request into a malformed
+-	// URL (error=7). Isolation of stale polls is identity discard of the
+-	// abandoned callback, not a second context. AbandonInFlightPoll must not
++	// URL (error=7). Isolation of stale polls is m_PollGeneration discard of
++	// the abandoned slot, not a second context. AbandonInFlightPoll must not
+ 	// reset() when m_PollCtx == m_Ctx.
+ 	protected string PollContextUrl(string url)
+ 	{
+@@ -497,14 +728,20 @@ class MCPClientBridge extends MCPJobRunnerOwner
+ 	}
+ 
+ 	// reset() only a distinct poll context (restapi.c:133). Shared results
+-	// context must not reset() here (would cancel in-flight POSTs). Detach the
+-	// live pointer so the next StartPoll allocates a new callback; keep the
+-	// abandoned object in m_PollCallbackRefs until its GET completion calls
+-	// ReleaseCallback. Engine retain of RestCallback passed to GET is unknown,
+-	// so script-side hold is required either way. An orphan that never
+-	// completes stays retained (bounded residual leak: one object per abandon).
++	// context must not reset() here (would cancel in-flight POSTs). Isolation
++	// of a stale poll is retire (-1) plus m_PollGeneration bump. The abandoned
++	// slot stays in the array so the engine can still fire; -1 never dispatches.
++	// AcquireIdle skips it until POLL_CALLBACK_QUARANTINE_S; a later OnSuccess
++	// may idle it sooner (GET completed). Next StartPoll takes an idle slot,
++	// a matured quarantine, or replenishes.
+ 	protected void AbandonInFlightPoll()
+ 	{
++		if (m_PollCallback)
++		{
++			m_PollCallback.Retire();
++		}
++
++		m_PollGeneration = m_PollGeneration + 1;
+ 		m_PollCallback = null;
+ 
+ 		if (m_PollCtx && m_PollCtx != m_Ctx)

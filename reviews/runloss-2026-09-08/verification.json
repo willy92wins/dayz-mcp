@@ -1,0 +1,26 @@
+{
+  "index_initial": "a056b737566f6431880bc88e9506a454709d303c5e6df76ffbc9ebdae717fae4",
+  "index_final": "a056b737566f6431880bc88e9506a454709d303c5e6df76ffbc9ebdae717fae4",
+  "sources": {
+    "tools/dayz_mcp/server.py": {
+      "bytes": 227237,
+      "sha256": "a998041e99683b5147ed6b36995d33f028930b2fc72ff134d378b3344b686477"
+    },
+    "tools/dayz_mcp/instance_fence.py": {
+      "bytes": 6842,
+      "sha256": "e674f403fd5245bd1b1ccd14095795e12d989bd81b84450073b204edee92adce"
+    },
+    "tools/dayz_mcp/loopback.py": {
+      "bytes": 156799,
+      "sha256": "dbab5c590cff8b23af987902a38f92e4b082c2d9f433cd1ded97f73b0b62d0b6"
+    },
+    "tools/dayz_mcp/process_lifecycle.py": {
+      "bytes": 181050,
+      "sha256": "cfa0c268eef4b44825cd3f8b2c0a749d581564f5aa326cbc6a64858a3989366e"
+    },
+    "tools/tests/test_runloss_diagnostics.py": {
+      "bytes": 11208,
+      "sha256": "78456616fd22e21047c76af61a9cad90d89067fafaa372b6696f9bb930081487"
+    }
+  }
+}

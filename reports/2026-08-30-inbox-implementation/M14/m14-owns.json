@@ -1,0 +1,17 @@
+{
+  "module": "M14",
+  "measured_by": "orchestrator",
+  "generated_utc": "2026-09-02T00:09:36.515904+00:00",
+  "owns": {
+    "tools/dayz_mcp/tool_registry_fingerprint.py": {
+      "sha256": "e5b4b656edff528b59d7e4bcaad9a42631d09ce2baf9cbb71a7b915e53b5d177",
+      "size_bytes": 28796,
+      "mtime_utc": "2026-09-01T07:05:03.178776+00:00"
+    },
+    "tools/tests/test_tool_registry_fingerprint.py": {
+      "sha256": "a2c6bca70c46d5dba3aed3207e889a68288236ae7cde1b1172eec44f81b9173b",
+      "size_bytes": 53073,
+      "mtime_utc": "2026-09-01T07:04:23.556740+00:00"
+    }
+  }
+}

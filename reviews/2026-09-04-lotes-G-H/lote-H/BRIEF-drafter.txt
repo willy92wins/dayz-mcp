@@ -1,0 +1,46 @@
+Eres el REDACTOR DEL GATE de un lote de implementación que hará otro modelo (Grok). Escribes el ledger y el oráculo ANTES de que exista la implementación, los calibras contra el árbol actual (tienen que salir ROJOS por la razón correcta) y entregas un informe de calibración. No implementas el producto. No editas el repo. Escribe en español; código, identificadores y comentarios de código en inglés.
+
+## Entorno (caveats reales)
+- Árbol de referencia (LECTURA): `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-G\integ\tools\` — es una copia congelada de `tools/` del repo tras la ronda 5 del lote anterior. Léelo con Read/Grep. No es git. NO toques `lote-G\ws\` (hay un worker editándolo ahora mismo).
+- Los planes de las fichas y el DAG: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\plans\inbox-20260830\` (OneDrive; sólo lectura con Read).
+- Python: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`. Para ejecutar tu oráculo contra el árbol de referencia: `cd <integ\tools> && PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 <python> <ruta del oraculo>`.
+- Tu directorio de escritura, y el único: `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-H\draft\`.
+- Un hit de grep es un indicio: abre el fichero en la línea antes de citar `path:line`.
+
+## El lote H: el sobre de `dayz_test_stop` y los diagnósticos de runs retirados
+Cierra lo que queda de la ficha 16 (`plans\inbox-20260830\16-fb-20260829-104608-4d66.md`, plan pasos 5-8 y criterios PASS 3º y 4º, líneas ~35-38 y ~50-51) y el 2º PASS de la ficha 17 (`17-fb-20260829-104625-7c88.md`, línea ~42). Léelos enteros primero. En resumen, el producto es:
+  H1. Para un run PRESENTE, `lifecycle_status`/`box_occupancy` adjunta `daemon_generation_at_launch`, `daemon_generation_current` y `generation_changed`.
+  H2. Para runs YA AUSENTES, status publica como máximo 32 `retired_run_diagnostics` por recencia, cada uno con `run_id`, generación de lanzamiento y actual, `event`, `reason`, `decision`, `state`; SIN timestamps ni paths.
+  H3. `execute_dayz_test_stop` (`dayz_test_tool.py:774`) captura UN snapshot pre-dispatch de status y clasifica el resultado de `resolve_stop_run`: run presente pero no activo → dict estructurado `status="failed"`, `run_id`, `error_code="run_not_active"` + los tres campos de generación COPIADOS del snapshot (no recomputados); run podado/ausente con UN ÚNICO `retired_run_diagnostic` exacto → dict `run_not_found` con los mismos tres campos copiados; UUID nunca visto o diagnóstico ausente/ambiguo → `ToolError("run_not_found")` SIN campos inventados. Stop sobre run activo continúa como hoy.
+  H4. `server.py:3039 dayz_test_stop` transporta íntegramente esos dicts; `retired_run_diagnostics` viaja sólo dentro del status público.
+  H5. Un `lifecycle_stop_outcome` exitoso (`reason="stopped",decision="stopped",state="EXITED"`) se distingue de `manual_cleanup_required`, `partial_cleanup`, `RUNNING`, `STOPPING`, `UNRECONCILED`; `run_reaped` acredita retirada sin terminación.
+
+## Decisiones YA TOMADAS por el orquestador y el humano, que tu gate tiene que respetar
+- D1. **La ruta de lectura NO lee el audit (`events.jsonl`)**. Se desvía a propósito de la ficha (paso 4): en Windows, leer el fichero hace fallar la escritura del writer (`os.replace` contra un handle abierto → `PermissionError`), medido 776/776 en saturación. Consecuencia: los `retired_run_diagnostics` y la generación de lanzamiento viven en MEMORIA del daemon (p. ej. un anillo acotado de 32 en `ProcessLifecycle`, alimentado por los mismos caminos que retiran runs: stop, reap, release, repair, reconcile) y en el MANIFIESTO (generación de lanzamiento por run), nunca reconstruidos leyendo el jsonl. Tras un reinicio del daemon el anillo empieza vacío y eso se publica como está, sin inventar historia.
+- D2. **Compatibilidad del manifiesto es data-crítica (DZ-R9)**: un campo nuevo en `RunRecord` que `from_payload` no tolere ausente convierte TODO manifiesto preexistente en `invalid_run_manifest` en el primer arranque. La construcción posicional en `process_lifecycle.py` pasa ~12 argumentos sin nombre y `_clone` hace round-trip `asdict→from_payload`; un campo que `from_payload` no lea se PIERDE en silencio. Tu gate necesita: (a) un manifiesto viejo sin el campo carga y publica `daemon_generation_at_launch=null` y `generation_changed=null` (fail-closed, no `false`); (b) el campo sobrevive al round-trip de `_clone`; (c) mutante «campo añadido pero `from_payload` no lo lee» sale rojo.
+- D3. La actividad (`activity_state`, `last_activity_age_s`) ya está resuelta en el lote anterior y NO es producto de este lote. No la re-gatees.
+- D4. Fail-closed siempre: lo que no se puede acreditar se publica `null`/`unknown`, nunca se infiere.
+
+## Anclajes verificados (ábrelos igualmente)
+- Reaper del daemon: `dayz_mcp/daemon.py:775-804` (`install_run_reaper`; `lifecycle.reap_dead_runs()` en `:792`; hoy sólo escribe al log).
+- `daemon_generation` por el estado: `daemon.py:332-351`, `:638-650`.
+- `execute_dayz_test_stop`: `dayz_mcp/dayz_test_tool.py:774`; `resolve_stop_run` y `_exact_run` en el mismo fichero.
+- `dayz_test_stop` público: `dayz_mcp/server.py:3039-3063`.
+- Caminos que retiran runs en `process_lifecycle.py`: `stop_run`, `begin_release_owner`, `repair_recovery_fault`, `repair_manifest_recovery`, `_reap_run_locked`, `admin_reconcile` (grep `_retire_run_bindings`).
+- Oráculo del lote anterior, como MODELO de estilo y de fixtures autocontenidos: `lote-G\ws\gate\oracle.py` (léelo sólo para copiar la forma de `build()`, `Sink`, `Guard`, `Launcher`, `check()`/`unmet()`; no dependas de él).
+
+## Reglas del gate (obligatorias)
+1. Fixtures autocontenidos: el oráculo NO importa nada de `tools/tests/` (el implementador puede editarlos: sería la hoja de respuestas). Copia las fakes que necesites.
+2. Cada check de aceptación lleva su check fail-closed pareado, y cada check que dependa de que un fixture alcance un estado lleva guarda anti-vacuidad: si el fixture no llega, `UNMET`, nunca `PASS` ni `FAIL`.
+3. Las expectativas se DERIVAN de la fuente (p. ej. la generación del daemon inyectada por constructor), nunca se escriben como literal copiado.
+4. Los mutantes de la ficha se codifican como checks, no como prosa: «recomputar `generation_changed`», «fabricar campos para UUID desconocido», «convertir un run podado en `run_not_active`», «>32 diagnósticos», «timestamp o path en un diagnóstico», «`from_payload` no lee el campo».
+5. El veredicto final se calcula DESPUÉS del último check; imprime `ORACULO: PASS=a FAIL=b UNMET=c de N` y `ORACULO-VERDE` sólo si b=c=0. Comprueba que N coincide con los checks que has escrito.
+6. Calibración: corre el oráculo contra el árbol de referencia. Cada check nuevo de producto tiene que salir ROJO (o UNMET si el sujeto aún no existe, y entonces dilo). Un check verde antes de implementar no mide nada: o lo reescribes o lo declaras «guarda de regresión, verde por diseño». Registra la salida literal.
+7. Alcanzabilidad: para al menos un check central (H3 `run_not_active`), demuestra que PUEDE ponerse verde: un prototipo mínimo en una copia tuya del árbol (bajo `lote-H\draft\proto\`), medir, y NO entregarlo al implementador. El prototipo no viaja.
+
+## Entregables (todos bajo `lote-H\draft\`)
+- `GATES-lote-H.md`: ledger con §Producto (H1-H5 en una frase cada uno), §Decisiones heredadas (D1-D4 con su motivo), §Estado medido antes de delegar (la salida literal de la calibración), §Checks retirados o UNMET con su razón, y el bloque ```gates``` con G1 (`gate/run.sh` → `ORACULO-VERDE`) y G2 (`gate/suite.sh` → `SUITE-ACOTADA OK`).
+- `oracle.py`: el oráculo, ejecutable como se indica arriba.
+- `suite.sh`: lista de módulos de test acotada que el implementador debe mantener verde (modela `lote-G\ws\gate\suite.sh`; añade los de status/tool/server que toque este lote).
+- `CALIBRACION.md`: salida literal del oráculo contra el árbol de referencia, por qué cada rojo es rojo, qué mutantes codificaste, el resultado de la prueba de alcanzabilidad, y `LO QUE NO PUDE VERIFICAR` (vacío es señal de alarma).
+Respuesta final: SOLO la línea `ORACULO: ...` de la calibración, la lista de checks con su color, y `LO QUE NO PUDE VERIFICAR` (máx. 40 líneas). El detalle vive en los ficheros.

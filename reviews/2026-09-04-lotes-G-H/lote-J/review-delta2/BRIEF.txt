@@ -1,0 +1,54 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+SEGUNDA REVISIÓN DELTA DEL LOTE J (ronda 3, la última de implementación) del daemon del MCP de DayZ.
+Sesión nueva: no arrastras nada. Historia: la revisión completa de la ronda 1 (`../review1/REVIEW-CODEX.md`)
+dio F-01 ALTA / F-02 MEDIA / F-03 BAJA; la delta de la ronda 2 (`../review-delta/REVIEW-CODEX.md`) dio
+F-04 MEDIA (F-01 incompleto: el compensador `abort_reservation` iba en un `except: pass` y su tupla de
+degradaciones se tiraba) y F-05 MEDIA (F-02 incompleto: una fila sin esquema en `list_runs` se publicaba
+como `null`). El implementador entregó la ronda 3 sólo para F-04 y F-05. Dictamen sobre el DELTA
+`../ws-frozen-r2/tools/` → `../ws/tools/`.
+
+Producto: `../ws/tools/dayz_mcp/loopback.py` (SHA-256 0584eb10d5f9c17c1198d7adcc6ae491e5b3bad5da95e05b3ff49f1738553377) y
+`../ws/tools/dayz_mcp/process_lifecycle.py` (SHA-256 ccf463ecafaf2eec66c02aaee312b2f0912fcfcf133e1ca75df119054726968a); resto de `dayz_mcp/` congelado
+(`bash ../ws/gate/product_frozen.sh`). Tests entregados: `../ws/tools/tests/test_daemon.py` (SHA-256 716b86d0815fcd78ec0247b2da26dfa05df61f2d611ac31e46e210c554ae1131), `../ws/tools/tests/test_process_lifecycle.py` (SHA-256 48ed7fffafe16f4bfc8f469cac664fa4cce76ead89a72786f620e767b71fc871); `test_session_e2e.py`, `test_loopback.py`, `test_instance_fence.py` y `test_client_mode.py` no cambiaron respecto a r2. Ledger completo (decisiones,
+rulings, los cinco hallazgos y el TOPE del bucle): `../ws/gate/GATES.md`. STATE.md del implementador:
+`../ws/STATE.md` (léelo DESPUÉS de formarte tu opinión del diff).
+
+===============================================================================
+§1. LO QUE QUIERO DE TI
+===============================================================================
+
+  F-04: ¿las degradaciones que devuelve `abort_reservation` llegan a `cleanup_degraded` del error de
+        `adopt_run` y de ahí a `adopted_run.cleanup_degraded`? Si `abort_reservation` lanza, ¿el cierre
+        alternativo (`reject_reservation`) deja `pending_authorizations` vacío, y si también lanza se
+        declara `reservation_abort_failed`? ¿Alguna rama sigue afirmando un cierre que no ocurrió?
+        ¿El camino ordinario de la ronda 2 (adopt_run lanza, abort funciona) sigue igual?
+  F-05: ¿`null` queda reservado a una lista válida sin candidato? ¿Qué pasa con una lista donde una
+        fila es válida y otra no (¿`run_state_unavailable` entera, como pide el ledger?)? ¿Y con un
+        `run_id` no-str o un `state` no-str?
+  Regresiones: los 16 checks anteriores y los tests de r1/r2 siguen; aserciones cambiadas sin F-item;
+        `skip`/`expectedFailure`; tests nuevos tautológicos (que pasen también contra `../ws-frozen-r2/tools/`).
+
+TOPE DEL BUCLE (decisión del orquestador, escrita en el ledger): esta es la última ronda de
+implementación. Clasifica cada hallazgo con severidad Y con repro ejecutable o no; una CRÍTICA/ALTA
+con repro abre una ronda 4 sólo si el arreglo es local; MEDIA/BAJA van a BACKLOG con el repro
+archivado y se integra. Sé preciso en la severidad: un fallo que exige inyectar DOS fallos de
+infraestructura a la vez no es ALTA salvo que dañe datos o deje la caja inusable de forma
+irrecuperable.
+
+Reglas duras: **enseña, no cuentes** (diff literal con `path:line`); **escribe el fallo concreto**
+(entrada → salida errónea) con repro ejecutable si lo hay; **la tolerancia no es un defecto**; cero
+hallazgos es una respuesta legítima. Ejecuta los tres gates desde `../ws` y pega su última línea; si tu
+sandbox da los ERROR ambientales de path authority / launcher nativo / `psutil.AccessDenied`, dilo y no
+lo atribuyas al diff (la suite completa verde la corre el orquestador; el sello de `gate/` cubre
+`allowed_red.txt`).
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrar este producto?
+    ## HALLAZGOS      — por severidad: título, path:line, diff pegado, fallo concreto, repro (sí/no),
+                        y tu propuesta: ronda 4 / backlog.
+    ## ASERCIONES CAMBIADAS — tabla: test, antes, después, F-item (o «ninguno»).
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.

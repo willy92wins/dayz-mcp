@@ -1,0 +1,1293 @@
+--- a/tools/h9_native_probe.py
++++ b/tools/h9_native_probe.py
+@@ -0,0 +1,411 @@
++from __future__ import annotations
++
++import argparse
++import asyncio
++import hashlib
++import json
++from pathlib import Path
++from types import SimpleNamespace
++
++from dayz_mcp import (
++    dayz_test_request,
++    launcher_registry,
++    native_bundle,
++    native_launcher_backend,
++)
++from dayz_mcp.native_broker_protocol import BrokerKind, encode_request
++from dayz_mcp.native_launcher_backend import (
++    NativeLauncherBackendError,
++    launch_registered_native,
++)
++from dayz_mcp.normal_daemon_policy import (
++    load_normal_daemon_policy,
++    serialize_normal_daemon_policy,
++)
++from dayz_mcp.request_path_authority import _file_identity, _final_handle_path
++
++
++TOOLS_DIR = Path(__file__).resolve().parent
++BUNDLE_DIR = TOOLS_DIR / "native-launchers" / "dayz-test-v1"
++REGISTRY_PATH = TOOLS_DIR / "approved-launchers.json"
++OUTPUT_PBO = Path(r"P:\Mods\@Utopia_PC\Addons\Utopia_PC.pbo")
++
++
++class _RecordingAuthority:
++    def __init__(self, inner: object) -> None:
++        self._inner = inner
++        self.debug_images: list[dict[str, object]] = []
++        self.direct_processes: list[dict[str, object]] = []
++        self.helper_attempts: list[dict[str, object]] = []
++
++    def approve_debug_image(self, file_handle: int, *, event_kind: str) -> bool:
++        try:
++            path = _final_handle_path(file_handle)
++        except (OSError, ValueError):
++            path = None
++        approved = bool(
++            self._inner.approve_debug_image(file_handle, event_kind=event_kind)
++        )
++        self.debug_images.append(
++            {"approved": approved, "event_kind": event_kind, "path": path}
++        )
++        return approved
++
++    def approve_announced_process(self, file_handle: int, announcement: object) -> bool:
++        approved = bool(
++            self._inner.approve_announced_process(file_handle, announcement)
++        )
++        self.direct_processes.append(
++            {
++                "approved": approved,
++                "kind": getattr(getattr(announcement, "kind", None), "name", None),
++                "path": getattr(announcement, "announced_path", None),
++            }
++        )
++        return approved
++
++    def approve_addon_helper_process(self, file_handle: int) -> bool:
++        try:
++            path = _final_handle_path(file_handle)
++        except (OSError, ValueError):
++            path = None
++        approved = bool(self._inner.approve_addon_helper_process(file_handle))
++        self.helper_attempts.append({"approved": approved, "path": path})
++        return approved
++
++
++class _RecordingRootAuthority:
++    def __init__(self, inner: object) -> None:
++        self._inner = inner
++        self.path = inner.path
++        self.images: list[dict[str, object]] = []
++
++    def validate_native_pe(self) -> None:
++        self._inner.validate_native_pe()
++
++    def approve_root_debug_image(self, file_handle: int) -> bool:
++        try:
++            path = _final_handle_path(file_handle)
++            identity = _file_identity(file_handle)
++        except (OSError, ValueError):
++            path = None
++            identity = None
++        approved = bool(self._inner.approve_root_debug_image(file_handle))
++        expected = self._inner.file_identity
++        self.images.append(
++            {
++                "approved": approved,
++                "expected_file_id": expected.file_id,
++                "expected_volume": expected.volume_serial_number,
++                "observed_file_id": getattr(identity, "file_id", None),
++                "observed_volume": getattr(
++                    identity, "volume_serial_number", None
++                ),
++                "path": path,
++            }
++        )
++        return approved
++
++
++def _parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("mode", choices=("preflight", "pack-only", "normal"))
++    parser.add_argument("--source", type=Path)
++    parser.add_argument(
++        "--root-start",
++        choices=("planned", "debug-event"),
++        default="planned",
++    )
++    parser.add_argument("--cancel-after-s", type=int)
++    return parser
++
++
++def _canonical_request(
++    mode: str,
++    source: Path | None,
++    policies: tuple[dayz_test_request.RequestProjectPolicy, ...],
++) -> dayz_test_request.ParsedDayzTestRequest:
++    value: dict[str, object] = {
++        "dev_root": r"P:\Utopia_PC_Suite",
++        "mod": "Utopia_PC",
++        "mode": "server",
++        "no_base_mods": True,
++        "version": 1,
++    }
++    if mode == "preflight":
++        value["preflight"] = True
++    else:
++        if source is None:
++            raise ValueError("probe_source_required")
++        if not source.is_absolute() or not source.is_dir():
++            raise ValueError("probe_source_invalid")
++        value.update(
++            {
++                "build": True,
++                "clean": True,
++                "pack_only": mode == "pack-only",
++                "source": str(source),
++            }
++        )
++    raw = json.dumps(
++        value,
++        ensure_ascii=False,
++        separators=(",", ":"),
++        sort_keys=True,
++    ).encode("utf-8")
++    return dayz_test_request.parse_dayz_test_request(raw, policies=policies)
++
++
++def _pbo_snapshot() -> dict[str, object] | None:
++    if not OUTPUT_PBO.is_file():
++        return None
++    raw = OUTPUT_PBO.read_bytes()
++    info = OUTPUT_PBO.stat()
++    return {
++        "file_id": int(info.st_ino),
++        "mtime_ns": int(info.st_mtime_ns),
++        "sha256": hashlib.sha256(raw).hexdigest().upper(),
++        "size": len(raw),
++    }
++
++
++async def _run(
++    mode: str,
++    source: Path | None,
++    root_start: str,
++    cancel_after_s: int | None,
++) -> dict[str, object]:
++    if root_start not in {"planned", "debug-event"}:
++        raise ValueError("probe_root_start_invalid")
++    if cancel_after_s is not None and not 1 <= cancel_after_s <= 120:
++        raise ValueError("probe_cancel_after_invalid")
++    if not BUNDLE_DIR.is_absolute() or not BUNDLE_DIR.is_dir():
++        raise ValueError("probe_bundle_invalid")
++    registry_before = REGISTRY_PATH.read_bytes()
++    pbo_before = _pbo_snapshot()
++    registry_payload = json.loads(registry_before)
++    if (
++        not isinstance(registry_payload, dict)
++        or registry_payload.get("format_version") != 1
++        or not isinstance(registry_payload.get("launchers"), list)
++    ):
++        raise ValueError("probe_registry_invalid")
++
++    entry = launcher_registry._create_registry_entry_for_test(
++        "dayz-test-v1",
++        BUNDLE_DIR,
++        "dayz-test-launcher.exe",
++    )
++    output: dict[str, bytearray] = {
++        "stdout": bytearray(),
++        "stderr": bytearray(),
++    }
++    debug_events: list[dict[str, object]] = []
++    broker_announcements: list[dict[str, object]] = []
++    result: dict[str, object]
++    with launcher_registry._open_registry_entry_for_test(entry) as opened:
++        opened.validate_native_pe()
++        with native_bundle.load_verified_bundle(opened) as verified:
++            policies = tuple(item.policy for item in verified.sealed_policies)
++            parsed = _canonical_request(mode, source, policies)
++            frame = encode_request(
++                BrokerKind.PRIVATE_WORKER,
++                {"request_sha256": parsed.sha256},
++                stdin=parsed.canonical_bytes,
++            )
++            authority = _RecordingAuthority(verified.debug_image_authority)
++            root_authority = _RecordingRootAuthority(opened)
++
++            def output_sink(channel: str, chunk: bytes) -> None:
++                if channel not in output or type(chunk) is not bytes:
++                    raise ValueError("invalid_probe_output")
++                if len(output[channel]) + len(chunk) > 16 * 1024:
++                    raise ValueError("probe_output_too_large")
++                output[channel].extend(chunk)
++
++            original_read_debug_event = (
++                native_launcher_backend._wait_debug_event
++            )
++            original_create_flags = native_launcher_backend.CREATE_FLAGS
++            original_feed_announcement = (
++                native_launcher_backend.ChildAnnouncementDecoder.feed
++            )
++
++            def read_debug_event() -> object:
++                event = original_read_debug_event()
++                if event is not None:
++                    debug_events.append(
++                        {
++                            "exit_code": event.exit_code,
++                            "kind": event.kind,
++                            "pid": event.pid,
++                            "tid": event.tid,
++                        }
++                    )
++                return event
++
++            def feed_announcement(decoder: object, chunk: bytes) -> list[object]:
++                values = original_feed_announcement(decoder, chunk)
++                broker_announcements.extend(
++                    {
++                        "kind": item.kind.name,
++                        "path": item.announced_path,
++                        "sequence": item.sequence,
++                    }
++                    for item in values
++                )
++                return values
++
++            try:
++                identity_json = (
++                    '{"pid":1,"platform":"unknown","ppid":1,'
++                    '"session_id":"00000000-0000-4000-8000-000000000001",'
++                    '"started_at_utc":"2026-07-22T00:00:00.000000Z",'
++                    '"task_label":"h9-native-preflight"}'
++                    if mode == "preflight"
++                    else "[0]"
++                )
++                native_launcher_backend._wait_debug_event = read_debug_event
++                native_launcher_backend.ChildAnnouncementDecoder.feed = (
++                    feed_announcement
++                )
++                if root_start == "debug-event":
++                    native_launcher_backend.CREATE_FLAGS = (
++                        original_create_flags
++                        & ~native_launcher_backend.CREATE_SUSPENDED
++                    )
++                try:
++                    cancel_event = asyncio.Event()
++                    cancel_timer = (
++                        asyncio.get_running_loop().call_later(
++                            cancel_after_s, cancel_event.set
++                        )
++                        if cancel_after_s is not None
++                        else None
++                    )
++                    daemon_policy_json = serialize_normal_daemon_policy(
++                        load_normal_daemon_policy()
++                    )
++                    exit_code = await launch_registered_native(
++                        root_authority,
++                        verified_bundle=SimpleNamespace(
++                            debug_image_authority=authority
++                        ),
++                        identity_json=identity_json,
++                        lease_token="h9-native-probe-no-secret",
++                        daemon_policy_json=daemon_policy_json,
++                        canonical_request=frame,
++                        cancel_event=cancel_event,
++                        output_sink=output_sink,
++                    )
++                    launch_error = None
++                except NativeLauncherBackendError as error:
++                    exit_code = None
++                    launch_error = str(error)
++                finally:
++                    if cancel_timer is not None:
++                        cancel_timer.cancel()
++            finally:
++                native_launcher_backend._wait_debug_event = (
++                    original_read_debug_event
++                )
++                native_launcher_backend.CREATE_FLAGS = original_create_flags
++                native_launcher_backend.ChildAnnouncementDecoder.feed = (
++                    original_feed_announcement
++                )
++
++            helper_names = {
++                Path(str(item["path"])).name.casefold()
++                for item in authority.helper_attempts
++                if item["approved"] is True and item["path"] is not None
++            }
++            result = {
++                "broker_announcements": broker_announcements,
++                "debug_images": authority.debug_images,
++                "direct_processes": authority.direct_processes,
++                "debug_events": debug_events,
++                "exit_code": exit_code,
++                "helper_attempts": authority.helper_attempts,
++                "launch_error": launch_error,
++                "mode": mode,
++                "root_start": root_start,
++                "output": {
++                    key: bytes(value).decode("utf-8", errors="replace")
++                    for key, value in output.items()
++                },
++                "pbo": _pbo_snapshot(),
++                "pbo_before": pbo_before,
++                "request_sha256": parsed.sha256,
++                "root_images": root_authority.images,
++            }
++            pbo_fresh = result["pbo"] is not None and result["pbo"] != pbo_before
++            result["pbo_fresh"] = pbo_fresh
++
++            probe_error = (
++                f"probe_native_gate_failed:{launch_error}"
++                if launch_error is not None
++                else None
++            )
++            if probe_error is None and cancel_after_s is not None:
++                lifecycle_seen = any(
++                    item["kind"] == "LIFECYCLE_CLI"
++                    for item in broker_announcements
++                )
++                if exit_code != 130 or pbo_fresh or lifecycle_seen:
++                    probe_error = "probe_cancellation_failed"
++            elif probe_error is None and mode == "preflight":
++                if exit_code != 0 or authority.helper_attempts:
++                    probe_error = "probe_preflight_failed"
++            elif probe_error is None:
++                if exit_code != 2 or not pbo_fresh:
++                    probe_error = "probe_build_failed"
++                if mode == "pack-only" and helper_names != {
++                    "binarize.exe",
++                    "filebank.exe",
++                }:
++                    probe_error = "probe_pack_helper_drift"
++                if mode == "normal" and not helper_names:
++                    probe_error = "probe_normal_helper_missing"
++                if not helper_names.issubset(
++                    {"binarize.exe", "cfgconvert.exe", "filebank.exe"}
++                ):
++                    probe_error = "probe_unknown_helper"
++            result["probe_error"] = probe_error
++
++    if REGISTRY_PATH.read_bytes() != registry_before:
++        raise RuntimeError("probe_registry_drift")
++    return result
++
++
++def main() -> int:
++    args = _parser().parse_args()
++    try:
++        result = asyncio.run(
++            _run(
++                args.mode,
++                args.source,
++                args.root_start,
++                args.cancel_after_s,
++            )
++        )
++    except TypeError as error:
++        print(
++            json.dumps(
++                {
++                    "error": f"probe_internal_error: {type(error).__name__}: {error}",
++                    "ok": False,
++                },
++                sort_keys=True,
++            )
++        )
++        return 1
++    except (OSError, ValueError, RuntimeError) as error:
++        print(json.dumps({"error": str(error), "ok": False}, sort_keys=True))
++        return 1
++    ok = result.get("probe_error") is None
++    print(json.dumps({"ok": ok, **result}, sort_keys=True))
++    return 0 if ok else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+--- a/tools/tests/test_effective_schema.py
++++ b/tools/tests/test_effective_schema.py
+@@ -1,5 +1,7 @@
+ """Effective schemas are the post-build_app public contract, not the fn body."""
+ from __future__ import annotations
++
++import unittest
+ 
+ from dayz_mcp.effective_schema import (
+     _json_enum,
+@@ -13,202 +15,203 @@
+     return {"required": required, "default": None, "type": "string", "enum": enum}
+ 
+ 
+-def test_scene_raycast_exposes_from_not_from_pos():
+-    schemas = resolve_effective_schemas()
+-    assert "scene_raycast" in schemas
+-    params = schemas["scene_raycast"]["params"]
+-    assert "from" in params
+-    assert "from_pos" not in params
+-    assert params["from"]["required"] is True
+-    assert params["from"]["type"] == "array"
+-
+-
+-def test_resolve_shape_has_description_and_params():
+-    schemas = resolve_effective_schemas()
+-    assert len(schemas) >= 40
+-    sample = schemas["scene_raycast"]
+-    assert isinstance(sample["description"], str)
+-    assert sample["description"]
+-    entry = sample["params"]["from"]
+-    assert set(entry) >= {"required", "default", "type", "enum"}
+-
+-
+-def test_live_audit_flags_type_classname_divergence():
+-    findings = audit_contracts()
+-    assert findings, "live tree splits type/classname; auditor must report it"
+-    divergences = [
+-        item
+-        for item in findings
+-        if item.get("code") == "PARAM-NAME-DIVERGENCE"
+-    ]
+-    assert divergences
+-    text = " ".join(str(item) for item in divergences)
+-    assert "world_spawn" in text
+-    assert "inventory_give" in text
+-
+-
+-def test_live_audit_does_not_flag_scene_raycast_from_alias():
+-    findings = audit_contracts()
+-    aliased = [
+-        item
+-        for item in findings
+-        if "scene_raycast" in str(item).lower()
+-        and (
+-            "from_pos" in str(item).lower()
+-            or "'from'" in str(item).lower()
+-            or '"from"' in str(item).lower()
++class EffectiveSchemaTests(unittest.TestCase):
++    def test_scene_raycast_exposes_from_not_from_pos(self) -> None:
++        schemas = resolve_effective_schemas()
++        self.assertIn("scene_raycast", schemas)
++        params = schemas["scene_raycast"]["params"]
++        self.assertIn("from", params)
++        self.assertNotIn("from_pos", params)
++        self.assertIs(True, params["from"]["required"])
++        self.assertEqual(params["from"]["type"], "array")
++
++    def test_resolve_shape_has_description_and_params(self) -> None:
++        schemas = resolve_effective_schemas()
++        self.assertGreaterEqual(len(schemas), 40)
++        sample = schemas["scene_raycast"]
++        self.assertIsInstance(sample["description"], str)
++        self.assertTrue(sample["description"])
++        entry = sample["params"]["from"]
++        self.assertGreaterEqual(set(entry), {"required", "default", "type", "enum"})
++
++    def test_live_audit_flags_type_classname_divergence(self) -> None:
++        findings = audit_contracts()
++        self.assertTrue(findings, "live tree splits type/classname; auditor must report it")
++        divergences = [
++            item
++            for item in findings
++            if item.get("code") == "PARAM-NAME-DIVERGENCE"
++        ]
++        self.assertTrue(divergences)
++        text = " ".join(str(item) for item in divergences)
++        self.assertIn("world_spawn", text)
++        self.assertIn("inventory_give", text)
++
++    def test_live_audit_does_not_flag_scene_raycast_from_alias(self) -> None:
++        findings = audit_contracts()
++        aliased = [
++            item
++            for item in findings
++            if "scene_raycast" in str(item).lower()
++            and (
++                "from_pos" in str(item).lower()
++                or "'from'" in str(item).lower()
++                or '"from"' in str(item).lower()
++            )
++        ]
++        self.assertEqual(aliased, [])
++
++    def test_injected_schema_flags_desc_enum_and_name_split(self) -> None:
++        schemas = {
++            "probe_run": {
++                "description": "Run a thing. mode is server|all|client.",
++                "params": {
++                    "mode": _param(
++                        True, ["offline", "server", "client", "all"]
++                    ),
++                },
++            },
++            "probe_spawn": {
++                "description": "Spawn one entity by class.",
++                "params": {"type": _param(True)},
++            },
++            "probe_give": {
++                "description": "Give one entity by class.",
++                "params": {"classname": _param(True)},
++            },
++        }
++        findings = audit_contracts(schemas)
++        text = " ".join(str(item) for item in findings).lower()
++        self.assertTrue(
++            any(
++                item.get("code") == "DESC-ENUM-MISMATCH" and item.get("tool") == "probe_run"
++                for item in findings
++            )
+         )
+-    ]
+-    assert aliased == []
+-
+-
+-def test_injected_schema_flags_desc_enum_and_name_split():
+-    schemas = {
+-        "probe_run": {
+-            "description": "Run a thing. mode is server|all|client.",
+-            "params": {
+-                "mode": _param(
+-                    True, ["offline", "server", "client", "all"]
+-                ),
+-            },
+-        },
+-        "probe_spawn": {
+-            "description": "Spawn one entity by class.",
+-            "params": {"type": _param(True)},
+-        },
+-        "probe_give": {
+-            "description": "Give one entity by class.",
+-            "params": {"classname": _param(True)},
+-        },
+-    }
+-    findings = audit_contracts(schemas)
+-    text = " ".join(str(item) for item in findings).lower()
+-    assert any(
+-        item.get("code") == "DESC-ENUM-MISMATCH" and item.get("tool") == "probe_run"
+-        for item in findings
+-    )
+-    assert "probe_spawn" in text or "probe_give" in text
+-    assert any(item.get("code") == "PARAM-NAME-DIVERGENCE" for item in findings)
+-
+-
+-def test_coherent_injected_schema_is_silent():
+-    schemas = {
+-        "clean_run": {
+-            "description": "Run a thing. mode is offline|server|client|all.",
+-            "params": {
+-                "mode": _param(
+-                    True, ["offline", "server", "client", "all"]
+-                ),
+-            },
+-        },
+-        "clean_spawn": {
+-            "description": "Spawn one entity by class.",
+-            "params": {"classname": _param(True)},
+-        },
+-        "clean_give": {
+-            "description": "Give one entity by class.",
+-            "params": {"classname": _param(True)},
+-        },
+-    }
+-    assert audit_contracts(schemas) == []
+-
+-
+-def test_marker_union_keeps_string_and_object():
+-    schemas = resolve_effective_schemas()
+-    for tool_name in ("logs_since", "wait_for"):
+-        published = schemas[tool_name]["params"]["marker"]["type"]
+-        published_set = (
+-            set(published)
+-            if isinstance(published, (list, tuple, set))
+-            else {published}
++        self.assertTrue("probe_spawn" in text or "probe_give" in text)
++        self.assertTrue(any(item.get("code") == "PARAM-NAME-DIVERGENCE" for item in findings))
++
++    def test_coherent_injected_schema_is_silent(self) -> None:
++        schemas = {
++            "clean_run": {
++                "description": "Run a thing. mode is offline|server|client|all.",
++                "params": {
++                    "mode": _param(
++                        True, ["offline", "server", "client", "all"]
++                    ),
++                },
++            },
++            "clean_spawn": {
++                "description": "Spawn one entity by class.",
++                "params": {"classname": _param(True)},
++            },
++            "clean_give": {
++                "description": "Give one entity by class.",
++                "params": {"classname": _param(True)},
++            },
++        }
++        self.assertEqual(audit_contracts(schemas), [])
++
++    def test_marker_union_keeps_string_and_object(self) -> None:
++        schemas = resolve_effective_schemas()
++        for tool_name in ("logs_since", "wait_for"):
++            published = schemas[tool_name]["params"]["marker"]["type"]
++            published_set = (
++                set(published)
++                if isinstance(published, (list, tuple, set))
++                else {published}
++            )
++            self.assertLessEqual(
++                {"string", "object"},
++                published_set,
++                f"{tool_name}.marker type {published!r} dropped a union branch",
++            )
++
++    def test_two_enums_in_one_description_are_not_crossed(self) -> None:
++        schemas = {
++            "t": {
++                "description": "source is auto|manual. mode is safe|manual.",
++                "params": {
++                    "source": _param(True, ["auto", "manual"]),
++                    "mode": _param(True, ["safe", "manual"]),
++                },
++            }
++        }
++        self.assertEqual(audit_contracts(schemas), [])
++
++    def test_disjoint_pipe_list_before_param_name_is_mismatch(self) -> None:
++        schemas = {
++            "t": {
++                "description": "server|client are valid values for mode.",
++                "params": {"mode": _param(True, ["offline", "local"])},
++            }
++        }
++        findings = audit_contracts(schemas)
++        self.assertTrue(
++            any(
++                item.get("code") == "DESC-ENUM-MISMATCH" and item.get("tool") == "t"
++                for item in findings
++            )
+         )
+-        assert {"string", "object"} <= published_set, (
+-            f"{tool_name}.marker type {published!r} dropped a union branch"
+-        )
+-
+-
+-def test_two_enums_in_one_description_are_not_crossed():
+-    schemas = {
+-        "t": {
+-            "description": "source is auto|manual. mode is safe|manual.",
+-            "params": {
+-                "source": _param(True, ["auto", "manual"]),
+-                "mode": _param(True, ["safe", "manual"]),
+-            },
+-        }
+-    }
+-    assert audit_contracts(schemas) == []
+-
+-
+-def test_disjoint_pipe_list_before_param_name_is_mismatch():
+-    schemas = {
+-        "t": {
+-            "description": "server|client are valid values for mode.",
+-            "params": {"mode": _param(True, ["offline", "local"])},
+-        }
+-    }
+-    findings = audit_contracts(schemas)
+-    assert any(
+-        item.get("code") == "DESC-ENUM-MISMATCH" and item.get("tool") == "t"
+-        for item in findings
+-    )
+-
+-
+-def test_divergence_evidence_does_not_claim_object_class():
+-    schemas = {
+-        "decode": {
+-            "description": "Decode a payload. type is the serialization format.",
+-            "params": {"type": _param(True)},
+-        },
+-        "spawn": {
+-            "description": "Spawn an entity by class.",
+-            "params": {"classname": _param(True)},
+-        },
+-    }
+-    findings = audit_contracts(schemas)
+-    assert any(item.get("code") == "PARAM-NAME-DIVERGENCE" for item in findings)
+-    for item in findings:
+-        if item.get("tool") == "decode":
+-            assert "object class" not in str(item.get("evidence", "")).lower()
+-
+-
+-def test_nested_union_keeps_every_branch():
+-    """A union inside a union is still a union: no branch may be dropped."""
+-    nested = {
+-        "anyOf": [
+-            {"type": "string"},
+-            {"anyOf": [{"type": "integer"}, {"type": "number"}]},
+-        ]
+-    }
+-    assert _json_type(nested) == ["string", "integer", "number"]
+-
+-
+-def test_every_branch_enum_survives_the_union():
+-    """Keeping only the first branch's enum invents DESC-ENUM-MISMATCH findings."""
+-    per_branch = {
+-        "anyOf": [
+-            {"type": "string", "enum": ["a", "b"]},
+-            {"type": "integer", "enum": [1, 2]},
+-        ]
+-    }
+-    assert _json_enum(per_branch) == ["a", "b", 1, 2]
+-
+-
+-def test_cyclic_schema_resolves_instead_of_recursing():
+-    """A self-referencing schema must return a value, not RecursionError."""
+-    cyclic: dict = {}
+-    cyclic["anyOf"] = [cyclic]
+-    assert _json_type(cyclic) is None
+-    assert _json_enum(cyclic) is None
+-
+-
+-def test_non_scalar_enum_values_do_not_crash_the_audit():
+-    """audit_contracts takes injected records, so its enum compare must not hash."""
+-    schemas = {
+-        "t": {
+-            "description": "mode is alpha|beta.",
+-            "params": {"mode": _param(True, [{"alpha": 1}, ["beta"]])},
+-        }
+-    }
+-    findings = audit_contracts(schemas)
+-    assert any(item.get("code") == "DESC-ENUM-MISMATCH" for item in findings)
++
++    def test_divergence_evidence_does_not_claim_object_class(self) -> None:
++        schemas = {
++            "decode": {
++                "description": "Decode a payload. type is the serialization format.",
++                "params": {"type": _param(True)},
++            },
++            "spawn": {
++                "description": "Spawn an entity by class.",
++                "params": {"classname": _param(True)},
++            },
++        }
++        findings = audit_contracts(schemas)
++        self.assertTrue(any(item.get("code") == "PARAM-NAME-DIVERGENCE" for item in findings))
++        for item in findings:
++            if item.get("tool") == "decode":
++                self.assertNotIn(
++                    "object class",
++                    str(item.get("evidence", "")).lower(),
++                )
++
++    def test_nested_union_keeps_every_branch(self) -> None:
++        """A union inside a union is still a union: no branch may be dropped."""
++        nested = {
++            "anyOf": [
++                {"type": "string"},
++                {"anyOf": [{"type": "integer"}, {"type": "number"}]},
++            ]
++        }
++        self.assertEqual(_json_type(nested), ["string", "integer", "number"])
++
++    def test_every_branch_enum_survives_the_union(self) -> None:
++        """Keeping only the first branch's enum invents DESC-ENUM-MISMATCH findings."""
++        per_branch = {
++            "anyOf": [
++                {"type": "string", "enum": ["a", "b"]},
++                {"type": "integer", "enum": [1, 2]},
++            ]
++        }
++        self.assertEqual(_json_enum(per_branch), ["a", "b", 1, 2])
++
++    def test_cyclic_schema_resolves_instead_of_recursing(self) -> None:
++        """A self-referencing schema must return a value, not RecursionError."""
++        cyclic: dict = {}
++        cyclic["anyOf"] = [cyclic]
++        self.assertIsNone(_json_type(cyclic))
++        self.assertIsNone(_json_enum(cyclic))
++
++    def test_non_scalar_enum_values_do_not_crash_the_audit(self) -> None:
++        """audit_contracts takes injected records, so its enum compare must not hash."""
++        schemas = {
++            "t": {
++                "description": "mode is alpha|beta.",
++                "params": {"mode": _param(True, [{"alpha": 1}, ["beta"]])},
++            }
++        }
++        findings = audit_contracts(schemas)
++        self.assertTrue(any(item.get("code") == "DESC-ENUM-MISMATCH" for item in findings))
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- a/tools/dayz_mcp/doctor.py
++++ b/tools/dayz_mcp/doctor.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import argparse
++import hashlib
+ import json
+ import locale
+ import math
+@@ -102,6 +103,10 @@
+     expected_command: str
+     knowledge_pack_dir: Path | None = None
+     knowledge_pack_manifest_path: Path | None = None
++    # Approved native launcher whose closure-manifest externals are checked against the
++    # disk. None (the default for injected sources) skips the check entirely, so a
++    # synthetic diagnosis never opens the host's real registry.
++    native_launcher_id: str | None = None
+ 
+ 
+ @dataclass(frozen=True)
+@@ -255,6 +260,7 @@
+         expected_command=sys.executable,
+         knowledge_pack_dir=knowledge_pack_dir,
+         knowledge_pack_manifest_path=default_manifest_path(knowledge_pack_dir),
++        native_launcher_id="dayz-test-v1",
+     )
+ 
+ 
+@@ -432,6 +438,90 @@
+     return {"code": code, "severity": severity, **details}
+ 
+ 
++def check_native_bundle_externals(
++    entries: list[dict],
++    *,
++    stat: Callable[[str], tuple[int, str] | None],
++    approved_sha256: str | None = None,
++) -> list[dict[str, object]]:
++    externals = [item for item in entries if item.get("kind") == "external"]
++    drifted: list[str] = []
++    for entry in externals:
++        path = str(entry["path"])
++        observed = stat(path)
++        if observed is None:
++            drifted.append(path)
++            continue
++        size, sha256_hex = observed
++        if size != entry["size"] or sha256_hex.lower() != str(entry["sha256"]).lower():
++            drifted.append(path)
++    if not drifted:
++        return [
++            _finding(
++                "NATIVE_BUNDLE_EXTERNALS_OK",
++                severity="INFO",
++                checked=len(externals),
++            )
++        ]
++    # The CAS of `install-dayz-test-v1` is the sha256 of tools/approved-launchers.json AFTER
++    # `rollback-last`, which cannot be known before the rollback runs; the PE hash is never it.
++    sha_token = approved_sha256 or "<sha256 of tools/approved-launchers.json after rollback-last>"
++    remediation = (
++        "Renew the native bundle: "
++        "python tools/build_native_launcher.py --offline --verify-reproducible, then "
++        "python -m dayz_mcp.launcher_registry_update rollback-last, then "
++        f"install-dayz-test-v1 --expected-sha256 {sha_token}."
++    )
++    return [
++        _finding(
++            "NATIVE_BUNDLE_EXTERNAL_DRIFT",
++            severity="FAIL",
++            drifted=drifted,
++            remediation=remediation,
++        )
++    ]
++
++
++def _stat_external_file(path: str) -> tuple[int, str] | None:
++    target = Path(path)
++    try:
++        if not target.is_file():
++            return None
++        data = target.read_bytes()
++    except OSError:
++        return None
++    return len(data), hashlib.sha256(data).hexdigest()
++
++
++def _check_native_bundle_closure(
++    sources: DoctorSources, findings: list[dict[str, object]]
++) -> None:
++    launcher_id = getattr(sources, "native_launcher_id", None)
++    if launcher_id is None:
++        return
++    try:
++        from dayz_mcp.launcher_registry import open_approved_launcher
++
++        with open_approved_launcher(launcher_id) as opened:
++            manifest_path = opened.root / "closure-manifest.json"
++            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
++            entries = manifest.get("entries")
++            if type(entries) is not list:
++                raise ValueError("invalid_closure_manifest_entries")
++            findings.extend(
++                check_native_bundle_externals(
++                    entries,
++                    stat=_stat_external_file,
++                )
++            )
++    except Exception:
++        findings.append(
++            # A launcher that cannot be opened or a manifest that cannot be read is not
++            # "unknown": with a launcher id configured it is a failed check.
++            _finding("NATIVE_BUNDLE_MANIFEST_UNREADABLE", severity="FAIL")
++        )
++
++
+ def _check_knowledge_pack(
+     sources: DoctorSources,
+     registrations: dict[str, _Registration],
+@@ -1101,6 +1191,7 @@
+         )
+     _check_runs(sources, managed, findings)
+     _check_launchers(sources.scan_roots, findings)
++    _check_native_bundle_closure(sources, findings)
+     _check_knowledge_pack(sources, registrations, findings)
+ 
+     findings.sort(
+--- a/tools/tests/test_doctor.py
++++ b/tools/tests/test_doctor.py
+@@ -1426,5 +1426,153 @@
+         self.assertNotIn("$effectiveClaude.Contains($KeyFile)", script)
+         self.assertNotIn("[Array]::IndexOf", script)
+ 
++
++class NativeBundleExternalsTests(unittest.TestCase):
++    def test_all_matching_externals_emit_ok_finding(self) -> None:
++        if doctor is None:
++            self.skipTest("dayz_mcp.doctor unavailable")
++        entries = [
++            {
++                "kind": "external",
++                "path": r"C:\ext\one.dll",
++                "size": 10,
++                "sha256": "aa" * 32,
++            },
++            {
++                "kind": "external",
++                "path": r"C:\ext\two.dll",
++                "size": 20,
++                "sha256": "bb" * 32,
++            },
++            {
++                "kind": "bundle",
++                "path": "runtime/python.exe",
++                "size": 5,
++                "sha256": "cc" * 32,
++            },
++        ]
++        table = {
++            entries[0]["path"]: (10, "aa" * 32),
++            entries[1]["path"]: (20, "bb" * 32),
++        }
++
++        def stat_ok(path: str) -> tuple[int, str] | None:
++            return table.get(str(path))
++
++        findings = doctor.check_native_bundle_externals(entries, stat=stat_ok)
++        self.assertEqual([item["code"] for item in findings], ["NATIVE_BUNDLE_EXTERNALS_OK"])
++        self.assertEqual(findings[0]["severity"], "INFO")
++        self.assertEqual(findings[0]["checked"], 2)
++
++    def test_size_drift_emits_fail_with_remediation(self) -> None:
++        if doctor is None:
++            self.skipTest("dayz_mcp.doctor unavailable")
++        entries = [
++            {
++                "kind": "external",
++                "path": r"C:\ext\one.dll",
++                "size": 10,
++                "sha256": "aa" * 32,
++            },
++            {
++                "kind": "external",
++                "path": r"C:\ext\two.dll",
++                "size": 20,
++                "sha256": "bb" * 32,
++            },
++        ]
++        table = {
++            entries[0]["path"]: (10, "aa" * 32),
++            entries[1]["path"]: (20, "bb" * 32),
++        }
++
++        def stat_drift(path: str) -> tuple[int, str] | None:
++            if str(path) == entries[0]["path"]:
++                return (11, "aa" * 32)
++            return table.get(str(path))
++
++        findings = doctor.check_native_bundle_externals(entries, stat=stat_drift)
++        drift = next(
++            item for item in findings if item["code"] == "NATIVE_BUNDLE_EXTERNAL_DRIFT"
++        )
++        self.assertEqual(drift["severity"], "FAIL")
++        self.assertIn(entries[0]["path"], drift["drifted"])
++        remediation = str(drift["remediation"])
++        self.assertIn("rollback-last", remediation)
++        self.assertIn("install-dayz-test-v1", remediation)
++
++    def test_missing_external_is_reported_not_bundle_entries(self) -> None:
++        if doctor is None:
++            self.skipTest("dayz_mcp.doctor unavailable")
++        entries = [
++            {
++                "kind": "external",
++                "path": r"C:\ext\one.dll",
++                "size": 10,
++                "sha256": "aa" * 32,
++            },
++            {
++                "kind": "external",
++                "path": r"C:\ext\two.dll",
++                "size": 20,
++                "sha256": "bb" * 32,
++            },
++            {
++                "kind": "bundle",
++                "path": "runtime/python.exe",
++                "size": 5,
++                "sha256": "cc" * 32,
++            },
++        ]
++        table = {
++            entries[0]["path"]: (10, "aa" * 32),
++            entries[1]["path"]: (20, "bb" * 32),
++        }
++
++        def stat_missing(path: str) -> tuple[int, str] | None:
++            if str(path) == entries[1]["path"]:
++                return None
++            return table.get(str(path))
++
++        findings = doctor.check_native_bundle_externals(entries, stat=stat_missing)
++        drift = next(
++            item for item in findings if item["code"] == "NATIVE_BUNDLE_EXTERNAL_DRIFT"
++        )
++        self.assertIn(entries[1]["path"], drift["drifted"])
++        self.assertNotIn(entries[2]["path"], drift["drifted"])
++
++
+ if __name__ == "__main__":
+     unittest.main()
++
++
++class NativeBundleClosureWiringTests(unittest.TestCase):
++    """The closure check runs only for sources that name a launcher (ronda 2, orquestador).
++
++    Injected sources default to ``native_launcher_id=None`` so a synthetic diagnosis never
++    opens the host's real registry; ``default_sources`` names ``dayz-test-v1``.
++    """
++
++    def test_sources_without_launcher_id_add_no_finding(self) -> None:
++        if doctor is None:
++            self.skipTest("dayz_mcp.doctor unavailable")
++        from types import SimpleNamespace
++
++        findings: list[dict[str, object]] = []
++        doctor._check_native_bundle_closure(SimpleNamespace(native_launcher_id=None), findings)
++        self.assertEqual([], findings)
++
++    def test_unreadable_launcher_is_a_single_warn_finding(self) -> None:
++        if doctor is None:
++            self.skipTest("dayz_mcp.doctor unavailable")
++        from types import SimpleNamespace
++        from unittest import mock
++
++        import dayz_mcp.launcher_registry as registry
++
++        findings: list[dict[str, object]] = []
++        with mock.patch.object(registry, "open_approved_launcher", side_effect=OSError("boom")):
++            doctor._check_native_bundle_closure(SimpleNamespace(native_launcher_id="dayz-test-v1"), findings)
++        self.assertEqual(
++            [{"code": "NATIVE_BUNDLE_MANIFEST_UNREADABLE", "severity": "FAIL"}], findings
++        )
+--- a/tools/tests/test_docs_truth.py
++++ b/tools/tests/test_docs_truth.py
+@@ -632,7 +632,7 @@
+         self.assertEqual(
+             offenders, [],
+             f"PROJECT-MAP size claims drifted: {offenders}. "
+-            f"Regenerate the map")
++            f"Update PROJECT-MAP.md by hand")
+ 
+ 
+ class ProjectMapEntryPointsDocsTest(unittest.TestCase):
+@@ -652,7 +652,7 @@
+         self.assertEqual(
+             ghosts, [],
+             f"PROJECT-MAP lists entry points that do not exist: {ghosts}. "
+-            f"Regenerate the map or delete the stale lines")
++            f"Update PROJECT-MAP.md by hand or delete the stale lines")
+ 
+ 
+ if __name__ == "__main__":
+--- a/tools/tests/test_interpreter_guard.py
++++ b/tools/tests/test_interpreter_guard.py
+@@ -0,0 +1,59 @@
++"""Guard that the suite runs under the approved project interpreter."""
++from __future__ import annotations
++
++import os
++import sys
++import unittest
++from pathlib import Path
++
++
++def approved_interpreter(package_file: Path) -> Path:
++    return (
++        package_file.resolve().parents[1]
++        / ".venv-mcp"
++        / "Scripts"
++        / "python.exe"
++    )
++
++
++def verdict(
++    current: Path,
++    approved: Path,
++    *,
++    approved_exists: bool,
++) -> tuple[str, str]:
++    if not approved_exists:
++        return (
++            "absent",
++            f"approved interpreter not found at {approved}; expected tools/.venv-mcp",
++        )
++    # Resolve both sides before comparing, as daemon.py:193-198 does: two spellings of the
++    # same executable (junction, `..` segment) must not read as a mismatch (Codex backlog 2).
++    if os.path.normcase(str(Path(current).resolve())) == os.path.normcase(str(Path(approved).resolve())):
++        return ("ok", f"interpreter matches approved {approved}")
++    return (
++        "mismatch",
++        f"interpreter mismatch: current={current} approved={approved}",
++    )
++
++
++class InterpreterGuardTests(unittest.TestCase):
++    def test_suite_runs_on_approved_interpreter(self) -> None:
++        import dayz_mcp
++
++        approved = approved_interpreter(Path(dayz_mcp.__file__))
++        approved_exists = approved.is_file()
++        status, message = verdict(
++            Path(sys.executable),
++            approved,
++            approved_exists=approved_exists,
++        )
++        if status == "mismatch":
++            self.fail(message)
++        if status == "absent":
++            self.skipTest(message)
++        self.assertEqual(status, "ok")
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- a/tools/tests/test_lote_w_h9.py
++++ b/tools/tests/test_lote_w_h9.py
+@@ -0,0 +1,77 @@
++"""Lote W regression tests for h9_native_probe."""
++from __future__ import annotations
++
++import ast
++import inspect
++import io
++import sys
++import unittest
++from pathlib import Path
++from unittest.mock import patch
++
++import contextlib
++
++_TOOLS_DIR = Path(__file__).resolve().parents[1]
++if str(_TOOLS_DIR) not in sys.path:
++    sys.path.insert(0, str(_TOOLS_DIR))
++
++# h9_native_probe.py is a host-local probe (never published, untracked in the repo): a
++# checkout without it skips this module instead of failing at import.
++if not (_TOOLS_DIR / "h9_native_probe.py").is_file():
++    raise unittest.SkipTest("h9_native_probe.py is not present in this tree")
++
++from dayz_mcp import native_launcher_backend as nlb
++import h9_native_probe as h9
++
++
++class H9NativeProbeTests(unittest.TestCase):
++    def test_launch_registered_native_passes_all_required_keyword_args(self) -> None:
++        sig = inspect.signature(nlb.launch_registered_native)
++        required_kw = {
++            name
++            for name, param in sig.parameters.items()
++            if param.kind is inspect.Parameter.KEYWORD_ONLY
++            and param.default is inspect.Parameter.empty
++        }
++        tree = ast.parse((_TOOLS_DIR / "h9_native_probe.py").read_text(encoding="utf-8"))
++        calls = []
++        for node in ast.walk(tree):
++            if isinstance(node, ast.Call):
++                func = node.func
++                name = getattr(func, "attr", None) or getattr(func, "id", None)
++                if name == "launch_registered_native":
++                    calls.append(node)
++        passed: set[str] = set()
++        for call in calls:
++            passed |= {keyword.arg for keyword in call.keywords if keyword.arg}
++        self.assertTrue(calls)
++        self.assertLessEqual(required_kw, passed)
++
++    def test_main_does_not_fold_typeerror_into_bundle_code(self) -> None:
++        async def boom(*_args, **_kwargs):
++            raise TypeError(
++                "missing 1 required keyword-only argument: 'daemon_policy_json'"
++            )
++
++        buf = io.StringIO()
++        with patch.object(h9, "_run", boom), patch.object(
++            sys, "argv", ["h9_native_probe.py", "preflight"]
++        ):
++            with contextlib.redirect_stdout(buf):
++                try:
++                    rc: object = h9.main()
++                except TypeError:
++                    rc = "raised"
++        out = buf.getvalue()
++        self.assertTrue(
++            rc == "raised"
++            or (
++                "probe_internal_error" in out
++                and "invalid_native_launcher_bundle" not in out
++            ),
++            f"rc={rc!r} out={out!r}",
++        )
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- a/tools/README-mcp.md
++++ b/tools/README-mcp.md
+@@ -104,6 +104,19 @@
+ 8. Seed and install the registry:
+    `python -m dayz_mcp.launcher_registry_update bootstrap`, then
+    `python -m dayz_mcp.launcher_registry_update install-dayz-test-v1 --expected-sha256 <sha printed by bootstrap>`.
++9. Renew the registry after ANY rebuild. The registry pins the file identity of the bundle
++   directory and `build_native_launcher.py` renews that directory with `os.replace`, so after
++   `python build_native_launcher.py --offline --verify-reproducible` every `dayz_test_run` fails
++   with `launcher_root_identity_drift` until the registry is renewed:
++   `python -m dayz_mcp.launcher_registry_update rollback-last`, then
++   `python -m dayz_mcp.launcher_registry_update install-dayz-test-v1 --expected-sha256 <sha256 of the CURRENT tools/approved-launchers.json>`.
++   The CAS value is the hash of the registry file after the rollback, never the PE's hash
++   (`launcher_registry_cas_mismatch` otherwise), and `install` without the rollback fails with
++   `launcher_registry_version_already_installed`. `bootstrap` is create-only: it never resets an
++   existing registry. A Steam client update invalidates the sealed bundle the same way (the
++   closure manifest pins four Steam DLLs by size and sha256): rebuild, then run this cycle.
++   Live MCP client sessions keep the tool code and the bundle layout they started with: after a
++   tools deploy, a daemon restart or a bundle layout change, reopen the client session.
+ 
+ Locate the file with `--policy PATH`, then `DAYZ_MCP_LAUNCHER_POLICY`, then `%LOCALAPPDATA%\DayZ_MCP\launcher-policy.json`. An empty env value is an error, not a fallback. The published example is never selected.
+ 

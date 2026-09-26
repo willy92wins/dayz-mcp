@@ -1,0 +1,115 @@
+MODO NO INTERACTIVO. EJECUTA DE PRINCIPIO A FIN. No hay nadie al otro lado para aprobar nada:
+este brief ES la aprobacion. No preguntes y no pares a confirmar. Si algo es ambiguo, elige la
+opcion conservadora, hazla, y anota la decision y su motivo en el informe. Terminar sin
+REVIEW-CODEX.md escrito en disco cuenta como no haber hecho el encargo.
+
+REVISION CRUZADA — lote C, schema UI del ingress (modulo M06-UI-INGRESS)
+
+Eres el revisor de OTRA familia. La implementacion la hizo Grok 4.6; tu no la escribiste y no
+tienes que defenderla. Sesion nueva: no heredas nada.
+
+## 0. El principio rector, y es lo que mas condiciona tu trabajo
+
+**Solo se evalua el PRODUCTO.** El producto de este lote es una unica cosa: la conducta de
+`tools/dayz_mcp/loopback.py` al validar los argumentos de los cuatro verbos UI. Nada mas.
+
+NO es producto, y por tanto NO se revisa en esta ronda: el oraculo que uso para medir, el ledger
+`GATES.md`, la calibracion por mutantes, el workspace aislado, la forma de los tests como
+artefacto, ni la metodologia de esta delegacion. Ese aparato es MIO y es instrumental.
+
+Esto no es cortesia: es una regla de proceso adoptada tras cuatro bucles que no cerraron nunca.
+Un bucle de revision que se alimenta de defectos del aparato genera trabajo infinito, porque el
+aparato siempre se puede pulir mas. Si ves algo del aparato que te parece flojo, escribelo en
+BACKLOG con una linea. **No puede ser bloqueante, aunque tengas razon.**
+
+Una version anterior de este mismo brief te pedia lo contrario —atacar mis instrumentos con la
+misma dureza— y la retire yo antes de lanzarte, por contradecir esta regla. Esta en
+`BRIEF-v1-retirado.txt` por si quieres ver que cambio.
+
+## 1. Que se cambio, y por que
+
+`tools/dayz_mcp/loopback.py` validaba los cuatro verbos UI contra un schema anterior al lote:
+`ui_click` solo admitia `path` y `button`, y ningun verbo admitia `root`. La comprobacion
+`keys - required - optional` (`:734`) convertia en `bad_args` cualquier campo no declarado.
+
+Mientras tanto el lado Enforce YA consume esos campos desde el commit `117730b`
+(`addon/scripts/5_Mission/MCPMessages.c:63` `string mode`, `:70` `string root`, `:71` `bool bubble`).
+Habia por tanto capacidad entregada e inalcanzable: el ingress era el eslabon que cortaba.
+
+El contrato aprobado, literal (`plans/inbox-20260830/00-execution-dag.md`, seccion UI):
+- verbos publicos exactamente `ui_tree`, `ui_set_text`, `ui_click`, `ui_focus`;
+- `root` OPCIONAL en los cuatro;
+- `mode` (enum `direct` | `complete`) y `bubble` (booleano) SOLO en `ui_click`;
+- todo lo demas sigue siendo `bad_args`.
+
+## 2. Que tienes delante
+
+En este directorio (`reviews/2026-09-03-lote-C-m06-ingress/`):
+
+- `DIFF.patch` — el diff completo de los tres ficheros tocados, contra el arbol vivo. **Es tu
+  objeto de revision.**
+- `GROK-REPORT.md` — lo que dice el implementador. Afirmacion, no hecho.
+- `oracle_ui_schema.py` y `heldout_oracle.py` — mis instrumentos. Estan aqui para que puedas
+  EJECUTARLOS y comprobar una hipotesis tuya sobre el producto, no para que los audites.
+
+El arbol vivo esta en el workdir: abre cualquier fichero para verificar una cita. El codigo
+entregado vive en
+`C:/Users/guill/AppData/Local/Temp/claude/C--Users-guill-OneDrive-Documentos-DayZ-Projects/938664ff-361c-4575-aa56-c7c06c7ca2a8/scratchpad/lote-C/ws/`
+y ahi puedes ejecutar lo que quieras. No escribas en ese directorio.
+
+## 3. Tu encargo: cuatro preguntas sobre el producto
+
+1. **¿Acepta algo que el contrato NO da?** Un campo, un valor, una combinacion. Cualquier verbo.
+2. **¿Rechaza algo que el contrato SI da?** Idem.
+3. **¿Debilito el fail-closed?** Una clave no nombrada tiene que seguir siendo `bad_args` en los
+   cuatro verbos, y en el resto de comandos de la tabla.
+4. **¿Rompe algo fuera de los verbos UI?** Otro comando, otro consumidor de
+   `validate_command_args`, otra ruta que dependa de la forma de `_COMMAND_ARG_SCHEMAS`.
+
+La forma mas util de contestarlas es construir tu propio caso y ejecutarlo, no leer mi oraculo.
+Si encuentras un payload que el contrato decide de una forma y el codigo de otra, eso es el
+hallazgo, y trae su comando.
+
+## 4. Regla de parada, fijada ANTES de esta ronda
+
+- Esta ficha es clase C1 y su tope es **UNA ronda**. No hay ronda 2.
+- Un hallazgo **BLOQUEA solo si**: (a) es sobre el producto segun el §0, y (b) trae un repro
+  ejecutable — un comando literal que, corrido hoy, reproduce el defecto.
+- Todo lo demas va a BACKLOG con su nombre y su razon. Incluye lo que te parezca mal del aparato.
+  Backlog no es demerito: es donde debe estar.
+- Si crees que hace falta otra ronda, no la pidas: escribe `ORCHESTRATOR_NEEDED` con el motivo.
+- **CLEAN es un veredicto legitimo y esperable.** No busques algo que decir. Un cambio de veinte
+  lineas que hace lo que dice puede no tener defectos, y decirlo es informacion.
+
+## 5. Casilla obligatoria: la premisa
+
+Antes de valorar nada, contesta: **¿que puede estar mal en la premisa de este encargo?**
+Puedes conservar los hechos y refutar la inferencia. El tipo de cosa que quiero saber: que el
+contrato que cito no diga lo que digo que dice; que declarar los campos en el ingress no baste
+para que la capacidad sea alcanzable de verdad y falte un eslabon aguas abajo; que el alcance de
+tres ficheros deje fuera algo que este cambio rompe. Esta casilla SI puede tumbar el encargo
+entero, y por eso es la unica parte donde puedes cuestionar el encuadre.
+
+## 6. Entregable
+
+Escribe `REVIEW-CODEX.md` EN ESTE MISMO DIRECTORIO. Estructura:
+
+    ## Premisa
+    ## Hallazgos BLOQUEANTES (producto, con repro ejecutable)
+    ## Backlog (todo lo demas, incluido el aparato)
+    ## Lo que no pude verificar
+    ## Veredicto: CLEAN | FINDINGS | ORCHESTRATOR_NEEDED
+
+Cada hallazgo con `path:line` que hayas ABIERTO. Una cita plausible pero inventada invalida el
+hallazgo entero.
+
+## 7. Limites del entorno, que son mios darte
+
+- **No edites ningun fichero salvo `REVIEW-CODEX.md`.** El arbol vivo lo comparten otras sesiones.
+- **No corras la suite completa** (`unittest discover`): tarda ~4 min y arrastra rojos ajenos.
+  Ya he medido yo los 16 ficheros de test que tocan el validador: 346 tests, y los 3 rojos que
+  salen se reproducen igual SIN el cambio (son de mi copia incompleta del arbol, no del cambio).
+- Interprete:
+  `C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/tools/.venv-mcp/Scripts/python.exe`.
+- No hay juego corriendo, no uses MCP, no gestiones procesos. Nada de esto lo necesita.
+- Tope de reloj: unos 20 minutos.

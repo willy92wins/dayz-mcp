@@ -1,0 +1,187 @@
+{
+  "module": "M11-LFPG-VERSION",
+  "ficha": "19-fb-20260829-111016-344d",
+  "measured_at_utc": "2026-09-02T21:0Z",
+  "verdict": "INCONCLUSIVE",
+  "verdict_reason": [
+    "El modo (a) exige exactamente dos [FAIL] calibrados y ninguno mas; se observaron 6.",
+    "Los cuatro PERF_* adicionales no estan contemplados en la calibracion de la ficha.",
+    "El [FAIL] PBO NO es el mismatch de requiredAddons del chequeo final: es un mismatch de bytes de script en scripts/3_Game/LFPG_Defines.c, que es un chequeo ANTERIOR. La ficha exige que ese haya pasado para llegar al final, y prohibe aceptar un [FAIL] PBO anterior.",
+    "En consecuencia el chequeo final del config debinarizado no se alcanzo."
+  ],
+  "ficha_rule_applied": "Criterios verificables -> INCONCLUSIVE; y Plan materializable punto 7: detener M11 y abrir un cambio LFPowerGrid separado.",
+  "version_gate": {
+    "expected_literal": "1.2.4",
+    "literal_is_frozen_outside_sources": true,
+    "cardinality_rule": "len(hits) == 1 por fuente (no len(set(hits)))",
+    "sources": [
+      {
+        "relative": "config.cpp",
+        "path": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\LFPowerGrid\\config.cpp",
+        "match_count": 1,
+        "values": [
+          "1.2.4"
+        ],
+        "sha256": "D3AC71035C71019A914A35F43F25F017E2C14B0C3493D792B0C46FB2C40AB95B",
+        "size": 90957
+      },
+      {
+        "relative": "scripts\\3_Game\\LFPG_Defines.c",
+        "path": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\LFPowerGrid\\scripts\\3_Game\\LFPG_Defines.c",
+        "match_count": 1,
+        "values": [
+          "1.2.4"
+        ],
+        "sha256": "A6CC34187368FB5F2A1FB7295DECDFED1A0E7F569AB383478648B1948B903AF0",
+        "size": 49578
+      }
+    ],
+    "gate_result_on_source": "PASS",
+    "bank": {
+      "path": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\LFPowerGrid_dev\\tests\\test_version_gate.py",
+      "sha256": "72981996132E9D2830E53F53BB9DB8B0A03E29549FD62E9339524405A277030D",
+      "result": "OK - version gate accepts only 1.2.4/1.2.4 and blocks every negative before build",
+      "cases": [
+        "cardinalidad",
+        "arbol real",
+        "1.2.4/1.2.4",
+        "config.cpp ausente",
+        "LFPG_Defines.c ausente",
+        "error de lectura en cada una",
+        "cero matches en cada una",
+        "duplicado identico en cada una",
+        "duplicado divergente",
+        "1.2.4/1.2.3",
+        "1.2.3/1.2.4",
+        "1.2.3/1.2.3",
+        "9.9.9/9.9.9",
+        "main() positivo cruza una vez",
+        "main() negativos se quedan antes de journal/probe/build"
+      ]
+    }
+  },
+  "precondition_required_addons": {
+    "source_set": [
+      "DZ_Data",
+      "DZ_Scripts",
+      "DZ_Gear_Tools",
+      "DZ_Gear_Camping",
+      "DZ_Gear_Containers",
+      "DZ_Gear_Consumables",
+      "DZ_Radio",
+      "DZ_Gear_Cooking",
+      "DF_Scripts"
+    ],
+    "expected_set_for_1_2_4": [
+      "DZ_Data",
+      "DZ_Scripts",
+      "DZ_Gear_Tools",
+      "DZ_Gear_Camping",
+      "DZ_Gear_Containers",
+      "DZ_Gear_Consumables",
+      "DZ_Radio",
+      "DZ_Gear_Cooking"
+    ],
+    "relation": "ocho-versus-nueve",
+    "delta": [
+      "DF_Scripts"
+    ],
+    "mode_applied": "(a)"
+  },
+  "cli_run": {
+    "command": [
+      "python",
+      "tools/verify_corrective.py",
+      "--root",
+      "P:/LFPowerGrid",
+      "--pbo",
+      "P:/Mods/@LFPowerGrid/Addons/LFPowerGrid.pbo",
+      "--expected-version",
+      "1.2.4"
+    ],
+    "cwd": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\LFPowerGrid_dev",
+    "mode": "read-only",
+    "rc": 1,
+    "summary": "pass=10 fail=6",
+    "fails_observed": [
+      "BOOT_DABS_DEPENDENCY",
+      "PERF_REUSED_PURGE",
+      "PERF_SCHEDULE_MAP",
+      "PERF_RESTARTABLE",
+      "PERF_DEFERRED_PRUNE",
+      "PBO"
+    ],
+    "fails_expected_by_calibration": [
+      "BOOT_DABS_DEPENDENCY",
+      "PBO(requiredAddons, chequeo final)"
+    ],
+    "pbo_fail_is_final_requiredaddons_check": false,
+    "pbo_fail_detail": {
+      "kind": "script content mismatch",
+      "member": "scripts/3_Game/LFPG_Defines.c",
+      "source_bytes": 49578,
+      "pbo_bytes": 48767,
+      "source_sha256": "A6CC34187368FB5F2A1FB7295DECDFED1A0E7F569AB383478648B1948B903AF0",
+      "pbo_sha256": "57E0359F2FC24EB0347543A1B95B095CBDA323C3E3E667E52C9BD2C98AC65490"
+    },
+    "stdout_path": "C:\\Users\\guill\\ObsidianVault\\AI\\10_Projects\\DayZ_MCP\\reviews\\2026-09-02-lote-B-M11\\verify-corrective-stdout.txt",
+    "stdout_sha256": "55A7CAA0ADA1D29E3068B85A019AE71606622A3905026B4FE7115E278CF7FCAC"
+  },
+  "inputs": {
+    "config_cpp": {
+      "path": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\LFPowerGrid\\config.cpp",
+      "exists": true,
+      "size": 90957,
+      "sha256": "D3AC71035C71019A914A35F43F25F017E2C14B0C3493D792B0C46FB2C40AB95B"
+    },
+    "lfpg_defines_c": {
+      "path": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\LFPowerGrid\\scripts\\3_Game\\LFPG_Defines.c",
+      "exists": true,
+      "size": 49578,
+      "sha256": "A6CC34187368FB5F2A1FB7295DECDFED1A0E7F569AB383478648B1948B903AF0"
+    },
+    "deployed_pbo": {
+      "path": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\Mods\\@LFPowerGrid\\Addons\\LFPowerGrid.pbo",
+      "exists": true,
+      "size": 108027366,
+      "sha256": "08FFCD14E320F5EAB2FA5F3C9D5DBEE914893E53C3661139C1D1693E0F45E086"
+    },
+    "verify_corrective": {
+      "path": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\LFPowerGrid_dev\\tools\\verify_corrective.py",
+      "exists": true,
+      "size": 47961,
+      "sha256": "7D1B763796E0E17B95A2BBE9114F9E2135447C862EAC572A73494E7D1ACE4F0E"
+    },
+    "build_guarded": {
+      "path": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\LFPowerGrid_dev\\tools\\build_guarded.py",
+      "exists": true,
+      "size": 10565,
+      "sha256": "6A0DC9D0BD6B0EFA4CD96437409F894C0C8DFCE57DF617C2B013DCB3CCF36353"
+    },
+    "test_version_gate": {
+      "path": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\LFPowerGrid_dev\\tests\\test_version_gate.py",
+      "exists": true,
+      "size": 9558,
+      "sha256": "72981996132E9D2830E53F53BB9DB8B0A03E29549FD62E9339524405A277030D"
+    },
+    "pboviewer": {
+      "path": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\pboviewer-cli-windows-x64\\PboViewer.exe",
+      "exists": true,
+      "size": 162304,
+      "sha256": "B7FDF77955EF657005FFD1487CE4B3DF6E615B6B72D8A827A19D2ABAFE35E78A"
+    },
+    "cfgconvert": {
+      "path": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ Tools\\Bin\\CfgConvert\\CfgConvert.exe",
+      "exists": true,
+      "size": 1246712,
+      "sha256": "4C4FC15EF9773B42B4191155D4E243D8C95D3156CF7B6F24E7D84DEA7CD15A4C"
+    }
+  },
+  "provenance": {
+    "dayz_mcp_dev_head": "644dc6f0d3b07a58023fe8fdfc4684159bc439a7",
+    "dayz_mcp_dev_branch": "work/inbox-20260830-modules",
+    "lfpowergrid_dev_head": "ad6e8a22d1f91110be8a7cdf4dd234acb1fa30a6",
+    "note": "LFPowerGrid no se edita desde M11; los inputs son read-only."
+  },
+  "blocking_finding": "El PBO desplegado esta rancio respecto al source en scripts/3_Game/LFPG_Defines.c (811 bytes de diferencia), que es justamente el fichero que declara LFPG_VERSION_STR. El gate de version acredita el SOURCE; el artefacto desplegado lleva otra copia de ese fichero."
+}

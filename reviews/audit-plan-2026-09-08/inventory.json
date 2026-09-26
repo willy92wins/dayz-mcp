@@ -1,0 +1,741 @@
+{
+  "head": "4e34bda128fee203f0056fe5e2fa56ce0b941763",
+  "entry_count": 103,
+  "verdict_counts": {
+    "NO VERIFICABLE": 19,
+    "FALSO": 19,
+    "VIVO": 60,
+    "YA ARREGLADO": 2,
+    "MOVIDO": 3
+  },
+  "original_id_count": 79,
+  "live_ids": [
+    "S3",
+    "E-ERR-04",
+    "E-BUF-01",
+    "E-ERR-05",
+    "E-ERR-01",
+    "E-ERR-02",
+    "E-ERR-03",
+    "E-BUF-03a",
+    "E-TICK-02",
+    "E-TICK-03",
+    "E-TICK-04",
+    "E-DUP-01",
+    "E-DUP-02",
+    "E-DUP-03",
+    "E-DUP-04",
+    "E-DUP-05",
+    "E-HOT-04",
+    "E-HOT-06",
+    "E-HOT-01",
+    "E-HOT-02",
+    "E-HOT-03",
+    "E-HOT-05",
+    "E-HOT-07",
+    "E-HOT-08",
+    "E-HOT-09",
+    "E-HOT-10",
+    "E-HOT-11",
+    "E-BUF-04",
+    "E-GUI-01",
+    "E-GUI-02",
+    "P-ARC-02a",
+    "P-ARC-03a",
+    "P-TICK-02",
+    "P-TICK-05a",
+    "P-TICK-01",
+    "P-OPT-02",
+    "P-ARC-04",
+    "P-ARC-05",
+    "P-ARC-06",
+    "P-ARC-07",
+    "P-OPT-04",
+    "P-OPT-05",
+    "P-TICK-03",
+    "P-TICK-04",
+    "T-OPT-01",
+    "T-OPT-02",
+    "T-OPT-03a",
+    "T-ARC-04",
+    "T-ARC-05",
+    "T-DUP-01",
+    "T-DUP-02",
+    "T-DUP-03",
+    "T-DUP-04",
+    "T-DUP-05",
+    "T-DUP-06",
+    "T-CON-01",
+    "T-CON-03",
+    "T-CON-04a",
+    "E-P05b",
+    "E-P06"
+  ],
+  "test_module_count": 187,
+  "test_to_test_imports": [
+    {
+      "file": "tools/tests/test_authority_invariants_are_gated.py",
+      "line": 32,
+      "module": "tests.test_session_coordination",
+      "names": [
+        "AuditSink",
+        "CleanupSink",
+        "FakeClock",
+        "SequentialIds",
+        "_identity"
+      ]
+    },
+    {
+      "file": "tools/tests/test_box_occupancy.py",
+      "line": 34,
+      "module": "tests.test_mcp_tools",
+      "names": [
+        "_content_json"
+      ]
+    },
+    {
+      "file": "tools/tests/test_box_occupancy.py",
+      "line": 35,
+      "module": "tests.test_process_lifecycle",
+      "names": [
+        "IDENTITY_A",
+        "HASH_A",
+        "HASH_B",
+        "AuditSink",
+        "FakeGuard",
+        "FakeLauncher",
+        "process",
+        "snapshot"
+      ]
+    },
+    {
+      "file": "tools/tests/test_box_occupancy.py",
+      "line": 1914,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_box_occupancy.py",
+      "line": 1986,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_box_occupancy.py",
+      "line": 2011,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_box_occupancy.py",
+      "line": 2029,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_box_occupancy.py",
+      "line": 2091,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_box_port_occupancy.py",
+      "line": 33,
+      "module": "tests.test_box_occupancy",
+      "names": [
+        "_argv_lookup"
+      ]
+    },
+    {
+      "file": "tools/tests/test_box_port_occupancy.py",
+      "line": 34,
+      "module": "tests.test_process_lifecycle",
+      "names": [
+        "IDENTITY_A",
+        "AuditSink",
+        "FakeGuard",
+        "FakeLauncher",
+        "process",
+        "snapshot"
+      ]
+    },
+    {
+      "file": "tools/tests/test_box_port_wait.py",
+      "line": 14,
+      "module": "tests.test_box_occupancy",
+      "names": [
+        "FakeBoxClient"
+      ]
+    },
+    {
+      "file": "tools/tests/test_bug046_audit_fault_recovery.py",
+      "line": 24,
+      "module": "tests.test_session_coordination",
+      "names": [
+        "_identity"
+      ]
+    },
+    {
+      "file": "tools/tests/test_bug046_authority_fence.py",
+      "line": 8,
+      "module": "tests.test_session_coordination",
+      "names": [
+        "_identity"
+      ]
+    },
+    {
+      "file": "tools/tests/test_bug046_lease_queue_liveness.py",
+      "line": 8,
+      "module": "tests.test_session_coordination",
+      "names": [
+        "AuditSink",
+        "FakeClock",
+        "SequentialIds",
+        "_identity"
+      ]
+    },
+    {
+      "file": "tools/tests/test_bug104_reap_under_quarantine.py",
+      "line": 18,
+      "module": "tests.test_process_lifecycle",
+      "names": [
+        "IDENTITY_A",
+        "AuditSink",
+        "FakeGuard",
+        "FakeLauncher",
+        "process",
+        "snapshot"
+      ]
+    },
+    {
+      "file": "tools/tests/test_client_mode.py",
+      "line": 22,
+      "module": "tests.test_daemon",
+      "names": [
+        "DaemonHttpServer",
+        "_config",
+        "_free_port",
+        "_http"
+      ]
+    },
+    {
+      "file": "tools/tests/test_client_mode.py",
+      "line": 23,
+      "module": "tests.test_mcp_tools",
+      "names": [
+        "_content_json"
+      ]
+    },
+    {
+      "file": "tools/tests/test_client_platform_alias.py",
+      "line": 27,
+      "module": "tests.test_daemon",
+      "names": [
+        "DaemonHttpServer",
+        "_config",
+        "_http"
+      ]
+    },
+    {
+      "file": "tools/tests/test_client_runtime_control_composition.py",
+      "line": 421,
+      "module": "tests.test_control_client",
+      "names": [
+        "_policy"
+      ]
+    },
+    {
+      "file": "tools/tests/test_d05_capture_targets_run_client.py",
+      "line": 28,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_dayz_test_tool_modes.py",
+      "line": 24,
+      "module": "tests.test_dayz_test_tool",
+      "names": [
+        "RUN_ID",
+        "_Bundle",
+        "_Opened",
+        "_Runtime",
+        "_policy",
+        "_sealed",
+        "_terminal"
+      ]
+    },
+    {
+      "file": "tools/tests/test_db05_preflight_diagnostics.py",
+      "line": 12,
+      "module": "tests.test_steam_preflight",
+      "names": [
+        "_MutableSteamProvider"
+      ]
+    },
+    {
+      "file": "tools/tests/test_enqueue_refusal_reaches_the_caller.py",
+      "line": 15,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_fase4b_tools.py",
+      "line": 11,
+      "module": "tests.test_mcp_tools",
+      "names": [
+        "FakePeer",
+        "_assert_tool_error",
+        "_content_json"
+      ]
+    },
+    {
+      "file": "tools/tests/test_lifecycle_reconcile.py",
+      "line": 34,
+      "module": "tests.test_dayz_test_tool",
+      "names": [
+        "RUN_ID",
+        "_Bundle",
+        "_Opened",
+        "_Runtime",
+        "_policy",
+        "_sealed",
+        "_terminal"
+      ]
+    },
+    {
+      "file": "tools/tests/test_lifecycle_reconcile.py",
+      "line": 43,
+      "module": "tests.test_process_lifecycle",
+      "names": [
+        "HASH_A",
+        "HASH_B",
+        "IDENTITY_A",
+        "AuditSink",
+        "FakeGuard",
+        "FakeLauncher",
+        "process",
+        "snapshot"
+      ]
+    },
+    {
+      "file": "tools/tests/test_lifecycle_reconcile.py",
+      "line": 1154,
+      "module": "tests.test_daemon",
+      "names": [
+        "_config"
+      ]
+    },
+    {
+      "file": "tools/tests/test_logs_since_marker_roundtrip.py",
+      "line": 16,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_logs_since_marker_roundtrip.py",
+      "line": 17,
+      "module": "tests.test_mcp_tools",
+      "names": [
+        "_content_json"
+      ]
+    },
+    {
+      "file": "tools/tests/test_lote2_t2_steam.py",
+      "line": 6,
+      "module": "tests.test_steam_preflight",
+      "names": [
+        "_MutableSteamProvider",
+        "_FakeRemediationHost"
+      ]
+    },
+    {
+      "file": "tools/tests/test_lote_v_products.py",
+      "line": 176,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_lote_v_products.py",
+      "line": 246,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_mcp_tools.py",
+      "line": 199,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_mcp_tools.py",
+      "line": 270,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_mcp_tools.py",
+      "line": 332,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_mcp_tools.py",
+      "line": 382,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_mcp_tools.py",
+      "line": 702,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_mcp_tools.py",
+      "line": 796,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_mcp_tools.py",
+      "line": 797,
+      "module": "tests.test_dayz_test_tool",
+      "names": [
+        "_Bundle",
+        "_Opened",
+        "_policy",
+        "_sealed"
+      ]
+    },
+    {
+      "file": "tools/tests/test_mcp_tools.py",
+      "line": 859,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_mcp_tools.py",
+      "line": 860,
+      "module": "tests.test_dayz_test_tool",
+      "names": [
+        "_Bundle",
+        "_Opened",
+        "_policy",
+        "_sealed"
+      ]
+    },
+    {
+      "file": "tools/tests/test_mcp_tools.py",
+      "line": 927,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_run_reaper.py",
+      "line": 19,
+      "module": "tests.test_process_lifecycle",
+      "names": [
+        "IDENTITY_A",
+        "IDENTITY_B",
+        "AuditSink",
+        "FakeGuard",
+        "FakeLauncher",
+        "process"
+      ]
+    },
+    {
+      "file": "tools/tests/test_server_response_truth.py",
+      "line": 10,
+      "module": "tests.test_mcp_tools",
+      "names": [
+        "_content_json"
+      ]
+    },
+    {
+      "file": "tools/tests/test_session_acquire_wait.py",
+      "line": 16,
+      "module": "tests.test_session_coordination",
+      "names": [
+        "AuditSink",
+        "FakeClock",
+        "SequentialIds",
+        "_identity"
+      ]
+    },
+    {
+      "file": "tools/tests/test_session_acquire_wait.py",
+      "line": 17,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_session_e2e.py",
+      "line": 24,
+      "module": "tests.test_daemon",
+      "names": [
+        "_free_port",
+        "_http"
+      ]
+    },
+    {
+      "file": "tools/tests/test_session_e2e.py",
+      "line": 25,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_session_status_blocked_on.py",
+      "line": 17,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_session_status_blocked_on.py",
+      "line": 18,
+      "module": "tests.test_mcp_tools",
+      "names": [
+        "_content_json"
+      ]
+    },
+    {
+      "file": "tools/tests/test_task7_final_authority_regressions.py",
+      "line": 12,
+      "module": "tests.test_task7_review_regressions",
+      "names": [
+        "Clock",
+        "IDENTITY",
+        "IDENTITY_PAYLOAD",
+        "Sequence"
+      ]
+    },
+    {
+      "file": "tools/tests/test_task7_final_authority_regressions.py",
+      "line": 18,
+      "module": "tests.test_task7_rereview_regressions",
+      "names": [
+        "IDENTITY_B"
+      ]
+    },
+    {
+      "file": "tools/tests/test_task7_final_lifecycle_regressions.py",
+      "line": 9,
+      "module": "tests.test_lifecycle_cli",
+      "names": [
+        "TtyInput"
+      ]
+    },
+    {
+      "file": "tools/tests/test_task7_final_lifecycle_regressions.py",
+      "line": 10,
+      "module": "tests.test_task7_review_regressions",
+      "names": [
+        "IDENTITY",
+        "LifecycleFixture",
+        "identity",
+        "record"
+      ]
+    },
+    {
+      "file": "tools/tests/test_task7_rereview_regressions.py",
+      "line": 33,
+      "module": "tests.test_task7_review_regressions",
+      "names": [
+        "Audit",
+        "Guard",
+        "IDENTITY",
+        "IDENTITY_PAYLOAD",
+        "LifecycleFixture",
+        "Sequence",
+        "identity",
+        "record"
+      ]
+    },
+    {
+      "file": "tools/tests/test_telemetry_read_names_the_bad_field.py",
+      "line": 29,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_ui_dialog.py",
+      "line": 16,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_ui_enforce_contract.py",
+      "line": 16,
+      "module": "tests.test_vehicle_telemetry_contract",
+      "names": [
+        "TELEMETRY_REGION_SHA256",
+        "_telemetry_sha256"
+      ]
+    },
+    {
+      "file": "tools/tests/test_vehicle_telemetry_contract.py",
+      "line": 270,
+      "module": "tests.test_vehicle_telemetry_contract",
+      "names": []
+    },
+    {
+      "file": "tools/tests/test_wait_for.py",
+      "line": 22,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_wait_for.py",
+      "line": 23,
+      "module": "tests.test_mcp_tools",
+      "names": [
+        "_content_json"
+      ]
+    },
+    {
+      "file": "tools/tests/test_wait_for_launch_and_contract.py",
+      "line": 38,
+      "module": "tests.test_wait_for",
+      "names": [
+        "_HttpClientNotPollingThenPlayers",
+        "_MAPPED_CLIENT_NOT_POLLING",
+        "_http_always_client_not_polling",
+        "_real_client_runtime_http_only"
+      ]
+    },
+    {
+      "file": "tools/tests/test_wait_for_marker.py",
+      "line": 19,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_wait_for_marker.py",
+      "line": 20,
+      "module": "tests.test_mcp_tools",
+      "names": [
+        "_content_json"
+      ]
+    },
+    {
+      "file": "tools/tests/test_wait_for_requires_a_live_run.py",
+      "line": 32,
+      "module": "tests.test_wait_for_launch_and_contract",
+      "names": [
+        "_FakeRuntime",
+        "_live_process",
+        "_profiles"
+      ]
+    },
+    {
+      "file": "tools/tests/test_weak_agent_consumer_ux.py",
+      "line": 20,
+      "module": "tests.test_client_mode",
+      "names": [
+        "_fixture_client_runtime"
+      ]
+    },
+    {
+      "file": "tools/tests/test_weak_agent_consumer_ux.py",
+      "line": 21,
+      "module": "tests.test_mcp_tools",
+      "names": [
+        "_content_json"
+      ]
+    },
+    {
+      "file": "tools/tests/test_x5_tools.py",
+      "line": 11,
+      "module": "tests.test_mcp_tools",
+      "names": [
+        "FakePeer",
+        "_assert_tool_error",
+        "_content_json"
+      ]
+    }
+  ],
+  "task7_lines": {
+    "test_task7_final_authority_regressions.py": 1809,
+    "test_task7_final_lifecycle_regressions.py": 344,
+    "test_task7_rereview_regressions.py": 1213,
+    "test_task7_review_regressions.py": 1418
+  },
+  "backups": [
+    "test_client_mode.py.bak_pre_fencing_20260819",
+    "test_daemon.py.bak_pre_fencing_20260819",
+    "test_fase4b_loopback.py.bak_pre_fencing_20260819",
+    "test_fase4b_tools.py.bak_pre_fencing_20260819",
+    "test_inventory_give.py.bak_pre_fencing_20260819",
+    "test_loopback.py.bak_pre_fencing_20260819",
+    "test_mcp_host_timeouts.py.bak-20260907-timeout",
+    "test_mcp_server.py.bak_pre_fencing_20260819",
+    "test_mcp_tools.py.bak_pre_fencing_20260819",
+    "test_object_anim.py.bak_pre_fencing_20260819",
+    "test_player_teleport.py.bak_pre_fencing_20260819",
+    "test_poll_key_reload_contract.py.bak_pre_fencing_20260819",
+    "test_python_backlog_fixes.py.bak_pre_fencing_20260819",
+    "test_restore_gameplay_contract.py.bak_pre_fencing_20260819",
+    "test_retail_quarantine.py.bak_pre_fencing_20260819",
+    "test_session_acquire_wait.py.bak_pre_agujero1_20260819",
+    "test_session_e2e.py.bak_pre_fencing_20260819",
+    "test_session_http.py.bak_pre_fencing_20260819",
+    "test_task7_final_authority_regressions.py.bak_pre_fencing_20260819",
+    "test_task7_rereview_regressions.py.bak_pre_fencing_20260819",
+    "test_task7_review_regressions.py.bak_pre_fencing_20260819",
+    "test_task9_spawn_phase_markers.py.bak-20260907-bd90",
+    "test_vehicle_prepare_fixture.py.bak_pre_fencing_20260819",
+    "test_vehicle_trace_contract.py.bak_pre_fencing_20260819",
+    "test_x5_loopback.py.bak_pre_fencing_20260819",
+    "test_x5_tools.py.bak_pre_fencing_20260819"
+  ],
+  "staged": "A\tdecisions/decision-log.md"
+}

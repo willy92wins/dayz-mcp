@@ -1,0 +1,11 @@
+﻿tokens used
+186.686
+VEREDICTO: REQUEST-CHANGES
+
+V1: limpio.
+
+V2: P1 - agotamiento permanente del pool - `MCPClientBridge.c:50,53-83,502-504` - Un GET puede terminar por error o timeout sin `OnSuccess`; su slot queda en `-1` para siempre. Tras ocho fallos terminales, ningún GET nuevo puede arrancar y el backoff solo repite una adquisición imposible. `OnPollFail` sí limpia `m_PollInFlight` y evita log por tick. [Contrato `restapi.c:45-63,89-91`](https://github.com/BohemiaInteractive/DayZ-Script-Diff/blob/main/scripts/3_game/http/restapi.c#L45-L63) - Aislar y cancelar verificablemente el GET fallido antes de devolver su slot a `0`; no aplicar el techo hasta disponer de ese cierre seguro.
+
+V3: limpio.
+
+V4: limpio — residuo aceptable-declarado; `restapi.c:45-63` documenta reintentos de `OnError`, pero no aporta evidencia de un orden `OnSuccess → OnError`.

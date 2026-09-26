@@ -1,0 +1,79 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni hagas preguntas.
+Escribe tu dictamen en REVIEW-CODEX.md, en el directorio desde el que te lanzo.
+
+Séptima revisión de este lote, y la de cierre de la actividad y del ciclo de vida del binding.
+Tu sexta dio 3 hallazgos (lecturas e internos atravesaban el cerco de `RUNNING_IDLE` y
+acreditaban; `release_owner` publicaba antes de vaciar y un poll ganaba; la tumba del
+rollback se fechaba después de exponerlo) y otro revisor ciego de otra familia dio 2 más (la
+rama asíncrona de `begin_release_owner` y `repair_manifest_recovery`→`recover_after_restart`
+producían `RUNNING_IDLE` sin cercar: «la invariante se ató a los call-sites, no a la
+transición»). **Los cinco los verifiqué**, y sus cinco sondas ya no reproducen sobre el
+producto de esta ronda. Dictamen sobre el producto que hay:
+`../ws/tools/dayz_mcp/process_lifecycle.py` (SHA-256 f0b876634851dd50e765d90c05b87cbb3cd1b0288ea18fd571bbad31e3605d3b) y
+`../ws/tools/dayz_mcp/loopback.py` (SHA-256 f5db0ec67d4b7cda14207e25fa8add9d5c443a3b58e9cdf5c321d4f6b59d714d).
+
+===============================================================================
+§0. QUÉ SE REVISA. Sólo esto.
+===============================================================================
+
+  P6. **Sin dueño no se despacha NADA, y el cerco va antes de publicar.** Con el run en
+      `RUNNING_IDLE` se rechaza TODO comando dirigido a él por su binding —lectura, mutación o
+      `internal=True`— con `run_not_owned` (409), y nada acredita actividad. El cerco es un
+      estado lógico de `ServerState` (`_fenced_runs`), activado y con la cola vaciada bajo el
+      MISMO lock que enqueue y poll, ANTES de que `manifest.release_owner` persista; el poll de
+      un binding cercado devuelve `commands: []`; si la persistencia falla, el cerco se
+      revierte; `adopt_run` lo levanta. Un único método (`_quiesce_then_release_owner`) lo
+      hace para TODOS los productores de `RUNNING_IDLE`: `release_owner`, las dos ramas de
+      `begin_release_owner`, `admin_reconcile` con supervivientes, `repair_manifest_recovery`.
+      El cleanup interno del release se entrega o se descarta antes de publicar. `STARTING`
+      sigue despachando. La retirada física queda para stop/reap/repair/reconcile-sin-supervivientes.
+  P7'. **La tumba es la frontera del rollback.** `_settle_failed_launch` encierra el rollback
+      durable en un cerco de compensación (`_compensating`): mientras dura,
+      `_seal_activity_locked` DESCARTA crédito y basal para ese run; tras persistir se
+      compensa `[inicio del intento, ahora]`, se eleva la tumba y se levanta el cerco (también
+      si el `replace` falla). Un crédito posterior al levantamiento aterriza.
+  P8. El sello del caché de sondas se muestrea antes que el dato.
+
+Sigue en pie P1-P5 y P7 (tumbas por época) de las rondas 6-7, y todo lo anterior.
+
+**LO QUE NO ES EL PRODUCTO**, y va a `BACKLOG`: el gate, el oráculo, el ledger, este brief;
+el sobre de `dayz_test_stop` y el anillo de diagnósticos (otro lote, otra revisión);
+`runtime_state.py`; refactors, estilo, tipado.
+**Prohibido justificar alcance con «es donde han salido cosas antes».**
+
+===============================================================================
+§1. LO QUE QUIERO DE TI
+===============================================================================
+
+  - **El cerco lógico**: ¿queda algún productor de `RUNNING_IDLE` que no pase por el método
+    único (grep de `RUNNING_IDLE` en los dos ficheros y en `RunManifestStore`)? ¿Alguna vía de
+    despacho (rama normal, `exec_enforce`, cola legacy, poll) que no consulte `_fenced_runs`?
+    ¿El cerco se revierte en TODOS los desenlaces de fallo de persistencia? ¿`adopt_run`
+    levanta el cerco exactamente del run adoptado y no de otro? ¿Un binding cercado que se
+    RETIRA (stop tras release) deja el cerco limpio, o se acumula?
+  - **Orden de locks nuevo**: el lock del loopback ahora se toma DENTRO de `_operation_lock`
+    (quiesce antes de persistir). ¿Hay alguna ruta que tome `_operation_lock` o `_activity_lock`
+    DENTRO del lock del loopback? Es la inversión que produciría deadlock.
+  - **El cerco de compensación**: ¿algún escritor de sellos que lo esquive? ¿Se levanta en
+    los DOS desenlaces del rollback (replace OK / replace falla) y ante una excepción
+    inesperada (`finally`)? ¿Puede quedar un run «compensando» para siempre (mudo)?
+    ¿Interacción con el sticky y con la observación sin binding mientras dura?
+  - **Regresiones sobre P1-P5, P7, P8**: la ronda tocó el enqueue, el poll, el release, el
+    reconcile, el repair y el rollback.
+  - **¿Ha debilitado el implementador alguna validación existente para pasar el gate?**
+
+Y la pregunta de proceso, en su sección: **¿lo que encuentres es de familia NUEVA o de las
+visitadas (coherencia de caché, identidad/autoridad del destino, frontera de generación,
+sello-vs-dato, borrado-sin-tumba, invariante-atada-al-call-site)?**
+
+Reglas duras: **enseña, no cuentes** (código literal con `path:line`); **escribe el fallo
+concreto**; **la tolerancia no es un defecto**; cero hallazgos es una respuesta legítima y,
+en una séptima revisión sobre un cierre estructural, un resultado plausible.
+
+Formato de `REVIEW-CODEX.md`:
+
+    ## VEREDICTO      — una línea: ¿es seguro integrarlo?
+    ## HALLAZGOS      — por severidad: título, path:line, código pegado, fallo concreto.
+    ## FAMILIAS       — la pregunta de proceso del §1.
+    ## BACKLOG        — lo que viste y no es de este lote.
+    ## NO VERIFICADO  — sin excusas. Vacío es señal de alarma, no de calidad.

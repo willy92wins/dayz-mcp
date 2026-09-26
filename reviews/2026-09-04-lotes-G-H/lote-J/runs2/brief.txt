@@ -1,0 +1,104 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar. Tienes shell: úsalo.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+LOTE J, RONDA 2 — tres hallazgos de la revisión ciega de Codex sobre la ronda 1 (tu entrega de las
+14:51: sello 8/8, write-set limpio, 13/13 del oráculo y suite completa verde corridos por el
+orquestador; tu DISPUTA sobre `internal=True` con idle durable queda ACEPTADA y registrada en
+`gate/GATES.md` §Ronda 1). El ledger completo de la ronda: `gate/GATES.md` §Ronda 2.
+
+===============================================================================
+§0. LOS TRES HALLAZGOS (con repro ejecutado por el revisor) Y LO QUE SE PIDE
+===============================================================================
+
+  F-01 ALTA — `_adopt_on_grant` (`tools/dayz_mcp/loopback.py:3113-3184`, llamado en `:3265-3266`
+       DESPUÉS de que `coordination.acquire`/`wait` ya concedió el lease) llama a `lifecycle.adopt_run`
+       sin frontera de excepción; y `adopt_run` (`process_lifecycle.py:2487`) abre la reserva en
+       `_authorize` (`:2492-2497`) ANTES de entrar en `_operation_lock` y, si una dependencia lanza
+       (manifiesto, guard, audit), no la cierra: ni `_reject_reserved` (`:1449`), ni
+       `_commit_reserved` (`:1464`) + `_finish_committed` (`:1480`), ni `coordinator.abort_reservation`
+       (`session_coordination.py:1373`, ya usado por el lifecycle en `:2280`).
+       Repro del revisor: un run RUNNING_IDLE sin dueño y `manifest.list_runs` lanzando `OSError` en su
+       segunda lectura → `/session/acquire` muere con el lease YA concedido (`RemoteDisconnected`) y el
+       lease activo se queda con `pending_authorizations == 1`. Respuesta cortada, cliente que no sabe
+       que tiene lease, reserva huérfana.
+       Pide: (a) `adopt_run` exception-safe tras `_authorize`: cualquier salida inesperada anterior al
+       commit cierra la reserva (abort o rechazo por el coordinador, el que corresponda al contrato
+       del coordinador — mira `:1373-1412` y `:1413-1448`) y devuelve un error declarado (p. ej.
+       `{"error": "adopt_failed"}`, 503) sin cambiar el manifiesto; (b) `_adopt_on_grant` NUNCA
+       propaga: envuelve la adopción entera y declara `{ok:false, run_id, error:"adopt_failed"}` si
+       algo lanza; el lease ya es del llamante y la respuesta tiene que llegar entera.
+  F-02 MEDIA — un `list_runs` que lanza produce `adopted_run: null` (`loopback.py:3134-3146`),
+       indistinguible de «no había run». Pide: `{ok:false, run_id:null, error:"run_state_unavailable"}`
+       (código ya existente, `loopback.py:1317-1319`); `null` SÓLO para una enumeración válida sin
+       candidato.
+  F-03 BAJA — `tests/test_process_lifecycle.py::test_internal_cleanup_enqueued_before_release_is_gone_when_idle_published`
+       afirma ahora que la limpieza sobrevive y se entrega. Pide: renombrarlo a
+       `test_internal_cleanup_enqueued_before_release_survives_when_idle_published` sin tocar su lógica.
+
+Tests que DEBES añadir (rojos antes, verdes después; pégalo en CONTROL POSITIVO):
+  - `test_daemon.py`: (1) `list_runs` lanzando → acquire 200 active + `adopted_run` =
+    `{ok:false, run_id:null, error:"run_state_unavailable"}`; (2) `manifest.get` lanzando dentro de
+    `adopt_run` → acquire 200 active + `adopted_run.ok false` + error no vacío, sin reserva pendiente
+    en el lease activo (obsérvalo por la vía pública que exista: p. ej. release → 200 y un acquire
+    posterior de otra sesión concede; si no hay vía pública, lee el estado y dilo en STATE.md),
+    y el run sigue RUNNING_IDLE sin dueño.
+  - `test_process_lifecycle.py`: `adopt_run` con una dependencia que lanza tras `_authorize` devuelve
+    el error declarado, cierra la reserva y no toca el manifiesto.
+
+===============================================================================
+§1. EL ORÁCULO (16 checks; 3 rojos hoy)
+===============================================================================
+
+Los 13 de la ronda 1 siguen verdes y no pueden romperse. Nuevos:
+  JB9  `list_runs` ilegible → acquire 200 active + `adopted_run` {ok false, error run_state_unavailable, run_id None}.
+  JB10 `manifest.get` lanzando dentro de `adopt_run` → la respuesta llega entera (200 + adopted_run ok:false
+       con error), `pending_authorizations` del lease activo == 0, `release` → 200, run sigue RUNNING_IDLE
+       sin dueño.
+  JC1  el nombre viejo `*_is_gone_when_idle_published` ya no existe y hay uno `*_survives_*` o `*_is_delivered_*`.
+
+===============================================================================
+§2. EL GATE (triple, sellado)
+===============================================================================
+
+    bash gate/product_frozen.sh       -> PRODUCTO-CONGELADO OK
+    bash gate/run_oracle_tests.sh     -> ORACULO-TESTS-VERDE     (16 checks)
+    bash gate/suite_full.sh           -> SUITE-COMPLETA OK       (rojos == los 2 permitidos)
+
+Ahora mismo: PRODUCTO-CONGELADO OK · ORACULO-TESTS: PASS=13 FAIL=3 UNMET=0 de 16 · SUITE-COMPLETA OK.
+Guarda anti-vacuidad: un `UNMET` no es tu código; si un criterio del oráculo está mal, DISPUTAS.
+`gate/` está sellado por hash y es de sólo lectura. Intermitentes conocidos bajo carga
+(`test_wait_for_marker...lookback...` y `test_bug046...one_generation`): si uno de ellos es el ÚNICO
+rojo extra, repite la suite una vez y pega las dos salidas.
+
+===============================================================================
+§3. FRONTERAS (idénticas a la ronda 1)
+===============================================================================
+
+WRITE-SET, y nada fuera de él: tools/dayz_mcp/loopback.py · tools/dayz_mcp/process_lifecycle.py ·
+tools/tests/test_session_e2e.py · tools/tests/test_process_lifecycle.py · tools/tests/test_instance_fence.py ·
+tools/tests/test_daemon.py · tools/tests/test_client_mode.py · tools/tests/test_loopback.py.
+PROHIBIDO: cualquier otro fichero de `tools/dayz_mcp/` (en especial `server.py`, `control_client.py`,
+`daemon.py`, `session_coordination.py`); `tools/tests/fence_helpers.py`; `gate/`; `addon/`;
+`unittest.skip`/`expectedFailure`; borrar tests (renombrar sólo el de F-03); tocar `allowed_red.txt`; red.
+No reabras P-J1/P-J2 ni cambies nada que no pidan F-01..F-03: la ronda 1 está aceptada.
+
+Intérprete: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`,
+desde `tools/` con `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1`. Tu entrega de la ronda 1 (baseline del diff):
+`../../ws-frozen-r1/tools/` (sólo lectura).
+
+===============================================================================
+§4. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — F-01, F-02, F-03 con `path:line`; cómo se cierra la reserva en la salida
+                          inesperada de adopt_run (abort o rechazo, y por qué ese).
+    ## ASERCIONES       — tabla `test → antes → después → F-item` de TODO lo que cambie.
+    ## GATE             — la salida literal de los TRES gates, pegada, no resumida.
+    ## CONTROL POSITIVO — los tests nuevos de F-01/F-02 fallando contra `../../ws-frozen-r1/tools/`
+                          (cópialo a un temporal y corre ahí los tests) pegado literal: rojo antes,
+                          verde después.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si un criterio del oráculo o del brief está mal, aquí, con el argumento.

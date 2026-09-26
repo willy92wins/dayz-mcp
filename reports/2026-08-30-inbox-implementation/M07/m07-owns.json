@@ -1,0 +1,17 @@
+{
+  "module": "M07",
+  "measured_by": "orchestrator",
+  "generated_utc": "2026-09-02T00:09:36.515904+00:00",
+  "owns": {
+    "tools/mcp_capture.py": {
+      "sha256": "b06fa0ea85aad5e217730b9c1e42c5925cecd9b59abe436f732bb45af404ef7d",
+      "size_bytes": 21840,
+      "mtime_utc": "2026-08-23T19:54:04.161066+00:00"
+    },
+    "tools/tests/test_mcp_capture.py": {
+      "sha256": "dd635f3d79759956312943f4480385e5757cb3a9262735d001ace4d73164eeaf",
+      "size_bytes": 8644,
+      "mtime_utc": "2026-08-23T19:54:04.162065+00:00"
+    }
+  }
+}

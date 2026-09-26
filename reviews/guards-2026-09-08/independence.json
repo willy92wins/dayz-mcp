@@ -1,0 +1,43 @@
+[
+  {
+    "guard_reverted": "G1",
+    "tests": 8,
+    "failures": [
+      "test_g1_unavailable_result_logs_once_before_return"
+    ],
+    "errors": 0
+  },
+  {
+    "guard_reverted": "G2",
+    "tests": 8,
+    "failures": [
+      "test_g2_reserves_next_batch_and_accepted_work_without_dropping_results"
+    ],
+    "errors": 0
+  },
+  {
+    "guard_reverted": "G3",
+    "tests": 8,
+    "failures": [
+      "test_g3_client_clamps_only_above_sixty_hz",
+      "test_g3_server_clamps_only_above_sixty_hz"
+    ],
+    "errors": 0
+  },
+  {
+    "guard_reverted": "G4",
+    "tests": 8,
+    "failures": [
+      "test_g4_restore_checks_game_before_player_and_mission"
+    ],
+    "errors": 0
+  },
+  {
+    "guard_reverted": "G5",
+    "tests": 8,
+    "failures": [
+      "test_g5_shutdown_latches_before_cleanup_but_allows_first_terminal_post"
+    ],
+    "errors": 0
+  }
+]

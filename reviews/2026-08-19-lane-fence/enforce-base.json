@@ -1,0 +1,9 @@
+{
+  "_why": "sha256 del arbol para cada fuente Enforce EN EL MOMENTO de derivar el merge del fencing. Si el arbol se mueve, el merge hay que rehacerlo: sustituir el fichero entero borraria lo que se añadio despues. Paso el 2026-08-19 con ui_reload_layout.",
+  "derived_at": "2026-08-19T18:00+02:00",
+  "tree_sha256": {
+    "MCPBridge.c": "F1B49714E2CC9660362BF5ACD57844BAD16F284BC5F5D523908F44E56A38DFE3",
+    "MCPClientBridge.c": "CBDA155AEF9F289F341FDC922C6CE370226ED792A16E4DDB31DAC171CBC34003",
+    "MCPMessages.c": "A02B3882ABFEFC2F70B4B1F9D67F6FFDBB20265677C582B789DBDD716B5CC82A"
+  }
+}

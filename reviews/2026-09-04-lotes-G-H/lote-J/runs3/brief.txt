@@ -1,0 +1,100 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar. Tienes shell: úsalo.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+LOTE J, RONDA 3 (la última de implementación) — dos MEDIA de la revisión delta de Codex sobre tu
+ronda 2 (recibida verde: sello 8/8, 16/16, suite completa). Ledger: `gate/GATES.md` §Ronda 3.
+
+===============================================================================
+§0. LOS DOS HALLAZGOS (con repro ejecutado por el revisor) Y LO QUE SE PIDE
+===============================================================================
+
+  F-04 MEDIA (F-01 incompleto) — en `adopt_run` (`tools/dayz_mcp/process_lifecycle.py:2595-2608`) el
+       compensador `self.coordinator.abort_reservation(...)` va dentro de un `except Exception: pass`
+       y su valor de retorno se tira. Contrato real del compensador (`session_coordination.py:1373-1411`):
+       devuelve una TUPLA de degradaciones (p. ej. `("audit_failed",)` cuando el audit del abort falla)
+       y puede lanzar. Repro del revisor: `manifest.get` lanzando dentro de `adopt_run` Y
+       `abort_reservation` lanzando → `/session/acquire` responde `200 active` con
+       `adopted_run {ok:false, error:adopt_failed}` como si el cierre hubiera ocurrido, y el lease se
+       queda con `pending_authorizations == 1` (el heartbeat no la limpia).
+       Pide: (a) recoger las degradaciones que devuelve `abort_reservation` en `cleanup_degraded` del
+       error de `adopt_run` — mismo patrón que ya usa `stop_run` cuando `manifest.replace` falla
+       (`process_lifecycle.py:2280-2296`: `degraded.extend(self.coordinator.abort_reservation(...))`
+       y `result["cleanup_degraded"] = list(dict.fromkeys(degraded))`); (b) si `abort_reservation`
+       LANZA, intentar el cierre alternativo `self.coordinator.reject_reservation(authority[0],
+       authority[1], authority[2], "adopt_failed")` (`session_coordination.py:1413-1448`) y, si también
+       falla, declarar `"reservation_abort_failed"` en `cleanup_degraded`; (c) `_adopt_on_grant`
+       (`loopback.py:3136-3197`) propaga `cleanup_degraded` del resultado de `adopt_run` a
+       `adopted_run["cleanup_degraded"]` (lista, sólo cuando no esté vacía) — también en el `except`
+       exterior si algo lanza fuera de `adopt_run`. Nunca una respuesta que afirme un cierre que no
+       ocurrió.
+  F-05 MEDIA (F-02 incompleto) — `_adopt_on_grant` (`loopback.py:3136-3153`): `getattr(run, "state",
+       None)` hace tolerante una fila sin esquema; `list_runs() -> [object()]` no lanza, `idle` queda
+       vacío y se publica `null`. Pide: materializar la lista y validar CADA fila antes de filtrar
+       (atributos `state`, `owner_session_id`, `run_id` presentes, `state` str, `run_id` str); una
+       fila que no cumpla lleva la enumeración entera a `{ok:false, run_id:null,
+       error:"run_state_unavailable"}`; `null` sólo para una lista válida sin candidato.
+
+Tests que DEBES añadir (rojos antes contra `../../ws-frozen-r2/tools/`, verdes después; pégalo en
+CONTROL POSITIVO):
+  - `test_process_lifecycle.py`: (1) `abort_reservation` devuelve `("audit_failed",)` → el error de
+    `adopt_run` trae `cleanup_degraded` con `audit_failed`; (2) `abort_reservation` lanza → la reserva
+    se cierra por `reject_reservation` (pendientes 0) o, si también lanza, `reservation_abort_failed`
+    declarado; en ambos casos el manifiesto intacto.
+  - `test_daemon.py`: (3) `manifest.get` lanzando + `abort_reservation` lanzando → acquire 200 active,
+    `adopted_run.ok false`, y (pendientes 0 o `reservation_abort_failed` en
+    `adopted_run.cleanup_degraded`), release 200; (4) `list_runs -> [object()]` → acquire 200 active +
+    `adopted_run == {ok:false, run_id:null, error:run_state_unavailable}`.
+
+===============================================================================
+§1. EL ORÁCULO (18 checks; 2 rojos hoy)
+===============================================================================
+
+Los 16 anteriores siguen verdes y no pueden romperse. Nuevos:
+  JB11 dos escenarios: [1] `manifest.get` lanzando + `abort_reservation` lanzando → acquire 200,
+       `adopted_run.ok false`, (pendientes 0 O `reservation_abort_failed` en `adopted_run.cleanup_degraded`),
+       release 200; [2] `abort_reservation` que funciona pero devuelve además `audit_failed` → ese
+       `audit_failed` aparece en `adopted_run.cleanup_degraded`.
+  JB12 `list_runs -> [object()]` → `adopted_run == {ok:false, run_id:null, error:run_state_unavailable}`.
+
+===============================================================================
+§2. EL GATE (triple, sellado)
+===============================================================================
+
+    bash gate/product_frozen.sh       -> PRODUCTO-CONGELADO OK
+    bash gate/run_oracle_tests.sh     -> ORACULO-TESTS-VERDE     (18 checks)
+    bash gate/suite_full.sh           -> SUITE-COMPLETA OK       (rojos == los 2 permitidos)
+
+Ahora mismo: PRODUCTO-CONGELADO OK · ORACULO-TESTS: PASS=16 FAIL=2 UNMET=0 de 18 · SUITE-COMPLETA OK.
+`gate/` está sellado por hash y es de sólo lectura. Intermitentes conocidos bajo carga
+(`test_wait_for_marker...lookback...`, `test_bug046...one_generation`): si uno es el ÚNICO rojo extra,
+repite la suite una vez y pega las dos salidas.
+
+===============================================================================
+§3. FRONTERAS (idénticas a las rondas 1 y 2)
+===============================================================================
+
+WRITE-SET: tools/dayz_mcp/loopback.py · tools/dayz_mcp/process_lifecycle.py · tools/tests/test_session_e2e.py ·
+tools/tests/test_process_lifecycle.py · tools/tests/test_instance_fence.py · tools/tests/test_daemon.py ·
+tools/tests/test_client_mode.py · tools/tests/test_loopback.py. Nada fuera de él.
+PROHIBIDO: cualquier otro fichero de `tools/dayz_mcp/` (`server.py`, `control_client.py`, `daemon.py`,
+`session_coordination.py`…); `tools/tests/fence_helpers.py`; `gate/`; `addon/`; `unittest.skip` /
+`expectedFailure`; borrar o renombrar tests; tocar `allowed_red.txt`; red. No reabras P-J1/P-J2 ni
+F-01..F-03: están aceptados. Sólo F-04 y F-05.
+
+Intérprete: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`,
+desde `tools/` con `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1`. Baseline del diff: `../../ws-frozen-r2/tools/`.
+
+===============================================================================
+§4. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — F-04 y F-05 con `path:line`; qué pasa exactamente cuando el compensador
+                          devuelve degradaciones, cuando lanza, y cuando el cierre alternativo también lanza.
+    ## ASERCIONES       — tabla `test → antes → después → F-item` de TODO lo que cambie.
+    ## GATE             — la salida literal de los TRES gates, pegada, no resumida.
+    ## CONTROL POSITIVO — los tests nuevos fallando contra `../../ws-frozen-r2/tools/` y pasando ahora.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si un criterio del oráculo o del brief está mal, aquí, con el argumento.

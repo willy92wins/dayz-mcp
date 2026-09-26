@@ -1,0 +1,2210 @@
+{
+  "numeric": [
+    [
+      "action_use",
+      "pos",
+      "vector"
+    ],
+    [
+      "action_use",
+      "radius",
+      "float"
+    ],
+    [
+      "action_use",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "camera_get",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "camera_set",
+      "cam_pos",
+      "vector"
+    ],
+    [
+      "camera_set",
+      "cam_orientation",
+      "vector"
+    ],
+    [
+      "camera_set",
+      "look_at",
+      "vector"
+    ],
+    [
+      "camera_set",
+      "cam_matrix",
+      "vector"
+    ],
+    [
+      "camera_set",
+      "fov",
+      "float"
+    ],
+    [
+      "camera_set",
+      "settle_ticks",
+      "int"
+    ],
+    [
+      "camera_set",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "capture_screenshot",
+      "max_tokens",
+      "int"
+    ],
+    [
+      "capture_screenshot",
+      "frames",
+      "int"
+    ],
+    [
+      "capture_screenshot",
+      "quality",
+      "int"
+    ],
+    [
+      "dayz_test_run",
+      "port",
+      "int"
+    ],
+    [
+      "dayz_test_run",
+      "width",
+      "int"
+    ],
+    [
+      "dayz_test_run",
+      "height",
+      "int"
+    ],
+    [
+      "dayz_test_run",
+      "server_wait_s",
+      "int"
+    ],
+    [
+      "dayz_test_run",
+      "wait_for_box_s",
+      "float"
+    ],
+    [
+      "dayz_test_run",
+      "client_start_budget_s",
+      "float"
+    ],
+    [
+      "engine_set",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "entities_query",
+      "pos",
+      "vector"
+    ],
+    [
+      "entities_query",
+      "radius",
+      "float"
+    ],
+    [
+      "entities_query",
+      "limit",
+      "int"
+    ],
+    [
+      "entities_query",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "exec_enforce",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "infected_drive",
+      "pos",
+      "vector"
+    ],
+    [
+      "infected_drive",
+      "heading",
+      "float"
+    ],
+    [
+      "infected_drive",
+      "speed",
+      "float"
+    ],
+    [
+      "infected_drive",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "inventory_give",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "key_press",
+      "dik",
+      "int"
+    ],
+    [
+      "key_press",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "lease_acquire",
+      "max_wait_s",
+      "float"
+    ],
+    [
+      "logs_since",
+      "max_lines",
+      "int"
+    ],
+    [
+      "notify_players",
+      "show_time",
+      "float"
+    ],
+    [
+      "notify_players",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "object_anim",
+      "pos",
+      "vector"
+    ],
+    [
+      "object_anim",
+      "phase",
+      "float"
+    ],
+    [
+      "object_anim",
+      "object_id",
+      "int"
+    ],
+    [
+      "object_anim",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "object_delete",
+      "object_id",
+      "int"
+    ],
+    [
+      "object_delete",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "object_inspect",
+      "pos",
+      "vector"
+    ],
+    [
+      "object_inspect",
+      "object_id",
+      "int"
+    ],
+    [
+      "object_inspect",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "pipeline_inbox",
+      "limit",
+      "int"
+    ],
+    [
+      "player_respawn",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "player_teleport",
+      "pos",
+      "vector"
+    ],
+    [
+      "player_teleport",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "query_all_players",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "query_get_in_condition",
+      "pos",
+      "vector"
+    ],
+    [
+      "query_get_in_condition",
+      "component",
+      "int"
+    ],
+    [
+      "query_get_in_condition",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "query_player_state",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "restore_gameplay",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "scene_raycast",
+      "from_pos",
+      "vector"
+    ],
+    [
+      "scene_raycast",
+      "to",
+      "vector"
+    ],
+    [
+      "scene_raycast",
+      "radius",
+      "float"
+    ],
+    [
+      "scene_raycast",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "session_acquire_wait",
+      "max_wait_s",
+      "float"
+    ],
+    [
+      "session_wait",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "surface_query",
+      "x",
+      "float"
+    ],
+    [
+      "surface_query",
+      "z",
+      "float"
+    ],
+    [
+      "surface_query",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "telemetry_read",
+      "pos",
+      "vector"
+    ],
+    [
+      "telemetry_read",
+      "radius",
+      "float"
+    ],
+    [
+      "telemetry_read",
+      "max_lines",
+      "int"
+    ],
+    [
+      "telemetry_read",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "ui_click",
+      "button",
+      "int"
+    ],
+    [
+      "ui_click",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "ui_dialog",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "ui_focus",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "ui_reload_layout",
+      "limit",
+      "int"
+    ],
+    [
+      "ui_reload_layout",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "ui_set_text",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "ui_tree",
+      "limit",
+      "int"
+    ],
+    [
+      "ui_tree",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "vehicle_control",
+      "throttle",
+      "float"
+    ],
+    [
+      "vehicle_control",
+      "steer",
+      "float"
+    ],
+    [
+      "vehicle_control",
+      "brake",
+      "float"
+    ],
+    [
+      "vehicle_control",
+      "handbrake",
+      "float"
+    ],
+    [
+      "vehicle_control",
+      "hold_ttl_s",
+      "float"
+    ],
+    [
+      "vehicle_control",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "vehicle_enter",
+      "pos",
+      "vector"
+    ],
+    [
+      "vehicle_enter",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "vehicle_get_in_client",
+      "pos",
+      "vector"
+    ],
+    [
+      "vehicle_get_in_client",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "vehicle_prepare_fixture",
+      "pos",
+      "vector"
+    ],
+    [
+      "vehicle_prepare_fixture",
+      "radius",
+      "float"
+    ],
+    [
+      "vehicle_prepare_fixture",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "vehicle_release",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "vehicle_telemetry",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "vehicle_trace",
+      "cursor",
+      "int"
+    ],
+    [
+      "vehicle_trace",
+      "limit",
+      "int"
+    ],
+    [
+      "vehicle_trace",
+      "sample_hz",
+      "int"
+    ],
+    [
+      "vehicle_trace",
+      "max_samples",
+      "int"
+    ],
+    [
+      "vehicle_trace",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "wait_for",
+      "value",
+      "int"
+    ],
+    [
+      "wait_for",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "wait_for",
+      "poll_interval_s",
+      "float"
+    ],
+    [
+      "wait_for",
+      "lookback_lines",
+      "int"
+    ],
+    [
+      "world_spawn",
+      "pos",
+      "vector"
+    ],
+    [
+      "world_spawn",
+      "flags",
+      "int"
+    ],
+    [
+      "world_spawn",
+      "rotation",
+      "int"
+    ],
+    [
+      "world_spawn",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "world_time_set",
+      "year",
+      "int"
+    ],
+    [
+      "world_time_set",
+      "month",
+      "int"
+    ],
+    [
+      "world_time_set",
+      "day",
+      "int"
+    ],
+    [
+      "world_time_set",
+      "hour",
+      "int"
+    ],
+    [
+      "world_time_set",
+      "minute",
+      "int"
+    ],
+    [
+      "world_time_set",
+      "time_multiplier",
+      "float"
+    ],
+    [
+      "world_time_set",
+      "timeout_s",
+      "float"
+    ],
+    [
+      "world_weather_set",
+      "overcast",
+      "float"
+    ],
+    [
+      "world_weather_set",
+      "rain",
+      "float"
+    ],
+    [
+      "world_weather_set",
+      "fog",
+      "float"
+    ],
+    [
+      "world_weather_set",
+      "time",
+      "float"
+    ],
+    [
+      "world_weather_set",
+      "min_duration",
+      "float"
+    ],
+    [
+      "world_weather_set",
+      "timeout_s",
+      "float"
+    ]
+  ],
+  "parameters": [
+    {
+      "tool": "action_use",
+      "param": "action",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "action_use",
+      "param": "classname",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "action_use",
+      "param": "pos",
+      "annotation": "list[StrictFloat] | None",
+      "coercible": false
+    },
+    {
+      "tool": "action_use",
+      "param": "radius",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "action_use",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "camera_get",
+      "param": "cam_mode",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "camera_get",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "camera_set",
+      "param": "cam_mode",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "camera_set",
+      "param": "cam_pos",
+      "annotation": "list[StrictFloat] | None",
+      "coercible": false
+    },
+    {
+      "tool": "camera_set",
+      "param": "cam_orientation",
+      "annotation": "list[StrictFloat] | None",
+      "coercible": false
+    },
+    {
+      "tool": "camera_set",
+      "param": "look_at",
+      "annotation": "list[StrictFloat] | None",
+      "coercible": false
+    },
+    {
+      "tool": "camera_set",
+      "param": "cam_matrix",
+      "annotation": "list[StrictFloat] | None",
+      "coercible": false
+    },
+    {
+      "tool": "camera_set",
+      "param": "fov",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "camera_set",
+      "param": "settle_ticks",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "camera_set",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "capture_screenshot",
+      "param": "scale",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "capture_screenshot",
+      "param": "max_tokens",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "capture_screenshot",
+      "param": "frames",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "capture_screenshot",
+      "param": "process_name",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "capture_screenshot",
+      "param": "fmt",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "capture_screenshot",
+      "param": "quality",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "capture_screenshot",
+      "param": "crop",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "capture_screenshot",
+      "param": "crop_space",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "capture_screenshot",
+      "param": "save_fullres",
+      "annotation": "bool",
+      "coercible": true
+    },
+    {
+      "tool": "capture_screenshot",
+      "param": "save_dir",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "dayz_knowledge_find",
+      "param": "query",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "dayz_knowledge_show",
+      "param": "name",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "project",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "mode",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "mission",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "build",
+      "annotation": "bool",
+      "coercible": true
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "clean",
+      "annotation": "bool",
+      "coercible": true
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "pack_only",
+      "annotation": "bool",
+      "coercible": true
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "preflight",
+      "annotation": "bool",
+      "coercible": true
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "run_id",
+      "annotation": "str | None",
+      "coercible": true
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "extra_mods",
+      "annotation": "list[str] | None",
+      "coercible": false
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "base_mods",
+      "annotation": "list[str] | None",
+      "coercible": false
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "server_mods",
+      "annotation": "list[str] | None",
+      "coercible": false
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "no_base_mods",
+      "annotation": "bool",
+      "coercible": true
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "no_file_patching",
+      "annotation": "bool",
+      "coercible": true
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "port",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "width",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "height",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "player_name",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "server_wait_s",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "wait_for_box_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "auto_remediate_steam",
+      "annotation": "StrictBool",
+      "coercible": false
+    },
+    {
+      "tool": "dayz_test_run",
+      "param": "client_start_budget_s",
+      "annotation": "StrictFloat | StrictInt | None",
+      "coercible": false
+    },
+    {
+      "tool": "dayz_test_stop",
+      "param": "run_id",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "engine_set",
+      "param": "mode",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "engine_set",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "entities_query",
+      "param": "pos",
+      "annotation": "list[StrictFloat]",
+      "coercible": false
+    },
+    {
+      "tool": "entities_query",
+      "param": "radius",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "entities_query",
+      "param": "limit",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "entities_query",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "exec_enforce",
+      "param": "expr",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "exec_enforce",
+      "param": "main_fn",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "exec_enforce",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "infected_drive",
+      "param": "type",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "infected_drive",
+      "param": "pos",
+      "annotation": "list[StrictFloat]",
+      "coercible": false
+    },
+    {
+      "tool": "infected_drive",
+      "param": "heading",
+      "annotation": "StrictFloat | None",
+      "coercible": false
+    },
+    {
+      "tool": "infected_drive",
+      "param": "speed",
+      "annotation": "StrictFloat | None",
+      "coercible": false
+    },
+    {
+      "tool": "infected_drive",
+      "param": "mode",
+      "annotation": "str | None",
+      "coercible": true
+    },
+    {
+      "tool": "infected_drive",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "inventory_give",
+      "param": "classname",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "inventory_give",
+      "param": "dest",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "inventory_give",
+      "param": "uid",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "inventory_give",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "key_press",
+      "param": "dik",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "key_press",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "lease_acquire",
+      "param": "purpose",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "lease_acquire",
+      "param": "max_wait_s",
+      "annotation": "StrictFloat | None",
+      "coercible": false
+    },
+    {
+      "tool": "logs_since",
+      "param": "marker",
+      "annotation": "str | dict[str, Any] | None",
+      "coercible": true
+    },
+    {
+      "tool": "logs_since",
+      "param": "max_lines",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "logs_since",
+      "param": "run_id",
+      "annotation": "str | None",
+      "coercible": true
+    },
+    {
+      "tool": "notify_players",
+      "param": "show_time",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "notify_players",
+      "param": "title",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "notify_players",
+      "param": "detail",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "notify_players",
+      "param": "icon",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "notify_players",
+      "param": "uid",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "notify_players",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "object_anim",
+      "param": "source",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "object_anim",
+      "param": "type",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "object_anim",
+      "param": "pos",
+      "annotation": "list[StrictFloat] | None",
+      "coercible": false
+    },
+    {
+      "tool": "object_anim",
+      "param": "phase",
+      "annotation": "StrictFloat | None",
+      "coercible": false
+    },
+    {
+      "tool": "object_anim",
+      "param": "object_id",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "object_anim",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "object_delete",
+      "param": "object_id",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "object_delete",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "object_inspect",
+      "param": "want",
+      "annotation": "list[str]",
+      "coercible": false
+    },
+    {
+      "tool": "object_inspect",
+      "param": "type",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "object_inspect",
+      "param": "pos",
+      "annotation": "list[StrictFloat] | None",
+      "coercible": false
+    },
+    {
+      "tool": "object_inspect",
+      "param": "object_id",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "object_inspect",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "pipeline_feedback",
+      "param": "kind",
+      "annotation": "Literal['bug', 'request', 'finding', 'tool_contribution']",
+      "coercible": false
+    },
+    {
+      "tool": "pipeline_feedback",
+      "param": "title",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "pipeline_feedback",
+      "param": "body",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "pipeline_feedback",
+      "param": "project",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "pipeline_inbox",
+      "param": "limit",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "pipeline_inbox",
+      "param": "kind",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "pipeline_inbox",
+      "param": "include_resolved",
+      "annotation": "bool",
+      "coercible": true
+    },
+    {
+      "tool": "pipeline_resolve",
+      "param": "feedback_id",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "pipeline_resolve",
+      "param": "resolution",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "pipeline_resolve",
+      "param": "evidence_ref",
+      "annotation": "str | None",
+      "coercible": true
+    },
+    {
+      "tool": "playbook_run",
+      "param": "name",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "playbook_run",
+      "param": "params",
+      "annotation": "dict[str, Any] | None",
+      "coercible": false
+    },
+    {
+      "tool": "player_respawn",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "player_teleport",
+      "param": "pos",
+      "annotation": "list[StrictFloat]",
+      "coercible": false
+    },
+    {
+      "tool": "player_teleport",
+      "param": "uid",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "player_teleport",
+      "param": "skip_clearance_check",
+      "annotation": "bool",
+      "coercible": true
+    },
+    {
+      "tool": "player_teleport",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "query_all_players",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "query_get_in_condition",
+      "param": "pos",
+      "annotation": "list[StrictFloat]",
+      "coercible": false
+    },
+    {
+      "tool": "query_get_in_condition",
+      "param": "component",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "query_get_in_condition",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "query_player_state",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "restore_gameplay",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "scene_raycast",
+      "param": "from_pos",
+      "annotation": "list[StrictFloat]",
+      "coercible": false
+    },
+    {
+      "tool": "scene_raycast",
+      "param": "to",
+      "annotation": "list[StrictFloat]",
+      "coercible": false
+    },
+    {
+      "tool": "scene_raycast",
+      "param": "method",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "scene_raycast",
+      "param": "ignore",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "scene_raycast",
+      "param": "radius",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "scene_raycast",
+      "param": "intersect",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "scene_raycast",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "session_acquire",
+      "param": "purpose",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "session_acquire_wait",
+      "param": "purpose",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "session_acquire_wait",
+      "param": "max_wait_s",
+      "annotation": "StrictFloat | None",
+      "coercible": false
+    },
+    {
+      "tool": "session_cancel",
+      "param": "ticket",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "session_heartbeat",
+      "param": "lease_token",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "session_release",
+      "param": "lease_token",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "session_wait",
+      "param": "ticket",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "session_wait",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "surface_query",
+      "param": "x",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "surface_query",
+      "param": "z",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "surface_query",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "telemetry_read",
+      "param": "mode",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "telemetry_read",
+      "param": "type",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "telemetry_read",
+      "param": "pos",
+      "annotation": "list[StrictFloat] | None",
+      "coercible": false
+    },
+    {
+      "tool": "telemetry_read",
+      "param": "radius",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "telemetry_read",
+      "param": "path",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "telemetry_read",
+      "param": "max_lines",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "telemetry_read",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "ui_click",
+      "param": "path",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "ui_click",
+      "param": "button",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "ui_click",
+      "param": "root",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "ui_click",
+      "param": "mode",
+      "annotation": "Literal['direct', 'complete']",
+      "coercible": false
+    },
+    {
+      "tool": "ui_click",
+      "param": "bubble",
+      "annotation": "StrictBool",
+      "coercible": false
+    },
+    {
+      "tool": "ui_click",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "ui_dialog",
+      "param": "kind",
+      "annotation": "Literal['acknowledge', 'confirm', 'form']",
+      "coercible": false
+    },
+    {
+      "tool": "ui_dialog",
+      "param": "title",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "ui_dialog",
+      "param": "message",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "ui_dialog",
+      "param": "fields",
+      "annotation": "list[dict[str, Any]] | None",
+      "coercible": false
+    },
+    {
+      "tool": "ui_dialog",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "ui_focus",
+      "param": "path",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "ui_focus",
+      "param": "root",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "ui_focus",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "ui_reload_layout",
+      "param": "path",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "ui_reload_layout",
+      "param": "mode",
+      "annotation": "Literal['reload', 'close']",
+      "coercible": false
+    },
+    {
+      "tool": "ui_reload_layout",
+      "param": "limit",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "ui_reload_layout",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "ui_set_text",
+      "param": "path",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "ui_set_text",
+      "param": "text",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "ui_set_text",
+      "param": "root",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "ui_set_text",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "ui_tree",
+      "param": "path",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "ui_tree",
+      "param": "limit",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "ui_tree",
+      "param": "root",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "ui_tree",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_control",
+      "param": "throttle",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_control",
+      "param": "steer",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_control",
+      "param": "brake",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_control",
+      "param": "handbrake",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_control",
+      "param": "hold_ttl_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_control",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_enter",
+      "param": "pos",
+      "annotation": "list[StrictFloat]",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_enter",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_get_in_client",
+      "param": "pos",
+      "annotation": "list[StrictFloat]",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_get_in_client",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_prepare_fixture",
+      "param": "type",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "vehicle_prepare_fixture",
+      "param": "pos",
+      "annotation": "list[StrictFloat]",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_prepare_fixture",
+      "param": "radius",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_prepare_fixture",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_release",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_telemetry",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_trace",
+      "param": "mode",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "vehicle_trace",
+      "param": "trace_id",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "vehicle_trace",
+      "param": "cursor",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_trace",
+      "param": "limit",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_trace",
+      "param": "sample_hz",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_trace",
+      "param": "max_samples",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "vehicle_trace",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "wait_for",
+      "param": "condition",
+      "annotation": "Literal['players_at_least', 'players_at_most', 'log_matches']",
+      "coercible": false
+    },
+    {
+      "tool": "wait_for",
+      "param": "value",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "wait_for",
+      "param": "pattern",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "wait_for",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "wait_for",
+      "param": "poll_interval_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "wait_for",
+      "param": "lookback_lines",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "wait_for",
+      "param": "lookback_from",
+      "annotation": "Literal['lines', 'launch']",
+      "coercible": false
+    },
+    {
+      "tool": "wait_for",
+      "param": "marker",
+      "annotation": "str | dict[str, Any] | None",
+      "coercible": true
+    },
+    {
+      "tool": "world_spawn",
+      "param": "type",
+      "annotation": "str",
+      "coercible": true
+    },
+    {
+      "tool": "world_spawn",
+      "param": "pos",
+      "annotation": "list[StrictFloat]",
+      "coercible": false
+    },
+    {
+      "tool": "world_spawn",
+      "param": "flags",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "world_spawn",
+      "param": "rotation",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "world_spawn",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "world_time_set",
+      "param": "year",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "world_time_set",
+      "param": "month",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "world_time_set",
+      "param": "day",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "world_time_set",
+      "param": "hour",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "world_time_set",
+      "param": "minute",
+      "annotation": "StrictInt",
+      "coercible": false
+    },
+    {
+      "tool": "world_time_set",
+      "param": "time_multiplier",
+      "annotation": "StrictFloat | None",
+      "coercible": false
+    },
+    {
+      "tool": "world_time_set",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "world_weather_set",
+      "param": "overcast",
+      "annotation": "StrictFloat | None",
+      "coercible": false
+    },
+    {
+      "tool": "world_weather_set",
+      "param": "rain",
+      "annotation": "StrictFloat | None",
+      "coercible": false
+    },
+    {
+      "tool": "world_weather_set",
+      "param": "fog",
+      "annotation": "StrictFloat | None",
+      "coercible": false
+    },
+    {
+      "tool": "world_weather_set",
+      "param": "time",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "world_weather_set",
+      "param": "min_duration",
+      "annotation": "StrictFloat",
+      "coercible": false
+    },
+    {
+      "tool": "world_weather_set",
+      "param": "timeout_s",
+      "annotation": "StrictFloat",
+      "coercible": false
+    }
+  ],
+  "tools": [
+    {
+      "name": "dayz_knowledge_find",
+      "line": 630,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\knowledge.py"
+    },
+    {
+      "name": "dayz_knowledge_show",
+      "line": 640,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\knowledge.py"
+    },
+    {
+      "name": "dayz_knowledge_status",
+      "line": 650,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\knowledge.py"
+    },
+    {
+      "name": "dayz_knowledge_prepare",
+      "line": 659,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\knowledge.py"
+    },
+    {
+      "name": "session_acquire",
+      "line": 3255,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "session_wait",
+      "line": 3265,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "session_acquire_wait",
+      "line": 3277,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "lease_acquire",
+      "line": 3277,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "session_cancel",
+      "line": 3319,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "session_heartbeat",
+      "line": 3329,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "session_release",
+      "line": 3339,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "session_status",
+      "line": 3347,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "dayz_test_run",
+      "line": 3381,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "dayz_test_stop",
+      "line": 3560,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "query_player_state",
+      "line": 3593,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "query_all_players",
+      "line": 3598,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "logs_since",
+      "line": 3610,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "world_spawn",
+      "line": 3717,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "object_delete",
+      "line": 3735,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "notify_players",
+      "line": 3758,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "vehicle_enter",
+      "line": 3801,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "scene_raycast",
+      "line": 3815,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "telemetry_read",
+      "line": 3862,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "query_get_in_condition",
+      "line": 3890,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "vehicle_prepare_fixture",
+      "line": 3901,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "surface_query",
+      "line": 3934,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "player_teleport",
+      "line": 4020,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "object_anim",
+      "line": 4055,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "infected_drive",
+      "line": 4086,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "inventory_give",
+      "line": 4138,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "object_inspect",
+      "line": 4169,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "entities_query",
+      "line": 4197,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "world_time_set",
+      "line": 4256,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "world_weather_set",
+      "line": 4327,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "camera_set",
+      "line": 4381,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "camera_get",
+      "line": 4439,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "restore_gameplay",
+      "line": 4445,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "key_press",
+      "line": 4488,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "player_respawn",
+      "line": 4504,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "capture_screenshot",
+      "line": 4518,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "exec_enforce",
+      "line": 4632,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "bridge_status",
+      "line": 4638,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "vehicle_get_in_client",
+      "line": 4646,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "engine_set",
+      "line": 4657,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "vehicle_control",
+      "line": 4689,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "vehicle_telemetry",
+      "line": 4722,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "vehicle_trace",
+      "line": 4727,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "vehicle_release",
+      "line": 4762,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "ui_tree",
+      "line": 4772,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "ui_set_text",
+      "line": 4802,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "ui_click",
+      "line": 4827,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "ui_reload_layout",
+      "line": 4868,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "ui_focus",
+      "line": 4906,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "ui_dialog",
+      "line": 4935,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "action_use",
+      "line": 4956,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "wait_for",
+      "line": 4990,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "list_projects",
+      "line": 5051,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "pipeline_feedback",
+      "line": 5063,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "pipeline_inbox",
+      "line": 5100,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "pipeline_resolve",
+      "line": 5124,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    },
+    {
+      "name": "playbook_run",
+      "line": 5160,
+      "file": "C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\server.py"
+    }
+  ]
+}

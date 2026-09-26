@@ -1,0 +1,227 @@
+--- test-af59.ps1.BEFORE
++++ test-af59.ps1
+@@ -15,8 +15,29 @@
+     @{ Id = 'S6'; Text = 'Build Successful'; Code = 3; Write = $true; Prior = $true; Success = $false },
+     @{ Id = 'S7'; Text = 'Build Successful'; Code = 0; Write = $true; Prior = $false; Success = $true },
+     @{ Id = 'S8'; Text = 'Build Successful'; Code = 0; Write = $true; Prior = $true; Success = $true },
+-    @{ Id = 'S9'; Text = 'Build Successful'; Code = 0; Write = $true; Prior = $true; Success = $false }
++    @{ Id = 'S9'; Text = 'Build Successful'; Code = 0; Write = $true; Prior = $true; Success = $false },
++    @{ Id = 'S10'; Text = 'Build Successful'; Code = 0; Write = $true; Prior = $true; Success = $true },
++    @{ Id = 'S11'; Text = 'Build Successful'; Code = 0; Write = $true; Prior = $true; Success = $false },
++    @{ Id = 'S12'; Text = 'Build Successful'; Code = 0; Write = $true; Prior = $true; Success = $false },
++    @{ Id = 'S13'; Text = 'Build Successful'; Code = 0; Write = $true; Prior = $true; Success = $false },
++    @{ Id = 'S14'; Text = 'Build Successful'; Code = 0; Write = $true; Prior = $true; Success = $true },
++    @{ Id = 'S15'; Text = 'Build Successful'; Code = 0; Write = $true; Prior = $true; Success = $false },
++    @{ Id = 'S16'; Text = 'Build Successful'; Code = 0; Write = $true; Prior = $true; Success = $true }
+ )
++
++
++function Write-FixtureBytes([object[]]$Values) {
++    $path = [string]$Values[0]
++    $bytes = [byte[]]$Values[1]
++    [IO.File]::WriteAllBytes($path, $bytes)
++    if ((Get-Item -LiteralPath $path).Length -ne $bytes.Length -or
++        [Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) -cne [Convert]::ToBase64String($bytes)) {
++        throw ('Fixture write/readback mismatch: ' + $path)
++    }
++}
++function Write-FixtureText([object[]]$Values) {
++    Write-FixtureBytes @([string]$Values[0], $Values[2].GetBytes([string]$Values[1]))
++}
+ 
+ # Emit an uncompressed PBO with one directory entry and an end marker.
+ function New-FixturePbo([string]$EntryName) {
+@@ -82,6 +103,7 @@
+     $root = Join-Path $runRoot $case.Id
+     $savedEnv = @{}
+     $process = $null
++    $junctionPath = $null
+     $job = [IntPtr]::Zero
+     $exitCode = '<not-started>'
+     $stdout = ''
+@@ -111,31 +133,81 @@
+         $sentinel = Join-Path $temp ('dayz-addonbuilder\' + $mod + '\nested\stale.bin')
+         $wipeLog = Join-Path $root 'wipe.log'
+         $sibling = Join-Path $temp 'dayz-addonbuilder\other-mod\keep.bin'
++        $preparedAddons = $addons
++        if ($case.Id -eq 'S16') { $preparedAddons = Join-Path $layout ('mapped\@' + $mod + '\Addons') }
+         foreach ($dir in @((Join-Path $dev 'tools'), (Join-Path $dev '_server'),
+             (Join-Path $dev '_client'), (Join-Path $source 'scripts\5_Mission'),
+-            $addons, $abDir, $temp, $cwd)) {
++            $preparedAddons, $abDir, $temp, $cwd)) {
+             $null = New-Item -ItemType Directory -Path $dir -Force
+         }
+-        [IO.File]::WriteAllText((Join-Path $source 'config.cpp'), 'class CfgPatches { class AF59Fixture { requiredAddons[] = {}; }; };', [Text.Encoding]::ASCII)
+-        [IO.File]::WriteAllText((Join-Path $source 'scripts\5_Mission\dummy.c'), '// Fixture source only.', [Text.Encoding]::ASCII)
+-        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'stub-addonbuilder.cmd') -Destination $stub
++        if ($case.Id -eq 'S16') {
++            $junctionPath = Join-Path $drive 'Mods'
++            $mapping = Join-Path $layout 'mapped'
++            $null = New-Item -ItemType Junction -Path $junctionPath -Target $mapping
++            $link = Get-Item -LiteralPath $junctionPath -Force
++            if (-not ($link.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
++                [IO.Path]::GetFullPath([string]$link.Target[0]) -ne [IO.Path]::GetFullPath($mapping)) {
++                throw 'R4: fixture junction was not established'
++            }
++        }
++        Write-FixtureText ((Join-Path $source 'config.cpp'), 'class CfgPatches { class AF59Fixture { requiredAddons[] = {}; }; };', [Text.Encoding]::ASCII)
++        Write-FixtureText ((Join-Path $source 'scripts\5_Mission\dummy.c'), '// Fixture source only.', [Text.Encoding]::ASCII)
++        Write-FixtureBytes @($stub, [IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'stub-addonbuilder.cmd')))
+         $oldBytes = [byte[]]@(0, 255, 13, 10, 65, 70, 53, 57, 1)
+         $entryName = 'scripts\5_Mission\dummy.c'
+         if ($case.Id -eq 'S9') { $entryName = 'config.cpp' }
+         $newBytes = New-FixturePbo $entryName
++        if ($case.Id -eq 'S10') {
++            # Deliberately unsupported metadata, NOT claimed to be a valid real PBO.
++            $header = New-Object byte[] 21
++            [BitConverter]::GetBytes([uint32]0x56657273).CopyTo($header, 1)
++            $header[5] = 1
++            $newBytes = [byte[]]($header + $newBytes)
++        }
++        if ($case.Id -eq 'S11') {
++            # A standard, recognized header still promises the original payload size.
++            $newBytes = [byte[]]$newBytes[0..($newBytes.Length - 2)]
++        }
++        if ($case.Id -eq 'S12') {
++            Write-FixtureText ((Join-Path $source 'outside.c'), '// Also required.', [Text.Encoding]::ASCII)
++        }
++        if ($case.Id -eq 'S13') {
++            Remove-FixtureTree (Join-Path $source 'scripts')
++            Write-FixtureText ((Join-Path $source 'outside.c'), '// Only script.', [Text.Encoding]::ASCII)
++            $newBytes = New-FixturePbo 'config.cpp'
++        }
++        if ($case.Id -eq 'S14') {
++            # Frozen, untouched AddonBuilder -packonly artefact. See fixtures/README.md.
++            $fixture = Join-Path $PSScriptRoot 'fixtures\DayZ_MCP_fence_DCC8730F.pbo'
++            $hash = (Get-FileHash -LiteralPath $fixture -Algorithm SHA256).Hash
++            if ($hash -ne 'DCC8730FEB98FF2A4F7C203075D799428C53A669360E3499311AA3B4D31AFED3') {
++                throw 'R3: real fixture identity mismatch'
++            }
++            $newBytes = [IO.File]::ReadAllBytes($fixture)
++            # The frozen directory inventory independently records nine .c entries.
++            for ($n = 2; $n -le 9; $n++) {
++                Write-FixtureText ((Join-Path $source ('scripts\5_Mission\fixture' + $n + '.c')), '// Count fixture.', [Text.Encoding]::ASCII)
++            }
++        }
++        $valveLog = Join-Path $root 'valve.log'
++        if ($case.Id -eq 'S16') {
++            $stubBody = [IO.File]::ReadAllText($stub)
++            $probe = '@if defined DAYZ_ALLOW_PLAIN_MODS (echo set>"%AF59_VALVE_LOG%") else (echo absent>"%AF59_VALVE_LOG%")'
++            Write-FixtureText ($stub, ($probe + "`r`n" + $stubBody), [Text.Encoding]::ASCII)
++        }
+         if ($case.Id -eq 'S8') {
+             foreach ($file in @($sentinel, $sibling)) {
+                 $null = New-Item -ItemType Directory -Path (Split-Path $file) -Force
+-                [IO.File]::WriteAllText($file, 'stale sentinel', [Text.Encoding]::ASCII)
++                Write-FixtureText ($file, 'stale sentinel', [Text.Encoding]::ASCII)
+             }
+             # Observe the stale file at builder entry, not merely after deployment.
+             $stubBody = [IO.File]::ReadAllText($stub)
+             $probe = '@if exist "%AF59_TEMP_SENTINEL%" (echo present>"%AF59_WIPE_LOG%") else (echo absent>"%AF59_WIPE_LOG%")'
+-            [IO.File]::WriteAllText($stub, $probe + "`r`n" + $stubBody, [Text.Encoding]::ASCII)
+-        }
+-        [IO.File]::WriteAllBytes($payload, $newBytes)
++            Write-FixtureText ($stub, ($probe + "`r`n" + $stubBody), [Text.Encoding]::ASCII)
++        }
++        Write-FixtureBytes ($payload, $newBytes)
+         if ($case.Prior) {
+-            [IO.File]::WriteAllBytes($pbo, $oldBytes)
++            Write-FixtureBytes ($pbo, $oldBytes)
+             [IO.File]::SetLastWriteTimeUtc($pbo, [DateTime]::UtcNow.AddHours(-2))
+         }
+         $before = Get-ByteIdentity $pbo
+@@ -143,6 +215,7 @@
+         if ($case.Write) { $writeFlag = '1' }
+         $overrides = @{
+             DAYZ_ALLOW_PLAIN_MODS = '1'
++            AF59_VALVE_LOG = $valveLog
+             AF59_TEMP_SENTINEL = $sentinel; AF59_WIPE_LOG = $wipeLog
+             DAYZ_DEV_ROOT = $dev; DAYZ_WORK_DRIVE = $drive; DAYZ_ADDONBUILDER = $stub
+             DAYZ_GAME_PATH = (Join-Path $root 'absent game')
+@@ -152,9 +225,14 @@
+             AF59_ARGS_LOG = $argLog; AF59_PBO = $pbo; AF59_PAYLOAD = $payload
+             AF59_STUB_TEXT = $case.Text; AF59_STUB_EXIT = [string]$case.Code; AF59_STUB_WRITE = $writeFlag
+         }
++        if ($case.Id -in @('S15', 'S16')) { $overrides.DAYZ_ALLOW_PLAIN_MODS = $null }
+         foreach ($name in $overrides.Keys) {
+             $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+             [Environment]::SetEnvironmentVariable($name, $overrides[$name], 'Process')
++        }
++        if ($case.Id -in @('S15', 'S16') -and
++            $null -ne [Environment]::GetEnvironmentVariable('DAYZ_ALLOW_PLAIN_MODS', 'Process')) {
++            throw 'R4: escape variable was not removed'
+         }
+         # Windows SDK 10.0.26100.0/um/jobapi2.h:38,62,70; handleapi.h:38.
+         # Compile under the scenario TEMP, and own only this scenario's process tree.
+@@ -204,7 +282,7 @@
+         if ($exitCode -ne 0 -and -not $marker) { $observed = 'rejection' }
+         $issues = @()
+         if ($observed -ne $expected) { $issues += 'verdict mismatch' }
+-        if (-not (Test-Path -LiteralPath $argLog -PathType Leaf)) { $issues += 'stub was not invoked' }
++        if ($case.Id -ne 'S15' -and -not (Test-Path -LiteralPath $argLog -PathType Leaf)) { $issues += 'stub was not invoked' }
+         $after = Get-ByteIdentity $pbo
+         if ($case.Id -in @('S2', 'S4', 'S5') -and $after -cne $before) {
+             $issues += 'previous PBO bytes changed or PBO missing'
+@@ -228,6 +306,36 @@
+                 $issues += 'C3: missing script-count rejection'
+             }
+             if ($after -cne [Convert]::ToBase64String($newBytes)) { $issues += 'C3: incomplete new PBO not delivered by stub' }
++        }
++        if ($case.Id -eq 'S10') {
++            if (-not $stdout.Contains('[warn] PBO script check INCONCLUSIVE (unsupported format):') -or
++                $stdout.Contains('[ok] script check:')) { $issues += 'R1: unsupported header must warn without claiming a verified count' }
++        }
++        if ($case.Id -eq 'S11') {
++            if (-not $stdout.Contains('Invalid PBO: Truncated PBO payload.')) { $issues += 'R1: proven truncation was not rejected as invalid' }
++        }
++        if ($case.Id -eq 'S12' -and -not $stdout.Contains('PBO carries 1 .c entries but the source has 2')) {
++            $issues += 'R2a: outside script did not raise source threshold'
++        }
++        if ($case.Id -eq 'S13' -and -not $stdout.Contains('PBO carries 0 .c entries but the source has 1')) {
++            $issues += 'R2b: source without scripts directory was not checked'
++        }
++        if ($case.Id -eq 'S14' -and (-not $stdout.Contains('[ok] script check: 9/9 .c entries present in the PBO') -or
++            $stdout.Contains('INCONCLUSIVE'))) { $issues += 'R3: real PBO was not counted exactly' }
++        if ($case.Id -in @('S11', 'S12', 'S13') -and $after -cne [Convert]::ToBase64String($newBytes)) {
++            $issues += 'R1/R2: builder did not deliver the intended failing PBO'
++        }
++        if ($case.Id -eq 'S15') {
++            if (Test-Path -LiteralPath $argLog) { $issues += 'R4: builder ran on a plain destination without attestation' }
++            if ($after -cne $before) { $issues += 'R4: rejected destination PBO changed' }
++            if (-not $stdout.Contains('Mods destination is not a junction/link:')) { $issues += 'R4: wrong rejection cause' }
++        }
++        if ($case.Id -eq 'S16') {
++            if (-not (Test-Path -LiteralPath $valveLog) -or [IO.File]::ReadAllText($valveLog).Trim() -ne 'absent') {
++                $issues += 'R4: builder did not observe absent escape variable'
++            }
++            if (-not $stdout.Contains('[ok] script check: 1/1 .c entries present in the PBO')) { $issues += 'R4: mapped build skipped script check' }
++            if ((Get-ByteIdentity (Join-Path $preparedAddons ($mod + '.pbo'))) -cne $after) { $issues += 'R4: output did not reach mapping target' }
+         }
+         if ($case.Id -eq 'S1') {
+             try { Test-TempArgument $argLog $drive $cwd }
+@@ -266,8 +374,17 @@
+             }
+         }
+         try {
++            if ($null -ne $junctionPath -and (Test-Path -LiteralPath $junctionPath)) {
++                $fullLink = [IO.Path]::GetFullPath($junctionPath)
++                if (-not $fullLink.StartsWith([IO.Path]::GetFullPath($root) + '\', [StringComparison]::OrdinalIgnoreCase) -or
++                    -not ((Get-Item -LiteralPath $fullLink -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
++                    throw 'Unsafe fixture junction cleanup'
++                }
++                # Delete only the checked junction, never recurse through its target.
++                [IO.Directory]::Delete($fullLink)
++            }
+             Remove-FixtureTree $root
+-            if ($case.Id -eq 'S9') { Remove-FixtureTree $runRoot }
++            if ($case.Id -eq $scenarios[-1].Id) { Remove-FixtureTree $runRoot }
+         }
+         catch { $reason = ([string]$reason + '; cleanup failed: ' + $_.Exception.Message) }
+     }
+@@ -282,5 +399,5 @@
+     }
+ }
+ Write-Output ('PASS=' + $passed + ' FAIL=' + $failed)
+-if ($passed -eq 9 -and $failed -eq 0) { exit 0 }
++if ($passed -eq $scenarios.Count -and $failed -eq 0) { exit 0 }
+ exit 1

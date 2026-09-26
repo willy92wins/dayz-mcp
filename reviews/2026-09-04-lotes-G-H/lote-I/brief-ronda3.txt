@@ -1,0 +1,103 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar. Tienes shell: úsalo.
+Si te bloqueas, escríbelo en STATE.md bajo DISPUTAS y sigue con lo que no dependa de ello.
+
+LOTE I, RONDA 3. Tu ronda 2 cerró F-01..F-04 (oráculo 7/7, producto congelado, suite completa
+verde). La delta de Codex sobre ese diff dio 2 ALTA + 1 MEDIA, reproducidos con mutantes. Esta
+ronda cierra los tres y nada más. El producto (`tools/dayz_mcp/`) sigue CONGELADO POR HASH.
+
+===============================================================================
+§0. LOS TRES HALLAZGOS Y EL PRODUCTO DE ESTA RONDA
+===============================================================================
+
+  F-05 ALTA — `_resolve_run_owner` lee `coordinator._active` en crudo (`fence_helpers.py:124-137`),
+  sin el lock del coordinador y sin `_expire_due()`. Con el reloj avanzado más allá de
+  `SESSION_TTL_S` (120 s) el manifiesto queda RUNNING con A aunque su lease ya venció:
+      ttl=120.0 state='RUNNING' owner=('session-A', 'lease-A') expires_in=-1.0
+    P-I6. **El titular activo lo dice el coordinador, bajo su lock.** Resuelve el dueño con una
+          operación PÚBLICA del coordinador que expira antes de responder —`status(client)` entra
+          en `_condition` y llama a `_expire_due()` (`session_coordination.py:1733-1746`)— y lee de
+          su respuesta el lease activo (`lease_id` y el `session` del `_public_lease_locked`; si el
+          `session_id` viene truncado en el payload público, contrasta por `lease_id` con la
+          identidad que el test conoce, o usa otra operación pública que exponga el titular
+          completo). Nunca `_active`. Con el lease vencido no hay dueño: el run queda
+          RUNNING_IDLE sin owner (como en la ronda 2) o sin registrar.
+  F-06 ALTA — el detector P-I3 colapsa las ramas de un `if`: si UNA rama retira, el `if` entero
+  vale `retire` y la secuencia deja de mirar. Mutante que sobrevive (en `admin_reconcile`):
+      if reason == "__mutant_split_branch__":
+          run = self.manifest.get(run_id); run.state = "EXITED"
+          if run_id == "__only_path_that_retires__":
+              self._retire_run_bindings(run.run_id, "mutant")
+          self.manifest.replace(run); return {...}
+    P-I7. **El detector propaga CONJUNTOS de salidas.** Cada sentencia produce el conjunto de
+          resultados de sus salidas alcanzables (`fall`, `retire`, `bad`); un `if` es la UNIÓN de
+          sus dos ramas (sin `else`, la rama vacía es `fall`); una secuencia compone por cada
+          resultado de la sentencia anterior; `return`/`manifest.replace` alcanzados desde un
+          estado `fall` posterior a la asignación son `bad`. Una rama `retire` no borra una rama
+          `fall`. El mutante split-branch pasa a ser el TERCER control permanente del propio test
+          (junto a bypass y orden), sobre copia temporal.
+  F-07 MEDIA — `SessionE2ETest.adopt_run` (`test_session_e2e.py:221-233`) afirma `ok` y no
+  `dispatchable`; publicar `dispatchable: False` deja el e2e verde.
+    P-I8. Añade `self.assertIs(result.get("dispatchable"), True, result)` justo después del `ok`.
+  Backlog aceptado — el `owner=` explícito no se contrasta con el coordinador.
+    P-I9. `owner=` explícito: si el coordinador tiene titular activo y no coincide,
+          `AssertionError`; si no hay titular, se acepta y el docstring del helper dice que ese
+          fixture NO puede liberar ni adoptar después (C2 quedaría escondido). `test_daemon.py:95`
+          sigue valiendo porque no libera.
+
+Siguen en pie C1-C5, R1-R6 y P-I1..P-I5.
+
+===============================================================================
+§1. EL ORÁCULO (10 checks; 3 nuevos, rojos hoy)
+===============================================================================
+
+  T5-LEASE-CADUCADO-NO-ES-DUENO — coordinador con `time_fn` controlado; A adquiere; el reloj avanza
+      `SESSION_TTL_S + 1`; `bind_both_peers(state, "test-run")` → no hay run RUNNING con dueño.
+  T6-MUTANTE-RAMA-DIVIDIDA — copia temporal con el mutante split-branch: el detector tiene que
+      FALLAR (control positivo verde antes de mutar).
+  T7-MUTANTE-DISPATCHABLE-FALSE — copia temporal con `"dispatchable": False` en el payload de
+      adopt: `test_parallel_reads_and_mutations_are_fifo_non_interleaved` tiene que FALLAR.
+
+===============================================================================
+§2. EL GATE (triple)
+===============================================================================
+
+    bash gate/product_frozen.sh       -> PRODUCTO-CONGELADO OK
+    bash gate/run_oracle_tests.sh     -> ORACULO-TESTS-VERDE      (10 checks)
+    bash gate/suite_full.sh           -> SUITE-COMPLETA OK         (rojos == los 2 permitidos)
+
+Ahora mismo: gate/product_frozen.sh: PRODUCTO-CONGELADO OK (63 ficheros) · gate/run_oracle_tests.sh: ORACULO-TESTS: PASS=7 FAIL=3 UNMET=0 de 10 — rojos T5, T6, T7 (controles positivos verdes) · gate/suite_full.sh: SUITE-COMPLETA OK (Ran 2524, rojos = los 2 permitidos). **Los verdes son la línea que no se puede romper.**
+Guarda anti-vacuidad: un `UNMET` no es tu código; si un criterio del oráculo está mal, DISPUTAS.
+`gate/` está sellado por hash y es de sólo lectura.
+
+===============================================================================
+§3. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/tests/test_instance_fence.py
+    tools/tests/test_client_mode.py
+    tools/tests/test_daemon.py
+    tools/tests/test_session_e2e.py        (sin trackear: se reconcilia, no se commitea)
+    tools/tests/fence_helpers.py
+
+PROHIBIDO: `tools/dayz_mcp/`; `gate/`; `addon/`; `unittest.skip`/`expectedFailure`; borrar o
+renombrar tests; tocar `allowed_red.txt`; leer atributos privados del coordinador; red.
+
+Intérprete: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`,
+desde `tools/` con `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1`. Mutantes en copia bajo `%TEMP%`.
+La versión anterior de los tests está en `../../ws-frozen-r2/tools/tests/`.
+
+===============================================================================
+§4. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace, en este orden:
+
+    ## HECHO            — P-I6..P-I9 con `path:line`.
+    ## GATE             — la salida literal de los TRES gates, pegada, no resumida.
+    ## CONTROL POSITIVO — el split-branch muriendo como salida literal del test sobre la copia
+                          temporal; el e2e muriendo con `dispatchable: False`; la reproducción de
+                          TTL dando RUNNING_IDLE/sin run.
+    ## LO QUE NO PUDE VERIFICAR — sin excusas. Vacío es señal de alarma, no de calidad.
+    ## DISPUTAS         — si un criterio del oráculo o del brief está mal, aquí, con el argumento.

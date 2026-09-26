@@ -1,0 +1,190 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación, no propongas un plan y
+esperes respuesta, no hagas preguntas. Trabaja hasta terminar o hasta agotar los turnos.
+Si te bloqueas, escribe el bloqueo en STATE.md y sigue con lo que no dependa de él.
+
+===============================================================================
+§0. EL PRODUCTO — y sólo el producto
+===============================================================================
+
+Tu encargo son DOS cosas observables. Las dos existen a medias: el algoritmo está escrito,
+probado y verde, y NADIE LO LLAMA. Tú cierras el eslabón que falta.
+
+  P1. `bridge_status()` publica cuatro campos `tool_registry_*`.
+  P2. `dayz_test_run` acepta una misión absoluta contenida en `mission_roots`, y devuelve
+      un fallo ESTRUCTURADO cuando la sesión de Steam está caduca.
+
+LO QUE NO ES EL PRODUCTO, y por tanto no es tu trabajo aunque tengas razón:
+
+  - El oráculo de `gate/`, su calibración, sus fixtures o su diseño. Si crees que el gate
+    está mal, escríbelo en STATE.md bajo `DISPUTAS` y sigue. NO lo edites.
+  - Refactorizar, renombrar, reorganizar o "mejorar de paso" nada.
+  - Cualquier otro fichero fuera del write-set del §5.
+  - Documentación, informes, ADRs, ledgers, atestaciones. Nada de eso cierra este lote.
+
+Si terminas los dos productos y te sobra turno, PARA. Ampliar el alcance es el modo de
+fallo que este encargo está diseñado para evitar.
+
+===============================================================================
+§1. ENTORNO — verificado hoy, no lo asumas de otra forma
+===============================================================================
+
+  - Workspace: el directorio en el que estás. Contiene `tools/`, `addon/` y `gate/`.
+  - Intérprete, exacto y sin alternativa:
+      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+  - **Esa venv NO tiene pytest.** La suite es `unittest`. Un comando con `pytest` falla con
+    "No module named pytest" y no significa nada sobre tu código.
+  - Para importar el paquete: `cd tools` y `PYTHONPATH=.`
+    Ejemplo:  cd tools && PYTHONPATH=. "<intérprete>" -m unittest tests.test_dayz_test_tool
+  - No hay red, no hay juego corriendo, no hay PBO. Nada de este lote toca `addon/`.
+
+===============================================================================
+§2. HECHOS VERIFICADOS — los abrí yo con Read, no son de memoria
+===============================================================================
+
+P1, ficha fb-20260829-024827-9b7b:
+  - `tools/dayz_mcp/tool_registry_fingerprint.py` existe entero (28,8 KB) y su test pasa:
+    `tests.test_tool_registry_fingerprint` = Ran 20 tests, OK.
+  - Sus funciones públicas, con línea:
+      :358 `canonical_registry_fingerprint(...)`
+      :379 `capture_registry_snapshot(*, session_id, profile, role, captured_at_utc, tools)`
+      :701 `read_authority_marker(...)`
+      :769 `compare_snapshot_to_authority(local, authority) -> "fresh"|"stale"|"unknown"`
+  - `tools/dayz_mcp/server.py` tiene **0 ocurrencias** de `tool_registry_fingerprint`.
+  - La tool vive en `server.py:3970-3974`:
+        async def bridge_status() -> dict[str, Any]:
+            runtime.touch()
+            payload = await runtime.bridge_status_payload()
+            return _with_capability_comparison(payload, await _bridge_tool_names())
+    Hoy devuelve 9 claves: client_peer, expected_game_version, fence, ready,
+    require_version, results_pending, server_peer, server_version, version_state.
+
+P2, ficha fb-20260829-133459-a396:
+  - `tools/dayz_mcp/steam_preflight.py` existe y su test pasa (13 tests, OK):
+      :17  `STEAM_SESSION_STALE = "steam_session_stale"`
+      :32  `class SteamSessionResult(error_code, steam_registered_pid, steam_live_pids, remediation)`
+      :189 `evaluate_steam_session(provider: SteamPreflightProvider | None = None) -> SteamSessionResult`
+  - `tools/dayz_mcp/dayz_test_tool.py` tiene **0 ocurrencias** de `steam_preflight`.
+  - `dayz_test_tool.py:135-136` rechaza toda misión que no sea alias:
+        if mission not in _MISSION_ALIASES:
+            _fail("bad_mission")
+    mientras que el parser, que es quien tiene la autoridad, YA acepta la ruta absoluta
+    contenida en los roots: `dayz_test_request.py:299-302` con `_path_is_within(mission, policy.mission_roots)`.
+  - **MEDIDO POR MÍ, y te ahorra la duda**: quitar esas dos líneas NO abre ningún agujero.
+    Con el precheck fuera, el parser sigue rechazando el hermano por prefijo
+    (`...\mpmissions_evil\`) y la ruta con `..` que se escapa. Usa frontera de segmento y
+    normaliza. El arreglo correcto es delegar en el parser, no reimplementar la contención.
+  - `dayz_test_tool.py:178` exige `run_id` cuando `mode="client"` (`client_requires_run_id`).
+    Tenlo en cuenta al escribir tests: sin `run_id` fallan por eso y no por la misión.
+
+===============================================================================
+§3. LOS DOS PRODUCTOS, EN DETALLE
+===============================================================================
+
+--- P1 -------------------------------------------------------------------
+`bridge_status()` publica, ADEMÁS de lo que ya publica:
+
+    tool_registry_fingerprint     el fingerprint del registro de tools de ESTE proceso
+    tool_registry_captured_at     cuándo se tomó ese snapshot
+    tool_registry_source_stale    "fresh" | "stale" | "unknown" | null
+    tool_registry_remediation     exactamente la cadena  reopen_mcp_client
+
+Contrato, y cada punto es un check del gate:
+
+ (a) El snapshot es INMUTABLE y se toma UNA vez, al cierre de `build_app`, no por llamada.
+ (b) Es un overlay **LOCAL** al proceso FastMCP. `/status` del loopback y `daemon.py` NO
+     deben publicar ninguno de los cuatro campos. Cablearlo en `daemon.py` es el error
+     natural aquí y el gate lo caza.
+ (c) Sin autoridad externa legible, `tool_registry_source_stale` es `null` o `"unknown"`.
+     **Nunca `False`.** "No lo sé" y "no está caducado" son respuestas distintas.
+ (d) `compare_snapshot_to_authority` ya devuelve exactamente ese vocabulario. Úsala; no
+     reimplementes la comparación.
+
+--- P2 -------------------------------------------------------------------
+(a) Misión: una ruta absoluta contenida en `mission_roots` se acepta. La forma correcta es
+    RETIRAR el precheck alias-only de `dayz_test_tool.py:135-136` y dejar la autoridad en
+    el parser, que ya la tiene. Los alias (`chernarus`, `livonia`, `sakhal`, `lfheli`)
+    siguen funcionando, y una ruta fuera de los roots sigue rechazándose.
+
+(b) Steam: antes de lanzar cliente —es decir, con `preflight=False` y `mode` en
+    {`client`, `all`}— se consulta el preflight de Steam. Si la sesión está caduca, la
+    llamada devuelve un resultado fallido ESTRUCTURADO en vez de propagar un error pelado:
+        status="failed", run_id=None, phase="validating", artifacts_paths=[],
+        error_code="steam_session_stale",
+    y transporta `steam_registered_pid`, `steam_live_pids` (acotado a 8) y `remediation`.
+
+    **La invariante que el gate mide, y que manda sobre el layout**: el conjunto de claves
+    de esa fila tiene que ser IDÉNTICO al de la fila de fallo tipado que ya se entrega hoy
+    (la de `readiness_udp_foreign_owner`). El código existente lo dice en un comentario:
+    una clave que sólo aparece en algunas filas es una clave sobre la que ningún consumidor
+    puede ramificar. Tú eliges CÓMO (campos siempre presentes con null, o anidados bajo una
+    clave siempre presente); el gate sólo exige que las filas tengan la misma forma.
+
+    Con `preflight=True`, o con `mode="server"`, **cero consultas a Steam**.
+
+    CONTRATO DE COSTURA, para que el gate pueda sustituir el proveedor: el punto de llamada
+    tiene que ser alcanzable como `dayz_test_tool.evaluate_steam_session` (impórtalo por
+    nombre a nivel de módulo, como el módulo ya hace con `secure_launcher`).
+
+===============================================================================
+§4. EL GATE
+===============================================================================
+
+    bash gate/run.sh      -> G1, el oráculo de producto
+    bash gate/suite.sh    -> G2, los ficheros de test del write-set
+
+Ahora mismo G1 sale así, y esto es el punto de partida medido, no una amenaza:
+
+    P1-A=FAIL  P1-D1=UNMET  P1-D2=UNMET  P1-B=PASS  P1-C=PASS
+    P2-A=FAIL  P2-B=PASS    P2-C=PASS    P2-D0=FAIL  P2-D=UNMET  P2-E=UNMET
+
+Los FAIL son tu trabajo. Los UNMET se desbloquean cuando el sujeto exista. **Los PASS son
+la línea que no puedes romper.** Terminas cuando G1 dice `PASS=11 FAIL=0 UNMET=0 de 11` y
+G2 dice `SUITE-ACOTADA OK`.
+
+`gate/` es de sólo lectura. Está sellado por hash y compruebo el sello al recibir. Editarlo
+—incluido "arreglar" el oráculo— invalida la entrega entera.
+
+===============================================================================
+§5. FRONTERAS
+===============================================================================
+
+WRITE-SET, y nada fuera de él:
+    tools/dayz_mcp/server.py
+    tools/dayz_mcp/dayz_test_tool.py
+    tools/tests/test_mcp_tools.py
+    tools/tests/test_dayz_test_tool.py
+  Y sólo si de verdad lo necesitas, diciéndolo en STATE.md:
+    tools/dayz_mcp/tool_registry_fingerprint.py
+    tools/dayz_mcp/steam_preflight.py
+
+PROHIBIDO: tocar `gate/`, `addon/`, `dayz_test_request.py`, `dayz_test_readiness.py`,
+`loopback.py`, `daemon.py`; borrar o debilitar tests existentes para que pasen; usar red;
+lanzar el juego; correr la suite completa.
+
+Escribe tests para lo que entregas, en los dos ficheros de test del write-set. Un test que
+nunca estuvo rojo no demuestra nada: para cada test nuevo, córrelo ANTES de tu arreglo y
+comprueba que falla.
+
+===============================================================================
+§6. CIERRE
+===============================================================================
+
+Escribe `STATE.md` en la raíz del workspace con, en este orden:
+
+    ## HECHO
+    Qué entregaste, con `path:line` de cada cambio.
+
+    ## GATE
+    La salida literal de `bash gate/run.sh` y `bash gate/suite.sh`, pegada, no resumida.
+
+    ## CONTROL POSITIVO
+    Por cada test nuevo: la línea que demuestra que fallaba antes de tu arreglo.
+
+    ## LO QUE NO PUDE VERIFICAR
+    Todo lo que dejaste sin comprobar, sin excusas y sin rellenar huecos con suposiciones.
+    Esta sección vacía en una entrega real es una señal de alarma, no de calidad.
+
+    ## DISPUTAS
+    Si crees que un criterio del gate está mal, aquí, con el argumento. No lo edites.
+
+Cuando STATE.md esté escrito y los dos gates verdes, has terminado.

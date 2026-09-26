@@ -1,0 +1,37 @@
+server: a daemon enqueue refusal reaches the caller with its code and hint instead of a bare remote_error (ficha f45d)
+
+After dayz_test_run releases the owner lease the run is RUNNING_IDLE, and the daemon refuses every
+/enqueue on it, reads included, with 409 {"error": "run_not_owned", "hint": "This run has no owner
+(RUNNING_IDLE). Adopt the existing run before dispatching."} (loopback._enqueue_run_rejection,
+_fence_reject_response). The MCP client only lets whitelisted codes through (_REMOTE_ERROR_CODES) and
+_public_enqueue_error never looked at the hint, so wait_for(players_at_least) right after a client
+launch surfaced "remote_error" and nothing else. Measured 2026-09-06 21:07 (audit: the read-only
+query_all_players authorized at 19:07:25Z with no enqueue_accepted row behind it; the session's
+bridge_status counter fence.mutation_rejects_by_code.run_not_owned went 6 -> 7).
+
+- _REMOTE_ERROR_CODES gains run_not_owned, run_state_unavailable and enqueue_cancelled, the run-fence
+  refusals loopback can emit on /enqueue.
+- _public_enqueue_error carries the daemon hint beside a whitelisted code ("<code>: <hint>"), bounded
+  by _carriable_hint (str, 1..240 chars, stripped, single line). An unknown code stays the bare
+  remote_error token even when a hint is present; the three recipe branches are unchanged.
+- ClientRuntime.call_bridge / enqueue_bridge compare the raw code with _STALE_LEASE_ERRORS, so a
+  hinted lease_invalid still clears the local lease.
+- The wait_for description names the run_not_owned abort and its recipe (session_acquire_wait).
+- execute_wait_for is unchanged: its else-raise already relays the text; pinned by test.
+
+Tests: test_enqueue_refusal_reaches_the_caller.py (new: code + hint mapping, bounded hint, unknown code
+keeps dropping its hint, recipes untouched, AST census of every code the enqueue route can emit
+against the whitelist, client-mode fake daemon 409, wait_for description) and
+test_wait_for.py (an ownership refusal aborts the first probe with its hint). Red first, then green;
+three mutants each killed by a named test (STATE.md in the receipt).
+
+Implemented by Grok (Cursor, cursor-grok-4.6-xhigh) on a faithful copy of this branch; reviewed by
+the Anthropic family (SEGURO INTEGRAR, four PUEDE findings). Applied at integration, verbatim to the
+reviewer's diffs: H1 session_granting (emitted by session_coordination.authorize on /enqueue during a
+grant in flight, invisible to the AST census by construction) joins the whitelist and the census;
+H2 _carriable_hint rejects every non-printable character, not only newlines; H3 the wait_for
+description says that the grant adopts the single ownerless RUNNING_IDLE run and reports it in
+adopted_run. Three over-long lines re-wrapped by the integrator. Receipt:
+reviews/2026-09-06-vaciado-noche/f45d/.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>

@@ -1,0 +1,5 @@
+DELTA R2b (18:5x, dos minutos despues de lanzar las sesiones de la ronda 2; DIFF-D2.patch regenerado con estos bytes):
+1. process_lifecycle.py: _DAYZ_PORT_RANGE = range(2302, 2321) -> range(2302, 3000) (2402/2502 son puertos alternativos del proyecto; el test test_named_non_dayz_holders_never_trip_attribution lo exigia y salia rojo).
+2. tests/test_box_port_wait.py: test_port_scan_unknown_returns_at_once ya no espera una llamada done: el ticket vuelve al llamante como en la salida por timeout.
+Focal tras el delta: Ran 56 tests in 0.144s OK
+Un git apply --reverse --check de un DIFF-D2.patch leido antes de este delta fallara solo en esos dos hunks.

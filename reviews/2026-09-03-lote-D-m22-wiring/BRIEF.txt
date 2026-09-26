@@ -1,0 +1,140 @@
+MODO NO INTERACTIVO. Nadie va a contestarte. No pidas aprobación ni confirmación, no
+propongas un plan y esperes respuesta. Trabaja hasta emitir el dictamen y escríbelo en
+disco. Si algo te bloquea, dilo en el dictamen y sigue con el resto.
+
+===============================================================================
+§0. QUÉ ES EL PRODUCTO — y qué queda FUERA aunque tengas razón
+===============================================================================
+
+Revisas UN cambio de cableado en el servidor MCP de DayZ. El producto son exactamente DOS
+cosas observables, y tu dictamen sólo puede hablar de ellas:
+
+  P1. La respuesta de la tool `bridge_status()` publica cuatro campos `tool_registry_*`,
+      calculados como overlay LOCAL del proceso FastMCP.
+  P2. La fachada `dayz_test_run` acepta una misión por ruta absoluta contenida en
+      `mission_roots`, y devuelve un resultado fallido ESTRUCTURADO cuando la sesión de
+      Steam registrada está caduca.
+
+**FUERA DEL ALCANCE, y esto no es negociable ni siquiera si tienes razón:**
+
+  - El oráculo, el gate, el ledger, los mutantes, la calibración, el workspace, el brief
+    del implementador y este brief. Todo eso es aparato del orquestador. Si encuentras un
+    defecto ahí, escríbelo en la sección BACKLOG del dictamen y NO lo cuentes como
+    bloqueante, aunque sea cierto y aunque sea grave.
+  - La arquitectura, el estilo, los nombres, la organización de los módulos, la cobertura
+    de tests "en general", la deuda técnica preexistente y cualquier cosa que ya estuviera
+    mal antes de este diff.
+  - Propuestas de refactor.
+
+**Queda expresamente PROHIBIDO justificar el alcance de tu revisión con "es donde suelen
+aparecer los fallos" o "ahí es donde han salido antes".** Esa es una estadística del
+proceso, no del artefacto, y apuntar ahí es el modo de fallo que este encargo evita.
+
+Un hallazgo es BLOQUEANTE si y sólo si cumple las tres:
+  (a) es un defecto de P1 o de P2,
+  (b) traes un comando concreto que lo reproduce, y
+  (c) ese comando falla hoy con el código entregado.
+Sin repro ejecutable no es bloqueante: va a BACKLOG. Sin excepciones, salvo corrupción o
+pérdida de datos, que se reportan igual aunque no tengas repro completo.
+
+===============================================================================
+§1. ENTORNO
+===============================================================================
+
+  - Árbol entregado (lo que revisas): C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-D\ws
+  - Árbol vivo de referencia (sin el cambio): C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev
+  - Diff acotado, sin ruido de fin de línea: C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-D\review\DIFF.patch
+  - Intérprete, exacto y sin alternativa:
+      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+  - **Esa venv NO tiene pytest.** La suite es `unittest`. Para correr algo:
+      cd C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-D\ws/tools && PYTHONPATH=. "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m unittest tests.test_dayz_test_tool
+  - Nota de entorno: el sandbox de Codex no ve el user-site de Python. Usa ese intérprete
+    y ese PYTHONPATH y no instales nada.
+  - No hay juego, ni red, ni PBO. El cambio es Python puro.
+
+===============================================================================
+§2. HECHOS VERIFICADOS POR EL ORQUESTADOR — con path:line, ábrelos si dudas
+===============================================================================
+
+Estado ANTES del cambio, medido en el árbol vivo:
+  - `server.py` tenía 0 ocurrencias de `tool_registry_fingerprint`, y `bridge_status()`
+    devolvía 9 claves. El módulo `tools/dayz_mcp/tool_registry_fingerprint.py` existía
+    entero y con sus 20 tests verdes; nadie lo llamaba.
+  - `dayz_test_tool.py` tenía 0 ocurrencias de `steam_preflight`. Su línea 135 rechazaba
+    toda misión no-alias con `bad_mission`, mientras el parser
+    `dayz_test_request.py:299-302` ya aceptaba la ruta absoluta contenida en los roots.
+
+Invariante del árbol que el cambio NO puede romper, y que ya estaba antes:
+  - `dayz_test_tool.py:524` — `_validate_terminal_context`: `preflight != (terminal.run_id
+    is None)` es `terminal_invalid`.
+  - El sobre de resultado de `execute_dayz_test_run` tiene el MISMO conjunto de claves en
+    todas sus filas. El código lo dice en un comentario: una clave que sólo aparece en
+    algunas filas es una clave sobre la que ningún consumidor puede ramificar.
+
+Dato que te ahorra una hipótesis, medido por mí: quitar el precheck de la línea 135 NO
+abre ningún agujero de contención. Con el precheck fuera, el parser sigue rechazando el
+hermano por prefijo (`...\mpmissions_evil\`) y la ruta con `..` que se escapa; usa frontera
+de segmento y normaliza. Si crees que esto es falso, refútalo con un comando.
+
+Historia relevante de esta misma entrega, por si te ahorra trabajo: en la ronda 1 el
+implementador había añadido un `skip_run_id_context` que saltaba `_validate_terminal_context`
+en ciertos casos. Era una validación de producción debilitada para acomodar un fixture
+incoherente del orquestador. Está REVERTIDO en lo que revisas. Confirma que sigue fuera y
+que no hay otra vía por la que esa validación se esquive.
+
+===============================================================================
+§3. LO QUE TIENES QUE ATACAR
+===============================================================================
+
+Sobre P1:
+  - ¿Los cuatro campos salen de un snapshot tomado UNA vez al cierre de `build_app`, o se
+    recalculan por llamada? Un snapshot que cambia entre llamadas no es un fingerprint.
+  - ¿El overlay es de verdad LOCAL? `/status` del loopback y `daemon.py` no deben publicar
+    ninguno de los cuatro. Busca cualquier vía por la que se filtren.
+  - Sin autoridad externa legible, ¿`tool_registry_source_stale` puede valer `False`?
+    Debe ser `null` o `"unknown"`. "No lo sé" y "no está caducado" son respuestas distintas
+    y confundirlas es el defecto que la ficha existe para evitar.
+  - ¿Qué pasa si la autoridad existe pero está corrupta, truncada o con el par
+    (profile, role) distinto?
+
+Sobre P2:
+  - ¿Una ruta que NO está dentro de `mission_roots` sigue rechazándose, por todas las vías?
+  - ¿Los alias siguen funcionando los cuatro?
+  - ¿El sobre de la fila de Steam tiene EXACTAMENTE las mismas claves que las demás filas,
+    incluidas las de éxito y las de otros fallos tipados? Compruébalo ejecutando, no leyendo.
+  - ¿`preflight=True` y `mode="server"` consultan Steam alguna vez, por algún camino?
+  - ¿Qué pasa si `evaluate_steam_session` lanza una excepción en vez de devolver? ¿Y si
+    devuelve un `SteamSessionResult` con `error_code=None`?
+  - ¿Los `steam_live_pids` están acotados a 8 de verdad, y qué pasa con 9 o con 0?
+
+Y la pregunta transversal: **¿hay algún camino por el que este cambio haga que una llamada
+que hoy falla pase a tener éxito, o al revés, sin que sea uno de los dos productos?**
+
+===============================================================================
+§4. ENTREGABLE
+===============================================================================
+
+Escribe tu dictamen en:  C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-D\review\REVIEW-CODEX.md
+
+Formato, en este orden:
+
+    ## VEREDICTO
+    Una línea: BLOQUEANTES=<n>.
+
+    ## BLOQUEANTES
+    Uno por bloque, y cada uno con:
+      - qué producto rompe (P1 o P2)
+      - el path:line
+      - el comando de repro, literal y copiable
+      - la salida que da hoy ese comando, pegada
+
+    ## BACKLOG
+    Todo lo demás que hayas visto, incluido lo del aparato del orquestador. Aquí sí quiero
+    tu opinión completa: no la censures, sólo no la cuentes como bloqueante.
+
+    ## LO QUE NO PUDE VERIFICAR
+    Sin excusas. Vacío en una revisión real es señal de alarma, no de calidad.
+
+    ## PREMISAS DEL ORQUESTADOR QUE CREO FALSAS
+    Si algo del §2 no se sostiene, dilo con el comando que lo refuta. Esta sección vale más
+    que las otras: mis premisas ya han estado mal antes en este mismo lote.

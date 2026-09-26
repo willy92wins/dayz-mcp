@@ -1,0 +1,1140 @@
+{
+"run_id": "20260903n",
+"n": 52,
+"fichas": [
+{
+"id": "fb-20260903-004813-ef5e",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-03T00:48:13Z",
+"age_label": null,
+"title": "El espacio de `reason` de bridge_status es ABIERTO: la doc y la ficha 21 listan seis y hay mas",
+"body": "Medido el 2026-09-03 implementando M19 (proyeccion de readiness).\n\nQUE DICE LA DOC. La descripcion de la tool bridge_status enumera ready={ready, reason=ready|no_run|server_poll_stale|client_not_polling|client_legacy_blocked|version_mismatch}: seis valores. La ficha 21/a396 punto 5 se apoya en esa misma lista al definir LaunchReadinessProjection.\n\nQUE HACE EL CODIGO. compute_bridge_ready (tools/dayz_mcp/server.py:355-397) emite ademas:\n- \"legacy_unbound\" como literal, en :378 y :380;\n- y en :373-376, `return {\"ready\": False, \"reason\": s_block}` / `c_block`, donde s_block y c_block son `_FENCE_BLOCK_READY.get(<binding_state>)`. O sea CUALQUIER valor de ese mapa: instance_unattributed, instance_role_mismatch, instance_malformed, instance_peer_collision, creation_time_unreadable, ticket_expired, ticket_invalid, unauthorized, version_blocked, instance_unknown...\n\nPOR QUE IMPORTA, y no es cosmetico. Un consumidor que valide `reason` contra la lista de seis convierte una respuesta real e informativa en \"desconocida\". Me paso a mi: la primera version de _project_launch_readiness llevaba esa lista blanca y habria reportado bridge_ready=null para un peer bloqueado por fence, que es exactamente cuando mas falta hace saber por que. Lo cazo un test que deriva el conjunto del source en vez de copiarlo de la prosa; mi grep inicial solo busco los seis que esperaba encontrar (negativo acotado).\n\nARREGLADO EN M19: la validacion pasa a ser de FORMA -ready booleano, reason cadena no vacia- y la razon se transporta tal cual. Commit d600f22 en work/inbox-20260830-modules, con mutante dedicado: reponer la lista blanca de seis pone rojo test_every_reason_the_server_can_emit_survives_the_projection.\n\nPENDIENTE, y es de quien posea cada superficie: (1) la descripcion de la tool bridge_status deberia decir que la lista es abierta o enumerar tambien _FENCE_BLOCK_READY; (2) la ficha 21 punto 5 hereda la misma sublista. Ningun consumidor deberia cerrar ese conjunto por su cuenta.",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 36,
+"D3": false,
+"D4": false,
+"D5": "firma",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "C3",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-235202-d069",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T23:52:02Z",
+"age_label": null,
+"title": "Seis modelos de seis familias dieron seis clases distintas a la misma ficha: la rubrica por juicio no es reproducible",
+"body": "tool: council de planificacion (8 lanes lanzadas, 6 entregaron), brief byte-identico sha256 c7acfb7f...f2c8b\nargs: misma ficha de ejemplo para todas, fb-20260829-025502-251d, y rubricas equivalentes redactadas por cada lane\nhallazgo: las seis lanes (Anthropic Opus 5, Alibaba Qwen 2,4T, Google Gemini 3.6-flash, OpenAI gpt-5.6-sol, xAI Grok 4.6, Moonshot Kimi K3 Max) clasificaron esa unica ficha en SEIS clases distintas, desde \"1 fichero, 1 linea, trivial\" hasta \"transversal con gate in-game\". Cinco de las seis se equivocaron ademas en un hecho comprobable: esa ficha YA tiene disposicion aprobada y no lleva parche productivo. Verificado abriendo plans/inbox-20260830/10-fb-20260829-025502-251d.md, linea 6 \"Disposicion: EVIDENCIA\" y linea 14 \"OWNS: tools/tests/test_wait_for.py; no parche productivo salvo nueva aprobacion tras FAIL\".\npor que importa: cualquier sistema de triaje que fije la clase leyendo el texto de la ficha con un modelo produce dispersion total entre proveedores, y ademas ignora el trabajo ya aprobado. La clase tiene que salir de senales medidas por comando, y antes de clasificar hay que buscar mecanicamente si la ficha ya tiene hoja aprobada.\nmedido en el mismo arbol: plans/inbox-20260830/ tiene 46 ficheros, 35 con nombre NN-fb-<id>.md; 35 llevan linea Disposicion: y 22 llevan linea OWNS:.\nconsecuencia ya recogida: reglas R-A y R-B de plans/2026-09-03-sistema-triaje-y-tratamiento-del-buzon.md seccion 1.\ncoste del experimento: 0,4880 USD en OpenRouter (0,3022 de ellos en una lane que no devolvio texto) y 45485 tokens de la ventana semanal de Codex.",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": true,
+"D5": "pure_add",
+"D6": true,
+"D7": true
+},
+"clase_mecanica": "C3",
+"dup_candidatos": [
+"fb-20260829-025502-251d"
+]
+},
+{
+"id": "fb-20260902-235149-aa21",
+"kind": "finding",
+"project": "AI_Pipeline",
+"ts": "2026-09-02T23:51:49Z",
+"age_label": null,
+"title": "GLM 5.3 por OpenRouter cobra y devuelve vacio: el razonamiento se come el presupuesto de salida",
+"body": "tool: OpenRouter API directa, modelo z-ai/glm-5.3, lane de council\nargs: brief de 24304 bytes, max_tokens 32000, dos intentos\nerror: HTTP 200 en los dos intentos, campo content VACIO y finish_reason=length. El desglose de usage muestra 29165 tokens de razonamiento de los 32000 del presupuesto: el modelo agota max_tokens razonando y no llega a emitir texto. Coste 0,3022 USD por CERO lineas entregadas.\npor que importa: es un 200 con cuerpo vacio, asi que ningun guardian que compruebe codigo HTTP o RC lo detecta; parece exito. Ya habia una nota de que los relays sirven el error como contenido, pero este caso es peor: no hay ni error, hay silencio pagado.\nmitigacion sugerida para la proxima: reservar presupuesto de salida separado del de razonamiento (si el proveedor lo permite), o subir max_tokens muy por encima del contrato y cortar por coste, o descartar esta lane para trabajo de redaccion larga.\nfallback probado y tambien fallido: bai/glm-5.3-flash por prime-agent, dos intentos. El primero con --mode json re-serializa el mensaje entero por token y el typescript llego a 992 MB en 10 minutos mientras el modelo respondia bien (error de transporte, no del modelo). El segundo con --mode text salio RC=124 y script nunca creo su typescript.\nrepro: POST a openrouter chat/completions con z-ai/glm-5.3, un prompt largo y max_tokens 32000; leer choices[0].finish_reason y usage.\nmedido: 2026-09-02 23:52 a 00:10, dos intentos, 17 min 35 s.",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-235135-077d",
+"kind": "finding",
+"project": "AI_Pipeline",
+"ts": "2026-09-02T23:51:35Z",
+"age_label": null,
+"title": "La receta de aislamiento de claude -p esta rota: CLAUDE_CONFIG_DIR vacio responde Not logged in",
+"body": "tool: claude -p (CLI 2.1.251), lane de council\nargs: CLAUDE_CONFIG_DIR apuntando a un directorio VACIO + --strict-mcp-config + --model claude-fable-5-1, brief por stdin\nerror: la corrida devuelve is_error=true, terminal_reason=api_error, duration_api_ms=0, total_cost_usd=0 y el texto de resultado \"Not logged in - Please run /login\". El stderr anade [claude-code:unrecognized_model] {\"model\":\"claude-fable-5-1\",\"query_source\":\"sdk\"}. Es decir, DOS fallos: el directorio vacio no lleva credenciales, y el id de modelo publicado no lo reconoce esa CLI por esa puerta.\npor que importa: la receta de aislamiento documentada para no cargar el catalogo de skills del orquestador (references qwen-measurements.md:374 y qwen-montaje.md:245) deja la lane sin autenticar, asi que hoy no hay forma medida de correr una lane Anthropic aislada. El sustituto usado fue --setting-sources vacio con el CLAUDE_CONFIG_DIR real, que tiene el efecto colateral de abajo.\nefecto colateral verificado: arrancar claude.exe con CLAUDE_CONFIG_DIR al arbol real CREO C:\\Users\\guill\\.claude\\.claude.json (38375 B) y un backup de 84 B. La config buena, C:\\Users\\guill\\.claude.json, no se toco. Nadie ha borrado ni restaurado nada.\nrepro: powershell, $env:CLAUDE_CONFIG_DIR = un directorio nuevo vacio; claude -p --strict-mcp-config --model claude-fable-5-1 con el prompt por stdin; leer el JSON de salida.\nmedido: 2026-09-02 23:43, RC=1 en 11 s, coste 0.",
+"disposicion_previa": null,
+"senales": {
+"D1": 2,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "firma",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-235123-f6fa",
+"kind": "bug",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T23:51:23Z",
+"age_label": null,
+"title": "pipeline_resolve no pasa evidence_ref: el puntero a evidencia es inalcanzable desde el MCP",
+"body": "tool: pipeline_resolve\nargs: feedback_id, resolution (solo esos dos)\nerror: server.py:4257-4268 llama a inbox.append_resolution(feedback_id, resolution, platform=...) SIN pasar evidence_ref, pese a que inbox.py:125 lo acepta como kwarg opcional y inbox.py:144-146 lo persiste en el registro. Resultado: el enlace entre una resolucion y su evidencia (reviews/gates/reports/research, validados en inbox.py:15,30-46) solo cabe como prosa dentro de los 2000 caracteres de resolution (inbox.py:133). El validador _validate_evidence_ref y sus cuatro raices son codigo muerto desde la superficie MCP.\nSegundo efecto, mismo origen: inbox.py:185 sobrescribe la clave evidence_ref al plegar una resolucion posterior, asi que una resolucion nueva sin evidence_ref BORRA el puntero de la anterior. Con la tool actual esto no se puede ni producir ni reparar.\nrepro: leer server.py:4257-4268 y compararlo con la firma de inbox.append_resolution en inbox.py:120-146; grep evidence_ref en server.py devuelve 0 hits.\nalcance del fix: un fichero (server.py), parametro opcional con default None. tools/tests/test_pipeline_feedback.py:277-281 solo exige required == {feedback_id, resolution}, asi que un tercer parametro opcional no rompe el contrato del test. Requiere autorizacion del propietario por tocar la superficie de una tool publicada, no por tamano.\ncontexto: hallazgo del diseno del sistema de triaje, plans/2026-09-03-sistema-triaje-y-tratamiento-del-buzon.md seccion 1.",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": true,
+"D5": "pure_add",
+"D6": false,
+"D7": true
+},
+"clase_mecanica": "C1",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-211749-7bc1",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T21:17:49Z",
+"age_label": null,
+"title": "ANEXO a fb-20260902-210749-92a2: el PBO rancio de LFPowerGrid es un estado YA DECLARADO, no un bug nuevo",
+"body": "ANEXO de `fb-20260902-210749-92a2`. Que nadie lo re-archive como hallazgo nuevo.\n\nALIAS: el HANDOFF de LFPowerGrid del 2026-09-01 ya declara «PBO sin rebuild, HEAD ad6e8a2 sucio(26)»\ntras 39 commits de palancas. El estado era conocido y estaba escrito.\n\nLO QUE APORTA LA MEDIDA DE M11: es la primera evidencia POR CONTENIDO de ese estado, y nombra el\nfichero que lo hace consecuente.\n\n  scripts/3_Game/LFPG_Defines.c\n    source  49578 bytes  A6CC34187368FB5F2A1FB7295DECDFED1A0E7F569AB383478648B1948B903AF0\n    en PBO  48767 bytes  57E0359F2FC24EB0347543A1B95B095CBDA323C3E3E667E52C9BD2C98AC65490\n\n«PBO sin rebuild» dice que hay deriva. Esto dice DONDE, CUANTA y POR QUE importa: el fichero que\ndifiere es el que declara `LFPG_VERSION_STR`. Consecuencia practica que conviene no perder:\n**«version gate PASS» acredita el SOURCE, no el desplegado.**\n\nQUIEN LO ARREGLA: la reconstruccion del PBO y su prueba in-game son de la sesion y la ventana de\nLFPowerGrid, no del MCP. M11 no lo toca (punto 7 de su ficha) y su verdict queda INCONCLUSIVE, que\nes un cierre honesto y no un fallo que parchear.\n\nNO SE AFLOJA LA FICHA. Aceptar el `[FAIL] PBO` anterior al chequeo final, o ampliar la calibracion\npara admitir los cuatro `PERF_*`, seria mover el gate hacia el resultado: el mismo falso verde al\nreves. La calibracion se queda como esta.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": true,
+"D7": false
+},
+"clase_mecanica": "C3",
+"dup_candidatos": [
+"fb-20260902-210749-92a2"
+]
+},
+{
+"id": "fb-20260902-210749-92a2",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T21:07:49Z",
+"age_label": null,
+"title": "M11 INCONCLUSIVE: el PBO desplegado de LFPowerGrid esta rancio en el fichero que declara la version",
+"body": "FICHA: 19-fb-20260829-111016-344d (M11-LFPG-VERSION). Receipt completo con todos los hashes en\nR\\reports\\2026-08-30-inbox-implementation\\M11\\version-gate-verdict.json. Stdout integro en\nAI\\10_Projects\\DayZ_MCP\\reviews\\2026-09-02-lote-B-M11\\verify-corrective-stdout.txt.\n\nLO QUE SI ESTA ACREDITADO (medido por contenido, no por existencia de rutas):\n- Puntos 1-4 de la ficha, hechos. `version_gate` exige dos fuentes, `len(hits) == 1` por fuente\n  (no `len(set(hits))`), y compara contra el literal `[\"1.2.4\",\"1.2.4\"]` congelado en codigo, no\n  derivado de ningun input. El banco cubre los diez casos enumerados mas errores de lectura y el\n  boundary de `main()` en las dos direcciones. Corrida: OK.\n- Precondicion del punto 6: `config.cpp` trae exactamente las nueve entradas ordenadas terminando\n  en `DF_Scripts`, y `expected_required_addons(\"1.2.4\")` devuelve el baseline de ocho. Relacion\n  ocho-versus-nueve, delta exacto `DF_Scripts` -> modo (a).\n\nPOR QUE INCONCLUSIVE. La calibracion del modo (a) exige `rc=1` con EXACTAMENTE dos `[FAIL]`\n-`BOOT_DABS_DEPENDENCY` y `PBO` en el chequeo final de `requiredAddons`- y ninguno mas. Observado\n`rc=1` con `pass=10 fail=6`:\n  [FAIL] BOOT_DABS_DEPENDENCY   <- el calibrado, actual 9 / expected 8\n  [FAIL] PERF_REUSED_PURGE      <- no contemplado\n  [FAIL] PERF_SCHEDULE_MAP      <- no contemplado\n  [FAIL] PERF_RESTARTABLE       <- no contemplado\n  [FAIL] PERF_DEFERRED_PRUNE    <- no contemplado\n  [FAIL] PBO                    <- NO es el de requiredAddons\nEl `[FAIL] PBO` es un mismatch de BYTES DE SCRIPT, que es un chequeo ANTERIOR al final. La ficha\nexige que ese haya pasado para llegar al chequeo del config debinarizado, y prohibe expresamente\naceptar un `[FAIL] PBO` anterior. Luego el chequeo final nunca se alcanzo.\n\nEL HALLAZGO QUE HAY DEBAJO, y es mas grande que el veredicto: el PBO desplegado esta rancio\nrespecto al source justo en `scripts/3_Game/LFPG_Defines.c`, que es **el fichero que declara\n`LFPG_VERSION_STR`**.\n  source  49578 bytes  A6CC34187368FB5F2A1FB7295DECDFED1A0E7F569AB383478648B1948B903AF0\n  en PBO  48767 bytes  57E0359F2FC24EB0347543A1B95B095CBDA323C3E3E667E52C9BD2C98AC65490\nEl gate de version acredita el SOURCE. Lo que corre en el servidor lleva otra copia de ese fichero,\n811 bytes mas corta. Nadie deberia leer «version gate PASS» como «el desplegado es 1.2.4».\n\nACCION POR LA PROPIA FICHA (punto 7): detener M11 y abrir un cambio LFPowerGrid separado. No se\nreparan fuentes ni verificador desde DayZ_MCP, ni se deriva el literal esperado del drift. M11 NO\ncierra, y por tanto NO libera las 6 fichas que dependian de su receipt (01, 02, 04, 19, 24, 35).\n\nLos cuatro `PERF_*` pertenecen a la auditoria de rendimiento de LFPowerGrid, no a esta ficha; van en\nel mismo cambio separado.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": [
+"fb-20260829-111016-344d"
+]
+},
+{
+"id": "fb-20260902-205731-f630",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T20:57:31Z",
+"age_label": null,
+"title": "DECISION 2026-09-02: ABANDON de la fase 0 (autoridad v10); las fichas se cierran por producto",
+"body": "DECISION DE GUILLERMO, 2026-09-02 ~23:00, relevada por la sesion «revision del bucle\ngauntlet/asintota». Se archiva aqui para que la proxima sesion la vea aunque no lea el handoff.\n\nQUE SE ABANDONA\n- Fase 0 (autoridad v10): ABANDON con motivo. No se rediseña con los siete invariantes ni con\n  capas R->S->M->P. Nada de v10 se promueve. El staging se conserva sin tocar como historico.\n- Capa de autoridad existente (bundle v9, GATES.md con 195 titulos, hojas gates/, atestaciones de\n  ~/.unlazy/approved): CONGELADA como historico. No se atestan titulos nuevos, no se re-sella el\n  bundle, no se edita GATES.md. Las casillas y los PLAN-* / REVIEW-GROK / RESOLVED DEJAN DE SER\n  condicion de cierre.\n\nMOTIVO MEDIDO\n- v10 fase 0: r1 FAIL 3C/6M con 9 de 12 titulos satisfacibles sin trabajo; r2 FAIL NO CONVERGE,\n  familias en escape adyacente y punto fijo (artefactos que contienen su propio digest).\n- LL-432: la atestacion ata path + id + titulo, nunca el contenido, y se decidio no tocar el\n  checker. La capa no puede acreditar lo que promete.\n- 195 puertas con 85 atestadas, y BUG-113 (el app.pyz desplegado no arrancaba) invisible a todas\n  ellas y visible al ejecutar el pyz. HANDOFF.md:36 decia «Ran 2215 tests, OK» con la suite en\n  FAILED.\n\nCOMO SE CIERRA UNA FICHA DESDE AHORA\n(a) rama por lane y commits atribuibles; (b) suite verde MEDIDA -la linea OK/FAILED, nunca el rc de\nun pipe- Y NOMBRANDO EL INTERPRETE; (c) el app.pyz desplegado arranca; (d) revision de otra familia\ncon repro-o-backlog, tope 2 rondas y la tercera es ORCHESTRATOR_NEEDED; (e) pipeline_resolve citando\ncommit + suite + pyz + dictamen. Regla dueña: ~/.claude/skills/gates-ledger/SKILL.md:404.\n\nENMIENDA AL CRITERIO (b), medida el mismo dia y no incluida en la decision original: es necesario y\nNO suficiente. Esta suite da `Ran 2268, FAILED (failures=2)` con\n`tools/.venv-mcp/Scripts/python.exe` y `failures=7` con `C:\\Python314\\python.exe`, y cinco de esos\nsiete son falsos. Una linea OK/FAILED no identifica un resultado sin su interprete. Detalle en\nfb-20260902-202527-da54.\n\nCONTROL POSITIVO DE (c), ya ejercido: el app.pyz reconstruido, corrido con el runtime del propio\nbundle, importa dayz_mcp.dayz_test_request -> dayz_mcp.dayz_test_modes con RC=0. Es la cadena que\nBUG-113 rompia.\n\nOTROS PUNTOS VIGENTES: M15 sigue fuera del lote (DZ-R9, por rigorous-data-audit). El consumidor real\nes el ciclo in-game, y las fichas cerradas pasan por el en LOTE, nunca una por una (DZ-R5). Councils\nN=2 por defecto y ninguno para planificar un plan; el plan unificado no se reabre.\n\nARTEFACTOS: reviews/2026-09-02-v10-fase0/ABANDON.md (motivo largo), DayZ_MCP_dev/HANDOFF.md\n(LIVE-STATE reescrito), PB-020 en AI/00_System/pipeline-roadmap.md:173.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 3,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "firma",
+"D6": true,
+"D7": false
+},
+"clase_mecanica": "C3",
+"dup_candidatos": [
+"fb-20260902-202527-da54"
+]
+},
+{
+"id": "fb-20260902-202543-2bd3",
+"kind": "request",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T20:25:43Z",
+"age_label": null,
+"title": "Al registro de launchers le falta la transicion de reemplazo in situ",
+"body": "ARTEFACTO: tools/dayz_mcp/launcher_registry_update.py\n\nHUECO. El registro sabe hacer tres cosas: sembrar desde el baseline vacio (`_bootstrap_registry`,\n`:159-181`, create-only), instalar un id que NO existe (`_install_transition`, `:227-229` rechaza con\n`launcher_registry_version_already_installed` si el id ya esta) y deshacer la ultima transicion\n(`rollback_last_registry_transition`, `:525`). Lo que no sabe hacer es **reemplazar el binario de un\nid existente**.\n\nCONSECUENCIA MEDIDA en la ventana de M20: arreglar BUG-113 cambia `app.pyz`, y como la tabla del\ncierre se compila DENTRO del `.exe`, cambia tambien el PE. El registro se queda apuntando a un\nbinario que ya no existe y la suite se pone roja. Las unicas salidas hoy son:\n\n  a) resetear el registro -> se tira la cadena de recibos (~80 transacciones en esta maquina), y el\n     propio codigo reserva eso a decision humana (`:159-164`);\n  b) subir el id a `dayz-test-v2` -> obliga a renombrar el directorio del bundle y `BUNDLE_ID`\n     (`build_native_launcher.py:32-33`), que viaja dentro del `closure-manifest.json` y que\n     `verify_bundle` compara.\n\nSe tomo la (a) y queda registrado como tal; la copia previa esta en\n`AI/10_Projects/DayZ_MCP/reviews/2026-09-02-lote-B-M20/registry-pre-reset/`.\n\nDECISION SOBRE EL ID, para que no se relitigue: se queda `dayz-test-v1`. El id nombra un SLOT de\nbundle, no una version de binario. Que binario esta aprobado ya lo responde el registro por `sha256`\ny por identidad de fichero. Y como el build es reproducible, atar el id al binario crearia ids\nnuevos identicos al anterior en la mayoria de reconstrucciones: churn, no trazabilidad.\n\nPETICION: una transicion `replace` que, para un id ya instalado, valide el bundle y el PE nuevos,\nhaga CAS contra el registro actual y **escriba su recibo encadenado al anterior** en vez de empezar\nde cero. Es lo que convierte un rebuild legitimo en una operacion normal y no en una decision humana\nque destruye historial.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 2,
+"D3": false,
+"D4": true,
+"D5": "firma",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-202527-da54",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T20:25:27Z",
+"age_label": null,
+"title": "CORRECCION de fb-20260902-201212-b8d8: los 5 rojos eran el interprete, no el finder",
+"body": "ANEXO Y CORRECCION de la ficha `fb-20260902-201212-b8d8`. Aquella atribuia 4 rojos de\n`test_bug046_startup_deadlock` a un finder editable que resolvia `dayz_mcp` a\n`%LOCALAPPDATA%\\Temp\\nocturno-verify2\\repo`. La observacion era cierta y la causa NO.\n\nCAUSA REAL, medida: `_ensure_identity_migration` (`tools/dayz_mcp/daemon.py:186-198`) exige que el\ninterprete sea EXACTAMENTE `<arbol>/tools/.venv-mcp/Scripts/python.exe`, con `<arbol>` derivado de\ndonde se cargo `daemon.py`. La suite se estaba corriendo con `C:\\Python314\\python.exe`.\n\n  con C:\\Python314\\python.exe          -> Ran 22 tests, FAILED (failures=5, skipped=1)\n  con tools/.venv-mcp/Scripts/python   -> Ran 22 tests, OK (skipped=1)\n  suite entera, interprete aprobado    -> Ran 2268 tests, FAILED (failures=2, skipped=6)\n\nLos 2 que quedan son el centinela de `MCPBridge.c` (ficha fb-20260902-194845-bd90).\n\nPOR QUE EL FINDER PARECIA LA CAUSA: el checkout temporal NO tiene `.venv-mcp`, asi que\n`approved_python.resolve(strict=True)` moria por OSError y daba el mismo `daemon_python_not_approved`.\nSintoma identico, raiz distinta. Repointar el editable al arbol vivo NO arreglo los rojos: el venv\ntrae `ENABLE_USER_SITE = False` y su propio finder (`__editable___dayz_mcp_tools_0_0_0_finder`), que\nya mapeaba al arbol vivo. El repoint se conserva porque el editable del user-site apuntando a un\ndirectorio temporal es un defecto por su cuenta, pero no se le atribuye este arreglo.\n\nLO QUE HAY QUE ARREGLAR, y es mas grande que los 5 rojos: **este repo tiene dos interpretes que dan\nresultados distintos sobre la misma suite, y nada lo declara.** Una linea base de \"rojos heredados\"\nmedida con el interprete equivocado le cuelga cinco rojos falsos al siguiente modulo, que los dara\npor heredados y no los tocara. Paso exactamente eso en la ventana de M20.\n\nPROPUESTA: que la suite se niegue a correr, o avise fuerte, cuando el interprete no es el aprobado.\nUn `sys.executable` comprobado una vez en el arranque de los tests cuesta nada y convierte una\ncifra falsa en un error explicito. Y toda cifra de suite en informes y handoffs de este proyecto\ndebe venir con el interprete que la produjo.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 84,
+"D2": 0,
+"D3": true,
+"D4": false,
+"D5": "formato",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "C4",
+"dup_candidatos": [
+"fb-20260902-201212-b8d8",
+"fb-20260902-194845-bd90"
+]
+},
+{
+"id": "fb-20260902-201212-b8d8",
+"kind": "bug",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T20:12:12Z",
+"age_label": null,
+"title": "Un finder editable resuelve dayz_mcp a un checkout temporal muerto y pone 4 tests en rojo",
+"body": "TOOL: suite local, tests/test_bug046_startup_deadlock.py\n\nARGS: cd tools && python -m unittest tests.test_bug046_startup_deadlock\n\nERROR: 4 subtests de `test_real_run_daemon_crash_boundaries_recover_in_second_wave`\n(`tools/tests/test_bug046_startup_deadlock.py:849`, stages migration/bind/activation/status) mueren\ncon `returncode 1 != 91` y `RuntimeError: daemon_python_not_approved`.\n\nCAUSA MEDIDA (por el revisor cruzado de M20, no por mi): el proceso hijo carga\n`%LOCALAPPDATA%\\Temp\\nocturno-verify2\\repo\\tools\\dayz_mcp\\daemon.py` en vez del arbol vivo, porque\n`fixture_daemon_cwd` (`tools/tests/test_bug046_startup_deadlock.py:82-106`) sigue el finder editable\n`__editable___dayz_mcp_tools_1_0_0_finder`. Ese finder apunta a un checkout temporal de una corrida\nnocturna vieja que ya no existe como arbol de trabajo. El guard de aprobacion del daemon lo rechaza,\ncorrectamente: ese python no esta aprobado.\n\nEl QUINTO rojo del mismo modulo (`:765`, `test_real_canonical_clients_...`) es otra cosa: lanza\n`--client` sin `--port` y si puede chocar con un daemon ajeno escuchando en `:8765`.\n\nREPRO: correr el modulo con el venv actual. El sintoma es estable, no intermitente.\n\nPOR QUE ESTA FICHA: durante la ventana de M20 yo atribui los cinco rojos a contencion de puerto y lo\ndeclare inferido. Era una inferencia mala y bastaba correr el test para verla. Queda archivado el\nmecanismo real para que la proxima ventana no vuelva a atribuirlos al puerto.\n\nIMPACTO: la suite arrastra 4 rojos que NO son del codigo bajo revision, y que contaminan la linea\nbase de cualquier modulo que mida \"rojos heredados\". Cualquiera que lea `FAILED (failures=N)` en\nesta maquina esta contando estos cuatro.\n\nARREGLO CANDIDATO (no aplicado, fuera del write-set de M20): reinstalar el editable apuntando al\narbol vivo, o hacer que `fixture_daemon_cwd` prefiera el arbol del repo sobre lo que el finder\ndeclare. La segunda es la duradera: un test que se cree lo que le diga un finder editable mide la\nmaquina, no el codigo.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 0,
+"D3": true,
+"D4": true,
+"D5": "formato",
+"D6": false,
+"D7": true
+},
+"clase_mecanica": "C4",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-195453-70c9",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T19:54:53Z",
+"age_label": null,
+"title": "Cambiar el layout del closure (sin las DLL de Steam) deja a todos los bridges MCP vivos sin poder abrir el bundle nuevo",
+"body": "tool: dayz_test_run (project=DayZ_MCP, mode=all|preflight, extra_mods=[@LFQuad2,@LFQuad3]) y dayz_test_stop, 2026-09-02 21:36-21:55.\nerror: invalid_native_launcher_bundle en todas las llamadas desde esta sesion, con el registro OK (checks/check_native_launcher_registry.py: PE 3899A30B... anchored) y el bundle abriendo bien en un proceso fresco (load_verified_bundle -> 10 policies).\nmedido: el bundle resellado a las 21:27 se construyo con dayz_tools_paths.py modificado (STEAM_RELATIVE_FILES = (), mtime 21:25, sin commitear) y native_bundle.py (+dayz_test_modes.py); el closure-manifest lleva 23 externals sin Steam. Los bridges `python -m dayz_mcp --client` arrancados antes (los 19 pares vivos, del 09-01 18:16 al 09-02 19:21) cargaron la lista vieja de 6 DLL de Steam y native_bundle.py:483-484 exige igualdad de conjuntos -> rechazo. daemon_modules.stale no lo cubre: vigila el daemon, no los bridges.\nrepro: cualquier sesion Claude abierta antes del cambio de layout; solo un bridge nuevo lo abre.\nworkaround usado (documentado en README-mcp.md:86): `python -m dayz_mcp.secure_launcher dayz-test-v1 --max-wait-s 600 < request.json`, con el request canonico generado por dayz_test_tool.build_run_request(...) en un proceso fresco; el stop, igual con kill=True y run_id. Funciono: run 1901a65d-..., server+client, y stop limpio.\npropuesta: (1) que el bridge relea dayz_tools_paths/native_bundle (o su layout sellado) al abrir el bundle, o que el error diga `bundle_layout_newer_than_bridge: restart the MCP bridge`; (2) que un cambio de layout se registre en el handoff del proyecto como \"obliga a reiniciar los bridges de todas las sesiones\".",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-194914-b12d",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T19:49:14Z",
+"age_label": null,
+"title": "mode_not_implemented no esta en la tabla de errores de negocio del DAG",
+"body": "ARTEFACTO: plans/inbox-20260830/00-execution-dag.md:121-124 (tabla de errores de negocio)\n\nDEFECTO DE CONTRATO, menor pero con consumidor. M05 introdujo el literal `mode_not_implemented`\nen el puente cliente (addon/scripts/5_Mission/MCPClientBridge.c:1451, commit 117730b): `ui_click`\ncon `mode=\"complete\"` devuelve ok=false con ese codigo ANTES de despachar, en vez de degradar el\nclick a `direct`. La conducta es la correcta; lo que falta es que el codigo este declarado.\n\nLa tabla del DAG nombra los errores de resolucion, `text_not_writable`, `no_handler`/`not_handled`\ny `focus_not_taken`. `mode_not_implemented` no aparece.\n\nPOR QUE IMPORTA: M22 es el unico dueno de tools/dayz_mcp/server.py (00-execution-dag.md:57). Si al\nmapear errores allowlistea la tabla del DAG y nada mas, este codigo cae al cajon generico junto con\ncualquier otro ok=0 (hoy server.py:677-678 eleva todo a ToolError), y el agente que llama pierde la\ndistincion entre \"ese modo no existe todavia\" y \"el click fallo\". Es exactamente la granularidad que\nel codigo se molesto en producir.\n\nARREGLO: anadir la fila a 00-execution-dag.md:121-124 antes de que M22 abra su ventana. El fichero\nes de M01 (`physical-ownership-addendum-v1.md:48`), no de M05 ni de M22, asi que ninguno de los dos\npuede anadirla por su cuenta.\n\nREPRO: grep -n \"mode_not_implemented\" plans/inbox-20260830/00-execution-dag.md devuelve cero.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 2,
+"D2": 1,
+"D3": false,
+"D4": false,
+"D5": "firma",
+"D6": true,
+"D7": false
+},
+"clase_mecanica": "C3",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-194902-485b",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T19:49:02Z",
+"age_label": null,
+"title": "El write-set congelado tiene huecos: ficheros vivos que ninguna fila declara",
+"body": "ARTEFACTO: plans/inbox-20260830/physical-ownership-addendum-v1.md, tabla \"Write-set fisico cerrado\"\n\nDEFECTO DE COBERTURA. La tabla declara cada fichero uno a uno; no hay ninguna regla de directorio\n(verificado: cero filas con `R\\tools\\tests` como directorio). Consecuencia: existen ficheros del\nsistema que NO aparecen en ninguna fila, y bajo la regla \"una ruta no listada requiere replan\"\nnadie puede escribirlos, ni siquiera para arreglar un rojo que vive en ellos.\n\nTRES ENCONTRADOS AL ABRIR M20, y uno llevaba un rojo:\n  tools/dayz_mcp/dayz_tools_paths.py     declara STEAM_RELATIVE_FILES, la lista de externos del cierre\n  tools/tests/test_dayz_tools_paths.py   afirma la cardinalidad de esa lista\n  tools/tests/test_native_bundle.py      llevaba uno de los tres rojos heredados del baseline\n\nREPRO: grep de cada basename en el addendum devuelve cero filas.\n\nESTADO: enmendado el 2026-09-02 anadiendolos a la fila de M20 (seccion \"Enmienda 2026-09-02\" al\nfinal del addendum). Eso cierra el sintoma. Lo que queda abierto es la CLASE.\n\nLO QUE PIDE ESTA FICHA, que es lo que el parche de hoy no da:\n1. Censar el hueco entero en vez de descubrirlo modulo a modulo: enumerar los ficheros que la suite\n   ejercita y restarle la union de las filas. El numero resultante dice si esto son tres casos o\n   trescientos.\n2. Decidir la forma del contrato: enumeracion fichero a fichero (hoy) frente a forma complementaria\n   (\"todo lo que no este en el conjunto AUTORIZADO queda identico\"). La lista de lo autorizado es\n   corta y se revisa; la de lo protegido es infinita.\n\nRIESGO SI NO SE HACE: el hueco no se manifiesta al planificar, se manifiesta cuando un modulo ya\nesta implementando y descubre que no puede tocar lo que necesita. Es la segunda vez en la misma\nventana que un modulo se bloquea por el contrato y no por el codigo; la otra es fb-20260902-194845-bd90.\n\nNOTA APARTE, misma familia: el addendum NO esta bajo control de versiones. `plans/` entero es\nuntracked en el repo. El documento sobre el que descansa toda la disciplina de write-set no tiene\nhistoria ni puede diffearse entre ventanas.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 0,
+"D3": false,
+"D4": true,
+"D5": "firma",
+"D6": false,
+"D7": true
+},
+"clase_mecanica": "C2",
+"dup_candidatos": [
+"fb-20260902-194845-bd90"
+]
+},
+{
+"id": "fb-20260902-194845-bd90",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T19:48:45Z",
+"age_label": null,
+"title": "Un centinela de fichero entero congela MCPBridge.c fuera de la fila de M03",
+"body": "ARTEFACTO: tools/tests/test_task9_spawn_phase_markers.py:126-127,192,245\n\nDEFECTO DE CONTRATO. El centinela congela `addon/scripts/5_Mission/MCPBridge.c` por sha256 del\nFICHERO ENTERO (`BRIDGE_SHA256`, y `BASE_BRIDGE_SHA256` sobre el fichero con las lineas de marcador\nretiradas). Ese fichero es el target de escritura de M03 (`physical-ownership-addendum-v1.md:50`),\npero el centinela vive en un test que NO esta en la fila de M03. Consecuencia: M03 no puede entregar\nsin poner dos tests en rojo, y no tiene derecho a recongelarlos.\n\nEVIDENCIA: tras el commit de M03 (`1118329`) el centinela reclama\n  BRIDGE_SHA256      esperado 6A7AC297E4F48C1E186C5C83E8D7177CFD9825686E6193F356ADC22780E7361C\n                     real     3A86E09D9B9694BFB06BDFE8B9DCCE950920F93771FBC3C01C900D9421537D8D\n  BASE_BRIDGE_SHA256 esperado FBA9515D11BA135876E2D11329F8C807777E9CDD508AE32CE1BF977C2981761F\n                     real     257E5AF3877C685411A6B5D4D7FFEFD7E216935F4FFD03BEC7C8D001002D7370\n\nREPRO: cd tools && python -m unittest tests.test_task9_spawn_phase_markers\n\nCONTRASTE QUE NOMBRA EL ARREGLO: M04 congela su parte de MCPClientBridge.c por REGION delimitada\npor dos firmas (`tools/tests/test_vehicle_telemetry_contract.py:15,19`), y por eso M05 pudo entregar\nsobre el mismo fichero sin romperlo. Un congelado de fichero entero sobre un fichero con varios\nduenos hace imposible el trabajo del siguiente dueno por construccion.\n\nTRES SALIDAS, en orden de durabilidad:\n1. Convertirlo en congelado por region, como el de M04. Resuelve la clase entera.\n2. Mover el centinela a la fila de M03, para que quien escribe el fichero pueda resellarlo.\n3. Recongelar con los SHA de v2 de arriba. Cierra el sintoma de hoy y deja el defecto vivo para el\n   proximo dueno de MCPBridge.c.\n\nQuien recongele: usar los SHA de v2, no los de la primera ronda del lote A.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 5,
+"D3": false,
+"D4": false,
+"D5": "firma",
+"D6": true,
+"D7": true
+},
+"clase_mecanica": "C3",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-193257-363c",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T19:32:57Z",
+"age_label": null,
+"title": "Una actualizacion de Steam invalida el bundle sellado (4 DLL external) y ni doctor ni el checker del registro lo avisan",
+"body": "tool: dayz_test_run (project=DayZ_MCP, mode=all, extra_mods=[@LFQuad2,@LFQuad3]) el 2026-09-02 21:15.\nerror: `invalid_native_launcher_bundle`.\nmedido: en closure-manifest.json del bundle sellado a las 03:52, 4 entradas kind=external no casan con el disco: C:\\Program Files (x86)\\Steam\\GameOverlayRenderer.dll, steamclient.dll (sellado 21.291.672 B, en disco 21.377.688 B), tier0_s.dll, vstdlib_s.dll (mtime de los cuatro 2026-09-01 22:08, es decir, Steam actualizo su cliente despues del resellado). Los 54 entries bundle y el PE (F7F69A1C...) seguian integros y el registro casaba con el PE.\nlo que no avisa: `checks/check_native_launcher_registry.py` solo compara PE vs registro (dio OK tras el resellado; no se ejecuto antes, asi que no puedo afirmar que hubiera dicho OK con el bundle roto) y `python -m dayz_mcp.doctor --daemon-policy normal --json` no lleva ninguna comprobacion del closure-manifest contra el disco: sus unicos hallazgos fueron RUN_PREPRUNE_BACKUP_SLOTS_EXHAUSTED (FAIL) y KNOWLEDGE_PACK_MISSING (WARN).\nremedio aplicado: ciclo documentado `build_native_launcher.py --offline --verify-reproducible` (4 s, PE nuevo A4AAAB9D..., app.pyz identico AA59919B...) + `launcher_registry_update rollback-last` -> `install-dayz-test-v1 --expected-sha256 <sha del registro tras el rollback>` -> `NATIVE LAUNCHER REGISTRY OK`.\npropuesta: (1) que doctor verifique sha+size de las entradas external del closure-manifest y nombre el remedio; (2) que dayz_test_run, al fallar la apertura del bundle, diga QUE entrada fallo (hoy el codigo es el mismo para 6 causas distintas en native_bundle.py:293-827); (3) que `terminal_invalid` conserve al menos el exit code del PE y los primeros bytes redactados de stderr, porque hoy no hay forma de distinguir \"closure invalida (ERROR_CRC 23)\" de \"worker sin salida\".",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-193244-e338",
+"kind": "bug",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T19:32:44Z",
+"age_label": null,
+"title": "h9_native_probe.py roto: launch_registered_native exige daemon_policy_json y la sonda no lo pasa",
+"body": "tool: DayZ_MCP_dev/tools/h9_native_probe.py (sonda H9 del launcher nativo), modo preflight.\nargs: `.venv-mcp\\Scripts\\python.exe h9_native_probe.py preflight` (tambien `_run(\"preflight\", None, \"planned\", None)` en proceso).\nerror: la CLI imprime `{\"error\": \"invalid_native_launcher_bundle\", \"ok\": false}` (main() colapsa cualquier excepcion a str); en proceso la excepcion real es `TypeError: launch_registered_native() missing 1 required keyword-only argument: 'daemon_policy_json'` en h9_native_probe.py:282 (`exit_code = await launch_registered_native(`). La firma actual esta en dayz_mcp/native_launcher_backend.py:1566-1575 (`daemon_policy_json: str` keyword-only); la sonda pasa solo root_authority, verified_bundle, identity_json, lease_token, canonical_request, cancel_event, output_sink.\nrepro: cualquier invocacion de la sonda en el arbol vivo el 2026-09-02 21:26-21:29.\nimpacto: la unica herramienta del proyecto para ver el terminal crudo (stdout/stderr, exit code, debug images) del launcher fuera de dayz_test_run no funciona, justo cuando dayz_test_run devolvia `terminal_invalid` sin ningun detalle (la tool descarta stdout/stderr y el exit code del PE). Sugerencia: pasar `serialize_normal_daemon_policy(load_normal_daemon_policy())` como en secure_launcher.py:144-151, y que main() no colapse el TypeError a un codigo de bundle.",
+"disposicion_previa": null,
+"senales": {
+"D1": 2,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "firma",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-171824-3db9",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T17:18:24Z",
+"age_label": null,
+"title": "El DPF sella «60 tools» sin universo: 61 declaradas menos exec_enforce; el 56+4 de dfa2 acierta por cancelacion",
+"body": "tool: n/a (verificacion de aviso de sesion par + hallazgo propio)\n\nPROCEDENCIA. El aviso es de la sesion par `dayz-projects-9c`, que lo levanto al construir el\nM00 enmendado y me lo paso por mensaje entre sesiones. Yo lo he verificado de forma\nindependiente por AST antes de archivarlo. El merito del aviso es suyo; la comprobacion y el\npunto final de esta ficha son mios.\n\nEL AVISO, VERIFICADO. `product-spec.md:14` dice \"hoy son 60 tools registradas\" y no declara\ncon que configuracion. Medido por AST sobre tools/dayz_mcp/:\n\n  server.py     decorados @app.tool : 56   condicionados: [('exec_enforce','config.enable_exec_enforce')]\n  knowledge.py  decorados @app.tool :  4   (dayz_knowledge_find/show/status/prepare, :630-665)\n  alias add_tool                    : +1   lease_acquire = session_acquire_wait (server.py:2605)\n  ------------------------------------------------------------------\n  declaradas                        : 61\n  exec_enforce con la bandera OFF   : -1   (server.py:511 `enable_exec_enforce: bool = False`,\n                                            registro gateado en server.py:3820-3823)\n  activas por defecto               : 60\n\nTERCER ORACULO, INDEPENDIENTE DE AMBOS CONTEOS: el roster MCP de mi propia sesion viva lista\n`lease_acquire` Y `session_acquire_wait`, y NO lista `exec_enforce`. Coincide con 60 activas\ncon la bandera apagada. Son tres oraculos (AST mio, daemon del par, roster de mi sesion) que\ndan el mismo conjunto.\n\nConsecuencia para el sellado: 60 es el numero con `enable_exec_enforce` APAGADO. Con\n`--enable-exec-enforce` son 61. Un DPF que congela \"60\" sin nombrar la configuracion es una\ncifra sin universo declarado -- el mismo defecto de forma que el \"58\" que vino a corregir.\n\nLO QUE APORTO YO, Y NO LO HABIA VISTO NADIE. `fb-20260902-114108-dfa2` justifica la adopcion\nasi: \"el 60 es correcto (56 @app.tool en server.py + 4 en knowledge.py)\". Esa aritmetica\nllega a 60 por un camino que NO es el correcto: cuenta los 60 decorados y para. Se deja\nfuera dos terminos que se cancelan:\n\n    +1 el alias lease_acquire, que es registro real y no lleva decorador\n    -1 exec_enforce, que lleva decorador y no es registro real por defecto\n\nEl numero es correcto por CANCELACION, no por censo. Importa porque es fragil en las dos\ndirecciones: el dia que se encienda la bandera, o que se anada/quite un alias, el \"60\"\nseguira cuadrando en la cabeza de quien lo dedujo y ya no describira nada. Un censo que\nacierta por compensacion de dos errores no es una base para un DPF.\n\nENCUADRE, PARA NO EXAGERAR. Esto NO invalida la adopcion de 716a8e9b: 60 es el numero\ncorrecto para la configuracion por defecto, que es la que corre. Lo que falta es la clausula\nde universo. La correccion natural, si algun dia se toca product-spec (hoy congelado bajo el\nstaging v10), es decir \"60 tools activas con la configuracion por defecto; 61 con\nenable_exec_enforce\", no cambiar el numero.\n\nESTADO. No he tocado nada: ni product-spec.md, ni GATES.md, ni v9, ni el staging v10. Esta\nficha es solo el registro. Encadena con `fb-20260902-141337-97d4` (ROOT-DPF met con el hash\nviejo) y `fb-20260902-145136-9291` (authority-bundle-v9:7 caducado, radio medido 22/1/0):\nlas tres tratan el mismo fichero desde tres angulos distintos, y esta es la unica que mira\nlo que el fichero DICE en vez de que bytes tiene.\n\nREPRO (lectura pura)\n  cd DayZ_MCP_dev/tools/dayz_mcp\n  grep -n \"enable_exec_enforce\" server.py     -> :511 default False, :3820 gatea el registro\n  grep -n \"add_tool\" server.py                -> :2605 alias lease_acquire\n  grep -c \"@app.tool\" server.py knowledge.py  -> 56 y 4\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 63,
+"D2": 3,
+"D3": true,
+"D4": false,
+"D5": "formato",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "C4",
+"dup_candidatos": [
+"fb-20260902-114108-dfa2",
+"fb-20260902-141337-97d4",
+"fb-20260902-145136-9291"
+]
+},
+{
+"id": "fb-20260902-155057-cef3",
+"kind": "bug",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T15:50:57Z",
+"age_label": null,
+"title": "app.pyz no arranca: su __main__ importa dayz_test_request, que importa dayz_test_modes, no empaquetado",
+"body": "tool: n/a (defecto de empaquetado del launcher nativo)\n\nQUE PASA\nEl `app.pyz` desplegado en `tools/native-launchers/dayz-test-v1/app.pyz` no puede\narrancar: falla en el import de su propio entrypoint.\n\nREPRO (ejecutado hoy, 2026-09-02, no inferido)\n\n    python -c \"import sys; sys.path.insert(0, r'tools/native-launchers/dayz-test-v1/app.pyz'); import dayz_mcp.dayz_test_request\"\n    -> ImportError: cannot import name 'dayz_test_modes' from 'dayz_mcp'\n       (tools\\native-launchers\\dayz-test-v1\\app.pyz\\dayz_mcp\\__init__.py)\n\nLA CADENA, verificada pieza a pieza\n\n1. `app.pyz/__main__.py` importa el modulo en el arranque:\n   `from dayz_mcp import dayz_test_readiness, dayz_test_request, dayz_test_worker`\n2. `dayz_mcp/dayz_test_request.py` DENTRO del pyz importa `dayz_test_modes`\n   (`from . import dayz_test_modes`, mas 4 usos). Su sha256 es byte-identico al del\n   disco (`baa84dec1d278b4c...`), o sea que el pyz lleva la version de HOY.\n3. `dayz_mcp/dayz_test_modes.py` NO esta en el pyz. El pyz tiene 16 modulos .py y ese\n   no es uno.\n4. Causa: `tools/build_native_launcher.py:53` define `PACKAGED_MODULES` como una tupla\n   EXPLICITA de 14 nombres, y `dayz_test_modes.py` no fue añadido cuando M12/M18\n   aterrizaron esta madrugada (`ef2f769` 03:27:33, `ded0dab` 03:36:49).\n\nEL PROPIO FICHERO YA AVISA DE ESTE MODO DE FALLO\n`build_native_launcher.py:65-67`, comentario del 2026-08-21, verbatim:\n  \"Pulled in on 2026-08-21 by pinned_keyfile: the duplicated FILE_STANDARD_INFO moved\n   here, and a packaged module importing an unpackaged one is a ModuleNotFoundError\n   inside app.pyz, not a build error.\"\nEs la segunda vez que muerde el mismo mecanismo.\n\nPOR QUE LA SUITE NO LO CAZA\n`Ran 2215 tests, OK` corre contra el ARBOL FUENTE, donde `dayz_test_modes.py` existe y\nresuelve. El pyz es el unico sitio donde falta. Un gate que no importe desde el pyz no\npuede ponerse rojo por esta causa: es exactamente \"el instrumento no observa el sujeto\".\n\nCAVEAT DECLARADO\nNo he lanzado el launcher end-to-end. Si en ejecucion real el arbol fuente queda en\n`sys.path` (filepatching o modo dev), el import se resolveria desde disco y taparia el\ndefecto. Eso NO lo salva: el pyz esta pensado para ser autocontenido, y el comentario\nde `:65-67` lo dice.\n\nQUE HACE FALTA\n1. Añadir `dayz_test_modes.py` a `PACKAGED_MODULES`. Es OWNS de M20\n   (`plans/inbox-20260830/physical-ownership-addendum-v1.md:69`), no se toca fuera de su\n   ventana.\n2. Un gate que importe desde el PYZ, no desde el arbol: por cada nombre de\n   `PACKAGED_MODULES`, importarlo con el pyz en `sys.path` y exigir que no lance. Hoy no\n   existe ningun oraculo que mire dentro del bundle.\n3. Forma complementaria, no enumerada: el gate deriva la lista del propio\n   `PACKAGED_MODULES` y ademas exige que el cierre transitivo de imports de esos modulos\n   este contenido en el pyz. Enumerar 14 nombres a mano reintroduce el fallo del 21-ago.\n\nPROCEDENCIA\nLo levanto la lane Grok 4.6 del council `2026-09-02-council-propuesta-buzon-v10` como\nriesgo. El orquestador lo dio primero por \"plausible, no confirmado\" con una\ncontraevidencia EQUIVOCADA: uso `dayz_test_tool` como control (\"tambien da 0 menciones y\nsi esta en la app\"), pero ese modulo NO pertenece al bundle del worker y su cero era\ncorrecto. El control estaba mal elegido; la lane tenia razon.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 5,
+"D2": 5,
+"D3": false,
+"D4": false,
+"D5": "firma",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "C3",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-150207-c43a",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T15:02:07Z",
+"age_label": null,
+"title": "Alcance corregido a 105 titulos: la particion es atestado/no-atestado y el mecanismo funciono 70 de 70",
+"body": "SEGUNDO ANEXO de `fb-20260902-141739-336a`, y correccion de alcance de su primer anexo\n`fb-20260902-145751-5e3b`. Los dos siguen abiertos. Resultado conjunto con la sesion\n«MCP council planning», con las dos partes midiendo por separado y llegando al mismo desglose.\n\nLO QUE CAMBIA. El primer anexo acotaba el defecto a los 35 titulos de `RESOLVED`. **Son 105.**\n\nMEDIDO, gate a gate sobre las 35 hojas, preguntando solo si el titulo vivo contiene un\n`sha256:` real:\n\n    PLAN-CODEX    35 con sha256   /   0 sin\n    PLAN-GROK     35              /   0\n    IMPLEMENTED    0              /  35\n    REVIEW-GROK    0              /  35\n    RESOLVED       0              /  35\n\n**La particion es exactamente atestado / no atestado**: 70 con hash, 105 sin. Reproducido por\nlas dos sesiones por separado.\n\nY la medida complementaria, con control positivo para acreditar cobertura del patron:\n\n    placeholders `<...>` en gates/*.md   : 0\n    placeholders en GATES.md             : 0\n    control positivo en el addendum      : 39\n\nLO QUE SE RETIRA DE LA LECTURA ANTERIOR. La sesion council propuso que el pase de\n`physical-ownership-addendum-v1.md:254` («M01/M25 reemplaza los placeholders») fuera un **no-op\nsobre el ledger entero**. Es falso, y el desglose lo demuestra: **funciono 70 de 70**. Un cero de\nplaceholders NO distingue «el pase no tiene sujeto» de «el pase ya corrio con exito», porque una\nsustitucion correcta deja exactamente cero. Los 70 titulos con hash real acreditan lo segundo.\n\nTambien se retira la inferencia de que el digest acabo dentro del fichero hasheado en la ronda 2\n«porque el camino previsto estaba vacio». No estaba vacio: estaba **a medias**.\n\nLO QUE SOBREVIVE, Y ES EL ENUNCIADO BUENO:\n\n**El mecanismo de `:254` esta escrito para una forma de titulo que 105 de 175 gates no tienen.**\nLos 105 pendientes no llevan ni hash ni hueco donde meterlo. Cuando M25 llegue a atestarlos, el\npase no encuentra placeholder que sustituir Y el titulo no tiene ranura para el digest, asi que\nquien atesta tiene que **reescribir la frase entera** — que no es la operacion que `:254`\ndescribe ni manda.\n\nACCION, con el alcance corregido: **105 titulos a redactar explicitamente**, no 35. La\nverificacion se hace sobre el RESULTADO —que cada linea contenga el `sha256:` que le toca— y\nnunca sobre «el pase se ejecuto». Los 70 atestados salieron bien porque alguien puso el hash al\natestar; no hay evidencia de que siguiera `:254`, solo de que el resultado quedo bien, y con 105\npor delante no se puede contar con que se repita solo.\n\nLA LECCION, quinta forma del mismo fallo en un dia. Las cuatro anteriores fueron por universo,\ninstante, documento y reloj. Esta es por **ESTADO**: mirar el agregado hizo que 70 terminados y\n105 sin empezar parecieran lo mismo. Un cero medido despues de una transformacion no distingue\n«no habia sujeto» de «se completo bien»; hace falta la particion, y estaba a un grep de\ndistancia. Toda cifra viaja con universo, instante, documento **y estado**.\n\nRelacionado: LL-432, `fb-20260902-141739-336a`, `fb-20260902-145751-5e3b`.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": [
+"fb-20260902-141739-336a",
+"fb-20260902-145751-5e3b"
+]
+},
+{
+"id": "fb-20260902-145751-5e3b",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T14:57:51Z",
+"age_label": null,
+"title": "CORRECCION de fb-20260902-141739-336a: el pase de placeholders de M25 es un no-op sobre los titulos RESOLVED",
+"body": "ANEXO CORRECTIVO de `fb-20260902-141739-336a`. Hereda su estado: sigue abierta.\n\nQUE ME FALTO LEER. `physical-ownership-addendum-v1.md:254` dice: «Antes de cualquier attestation,\nM01/M25 **reemplaza los placeholders** por hex lowercase exacto». Los titulos de `:257-261` son\npor tanto una PLANTILLA con huecos `<ID>`, `<PLAN_SHA>`, `<RECEIPT_SHA>`, no el texto final. Yo\nlos compare como si fueran el titulo definitivo. Lo levanto la sesion «MCP council planning»\nvia su lane Fable, no yo.\n\nLO QUE CAE DE MI FICHA ORIGINAL, y lo retiro:\n\n1. **La lectura de RIESGO era demasiado fuerte.** Dije que «alguien con prisa puede cerrar las 35\n   hoy satisfaciendo los titulos literalmente». Para atestar hay que pasar antes por el reemplazo\n   de placeholders de :254, asi que hacerlo seria saltarse un paso del procedimiento, no colarse\n   por un hueco del gate. Menos grave de lo que escribi.\n2. **La lectura de OPORTUNIDAD estaba mal encuadrada.** Dije que retitular los 35 «cuesta cero y\n   deberia encabezar la tabla de enmiendas». No es una enmienda: es **un paso ya obligatorio de\n   M25** que el addendum ya prescribe. No va en la tabla de enmiendas, va en la checklist de M25.\n\nLO QUE SOBREVIVE, Y ES MAS PRECISO QUE LO QUE ESCRIBI. El titulo vivo de las 35 hojas es:\n\n    RESOLVED: pipeline_resolve conserva veredicto y referencia durable para <ID-ya-sustituido>\n\ny el prescrito es:\n\n    RESOLVED: pipeline_resolve conserva receipt-line <ID> sha256:<RECEIPT_SHA> y evidencia durable\n\n**No son la misma frase con huecos sin rellenar: son frases distintas.** El `<ID>` del titulo\nvivo YA esta sustituido (dice el fb- literal) y **no queda ningun placeholder**: cero `<`, cero\n`sha256:` en la linea. Por tanto el pase de :254 —que consiste en reemplazar placeholders— es un\n**no-op** sobre estas 35 lineas: no encuentra nada que sustituir y las deja tal cual.\n\nEs decir, el mecanismo de reparacion no puede repararlo, porque su condicion de disparo\n(«hay un placeholder») no se cumple. Para que M25 produzca el titulo prescrito tendria que\n**detectar que la frase entera es la equivocada y reescribirla**, y nada en el addendum le manda\nhacer eso. Un pase que no puede ponerse rojo por la causa que importa: la misma familia que el\nresto de esta noche.\n\nCONSECUENCIA PRACTICA, corregida: no es «enmienda gratis que encabeza la tabla», es **un defecto\nde contenido en las 35 hojas que M25 no va a arreglar solo**. Hay que corregir las frases\nexplicitamente, y quien lo haga debe comprobar despues que el titulo resultante contiene\n`receipt-line` y `sha256:` — no que «el pase de placeholders se ejecuto».\n\nY UNA SEGUNDA POSTIMAGEN, que tampoco estaba en mis siete invariantes (credito de la misma lane\nFable, via la sesion council): si M01/M25 reescriben titulos ANTES de atestar, entonces `GATES.md`\ny las 37 hojas **cambian otra vez en M25**, despues de la postimagen que v10 declara. Eso es una\nsegunda postimagen que el bundle no contempla, y rompe el invariante 3 (postimagen como fichero\nexacto y sujeto de review) justo en el ultimo modulo. El redisenio tiene que declararla.\n\nLA MORALEJA REPETIDA, cuarta vez en el dia. Cuatro parejas de numeros, ninguno falso, todos\nincompletos por lo mismo: 47/373 contra 52/380 (instante), 6 contra 4 contra 8 sedes de copia de\nmodos (universo: tres ficheros / el fichero de M19 / mas M20 en dayz_test_worker.py:592,607),\nmtime del fichero contra fecha del commit (`ef2f769` es 2026-09-02 03:27:33, no del dia 1), y\nplantilla contra titulo final. **Toda cifra y toda cita viajan con su universo y su instante.**\n\nVERIFICADO POR MI en esta correccion: `addendum:254` literal; las 35 hojas sin placeholder;\n`dayz_test_worker.py:592` `if mode in {\"client\", \"offline\"} and run_id is not None:` y `:607`\n`elif mode == \"offline\":`; `ffc7:65` nombra a M20 con ese mismo literal; `ef2f769` 03:27:33 y\n`ded0dab` 03:36:49, los dos del 2026-09-02; y `dayz_test_modes.py` **ya esta commiteado** —mi\nmedicion de provenance de las ~02:20 decia «sin commit» y era cierta entonces.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": [
+"fb-20260902-141739-336a"
+]
+},
+{
+"id": "fb-20260902-145136-9291",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T14:51:36Z",
+"age_label": null,
+"title": "AMPLIACION de 97d4: el cambio de las 03:43 tambien caduco authority-bundle-v9:7, y el radio es exactamente 2",
+"body": "tool: n/a (medicion de alcance sobre hallazgo propio)\n\nAMPLIACION de `fb-20260902-141337-97d4`, que a su vez es delta de `fb-20260902-114108-dfa2`.\n97d4 dijo que ROOT-DPF sigue met con el hash viejo. Faltaba el alcance: el cambio de\nproduct-spec.md de las 03:43 no toco UNA pieza de autoridad, sino DOS. La segunda es el\nbundle vivo.\n\n  plans/inbox-20260830/authority-bundle-v9.sha256:7\n    bundle  ccd509199e1faa5452e0d70ce1da8fa5e3ba2cab2b2b59c94ac2c44e8bb288f4  product-spec.md\n    disco   716a8e9ba31c7c78b98933840e16a66babff1729543decfde5fa78e9ae540df4\n\nRADIO MEDIDO, Y ES ACOTADO. Recompute las 23 lineas de authority-bundle-v9.sha256 contra\ndisco: **22 OK, 1 STALE, 0 MISSING**. La unica caducada es product-spec.md. En particular\nGATES.md sigue en 9dae7c9b219e3219f135102a36cb9c9ccc73e5fb742bc79e9ad8dd0a22ce15d7, que es\nexactamente lo que la linea 21 del bundle declara. Esto acota el dano: dos sitios, no una\nhemorragia. Lo que en 97d4 deje como \"nadie sabe cuantas mas estan caducadas\", para el\nbundle vivo ya esta respondido.\n\nLA CADENA. v7:5 y v8:7 tambien nombran ccd50919 (v5 y v6 traen hashes anteriores, que es lo\nesperado en generaciones superadas). v7 importa porque su sha propio, 9a0679809c30831d3538\n38165abbfdffef461c6f8531a83ca4b906026fba0b49, es el que citan los 35 titulos PLAN-CODEX de\ngates/inbox-*.md.\n\n  MATIZ, Y ES A FAVOR DEL LEDGER: verifique el fichero v7 y sigue hasheando 9a0679... Los 35\n  titulos NO son falsos. Un bundle congelado que envejece no es un error: es lo que un\n  snapshot hace. El defecto no es que el bundle mienta, es que **ninguna puerta lo revalida\n  contra disco antes de promocionar**. Misma causa raiz que 97d4, otra superficie.\n\nPOR QUE NO SE ARREGLA HOY. El usuario decidio NO tocar nada, y la medicion respalda la\ndecision:\n- Re-atestar ROOT-DPF \"contra 716a8e9b\" exige editar el titulo en GATES.md, porque\n  `handleAttest` escribe `title: gate.title` (gate-check.mjs:667) y no admite un hash por\n  argumento. Correr `--attest` a secas re-sellaria el titulo VIEJO con fecha de hoy: cambia\n  un fallo visible por uno camuflado.\n- Y editar GATES.md cambiaria su hash, rompiendo la linea 21 del bundle, que **hoy es\n  correcta**. Se cambiaria una linea caducada por dos.\n- Repararlo bien exige regenerar el bundle, o sea una generacion nueva, o sea la Fase 0 v10,\n  que esta parada por NO CONVERGE. El agujero no se cierra a mano porque el mecanismo para\n  cerrarlo es justo lo que no converge.\nEstado: ROOT-DPF sigue met y falso, y authority-bundle-v9:7 sigue caducado. Documentado y\nacotado, no reparado. Cero escrituras en el arbol por mi parte.\n\nAPORTE AL FRENTE v10. La comprobacion que habria cazado esto no existe y cabe en un bucle:\npor cada linea \"<sha>  <path>\" del bundle vivo, rehashear el path y comparar. Hoy da\n1 STALE sobre 23. Cualquier mecanismo sucesor deberia correr esto en la promocion y parar en\nrojo; y conviene que cubra las dos superficies a la vez, porque son la misma invariante\nvista desde dos sitios: el bundle ata bytes por linea, la atestacion los ata por titulo, y\nninguno de los dos vuelve a abrir el fichero.\n\n  REPRO (lectura pura, sin escrituras)\n    cd DayZ_MCP_dev\n    python - <<'EOF'\n    import hashlib\n    for line in open('plans/inbox-20260830/authority-bundle-v9.sha256',encoding='utf-8'):\n        line=line.rstrip('\\n')\n        if not line or line.startswith('#'): continue\n        exp,_,path=line.partition('  ')\n        got=hashlib.sha256(open(path,'rb').read()).hexdigest()\n        if got!=exp: print('STALE', path, exp, '->', got)\n    EOF\n    -> STALE product-spec.md ccd50919... -> 716a8e9b...\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": true
+},
+"clase_mecanica": "C1",
+"dup_candidatos": [
+"fb-20260902-141337-97d4",
+"fb-20260902-114108-dfa2"
+]
+},
+{
+"id": "fb-20260902-141739-336a",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T14:17:39Z",
+"age_label": null,
+"title": "Los 35 titulos vivos de RESOLVED no exigen el recibo de M25 que el addendum prescribe, y el titulo vivo es el que manda",
+"body": "HALLAZGO. Las 35 hojas de gates llevan un titulo de `RESOLVED` que NO es el que prescribe el\naddendum, y como la atestacion compara igualdad exacta de titulo (LL-432), el que gobierna es el\nvivo. Consecuencia: las 35 fichas se pueden cerrar sin delivery-manifest, sin receipt sha256 y\nsin M25.\n\nMEDIDO sobre las 35 hojas, un solo patron, sin excepciones:\n\n  vivo (35/35) : RESOLVED: pipeline_resolve conserva veredicto y referencia durable para <ID>\n  prescrito    : RESOLVED: pipeline_resolve conserva receipt-line <ID> sha256:<RECEIPT_SHA> y\n                 evidencia durable\n                 (physical-ownership-addendum-v1.md:261)\n\n  hojas que mencionan receipt-line : 0 de 35\n  hojas que mencionan RECEIPT_SHA  : 0 de 35\n  hojas que mencionan delivery     : 0 de 35\n\nUn append de `pipeline_resolve` con una `evidence_ref` satisface el titulo vivo al pie de la\nletra. Nada en el gate obliga a que exista una entrada de delivery-manifest producida por M25.\n\nCOMO APARECIO. Buscando el eslabon mas debil de la cadena M10 -> M24 -> M25 -> «ninguna ficha\nllega a RESOLVED bajo v9», a peticion de la sesion «MCP council planning». Los tres primeros\neslabones aguantan y se probaron intentando romperlos:\n - M10 sigue aislado bajo v9 y no solo bajo v3: el motivo declarado en 32-fb-...668f.md:6 es que\n   el bundle no enumera la raiz temporal, y `dayz-pbo-freshness` aparece 0 veces en el addendum;\n   `non-s15-successor-authority-v1.md` menciona M10 0 veces. Ninguna sucesora la enumero.\n - 00-execution-dag.md:59 -> M24 depende de M05,M10,M22. Literal.\n - 00-execution-dag.md:60 -> M25 depende de M00,M11,M23,M24. Literal.\nEl cuarto paso es el flojo, por dos motivos:\n (a) el FAIL de aislamiento de 668f (:20) dice «marcar EL FEEDBACK RESOLVED bajo el authority\n     bundle actual»: esta acotado a SU ficha, no prohibe a las otras 34.\n (b) y los titulos vivos no piden el recibo, que es lo de arriba.\n\nO sea: la cadena que bloquea el cierre se apoya en la PROSA del addendum, no en los gates.\n\nLAS DOS LECTURAS, LAS DOS ACCIONABLES.\n - RIESGO: alguien con prisa puede cerrar las 35 hoy satisfaciendo los titulos literalmente y\n   producir 35 verdes falsos sin violar ningun gate.\n - OPORTUNIDAD: retitular los 35 `RESOLVED` para que digan lo que el addendum quiere CUESTA CERO\n   hoy. Ninguno esta atestado (0/35 en RESOLVED, medido contra ~/.unlazy/approved), asi que no\n   invalida ninguna atestacion existente. Es el unico punto del ledger donde una enmienda es\n   gratis; deberia encabezar cualquier tabla de enmiendas por coste/beneficio.\n\nES LA TERCERA VEZ QUE LA MISMA PROPIEDAD MUERDE. LL-432 dice que la atestacion ata path + id +\ntitulo y nunca el contenido. Efecto 1: titulos vagos satisfacibles sin trabajo (9 de 12 en la\nronda 1 de v10). Efecto 2: para atar bytes hay que meter el digest en el titulo, y el titulo vive\ndentro del fichero hasheado -> punto fijo (ronda 2). Efecto 3, este: el titulo prescrito y el\ntitulo vivo divergen y gana el vivo. No son tres incidentes: es un mecanismo, y el redisenio\ntiene que tratarlo como tal.\n\nPREDICCION PRE-REGISTRADA, para que la comparacion con las seis lanes ciegas del council valga:\nespero que ninguna cuestione M10 ni las dos aristas del DAG; que como mucho UNA llegue sola a\nesta divergencia (hace falta abrir una hoja Y el addendum Y saber que la atestacion compara\ntitulos); y si dos o mas llegan solas, la divergencia es mas visible de lo que creo. Si alguna la\nrefuta demostrando que el checker ata el recibo por otra via, cae mi lectura de LL-432 con ella.\n\nNO TOCADO: ninguna hoja, ningun titulo. Esto es una medicion.\nRelacionado: LL-432, fb-20260902-114108-dfa2, fb-20260901-232841-9145.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": [
+"fb-20260902-114108-dfa2",
+"fb-20260901-232841-9145"
+]
+},
+{
+"id": "fb-20260902-141337-97d4",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T14:13:37Z",
+"age_label": null,
+"title": "ROOT-DPF sigue met con el hash viejo: el agujero de dfa2 ya se cobro una pieza de autoridad viva",
+"body": "tool: n/a (verificacion de hallazgo ajeno + delta propio)\n\nNO ES FICHA NUEVA DEL AGUJERO. El agujero ya esta archivado.\n`fb-20260902-114108-dfa2` (2026-09-02T11:41:08Z), seccion \"AGUJERO ADICIONAL, DECLARADO Y\nNO CERRADO\", lo declara verbatim: \"Ninguno de los 195 gates impide que otra sesion edite un\nfichero sellado entre la revision y la promocion\", con la instancia product-spec.md\nccd50919 -> 716a8e9b a las 03:43:26 y el cambio de una palabra. El merito es de esa sesion.\nEsta ficha NO lo repite: archiva lo que verifique al comprobarlo y que dfa2 NO dice.\n\nQUE VERIFIQUE YO, Y COMO\n1. Los dos sha256 son REALES, y la preimagen es exacta. `product-spec.md` (54.632 B) hashea\n   hoy 716a8e9ba31c7c78b98933840e16a66babff1729543decfde5fa78e9ae540df4. Sustituyendo en\n   esos bytes la unica ocurrencia de \"60 tools\" por \"58 tools\" (misma longitud, 54.632 B)\n   sale ccd509199e1faa5452e0d70ce1da8fa5e3ba2cab2b2b59c94ac2c44e8bb288f4. Es un match de\n   preimagen: acredita ambos hashes Y que la diferencia es exactamente esa palabra.\n2. La premisa \"product-spec.md esta sin trazar en git\" es FALSA. Esta trazada y limpia vs\n   HEAD (`git ls-files --error-unmatch` sale 0; `git status --porcelain` vacio). El cambio\n   entro en cf7f08b, cuyo diff muestra 54 -> 60: el estado \"58\" fue de working tree y nunca\n   se commiteo. La reconstruccion del punto 1 es lo que acredita la preimagen, no git.\n3. Ledger: 85 met / 110 unmet, `sealed: 0; attested: 85; pending: 110`. Sin cambios.\n\nLO NUEVO, Y ES LO QUE JUSTIFICA ESTA FICHA\ndfa2 enuncia el agujero como AUSENCIA DE PREVENCION (\"ninguno de los 195 gates lo impide\")\ny trata el cambio de product-spec como anecdota de la corrida. No conecta las dos cosas. La\nconexion es el defecto:\n\n  **El fichero que cambio es el SUJETO de un gate raiz vivo, y ese gate sigue met.**\n\n  GATES.md:16  [ ] ROOT-DPF: ...ligada a product-spec sha256:ccd50919...\n  GATES.md:17    EVIDENCE: product-spec.md sha256:ccd50919...\n  atestacion   ~/.unlazy/approved/attest-*.json, attestedAt 2026-08-31T20:53:25.620Z,\n               reason: \"Autoridad raiz hash-bound revalidada antes de abrir implementacion.\"\n  disco hoy    product-spec.md sha256:716a8e9b..., mtime 2026-09-02 03:43:26\n\nROOT-DPF es manual (no tiene linea CHECK, solo EVIDENCE), asi que su unico validador es la\natestacion. `gate-check --status --root . -- GATES.md` lo da MET hoy: de los 8 gates raiz\nnombra 5 UNMET y ROOT-DPF no esta entre ellos. Vale decir: el unico gate de todo el ledger\nque se declara a si mismo \"hash-bound\" es el que esta caducado, y el checker no puede verlo\nporque compara realpath + id + igualdad de titulo y nunca abre el fichero. El titulo no\ncambio -- lleva el hash VIEJO como texto literal -- luego la atestacion sigue validando.\nEsto no es \"nada lo impide\": es que ya paso y el ledger esta afirmando algo falso ahora\nmismo. La atestacion de ROOT-DPF deberia considerarse invalida y re-hacerse contra 716a8e9b.\n\nDOS REFINAMIENTOS DEL MECANISMO (verificados en el checker, no en dfa2)\na) Las atestaciones SI escriben digests, y nadie los valida. El campo `reason` los lleva por\n   convencion (p.ej. attest de inbox-24 PLAN-OPUS: \"plan sha=801c818a...; artifact sha=\n   89a5a1f2...\"). Pero `opt.reason` solo se ESCRIBE (gate-check.mjs:668) y se imprime (:675);\n   `readAttestation` (:604-645) valida schema, realpath del fichero, gate id y titulo, y\n   nunca lee `reason`. Un hash escrito y jamas recomputado es prosa, no una ligadura.\nb) El sello tampoco ataria bytes. `sealMaterial` (:442-455) es HMAC sobre\n   v1 + ledgerIdentityPath + gate.id + check + expect + cwd + shell + verdict: ata el\n   COMANDO, no el sujeto. Igual `signature()` (:273) = sha256 del oraculo. Las tres vias de\n   hash del checker (signature, seal, approvalPath) hashean identidad de comando. Ninguna\n   toca el artefacto revisado. Y en este repo `sealed: 0`.\n\nALCANCE HONESTO\n- ROOT-RESEARCH lo comprobe y SIGUE SIENDO CIERTO: los dos ficheros dan 453f84bf... Solo\n  ROOT-DPF esta caducado hoy. El mecanismo afecta a los 195; la instancia viva es una.\n- ROOT-PLANS (plan-manifest, grok-plan-review-manifest) NO lo he recomputado.\n- No he auditado las 132 atestaciones de DayZ_MCP contra sus sujetos. Nadie sabe cuantas\n  mas estan caducadas; el checker no puede responderlo por construccion.\n\nREPRO (3 comandos, lectura pura, sin escrituras)\n  cd DayZ_MCP_dev\n  node ~/.agents/skills/gates-ledger/scripts/gate-check.mjs --status --root . -- GATES.md\n    -> ROOT-DPF no aparece en UNMET (met: 3)\n  sed -n '16,17p' GATES.md            -> el titulo ata sha256:ccd50919...\n  sha256sum product-spec.md           -> 716a8e9b...\n\nFRONTERA. No propongo el arreglo: el mecanismo de congelado/promocion es de la Fase 0 v10 y\nlo esta planificando el council de seis lanes en\nObsidianVault\\AI\\10_Projects\\DayZ_MCP\\reviews\\2026-09-02-council-propuesta-buzon-v10\\.\nLo que si aporta esta ficha a ese frente es un test de aceptacion ejecutable: cualquier\nmecanismo sucesor tiene que hacer que el repro de arriba salga ROJO. Hoy sale verde.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": true
+},
+"clase_mecanica": "C1",
+"dup_candidatos": [
+"fb-20260902-114108-dfa2"
+]
+},
+{
+"id": "fb-20260902-141031-e914",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T14:10:31Z",
+"age_label": null,
+"title": "Ningun gate protege un fichero sellado entre la revision y la promocion: paso de verdad durante la fase 0 de v10",
+"body": "EL AGUJERO. El ledger de 195 gates no tiene ninguna puerta que impida que un fichero del\nauthority bundle cambie ENTRE el momento en que se revisa y el momento en que se promueve. No es\nteorico: ocurrio durante la redaccion de la autoridad v10 la madrugada del 2026-09-02.\n\nMEDIDO, con los dos digest.\n  product-spec.md  antes : ccd509199e1faa5452e0d70ce1da8fa5e3ba2cab2b2b59c94ac2c44e8bb288f4\n  product-spec.md  ahora : 716a8e9ba31c7c78b98933840e16a66babff1729543decfde5fa78e9ae540df4\n  tamano : 54.632 B en los dos casos; 491 lineas en los dos casos.\n  instante: mtime 2026-09-02 03:43:26, dentro de la ventana de la lane (03:37:07-03:53:35).\nEl primero es el hash que `ROOT-DPF` declara en GATES.md y el que el bundle v9 sella. Detectado\npor censo sha256 del arbol tomado antes y despues de la corrida (1.240 -> 1.244 ficheros), no por\nningun gate del ledger.\n\nQUE CAMBIO. Una sola palabra: «58 tools registradas» -> «60». Verificado correcto: 56 @app.tool\nen tools/dayz_mcp/server.py mas 4 en tools/dayz_mcp/knowledge.py = 60. El «58» no se cita en\nningun otro punto de plans/, gates/ ni GATES.md. Es decir: **el dato sellado era el caduco y quien\nlo cambio tenia razon**. El problema no es el cambio, es que el sello no se entera.\n\nATRIBUCION, POR LANE Y NO POR PROPIEDAD GLOBAL DE LA CORRIDA (LL-407). La lane Grok de esa\nventana no tenia shell (--tools read_file,grep,list_dir,search_replace), su --cwd era staging\nfuera del repo, y su transcript menciona esas rutas CERO veces. Los otros 10 cambios de la misma\nventana son una transaccion de build de launcher nativo (app.pyz, .exe, recibos\nprepared/committed/rolled-back), que exige ejecucion. Habia 14 sesiones interactivas vivas. No he\nidentificado cual: eso queda sin resolver y se dice.\n\nPOR QUE ES EL MISMO DEFECTO QUE LL-432, VISTO DEL OTRO LADO. Lo apunta la sesion «MCP council\nplanning» y es correcto. LL-432 dice que una atestacion ata **path + gate id + titulo** y nunca\nel contenido al que apunta (verificado en gate-check.mjs:625-641; el texto de EVIDENCE: no se\nhashea en ningun punto). Si la identidad vive en el titulo y no en los bytes, entonces «los bytes\ncambian entre revisar y promover» no es un incidente aparte: es la consecuencia directa de que\nnada ate los bytes. Y tiene un tercer efecto ya descrito en LL-432: tras adoptar un fichero nuevo,\nun rollback que restaure el titulo viejo hace que la atestacion ANTIGUA vuelva a validar sobre\nbytes que ya no son los suyos.\n\nDECISION TOMADA. Guillermo decidio ADOPTAR el dato nuevo (716a8e9b) como DPF de autoridad, lo que\nexige actualizar el hash de ROOT-DPF, invalidar su atestacion y emitir una nueva. **No pidio\nanadir un gate de vigilancia**, asi que el agujero queda declarado y NO cerrado.\n\nLO QUE DEBERIA CUBRIRLO. Los siete invariantes de redisenio que dicto la revision de otra familia\npara el mecanismo de congelado/promocion. En particular el 3 (GATES.md postimagen como fichero\nexacto de staging y sujeto de review), el 4 (manifiesto detached que hashea payloads y no a si\nmismo, con los recibos fuera del payload) y sobre todo el **5: rehash final de POSTIMAGE E\nINMUTABLES** — los ficheros que se supone que no cambian se revalidan igual, porque otra sesion\npuede haberlos movido. Si el redisenio no los cubre, tiene que declarar por que no.\n\nQUE HARIA FALTA PARA CERRARLO, EN UNA LINEA: un gate cuyo titulo exija que el censo de promocion\nse tome con el arbol quieto y que falle si CUALQUIER fichero del bundle difiere entre el digest\nrevisado y el digest promovido — en forma complementaria (todo lo que no esta en el conjunto\nautorizado vuelve byte-identico), no como lista enumerada.\n\nRelacionado: LL-432, LL-407, LL-376. Evidencia completa en\nObsidianVault\\AI\\10_Projects\\DayZ_MCP\\reviews\\2026-09-02-v10-fase0\\ y los censos en\n%TEMP%\\dayz-v10-20260902\\evidence\\.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 6,
+"D2": 0,
+"D3": true,
+"D4": false,
+"D5": "formato",
+"D6": false,
+"D7": true
+},
+"clase_mecanica": "C4",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-131346-4083",
+"kind": "request",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T13:13:46Z",
+"age_label": null,
+"title": "Escribir tools/gen-project-map.ps1: hoy PROJECT-MAP.md se mantiene a mano y 4 clases de test lo gatean",
+"body": "tool: n/a (peticion de herramienta)\n\nQUE SE PIDE\n`tools/gen-project-map.ps1` NO existe ni existio nunca (ver finding\nfb-20260902-124229-f715). `PROJECT-MAP.md` se mantiene a mano desde el 2026-09-02, y su\nlinea de procedencia ya lo dice. Esto es la peticion del generador, con el contrato que\ntiene que cumplir para no reintroducir los dos fallos que ya costaron una sesion.\n\nCONTRATO EJECUTABLE (4 clases en tools/tests/test_docs_truth.py)\n\n1. ProjectMapHandoffCountsDocsTest\n   DEBE contener el literal `LIVE-STATE:END`.\n   NO puede emitir ninguno de estos cuatro, cada uno con su assert:\n     - \"`HANDOFF.md` tiene **N lineas**\"\n     - \"el bloque vivo termina en la **linea N**\"\n     - \"Read(HANDOFF.md, limit: N)\"\n     - \"- `HANDOFF.md` - ~N KB, touched ...\"\n   Motivo: el bloque LIVE-STATE se reescribe en cada cierre, asi que cualquier cifra sobre\n   HANDOFF.md nace caducada. El marcador no.\n\n2. ProjectMapEntryPointsDocsTest\n   Cada entrada de \"## Build / test entry points\" debe existir en `tools/<nombre>`\n   (`(_TOOLS / n).exists()`). Consecuencias practicas:\n     - rutas RELATIVAS a tools/, no basenames: `publish/clone_cycle.ps1`, `spike0/*.ps1`,\n       `_session_coordination/*.ps1`\n     - EXCLUIR el venv: activate.bat, Activate.ps1, deactivate.bat no son entry points y\n       estaban listados\n   Estado actual a mano: 14 entradas, 0 fantasmas.\n\n3. ProjectMapSizesDocsTest\n   Las cifras de \"## Docs in this project\" (`- `X.md` - N KB, touched ...`) deben casar con\n   os.stat dentro de 1 KB, y el fichero debe existir. HANDOFF.md esta exento (ver punto 1).\n\n4. ProjectMapEncodingDocsTest\n   UTF-8 real, sin mojibake (`A~...`). ESTE ES EL RIESGO ESPECIFICO DE UN GENERADOR PS1:\n   PowerShell 5.1 escribe en la codepage ANSI si no se le fuerza. Usar\n   `Out-File -Encoding utf8` explicito y verificar leyendo el resultado. El test tiene un\n   mapa `_unmojibake` para reparar el historico, o sea que ya paso antes.\n\nVERIFICACION DE ACEPTACION\n  cd DayZ_MCP_dev/tools\n  <generar>\n  .venv-mcp/Scripts/python.exe -m unittest tests.test_docs_truth\n  -> las 4 clases en verde (hoy: 20 tests, OK con 2 skips)\nY OJO con el PYTHONPATH: correr la suite con esa variable puesta rompe otros tests\n(ver LL-433). El paquete esta instalado editable; no hace falta.\n\nNOTA DE ALCANCE\n`PROJECT-MAP.md` es untracked y la frontera de publicacion lo excluye (\"absolute\nmachine-local paths\"), asi que ni el mapa ni el generador viajan al repo publico salvo que\nse decida lo contrario en boundary.py.\n\nALTERNATIVA LEGITIMA\nNo escribirlo. El fichero se mantiene a mano, su procedencia ya lo declara y los 4 tests lo\ngatean igual. Lo que NO vale es dejar los mensajes de los tests diciendo \"regenerate the\nmap\" cuando no hay nada que ejecutar: eso fue lo que atasco la sesion del 2026-09-02.\n\nOrigen: 30_Sessions/2026-09-02-dayzmcp-commits-1sep-bundle-y-suite-verde.md seccion 5.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 5,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": true
+},
+"clase_mecanica": "C3",
+"dup_candidatos": [
+"fb-20260902-124229-f715"
+]
+},
+{
+"id": "fb-20260902-124229-f715",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T12:42:29Z",
+"age_label": null,
+"title": "PROJECT-MAP.md se atribuia a tools/gen-project-map.ps1, un script que no existe ni existio nunca",
+"body": "tool: n/a (hallazgo del arbol)\n\nQUE PASA\n`PROJECT-MAP.md` abria con \"Generated 2026-09-02 01:04 by `tools\\gen-project-map.ps1`.\nRegenerate after moving files.\" Ese script **no existe en el arbol y nunca estuvo trackeado**.\nLa unica mencion a `gen-project-map` en todo el proyecto era esa linea, dentro del propio\nfichero que dice haber generado.\n\nrepro:\n  find . -iname \"*project-map*\"        -> solo ./PROJECT-MAP.md\n  git log --oneline --all -- '*gen-project-map*'   -> vacio\n  grep -rl \"gen-project-map\" --include=*.md --include=*.py --include=*.ps1 .\n                                       -> solo ./PROJECT-MAP.md\n\nPOR QUE IMPORTA\nDos tests de `tests/test_docs_truth.py` fallaban y **ambos aconsejan \"regenerate the map\"**\n(`test_handoff_claims_are_current`, `test_entry_points_exist`). Ese consejo es inaccionable:\nmanda correr algo que no esta. Un agente que siga el mensaje al pie de la letra se atasca, y\nuno que no lo siga se queda sin saber cual es la via buena.\n\nQUE HICE (2026-09-02)\nArreglado a mano, no regenerado, y actualizada la linea de procedencia para que diga la verdad\n(\"Maintained by hand (no generator exists...)\"). Los dos tests pasan.\n  - la cifra \"113 lineas / limit: 113\" sustituida por el marcador `<!-- LIVE-STATE:END -->`,\n    que es lo que pide el test y lo unico que no caduca en cada cierre\n  - 11 entry points fantasma: 3 eran artefactos del venv (activate.bat, Activate.ps1,\n    deactivate.bat) y 8 existian pero en subdirectorios y se listaban solo por basename\n    (clone_cycle.ps1 -> publish/, spike0-*.ps1 -> spike0/, process-*-probe.ps1 ->\n    _session_coordination/). Ahora 14 entradas con ruta real, 0 fantasmas\n\nLO QUE QUEDA POR DECIDIR\nSi el generador debe existir o no. Si se escribe, tiene que emitir el marcador en vez de una\ncifra y rutas relativas a `tools/` en vez de basenames, o reintroduce los dos fallos. Si no se\nescribe, la linea de procedencia ya lo dice y el mapa se mantiene a mano.\n\nNOTA: `PROJECT-MAP.md` es untracked y la frontera de publicacion lo excluye (\"absolute\nmachine-local paths, nothing else\"), asi que el arreglo es local y no viaja al repo publico.\n\nOrigen: 30_Sessions/2026-09-02-dayzmcp-commits-1sep-bundle-y-suite-verde.md\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 81,
+"D2": 0,
+"D3": true,
+"D4": false,
+"D5": "formato",
+"D6": false,
+"D7": true
+},
+"clase_mecanica": "C4",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-124211-cb40",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T12:42:11Z",
+"age_label": null,
+"title": "Los 14 tests de test_effective_schema.py no corren: estilo pytest sin TestCase y el venv no tiene pytest",
+"body": "tool: n/a (hallazgo del arbol, no de una tool MCP)\n\nQUE PASA\n`tools/tests/test_effective_schema.py` (llego en el merge del PR #1, 737ba38) tiene 14\nfunciones `def test_*` a nivel de modulo y CERO clases `unittest.TestCase`. El runner del\nproyecto es `unittest`, y `.venv-mcp` NO tiene pytest instalado. Por tanto\n`python -m unittest discover -s tests -t .` colecciona **0 tests** de ese fichero: no entran\nen los 2215 de la suite.\n\nImporta porque el modulo que cubren, `dayz_mcp.effective_schema`, es el unico que el\nCHANGELOG publica como feature (\"resolves the tool contract FastMCP publishes after\nbuild_app ... and audits it against the prose each description promises\"), y tiene 39\nficheros de `_bench/` mas `_gate.py` detras validandolo. La cobertura unitaria del sujeto de\ntodo ese aparato es invisible para la suite.\n\nrepro:\n  cd DayZ_MCP_dev/tools\n  .venv-mcp/Scripts/python.exe -m unittest tests.test_effective_schema\n  -> \"Ran 0 tests in 0.000s\"\n  .venv-mcp/Scripts/python.exe -c \"import pytest\"\n  -> ModuleNotFoundError: No module named 'pytest'\n\nEL CODIGO ESTA BIEN, ES VISIBILIDAD\nEjecutadas a mano las 14 funciones (importar el modulo y llamarlas): **14/14 verdes**,\n2026-09-02. No hay defecto detras; el agujero es que nadie las corre.\n\nOPCIONES (decision del dueno)\n  a) portar las 14 a `unittest.TestCase` -> entran en la suite tal cual, sin dependencia nueva\n  b) anadir pytest al venv y correr los dos runners -> conserva el fichero, pero mete una\n     dependencia y un segundo comando de suite\n  c) dejarlo y documentarlo -> peor: la suite dice 2215 OK y el numero miente sobre este modulo\n\nCONTROL\nEl mismo `unittest discover` SI colecciona `tests/test_effective_schema_core.py` (11 tests),\nhermano M13 que usa TestCase. El discover funciona; lo que no encaja es el estilo del fichero.\n\nOrigen: 30_Sessions/2026-09-02-dayzmcp-commits-1sep-bundle-y-suite-verde.md\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 38,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "firma",
+"D6": false,
+"D7": true
+},
+"clase_mecanica": "C3",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-114108-dfa2",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T11:41:08Z",
+"age_label": null,
+"title": "La atestacion ata titulo, no contenido: por eso el hash acaba dentro del fichero que hashea y v10 no converge",
+"body": "PARADA POR CRITERIO DE FAMILIA. Fase 0 (autoridad sucesora v10) se para en la ronda 2, no por\nnumero de hallazgos sino porque el revisor de otra familia dictamino NO CONVERGE con tabla:\nde siete familias, cuatro son ESCAPES ADYACENTES (identidad de bytes, pre/postimagen,\ncandidate-live, revision M10), dos CERRADAS (K1, M24/contador/scope) y una NUEVA (publicacion\ntransaccional sin journal). Es la regla adoptada el 2026-09-01, disparada esta vez en la ronda\n2 en vez de en la cuarta.\n\nEL DEFECTO DE FONDO, Y ES DE MECANISMO, NO DE REDACCION.\n\n1) Verificado leyendo el checker: la validez de una atestacion compara realpath del ledger +\n   gate id + IGUALDAD EXACTA DEL TITULO (gate-check.mjs:625-641). El texto de EVIDENCE: no se\n   hashea nunca; grep de evidence+hash da cero. La firma se compone de\n   ledgerIdentityPath + \"\\0\" + gate.id + \"\\0\" + signature(file,gate) (:490).\n   Consecuencia: **una atestacion ata lo que el gate DICE, no los bytes a los que apunta.**\n\n2) De ahi sale, inevitablemente, que para ligar bytes hay que meter el digest EN EL TITULO. Y el\n   titulo vive dentro de la hoja de gates, que es uno de los ficheros que el bundle hashea. En la\n   ronda 2 los cinco sujetos acabaron conteniendo su propio digest:\n   authority-bundle-v10.sha256:7, closure-successor-authority-v1.md:27,\n   gates/closure-successor-v10.md:19, transition.md:87, retirement-manifest-v8-v9.md:10.\n   Sustituir cada placeholder por el hash real cambia el hash. Es un punto fijo: no se resuelve\n   parcheando.\n\n3) Y hay un segundo efecto del mismo mecanismo: tras adoptar un DPF nuevo, un rollback que\n   restaure el titulo viejo hace que la atestacion ANTIGUA vuelva a validar por coincidencia de\n   titulo, aunque los bytes en disco sean otros. El sello revive sobre contenido que ya no es el\n   suyo.\n\nMI PARTE DE CULPA. El punto 2 lo fabrico mi instruccion de la ronda 2: escribi «ata digest, no\nadjetivo» sin darme cuenta de que el titulo esta dentro del sujeto hasheado. La ronda 1 tenia\ntitulos vagos; la 2 tiene titulos precisos e imposibles de finalizar. Nueve de doce titulos\nfallaron en la ronda 1 y el unico que paso limpio fue aquel para el que puse la regla concreta\n(LL-376, identidad y no cardinalidad) en el brief. Donde di guia general, fallo casi todo: la\nespecificidad del brief es lo que decide la calidad del gate, no la capacidad del redactor.\n\nLOS SIETE INVARIANTES DE REDISENO que dicta el revisor:\n 1. DPF global y monotonico, independiente del rollback de generacion.\n 2. Grafo de hashes aciclico: ningun sujeto contiene su propio digest.\n 3. GATES.md postimagen como fichero exacto de staging y sujeto de review.\n 4. Manifiesto detached que hashea payloads pero no a si mismo; receipts de review y de U0 fuera\n    del payload.\n 5. Rehash final de POSTIMAGE **e** IMMUTABLE.\n 6. Activaciones con un consumidor ejecutable y OWNS hasta el callsite real.\n 7. Journal durable de promocion con recuperacion para cada prefijo parcial.\n\nAGUJERO ADICIONAL, DECLARADO Y NO CERRADO. Ninguno de los 195 gates impide que otra sesion edite\nun fichero sellado entre la revision y la promocion. Ocurrio durante esta corrida:\nproduct-spec.md paso de ccd50919 a 716a8e9b a las 03:43:26. Medido: el cambio es una sola\npalabra, «58 tools registradas» -> «60», y el 60 es correcto (56 @app.tool en server.py + 4 en\nknowledge.py). El usuario decidio ADOPTAR el dato nuevo. No se anadio gate de vigilancia porque\nno se pidio.\n\nESTADO. Nada promovido al repo. Los 12 gates v10 siguen en staging. Censo: cero escrituras de\nlas lanes dentro del arbol; los 11 cambios detectados en la ventana son de otra sesion viva\n(Grok no menciona esas rutas ni una vez, no tenia shell, y construir un .exe exige ejecucion).\nArtefactos y las dos revisiones en\nObsidianVault\\AI\\10_Projects\\DayZ_MCP\\reviews\\2026-09-02-v10-fase0\\ (13 ficheros, 142.280 B).\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": true
+},
+"clase_mecanica": "C1",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-002800-65a4",
+"kind": "bug",
+"project": "AI_Pipeline",
+"ts": "2026-09-02T00:28:00Z",
+"age_label": null,
+"title": "Get-Content -Raw de PS 5.1 manda mojibake a las lanes Cursor: el brief UTF-8 llega ANSI y +2,7% de bytes",
+"body": "SINTOMA. Un brief UTF-8 de 10.223 B pasado a cursor-agent por un lanzador PowerShell 5.1 llega\nal CLI como 10.504 B de mojibake. No hay error, no hay aviso: la lane trabaja y entrega, porque\nun LLM lee mojibake sin problema. Lo unico que lo delata es comparar el hash del input efectivo\ncontra el del brief.\n\nCAUSA. `Get-Content -LiteralPath $f -Raw` decodifica con la codepage ANSI del host, no UTF-8.\nMedido byte a byte en esta corrida:\n  em-dash U+2014 : e2 80 94          ->  c3 a2 e2 82 ac e2 80 9d\n  o-acentuada    : c3 b3             ->  c3 83 c2 b3\nEl fichero no tiene BOM y tiene 177 LF, 0 CRLF, asi que NO es line-endings ni BOM: es\ndecodificacion. El crecimiento fue de +281 B (+2,7%) sobre un texto con acentos, comillas\nangulares y em-dashes normales en castellano.\n\nARREGLO. `[System.IO.File]::ReadAllText($path)` — .NET detecta UTF-8. Tras el cambio, las tres\nlanes relanzadas dieron input efectivo de 10.223 B con sha256 identico al del brief.\n\nPOR QUE IMPORTA MAS DE LO QUE PARECE. En un council esto rompe la comparabilidad (C5): tres\nlanes recibieron unos bytes y la cuarta —Grok, que recibe el fichero por --prompt-file sin\nround-trip— recibio otros. Comparar sus salidas habria sido F1 con otro nombre. La comprobacion\nde hash de C5 lo caza ANTES de leer una linea de salida, que es justo para lo que existe.\n\nALCANCE HACIA ATRAS. El mismo lanzador se uso en la acreditacion de los siete modulos de esta\nmadrugada: sus siete briefs tambien viajaron en mojibake. Los informes salieron buenos y cinco\npath:line suyos se re-verificaron a mano contra el fichero, asi que la corrupcion no impidio el\ntrabajo. Pero los inputs no eran los bytes que yo creia mandar, y una lane que responde bien no\nacredita que reciba lo correcto.\n\nREGLA. Cualquier prompt que viaje de disco a un CLI nativo por PowerShell se lee con\nReadAllText, y el input EFECTIVO se vuelca y se hashea contra el brief antes de leer la salida.\nNo basta con hashear lo que pretendias mandar.\n\nRelacionado en memoria: ps51-rewrite-destroys-accents, bash-tool-single-quote-wrapper,\nwrite-text-converts-whole-file-to-crlf.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260902-001316-97bc",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-02T00:13:16Z",
+"age_label": null,
+"title": "Acreditados los 7 modulos huerfanos: M12 y M14 completos, M07 y M17 sin empezar, 93 de 157 puntos son de M22/M19/M20",
+"body": "RESULTADO. Siete lanes Cursor Grok 4.6 xhigh, una por modulo, sobre DayZ_MCP_dev HEAD 9a58256.\n157 puntos de plan juzgados: 31 IMPLEMENTED, 31 NOT-IMPLEMENTED, 93 OUT-OF-SCOPE, 2 INCONCLUSIVE.\nInforme completo en ObsidianVault\\AI\\10_Projects\\DayZ_MCP\\reviews\\2026-09-02-acreditacion-siete-modulos.md\ny los 35 artefactos en reports\\2026-08-30-inbox-implementation\\M{06,07,12,13,14,17,21}\\.\n\nDentro del write-set de cada uno: M12 4/4 COMPLETO, M14 7/7 COMPLETO, M13 13/16, M21 2/4,\nM17 4/15, M07 1/12, M06 0/4.\n\nDONDE VAN LOS 93 OUT-OF-SCOPE: M22 aparece en 45, M19 en 14, M20 en 14, M23 en 12, M18 en 5.\nEs la misma forma que bloqueaba a M08/M09/M16 (fb-20260901-232841-9145), ahora medida sobre\nsiete modulos mas: el criterio de aceptacion de las fichas vive mayoritariamente DETRAS de los\nmodulos que las implementan. Ningun reparto de esfuerzo sobre modulos hoja mueve esa cifra.\n\nEL INDICADOR QUE ENGANABA, Y ERA MIO. Elegi estos siete por \"tiene fichero en disco\". Es falso\npara dos:\n - M07: sus dos ficheros byte-identicos a HEAD, ultimo commit ed83c43 del 2026-08-23, una\n   semana ANTES de que abriera el lote. crop_space aparece 0 veces en el codigo. El token\n   frame_client_rect_unverified que el plan exige sale SOLO en el plan, cero en tools/. Su\n   suite verde de 8 tests es la de antes del lote.\n - M17: 4 de 5 ficheros intactos. run_command_activity, retired_run_diagnostics,\n   last_activity_age_s, activity_state y generation_changed salen 0 veces en los cuatro. Sus 4\n   IMPLEMENTED son baseline previo que el plan cita como [EXACT].\nLa provenance por git (sucio o intacto; ultimo commit antes o despues del 30-ago) cuesta\nsegundos y es el filtro que debia pasar ANTES de repartir siete lanes.\n\nBUG VIVO DESTAPADO. M21 / 7c88 punto 6: la correlacion preflight != (terminal.run_id is None)\nsigue en tools/dayz_mcp/dayz_test_tool.py:469 -exactamente lo que la ficha pide corregir- y el\ntest de :458-463 la ENCIERRA en vez de tumbarla. No parcheado: acreditar no es arreglar.\n\nDOS TRAMPAS DE ARNES, REUTILIZABLES.\n1) Start-Process -ArgumentList une el array con espacios y deja que el hijo lo re-parta, asi que\n   \"...\\DayZ Projects\\DayZ_MCP_dev\" llega como DOS argumentos y la segunda mitad cae en el\n   parametro siguiente (-Model). Las siete lanes murieron en 1 segundo. El launcher documentaba\n   esa trampa PARA EL PROMPT y la habia resuelto pasandolo por fichero: arreglo un argumento, no\n   la clase. Hay que citar todos los valores, no solo los que hoy llevan espacio.\n2) La confianza de workspace de cursor-agent es un fichero:\n   ~/.cursor/projects/<slug>/.workspace-trusted. --trust solo lo CREA para un directorio sin\n   entrada previa; si la entrada existe sin marcador, --trust se ignora y la corrida muere en\n   \"Workspace Trust Required\" con stream de 0 B. La raiz del repo esta en ese estado. Las lanes\n   que produjeron M08/M09/M16 nunca usaron el repo como workspace: cada una uso su propia\n   carpeta reports\\...\\M##\\, y esos tres slugs SI llevan el marcador. Replicarlo tiene una\n   ventaja aparte: el write-set pasa a ser estructural en vez de una promesa del prompt.\n\nCURSOR NO TIENE SHELL EN HEADLESS AQUI. La lane de control no pudo correr ni \"echo hello\" y\ndevolvio status INCONCLUSIVE con ran:null, ademas de avisar en su .sha256 de que no se lo\nalimentara a sha256sum --check. Se nego a fabricar, que era el comportamiento que el brief\npedia. Reparto adoptado: las lanes el analisis, el orquestador las mediciones. Es mejor que\narreglar el permiso -un solo instrumento, los numeros no derivan entre lanes, y la lane nunca\nve la cifra que podria repetir-. Los briefs omitian los conteos de tests a proposito.\n\nMEDIDO POR MI: 256 tests, 0 fallos (M06 76, M07 8, M12 8, M13 20, M14 20, M17 91, M21 33) con\ntools\\.venv-mcp\\Scripts\\python.exe 3.14.3. Cada -test-run.json lleva measured_by: orchestrator.\n\nGUARDIA. Censo sha256 antes/despues de tools, plans, gates, reports, addon, GATES.md y\nproduct-spec.md (excluidos .git, .venv-mcp, __pycache__, y la exclusion es parte de la\nevidencia): 1203 de 1203 identicos, 35 nuevos todos bajo las siete carpetas autorizadas, 0\nmodificados, 0 borrados. Seis lanes con escritura sobre el arbol vivo y cero escrituras fuera.\n\nNO TOCADO. GATES.md, las 37 hojas de gates/ y los 113 ficheros de plans/ intactos. Ninguna\ncasilla marcada, ninguna resolucion escrita. Los gates IMPLEMENTED/REVIEW-GROK/RESOLVED de las\n35 fichas siguen en pending. Esto es acreditacion, no cierre.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 80,
+"D2": 0,
+"D3": true,
+"D4": false,
+"D5": "formato",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "C4",
+"dup_candidatos": [
+"fb-20260901-232841-9145"
+]
+},
+{
+"id": "fb-20260901-232841-9145",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-01T23:28:41Z",
+"age_label": null,
+"title": "Las 3 fichas con informe de implementacion NO son cerrables: cada plan nombra como FAIL el cierre por un solo modulo",
+"body": "CONTEXTO. Del lote de 35 del buzon, tres tienen informe de implementacion con test-run\nverde: M08->fb-20260829-024848-c7ca, M09->fb-20260829-135727-782b, M16->fb-20260829-133459-a396.\nParecian el peldano barato para un cierre real. Medido: no lo son, y el obstaculo es el\npropio plan aprobado, no el codigo.\n\nMEDIDO (2026-09-02, arbol DayZ_MCP_dev HEAD 9a58256, 176 ficheros sucios).\n\n1) Suites propias: 64/64 OK con el venv nativo tools/.venv-mcp (python 3.14.3):\n   test_pipeline_feedback 15, test_steam_preflight 13, test_knowledge_* 36. Coincide\n   exactamente con lo declarado en los tres informes. Los modulos estan bien.\n\n2) Sonda in-process (build_app(ServerConfig(port=0)), igual que tests/test_mcp_tools.py:134),\n   contra la superficie publica efectiva:\n   - pipeline_resolve props=[feedback_id, resolution]; evidence_ref AUSENTE.\n   - dayz_knowledge_status / dayz_knowledge_prepare: registradas y vivas via\n     knowledge.py:665 + server.py:2538-2540, pero additionalProperties NO declarado y\n     call_tool(\"dayz_knowledge_status\", {\"unexpected\": 1}) NO RECHAZA: devuelve resultado\n     normal. dayz_knowledge_prepare tampoco valida el extra; falla despues por\n     knowledge_pack_missing, que es logica de negocio, no bad_args.\n   - dayz_test_run existe pero su schema no menciona steam: sin proyeccion.\n\n3) Cada plan nombra su propio FAIL, verbatim:\n   - 08-fb-...-c7ca.md: \"FAIL: el helper pasa pero la tool publica no acepta/propaga\n     evidence_ref\". Se cumple hoy.\n   - 23-fb-...-782b.md: \"FAIL: ... schema 0-arg que ignora extras despues de M22\". Se\n     cumple hoy.\n   - 21-fb-...-a396.md: \"FAIL: gate solo del provider M16 o solo de M19\". Se cumple hoy.\n\n4) Los tres informes ya lo decian y nadie lo leyo asi: M08 scope \"plan points 1-3\";\n   M09 disposition \"CHANGE implemented (M09-KNOWLEDGE scope only)\", not_touched incluye\n   \"server.py (M22 owns it)\"; M16 scope \"M19 points 3-6 ... NOT implemented this hop\".\n\n5) Los tres planes llevan la misma clausula de cabecera: \"la cadena modular descriptiva de\n   esta ficha no recorta el DAG. Siempre se ejecuta con la clausura transitiva integra ...\n   incluidos M01->M00, M25-EVIDENCE-CLOSE y todos los predecesores de M22/M23/M24/M25\".\n\nCONSECUENCIA. No hay cierre barato en este lote. Las tres desembocan en M22-SERVER-INTEGRATION\n(unico dueno de server.py, 11 predecesores: M03 M05 M06 M07 M08 M09 M12 M13 M14 M17 M21) o en\nM19. Y la via de atajo tambien esta cerrada por contrato: el plan de M09 marca FAIL si \"M09 se\nusa como dueno de server.py, schema, list_tools o rechazo wire\", asi que endurecer el schema\ndesde knowledge.py tampoco vale.\n\nMATIZ QUE IMPORTA PARA DECIDIR. La sustancia de 782b esta entregada: la queja era que\ndayz_knowledge_find exigia salir del MCP, y hoy existen dayz_knowledge_status y\ndayz_knowledge_prepare 0-arg respondiendo en banda. Lo que bloquea la puerta es el\nendurecimiento de wire, que pertenece a otro modulo. Es una ficha cuyo problema esta resuelto\ny cuyo gate no puede cerrarse.\n\nLECCION. Un informe de modulo verde no es una ficha cerrable cuando el criterio de aceptacion\nde la ficha es una conjuncion de dos modulos. El indicador que enganaba era \"tiene informe y\nsus tests pasan\"; el que decide es \"su clausula FAIL, leida hoy contra la superficie publica\".\nAl elegir por donde entrar en un lote, ordenar por informes existentes ordena mal: hay que\nordenar por si el PASS de la ficha cabe dentro del write-set de un solo modulo.\n\nNO TOCADO. Ni GATES.md ni las hojas de gates/ ni ninguna resolucion: siguen exactamente como\nestaban. Esto es una medicion, no un cierre.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 80,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "firma",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "C3",
+"dup_candidatos": [
+"fb-20260829-024848-c7ca",
+"fb-20260829-135727-782b",
+"fb-20260829-133459-a396"
+]
+},
+{
+"id": "fb-20260901-230128-9586",
+"kind": "finding",
+"project": "AI_Pipeline",
+"ts": "2026-09-01T23:01:28Z",
+"age_label": null,
+"title": "Criterio de parada de un bucle implementador-revisor: procedencia por familia, no numero de hallazgos",
+"body": "tool: bucle implementador (Grok + subagente Opus) contra revisor de otra familia (gpt-5.6-sol), tres rondas sobre el mismo aparato de oraculos\n\nhallazgo: un bucle de correccion no se para bien contando hallazgos ni mirando la gravedad. Las tres rondas dieron 0+6+1, 1+7+1 y 0+6+1: el numero no baja y la gravedad va y viene. Con ese indicador no se sabe si falta una ronda o veinte.\n\nEl criterio que si discrimina es la PROCEDENCIA POR FAMILIA de cada hallazgo nuevo:\n\n- si los hallazgos nuevos son de familias DISTINTAS a las anteriores, el revisor esta\n  ampliando cobertura y el bucle avanza;\n- si son ESCAPES ADYACENTES de una familia ya cerrada -el mismo limite de confianza o la\n  misma heuristica, un salto mas alla del parche anterior- el bucle esta persiguiendo su\n  propia cola y el defecto es de diseno, no de implementacion.\n\nMedido en la ronda 3: 6 de 6 MAJOR eran reincidencias, y cada una estaba exactamente a un\nsalto del parche de la ronda 2. Se cerro el resolvedor pero no su consumidor; se valido\nend>n pero no la gramatica completa; se acoto la clausula pero no la polaridad; se limito a\nuna celda pero se infirio su funcion por posicion; se quito la atribucion autoafirmada pero\nse dejo sustituir la observacion entera.\n\nregla adoptada: si una misma familia reaparece en DOS RONDAS CONSECUTIVAS mediante un escape\nadyacente del mismo limite de confianza o heuristica, no se autoriza otra ronda de parche\nlocal. Reanudar exige rediseno con invariantes escritos, y el criterio de salida pasa a ser\ndos lotes adversariales independientes sin reapertura de esas familias.\n\npor que importa aqui: este pipeline ya tenia la regla de la ronda 11 -si algo solo se cierra\nabriendo otro flanco, se declara- pero la aplicaba por intuicion del orquestador, que es\njuez y parte. Preguntarle al REVISOR, aparte de los hallazgos, si el bucle converge y con\nque criterio, convierte esa intuicion en un dictamen con tabla. Cuesta una pregunta en el\nbrief y ahorra la cuarta ronda.\n\nsegundo hallazgo del mismo dia, distinto y complementario: al arreglar la calibracion salio\nque varios oraculos comprueban FORMA y no SUSTANCIA. Un candidato falso que imita el\nformato entero salia rojo por razones equivocadas -le faltaban literales, no contradecia el\ninvariante-. Un mutante de calibracion tiene que cambiar UN SOLO invariante y conservar\nforma y todas las demas precondiciones; si cambia dos cosas, el rojo no acredita cual de las\ndos lo produjo. Es la version fuerte de LL-378: alcanzable no es discriminante, y ademas\nrojo no es rojo-por-la-razon-correcta.\n\nAparato caracterizado y sus tres dictamenes en\nAI/10_Projects/DayZ_MCP/reviews/2026-09-01-adr-instrument/.",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260901-225330-b224",
+"kind": "finding",
+"project": "SUB_BRZ",
+"ts": "2026-09-01T22:53:30Z",
+"age_label": null,
+"title": "session_transition_conflict: lease manual + dayz_test_run chocan sin mensaje accionable",
+"body": "tool: dayz_test_run tras session_acquire_wait. error: session_transition_conflict (opaco). Causa real (descubierta leyendo dayz_test_tool.py): dayz_test_run gestiona su PROPIO lease interno y rechaza si el llamante ya posee uno; la secuencia correcta es release del lease manual ANTES de dayz_test_run. Tambien: mode acepta solo {offline, server, client, all} pero el error bad_dayz_test_request no lista los valores (hubo que leer dayz_test_request.py:280). repro: session_acquire_wait -> dayz_test_run -> session_transition_conflict. sugerencia barata: que ambos errores incluyan la pista en el mensaje (p.ej. \"release your lease first; dayz_test_run manages its own\" y \"mode must be offline|server|client|all\"). Documentar la secuencia en el runbook dayz-mcp-agent-session-protocol.md.",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260901-225325-76dd",
+"kind": "request",
+"project": "SUB_BRZ",
+"ts": "2026-09-01T22:53:25Z",
+"age_label": null,
+"title": "Daemon idle-restart mata los runs gestionados entre sesiones de usuario",
+"body": "tool: dayz_test_run (lifecycle). Observado 3 veces (24-ago, 26-ago x2, sesion SUB_BRZ s74/s75): un run mode=all sano (server+cliente vivos, RUNNING_IDLE) desaparece cuando el daemon se reinicia por idle-timeout (daemon_generation cambia; box queda vacia sin dayz_test_stop de nadie). Coste: cada vuelta del usuario obliga a boot completo (rotar storage + run + reconectar + re-spawn del coche de test, ~3-5 min) aunque el juego pudiera seguir vivo. repro: lanzar dayz_test_run mode=all, dejar la sesion MCP inactiva >idle-timeout (3600 s), volver: session_status.box vacia y procesos DayZ muertos. request: (a) que el daemon adopte runs vivos al rearrancar (ya identifica procesos por CommandLine sha) en vez de matarlos/olvidarlos, o (b) un flag keep_alive en dayz_test_run que sobreviva el restart del daemon, con expiracion explicita. Prioridad media: es la friccion nro 1 del ciclo in-game multi-dia.",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": true,
+"D7": false
+},
+"clase_mecanica": "C3",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260901-220647-1c81",
+"kind": "bug",
+"project": "DayZ_MCP",
+"ts": "2026-09-01T22:06:47Z",
+"age_label": null,
+"title": "La calibracion quedo vacia al renombrar los artefactos: rojo por fichero ausente, no por discriminar",
+"body": "tool: calibrate.py + adr-check.mjs del aparato de verificacion del lote ADR (corrida dayz-mcp-adr-20260901)\n\nerror: la prueba de discriminacion del aparato dejo de discriminar y siguio dando 9/9 rojo.\n\n`calibrate.py:27-29` escribe los candidatos falsos TOY-A y TOY-B con los nombres\n`PROPUESTO-adr-s15-m15-storage.md`, `PROPUESTO-adr-candidate-live-s04-s24.md` y\n`PROPUESTO-adr-tabla-procedencia.md`. La promocion al bundle v9 renombro los tres ADR\na su nombre final y `adr-check.mjs:30-32` se actualizo para buscar los nombres promovidos\n(mtime 2026-09-01 17:54). `calibrate.py` no se actualizo (mtime 05:04).\n\nDesde ese momento el checker NUNCA abre los ficheros que la calibracion escribe. Las ocho\npuertas empiezan su salida con «no existe ...\\adr-...md» y salen rojas por eso. Cambiar el\ncontenido del TOY no puede ponerlas verdes, asi que el rojo no acredita nada: es un fallo de\nmontaje leido como discriminacion.\n\ncalendario, medido por mtime:\n  17:54  adr-check.mjs pasa a los nombres promovidos\n  17:55  ultima corrida de calibracion de la sesion (evidence/calibration/toy-a, toy-b),\n         con nombres PROPUESTO-\n  20:42  atestacion final de las puertas de esa sesion\n\nO sea: la recalibracion obligatoria tras un cambio se ejecuto un minuto despues del cambio,\ny fue ESE cambio el que la dejo vacia. La regla se cumplio y aun asi no sirvio, porque el\ncontrol no comprobaba que su propio montaje fuera valido.\n\nrepro:\n  grep -n 'PROPUESTO' <run>/tools/calibrate.py            -> lineas 27-29\n  grep -n 'ADR_S15 =' <run>/tools/adr-check.mjs           -> nombre sin prefijo\n  correr las nueve puertas contra los toys existentes     -> «no existe ...» en ocho de nueve\n\nque invalida y que NO: invalida la afirmacion de que los oraculos se mostraron\ndiscriminantes en la corrida de las 17:55, que es la ultima de esa sesion. NO invalida los\nresultados de las puertas sobre los artefactos REALES (esos si abren los ficheros de verdad\ny pasaron), ni los dictamenes de los dos revisores, ni la verificacion del bundle, ni los\ncensos.\n\nfix: (1) que los nombres de los toys se DERIVEN del checker en vez de repetirse, para que no\npuedan separarse otra vez; (2) un tercer veredicto SETUP-FAILED: cualquier salida con «no\nexiste», excepcion o fallo de montaje no cuenta como rojo valido y hace fallar la\ncalibracion entera; (3) que cada control afirme un marcador causal concreto, no solo rc!=0.\n\nLeccion general: un control positivo tiene que acreditar que su montaje llego al sujeto.\nUn rojo sin causa comprobada es indistinguible de un instrumento que no toco nada.\nHallado el 2026-09-02 por revision cruzada (gpt-5.6-sol) sobre una copia del aparato; el\nledger de aquella sesion se deja sellado por decision del usuario.",
+"disposicion_previa": null,
+"senales": {
+"D1": 2,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260901-201402-1578",
+"kind": "bug",
+"project": "AI_Pipeline",
+"ts": "2026-09-01T20:14:02Z",
+"age_label": null,
+"title": "Un lanzador con ErrorActionPreference Stop se traga el stderr que explica por que murio la lane",
+"body": "tool: launch_*.ps1 (patron comun de los lanzadores de lane detached)\n\nerror: la lane murio en 1 s con stream-doctor.jsonl de 0 B, stderr-doctor.txt de 0 B y sin fichero EXIT. Eso se lee exactamente igual que «el modelo no produjo nada», que es la trampa que estos lanzadores ya documentan para otro motivo (el prompt troceado por Start-Process -ArgumentList).\n\nLa causa real era trivial: --model grok-4.6-xhigh no existe; el identificador de Cursor es cursor-grok-4.6-xhigh. cursor-agent lo dice con un mensaje completo por stderr, listando los 190 modelos validos.\n\nPor que ese mensaje no llego al log: el script llevaba $ErrorActionPreference = 'Stop' en alcance, y en PowerShell 5.1 redirigir el stderr de un ejecutable nativo envuelve cada linea en un ErrorRecord (NativeCommandError). Con 'Stop', la PRIMERA linea de stderr lanza excepcion terminante: el script muere antes de que la redireccion cuaje y antes de escribir EXIT. El diagnostico que existia se perdio por como estaba escrito el lanzador.\n\nrepro:\n  $ErrorActionPreference='Stop'; & $cursor -p x --model MODELO-QUE-NO-EXISTE 1> a.jsonl 2> b.txt\n  -> a.jsonl 0 B, b.txt 0 B, sin EXIT\n  con $ErrorActionPreference='Continue' alrededor de la llamada nativa -> b.txt trae el mensaje entero\n\nfix aplicado: 'Continue' solo alrededor de la invocacion nativa, y el EXIT se escribe desde un finally para que exista aunque la llamada lance. Vale para cualquier lanzador de este host.\n\nSegunda mitad del mismo fallo, y es de metodo: el identificador salio de un grep -oE 'grok-[a-z0-9.-]+' sobre los logs de una corrida anterior. El patron devolvio el SUFIJO de cursor-grok-4.6-xhigh y parecia un nombre completo. Un identificador recuperado por grep se comprueba contra la lista que publica la herramienta antes de cablearlo, no contra lo que parezca.",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260901-201348-e33d",
+"kind": "finding",
+"project": "AI_Pipeline",
+"ts": "2026-09-01T20:13:48Z",
+"age_label": null,
+"title": "El universo que le das a una lane tiene que cubrir donde viven los arreglos, no donde vive el sintoma",
+"body": "tool: brief de delegacion (lane Cursor Grok sobre el pipeline-doctor)\n\nerror: el encargo decia «tu universo es C:\\Users\\guill\\ObsidianVault\\AI» y prohibia tocar OneDrive. Los cuatro FAIL se MIDEN dentro del vault, pero dos de los cuatro se ARREGLAN fuera: uno en GunRacks_mod_dev\\GunRacks_dev\\HANDOFF.md y otro regenerando DayZ_MCP_dev\\PROJECT-MAP.md, los dos bajo OneDrive.\n\nLa lane hizo lo correcto —los declaro ABIERTOS citando la prohibicion en vez de saltarsela— pero cerro 1 de 4 cuando podia haber cerrado 3. El tiempo perdido no es suyo: el encargo estaba mal recortado.\n\nrepro: el checker vive en el vault y sus contadores tambien, asi que al recortar el universo por donde SE MIDE parece que cubres el trabajo. La comprobacion que faltaba es de treinta segundos: por cada FAIL, localizar el fichero culpable ANTES de escribir el brief y comprobar que cae dentro del universo que vas a conceder.\n\nLeccion: un checker que mide dentro de un arbol no implica que sus defectos vivan ahi. El alcance de una delegacion se deriva del conjunto de FICHEROS QUE HAY QUE ESCRIBIR, no del arbol donde corre el instrumento. Si ese conjunto cruza una frontera que no quieres abrir, el brief lo dice desde el principio y reparte: «estos dos son tuyos, estos dos los hago yo», en vez de dejar que la lane descubra el muro a mitad.\n\nColateral medido el mismo dia: arreglar el FAIL de GunRacks (anadir LIVE-STATE a su HANDOFF) dejo obsoleto su PROJECT-MAP y reabrio el FAIL que se acababa de cerrar para otro proyecto. Los checks de un vault estan acoplados por sus derivados: tras cerrar uno hay que volver a correr la suite ENTERA, no solo el check que tocaste.",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260901-201327-bb66",
+"kind": "bug",
+"project": "AI_Pipeline",
+"ts": "2026-09-01T20:13:27Z",
+"age_label": null,
+"title": "El doctor salta promoted-snapshots y el auditor de enlaces lo recorre como live: dos checkers que se contradicen",
+"body": "tool: pipeline-doctor.ps1 -> vault-link-audit.ps1\n\nerror: el check «Delta de enlaces live» lleva en FAIL con new_live_pairs=41, y las 41 parejas viven bajo AI/10_Projects/DayZ_Modding_Knowledge_Pack/promoted-snapshots/**/05032021e5025257347365ebf1fe569605ecdf8a/**.\n\nEl propio pipeline-doctor.ps1 declara 'promoted-snapshots' en $skipDirs (linea ~232) y el comentario de al lado dice literalmente que editar una copia congelada para reparar un enlace falsea el registro, y que contarla como deuda pide exactamente eso. Pero vault-link-audit.ps1 no menciona promoted-snapshots en ningun sitio: su Get-SourceClass (lineas 71-77) no tiene rama para ese arbol, asi que cae al default 'live', y RegressionGate (289-290) pone FAIL con cualquier pareja live nueva.\n\nResultado: la suite se contradice. Un directorio que un checker declara intocable lo cuenta otro como deuda viva, y el FAIL solo se puede cerrar (a) reescribiendo snapshots congelados, (b) cambiando el checker, o (c) regenerando el baseline dentro de la misma corrida, que es justo lo que el fix-text del propio check prohibe.\n\nrepro:\n  powershell -NoProfile -ExecutionPolicy Bypass -File C:\\Users\\guill\\ObsidianVault\\AI\\20_Runbooks\\scripts\\pipeline-doctor.ps1\n  -> [FAIL] Delta de enlaces live / new_live_pairs=41\n  grep -n 'promoted-snapshots' ...\\vault-link-audit.ps1   -> cero coincidencias\n  sed -n '228,237p' ...\\pipeline-doctor.ps1               -> 'promoted-snapshots' en $skipDirs\n\nFix propuesto (una linea, no afloja nada): Get-SourceClass devuelve una clase distinta de 'live' para rutas bajo promoted-snapshots, igual que ya hace con _backups y con 30_Sessions. Alternativa mejor: derivar la exclusion del auditor del mismo $skipDirs del doctor, para que no sean dos definiciones de «que se ignora» que puedan derivar — que es exactamente lo que el comentario de $skipDirs dice querer evitar.\n\nDetectado el 2026-09-01 por la lane que cerro los otros cuatro FAIL del doctor; se dejo ABIERTO a proposito en vez de forzarlo. Los otros cuatro estan cerrados: 5 FAIL -> 1.",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 5,
+"D3": false,
+"D4": false,
+"D5": "firma",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "C3",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260901-185627-8fac",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-01T18:56:27Z",
+"age_label": null,
+"title": "La ceguera de una lane ciega se degrada al decirle que es la septima pasada",
+"body": "Medido en la sesión 2026-09-01. Ticket O3 en `TICKETS-ORQUESTADOR.md`. Handoff: `AI/30_Sessions/2026-09-01-dayzmcp-adr-deferred-s15-candidate-live.md`.\n\nSÍNTOMA\nSe usó una lane de revisión ciega (sesión nueva cada vez, sin council, sin dictámenes previos, sin briefs de autoría — verificado con `find`: 0 coincidencias en su workspace). La PRIMERA pasada fue genuinamente ciega.\n\nDe la segunda en adelante, el orquestador le añadió al brief una adenda que decía que era una segunda pasada, que «los documentos han sido corregidos desde entonces», y que numerase sus hallazgos desde `D1` / `E1` / `G1` / `X1`…\n\nEso es **información sobre el proceso** que una sesión ciega no debería tener: le revela que hubo hallazgos previos, cuántas tandas van, y que otros ya revisaron. Un revisor que sabe que va por la séptima pasada tiene un sesgo distinto del que cree ser el primero — puede buscar menos, o buscar distinto.\n\nLa degradación no se registró en ningún sitio: el manifiesto seguía describiendo la lane como «ciega» sin matices.\n\nSUGERENCIA\n- Si se necesitan varias pasadas ciegas, cada una recibe el brief **byte-idéntico**, y la numeración de hallazgos la reasigna el RECEPTOR al integrarlos, no el revisor.\n- Si por lo que sea hay que darle contexto de proceso, la lane deja de ser ciega y se relabela como tal en el manifiesto.\n- La única excepción legítima que hubo en esta corrida fue darle shell (`--force`) a partir de la 2.ª pasada, porque su primer paso obligatorio era recalcular SHA-256 y sin shell no podía: ahí el hueco era del encuadre, no del revisor, y se declaró.\n\nRelacionado con LL-408 (un solo PASS de revisor ciego no es señal estable): si además la ceguera se degrada pasada a pasada, la señal se debilita por dos vías a la vez.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260901-185612-21bc",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-01T18:56:12Z",
+"age_label": null,
+"title": "Sustituir lanes de un council pierde diversidad de puerta sin recuento",
+"body": "Medido en la sesión 2026-09-01. Ticket O6 en `TICKETS-ORQUESTADOR.md`. Handoff: `AI/30_Sessions/2026-09-01-dayzmcp-adr-deferred-s15-candidate-live.md`.\n\nSÍNTOMA\nUn council de 7 lanes se diseñó con 3 entrando por `cursor-cli`, y esa concentración se DECLARÓ en el manifiesto como limitación estructural conocida. Dos titulares cayeron durante la corrida (`gemini-3.6-flash` por 429 de Google; `qwen3.8:98k` local atascado en 81 MB de `thinking_delta` sin entregar) y sus ángulos se relevaron por Cursor.\n\nResultado: **5 de 7 lanes acabaron entrando por la misma puerta**. Eso no se re-evaluó: quedó anotado en el manifiesto original y nadie recontó tras las sustituciones. Un fallo de Cursor habría dejado la corrida en 2 lanes.\n\nLa diversidad de FAMILIA cognitiva sí se mantuvo (xAI, Moonshot, Zhipu, Cursor, OpenAI). La que se perdió es la de PUERTA, que es la que protege contra un fallo de transporte.\n\nSUGERENCIA\nLa diversidad de puerta es un invariante de la corrida, no una nota del manifiesto:\n- al sustituir una lane, recontar cuántas quedan por cada puerta;\n- si se cruza un umbral (p. ej. más de la mitad por una sola), decirlo en voz alta o elegir otra puerta para el relevo;\n- y registrar el recuento POST-sustitución junto al original, para que la limitación declarada siga siendo cierta al cerrar.\n\nRelacionado: C13 de `council-orchestration` ya obliga a relabelar una lane sustituida; lo que falta es que la sustitución dispare el recuento de puertas.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260901-185558-cd55",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-09-01T18:55:58Z",
+"age_label": null,
+"title": "Bucle autor-revisor sin criterio de parada declarado: 15 rondas",
+"body": "Medido en la sesión 2026-09-01 (cierre documental del lote DEFERRED S15 + candidate-live). Handoff: `AI/30_Sessions/2026-09-01-dayzmcp-adr-deferred-s15-candidate-live.md`. Ticket completo O7 en `TICKETS-ORQUESTADOR.md` del directorio de corrida.\n\nSÍNTOMA\nUn bucle autor↔revisor sobre tres documentos sin código corrió **15 rondas de corrección y 8 vueltas de revisión**. La gravedad bajó de forma monótona (1 CRITICAL → 2 CRITICAL → 0 CRITICAL → solo MAJOR → solo MINOR), así que el bucle SÍ convergía. Lo que faltaba no era parar antes: era un criterio de parada escrito desde el principio.\n\nLO QUE SÍ LO DESBLOQUEÓ, y se improvisó a mitad\n1. Ronda 4 — «corregir sin ampliar». El documento crecía 52→63→69 KB y el texto nuevo traía defectos nuevos que nadie había revisado. Con la regla, el crecimiento cayó de +8 KB a +1,7 KB por ronda.\n2. Ronda 11 — «un hallazgo declarado abierto, con su número y su motivo, cuenta como cierre legítimo». Sin ella el bucle es asintótico: se aplicó a un discriminador que llevaba cinco iteraciones (G1 → K2 → N1/M1 → V1/W1 → Y1/X5) y cada refinamiento abría el siguiente borde.\n\nLas dos funcionaron en la primera ronda en que se aplicaron.\n\nSUGERENCIA\nTodo bucle implementador↔revisor arranca con su condición de parada en el PRIMER brief, no en el cuarto:\n- qué gravedad bloquea y cuál no;\n- qué cuenta como cierre legítimo (incluido «declarado abierto con número, motivo, dueño y condición de cierre»);\n- a partir de qué ronda un hallazgo nuevo del MISMO tipo se declara hueco en vez de corregirse;\n- y la regla de no ampliar: preferir retirar una afirmación que no se sostiene antes que escribir tres párrafos para sostenerla.\n\nNO ES un problema del MCP ni de sus tools: es del patrón de orquestación reutilizable (`council-orchestration` / `gates-ledger`), que es donde se repetirá.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260901-135438-28c5",
+"kind": "finding",
+"project": "",
+"ts": "2026-09-01T13:54:38Z",
+"age_label": null,
+"title": "council-orchestration: un gate de \"revisión ciega fresca\" no debería aceptar un solo PASS como suficiente",
+"body": "Observado auditando la corrida adr-20260901 (DayZ-MCP, dos ADR documentales revisados por hasta\n7 pasadas de blind review independientes antes de publicar). El propio historial de rondas de\nesta sesión es el dato: la pasada ciega 3 dio PASS unánime en los tres documentos revisados. La\npasada ciega 4 -una sesión igual de \"nueva y ciega\" según el mismo brief- encontró un hallazgo\nMAJOR real y verificable que las tres pasadas anteriores no habían visto (un discriminador de\nseguridad comparaba sólo un deletreo de un path que tiene dos formas equivalentes, dejando pasar\nla forma que realmente usa el código). Si la corrida se hubiera detenido en la pasada 3 -un punto\nde parada razonable, PASS×3-, el gate se habría dado por cumplido sobre un documento con un hueco\nreal.\n\nLección para council-orchestration y para cualquier gate tipo \"G12-FRESH-REVIEW\" del patrón\ngates-ledger: una sola sesión ciega en PASS es una muestra de tamaño 1, y esta misma corrida\ndemuestra varianza real entre sesiones igualmente ciegas y frescas sobre el mismo material (PASS\nen la ronda 3, REVISE con MAJOR en la ronda 4, REVISE parcial de nuevo en la ronda 6). El diseño\ncorrecto de un gate de este tipo debería exigir N pasadas consecutivas en PASS (N≥2) antes de\ndarlo por cerrado, o exigir que la pasada que cierra declare qué ángulos de las pasadas previas\nno volvió a recorrer -para no asumir que la última ronda es representativa de las que no se\nrepitieron. Un solo dictamen fresco es una buena señal, pero el propio catálogo de esta corrida\nprueba que no es una señal suficiente por sí sola.",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260901-135420-5ca4",
+"kind": "finding",
+"project": "",
+"ts": "2026-09-01T13:54:20Z",
+"age_label": null,
+"title": "gates-ledger: un gate \"no-writes\" complementario no debe asumir por comentario qué lanes tenían shell",
+"body": "Observado auditando la corrida adr-20260901 (DayZ-MCP, ledger de 12 puertas para dos ADR\ndocumentales; script en C:\\Users\\guill\\AppData\\Local\\Temp\\dayz-mcp-adr-20260901\\tools\\adr-check.mjs,\ntemp — no persiste).\n\nPatrón del gate: G8-NOWRITES compara un censo A (inicio) contra un censo B (cierre) en forma\ncomplementaria (todo lo no autorizado debe seguir byte-idéntico) y excluye de fallo cualquier\ncambio fuera del árbol de la propia corrida, clasificándolo como \"cambio de tercero declarado y\nno imputado\". La exclusión se justifica en el código con un comentario que afirma, como hecho\nestructural: \"NO lane of this run could write to <repo>\" porque ninguna lane de Cursor corrió con\n--force (shell).\n\nEl defecto: esa enumeración de capacidades por lane vivía en un comentario, no en una comprobación\nejecutable, y quedó desactualizada sin que nada lo detectara. La misma sesión, en una fase\nposterior (blind review, segunda pasada), SÍ lanzó una lane de Cursor con --force (necesitaba\nshell para recalcular SHA-256) — y el comentario del gate nunca se actualizó para reflejarlo.\n\nLección para el patrón gates-ledger / council-orchestration: cuando un gate \"no-writes\" excluye\nterceros por argumento estructural (\"esta lane no podía escribir ahí\"), esa afirmación caduca en\ncuanto se añade una fase nueva a la corrida (review rounds, blind rounds) con permisos distintos\nde la fase original. O bien el gate deriva la lista de \"lanes con shell\" de algo verificable\n(los propios scripts de lanzamiento, un log de flags realmente usados), o bien cada fase nueva\nque cambie permisos debe tocar y re-justificar ese comentario como parte de su propio checklist.\nUn comentario de \"por qué esto es seguro\" que no se revisa cuando cambian las condiciones es el\nmismo antipatrón que un EXPECT hardcodeado.",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 2,
+"D3": true,
+"D4": false,
+"D5": "formato",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "C4",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260831-220737-4597",
+"kind": "bug",
+"project": "DayZ_Modding_Knowledge_Pack",
+"ts": "2026-08-31T22:07:37Z",
+"age_label": null,
+"title": "promote --apply deja el pack en rojo: escribe su recibo y nadie lo mapea en source-map",
+"body": "tool: python -m packctl promote --apply\nrepro: correr un promote --apply completo y despues `packctl validate --root . --report <f>`.\n\nQUE PASA. `promote --apply` escribe su recibo en `promotions/receipts/<transaction_id>.json`\n(aqui 99c0cf65e815aeaabc7f6f24, 34 KB) pero NO anade la entrada correspondiente a\n`sources/source-map.json`. El resultado es que un promote exitoso deja el repo en FAIL:\n\n  SOURCE-RECEIPT-UNTRACKED  promotions/receipts/99c0cf65e815aeaabc7f6f24.json\n  SOURCE-UNMAPPED           promotions/receipts/99c0cf65e815aeaabc7f6f24.json\n\nO sea: la operacion que mas necesita dejar rastro auditable es justo la que rompe el sello.\n\nQUE NO ES. No es que el recibo este mal ni que falte el fichero: esta escrito y es correcto.\nEs que el pack sella todo lo publicado y el recibo nace fuera del sello.\n\nPRECEDENTE, y por eso se ve que la entrada deberia existir: los cuatro recibos que 40c8e2d\nretiro SI tenian su entrada en source-map (`git show 40c8e2d^:sources/source-map.json`),\ncon `distribution_role: repo_only`, `routing_artifact_id: repo/promotions` y un\n`decision_evidence` que describe la transaccion. Se escribieron a mano en su dia.\n\nARREGLADO A MANO esta vez, clonando esa plantilla (commit b4f4207 de la rama\npromo/sp084-sp227): validate vuelve a PASS con 0 findings.\n\nSUGERENCIA: que `promote --apply` anada la entrada del recibo al source-map como parte de\nla transaccion, o que al terminar imprima el next-step igual que se pide para\nbuild_native_launcher.py en fb-20260831-142027-eca9. Es el mismo patron: una operacion que\ndeja el entorno en un estado que solo el siguiente comando revela.\n\nSEGUNDO DEFECTO, mas sutil, en el mismo camino. `promote --apply` reescribe\n`promotions/adjudications.json` (avanza los digests que casan) con\n`json.dumps(..., ensure_ascii=False)`. Si las razones que escribiste eran ASCII puro, el\nfichero cambia de forma en cuanto una lleve un caracter no-ASCII: el round-trip que\ncomprueba `reseal-source-map.py` deja de reproducirlo y aborta. Coste: una ronda para\ndescubrir que el discriminante era `ensure_ascii`, no el contenido. Mitigacion barata:\nmantener las razones en ASCII.\n\nLO QUE NO VERIFIQUE: si el recibo deberia ir al source-map o quedar excluido por\n.gitignore como decision de diseno. Los cuatro precedentes dicen que va mapeado, pero no\nhay decision escrita en decisions/ que lo fije.\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 4,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "C3",
+"dup_candidatos": [
+"fb-20260831-142027-eca9"
+]
+},
+{
+"id": "fb-20260831-142027-eca9",
+"kind": "finding",
+"project": "",
+"ts": "2026-08-31T14:20:27Z",
+"age_label": null,
+"title": "Rebuild del bundle rompe el registry (identity drift): ciclo rollback-last→install; clients MCP vivos no ven el deploy",
+"body": "Dos hechos operativos medidos hoy (31-ago, cierre del alias lfheli):\n\n1) Tras CUALQUIER rebuild del bundle nativo, dayz_test_run muere con launcher_root_identity_drift: el registry pinea el file_id del DIRECTORIO del bundle y el os.replace del build lo renueva. El ciclo canónico de renovación (~70 recibos históricos en approved-launchers.receipts lo confirman): `python -m dayz_mcp.launcher_registry_update rollback-last` y luego `install-dayz-test-v1 --expected-sha256 <sha-del-REGISTRY-actual>`. OJO: el CAS del install es el sha256 del fichero approved-launchers.json ACTUAL, NO el del PE (costó 2 intentos fallidos: launcher_registry_cas_mismatch, y luego launcher_registry_version_already_installed por intentar install sin rollback previo); `bootstrap` es create-only para clones frescos y nunca resetea un registry existente.\n\n2) El tool _MISSION_ALIASES (y toda la validación de dayz_test_tool) corre en el proceso CLIENT MCP de cada sesión Cowork, spawneado al arranque de esa sesión. Tras un deploy de código de tools + restart del daemon, las sesiones VIVAS siguen ejecutando el tool viejo (aquí: bad_mission con mission=lfheli) hasta reiniciar su sesión; solo las sesiones nuevas ven el cambio. El daemon restarted no basta.\n\nSugerencia: documentar el ciclo rebuild→rollback-last→install en el runbook del proyecto y/o hacer que build_native_launcher.py imprima ese next-step al terminar; y que bad_mission / launcher_root_identity_drift lleven un hint del remedio.",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260831-113350-7a9f",
+"kind": "request",
+"project": "LFHeli",
+"ts": "2026-08-31T11:33:50Z",
+"age_label": null,
+"title": "Runner-de-celdas foreign no puede acreditarse (binding_retired) ni leer logs; falta alias de mision privada",
+"body": "Contexto (2026-08-31, sesion LFHeli T4/SC-003): necesitaba boot server + 4 world_spawn + grep del log. Tres fricciones encadenadas, todas con repro:\n\n1) dayz_test_run(project=LFHeli_OH1) solo permite mission_aliases chernarus|livonia|sakhal (worker-runtime.json). La mision privada LFHeli.chernarusplus (la de las celdas del runner, CE recortado, storage limpiado por SP-062) NO esta. La vanilla dayzOffline.chernarusplus CRASHEO con el storage_1 persistido: cadena de VM Exception 'Failed to read modstorage' (CF_ModStorageObject.OnStoreLoad_CF, cf_modstorageobject.c:142) hasta minidump a los ~2.5 min (crash_2026-08-31_13-12-22.log en P:\\LFHeli_dev\\_server\\profiles). PETICION: alias 'lfheli' -> LFHeli.chernarusplus en el policy del proyecto LFHeli_OH1 (build_native_launcher.py).\n\n2) Server lanzado por run_oh1_server_v2.ps1 (patron runner-de-celdas) pollea bien (version 10~1.29 accepted) pero el fence lo rechaza: binding_state=binding_retired, 420 unaccredited_polls. Causa: $profile:dayz_mcp.json conserva la instance del ultimo run del guard (retirado); un launcher manual no la refresca. Fail-closed correcto, pero deja al patron runner-de-celdas (el que usara F1 de LFHeli) sin via de acreditacion. PETICION: documentar/proveer la via soportada (p.ej. dayz_test_run con alias de mision privada cubre el caso; o un verbo que emita instance fresca para un launch externo).\n\n3) wait_for y logs_since devuelven no_active_run con server foreign — sin run del guard no hay lectura de logs por tools. Workaround usado: Select-String host-direct sobre P:\\LFHeli_dev\\_server\\profiles (funciono).\n\nNota: el run del guard vanilla quedo UNRECONCILED tras el crash (dayz_test_stop 1o intento run_stop_failed, 2o run_not_active); el registro mostraba RUNNING_IDLE ~5 min con el proceso ya muerto (13:14:58) — un liveness check del pid en bridge_status/session_status habria delatado al cadaver antes.",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": true,
+"D4": false,
+"D5": "formato",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "C4",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260831-004457-62d7",
+"kind": "bug",
+"project": "AI_Pipeline",
+"ts": "2026-08-31T00:44:57Z",
+"age_label": null,
+"title": "Cuarto disparo del guard de borrado de PowerShell: una ruta dentro del MENSAJE DE COMMIT, sin ningun Remove-Item",
+"body": "tool: herramienta PowerShell del arnes (guard de Remove-Item)\namplia: fb-20260830-224952-eb6b, que documenta tres disparos falsos. Este es un cuarto, con\nuna forma de disparo que esa ficha no recoge.\n\nrepro exacto: `git commit` con el mensaje pasado por here-string de PowerShell. El mensaje\ncontenia esta linea de prosa:\n\n    research/2026-08-31-deuda-skills-cinco-almacenes: copia durable del censo que\n    estaba en C:\\tmp, verificada por sha256 fichero a fichero (9 de 9).\n\nerror devuelto:\n\n    Remove-Item on system path 'C:\\tmp,' is blocked. This path is protected from removal.\n\nEn el comando NO habia Remove-Item, ni rm, ni Clear-Content: era un `git commit -m @'...'@` y\nnada mas. El guard extrajo `C:\\tmp,` -- con la coma de la frase pegada, que ya delata que no\nsalio de un parseo de argumentos sino de una coincidencia de patron sobre el texto crudo.\n\npor que este caso es distinto de los tres de la ficha original: alli el texto sospechoso\nestaba en una cadena de SALIDA (`Write-Output \"=== A: intacto ===\"`) o en una variable sin\nasignar. Aqui esta dentro de un here-string de datos que se le pasa a un ejecutable externo\ncomo argumento. O sea que ni siquiera basta con evitar `Write-Output` con rutas: cualquier\nCONTENIDO que viaje por PowerShell y mencione una ruta puede abortar el bloque.\n\nimpacto: el commit no se ejecuto. Coste bajo porque el fallo es ruidoso y el trabajo estaba\nindexado, pero en un bloque que hubiera hecho varias cosas antes del commit se pierde todo lo\nanterior, porque el guard aborta el bloque ENTERO antes de ejecutar nada.\n\nworkaround que uso: pasar el mensaje por fichero (`git commit -F <ruta>`) desde el Bash tool.\nCon eso el texto no atraviesa PowerShell.\n\nsugerencia (la misma de la ficha original, reforzada): analizar el AST y mirar los argumentos\nRESUELTOS de las llamadas a Remove-Item / Clear-Content / rm. Como minimo, no mirar dentro de\nliterales de cadena ni de here-strings: un here-string es dato, nunca un comando.",
+"disposicion_previa": null,
+"senales": {
+"D1": 80,
+"D2": 0,
+"D3": true,
+"D4": false,
+"D5": "formato",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "C4",
+"dup_candidatos": [
+"fb-20260830-224952-eb6b"
+]
+},
+{
+"id": "fb-20260831-004409-1ad0",
+"kind": "finding",
+"project": "LFThermalCore",
+"ts": "2026-08-31T00:44:09Z",
+"age_label": null,
+"title": "extra_mods + P:\\Mods como mod_root permite correr un probe desechable sin tocar la politica sellada",
+"body": "CONTEXTO\nGate G10 de LFThermalCore necesitaba cliente+jugador y un mod propio que llamase\nSetObjectMaterial. LFThermalCore NO esta en list_projects (10 proyectos aprobados), asi que\ndayz_test_run no podia lanzarlo directamente.\n\nHALLAZGO (util, no es bug)\nNo hace falta reconstruir la politica con build_native_launcher.py. Los DIEZ proyectos\naprobados llevan 'P:\\Mods' en mod_roots (native-launchers/dayz-test-v1/request-policy.json),\ny dayz_test_tool._valid_public_mod acepta \"a relative folder name\" dentro de esos roots\n(dayz_test_tool.py:90-93). Receta:\n\n  1. construir el mod desechable a P:\\Mods\\@<Nombre>\\Addons (AddonBuilder -packonly -clear\n     -include=<src>\\include.lst), firmar con Return0.biprivatekey\n  2. dayz_test_run(project=\"DayZ_MCP\", mode=\"all\", extra_mods=[\"@<Nombre>\"])\n\nSale el bridge entero (capture_screenshot, camera_set, query_player_state, wait_for sobre\nlog_matches) MAS el probe. Cuatro corridas esta noche, cero cambios en la politica sellada.\n\nDOS TRAMPAS MEDIDAS\n\n1. La PERSISTENCIA contamina el experimento entre corridas. El personaje volvio con la\n   prenda tal y como la dejo la corrida anterior (wetlevel=4, hplevel=2), asi que el\n   control de la corrida 2 arrancaba pasado el nivel que tenia que cruzar y habria salido\n   \"el control no dispara\" siendo falso. Un probe que mide estado de entidades tiene que\n   NORMALIZAR el sujeto al empezar y no fiarse del loadout de spawn.\n\n2. dayz_test_run deja el PBO bloqueado. Reconstruir con AddonBuilder mientras el run esta\n   vivo da \"Build failed\" y — esto es lo peligroso — DSSignFile a continuacion devuelve\n   EXIT=0 firmando el PBO VIEJO. El exit code de la firma no dice nada sobre si el build\n   entro. Verificar SIEMPRE la tabla del PBO contra el tamano del fuente antes de lanzar.\n\nSUGERENCIA\nMerece una linea en la doc de dayz_test_run: \"extra_mods acepta cualquier carpeta bajo los\nmod_roots del proyecto; para un probe desechable no hace falta darlo de alta como proyecto\".\n\nREPRO\ntool: dayz_test_run\nargs: {\"project\":\"DayZ_MCP\",\"mode\":\"all\",\"extra_mods\":[\"@LFG10Probe\"],\"mission\":\"chernarus\"}\nerror: ninguno, funciona\nevidencia: C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\LFThermalCore_dev\\F0\\g10-evidence\\\n",
+"disposicion_previa": null,
+"senales": {
+"D1": 11,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "firma",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "C3",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260831-003021-63d4",
+"kind": "finding",
+"project": "AI_Pipeline",
+"ts": "2026-08-31T00:30:21Z",
+"age_label": null,
+"title": "Un paquete .skill alcanza SOLO el arbol del plugin: 1 de los 5 almacenes de skills del host",
+"body": "tool: instalacion de paquetes .skill (canal de distribucion de skills del host)\n\nhallazgo: instalar un `.skill` escribe SOLO en el arbol del plugin. Medido sobre 6 destinos\ncandidatos: 6 de 6 llegan al arbol del plugin, 0 de 6 llegan a `~\\.claude\\skills` (el almacen\nde usuario, que es la copia de trabajo donde los agentes editan y cargan segun\n`CONTRIBUTING.md:18-20` del Knowledge Pack en origin/main).\n\npor que importa al pipeline: \"te paso la skill en .skill\" no es una entrega completa. El\nreceptor se queda con una copia en el plugin y las otras cuatro siguen divergiendo. Cualquier\ndiseno de fan-out automatico que asuma que el paquete es el vehiculo universal no es\nimplementable con el canal actual: hay que copiar a mano o por script a los almacenes que el\npaquete no toca.\n\nrepro: empaquetar una skill, instalarla, y censar los cinco almacenes buscando el fichero\nnuevo. Solo aparece bajo `...\\skills-plugin\\<guid>\\<guid>\\skills\\`.\n\nimpacto medido en la misma sesion: 29 skills con deuda real (contenido divergente entre\nalmacenes) sobre 91 nombres censados; 73 tienen 2 o mas copias propias y 53 divergen.\n\nevidencia durable: AI/30_Sessions/2026-08-31b-matriz-destinos-reconciliacion-y-cinco-almacenes.md\ny AI/20_Knowledge/lessons-learned.md LL-392.\n\nsugerencia: si el pipeline va a repartir skills, el reparto necesita un script que enumere los\nalmacenes y copie, con el paquete .skill como formato de transporte y no como mecanismo de\ninstalacion. Y el diseno debe declarar el alcance del canal antes de prometer sincronia.",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260830-224952-eb6b",
+"kind": "bug",
+"project": "pipeline",
+"ts": "2026-08-30T22:49:52Z",
+"age_label": null,
+"title": "El guard de borrado de PowerShell dispara con rutas que aparecen en cadenas de TEXTO, no en comandos de borrado",
+"body": "tool: herramienta PowerShell del arnes (guard de Remove-Item)\nrepro: tres disparos en una sola sesion (dayz-projects-6f, noche 2026-08-30/31), los tres FALSOS POSITIVOS y ninguno sobre un borrado real de esa ruta.\n\nCasos exactos, con el mensaje que devolvio:\n\n1. \"Remove-Item on system path '\\' is blocked.\"\n   El comando tenia `Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue` con\n   $tmp = 'C:\\tmp\\burn-0830\\_verif_mutante'. La variable estaba definida en la linea\n   anterior del MISMO bloque. El guard parece evaluar antes de la asignacion y ver la\n   variable vacia, quedandose con la barra suelta.\n\n2. \"Remove-Item on system path 'A:' is blocked.\"\n   NO habia ningun Remove-Item en el comando. La unica aparicion de \"A:\" era en una cadena\n   de salida mia: Write-Output \"=== A: intacto (debe VERDE) ===\". El guard la leyo como\n   unidad de disco A:.\n\n3. \"Remove-Item on system path '/' is blocked.\"\n   Tampoco habia Remove-Item. La barra venia de un literal de texto:\n   \"esperado por la lane: 46b34d652ea4..., 84467 bytes\" precedido de \" / \".\n\nimpacto: cada disparo aborta el bloque ENTERO antes de ejecutar nada, asi que se pierde\ntodo el trabajo del comando, no solo la parte del borrado. En los casos 2 y 3 el comando\nera de solo lectura (Get-FileHash, Test-Path, Measure-Object) y no borraba nada.\n\nsugerencia: que el guard analice el AST de PowerShell y mire los argumentos resueltos de\nlas llamadas a Remove-Item / Clear-Content / rm, en vez de hacer coincidencia de patrones\nsobre el texto del comando. Como minimo, no evaluar variables antes de su asignacion\ndentro del mismo bloque, y no tratar como ruta lo que esta dentro de un literal de cadena.\n\nworkaround que uso: no meter barras ni cadenas tipo \"X:\" en los Write-Output, y usar un\ndirectorio nuevo en vez de borrar el anterior. Funciona, pero deforma el codigo por una\nrazon que no tiene que ver con el codigo.\n\nrelacionado: memoria powershell-removal-guard-false-positives (ya existia con otro caso),\ny powershell-harness-guard-removeitem.",
+"disposicion_previa": null,
+"senales": {
+"D1": 0,
+"D2": 0,
+"D3": false,
+"D4": false,
+"D5": "pure_add",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+},
+{
+"id": "fb-20260830-193034-7f67",
+"kind": "finding",
+"project": "DayZ_MCP",
+"ts": "2026-08-30T19:30:34Z",
+"age_label": null,
+"title": "effective_schema: cuatro defectos del resolutor/auditor hallados en revision independiente (NVIDIA NIM)",
+"body": "tool: tools/dayz_mcp/effective_schema.py\n\nOrigen: revision independiente del PR #1 por `nvidia/nemotron-3-ultra-550b-a55b` via\nprime-agent+nvidia, 2026-08-30. Los cuatro VERIFICADOS por el receptor abriendo el\nfichero; los que no se sostuvieron no estan aqui.\n\nContexto de por que aparecen ahora: seis rondas de trabajo adversarial se centraron en el\nGATE de aceptacion. El modulo en si solo lo habia revisado Codex, dos veces. Estos son del\nmodulo.\n\n--- ARREGLABLE FACIL, delegado a Codex el 2026-08-30 ---\n\n[1] `_json_type` no recorre uniones ANIDADAS  (:87-105, el bucle en :100-102)\n    Solo mira `alt.get(\"type\")` de cada alternativa. Un `anyOf` dentro de otro `anyOf` se\n    ignora entero.\n    repro: _json_type({\"anyOf\":[{\"type\":\"string\"},{\"anyOf\":[{\"type\":\"integer\"},\n           {\"type\":\"number\"}]}]}) -> \"string\"  (esperado: [\"string\",\"integer\",\"number\"])\n    impacto: tipos publicados INCOMPLETOS. Hoy no muerde porque el arbol real no tiene\n    uniones anidadas; muerde el dia que las tenga.\n\n[2] `_json_enum` corta en la PRIMERA alternativa con enum  (:108-119, el return de :117)\n    repro: anyOf [{\"type\":\"string\",\"enum\":[\"a\",\"b\"]}, {\"type\":\"integer\",\"enum\":[1,2]}]\n           -> [\"a\",\"b\"], descartando [1,2]\n    impacto: FALSO POSITIVO de DESC-ENUM-MISMATCH. Si la prosa anuncia \"a|b|1|2\", el\n    auditor compara contra [\"a\",\"b\"] y denuncia una divergencia que no existe.\n\n--- ARREGLO MEDIO, NO delegado ---\n\n[3] `_PIPE_ENUM_RE` solo captura identificadores  (:23-25)\n    `[A-Za-z_][A-Za-z0-9_]*` no casa valores con espacios ni comillas.\n    repro: descripcion \"kind must be 'bug report' | 'feature request'\" con enum\n           [\"bug report\",\"feature request\"] -> el pipe no se detecta y el mismatch NO se\n           dispara.\n    impacto: FALSO NEGATIVO silencioso. Hoy no muerde: `pipeline_feedback` usa\n    identificadores. Muerde con el primer tool que documente valores con espacios.\n    por que NO se delega: ensanchar ese regex arriesga falsos positivos sobre prosa\n    normal, y hoy no hay ningun caso real que lo ejercite. Decidir antes de tocar.\n\n--- NO SON ARREGLOS FACILES: cambian contrato o diseno ---\n\n[4] `default` ausente y `default: null` colapsan al mismo None (:63). Distinguirlos exige\n    un centinela o un campo `has_default`, o sea CAMBIAR LA FORMA DEL REGISTRO — y con ella\n    lo que el gate compara y los 37 casos del banco. Ya estaba declarado como limitacion\n    conocida desde la ronda 1.\n[5] `resolve_effective_schemas()` no tiene punto de inyeccion mientras `audit_contracts`\n    si acepta `schemas=`. Asimetria real de testabilidad; el gate parchea `build_app`\n    precisamente por eso. Cambiarlo simplificaria el gate pero es decision de diseno.\n[6] `PARAM_SYNONYM_SETS` solo lleva {type, classname}: por diseno, y dicho en el propio\n    modulo dos lineas encima de la declaracion.\n[7] `LIMIT` se imprime en dos caminos (_gate.py:39 y :1198): correcto, los dos deben\n    imprimirlo. Sin accion.\n\n--- METODO, que vale mas que los hallazgos ---\n\nSeis intentos de revision independiente, uno solo util, y la causa es la RUTA y no el\nmodelo: `nemotron-3-ultra` por OpenCode leyo dos ficheros, gasto 433 s y no escribio nada;\nEL MISMO MODELO por NVIDIA NIM entrego 10 KB con escenario y metodo de comprobacion por\nhallazgo. Gemini cayo dos veces con 429 (los dos modelos comparten cuota).\n\nY un control que merece repetirse: al brief se le metio a proposito la mencion de un P1\nFABRICADO por una pasada anterior (`_collapse_types(namedamed)`, cadena que no existe en el\nfichero). El revisor de NIM no lo repitio ni lo menciono. Un revisor que traga la cita\ninventada no acredita.",
+"disposicion_previa": null,
+"senales": {
+"D1": 1,
+"D2": 2,
+"D3": false,
+"D4": true,
+"D5": "firma",
+"D6": false,
+"D7": false
+},
+"clase_mecanica": "DUDOSA",
+"dup_candidatos": []
+}
+]
+}

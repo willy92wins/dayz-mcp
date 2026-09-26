@@ -1,0 +1,654 @@
+--- server.py.before
++++ tools/dayz_mcp/server.py
+@@ -39,11 +39,14 @@
+ from dayz_mcp.daemon_policy import load_normal_daemon_policy
+ from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
+ from dayz_mcp.effective_schema_core import project_server_config_identity
+-from dayz_mcp.tool_registry_fingerprint import (
+-    AuthorityBundleBytes,
+-    capture_registry_snapshot,
+-    compare_snapshot_to_authority,
+-    read_authority_marker,
++from dayz_mcp.tool_registry_fingerprint import capture_registry_snapshot
++from dayz_mcp.knowledge import register_knowledge_tools
++from dayz_mcp.server_freshness import (
++    REMEDIATION as _TOOL_REGISTRY_REMEDIATION,
++    ServerSourceWatch,
++    install_result_freshness,
++    loaded_source_files,
++    source_stale,
+ )
+ from dayz_mcp import log_tail, result_prune
+ from dayz_mcp.loopback import LoopbackServer, read_key
+@@ -51,6 +54,10 @@
+ from dayz_mcp.process_lifecycle import empty_box, occupancy_error_fields
+ from dayz_mcp.session_coordination import ClientIdentity
+ from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
++
++# Freeze the source baseline while importing this server, before build_app can
++# be delayed or repeated. Includes knowledge tools and local capture helpers.
++_SERVER_SOURCES = ServerSourceWatch(loaded_source_files())
+ 
+ UiClickMode = Literal["direct", "complete"]
+ UiReloadLayoutMode = Literal["reload", "close"]
+@@ -637,9 +644,6 @@
+     return enriched
+ 
+ 
+-_TOOL_REGISTRY_REMEDIATION = "reopen_mcp_client"
+-
+-
+ def _registry_tool_records(app: FastMCP) -> list[dict[str, object]]:
+     records: list[dict[str, object]] = []
+     for tool in app._tool_manager.list_tools():
+@@ -674,21 +678,9 @@
+ 
+ def _frozen_tool_registry_overlay(app: FastMCP, config: ServerConfig) -> dict[str, Any]:
+     snapshot = _capture_process_registry(app, config)
+-    authority = read_authority_marker(
+-        AuthorityBundleBytes(
+-            marker=None,
+-            fingerprint_sidecar=None,
+-            verdict_sidecar=None,
+-            producers_sidecar=None,
+-            receipts=None,
+-        ),
+-        expected_profile=snapshot.profile,
+-        expected_role=snapshot.role,
+-    )
+     return {
+         "tool_registry_fingerprint": snapshot.fingerprint,
+         "tool_registry_captured_at": snapshot.captured_at_utc,
+-        "tool_registry_source_stale": compare_snapshot_to_authority(snapshot, authority),
+         "tool_registry_remediation": _TOOL_REGISTRY_REMEDIATION,
+     }
+ 
+@@ -3267,7 +3259,13 @@
+         "Inspect peer liveness, version_state, and ready "
+         f"{{ready, reason is an OPEN set (today: {reason_list}): validate by shape "
+         "(ready: bool, reason: non-empty string), never against a whitelist}}. "
+-        "daemon_modules.stale = source newer than daemon, not a crash."
++        "daemon_modules.stale = source newer than daemon, not a crash. "
++        "server_modules watches this tools process's loaded Python sources; "
++        "stale lists changed content, unreadable lists unverifiable sources. "
++        "tool_registry_source_stale is true/false, or an unknown object with "
++        "reasons. A server_code_freshness text block and result _meta mark "
++        "every MCP response from a stale/unverifiable tools process; reopen "
++        "the MCP client to load new server code."
+     )
+ 
+ 
+@@ -3316,8 +3314,6 @@
+         ),
+         lifespan=lifespan,
+     )
+-    from dayz_mcp.knowledge import register_knowledge_tools
+-
+     register_knowledge_tools(app)
+ 
+     def _client_runtime() -> ClientRuntime:
+@@ -3332,10 +3328,14 @@
+     # overlay is local to this FastMCP process; loopback /status does not
+     # publish it.
+     _tool_registry_overlay: dict[str, Any] = {}
+-
+-    def _with_tool_registry(payload: dict[str, Any]) -> dict[str, Any]:
++    server_sources = _SERVER_SOURCES
++
++    async def _with_tool_registry(payload: dict[str, Any]) -> dict[str, Any]:
+         overlay = dict(payload)
+         overlay.update(_tool_registry_overlay)
++        modules = await asyncio.to_thread(server_sources.snapshot)
++        overlay["server_modules"] = modules
++        overlay["tool_registry_source_stale"] = source_stale(modules)
+         return overlay
+ 
+     async def _bridge_tool_names() -> frozenset[str]:
+@@ -4756,7 +4756,7 @@
+     async def bridge_status() -> dict[str, Any]:
+         runtime.touch()
+         payload = await runtime.bridge_status_payload()
+-        return _with_tool_registry(
++        return await _with_tool_registry(
+             _with_capability_comparison(payload, await _bridge_tool_names())
+         )
+ 
+@@ -5330,6 +5330,7 @@
+         _patch_closed_tool_schema(app, _closed_tool)
+     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
+     _tool_registry_overlay.update(_frozen_tool_registry_overlay(app, config))
++    install_result_freshness(app, server_sources)
+     return app, runtime
+ 
+ 
+--- test_mcp_tools.py.before
++++ tools/tests/test_mcp_tools.py
+@@ -654,8 +654,12 @@
+             self.assertIn(key, status)
+         self.assertEqual(status["tool_registry_remediation"], "reopen_mcp_client")
+         stale = status["tool_registry_source_stale"]
+-        self.assertIn(stale, (None, "unknown"))
+-        self.assertIsNot(stale, False)
++        if isinstance(stale, dict):
++            self.assertEqual(stale["status"], "unknown")
++            self.assertEqual(stale["reason"], "unverifiable_server_sources")
++        else:
++            self.assertIs(type(stale), bool)
++        self.assertGreater(status["server_modules"]["watched_count"], 0)
+         with patch.object(server_module, "capture_registry_snapshot") as capture:
+             again = _content_json(await app.call_tool("bridge_status", {}))
+         capture.assert_not_called()
+--- test_ui_error_diagnostics.py.before
++++ tools/tests/test_ui_error_diagnostics.py
+@@ -10,6 +10,7 @@
+ """
+ from __future__ import annotations
+ 
++import json
+ import unittest
+ from types import SimpleNamespace
+ from typing import Any
+@@ -159,7 +160,13 @@
+         async with create_connected_server_and_client_session(app._mcp_server) as session:
+             call = await session.call_tool(tool, arguments)
+     assert call.isError, call
+-    return " ".join(getattr(block, "text", "") for block in call.content)
++    # S3 adds process freshness as a separate block, not to the domain error.
++    # Check that sidecar independently and retain the exact diagnostic assertion.
++    for block in call.content[1:]:
++        sidecar = json.loads(block.text)
++        assert set(sidecar) == {"server_code_freshness"}, call
++        assert sidecar["server_code_freshness"] == call.meta["server_code_freshness"], call
++    return call.content[0].text
+ 
+ 
+ class UiClickWireTest(unittest.IsolatedAsyncioTestCase):
+--- /dev/null
++++ tools/dayz_mcp/server_freshness.py
+@@ -0,0 +1,147 @@
++"""Read-only source drift evidence for the process serving MCP tools.
++
++This is a source snapshot, not a bytecode attestation or a reload mechanism.
++Capture it at server import, not at the first status request or each app build.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import hashlib
++import json
++import os
++import sys
++import time
++from pathlib import Path
++from typing import Any
++
++from mcp import types
++from mcp.server.fastmcp import FastMCP
++
++REMEDIATION = "reopen_mcp_client"
++MARKER = "server_code_freshness"
++_TOOLS_ROOT = Path(__file__).resolve().parents[1]
++
++
++def loaded_source_files() -> dict[str, Path | None]:
++    """Watch the loaded package and local tools/ helpers, not third-party code."""
++    files: dict[str, Path | None] = {}
++    for name, module in list(sys.modules.items()):
++        path = getattr(module, "__file__", None)
++        if name == "dayz_mcp" or name.startswith("dayz_mcp."):
++            files[name] = Path(path) if isinstance(path, str) else None
++        elif name in {"mcp_capture", "knowledge_pack"}:
++            # These helpers also implement tools. Keep them covered when a
++            # Windows drive alias spells tools/ differently from resolve().
++            files[name] = Path(path) if isinstance(path, str) else None
++        elif isinstance(path, str) and Path(path).parent == _TOOLS_ROOT:
++            files[name] = Path(path)
++    return files
++
++
++def _digest(path: Path | None) -> str | None:
++    if path is None or path.suffix != ".py":
++        return None
++    try:
++        return hashlib.sha256(path.read_bytes()).hexdigest()
++    except OSError:
++        return None
++
++
++class ServerSourceWatch:
++    def __init__(self, files: dict[str, Path | None]) -> None:
++        self.started_at = time.time()
++        self.pid = os.getpid()
++        self._files = dict(files)
++        self._hashes = {name: _digest(path) for name, path in files.items()}
++
++    def snapshot(self) -> dict[str, Any]:
++        # Read every time: metadata-preserving edits and new ACL denies must not
++        # silently pass. Callers move these reads off the asyncio event loop.
++        current = loaded_source_files()
++        files = {**current, **self._files}
++        stale: list[str] = []
++        unreadable: dict[str, str] = {}
++        for name, path in sorted(files.items()):
++            if name not in self._files:
++                # A late import has no baseline. Reading it now cannot prove
++                # which bytes were imported; never silently re-anchor it.
++                unreadable[name] = "loaded_after_server_snapshot"
++            elif self._hashes[name] is None:
++                unreadable[name] = "source_unreadable_at_server_snapshot"
++            elif name in current and current[name] != path:
++                unreadable[name] = "loaded_module_path_changed"
++            else:
++                digest = _digest(path)
++                if digest is None:
++                    unreadable[name] = "source_unreadable_now"
++                elif digest != self._hashes[name]:
++                    stale.append(name)
++        return {
++            "server_started_at": self.started_at,
++            "server_pid": self.pid,
++            "watched_count": len(files),
++            "stale": stale,
++            "unreadable": sorted(unreadable),
++            "unreadable_reasons": unreadable,
++        }
++
++
++def source_stale(snapshot: dict[str, Any]) -> bool | dict[str, Any]:
++    """A positive witness decides stale even when another source is unreadable."""
++    if snapshot["stale"]:
++        return True
++    if snapshot["unreadable"] or not snapshot["watched_count"]:
++        return {
++            "status": "unknown",
++            "reason": "unverifiable_server_sources",
++            "modules": snapshot["unreadable_reasons"],
++        }
++    return False
++
++
++def _call_marker(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any] | None:
++    stale = sorted(set(before["stale"]) | set(after["stale"]))
++    unreadable = sorted(set(before["unreadable"]) | set(after["unreadable"]))
++    if not stale and not unreadable and before["watched_count"] and after["watched_count"]:
++        return None
++    return {
++        "status": "stale" if stale else "unknown",
++        "scope": "loaded_server_modules",
++        "stale": stale,
++        "unreadable": unreadable,
++        "unreadable_reasons": {
++            **before["unreadable_reasons"], **after["unreadable_reasons"]
++        },
++        "server_pid": after["server_pid"],
++        "server_started_at": after["server_started_at"],
++        "remediation": REMEDIATION,
++    }
++
++
++def install_result_freshness(app: FastMCP, watch: ServerSourceWatch) -> None:
++    """Annotate the final MCP result, including SDK-generated tool errors.
++
++    Keep outputSchema/structuredContent and original content intact. _meta is
++    machine-readable; the extra TextContent is necessary because clients need
++    not expose _meta to the model. Direct in-process app.call_tool calls are not
++    protocol responses; their enclosing MCP call receives the marker here.
++    """
++    handlers = app._mcp_server.request_handlers
++    original = handlers[types.CallToolRequest]
++
++    async def handler(request: types.CallToolRequest) -> types.ServerResult:
++        before = await asyncio.to_thread(watch.snapshot)
++        response = await original(request)
++        after = await asyncio.to_thread(watch.snapshot)
++        marker = _call_marker(before, after)
++        result = response.root
++        if marker is not None and isinstance(result, types.CallToolResult):
++            result.meta = {**(result.meta or {}), MARKER: marker}
++            result.content = [
++                *result.content,
++                types.TextContent(type="text", text=json.dumps({MARKER: marker})),
++            ]
++        return response
++
++    handlers[types.CallToolRequest] = handler
+--- /dev/null
++++ tools/tests/test_server_freshness.py
+@@ -0,0 +1,336 @@
++from __future__ import annotations
++
++import base64
++import importlib.util
++import json
++import os
++import sys
++import tempfile
++import types as python_types
++import unittest
++from pathlib import Path
++from unittest.mock import AsyncMock, patch
++
++from mcp import types
++from mcp.server.fastmcp import Image
++from mcp.server.fastmcp.exceptions import ToolError
++
++from dayz_mcp import server
++from dayz_mcp.server_freshness import (
++    MARKER,
++    ServerSourceWatch,
++    loaded_source_files,
++    source_stale,
++)
++from tests.test_client_mode import _fixture_client_runtime
++
++_MODULE = "dayz_mcp.dayz_test_tool"
++_OLD = '''on_call = None
++
++async def execute_dayz_test_run(client, **kwargs):
++    if on_call is not None:
++        on_call()
++    return {"status": "succeeded", "implementation": "old"}
++'''
++_NEW = _OLD.replace('"old"', '"new"')
++
++
++class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
++    def setUp(self) -> None:
++        self.directory = tempfile.TemporaryDirectory()
++        self.addCleanup(self.directory.cleanup)
++        self.path = Path(self.directory.name) / "dayz_test_tool.py"
++        self.path.write_text(_OLD, encoding="utf-8")
++        spec = importlib.util.spec_from_file_location(_MODULE, self.path)
++        assert spec is not None and spec.loader is not None
++        self.module = importlib.util.module_from_spec(spec)
++        # Keep the real exception/constants contract, but load a harmless
++        # executor from disk. No launcher, daemon, Steam or game is contacted.
++        self.module.__dict__.update({
++            key: value for key, value in vars(server.dayz_test_tool).items()
++            if not key.startswith("__")
++        })
++        spec.loader.exec_module(self.module)
++        modules_patch = patch.dict(sys.modules, {_MODULE: self.module})
++        modules_patch.start()
++        self.addCleanup(modules_patch.stop)
++        module_patch = patch.object(server, "dayz_test_tool", self.module)
++        module_patch.start()
++        self.addCleanup(module_patch.stop)
++        self.watch = ServerSourceWatch(loaded_source_files())
++        watch_patch = patch.object(server, "_SERVER_SOURCES", self.watch)
++        watch_patch.start()
++        self.addCleanup(watch_patch.stop)
++        self.app, self.runtime = self.build()
++
++    def build(self):
++        config = server.ServerConfig(
++            mode="client", key="fixture-key", port=12345,
++            client_platform="codex", auto_spawn_daemon=False,
++            log_sink=lambda _message: None,
++        )
++        runtime = _fixture_client_runtime(config)
++        runtime.bridge_status_payload = AsyncMock(return_value={
++            "daemon_modules": {
++                "daemon_started_at": 1.0, "watched_count": 2,
++                "stale": [], "unreadable": [],
++            }
++        })
++        with patch.object(server, "ClientRuntime", return_value=runtime):
++            app, built = server.build_app(config)
++        self.assertIs(built, runtime)
++        return app, runtime
++
++    async def call(self, name="dayz_test_run", arguments=None, app=None):
++        if arguments is None:
++            arguments = {"project": "Fixture", "mode": "server"}
++        request = types.CallToolRequest(
++            method="tools/call",
++            params=types.CallToolRequestParams(name=name, arguments=arguments),
++        )
++        response = await (app or self.app)._mcp_server.request_handlers[
++            types.CallToolRequest
++        ](request)
++        self.assertIsInstance(response.root, types.CallToolResult)
++        # Round-trip the actual protocol envelope, including the _meta alias.
++        return types.CallToolResult.model_validate_json(
++            response.root.model_dump_json(by_alias=True)
++        )
++
++    def marker(self, result):
++        self.assertIn(MARKER, result.meta or {})
++        marker = result.meta[MARKER]
++        self.assertEqual(json.loads(result.content[-1].text), {MARKER: marker})
++        self.assertEqual(marker["scope"], "loaded_server_modules")
++        self.assertEqual(marker["remediation"], "reopen_mcp_client")
++        return marker
++
++    def deny_source_read(self):
++        original = Path.read_bytes
++
++        def read(path):
++            if path == self.path:
++                raise PermissionError("fixture access denied")
++            return original(path)
++
++        return patch.object(Path, "read_bytes", read)
++
++    async def test_fresh_response_has_no_marker(self) -> None:
++        result = await self.call()
++        self.assertFalse(result.isError)
++        self.assertEqual(result.structuredContent["implementation"], "old")
++        self.assertNotIn(MARKER, result.meta or {})
++        self.assertEqual(len(result.content), 1)
++
++    async def test_dayz_run_keeps_old_behavior_and_marks_stale_on_wire(self) -> None:
++        self.path.write_text(_NEW, encoding="utf-8")
++        for _ in range(2):
++            result = await self.call()
++            self.assertFalse(result.isError)
++            self.assertEqual(result.structuredContent["implementation"], "old")
++            self.assertEqual(json.loads(result.content[0].text), result.structuredContent)
++            marker = self.marker(result)
++            self.assertEqual(marker["status"], "stale")
++            self.assertEqual(marker["stale"], [_MODULE])
++            self.assertEqual(marker["unreadable"], [])
++
++    async def test_bridge_status_is_live_but_registry_fingerprint_is_frozen(self) -> None:
++        fresh = (await self.call("bridge_status", {})).structuredContent
++        self.assertIs(fresh["tool_registry_source_stale"], False)
++        modules = fresh["server_modules"]
++        self.assertGreater(modules["watched_count"], 1)
++        self.assertEqual(modules["stale"], [])
++        self.assertEqual(modules["unreadable"], [])
++        self.assertEqual(modules["server_pid"], os.getpid())
++        self.assertEqual(fresh["daemon_modules"]["watched_count"], 2)
++        self.path.write_text(_NEW, encoding="utf-8")
++        with patch.object(server, "capture_registry_snapshot") as capture:
++            stale = (await self.call("bridge_status", {})).structuredContent
++        capture.assert_not_called()
++        self.assertIs(stale["tool_registry_source_stale"], True)
++        self.assertEqual(stale["server_modules"]["stale"], [_MODULE])
++        self.assertEqual(stale["tool_registry_fingerprint"], fresh["tool_registry_fingerprint"])
++        self.assertEqual(stale["tool_registry_captured_at"], fresh["tool_registry_captured_at"])
++        self.assertEqual(stale["daemon_modules"], fresh["daemon_modules"])
++
++    async def test_rebuilding_app_does_not_reanchor_loaded_code(self) -> None:
++        self.path.write_text(_NEW, encoding="utf-8")
++        app, _runtime = self.build()
++        result = await self.call(app=app)
++        self.assertEqual(self.marker(result)["stale"], [_MODULE])
++
++    async def test_identical_content_touch_is_fresh(self) -> None:
++        stat = self.path.stat()
++        os.utime(self.path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000_000))
++        result = await self.call()
++        self.assertNotIn(MARKER, result.meta or {})
++
++    async def test_same_size_and_mtime_edit_is_stale(self) -> None:
++        stat = self.path.stat()
++        self.path.write_text(_NEW, encoding="utf-8")
++        os.utime(self.path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
++        self.assertEqual(self.path.stat().st_size, stat.st_size)
++        self.assertEqual(self.path.stat().st_mtime_ns, stat.st_mtime_ns)
++        self.assertEqual(self.marker(await self.call())["stale"], [_MODULE])
++
++    async def test_deleted_source_is_unknown_and_call_still_succeeds(self) -> None:
++        self.path.unlink()
++        result = await self.call()
++        self.assertFalse(result.isError)
++        marker = self.marker(result)
++        self.assertEqual(marker["status"], "unknown")
++        self.assertEqual(marker["unreadable"], [_MODULE])
++        status = (await self.call("bridge_status", {})).structuredContent
++        self.assertEqual(status["tool_registry_source_stale"], {
++            "status": "unknown", "reason": "unverifiable_server_sources",
++            "modules": {_MODULE: "source_unreadable_now"},
++        })
++
++    async def test_read_denied_is_unknown_without_failing_tool(self) -> None:
++        with self.deny_source_read():
++            result = await self.call()
++        self.assertFalse(result.isError)
++        self.assertEqual(self.marker(result)["unreadable"], [_MODULE])
++
++    async def test_unreadable_initial_snapshot_never_becomes_false_fresh(self) -> None:
++        with self.deny_source_read():
++            watch = ServerSourceWatch(loaded_source_files())
++        snapshot = watch.snapshot()
++        self.assertEqual(snapshot["unreadable_reasons"][_MODULE],
++                         "source_unreadable_at_server_snapshot")
++        self.assertEqual(source_stale(snapshot)["status"], "unknown")
++
++    async def test_late_import_has_explicit_unknown_reason(self) -> None:
++        name = "dayz_mcp.s3_late_fixture"
++        module = python_types.ModuleType(name)
++        module.__file__ = str(self.path)
++        with patch.dict(sys.modules, {name: module}):
++            for _ in range(2):
++                marker = self.marker(await self.call())
++                self.assertEqual(marker["unreadable_reasons"][name],
++                                 "loaded_after_server_snapshot")
++
++    async def test_changed_module_origin_is_unknown(self) -> None:
++        with patch.object(self.module, "__file__", str(self.path.with_name("other.py"))):
++            marker = self.marker(await self.call())
++        self.assertEqual(marker["unreadable_reasons"][_MODULE],
++                         "loaded_module_path_changed")
++
++    async def test_stale_at_entry_is_retained_if_source_is_restored_in_call(self) -> None:
++        self.path.write_text(_NEW, encoding="utf-8")
++        self.module.on_call = lambda: self.path.write_text(_OLD, encoding="utf-8")
++        self.assertEqual(self.marker(await self.call())["stale"], [_MODULE])
++        self.assertNotIn(MARKER, (await self.call()).meta or {})
++
++    async def test_source_edit_during_call_is_marked(self) -> None:
++        self.module.on_call = lambda: self.path.write_text(_NEW, encoding="utf-8")
++        self.assertEqual(self.marker(await self.call())["stale"], [_MODULE])
++
++    async def test_stale_witness_wins_over_another_unreadable_source(self) -> None:
++        self.path.write_text(_NEW, encoding="utf-8")
++        module = python_types.ModuleType("dayz_mcp.s3_missing_fixture")
++        with patch.dict(sys.modules, {module.__name__: module}):
++            result = await self.call("bridge_status", {})
++        self.assertIs(result.structuredContent["tool_registry_source_stale"], True)
++        marker = self.marker(result)
++        self.assertEqual(marker["status"], "stale")
++        self.assertIn(module.__name__, marker["unreadable"])
++
++    async def test_error_flag_and_original_error_text_are_preserved(self) -> None:
++        @self.app.tool()
++        async def s3_error() -> dict:
++            raise ToolError("fixture_error")
++
++        fresh = await self.call("s3_error", {})
++        self.path.write_text(_NEW, encoding="utf-8")
++        stale = await self.call("s3_error", {})
++        self.assertTrue(stale.isError)
++        self.assertEqual(stale.content[:-1], fresh.content)
++        self.assertEqual(self.marker(stale)["status"], "stale")
++
++    async def test_closed_argument_validation_is_preserved_and_marked(self) -> None:
++        self.path.write_text(_NEW, encoding="utf-8")
++        result = await self.call(arguments={
++            "project": "Fixture", "mode": "server", "unexpected": True,
++        })
++        self.assertTrue(result.isError)
++        self.assertIn("unexpected arguments", result.content[0].text)
++        self.assertEqual(self.marker(result)["status"], "stale")
++
++    async def test_image_and_existing_content_are_preserved(self) -> None:
++        @self.app.tool()
++        async def s3_picture():
++            return [Image(data=b"fixture-image", format="png"), "fixture metadata"]
++
++        fresh = await self.call("s3_picture", {})
++        self.path.write_text(_NEW, encoding="utf-8")
++        stale = await self.call("s3_picture", {})
++        self.assertFalse(stale.isError)
++        self.assertEqual(stale.content[:-1], fresh.content)
++        self.assertEqual(stale.content[0].data, base64.b64encode(b"fixture-image").decode())
++        self.assertIsNone(stale.structuredContent)
++        self.marker(stale)
++
++    async def test_list_result_and_output_schema_are_preserved(self) -> None:
++        @self.app.tool()
++        async def s3_list() -> list[dict[str, str]]:
++            return [{"symbol": "fixture"}]
++
++        fresh = await self.call("s3_list", {})
++        self.path.write_text(_NEW, encoding="utf-8")
++        stale = await self.call("s3_list", {})
++        self.assertFalse(stale.isError)
++        self.assertEqual(stale.structuredContent, fresh.structuredContent)
++        self.assertEqual(stale.content[:-1], fresh.content)
++        self.marker(stale)
++
++    async def test_existing_result_metadata_is_preserved(self) -> None:
++        @self.app.tool()
++        async def s3_metadata() -> types.CallToolResult:
++            return types.CallToolResult(
++                _meta={"fixture": "retained"},
++                content=[types.TextContent(type="text", text="fixture")],
++            )
++
++        self.path.write_text(_NEW, encoding="utf-8")
++        result = await self.call("s3_metadata", {})
++        self.assertEqual(result.meta["fixture"], "retained")
++        self.marker(result)
++
++    async def test_loaded_watch_covers_registered_implementations_and_helpers(self) -> None:
++        files = loaded_source_files()
++        for name in (
++            "dayz_mcp.server", "dayz_mcp.dayz_test_tool", "dayz_mcp.knowledge",
++            "dayz_mcp.playbook_tool", "dayz_mcp.ui_dialog",
++            "dayz_mcp.server_freshness", "mcp_capture",
++        ):
++            self.assertIn(name, files)
++        for tool in self.app._tool_manager.list_tools():
++            self.assertIn(tool.fn.__module__, files)
++
++    async def test_empty_watch_is_unknown(self) -> None:
++        with patch("dayz_mcp.server_freshness.loaded_source_files", return_value={}):
++            snapshot = ServerSourceWatch({}).snapshot()
++        self.assertEqual(source_stale(snapshot)["status"], "unknown")
++
++
++    async def test_named_capture_helper_is_watched_through_a_drive_alias(self) -> None:
++        import mcp_capture
++        with patch.object(mcp_capture, "__file__", r"Q:\alias\tools\mcp_capture.py"):
++            files = loaded_source_files()
++        self.assertIn("mcp_capture", files)
++
++    async def test_stale_marker_survives_a_real_mcp_client_session(self) -> None:
++        from mcp.shared.memory import create_connected_server_and_client_session
++        self.path.write_text(_NEW, encoding="utf-8")
++        async with create_connected_server_and_client_session(self.app._mcp_server) as session:
++            result = await session.call_tool(
++                "dayz_test_run", {"project": "Fixture", "mode": "server"}
++            )
++        self.assertFalse(result.isError)
++        self.assertEqual(result.structuredContent["implementation"], "old")
++        self.assertEqual(self.marker(result)["stale"], [_MODULE])
++
++
++if __name__ == "__main__":
++    unittest.main()

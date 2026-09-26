@@ -1,0 +1,689 @@
+[
+  {
+    "phase": "red",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_resultleak_pool' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08"
+    ],
+    "exit_code": 1,
+    "summary": [
+      "Ran 13 tests in 0.129s",
+      "FAILED (failures=12)"
+    ]
+  },
+  {
+    "phase": "green",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_resultleak_pool' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 13 tests in 0.147s",
+      "OK"
+    ],
+    "module": "tests.test_resultleak_pool"
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_action_use",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_action_use' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 3 tests in 0.092s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_addon_tree_has_no_write_artifacts",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_addon_tree_has_no_write_artifacts' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 5 tests in 0.003s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_batch6",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_batch6' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 13 tests in 0.164s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_bridge_client_capabilities",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_bridge_client_capabilities' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 8 tests in 0.004s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_bridge_server_capabilities",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_bridge_server_capabilities' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 9 tests in 0.011s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_camera_native_crash",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_camera_native_crash' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 12 tests in 0.451s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_d09_d10_spawn_timeout_object_id",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_d09_d10_spawn_timeout_object_id' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 2 tests in 0.017s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_effective_schema_catalog",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_effective_schema_catalog' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 5 tests in 0.002s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_entities_has_cargo",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_entities_has_cargo' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 5 tests in 0.005s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_entities_query_cargo",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_entities_query_cargo' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 12 tests in 0.318s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_guards_bridge",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_guards_bridge' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 8 tests in 0.072s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_instance_fence",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_instance_fence' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 64 tests in 1.156s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_inventory_give",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_inventory_give' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 5 tests in 0.086s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_key_press",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_key_press' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 6 tests in 0.178s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_leak_callback_drain",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_leak_callback_drain' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 8 tests in 0.552s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_leak_callback_lifetime",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_leak_callback_lifetime' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 7 tests in 0.019s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_loopback",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_loopback' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 74 tests in 1.103s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_mcp_tools",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_mcp_tools' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 51 tests in 7.977s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_object_anim",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_object_anim' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 4 tests in 0.085s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_object_inspect",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_object_inspect' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 4 tests in 0.082s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_player_respawn",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_player_respawn' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 4 tests in 0.082s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_player_teleport",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_player_teleport' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 9 tests in 0.408s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_poll_key_reload_contract",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_poll_key_reload_contract' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 2 tests in 0.001s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_poll_watchdog_contract",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_poll_watchdog_contract' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 8 tests in 0.002s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_restore_gameplay_contract",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_restore_gameplay_contract' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 12 tests in 0.550s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_surface_query",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_surface_query' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 4 tests in 0.081s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_task9_spawn_phase_markers",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_task9_spawn_phase_markers' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 7 tests in 0.001s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_ui_click_scriptview",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_ui_click_scriptview' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 6 tests in 0.002s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_ui_enforce_contract",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_ui_enforce_contract' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 15 tests in 0.008s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_ui_error_diagnostics",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_ui_error_diagnostics' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 10 tests in 0.587s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_ui_reload_layout",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_ui_reload_layout' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 10 tests in 0.073s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_vehicle_prepare_fixture",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_vehicle_prepare_fixture' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 4 tests in 0.081s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_vehicle_telemetry_contract",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_vehicle_telemetry_contract' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 10 tests in 0.027s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_vehicle_trace_contract",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_vehicle_trace_contract' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 7 tests in 0.083s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "green",
+    "module": "tests.test_world_spawn_ground_contract",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' '-m' 'unittest' 'tests.test_world_spawn_ground_contract' '-v'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "Ran 2 tests in 0.001s",
+      "OK"
+    ]
+  },
+  {
+    "phase": "lint",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' 'C:/Users/guill/DayZ-Modding-Knowledge-Pack/tools/dayz-script-validator/scripts/script_validator.py' 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\addon' '--terse'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1",
+      "TMP/TEMP/TMPDIR = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\test-temp",
+      "DAYZ_RESULTLEAK_BEFORE_DIR, DAYZ_LEAK_BEFORE_DIR, GUARDS_SOURCE_DIR unset"
+    ],
+    "exit_code": 1,
+    "summary": [
+      "FAIL - 2 errors, 5 warnings"
+    ]
+  },
+  {
+    "phase": "lint-before",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\check_lint_before.py'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1"
+    ],
+    "summary": [
+      "FAIL - 2 errors, 5 warnings",
+      "BEFORE substitutions verified: MCPBridge.c, MCPCallbacks.c, MCPClientBridge.c",
+      "BEFORE == current: same 2 errors and 5 warnings (line offsets normalized)"
+    ],
+    "exit_code": 1
+  },
+  {
+    "phase": "preservation",
+    "command": "& 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\.venv-mcp\\Scripts\\python.exe' '-X' 'utf8' 'C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\reviews\\resultleak-2026-09-08\\verify_preservation.py'",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools",
+      "PYTHONPATH = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev",
+      "PYTHONDONTWRITEBYTECODE = 1"
+    ],
+    "summary": [
+      "PASS: all three BEFORE backups retain their recorded bytes and SHA-256",
+      "PASS: entire MCPClientBridge.c byte-identical, including camera/guards/poll/shutdown",
+      "PASS: entire MCPPollCallback class byte-identical",
+      "PASS: 14 server poll/admission/dispatch/drain/guard methods unchanged",
+      "PASS: PostResult differs only in callback acquisition; same POST path/order/body/logging",
+      "SHA256 MCPBridge.c 83667 8137e231f6e648a6b2ea9d7633a323cc4fdd37cbb4ef7de06fa9fac84ef5668d",
+      "SHA256 MCPCallbacks.c 1819 1838f39da577d274817b846ca4b772b1a896d4a7dc9c7e44b4c9424611384e24",
+      "SHA256 MCPClientBridge.c 95702 9ce3ec0bb1430dea4f91e15e5efa4fffb0d77d95570da259b8463ec4c5017a19"
+    ],
+    "exit_code": 0
+  },
+  {
+    "phase": "diff-check",
+    "command": "git diff --check -- addon/scripts/5_Mission/MCPBridge.c addon/scripts/5_Mission/MCPClientBridge.c addon/scripts/5_Mission/MCPCallbacks.c",
+    "settings": [
+      "cwd = C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev"
+    ],
+    "summary": [],
+    "exit_code": 0
+  }
+]
