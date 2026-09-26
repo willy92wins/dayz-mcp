@@ -19,7 +19,7 @@
 
 | Ãrbol | QuÃ© es | Estado 2026-09-12 |
 |---|---|---|
-| `P:\DayZ_MCP` | Addon compilable (`$PBOPREFIX$=DayZ_MCP`). **Sin `.git`.** | **DESFASADO (2026-09-25):** 5/10 ficheros difieren de `addon/` de `main` (lleva `vehicle_drive`/`drive_probe_client`, retirados en `5892014`) con la misma version `"10"`. No empaquetar desde aqui (ficha `fb-20260925-233932-aa11`). |
+| `P:\DayZ_MCP` | Addon compilable (`$PBOPREFIX$=DayZ_MCP`). **Sin `.git`.** | **DESFASADO (medido 2026-09-26 contra `main` `1785212`):** 5 de los 13 ficheros versionados de `addon/` difieren (`MCPBridge.c`, `MCPClientBridge.c`, `MCPDialogController.c`, `MCPMessages.c`, `MissionGameplay.c`) (lleva `vehicle_drive`/`drive_probe_client`, retirados en `5892014`) con la misma version `"10"`. No empaquetar desde aqui (ficha `fb-20260925-233932-aa11`). |
 | `P:\DayZ_MCP_dev` | Repo de producto (Python MCP, plans, reviews, este HANDOFF). `addon/` es la copia git del bridge. | Git `https://github.com/willy92wins/dayz-mcp.git`. HEAD local = `main` (tracking `origin/main`, ff desde inbox `6de5d98` = PR #17). **Inbox no mergeada.** `HANDOFF.md` entra en este commit. Untracked leftovers (backups, dumps de reviews, `NEXT-SESSION-PROMPT.txt`) se conservan y no se publican. |
 | `â€¦\!Workshop\@DayZ_MCP\Addons\DayZ_MCP.pbo` | PBO desplegado | SHA-256 `1E79BF80EADE48C98BB318A96C7F4ECF73F8782EC3AD3DDD08045B7751F98C9B` (2026-09-16, desde `1737dc5`) |
 | `C:\Users\guill\Repos\dayz-mcp` | Otro clone | Rancio. No usarlo como checkout. Rama local `fichas/hands-watchdog` (**13c, no estÃ¡ en main**). |
