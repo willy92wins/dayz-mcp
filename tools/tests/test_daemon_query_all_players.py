@@ -12,6 +12,7 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 from dayz_mcp import loopback, server
+from tests.fence_helpers import announced_capabilities
 
 
 class _ResultState:
@@ -42,6 +43,7 @@ class _ResultState:
                     "binding_state": "BOUND",
                     "instance_prefix": peer,
                     "bound_last_poll_age_s": 0.1,
+                    "capabilities": announced_capabilities(peer),
                 }
                 for peer in ("server", "client")
             },

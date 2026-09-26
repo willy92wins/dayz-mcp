@@ -207,6 +207,17 @@ class HonestReadyAfterLaunchTest(unittest.TestCase):
                     "last_poll_age_s": 0.2,
                     "bound_last_poll_age_s": 0.2,
                     "version_state": "ok",
+                    # 0878: a live server peer needs an announced census + ach.
+                    "capabilities": {
+                        "state": "announced",
+                        "reason": "ok",
+                        "announced_commands": sorted(
+                            server._BRIDGE_COMMAND_TOOLS["server"]
+                        ),
+                        "announced_arg_contract_hash": (
+                            server.EXPECTED_SERVER_ARG_CONTRACT_HASH
+                        ),
+                    },
                 },
                 "client_peer": {
                     "last_poll_age_s": 0.3,

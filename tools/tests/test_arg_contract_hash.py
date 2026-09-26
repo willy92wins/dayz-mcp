@@ -10,8 +10,14 @@ plus ``compute_bridge_ready`` fail closed on absent/wrong values.
 from __future__ import annotations
 
 import re
+import sys
 import unittest
 from pathlib import Path
+
+# Make tools/ importable whether run via discover or by module name.
+_TOOLS_DIR = Path(__file__).resolve().parents[1]
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
 
 from dayz_mcp import loopback, server as server_module
 from tests._addon_paths import addon_root

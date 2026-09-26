@@ -17,6 +17,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp import agent_loop, inbox, server
 from dayz_mcp.server import ServerConfig, build_app
+from tests.fence_helpers import announced_capabilities
 from tests.test_client_mode import _fixture_client_runtime
 from tests.test_mcp_tools import _content_json
 
@@ -205,7 +206,11 @@ class WeakAgentReadyTest(unittest.TestCase):
 
     def test_server_only_run_is_client_not_polling(self) -> None:
         status = {
-            "server_peer": {"last_poll_age_s": 0.2, "version_state": "ok"},
+            "server_peer": {
+                "last_poll_age_s": 0.2,
+                "version_state": "ok",
+                "capabilities": announced_capabilities("server"),
+            },
             "client_peer": {
                 "last_poll_age_s": None,
                 "version_state": "legacy_blocked",
@@ -217,7 +222,11 @@ class WeakAgentReadyTest(unittest.TestCase):
 
     def test_fresh_ok_peers_are_ready(self) -> None:
         status = {
-            "server_peer": {"last_poll_age_s": 0.2, "version_state": "ok"},
+            "server_peer": {
+                "last_poll_age_s": 0.2,
+                "version_state": "ok",
+                "capabilities": announced_capabilities("server"),
+            },
             "client_peer": {"last_poll_age_s": 0.3, "version_state": "ok"},
         }
         ready = server.compute_bridge_ready(status)

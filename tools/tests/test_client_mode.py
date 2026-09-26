@@ -21,7 +21,7 @@ from dayz_mcp import control_client, core, host_config, server
 from dayz_mcp.server import ServerConfig
 from tests.test_daemon import DaemonHttpServer, _config, _free_port, _http
 from tests.test_mcp_tools import _content_json
-from tests.fence_helpers import INST_CLIENT, INST_SERVER
+from tests.fence_helpers import INST_CLIENT, INST_SERVER, poll_census_query
 
 
 _VALID_PEER_VERSION = f"{core.EXPECTED_BRIDGE_VERSION}~1.29.0"
@@ -93,6 +93,7 @@ class GamePeer:
         while not self._stop.is_set():
             query = {"peer": self.peer}
             query["inst"] = INST_SERVER if self.peer == "server" else INST_CLIENT
+            query.update(poll_census_query(self.peer))
             if self.version is not None:
                 query["ver"] = self.version
             try:
