@@ -99,8 +99,8 @@ CREDENTIAL_RECOVERY_COUNT_MAX = 2_147_483_647
 EXEC_COMMANDS = {"exec_enforce"}
 WHITELISTED_COMMANDS = SERVER_COMMANDS | CLIENT_COMMANDS
 _RUN_NOT_OWNED_HINT = (
-    "This run has no owner (RUNNING_IDLE); call session_acquire_wait, whose "
-    "grant adopts the single ownerless run"
+    "This run has no owner (RUNNING_IDLE). Adopt it with session_acquire_wait: "
+    "its grant adopts the single ownerless run"
 )
 _DURABLE_UNREADABLE = "run_state_unavailable"
 # Whitelisted verbs that validate_command_args does NOT schema-check. Each is
