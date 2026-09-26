@@ -3,10 +3,10 @@
 <!-- LIVE-STATE:START -->
 # DayZ-MCP - Estado vivo - 2026-09-26 (Madrid)
 
-- **main** = `515fb94c8a4c0fb99b117e3c219920cb25525609` (#97 MERGED squash; camera_set RestoreGameplay on ApplyCameraSet fail / 9957).
-- **#97 MERGED** tip pre-squash `8cf0ae6` → main `515fb94`; Auditor LIMPIO. Ticket `fb-20260925-233952-9957` stays **OPEN**.
-- Prior: #95 `e03282b` foreign_ports DayZ-related default / 1432; #94 `9af5cbf` arg-contract hash fail-closed / 0878 detectability; #92 `72f6354` wave1 resolve `0c27`+`b1a7`+`99db` CLOSED; `e7ef` deferred.
-- Checkout: ff `origin/main` when clean; do **not** reset --hard. Canonical tip is `515fb94`.
+- **main** = `41a3a78895cf8b19cae01aaa9a924456c8b40761` (#101 MERGED squash; sibling DayZ_MCP DESFASADO / aa11; census always reads addon/).
+- **#101 MERGED** tip pre-squash `6ccc924` → main `41a3a78`. Ticket `fb-20260925-233932-aa11` (DESFASADO landed; Option A).
+- Prior: #100 `8e6d0ad` tool-count SSOT 62→63; #98 `1785212` run_not_owned/session_acquire_wait / 9ccc; #97 `515fb94` camera_set RestoreGameplay / 9957; #95 `e03282b` foreign_ports / 1432; #94 `9af5cbf` arg-contract / 0878; #92 `72f6354` wave1.
+- Checkout: ff `origin/main` when clean; do **not** reset --hard. Canonical tip is `41a3a78`.
 - Abierto: triaje buzón continúa (FN/Flash/script; **NO Sol** en tickets). 0 PRs abiertos.
 - HOLD dueño: Workshop re-pack / heater / GATES / e7ef / 0878 - no tocar desde Orq sin OT/GO. Ticket `fb-20260924-235528-0878` stays **OPEN**.
 <!-- LIVE-STATE:END -->
