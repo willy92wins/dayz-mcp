@@ -10,7 +10,7 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from dayz_mcp import instance_fence, loopback, server
+from dayz_mcp import agent_loop, instance_fence, loopback, server
 from dayz_mcp.server import ServerConfig, build_app
 from tests.test_client_mode import _fixture_client_runtime
 
@@ -29,6 +29,8 @@ _REQUIRED_RUN_FENCE_CODES = (
     "run_state_unavailable",
     "enqueue_cancelled",
 )
+# run_not_owned always names the tool whose grant adopts the ownerless run.
+_NEXT_ACQUIRE = "; next_step=session_acquire_wait"
 
 
 def _codes_from_function(fn: ast.FunctionDef) -> set[str]:
@@ -78,12 +80,32 @@ class EnqueueRefusalCodeTest(unittest.TestCase):
             server._public_enqueue_error(
                 {"error": "run_not_owned", "hint": loopback._RUN_NOT_OWNED_HINT}
             ),
-            "run_not_owned: " + loopback._RUN_NOT_OWNED_HINT,
+            "run_not_owned: " + loopback._RUN_NOT_OWNED_HINT + _NEXT_ACQUIRE,
+        )
+
+    def test_the_idle_run_refusal_names_the_adopting_tool(self) -> None:
+        # fb-20260925-233943-9ccc: the hint and next_step name a public tool,
+        # the hint survives the carrier bounds, and an older daemon's prose
+        # still gets the next step.
+        self.assertIn("session_acquire_wait", loopback._RUN_NOT_OWNED_HINT)
+        self.assertEqual(
+            server._carriable_hint({"hint": loopback._RUN_NOT_OWNED_HINT}),
+            loopback._RUN_NOT_OWNED_HINT,
+        )
+        self.assertEqual(
+            agent_loop.next_step("session_acquire_wait"), "session_acquire_wait"
+        )
+        self.assertEqual(
+            server._public_enqueue_error(
+                {"error": "run_not_owned", "hint": "Legacy daemon prose."}
+            ),
+            "run_not_owned: Legacy daemon prose." + _NEXT_ACQUIRE,
         )
 
     def test_every_run_fence_code_is_whitelisted(self) -> None:
         for code in _REQUIRED_RUN_FENCE_CODES:
-            self.assertEqual(server._public_enqueue_error({"error": code}), code)
+            expected = code + _NEXT_ACQUIRE if code == "run_not_owned" else code
+            self.assertEqual(server._public_enqueue_error({"error": code}), expected)
             self.assertIn(code, server._REMOTE_ERROR_CODES)
 
     def test_the_lease_grant_race_code_is_whitelisted(self) -> None:
@@ -133,33 +155,34 @@ class EnqueueRefusalCodeTest(unittest.TestCase):
 
     def test_an_oversized_or_malformed_hint_is_dropped(self) -> None:
         code = "run_not_owned"
+        bare = code + _NEXT_ACQUIRE
         self.assertEqual(
             server._public_enqueue_error({"error": code, "hint": "a" * 241}),
-            code,
+            bare,
         )
         self.assertEqual(
             server._public_enqueue_error({"error": code, "hint": "a" * 240}),
-            f"{code}: {'a' * 240}",
+            f"{code}: {'a' * 240}{_NEXT_ACQUIRE}",
         )
         self.assertEqual(
             server._public_enqueue_error({"error": code, "hint": 123}),
-            code,
+            bare,
         )
         self.assertEqual(
             server._public_enqueue_error({"error": code, "hint": " padded "}),
-            code,
+            bare,
         )
         self.assertEqual(
             server._public_enqueue_error({"error": code, "hint": "a\nb"}),
-            code,
+            bare,
         )
         self.assertEqual(
             server._public_enqueue_error({"error": code, "hint": "a\tb"}),
-            code,
+            bare,
         )
         self.assertEqual(
             server._public_enqueue_error({"error": code, "hint": "a\x1bb"}),
-            code,
+            bare,
         )
 
     def test_the_recipes_keep_their_own_text(self) -> None:
@@ -222,7 +245,7 @@ class ClientModeIdleRunRefusalTest(unittest.IsolatedAsyncioTestCase):
             await runtime.call_bridge("query_all_players", {}, "server", 1.0)
         self.assertEqual(
             str(ctx.exception),
-            "run_not_owned: " + loopback._RUN_NOT_OWNED_HINT,
+            "run_not_owned: " + loopback._RUN_NOT_OWNED_HINT + _NEXT_ACQUIRE,
         )
 
     async def test_enqueue_bridge_surfaces_the_same_text(self) -> None:
@@ -236,7 +259,7 @@ class ClientModeIdleRunRefusalTest(unittest.IsolatedAsyncioTestCase):
             await runtime.enqueue_bridge("query_all_players", {}, "server", 1.0)
         self.assertEqual(
             str(ctx.exception),
-            "run_not_owned: " + loopback._RUN_NOT_OWNED_HINT,
+            "run_not_owned: " + loopback._RUN_NOT_OWNED_HINT + _NEXT_ACQUIRE,
         )
 
     async def test_a_hinted_stale_lease_still_clears_the_local_lease(self) -> None:

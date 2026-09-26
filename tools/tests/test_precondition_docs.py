@@ -15,7 +15,12 @@ import unittest
 from unittest.mock import patch
 
 from tests._addon_paths import addon_root
-from dayz_mcp.server import LEASE_TOOL_LINE, ServerConfig, build_app
+from dayz_mcp.server import (
+    LEASE_TOOL_LINE,
+    _INITIAL_DESCRIPTION_LIMIT,
+    ServerConfig,
+    build_app,
+)
 from tests.test_client_mode import _fixture_client_runtime
 from tests.test_vehicle_trace_contract import _method_body
 
@@ -41,6 +46,7 @@ _SPAWN_NOLIFETIME_EXCLUDED = "ECE_NOLIFETIME (4194304)"
 _SPAWN_COMBO_EXCLUDED = "flags=4718592"
 _SPAWN_BAD_FLAGS_CLAUSE = "return bad_flags"
 _RUN_RELEASE_FIRST = "Release any held session lease before calling"
+_RUN_ACQUIRE_BEFORE_VERBS = "required before any bridge verb or wait_for"
 
 
 def _assert_vehicle_trace_copy(test: unittest.TestCase, description: str) -> None:
@@ -75,6 +81,7 @@ def _assert_dayz_test_run_copy(test: unittest.TestCase, description: str) -> Non
     test.assertLess(release_at, run_at, description)
     test.assertLess(run_at, acquire_at, description)
     test.assertIn("later mutating tools", description)
+    test.assertIn(_RUN_ACQUIRE_BEFORE_VERBS, description)
     test.assertIn("mode=all plus wait_for(players_at_least, 1)", description)
     test.assertIn("viable night session", description)
 
@@ -165,6 +172,25 @@ class PreconditionDocsTest(unittest.IsolatedAsyncioTestCase):
     def test_dayz_test_run_names_lease_release_run_lease_cycle(self) -> None:
         description = _tool_description(self.app, "dayz_test_run")
         _assert_dayz_test_run_copy(self, description)
+
+    def test_dayz_test_run_cycle_survives_the_initial_catalog_cut(self) -> None:
+        # fb-20260925-233943-9ccc: before a lease the catalog keeps only the
+        # first _INITIAL_DESCRIPTION_LIMIT characters; the cycle must be there.
+        head = _tool_description(self.app, "dayz_test_run")[:_INITIAL_DESCRIPTION_LIMIT]
+        for token in ("session_release", "dayz_test_run", "session_acquire_wait"):
+            self.assertIn(token, head)
+        self.assertLess(head.index("session_release"), head.index("dayz_test_run"), head)
+        self.assertLess(head.index("dayz_test_run"), head.index("session_acquire_wait"), head)
+
+    def test_instructions_name_the_dayz_test_run_cycle(self) -> None:
+        instructions = self.app.instructions or ""
+        self.assertIn("call dayz_test_run without a lease", instructions)
+        self.assertIn("then session_acquire_wait", instructions)
+        self.assertLess(
+            instructions.index("call dayz_test_run without a lease"),
+            instructions.index("then session_acquire_wait"),
+            instructions,
+        )
 
     def test_copy_checker_rejects_negated_polarity_and_inverted_cycle(self) -> None:
         with self.assertRaises(AssertionError):
