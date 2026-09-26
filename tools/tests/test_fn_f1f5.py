@@ -53,6 +53,7 @@ def _announced_snapshot() -> dict[str, object]:
             "capabilities": {
                 "state": "announced",
                 "announced_commands": sorted(server._BRIDGE_COMMAND_TOOLS["server"]),
+                "announced_arg_contract_hash": server.EXPECTED_SERVER_ARG_CONTRACT_HASH,
             },
         },
         "client_peer": {
@@ -67,8 +68,13 @@ def _announced_snapshot() -> dict[str, object]:
 
 
 def _ready_snapshot() -> dict[str, object]:
+    # #94 (0878): server ready requires an accredited caps census.
     return {
-        "server_peer": {"last_poll_age_s": 0.1, "version_state": "ok"},
+        "server_peer": {
+            "last_poll_age_s": 0.1,
+            "version_state": "ok",
+            "capabilities": {"state": "match", "reason": "ok"},
+        },
         "client_peer": {"last_poll_age_s": 0.1, "version_state": "ok"},
     }
 
@@ -216,18 +222,20 @@ class Local8BToolPackTest(unittest.IsolatedAsyncioTestCase):
         )
         snapshot = _announced_snapshot()
 
+        # #94 moved the capability comparison into bridge_status_payload, so
+        # feed the raw status underneath it instead of replacing it.
         with patch.object(
             full_runtime,
-            "bridge_status_payload",
-            new=AsyncMock(return_value=snapshot),
+            "status",
+            new=MagicMock(return_value=snapshot),
         ):
             full_status = _content_json(
                 await full_app.call_tool("bridge_status", {})
             )
         with patch.object(
             local_runtime,
-            "bridge_status_payload",
-            new=AsyncMock(return_value=snapshot),
+            "status",
+            new=MagicMock(return_value=snapshot),
         ):
             local_status = _content_json(
                 await local_app.call_tool("bridge_status", {})

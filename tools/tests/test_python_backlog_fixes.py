@@ -13,6 +13,7 @@ from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from mcp.server.fastmcp.exceptions import ToolError
 
@@ -294,13 +295,17 @@ class PythonBacklogFixesTest(unittest.IsolatedAsyncioTestCase):
         )
         runtime.loopback = SimpleNamespace(state=state)
 
-        with self.assertRaisesRegex(ToolError, "timeout waiting"):
-            await runtime.call_bridge(
-                "query_player_state",
-                {},
-                "server",
-                0.01,
-            )
+        # e72ff5b: world reads fail fast with not_ready before enqueue when no
+        # peer has polled. This test is about timeout reaping, so bypass that
+        # gate and keep the enqueue -> timeout path under test.
+        with patch.object(server, "_world_read_not_ready", return_value=None):
+            with self.assertRaisesRegex(ToolError, "timeout waiting"):
+                await runtime.call_bridge(
+                    "query_player_state",
+                    {},
+                    "server",
+                    0.01,
+                )
 
         command_id = 1
         _status, reconnect_poll = state.record_poll("server")

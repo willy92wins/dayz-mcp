@@ -332,8 +332,10 @@ class A429EmbeddedOverlayTest(unittest.IsolatedAsyncioTestCase):
         )
         original = runtime.bridge_status_payload
 
-        async def with_rejects():
-            payload = await original()
+        # #94 (9af5cbf): bridge_status passes registered_tools/intended_tools
+        # so the capability comparison runs before ready.
+        async def with_rejects(**kwargs):
+            payload = await original(**kwargs)
             fence = dict(payload.get("fence") or {})
             rejects = dict(fence.get("mutation_rejects_by_code") or {})
             rejects["legacy_unbound"] = 1
@@ -343,7 +345,7 @@ class A429EmbeddedOverlayTest(unittest.IsolatedAsyncioTestCase):
 
         runtime.bridge_status_payload = with_rejects
         status = _content_json(await app.call_tool("bridge_status", {}))
-        self.assertIs(status["ready"]["ready"], True)
+        self.assertIs(status["ready"]["ready"], True, status["ready"])
         meta = status["fence"]["mutation_rejects_meta"]
         self.assertIs(meta["blocks_now"], False)
         self.assertEqual(meta["kind"], "historical")
