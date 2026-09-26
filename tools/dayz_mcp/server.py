@@ -1329,9 +1329,10 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # observed= telemetry allowlist the bridge already filled.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
-    if code == "binding_retired":
-        # The daemon also retires already queued commands. Carry the same
-        # bounded hint through /await as through a refused /enqueue.
+    if code in {"binding_retired", "run_not_owned"}:
+        # The daemon also retires (binding_retired) or fences (run_not_owned)
+        # already queued commands. Carry the same bounded hint and next step
+        # through /await as through a refused /enqueue.
         error = ToolError(_public_enqueue_error(result))
     else:
         error = ToolError(f"{code}; {detail}" if detail else code)
@@ -1361,7 +1362,8 @@ def _public_enqueue_error(
     enqueue whitelist travels as game_not_ready:reason=<token> so the caller
     still sees client_not_polling (and the other startup reasons) instead of
     a stripped remote_error -- when that token is on the enqueue payload,
-    not merely on a sibling /status snapshot.
+    not merely on a sibling /status snapshot. run_not_owned also carries
+    next_step=session_acquire_wait: that grant adopts the ownerless run.
     """
     code = _remote_error_code(payload)
     if code == "retail_quarantine":
@@ -1395,9 +1397,14 @@ def _public_enqueue_error(
     if code in _PUBLISHED_NOT_READY_CODES:
         return f"game_not_ready:reason={code}"
     hint = _carriable_hint(payload)
+    message = code
     if code != "remote_error" and hint is not None:
-        return f"{code}: {hint}"
-    return code
+        message = f"{code}: {hint}"
+    if code == "run_not_owned":
+        # Named here, not only in the daemon's hint, so an older daemon's
+        # prose still reaches the caller with the tool to call next.
+        return with_next_step(message, "session_acquire_wait")
+    return message
 
 
 def _image_format_from_mime(mime: object) -> str:
@@ -4873,7 +4880,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Expose DayZDiag through typed MCP tools. Flow: "
             "session_acquire_wait (or lease_acquire) -> check "
             "bridge_status.ready -> mutating verbs -> wait_for to wait -> "
-            "session_release. Use dayz_test_run / dayz_test_stop for lifecycle. "
+            "session_release. Use dayz_test_run / dayz_test_stop for lifecycle; "
+            "call dayz_test_run without a lease, then session_acquire_wait "
+            "(its grant adopts the run) before bridge verbs or wait_for. "
             "Spawn: playbook_run(name=\"place_safely\", "
             "params={\"x\":..,\"z\":..}) before a new site; "
             "pos=[x, surface_query.y, z]; y=0 is ground; example "
@@ -5110,16 +5119,22 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(
         description=(
-            "Queue and run an approved DayZ test project; lease ownership and "
-            "heartbeat remain internal to the tool. Release any held session "
-            "lease before calling. Cycle: session_release (if holding) -> "
-            "dayz_test_run -> session_acquire_wait for later mutating tools. "
+            "Cycle: session_release (if holding) -> dayz_test_run -> "
+            "session_acquire_wait. Queue and run an approved DayZ test "
+            "project; lease ownership and heartbeat remain internal to the "
+            "tool. Release any held session lease before calling. The run it "
+            "leaves has no owner (RUNNING_IDLE): session_acquire_wait adopts "
+            "it and is required before any bridge verb or wait_for "
+            "players_*/entity_state, as for later mutating tools. With several "
+            "ownerless runs the grant adopts none (adopted_run error "
+            "multiple_idle_runs). "
             "Reattach sequence: server -> run_id -> client(run_id). "
             "mode=client requires run_id: it reattaches only the client to a "
             "live run, preserving the server and the world state (no server "
             "reboot); mode=server|all must NOT pass run_id. "
-            "mode=all plus wait_for(players_at_least, 1) can complete without "
-            "human intervention (viable night session). "
+            "mode=all plus wait_for(players_at_least, 1) after "
+            "session_acquire_wait can complete without human intervention "
+            "(viable night session). "
             "preflight does not relax that matrix. "
             "extra_mods entries must be a single folder name "
             "(for example '@DayZ_MCP') or an absolute path inside the "
