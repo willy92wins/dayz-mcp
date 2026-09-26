@@ -2737,6 +2737,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			bool applied = ApplyCameraSet(job);
 			if (!applied)
 			{
+				RestoreGameplay();
 				return true;
 			}
 
