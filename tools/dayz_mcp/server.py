@@ -1329,9 +1329,10 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # observed= telemetry allowlist the bridge already filled.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
-    if code == "binding_retired":
-        # The daemon also retires already queued commands. Carry the same
-        # bounded hint through /await as through a refused /enqueue.
+    if code in {"binding_retired", "run_not_owned"}:
+        # The daemon also retires (binding_retired) or fences (run_not_owned)
+        # already queued commands. Carry the same bounded hint and next step
+        # through /await as through a refused /enqueue.
         error = ToolError(_public_enqueue_error(result))
     else:
         error = ToolError(f"{code}; {detail}" if detail else code)
@@ -5124,7 +5125,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "tool. Release any held session lease before calling. The run it "
             "leaves has no owner (RUNNING_IDLE): session_acquire_wait adopts "
             "it and is required before any bridge verb or wait_for "
-            "players_*/entity_state, as for later mutating tools. "
+            "players_*/entity_state, as for later mutating tools. With several "
+            "ownerless runs the grant adopts none (adopted_run error "
+            "multiple_idle_runs). "
             "Reattach sequence: server -> run_id -> client(run_id). "
             "mode=client requires run_id: it reattaches only the client to a "
             "live run, preserving the server and the world state (no server "

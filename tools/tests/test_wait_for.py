@@ -380,7 +380,9 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.bridge_calls, 1)
 
     async def test_an_ownership_refusal_aborts_the_first_probe_with_its_hint(self) -> None:
-        message = "run_not_owned: " + loopback._RUN_NOT_OWNED_HINT
+        message = server._public_enqueue_error(
+            {"error": "run_not_owned", "hint": loopback._RUN_NOT_OWNED_HINT}
+        )
         runtime = _FakeRuntime(player_counts=[message, 1])
         with self.assertRaises(server.ToolError) as ctx:
             await server.execute_wait_for(

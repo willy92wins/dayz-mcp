@@ -19,6 +19,7 @@ from dayz_mcp.server import (
     LEASE_TOOL_LINE,
     _INITIAL_DESCRIPTION_LIMIT,
     ServerConfig,
+    _compact_initial_catalog,
     build_app,
 )
 from tests.test_client_mode import _fixture_client_runtime
@@ -82,6 +83,7 @@ def _assert_dayz_test_run_copy(test: unittest.TestCase, description: str) -> Non
     test.assertLess(run_at, acquire_at, description)
     test.assertIn("later mutating tools", description)
     test.assertIn(_RUN_ACQUIRE_BEFORE_VERBS, description)
+    test.assertIn("multiple_idle_runs", description)
     test.assertIn("mode=all plus wait_for(players_at_least, 1)", description)
     test.assertIn("viable night session", description)
 
@@ -173,10 +175,15 @@ class PreconditionDocsTest(unittest.IsolatedAsyncioTestCase):
         description = _tool_description(self.app, "dayz_test_run")
         _assert_dayz_test_run_copy(self, description)
 
-    def test_dayz_test_run_cycle_survives_the_initial_catalog_cut(self) -> None:
+    async def test_dayz_test_run_cycle_survives_the_initial_catalog_cut(self) -> None:
         # fb-20260925-233943-9ccc: before a lease the catalog keeps only the
         # first _INITIAL_DESCRIPTION_LIMIT characters; the cycle must be there.
-        head = _tool_description(self.app, "dayz_test_run")[:_INITIAL_DESCRIPTION_LIMIT]
+        compact = {
+            tool.name: tool
+            for tool in _compact_initial_catalog(await self.app.list_tools())
+        }
+        head = compact["dayz_test_run"].description or ""
+        self.assertLessEqual(len(head), _INITIAL_DESCRIPTION_LIMIT + 1, head)
         for token in ("session_release", "dayz_test_run", "session_acquire_wait"):
             self.assertIn(token, head)
         self.assertLess(head.index("session_release"), head.index("dayz_test_run"), head)

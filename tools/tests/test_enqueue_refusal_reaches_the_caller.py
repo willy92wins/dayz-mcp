@@ -102,6 +102,19 @@ class EnqueueRefusalCodeTest(unittest.TestCase):
             "run_not_owned: Legacy daemon prose." + _NEXT_ACQUIRE,
         )
 
+    def test_a_fenced_queued_command_names_the_next_step_through_await(self) -> None:
+        # loopback._drain_run_locked discards a fenced run's queued commands
+        # with a bare run_not_owned; /await must still name the next tool.
+        error = server._bridge_error(
+            {"id": 7, "ok": False, "error": "run_not_owned"}, "query_all_players"
+        )
+        self.assertEqual(str(error), "run_not_owned" + _NEXT_ACQUIRE)
+        retired = {"id": 8, "ok": False, "error": "binding_retired"}
+        self.assertEqual(
+            str(server._bridge_error(dict(retired), "query_all_players")),
+            server._public_enqueue_error(dict(retired)),
+        )
+
     def test_every_run_fence_code_is_whitelisted(self) -> None:
         for code in _REQUIRED_RUN_FENCE_CODES:
             expected = code + _NEXT_ACQUIRE if code == "run_not_owned" else code
