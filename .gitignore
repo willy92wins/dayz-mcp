@@ -106,3 +106,4 @@ reviews/**/runs/**/*.raw
 reports/**/*.jsonl
 reviews/**/*.png
 reviews/**/*.raw
+reviews/**/sessions/
