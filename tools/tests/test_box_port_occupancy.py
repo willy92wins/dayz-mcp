@@ -449,6 +449,33 @@ class PortOccupancyRound2Test(PortOccupancyTest):
         # DayZ image occupies the box even outside the game port band.
         self.assertTrue(box["occupied"])
 
+    def test_foreign_ports_dayz_image_outside_range_annotates_coherent(self) -> None:
+        # Capture → annotate: DayZServer_x64.exe:1234 must stay dayz_relevant
+        # so meta dayz_relevant matches dayz_related (fb-1432 B1).
+        from dayz_mcp import server
+
+        self.port_holders = _holders(
+            (53, 4032, "svchost.exe"),
+            (1234, 888, "DayZServer_x64.exe"),
+        )
+        box = dict(self.lifecycle.box_occupancy())
+        annotated = server._annotate_box_foreign_ports(box)
+        self.assertEqual(
+            annotated["foreign_ports"],
+            [{"port": 1234, "dayz_relevant": True}],
+        )
+        self.assertEqual(
+            annotated["foreign_ports_all"],
+            [
+                {"port": 53, "dayz_relevant": False},
+                {"port": 1234, "dayz_relevant": True},
+            ],
+        )
+        self.assertEqual(annotated["foreign_ports_meta"]["dayz_related"], 1)
+        self.assertEqual(annotated["foreign_ports_meta"]["dayz_relevant"], 1)
+        self.assertEqual(annotated["foreign_ports_meta"]["count"], 1)
+        self.assertEqual(annotated["foreign_ports_meta"]["count_all"], 2)
+
     def test_unknown_scan_carries_its_reason(self) -> None:
         self.lifecycle.port_probe = lambda: {"known": False, "holders": []}
         box = self.lifecycle.box_occupancy()

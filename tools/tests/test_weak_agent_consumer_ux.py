@@ -702,23 +702,65 @@ class WeakAgentForeignPortsTest(unittest.TestCase):
         self.assertEqual(fields["reason"], "port_in_use_foreign")
         self.assertEqual(fields["port"], 3002)
 
-    def test_structured_dayz_relevant_is_recalculated_from_port(self) -> None:
+    def test_structured_dayz_relevant_follows_foreign_ports_membership(self) -> None:
+        # Membership of capture's DayZ-related foreign_ports (not range-only)
+        # so DayZ image on 1234 stays relevant and noise on _all does not.
         box = {
             "foreign_ports": [
-                {"port": 2302, "dayz_relevant": False},
-                {"port": 53, "dayz_relevant": True},
+                {"port": 1234, "dayz_relevant": False},
             ],
+            "foreign_ports_all": [
+                {"port": 53, "dayz_relevant": True},
+                {"port": 1234, "dayz_relevant": False},
+            ],
+            "foreign_ports_meta": {
+                "dayz_related": 1,
+                "kind": "os_socket_table_ignored_for_occupancy",
+            },
         }
         annotated = server._annotate_box_foreign_ports(box)
         self.assertEqual(
             annotated["foreign_ports"],
+            [{"port": 1234, "dayz_relevant": True}],
+        )
+        self.assertEqual(
+            annotated["foreign_ports_all"],
             [
-                {"port": 2302, "dayz_relevant": True},
                 {"port": 53, "dayz_relevant": False},
+                {"port": 1234, "dayz_relevant": True},
             ],
         )
-        self.assertEqual(annotated["foreign_ports_meta"]["count"], 2)
+        self.assertEqual(annotated["foreign_ports_meta"]["count"], 1)
+        self.assertEqual(annotated["foreign_ports_meta"]["count_all"], 2)
+        self.assertEqual(annotated["foreign_ports_meta"]["dayz_related"], 1)
         self.assertEqual(annotated["foreign_ports_meta"]["dayz_relevant"], 1)
+
+    def test_annotate_dayz_image_outside_range_coherent_with_meta(self) -> None:
+        # Same shape as capture for DayZServer_x64.exe:1234 + DNS noise.
+        box = {
+            "foreign_ports": [1234],
+            "foreign_ports_all": [53, 1234],
+            "foreign_ports_meta": {
+                "count": 1,
+                "count_all": 2,
+                "dayz_related": 1,
+                "kind": "os_socket_table_ignored_for_occupancy",
+            },
+        }
+        annotated = server._annotate_box_foreign_ports(box)
+        self.assertEqual(
+            annotated["foreign_ports"],
+            [{"port": 1234, "dayz_relevant": True}],
+        )
+        self.assertEqual(
+            annotated["foreign_ports_all"],
+            [
+                {"port": 53, "dayz_relevant": False},
+                {"port": 1234, "dayz_relevant": True},
+            ],
+        )
+        self.assertEqual(annotated["foreign_ports_meta"]["dayz_relevant"], 1)
+        self.assertEqual(annotated["foreign_ports_meta"]["dayz_related"], 1)
 
 
 class WeakAgentOkNextStepTest(unittest.TestCase):

@@ -4189,8 +4189,18 @@ def _foreign_ports_contain(foreign_ports: object, port: int) -> bool:
     return any(_foreign_port_number(item) == port for item in foreign_ports)
 
 
-def _annotate_foreign_port_list(ports: object) -> list[dict[str, Any]]:
-    """Normalize a foreign_ports* list to [{port, dayz_relevant}, ...]."""
+def _annotate_foreign_port_list(
+    ports: object,
+    *,
+    relevant_ports: set[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Normalize a foreign_ports* list to [{port, dayz_relevant}, ...].
+
+    When relevant_ports is set (membership of capture's DayZ-related
+    foreign_ports), dayz_relevant follows that set so image-classified
+    ports outside 2302-2999 stay coherent with foreign_ports_meta.dayz_related.
+    Otherwise fall back to the UDP game-port range alone.
+    """
     if not isinstance(ports, list):
         return []
     annotated: list[dict[str, Any]] = []
@@ -4201,23 +4211,44 @@ def _annotate_foreign_port_list(ports: object) -> list[dict[str, Any]]:
         extra = dict(item) if isinstance(item, dict) else {}
         extra.pop("port", None)
         extra["port"] = port
-        extra["dayz_relevant"] = _port_is_dayz_relevant(port)
+        if relevant_ports is not None:
+            extra["dayz_relevant"] = port in relevant_ports
+        else:
+            extra["dayz_relevant"] = _port_is_dayz_relevant(port)
         annotated.append(extra)
     return annotated
 
 
 def _annotate_box_foreign_ports(box: dict[str, Any]) -> dict[str, Any]:
-    """Flag DayZ-relevant listeners; keep full table under foreign_ports_all."""
+    """Flag DayZ-relevant listeners; keep full table under foreign_ports_all.
+
+    Capture already filters foreign_ports to image-or-range DayZ-related
+    holders. Annotate both lists from that membership so a DayZ image on
+    e.g. 1234 stays dayz_relevant:true and meta dayz_relevant matches
+    dayz_related (fb-1432 B1). Range-only marking demoted those ports.
+    """
     ports = box.get("foreign_ports")
+    relevant_ports: set[int] | None = None
+    if isinstance(ports, list):
+        relevant_ports = {
+            port
+            for port in (_foreign_port_number(item) for item in ports)
+            if port is not None
+        }
+
     annotated: list[dict[str, Any]] = []
     if isinstance(ports, list):
-        annotated = _annotate_foreign_port_list(ports)
+        annotated = _annotate_foreign_port_list(
+            ports, relevant_ports=relevant_ports
+        )
         box["foreign_ports"] = annotated
 
     ports_all = box.get("foreign_ports_all")
     annotated_all: list[dict[str, Any]] | None = None
     if isinstance(ports_all, list):
-        annotated_all = _annotate_foreign_port_list(ports_all)
+        annotated_all = _annotate_foreign_port_list(
+            ports_all, relevant_ports=relevant_ports
+        )
         box["foreign_ports_all"] = annotated_all
 
     meta = dict(box.get("foreign_ports_meta") or {})
