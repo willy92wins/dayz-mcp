@@ -21,6 +21,7 @@ from dayz_mcp.process_lifecycle import ProcessLifecycle, RunManifestStore, RunRe
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.server import ServerConfig, build_app
 from dayz_mcp.session_coordination import SESSION_TTL_S, SessionCoordinator
+from tests.catalog_helpers import list_tools_after_lease
 from tests.fence_helpers import bind_both_peers
 from tests.steam_helpers import FakeSteamGate
 from tests.test_client_mode import _fixture_client_runtime
@@ -111,7 +112,10 @@ class PlenoLeaseAndOrphansTest(unittest.IsolatedAsyncioTestCase):
     async def test_t2_four_descriptions_name_heartbeat_and_drop_internal_renewal(
         self,
     ) -> None:
-        tools = {tool.name: tool for tool in await self.app.list_tools()}
+        tools = {
+            tool.name: tool
+            for tool in await list_tools_after_lease(self.app, self.runtime)
+        }
         for name in _LEASE_TOOLS:
             with self.subTest(tool=name):
                 description = tools[name].description or ""
@@ -207,7 +211,10 @@ class PlenoLeaseAndOrphansTest(unittest.IsolatedAsyncioTestCase):
         self.dumps_get.assert_not_awaited()
 
     async def test_t2_r2_session_heartbeat_keeps_low_level_marker(self) -> None:
-        tools = {tool.name: tool for tool in await self.app.list_tools()}
+        tools = {
+            tool.name: tool
+            for tool in await list_tools_after_lease(self.app, self.runtime)
+        }
         description = tools["session_heartbeat"].description or ""
         self.assertTrue(
             description.startswith("LOW-LEVEL: "),
@@ -267,7 +274,10 @@ class PlenoLeaseAndOrphansTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hb_status, 200)
         self.assertIsNotNone(kept.get("owner"))
 
-        tools = {tool.name: tool for tool in await self.app.list_tools()}
+        tools = {
+            tool.name: tool
+            for tool in await list_tools_after_lease(self.app, self.runtime)
+        }
         for name in _LEASE_TOOLS:
             with self.subTest(tool=name):
                 description = tools[name].description or ""

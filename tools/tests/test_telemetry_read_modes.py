@@ -24,6 +24,7 @@ from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
 from dayz_mcp import server  # noqa: E402
 from dayz_mcp.server import ServerConfig, build_app  # noqa: E402
 
+from tests.catalog_helpers import list_tools_after_lease  # noqa: E402
 from tests.test_client_mode import _fixture_client_runtime  # noqa: E402
 
 
@@ -49,7 +50,10 @@ class TelemetryReadModesContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({"object_at", "fixture_jsonl"}, set(enum))
 
     async def test_list_tools_schema_matches_the_manager_enum(self) -> None:
-        listed = {tool.name: tool for tool in await self.app.list_tools()}
+        listed = {
+            tool.name: tool
+            for tool in await list_tools_after_lease(self.app, self.runtime)
+        }
         listed_enum = listed["telemetry_read"].inputSchema["properties"]["mode"]["enum"]
         manager_enum = self._tool().parameters["properties"]["mode"]["enum"]
         self.assertEqual(set(listed_enum), set(manager_enum))
