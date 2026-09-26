@@ -17,6 +17,11 @@ from mcp import types
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.shared.memory import create_connected_server_and_client_session
 
+# Make tools/ importable whether run via discover or by module name.
+_TOOLS_DIR = Path(__file__).resolve().parents[1]
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
 from dayz_mcp import playbook_tool as adapter, server, server_freshness as freshness
 from tests.test_client_mode import _fixture_client_runtime
 
