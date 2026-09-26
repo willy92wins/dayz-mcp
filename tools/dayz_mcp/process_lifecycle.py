@@ -550,11 +550,14 @@ def _derive_box(snapshot: _BoxSnapshot, probes: _BoxProbes) -> dict[str, object]
         "scan_known": probes.scan_known,
         "port_scan_known": probes.port_scan_known,
         "port_scan_reason": probes.port_scan_reason,
-        # Ports held by processes that are not managed runs, whatever their
-        # image: the launch diagnosis names the requested port from here.
-        "foreign_ports": list(probes.foreign_ports),
+        # Default surface: DayZ-related holders only (image or DayZ UDP range).
+        # Full OS socket table (minus managed runs) lives under foreign_ports_all
+        # so conflict diagnosis can still see any held port (fb-1432 option A).
+        "foreign_ports": list(probes.foreign_ports_dayz_related),
+        "foreign_ports_all": list(probes.foreign_ports),
         "foreign_ports_meta": {
-            "count": len(probes.foreign_ports),
+            "count": len(probes.foreign_ports_dayz_related),
+            "count_all": len(probes.foreign_ports),
             "dayz_related": len(probes.foreign_ports_dayz_related),
             "kind": "os_socket_table_ignored_for_occupancy",
         },
