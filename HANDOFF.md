@@ -24,7 +24,7 @@
 | `â€¦\!Workshop\@DayZ_MCP\Addons\DayZ_MCP.pbo` | PBO desplegado | SHA-256 `1E79BF80EADE48C98BB318A96C7F4ECF73F8782EC3AD3DDD08045B7751F98C9B` (2026-09-16, desde `1737dc5`) |
 | `C:\Users\guill\Repos\dayz-mcp` | Otro clone | Rancio. No usarlo como checkout. Rama local `fichas/hands-watchdog` (**13c, no estÃ¡ en main**). |
 
-Empaquetar SOLO desde `DayZ_MCP_dev\addon` (`pack-addon.ps1` empaqueta el `addon/` de git en `-Ref`, por defecto `HEAD`). `DayZ_MCP` no esta alineado con `main` (corregido 2026-09-25; ver la fila de arriba y `reviews/2026-09-25-vista-alto-nivel/INFORME.md` seccion 2.2 C1).
+Empaquetar SOLO desde `DayZ_MCP_dev\addon` (`pack-addon.ps1` empaqueta por defecto el `addon/` de git en `-Ref`, `HEAD` si no se pasa; `-Source` cambia el arbol empaquetado y no debe apuntar a `DayZ_MCP`). `DayZ_MCP` no esta alineado con `main` (corregido 2026-09-25; ver la fila de arriba y `reviews/2026-09-25-vista-alto-nivel/INFORME.md` seccion 2.2 C1).
 
 Las ramas de trabajo ya fusionadas se retiraron el 2026-09-16: el remoto se queda solo con `main`, y en local sobreviven las que sujeta un worktree vivo y tres con commits sin fusionar. NingÃºn commit se pierde â€”todos siguen alcanzables desde `main` y desde sus PRâ€”, y el registro con nombre y sha de cada una queda fuera del repo, junto a la evidencia de la ola. El vault sigue con los D1-1/D1-4 del 10-sep; no son un plan activo.
 
