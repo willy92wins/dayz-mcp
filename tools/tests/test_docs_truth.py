@@ -22,8 +22,9 @@ Out of scope, on purpose (an honest watchdog beats a pretend-complete one):
     date, this file does not touch it.
   - Files outside the repo: the vanilla scripts tree (named skip when absent,
     override with DAYZ_MCP_VANILLA_SCRIPTS), the vault, %LOCALAPPDATA%, and
-    the sibling mod tree -- which is why product-spec's `MCP*.c:NNN` citations
-    are NOT checked here: their ground truth is not in this checkout.
+    the sibling mod tree. product-spec's `MCP*.c:NNN` citations are NOT
+    checked here: ground truth for those files is git `addon/` (not the
+    sibling; fb-20260925-233932-aa11), which may be sparse-excluded.
   - In-game behaviour: the suite must run in CI without DayZ.
   - Tool counts and the README tool list: already watched by
     tests/test_install_mcp.py::PublicToolCountDocsTest. Not duplicated.
@@ -397,8 +398,8 @@ class VolatileCiteDocsTest(unittest.TestCase):
 class ProductSpecVolatileCiteDocsTest(unittest.TestCase):
     """product-spec must anchor server.py/loopback.py claims by symbol, not
     by line (A8). server.py moved four times under these citations; the
-    mod .c citations are NOT checked here (ground truth lives in the sibling
-    mod tree, outside this checkout)."""
+    mod .c citations are NOT checked here (ground truth is git `addon/`,
+    not the sibling tree; fb-20260925-233932-aa11)."""
 
     def test_product_spec_avoids_volatile_line_citations(self) -> None:
         hits = re.findall(r"(?:server|loopback)\.py:\d+",
