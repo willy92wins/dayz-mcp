@@ -13,7 +13,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp import loopback, result_prune, server, ui_dialog
 from dayz_mcp.server import ServerConfig, build_app
-from tests.test_client_mode import _fixture_client_runtime
+from tests.client_helpers import _fixture_client_runtime
 
 
 def _seven_fields() -> list[dict[str, object]]:

@@ -5,7 +5,6 @@ import ctypes
 import json
 import os
 import socket
-import threading
 import time
 import unittest
 import urllib.parse
@@ -26,120 +25,11 @@ from dayz_mcp import core
 from dayz_mcp import server as server_module
 from dayz_mcp.server import EXPECTED_BRIDGE_VERSION, ServerConfig, Runtime, build_app
 from tests.catalog_helpers import list_tools_after_lease
-from tests.fence_helpers import (
-    INST_CLIENT,
-    INST_SERVER,
-    bind_both_peers,
-    poll_census_query,
-)
+from tests.fence_helpers import bind_both_peers
+from tests.mcp_helpers import FakePeer, _assert_tool_error, _content_json
 
 
 _VALID_PEER_VERSION = f"{EXPECTED_BRIDGE_VERSION}~1.29.0"
-
-
-def _content_json(content: Any) -> dict[str, Any]:
-    if isinstance(content, tuple):
-        _blocks, structured = content
-        if isinstance(structured, dict):
-            return structured
-        content = _blocks
-    text = content[0].text
-    parsed = json.loads(text)
-    if not isinstance(parsed, dict):
-        raise AssertionError(f"expected dict content, got {parsed!r}")
-    return parsed
-
-
-def _assert_tool_error(testcase: unittest.TestCase, exc: BaseException) -> None:
-    testcase.assertEqual(type(exc).__name__, "ToolError")
-
-
-class FakePeer:
-    def __init__(
-        self,
-        runtime: Runtime,
-        key: str,
-        peer: str,
-        version: str | None = None,
-        result_delay_s: float = 0.0,
-        responder: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-    ) -> None:
-        if runtime.loopback is None or runtime.loopback.httpd is None:
-            raise RuntimeError("runtime loopback not started")
-        host, port = runtime.loopback.httpd.server_address
-        self.base = f"http://{host}:{port}"
-        self.key = key
-        self.peer = peer
-        self.version = version
-        self.result_delay_s = result_delay_s
-        self.responder = responder or self.default_responder
-        self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self.run, daemon=True)
-        self.max_batch_size = 0
-        self.commands_seen: list[dict[str, Any]] = []
-
-    def start(self) -> None:
-        self.thread.start()
-
-    def stop(self) -> None:
-        self.stop_event.set()
-        self.thread.join(timeout=2.0)
-
-    def default_responder(self, command: dict[str, Any]) -> dict[str, Any]:
-        # Bridge serializes Enforce bool as int 0/1; mirror that here so the
-        # ok-handling path is exercised against the real wire type, not Python bool.
-        result: dict[str, Any] = {
-            "id": command["id"],
-            "ok": 1,
-            "cmd": command["cmd"],
-            "args": command.get("args", {}),
-        }
-        if command["cmd"] == "query_player_state":
-            result["state"] = {"name": "fake", "pos": [1.0, 2.0, 3.0]}
-        if command["cmd"] == "camera_get":
-            result["camera"] = {"ok": 1, "viewport_moved": 1, "pos": [1.0, 2.0, 3.0]}
-        if command["cmd"] == "camera_set":
-            result["camera"] = {"ok": 1, "applied_mode": command.get("args", {}).get("cam_mode", "")}
-        return result
-
-    def request(self, method: str, path: str, payload: dict | None = None, query: dict | None = None) -> dict:
-        params = dict(query or {})
-        params["key"] = self.key
-        url = self.base + path + "?" + urllib.parse.urlencode(params)
-        data = None
-        headers = {}
-        if payload is not None:
-            data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        with urllib.request.urlopen(req, timeout=2.0) as response:
-            return json.loads(response.read().decode("utf-8"))
-
-    def run(self) -> None:
-        while not self.stop_event.is_set():
-            query = {"peer": self.peer}
-            query["inst"] = INST_SERVER if self.peer == "server" else INST_CLIENT
-            query.update(poll_census_query(self.peer))
-            if self.version is not None:
-                query["ver"] = self.version
-            try:
-                body = self.request("GET", "/poll", query=query)
-                commands = body.get("commands", [])
-                self.max_batch_size = max(self.max_batch_size, len(commands))
-                for command in commands:
-                    self.commands_seen.append(command)
-                    if self.result_delay_s > 0.0:
-                        time.sleep(self.result_delay_s)
-                    result = self.responder(command)
-                    self.request(
-                        "POST",
-                        "/result",
-                        payload=result,
-                        query={"inst": query["inst"]},
-                    )
-            except Exception:
-                time.sleep(0.02)
-            time.sleep(0.02)
 
 
 class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
@@ -323,7 +213,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("session_tools_require_client_mode", str(err.exception))
 
     async def test_session_tools_validate_locally_before_http(self) -> None:
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client", key=self.key, port=12345,
@@ -394,7 +284,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_dayz_test_operation_serializes_same_runtime_session_tools(self) -> None:
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -458,7 +348,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         # detail (host paths) does not, and a code that is not a bare token
         # stays mute exactly as before.
         from dayz_mcp.native_launcher_backend import NativeLauncherBackendError
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -505,7 +395,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_fb_c9ca_fine_code_crosses_the_wire_as_a_fourth_part(self) -> None:
         from dayz_mcp.native_launcher_backend import NativeLauncherBackendError
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -596,7 +486,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         # what makes build:true undiagnosable. A non-existent `project` would NOT
         # exercise this branch -- it leaves through DayzTestToolError -- so the
         # gate needs an untyped error, and that typed error is the control below.
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -1021,7 +911,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         # let them reach the wire as a bare "dayz_test_failed:ValueError" while run
         # translated them. Both tools go through _typed_dayz_test_value_errors now,
         # so this asserts the pair, not just the tool that happened to get the fix.
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -1115,7 +1005,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_dayz_test_run_names_run_id_matrix_causes_on_the_wire(self) -> None:
         from dayz_mcp import dayz_test_request, dayz_test_tool
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
         from tests.test_dayz_test_tool import _Bundle, _Opened, _policy, _sealed
 
         config = ServerConfig(
@@ -1178,7 +1068,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_dayz_test_run_preflight_client_reattach_keeps_run_id(self) -> None:
         from dayz_mcp import dayz_test_tool
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
         from tests.test_dayz_test_tool import _Bundle, _Opened, _policy, _sealed
 
         run_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -1246,7 +1136,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(payload.get("error_code"), "terminal_invalid")
 
     async def test_dayz_test_run_description_documents_reattach_matrix(self) -> None:
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -1403,7 +1293,6 @@ class UiPublicSurfaceTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
 
 
 # --- M22: the announced census against the tools the app registers ----------

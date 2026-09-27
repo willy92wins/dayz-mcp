@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from dayz_mcp import loopback, server
 from tests import test_instance_fence as fixtures
-from tests.test_client_mode import _fixture_client_runtime
+from tests.client_helpers import _fixture_client_runtime
 
 
 class RunlossRetirementTest(unittest.IsolatedAsyncioTestCase):

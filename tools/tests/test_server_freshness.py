@@ -25,7 +25,7 @@ from dayz_mcp.server_freshness import (
     install_result_freshness,
     source_stale,
 )
-from tests.test_client_mode import _fixture_client_runtime
+from tests.client_helpers import _fixture_client_runtime
 
 _MODULE = "dayz_mcp.dayz_test_tool"
 _OLD = '''on_call = None

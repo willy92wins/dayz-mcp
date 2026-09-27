@@ -33,7 +33,7 @@ from dayz_mcp.session_coordination import (
     ClientIdentity,
     SessionCoordinator,
 )
-from tests.test_mcp_tools import _content_json
+from tests.mcp_helpers import _content_json
 from tests.test_process_lifecycle import (
     IDENTITY_A,
     HASH_A,
@@ -1932,7 +1932,7 @@ class ExecuteWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
 class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
     async def test_wait_then_launch_when_box_already_free(self) -> None:
         # RED if wait_for_box_s>0 never reaches execute after a free box.
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -2004,7 +2004,7 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_wait_for_box_s_above_cap_is_bad_args(self) -> None:
         # RED if wait_for_box_s>600 is clamped silently instead of bad_args.
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -2029,7 +2029,7 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("wait_for_box_s", str(err.exception))
 
     async def test_dayz_test_run_description_names_wait_for_box_cap(self) -> None:
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -2047,7 +2047,7 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"{BOX_WAIT_MAX_S:g}", description)
 
     async def test_timeout_returns_enriched_active_run_exists(self) -> None:
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -2115,7 +2115,7 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
         # state, takeover_target_run_id is None and the MCP code stays
         # active_run_exists. With RUNNING + a foreign owner, wait already
         # expired; the recipe is takeover_required, not another wait.
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -2184,7 +2184,7 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("wait_for_box_s", str(payload.get("hint") or ""))
 
     async def test_zero_wait_enriches_execute_active_run_exists(self) -> None:
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",

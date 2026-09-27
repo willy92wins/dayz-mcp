@@ -25,7 +25,7 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import server  # noqa: E402
 from dayz_mcp.server import ServerConfig, build_app  # noqa: E402
 
-from tests.test_client_mode import _fixture_client_runtime  # noqa: E402
+from tests.client_helpers import _fixture_client_runtime
 
 
 class CaptureTargetsRunClientTest(unittest.IsolatedAsyncioTestCase):

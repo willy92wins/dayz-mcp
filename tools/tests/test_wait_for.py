@@ -19,8 +19,8 @@ from unittest.mock import AsyncMock, patch
 
 from dayz_mcp import loopback, server
 from dayz_mcp.server import ServerConfig, build_app
-from tests.test_client_mode import _fixture_client_runtime
-from tests.test_mcp_tools import _content_json
+from tests.client_helpers import _fixture_client_runtime
+from tests.mcp_helpers import _content_json
 
 def _live_run(profiles: Path) -> dict:
     """A RUNNING run: a process stamped just now, so its logs clear the floor.

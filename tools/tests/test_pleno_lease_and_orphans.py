@@ -24,8 +24,8 @@ from dayz_mcp.session_coordination import SESSION_TTL_S, SessionCoordinator
 from tests.catalog_helpers import list_tools_after_lease
 from tests.fence_helpers import bind_both_peers
 from tests.steam_helpers import FakeSteamGate
-from tests.test_client_mode import _fixture_client_runtime
-from tests.test_mcp_tools import _content_json
+from tests.client_helpers import _fixture_client_runtime
+from tests.mcp_helpers import _content_json
 from tests.test_daemon import IDENTITY, _http
 from tests.test_process_lifecycle import FakeGuard, legacy_process
 from tests.lease_helpers import (

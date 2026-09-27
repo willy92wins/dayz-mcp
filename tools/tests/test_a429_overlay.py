@@ -25,8 +25,8 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import daemon, dayz_test_tool, server
 from dayz_mcp.server import EXPECTED_BRIDGE_VERSION, Runtime, ServerConfig, build_app
 from tests.fence_helpers import bind_both_peers
-from tests.test_client_mode import _fixture_client_runtime
-from tests.test_mcp_tools import FakePeer, _content_json
+from tests.client_helpers import _fixture_client_runtime
+from tests.mcp_helpers import FakePeer, _content_json
 from tests.test_session_status_blocked_on import BOX_BLOCKED_ON
 
 

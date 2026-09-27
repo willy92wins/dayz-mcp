@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from dayz_mcp.server import Runtime, ServerConfig, build_app
-from tests.test_mcp_tools import FakePeer, _assert_tool_error, _content_json
+from tests.mcp_helpers import FakePeer, _assert_tool_error, _content_json
 
 
 class X5ToolsTest(unittest.IsolatedAsyncioTestCase):

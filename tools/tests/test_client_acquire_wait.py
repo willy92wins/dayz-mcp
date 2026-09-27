@@ -22,7 +22,7 @@ from dayz_mcp import server
 from dayz_mcp.server import ServerConfig
 from dayz_mcp.session_coordination import MAX_OPERATION_TOMBSTONES
 from tests.catalog_helpers import list_tools_after_lease
-from tests.test_client_mode import _fixture_client_runtime
+from tests.client_helpers import _fixture_client_runtime
 
 
 # --- from test_session_acquire_wait.py ---

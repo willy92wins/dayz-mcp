@@ -13,9 +13,9 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp import server
 from dayz_mcp.server import ServerConfig, build_app
-from tests.test_client_mode import _fixture_client_runtime
+from tests.client_helpers import _fixture_client_runtime
+from tests.mcp_helpers import _content_json
 from tests.test_control_client import _policy
-from tests.test_mcp_tools import _content_json
 
 _STARTED_AT = "2026-09-14T12:48:11Z"
 _STALE_WARNING = "tool_registry_stale_reopen_client"
