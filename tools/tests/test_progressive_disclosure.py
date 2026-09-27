@@ -160,6 +160,37 @@ class ProgressiveDisclosureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("vehicle_control", names)
         self.assertNotIn("ui_dialog", names)
 
+    async def test_opt_out_lists_the_full_catalog_before_the_lease(self) -> None:
+        # --no-progressive-disclosure (#93, e7ef): hosts that never re-list after
+        # tools/list_changed get every tool, full descriptions included, up front.
+        config = ServerConfig(
+            mode="client",
+            key="k",
+            port=12345,
+            log_sink=lambda _message: None,
+            progressive_disclosure=False,
+        )
+        with patch("dayz_mcp.server.ClientRuntime", _FakeClientRuntime):
+            app, runtime = build_app(config)
+        self.assertIsNone(runtime.active_lease_token)
+        registered = {tool.name: tool for tool in app._tool_manager.list_tools()}
+
+        listed = await _protocol_list_tools(app)
+
+        self.assertEqual(_names(listed), set(registered))
+        for tool in listed:
+            self.assertEqual(tool.description, registered[tool.name].description, tool.name)
+        self.assertGreater(_catalog_bytes(listed), INITIAL_CATALOG_MAX_BYTES)
+
+    def test_opt_out_is_a_flag_and_the_default_stays_progressive(self) -> None:
+        from dayz_mcp.server import parse_args
+
+        base = ["--client", "--keyfile", "k"]
+        self.assertTrue(parse_args(base).progressive_disclosure)
+        self.assertFalse(
+            parse_args([*base, "--no-progressive-disclosure"]).progressive_disclosure
+        )
+
     async def test_protocol_tools_list_reveals_after_lease(self) -> None:
         app, runtime = self._client_app()
         before = _names(await _protocol_list_tools(app))

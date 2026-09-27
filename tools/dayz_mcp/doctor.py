@@ -60,6 +60,7 @@ _BOOLEAN_OPTIONS = frozenset(
         "--require-version",
         "--enable-exec-enforce",
         "--no-daemon-autospawn",
+        "--no-progressive-disclosure",
         "--client",
         "--supervised",
         "--daemon",

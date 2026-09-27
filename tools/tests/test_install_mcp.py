@@ -300,6 +300,23 @@ class InstallerArgumentsTest(unittest.TestCase):
         self.assertNotIn("--require-version", arguments)
         self.assertEqual(arguments[arguments.index("--idle-timeout") + 1], "2.5")
 
+    def test_claude_opt_out_of_progressive_disclosure_reaches_claude_only(self) -> None:
+        default = parse_args([], tools_root=self.tools_root)
+        opted = parse_args(
+            ["--claude-no-progressive-disclosure"], tools_root=self.tools_root
+        )
+
+        self.assertNotIn(
+            "--no-progressive-disclosure", build_client_args(default, "claude")
+        )
+        self.assertEqual(
+            build_client_args(opted, "claude"),
+            build_client_args(default, "claude") + ["--no-progressive-disclosure"],
+        )
+        self.assertEqual(
+            build_client_args(opted, "codex"), build_client_args(default, "codex")
+        )
+
     def test_invalid_platform_is_rejected(self) -> None:
         options = parse_args([], tools_root=self.tools_root)
 
@@ -668,6 +685,19 @@ class InstallerRegistrationParserTest(unittest.TestCase):
                 "claude",
             ),
         )
+
+    def test_claude_text_reads_back_the_progressive_disclosure_opt_out(self) -> None:
+        text = """dayz-mcp:
+  Scope: User config
+  Type: stdio
+  Command: C:\\Python\\python.exe
+  Args: -m dayz_mcp --client --client-platform claude --no-progressive-disclosure
+  Environment:
+"""
+
+        spec = parse_claude_registration(text)
+
+        self.assertEqual(spec.arguments[-1], "--no-progressive-disclosure")
 
     def test_claude_text_rejects_duplicate_unknown_or_nonempty_environment(self) -> None:
         base = """dayz-mcp:

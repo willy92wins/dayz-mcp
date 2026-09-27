@@ -8,7 +8,8 @@ param(
   [double]$IdleTimeoutSeconds = 1800,
   [switch]$AllowLegacy,
   [switch]$Register,
-  [switch]$SkipKnowledgePack
+  [switch]$SkipKnowledgePack,
+  [switch]$ClaudeNoProgressiveDisclosure
 )
 
 $ErrorActionPreference = "Stop"
@@ -200,7 +201,7 @@ function Test-CanonicalTextArguments {
   )
   $booleanFlags = @(
     '--require-version', '--enable-exec-enforce', '--no-daemon-autospawn',
-    '--client', '--daemon', '--embedded'
+    '--no-progressive-disclosure', '--client', '--daemon', '--embedded'
   )
   $allowed = @($valueFlags) + @($booleanFlags)
   $matches = [regex]::Matches($ArgsText, '(?<!\S)(-{1,2}\S+)')
@@ -333,7 +334,7 @@ function Test-CanonicalArrayArguments {
   )
   $booleanFlags = @(
     '--require-version', '--enable-exec-enforce', '--no-daemon-autospawn',
-    '--client', '--daemon', '--embedded'
+    '--no-progressive-disclosure', '--client', '--daemon', '--embedded'
   )
   $allowed = @($valueFlags) + @($booleanFlags)
   $seen = @{}
@@ -506,6 +507,11 @@ if (-not $AllowLegacy) {
 $serverArgs += @("--idle-timeout", "$IdleTimeoutSeconds")
 
 $claudeArgs = $serverArgs + @('--client-platform','claude')
+# Claude Code does not re-list tools after tools/list_changed (#93): opt in to
+# listing the full catalog before the lease. Codex keeps the default.
+if ($ClaudeNoProgressiveDisclosure) {
+  $claudeArgs += @('--no-progressive-disclosure')
+}
 $codexArgs  = $serverArgs + @('--client-platform','codex')
 $quotedClaudeArgs = ($claudeArgs | ForEach-Object { '"' + ($_ -replace '"','\"') + '"' }) -join " "
 $quotedCodexArgs = ($codexArgs | ForEach-Object { '"' + ($_ -replace '"','\"') + '"' }) -join " "

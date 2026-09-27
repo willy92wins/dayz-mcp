@@ -81,6 +81,7 @@ class InstallerOptions:
     codex_exe: Path | None
     tools_root: Path
     skip_knowledge_pack: bool = False
+    claude_no_progressive_disclosure: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -510,6 +511,7 @@ _BOOLEAN_FLAGS = frozenset(
         "--require-version",
         "--enable-exec-enforce",
         "--no-daemon-autospawn",
+        "--no-progressive-disclosure",
         "--client",
         "--daemon",
         "--embedded",
@@ -751,6 +753,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--idle-timeout-seconds", type=float, default=1800.0)
     parser.add_argument("--allow-legacy", action="store_true")
     parser.add_argument("--skip-knowledge-pack", action="store_true")
+    parser.add_argument(
+        "--claude-no-progressive-disclosure",
+        action="store_true",
+        help="Register Claude Code with --no-progressive-disclosure: it does not re-list tools after a lease.",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--register", action="store_true")
     mode.add_argument("--pin-clis", action="store_true")
@@ -794,6 +801,7 @@ def parse_args(
         codex_exe=Path(args.codex_exe) if args.codex_exe else None,
         tools_root=canonical_tools,
         skip_knowledge_pack=args.skip_knowledge_pack,
+        claude_no_progressive_disclosure=args.claude_no_progressive_disclosure,
     )
 
 
@@ -825,6 +833,8 @@ def build_client_args(options: InstallerOptions, platform: str) -> list[str]:
             platform,
         )
     )
+    if platform == "claude" and options.claude_no_progressive_disclosure:
+        arguments.append("--no-progressive-disclosure")
     return arguments
 
 

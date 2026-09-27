@@ -846,6 +846,33 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
                 await app.call_tool(name, args)
             self.assertIn("lease_required", str(denied.exception), name)
 
+    async def test_full_catalog_opt_out_lists_lease_verbs_but_they_still_need_a_lease(
+        self,
+    ) -> None:
+        # --no-progressive-disclosure (#93, e7ef) only changes what tools/list
+        # shows: the mutating verb is listed before the lease and still refused.
+        srv = self._daemon()
+        self._peer(srv, "server", _VALID_PEER_VERSION)
+        self._peer(srv, "client", _VALID_PEER_VERSION)
+        config = ServerConfig(
+            mode="client", key=srv.key, port=srv.port,
+            client_platform="claude", progressive_disclosure=False,
+            log_sink=lambda _m: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        with patch.object(server, "ClientRuntime", return_value=runtime):
+            app, _built = server.build_app(config)
+        self._attach_fixture_transport(runtime, srv)
+        self.assertIsNone(runtime.active_lease_token)
+        await self._wait_bridge_ready(runtime)
+
+        self.assertIn("world_spawn", {tool.name for tool in await app.list_tools()})
+        with self.assertRaises(Exception) as denied:
+            await app.call_tool(
+                "world_spawn", {"type": "X", "pos": [1, 2, 3], "timeout_s": 2.0}
+            )
+        self.assertIn("lease_required", str(denied.exception))
+
     async def test_all_players_read_is_not_blocked_by_another_sessions_lease(self) -> None:
         # Second acceptance clause: with ANOTHER session holding
         # the lease, the pure read still completes. Negative control: the foreign
