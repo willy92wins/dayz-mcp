@@ -7,8 +7,12 @@ lease_helpers, lifecycle_helpers, ...).
 
 KNOWN_CROSS_TEST_IMPORTS lists the (importer, test module, name) imports that
 existed when this rule landed. It may only shrink: remove an entry when its
-fake moves into a helper module, and never add one. Only static imports are
-checked (`from tests.test_x import y`, `import tests.test_x`).
+fake moves into a helper module. Adding an entry is a review decision, never
+a way to turn this test green; the test cannot tell the two apart.
+
+Static imports only, in every file under tests/: `from tests.test_x import y`,
+`from tests import test_x`, `import tests.test_x` and their relative forms
+(name "*" means the module itself). importlib calls are not checked.
 """
 
 from __future__ import annotations
@@ -86,6 +90,7 @@ KNOWN_CROSS_TEST_IMPORTS: frozenset[tuple[str, str, str]] = frozenset({
     ("test_dayz_test_tool_modes.py", "tests.test_dayz_test_tool", "_policy"),
     ("test_dayz_test_tool_modes.py", "tests.test_dayz_test_tool", "_sealed"),
     ("test_dayz_test_tool_modes.py", "tests.test_dayz_test_tool", "_terminal"),
+    ("test_db05_preflight_diagnostics.py", "tests.test_dayz_test_tool", "*"),
     ("test_db05_preflight_diagnostics.py", "tests.test_steam_preflight", "_MutableSteamProvider"),
     ("test_enqueue_refusal_reaches_the_caller.py", "tests.test_client_mode", "_fixture_client_runtime"),
     ("test_fase4b_tools.py", "tests.test_mcp_tools", "FakePeer"),
@@ -101,6 +106,7 @@ KNOWN_CROSS_TEST_IMPORTS: frozenset[tuple[str, str, str]] = frozenset({
     ("test_fb_1f21_steam_envelope.py", "tests.test_dayz_test_tool", "_policy"),
     ("test_fb_1f21_steam_envelope.py", "tests.test_dayz_test_tool", "_sealed"),
     ("test_fb_1f21_steam_envelope.py", "tests.test_dayz_test_tool", "_terminal"),
+    ("test_fb_1f21_steam_envelope.py", "tests.test_process_lifecycle", "*"),
     ("test_fb_2223_box_queue_offer.py", "tests.test_client_mode", "_fixture_client_runtime"),
     ("test_fb_2223_box_queue_offer.py", "tests.test_mcp_tools", "_content_json"),
     ("test_fb_3bb4_esc_and_drive_retire.py", "tests.test_bridge_client_capabilities", "announced_caps"),
@@ -167,8 +173,10 @@ KNOWN_CROSS_TEST_IMPORTS: frozenset[tuple[str, str, str]] = frozenset({
     ("test_lifecycle_reconcile.py", "tests.test_process_lifecycle", "IDENTITY_A"),
     ("test_lifecycle_reconcile.py", "tests.test_process_lifecycle", "process"),
     ("test_lifecycle_reconcile.py", "tests.test_process_lifecycle", "snapshot"),
+    ("test_lifecycle_request_fixture_parity.py", "tests.test_lifecycle_reconcile", "*"),
     ("test_logs_since_marker_roundtrip.py", "tests.test_client_mode", "_fixture_client_runtime"),
     ("test_logs_since_marker_roundtrip.py", "tests.test_mcp_tools", "_content_json"),
+    ("test_lote2_t2_steam.py", "tests.test_dayz_test_tool", "*"),
     ("test_lote2_t2_steam.py", "tests.test_steam_preflight", "_FakeRemediationHost"),
     ("test_lote2_t2_steam.py", "tests.test_steam_preflight", "_MutableSteamProvider"),
     ("test_lote_v_products.py", "tests.test_client_mode", "_fixture_client_runtime"),
@@ -194,6 +202,7 @@ KNOWN_CROSS_TEST_IMPORTS: frozenset[tuple[str, str, str]] = frozenset({
     ("test_prerun_desktop_gate.py", "tests.test_dayz_test_tool", "_policy"),
     ("test_prerun_desktop_gate.py", "tests.test_dayz_test_tool", "_sealed"),
     ("test_prerun_desktop_gate.py", "tests.test_dayz_test_tool", "_terminal"),
+    ("test_relock_toolchain.py", "tests.test_dependency_lock", "*"),
     ("test_run_reaper.py", "tests.test_process_lifecycle", "AuditSink"),
     ("test_run_reaper.py", "tests.test_process_lifecycle", "FakeGuard"),
     ("test_run_reaper.py", "tests.test_process_lifecycle", "FakeLauncher"),
@@ -201,6 +210,7 @@ KNOWN_CROSS_TEST_IMPORTS: frozenset[tuple[str, str, str]] = frozenset({
     ("test_run_reaper.py", "tests.test_process_lifecycle", "IDENTITY_B"),
     ("test_run_reaper.py", "tests.test_process_lifecycle", "process"),
     ("test_runloss_diagnostics.py", "tests.test_client_mode", "_fixture_client_runtime"),
+    ("test_runloss_diagnostics.py", "tests.test_instance_fence", "*"),
     ("test_server_freshness.py", "tests.test_client_mode", "_fixture_client_runtime"),
     ("test_server_response_truth.py", "tests.test_mcp_tools", "_content_json"),
     ("test_session_e2e.py", "tests.test_client_mode", "_VALID_PEER_VERSION"),
@@ -213,12 +223,17 @@ KNOWN_CROSS_TEST_IMPORTS: frozenset[tuple[str, str, str]] = frozenset({
     ("test_session_status_blocked_on.py", "tests.test_mcp_tools", "_content_json"),
     ("test_steam_launch_guard.py", "tests.test_dayz_test_app", "RUN_ID"),
     ("test_steam_launch_guard.py", "tests.test_dayz_test_app", "_load_app"),
+    ("test_steam_launch_guard.py", "tests.test_dayz_test_worker", "*"),
+    ("test_steam_launch_guard.py", "tests.test_process_lifecycle", "*"),
     ("test_steam_launch_guard.py", "tests.test_steamfastpath_repair", "MemoryHost"),
     ("test_steam_launch_guard.py", "tests.test_steamfastpath_repair", "MemoryProvider"),
+    ("test_steam_not_running_preflight.py", "tests.test_dayz_test_tool", "*"),
     ("test_steam_not_running_preflight.py", "tests.test_steam_preflight", "FakeSteamProvider"),
     ("test_steam_not_running_preflight.py", "tests.test_steam_preflight", "_MutableSteamProvider"),
     ("test_steam_not_running_preflight.py", "tests.test_steam_preflight", "_STEAM_EXE"),
     ("test_steam_not_running_preflight.py", "tests.test_steam_preflight", "active_process"),
+    ("test_steampost_readiness.py", "tests.test_dayz_test_tool", "*"),
+    ("test_steampost_readiness.py", "tests.test_steamfastpath_repair", "*"),
     ("test_takeover_contract.py", "tests.test_client_mode", "_fixture_client_runtime"),
     ("test_takeover_contract.py", "tests.test_mcp_tools", "_content_json"),
     ("test_task7_final_lifecycle_regressions.py", "tests.test_lifecycle_cli", "TtyInput"),
@@ -228,7 +243,6 @@ KNOWN_CROSS_TEST_IMPORTS: frozenset[tuple[str, str, str]] = frozenset({
     ("test_ui_enforce_contract.py", "tests.test_vehicle_telemetry_contract", "TELEMETRY_REGION_SHA256"),
     ("test_ui_enforce_contract.py", "tests.test_vehicle_telemetry_contract", "_telemetry_sha256"),
     ("test_vehicle_prepare_fixture.py", "tests.test_ui_error_diagnostics", "_wire_error_text"),
-    ("test_vehicle_telemetry_contract.py", "tests.test_vehicle_telemetry_contract", "*"),
     ("test_wait_for.py", "tests.test_client_mode", "_fixture_client_runtime"),
     ("test_wait_for.py", "tests.test_mcp_tools", "_content_json"),
     ("test_wait_for_launch_and_contract.py", "tests.test_wait_for", "_HttpClientNotPollingThenPlayers"),
@@ -251,24 +265,48 @@ KNOWN_CROSS_TEST_IMPORTS: frozenset[tuple[str, str, str]] = frozenset({
 
 
 def _cross_test_imports() -> set[tuple[str, str, str]]:
+    """(importer path under tests/, imported test module, name) for every static import.
+
+    Covers `from tests.test_x import y`, `from tests import test_x`,
+    `import tests.test_x`, and relative imports of the same targets, in every
+    file under tests/ (unittest discovery also runs subpackages). A module
+    importing itself is not coupling and is skipped.
+    """
     found: set[tuple[str, str, str]] = set()
-    for path in sorted(_TESTS_DIR.glob("*.py")):
+    for path in sorted(_TESTS_DIR.rglob("*.py")):
+        relative = path.relative_to(_TESTS_DIR)
+        importer = relative.as_posix()
+        package = ("tests",) + relative.parent.parts
+        own = ".".join(package + (path.stem,))
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                if _is_test_module(node.module):
-                    found.update((path.name, node.module, alias.name) for alias in node.names)
+            if isinstance(node, ast.ImportFrom):
+                if node.level:
+                    base = package[: len(package) - node.level + 1]
+                    module = ".".join(base + ((node.module,) if node.module else ()))
+                else:
+                    module = node.module or ""
+                for alias in node.names:
+                    if _is_test_module(module):
+                        target, name = module, alias.name
+                    elif _is_test_module(f"{module}.{alias.name}"):
+                        target, name = f"{module}.{alias.name}", "*"
+                    else:
+                        continue
+                    if target != own:
+                        found.add((importer, target, name))
             elif isinstance(node, ast.Import):
                 found.update(
-                    (path.name, alias.name, "*")
+                    (importer, alias.name, "*")
                     for alias in node.names
-                    if _is_test_module(alias.name)
+                    if _is_test_module(alias.name) and alias.name != own
                 )
     return found
 
 
 def _is_test_module(module: str) -> bool:
-    return module.startswith("tests.") and module.rsplit(".", 1)[-1].startswith("test_")
+    parts = module.split(".")
+    return len(parts) > 1 and parts[0] == "tests" and parts[-1].startswith("test_")
 
 
 class CrossTestImportRatchetTest(unittest.TestCase):
