@@ -64,15 +64,7 @@ Los módulos unittest están en `tools/tests/`; el gate de este mapa es `tests.t
 - `mcp-grab.ps1`
 - `pack-addon.ps1`
 - `process-guard.ps1`
-- `publish/clone_cycle.ps1`
-- `run-s0-gate.ps1`
-- `run-step0.ps1`
 - `run-tests.ps1`
-- `spike0/mcp-grab-diag.ps1`
-- `spike0/spike0-deploy-ping.ps1`
-- `spike0/spike0-grab.ps1`
-- `spike0/spike0-ping.ps1`
-- `spike0/spike0-window-enum.ps1`
 
 ## Docs in this project
 
@@ -90,7 +82,6 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `dayz-mcp-architecture.md` - 20 KB, touched 2026-09-16 (UTC)
 - `GATES.md` - 4 KB, touched 2026-09-08 (UTC)
 - `HANDOFF-ARCHIVE.md` - 272 KB, touched 2026-08-29 (UTC)
-- `out.md` - 8 KB, touched 2026-08-28 (UTC)
 - `product-spec.md` - 58 KB, touched 2026-09-14 (UTC)
 - `QUICKSTART.md` - 3 KB, touched 2026-09-19 (UTC)
 - `README.md` - 18 KB, touched 2026-09-19 (UTC)
