@@ -210,15 +210,46 @@ class MCPCaptureTest(unittest.TestCase):
         self.assertEqual(content["mimeType"], "image/png")
 
     def test_capture_window_not_found_returns_is_error(self) -> None:
-        result = mcp_capture.capture_screenshot(
-            scale="tiny",
-            max_tokens=mcp_capture.DEFAULT_MAX_TOKENS,
-            frames=1,
-            process_name="__DayZ_MCP_missing_window__",
-        )
+        # This pins the error for a missing window, not the 8 s grab budget of
+        # grab_stable_frame: a cold PowerShell on a loaded CI runner can take
+        # longer than that to answer (mailbox fb-20260927-141044-76e2). The
+        # real backend still runs; it just gets time to report.
+        real_capture = mcp_capture._run_window_capture
+
+        def patient_capture(*args, **kwargs):
+            kwargs["timeout_s"] = max(float(kwargs.get("timeout_s") or 0.0), 60.0)
+            return real_capture(*args, **kwargs)
+
+        with mock.patch.object(mcp_capture, "_run_window_capture", side_effect=patient_capture):
+            result = mcp_capture.capture_screenshot(
+                scale="tiny",
+                max_tokens=mcp_capture.DEFAULT_MAX_TOKENS,
+                frames=1,
+                process_name="__DayZ_MCP_missing_window__",
+            )
 
         self.assertTrue(result.get("isError"))
         self.assertEqual(result.get("error"), "window_not_found")
+
+    def test_grab_budget_is_8s_and_an_overrun_maps_to_capture_timeout(self) -> None:
+        # Pins what the not-found test above relaxes (review of #111): each
+        # grab_stable_frame capture gets 8 s, and a backend that overruns it
+        # comes back as capture_timeout.
+        not_found = {"ok": False, "error": "window_not_found"}
+        with mock.patch.object(mcp_capture, "_run_window_capture", return_value=not_found) as run:
+            mcp_capture.grab_stable_frame(frames=1, process_name="__DayZ_MCP_missing_window__")
+        self.assertEqual(run.call_args.kwargs["timeout_s"], 8.0)
+
+        overrun = subprocess.TimeoutExpired(cmd="powershell", timeout=8.0)
+        with mock.patch.object(mcp_capture, "probe_input_desktop", return_value="unlocked"), mock.patch.object(
+            mcp_capture.subprocess, "run", side_effect=overrun
+        ):
+            result = mcp_capture._run_window_capture(
+                os.path.join(tempfile.gettempdir(), "dayz_mcp_never_written.png"),
+                process_name="__DayZ_MCP_missing_window__",
+                timeout_s=8.0,
+            )
+        self.assertEqual(result, {"ok": False, "error": "capture_timeout"})
 
 
 # --- crop_space fixture ---------------------------------------------------------------------------
