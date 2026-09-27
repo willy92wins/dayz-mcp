@@ -203,6 +203,28 @@ Three run modes (`python -m dayz_mcp`; `tools/dayz_mcp/server_cli.py:96-118`):
 - `--daemon` — the single owner of the port; the only process that talks to the game.
 - no flag — embedded single-session mode.
 
+### Before the first test run
+
+Each of these fails closed with a named error instead of guessing (#93):
+
+- **Server config and profiles.** Each project's `dev_root\_server\serverDZ.cfg`
+  must exist, and so must each role's profile folder
+  (`dev_root\<role>\profiles`, where `dayz_mcp.json` is seeded). Without them the
+  server exits with "Could not find server config", or the launch is refused
+  with `instance_config_missing`.
+- **One `mod` name per project.** Two projects that share a `mod` name are
+  refused with `bad_project`. The name is also the PBO prefix.
+- **No retail client.** A running `DayZ_x64.exe` or `DayZ_BE.exe` blocks every
+  test run with `retail_quarantine`. Close it first.
+- **Which DayZDiag.** The daemon starts only the `DayZDiag_x64.exe` under
+  `DAYZ_GAME_PATH` (default: `C:\Program Files (x86)\Steam\steamapps\common\DayZ`).
+  Anything else is `executable_not_allowed`. For a second install such as
+  `DayZ Exp`, start the daemon with `DAYZ_GAME_PATH` set to it.
+- **DayZ Tools on another drive.** Set `DAYZ_TOOLS_PATH` to the DayZ Tools
+  folder. The bundle builder also finds Tools through the registry, but the bundle
+  verifier does not yet: without the variable it checks the default `C:` paths and
+  fails with `invalid_native_launcher_bundle`.
+
 ## Security model
 
 Fail-closed from the first line: the listener binds `127.0.0.1` only, every request

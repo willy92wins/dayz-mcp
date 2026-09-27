@@ -77,10 +77,33 @@ class RegistryLock:
         self.close()
 
 
+def _create_missing_lock(path: Path) -> None:
+    """Create an empty lock file where nothing exists yet, create-only.
+
+    The lock is gitignored, so a fresh clone has none and every acquire failed
+    with invalid_launcher_registry_lock (#93). O_EXCL never reuses or follows
+    whatever is already at the path; the new file is then opened and checked
+    exactly like one that already existed.
+    """
+    try:
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600
+        )
+    except FileExistsError:
+        return  # created concurrently: the checks below decide
+    os.close(descriptor)
+
+
 def acquire_registry_lock(*, exclusive: bool, path: Path = _CANONICAL_LOCK) -> RegistryLock:
     if type(exclusive) is not bool or os.name != "nt":
         raise RuntimeError("launcher_registry_lock_unavailable")
     try:
+        if not os.path.lexists(path):
+            # Create only inside a directory chain free of links and junctions.
+            _reject_path_name_surrogates(
+                path.parent, error_code="invalid_launcher_registry_lock"
+            )
+            _create_missing_lock(path)
         _reject_path_name_surrogates(
             path, error_code="invalid_launcher_registry_lock"
         )

@@ -22,6 +22,9 @@ tools/native-launchers/dayz-test-v1/*.pyz
 tools/native-launchers/dayz-test-v1/*.json
 tools/native-launchers/dayz-test-v1/runtime/
 tools/native-launchers/dayz-test-v1/vendor/
+# Swap directories of build_native_launcher._publish_bundle; a crash can leave one.
+tools/native-launchers/dayz-test-v1.incoming/
+tools/native-launchers/dayz-test-v1.previous/
 
 # Virtualenv created by install-mcp.ps1, and the packaging metadata that
 # `pip install -e` leaves beside it.

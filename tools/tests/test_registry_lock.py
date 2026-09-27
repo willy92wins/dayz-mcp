@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -56,6 +57,42 @@ class RegistryLockTest(unittest.TestCase):
         with self.acquire(exclusive=True):
             with self.assertRaisesRegex(RuntimeError, "launcher_registry_busy"):
                 self.acquire(exclusive=False)
+
+    def test_missing_lock_is_created_once_then_checked_like_any_other(self) -> None:
+        # A clone has no lock file: it is gitignored (#93).
+        missing = self.lock_path.with_name("fresh-clone.lock")
+        self.assertFalse(os.path.lexists(missing))
+
+        with registry_lock.acquire_registry_lock(exclusive=True, path=missing):
+            info = os.stat(missing, follow_symlinks=False)
+            self.assertTrue(stat.S_ISREG(info.st_mode))
+            self.assertEqual(info.st_nlink, 1)
+            with self.assertRaisesRegex(RuntimeError, "launcher_registry_busy"):
+                registry_lock.acquire_registry_lock(exclusive=False, path=missing)
+        self.assertEqual(missing.read_bytes(), b"")
+        with registry_lock.acquire_registry_lock(exclusive=False, path=missing):
+            pass
+
+    def test_lock_is_not_created_in_a_missing_directory_or_through_a_junction(
+        self,
+    ) -> None:
+        orphan = self.lock_path.with_name("no-such-dir") / "approved-launchers.lock"
+        with self.assertRaisesRegex(RuntimeError, "invalid_launcher_registry_lock"):
+            registry_lock.acquire_registry_lock(exclusive=True, path=orphan)
+        self.assertFalse(os.path.lexists(orphan.parent))
+
+        import _winapi
+
+        target = self.lock_path.with_name("junction-target")
+        target.mkdir()
+        junction = self.lock_path.with_name("junction")
+        _winapi.CreateJunction(str(target), str(junction))
+        self.addCleanup(os.rmdir, junction)
+        with self.assertRaisesRegex(RuntimeError, "invalid_launcher_registry_lock"):
+            registry_lock.acquire_registry_lock(
+                exclusive=True, path=junction / "approved-launchers.lock"
+            )
+        self.assertEqual(list(target.iterdir()), [])
 
     def test_failed_productive_open_releases_its_shared_lock(self) -> None:
         # Stays on the canonical lock deliberately: the claim is about the

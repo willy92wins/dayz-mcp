@@ -847,16 +847,21 @@ def _compile(staging: Path, lock: dict[str, object]) -> None:
     cl = Path(msvc["files"]["cl"]["path"])
     root = cl.parents[3]
     sdk_version = str(sdk["version"])
-    sdk_root = Path(r"C:\Program Files (x86)\Windows Kits\10")
+    # The SDK trees relock_toolchain.py recorded, not a C: default: the SDK may
+    # live on another drive (#93).
+    sdk_include = Path(sdk["trees"]["include"]["path"])
+    sdk_lib = Path(sdk["trees"]["lib"]["path"])
+    if sdk_include.name != sdk_version or sdk_lib.name != sdk_version:
+        raise ValueError("windows_sdk_lock_version_mismatch")
     output = staging / "dayz-test-launcher.exe"
     obj = staging / "launcher.obj"
     source = staging / "src" / "launcher.cpp"
     compile_command = [
         str(cl), "/nologo", "/c", "/O2", "/Oi", "/GS", "/guard:cf", "/std:c++17",
         "/EHs-c-", "/GR-", "/Zl", "/Brepro", "/DUNICODE", "/D_UNICODE",
-        f"/I{root / 'include'}", f"/I{sdk_root / 'Include' / sdk_version / 'um'}",
-        f"/I{sdk_root / 'Include' / sdk_version / 'shared'}",
-        f"/I{sdk_root / 'Include' / sdk_version / 'ucrt'}", f"/Fo{obj}", str(source),
+        f"/I{root / 'include'}", f"/I{sdk_include / 'um'}",
+        f"/I{sdk_include / 'shared'}",
+        f"/I{sdk_include / 'ucrt'}", f"/Fo{obj}", str(source),
     ]
     link_command = [
         str(Path(msvc["files"]["link"]["path"])), "/NOLOGO", "/NODEFAULTLIB",
@@ -864,7 +869,7 @@ def _compile(staging: Path, lock: dict[str, object]) -> None:
         "/DYNAMICBASE", "/NXCOMPAT", "/HIGHENTROPYVA", "/guard:cf", "/CETCOMPAT", "/Brepro",
         "/INCREMENTAL:NO", "/MANIFEST:NO", f"/OUT:{output}",
         f"/LIBPATH:{root / 'lib' / 'x64'}",
-        f"/LIBPATH:{sdk_root / 'Lib' / sdk_version / 'um' / 'x64'}",
+        f"/LIBPATH:{sdk_lib / 'um' / 'x64'}",
         str(obj), "kernel32.lib", "bcrypt.lib", "BufferOverflowU.lib",
         "libvcruntime.lib", "libcmt.lib",
     ]
@@ -1029,6 +1034,40 @@ def _artifact_fingerprint(bundle: Path) -> dict[str, str]:
     }
 
 
+def _publish_bundle(staging: Path, output: Path, fingerprint: dict[str, str]) -> None:
+    """Swap a verified staging bundle into ``output`` without renaming across volumes.
+
+    Staging lives under %TEMP%, which can be on another drive than the output;
+    os.replace then fails with WinError 17 (#93). The bundle is first copied
+    beside the output and checked to be the same artifact, so every rename
+    stays inside the output's directory.
+    """
+    output.parent.mkdir(parents=True, exist_ok=True)
+    incoming = output.with_name(output.name + ".incoming")
+    previous = output.with_name(output.name + ".previous")
+    for stale in (incoming, previous):
+        if stale.exists():
+            shutil.rmtree(stale)
+    shutil.copytree(staging, incoming)
+    try:
+        verify_bundle(incoming, require_receipt=False)
+        if _artifact_fingerprint(incoming) != fingerprint:
+            raise ValueError("final_copy_mismatch")
+    except BaseException:
+        shutil.rmtree(incoming, ignore_errors=True)
+        raise
+    if output.exists():
+        os.replace(output, previous)
+    try:
+        os.replace(incoming, output)
+    except BaseException:
+        if previous.exists() and not output.exists():
+            os.replace(previous, output)
+        raise
+    if previous.exists():
+        shutil.rmtree(previous)
+
+
 def verify_reproducibility_receipt(
     bundle: Path,
     *,
@@ -1133,20 +1172,7 @@ def build(
             staging,
             require_reproducible=verify_reproducible,
         )
-        output.parent.mkdir(parents=True, exist_ok=True)
-        previous = output.with_name(output.name + ".previous")
-        if previous.exists():
-            shutil.rmtree(previous)
-        if output.exists():
-            os.replace(output, previous)
-        try:
-            os.replace(staging, output)
-        except BaseException:
-            if previous.exists() and not output.exists():
-                os.replace(previous, output)
-            raise
-        if previous.exists():
-            shutil.rmtree(previous)
+        _publish_bundle(staging, output, final_fingerprint)
     verify_bundle(output, require_receipt=False)
     verify_reproducibility_receipt(
         output,
