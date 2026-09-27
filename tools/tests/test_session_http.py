@@ -21,6 +21,7 @@ from dayz_mcp import loopback
 from dayz_mcp.runtime_state import CoordinationSnapshotStore, RuntimePaths
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 from tests.fence_helpers import INST_CLIENT, INST_SERVER, bind_both_peers
+from tests.lease_helpers import SnapshotStore
 
 
 IDENTITY_A = {
@@ -60,43 +61,6 @@ def _http(base, method, path, key, payload=None, query=None, timeout=2.0):
             return int(exc.code), json.loads(exc.read().decode("utf-8") or "{}")
         finally:
             exc.close()
-
-
-class SnapshotStore:
-    def __init__(self) -> None:
-        self.payloads: list[dict[str, object]] = []
-        self.raise_on_write = False
-        self.return_value = True
-        self.lock_probe: SessionCoordinator | None = None
-
-    def persisted_revision(self) -> int | None:
-        if not self.payloads:
-            return None
-        revision = self.payloads[-1].get("revision")
-        if isinstance(revision, int) and not isinstance(revision, bool):
-            return revision
-        return None
-
-    def write_coordination(self, payload: dict[str, object]) -> bool:
-        self.payloads.append(payload)
-        if self.lock_probe is not None:
-            acquired: list[bool] = []
-
-            def probe() -> None:
-                condition = self.lock_probe._condition  # type: ignore[attr-defined]
-                locked = condition.acquire(timeout=0.5)
-                acquired.append(locked)
-                if locked:
-                    condition.release()
-
-            thread = threading.Thread(target=probe)
-            thread.start()
-            thread.join(timeout=1.0)
-            if acquired != [True]:
-                raise RuntimeError("snapshot_ran_under_coordinator_condition")
-        if self.raise_on_write:
-            raise OSError("snapshot write failed")
-        return self.return_value
 
 
 class SessionHttpTest(unittest.TestCase):

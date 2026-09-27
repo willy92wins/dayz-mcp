@@ -21,7 +21,7 @@ from dayz_mcp.runtime_state import (
     recover_coordination_startup,
 )
 from dayz_mcp.session_coordination import SessionCoordinator
-from tests.test_session_coordination import _identity
+from tests.lease_helpers import _identity
 
 
 def _paths(root: Path) -> RuntimePaths:

@@ -28,8 +28,12 @@ from tests.test_client_mode import _fixture_client_runtime
 from tests.test_mcp_tools import _content_json
 from tests.test_daemon import IDENTITY, _http
 from tests.test_process_lifecycle import FakeGuard, legacy_process
-from tests.test_session_coordination import CleanupSink, FakeClock, _identity
-from tests.test_session_http import SnapshotStore
+from tests.lease_helpers import (
+    CleanupSink,
+    FakeClock,
+    SnapshotStore,
+    _identity,
+)
 from tests.test_session_status_blocked_on import _status_payload
 
 _COMMIT_RETIREMENT_TRIPLES = (

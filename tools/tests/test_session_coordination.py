@@ -28,6 +28,13 @@ from dayz_mcp.session_coordination import (
     SessionCoordinator,
     command_requires_lease,
 )
+from tests.lease_helpers import (
+    AuditSink,
+    CleanupSink,
+    FakeClock,
+    SequentialIds,
+    _identity,
+)
 
 
 READ_ONLY = {
@@ -115,63 +122,6 @@ class IdentityAndClassificationTest(unittest.TestCase):
         self.assertNotIn("ppid", identity.public_payload())
         with self.assertRaises(dataclasses.FrozenInstanceError):
             identity.pid = 999  # type: ignore[misc]
-
-
-class FakeClock:
-    def __init__(self) -> None:
-        self.value = 0.0
-
-    def __call__(self) -> float:
-        return self.value
-
-    def advance(self, seconds: float) -> None:
-        self.value += seconds
-
-
-class SequentialIds:
-    def __init__(self, prefix: str) -> None:
-        self.prefix = prefix
-        self.next_value = 1
-
-    def __call__(self) -> str:
-        value = f"{self.prefix}-{self.next_value}"
-        self.next_value += 1
-        return value
-
-
-class AuditSink:
-    def __init__(self) -> None:
-        self.events: list[dict[str, object]] = []
-        self.fail_events: set[str] = set()
-
-    def __call__(self, event: dict[str, object]) -> None:
-        if event.get("event") in self.fail_events:
-            raise OSError("audit unavailable")
-        self.events.append(dict(event))
-
-
-class CleanupSink:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str, bool]] = []
-
-    def __call__(
-        self, session_id: str, _lease_id: str, reason: str, vehicle_active: bool
-    ) -> dict[str, object]:
-        self.calls.append((session_id, reason, vehicle_active))
-        return {"cancelled": 0, "vehicle_release": vehicle_active}
-
-
-def _identity(name: str, *, session_id: str | None = None) -> ClientIdentity:
-    return ClientIdentity.from_payload(
-        {
-            "platform": "codex" if name != "b" else "claude",
-            "pid": 100 + ord(name[0]),
-            "ppid": 10,
-            "started_at_utc": f"2026-07-14T20:00:0{len(name)}Z",
-            "session_id": session_id or f"session-{name}",
-            "task_label": name,
-        }
-    )
 
 
 class SessionCoordinatorTest(unittest.TestCase):

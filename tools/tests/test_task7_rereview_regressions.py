@@ -32,20 +32,15 @@ from dayz_mcp.process_lifecycle import (
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 from tests.fence_helpers import accredited_poll, bind_both_peers
-from tests.test_task7_review_regressions import (
-    Audit,
+from tests.lifecycle_helpers import (
     Guard,
     IDENTITY,
+    IDENTITY_B,
     IDENTITY_PAYLOAD,
     LifecycleFixture,
     Sequence,
     identity,
     record,
-)
-
-
-IDENTITY_B = ClientIdentity(
-    "claude", 22, 1, "2026-07-15T00:00:01Z", "other-session", "fifo"
 )
 
 

@@ -7,7 +7,7 @@ from unittest.mock import patch
 from dayz_mcp import admin_cli
 from dayz_mcp.process_lifecycle import RunRecord
 from tests.test_lifecycle_cli import TtyInput
-from tests.test_task7_review_regressions import (
+from tests.lifecycle_helpers import (
     IDENTITY,
     LifecycleFixture,
     identity,
