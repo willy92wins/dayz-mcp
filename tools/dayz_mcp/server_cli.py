@@ -75,6 +75,16 @@ def _configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         help="Fail if the daemon is unavailable instead of spawning one.",
     )
     parser.add_argument(
+        "--no-progressive-disclosure",
+        action="store_false",
+        dest="progressive_disclosure",
+        help=(
+            "In client mode, list every tool with its full description before a lease "
+            "is held, for hosts that do not re-list after tools/list_changed (Claude "
+            "Code). Lease-gated tools still refuse to run without a lease."
+        ),
+    )
+    parser.add_argument(
         "--supervised",
         action="store_true",
         help=(
@@ -105,7 +115,7 @@ def _configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         const="embedded",
         help="Bind the loopback in-process (single session; back-compat default).",
     )
-    parser.set_defaults(mode="embedded", auto_spawn_daemon=True)
+    parser.set_defaults(mode="embedded", auto_spawn_daemon=True, progressive_disclosure=True)
     return parser
 
 

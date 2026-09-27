@@ -707,7 +707,11 @@ def _runtime_holds_lease(runtime: Any) -> bool:
 
 def _progressive_disclosure_active(runtime: Any) -> bool:
     config = getattr(runtime, "config", None)
-    return getattr(config, "mode", None) == "client" and not _runtime_holds_lease(runtime)
+    return (
+        getattr(config, "mode", None) == "client"
+        and getattr(config, "progressive_disclosure", True) is not False
+        and not _runtime_holds_lease(runtime)
+    )
 
 
 def _is_lease_revealed_tool(name: str) -> bool:
@@ -1444,6 +1448,10 @@ class ServerConfig:
     auto_spawn_daemon: bool = True
     # Opt-in small-model surface. The full public registry remains the default.
     tool_pack: str = "full"
+    # Client mode lists a compact catalog until a lease is held and relies on the
+    # host re-listing after tools/list_changed. Claude Code does not (#93, e7ef):
+    # --no-progressive-disclosure lists everything from the start instead.
+    progressive_disclosure: bool = True
 
 
 class Runtime:
@@ -7519,6 +7527,7 @@ def parse_args(argv: list[str] | None = None) -> ServerConfig:
         supervised=bool(args.supervised),
         auto_spawn_daemon=bool(args.auto_spawn_daemon),
         tool_pack=tool_pack,
+        progressive_disclosure=bool(args.progressive_disclosure),
     )
 
 

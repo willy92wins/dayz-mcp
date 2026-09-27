@@ -186,7 +186,14 @@ If `claude` / `codex` on PATH are shims (`.cmd` / `.ps1`), pass the native x64
 executables with `--claude-exe` and `--codex-exe`. Re-run `--pin-clis` after those
 binaries change. `.\install-mcp.ps1 -Register` does not read that pin.
 
-Three run modes (`python -m dayz_mcp`; `tools/dayz_mcp/server_cli.py:66-88`):
+Claude Code does not re-list tools after `tools/list_changed`, so in client mode it
+keeps the compact pre-lease catalog for the whole session and never sees the game
+verbs (#93). Register it with `--no-progressive-disclosure` to list every tool from
+the start: `.\install-mcp.ps1 -Register -ClaudeNoProgressiveDisclosure` or
+`python install_mcp.py --register --claude-no-progressive-disclosure`. Lease-gated
+tools still refuse to run without a lease, and Codex keeps the default.
+
+Three run modes (`python -m dayz_mcp`; `tools/dayz_mcp/server_cli.py:96-118`):
 
 - `--client` — what the installer registers. Does not bind; proxies to the daemon
   and starts it lazily. Lets several agent sessions share one running game.

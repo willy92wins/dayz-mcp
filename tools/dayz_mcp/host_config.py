@@ -88,6 +88,7 @@ _BOOLEAN_OPTIONS = frozenset(
         "--require-version",
         "--enable-exec-enforce",
         "--no-daemon-autospawn",
+        "--no-progressive-disclosure",
     }
 )
 _REQUIRED_OPTIONS = frozenset(
@@ -279,6 +280,10 @@ def _registration_from_entry(
         or (option_counts["--tool-pack"] == 0 and namespace.tool_pack != "full")
         or (option_counts["--supervised"] == 0 and namespace.supervised is not False)
         or (option_counts["--no-daemon-autospawn"] == 0 and namespace.auto_spawn_daemon is not True)
+        or (
+            option_counts["--no-progressive-disclosure"] == 0
+            and namespace.progressive_disclosure is not True
+        )
     ):
         raise HostConfigError("daemon_provenance_conflict")
     keyfile = _canonical_existing_file(namespace.keyfile)

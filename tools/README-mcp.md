@@ -21,6 +21,7 @@ The installer creates `.venv-mcp`, installs `mcp==1.27.2`, generates `.dayz_mcp.
 
 - Claude: `--client --client-platform claude`
 - Codex: `--client --client-platform codex`
+- Claude with `-ClaudeNoProgressiveDisclosure` (PowerShell) or `--claude-no-progressive-disclosure` (Python) adds `--no-progressive-disclosure`: every tool is listed before the lease, because Claude Code does not re-list after `tools/list_changed`. Lease-gated tools still refuse to run without a lease.
 
 It mutates the Claude and Codex MCP registrations only when run with `--register`. Registration is remove-then-add and verifies both effective configurations use client mode, the expected platform, the same port/keyfile, and no `--embedded` flag.
 

@@ -497,6 +497,16 @@ class DaemonProvenanceConfigTest(unittest.TestCase):
                 ):
                     self._resolve()
 
+    def test_claude_registration_may_opt_out_of_progressive_disclosure(self) -> None:
+        # A presentation flag of the MCP server: the registration carrying it
+        # resolves, and the daemon argv does not inherit it.
+        self._write_claude(args=self._args("claude") + ["--no-progressive-disclosure"])
+        self._write_codex()
+
+        provenance = self._resolve()
+
+        self.assertNotIn("--no-progressive-disclosure", provenance.argv)
+
     def test_optional_raw_options_are_at_most_once_and_absence_is_enumerated(self) -> None:
         optional_samples = (
             ("--expected-game-version", "1.28"),
@@ -504,6 +514,7 @@ class DaemonProvenanceConfigTest(unittest.TestCase):
             ("--enable-exec-enforce", None),
             ("--exec-allowlist", str(self.keyfile)),
             ("--no-daemon-autospawn", None),
+            ("--no-progressive-disclosure", None),
             ("--task-label", "fixture"),
         )
         for option, value in optional_samples:
