@@ -1,3 +1,9 @@
+"""The session HTTP contract of the loopback daemon.
+
+Moved verbatim from test_task7_review_regressions.py, test_session_http.py
+(review 2026-09-25, W4d step 3).
+"""
+
 from __future__ import annotations
 
 import json
@@ -12,18 +18,45 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 from dayz_mcp import loopback
+from dayz_mcp.process_lifecycle import RunRecord
 from dayz_mcp.runtime_state import CoordinationSnapshotStore, RuntimePaths
-from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
-from tests.fence_helpers import INST_CLIENT, INST_SERVER, bind_both_peers
+from dayz_mcp.session_coordination import SessionCoordinator
+from tests.fence_helpers import bind_both_peers, INST_CLIENT, INST_SERVER
 from tests.lease_helpers import SnapshotStore
+from tests.lifecycle_helpers import (
+    IDENTITY,
+    identity,
+    IDENTITY_PAYLOAD,
+    LifecycleFixture,
+    record,
+)
 
 
+# --- helpers from test_task7_review_regressions.py ---
+def http_post(base: str, path: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
+    url = base + path + "?" + urllib.parse.urlencode({"key": "key"})
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=2.0) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, json.loads(exc.read())
+        finally:
+            exc.close()
+
+
+# --- helpers from test_session_http.py ---
 IDENTITY_A = {
     "platform": "codex",
     "pid": 11,
@@ -32,6 +65,8 @@ IDENTITY_A = {
     "session_id": "A",
     "task_label": "test",
 }
+
+
 IDENTITY_B = {
     "platform": "claude",
     "pid": 22,
@@ -61,6 +96,177 @@ def _http(base, method, path, key, payload=None, query=None, timeout=2.0):
             return int(exc.code), json.loads(exc.read().decode("utf-8") or "{}")
         finally:
             exc.close()
+
+
+# --- from test_task7_review_regressions.py ---
+
+
+class RealLifecycleHttpQuarantineTest(unittest.TestCase):
+    def test_real_lifecycle_quarantine_blocks_mutations_but_status_and_release_work(self) -> None:
+        fixture = LifecycleFixture()
+        state = loopback.ServerState("key", coordination=fixture.coordinator)
+        bind_both_peers(state)
+        state.lifecycle = fixture.lifecycle
+        state.retail_probe = lambda: {"known": False, "processes": []}
+        fixture.probe = {"known": False, "processes": []}
+        server = loopback.create_http_server(
+            0, state, log_sink=lambda _message: None, reclaim_orphans=False
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address
+        base = f"http://{host}:{port}"
+        try:
+            requests = (
+                ("/lifecycle/start", {"identity": IDENTITY_PAYLOAD, "lease_token": fixture.token, "request": fixture.request()}),
+                ("/lifecycle/stop", {"identity": IDENTITY_PAYLOAD, "lease_token": fixture.token, "run_id": "missing"}),
+                ("/lifecycle/adopt", {"identity": IDENTITY_PAYLOAD, "lease_token": fixture.token, "run_id": "missing"}),
+            )
+            for path, payload in requests:
+                with self.subTest(path=path):
+                    status, result = http_post(base, path, payload)
+                    self.assertEqual((status, result["error"]), (409, "retail_quarantine"))
+            status, result = http_post(base, "/lifecycle/status", {"identity": IDENTITY_PAYLOAD})
+            self.assertEqual((status, result["retail_quarantine"]), (200, True))
+            status, result = http_post(
+                base,
+                "/admin/reconcile",
+                {"run_id": "missing", "pid": 9, "reason": "incident", "confirmation": "FORCE missing 9"},
+            )
+            self.assertEqual((status, result["error"]), (409, "retail_quarantine"))
+            status, result = http_post(
+                base,
+                "/admin/release",
+                {
+                    "lease_id": fixture.lease_id,
+                    "reason": "incident",
+                    "confirmation": f"FORCE {fixture.lease_id}",
+                },
+            )
+            self.assertEqual((status, result["released"]), (200, True))
+            self.assertEqual(fixture.launcher.calls, [])
+            self.assertEqual(fixture.guard.snapshot_calls, [])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(2.0)
+            fixture.close()
+
+    def test_real_lifecycle_clean_routes_cover_start_stop_adopt_reconcile_and_empty(self) -> None:
+        fixture = LifecycleFixture()
+        state = loopback.ServerState("key", coordination=fixture.coordinator)
+        bind_both_peers(state)
+        state.lifecycle = fixture.lifecycle
+        state.retail_probe = lambda: {"known": True, "processes": []}
+        fixture.probe = {"known": True, "processes": []}
+        server = loopback.create_http_server(
+            0, state, log_sink=lambda _message: None, reclaim_orphans=False
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address
+        base = f"http://{host}:{port}"
+        try:
+            launched = record(fixture.launcher.handle.pid)
+            fixture.guard.snapshots[launched.pid] = identity(launched)
+            status, started = http_post(
+                base,
+                "/lifecycle/start",
+                {
+                    "identity": IDENTITY_PAYLOAD,
+                    "lease_token": fixture.token,
+                    "request": fixture.request(),
+                },
+            )
+            self.assertEqual((status, started["state"]), (200, "RUNNING"))
+            status, state_payload = http_post(
+                base, "/lifecycle/status", {"identity": IDENTITY_PAYLOAD}
+            )
+            self.assertEqual((status, state_payload["retail_quarantine"]), (200, False))
+            status, stopped = http_post(
+                base,
+                "/lifecycle/stop",
+                {
+                    "identity": IDENTITY_PAYLOAD,
+                    "lease_token": fixture.token,
+                    "run_id": started["run_id"],
+                },
+            )
+            self.assertEqual((status, stopped["state"]), (200, "EXITED"))
+
+            idle_process = record(7601)
+            fixture.add_run(
+                idle_process,
+                run_id="idle",
+                state="RUNNING_IDLE",
+                owned=False,
+            )
+            fixture.guard.snapshots[idle_process.pid] = identity(idle_process)
+            status, adopted = http_post(
+                base,
+                "/lifecycle/adopt",
+                {
+                    "identity": IDENTITY_PAYLOAD,
+                    "lease_token": fixture.token,
+                    "run_id": "idle",
+                },
+            )
+            self.assertEqual((status, adopted["state"]), (200, "RUNNING"))
+
+            survivor = record(7602)
+            fixture.add_run(survivor, run_id="repair", state="UNRECONCILED")
+            fixture.guard.snapshots[survivor.pid] = identity(survivor)
+            fixture.lifecycle.diag_probe = lambda: {
+                "known": True,
+                "processes": [
+                    {"pid": survivor.pid, "name": "DayZDiag_x64.exe"}
+                ],
+            }
+            status, reconciled = http_post(
+                base,
+                "/admin/reconcile",
+                {
+                    "run_id": "repair",
+                    "pid": survivor.pid,
+                    "reason": "repair",
+                    "confirmation": f"FORCE repair {survivor.pid}",
+                },
+            )
+            self.assertEqual((status, reconciled["state"]), (200, "RUNNING_IDLE"))
+
+            fixture.store.add(
+                RunRecord(
+                    "empty-http",
+                    IDENTITY.session_id,
+                    fixture.lease_id,
+                    "UNRECONCILED",
+                    "red",
+                    "@SameMod",
+                    "profiles",
+                    "mission",
+                    [],
+                )
+            )
+            fixture.lifecycle.diag_probe = lambda: {"known": True, "processes": []}
+            status, emptied = http_post(
+                base,
+                "/admin/reconcile",
+                {
+                    "run_id": "empty-http",
+                    "empty": True,
+                    "reason": "confirmed empty",
+                    "confirmation": "FORCE empty-http EMPTY",
+                },
+            )
+            self.assertEqual((status, emptied["state"]), (200, "EXITED"))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(2.0)
+            fixture.close()
+
+
+# --- from test_session_http.py ---
 
 
 class SessionHttpTest(unittest.TestCase):
@@ -750,3 +956,7 @@ class ProductionCoordinationStorePersistSkipTest(unittest.TestCase):
             persisted = self.store.persisted_revision()
             self.assertIsInstance(persisted, int)
             self.assertEqual(persisted, self.coordinator.durable_revision())
+
+
+if __name__ == "__main__":
+    unittest.main()

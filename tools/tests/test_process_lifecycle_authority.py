@@ -1,11 +1,13 @@
+"""Process lifecycle under lease authority: runs, manifests, guards and settlement.
+
+Moved verbatim from test_task7_review_regressions.py, test_task7_rereview_regressions.py
+(review 2026-09-25, W4d step 3).
+"""
+
 from __future__ import annotations
 
-from tests.steam_helpers import FakeSteamGate
-
 import ctypes
-import dataclasses
-import inspect
-import io
+import json
 import os
 import sys
 import threading
@@ -16,543 +18,620 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
-TOOLS_ROOT = Path(__file__).resolve().parents[1]
-if str(TOOLS_ROOT) not in sys.path:
-    sys.path.insert(0, str(TOOLS_ROOT))
+_TOOLS_DIR = Path(__file__).resolve().parents[1]
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
 
 from _session_coordination.process_guard_gate import validate_result_shape
-from dayz_mcp import loopback, native_process_guard, orphan_guard
+from dayz_mcp import daemon, loopback, native_process_guard, orphan_guard
 from dayz_mcp.native_process_guard import NativeProcessGuard
-from dayz_mcp.process_lifecycle import (
-    ProcessLifecycle,
-    RunManifestStore,
-    RunRecord,
-)
+from dayz_mcp.process_lifecycle import RunManifestStore, RunRecord
 from dayz_mcp.runtime_state import RuntimePaths
-from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
-from tests.fence_helpers import accredited_poll, bind_both_peers
+from dayz_mcp.server import ServerConfig
+from tests.fence_helpers import bind_both_peers
 from tests.lifecycle_helpers import (
     Guard,
+    HASH_B,
     IDENTITY,
-    IDENTITY_B,
-    IDENTITY_PAYLOAD,
-    LifecycleFixture,
-    Sequence,
     identity,
+    LifecycleFixture,
+    LifecycleFixtureContext,
     record,
 )
 
 
-class AuthorityIoBoundaryTest(unittest.TestCase):
-    def _blocked_authorize(self):
-        entered = threading.Event()
-        resume = threading.Event()
-        events: list[dict[str, object]] = []
+# --- helpers from test_task7_review_regressions.py ---
+_DAYZ_MCP_WORKER_PREFIXES = (
+    "dayz-mcp-release-audit-",
+    "dayz-mcp-cleanup-",
+    "dayz-mcp-fenced-cleanup-",
+)
 
-        def audit(event: dict[str, object]) -> bool:
-            events.append(dict(event))
-            if event.get("event") == "session_authorized":
-                entered.set()
-                resume.wait(2.0)
-            return True
 
-        coordinator = SessionCoordinator(
-            token_fn=Sequence("token"),
-            id_fn=Sequence("lease"),
-            audit=audit,
-            cleanup=lambda *_args: {},
-        )
-        _, acquired = coordinator.acquire(IDENTITY, "authority")
-        state = loopback.ServerState("key", coordination=coordinator)
-        bind_both_peers(state)
-        state.retail_probe = lambda: {"known": True, "processes": []}
-        state._enqueue_command(
-            "query_player_state",
-            {},
-            "server",
-            owner_client=None,
-            owner_lease_id=None,
-        )
-        result: list[tuple[int, dict]] = []
-        worker = threading.Thread(
-            target=lambda: result.append(
-                state.enqueue_command(
-                    "world_time_set",
-                    {},
-                    "server",
-                    identity_payload=IDENTITY_PAYLOAD,
-                    lease_token=acquired["lease_token"],
-                )
+def _wait_for_dayz_mcp_background_workers(
+    *,
+    timeout_s: float = 2.0,
+    enumerate_fn=threading.enumerate,
+    monotonic_fn=time.monotonic,
+) -> None:
+    """Join dayz-mcp background workers or fail with their names.
+
+    Raises AssertionError if any matching thread is still alive after timeout_s.
+    """
+    deadline = monotonic_fn() + timeout_s
+    while True:
+        workers = [
+            thread
+            for thread in enumerate_fn()
+            if thread.name.startswith(_DAYZ_MCP_WORKER_PREFIXES)
+        ]
+        if not workers:
+            return
+        if monotonic_fn() >= deadline:
+            names = ", ".join(sorted({thread.name for thread in workers}))
+            raise AssertionError(
+                f"los workers {names} no terminaron en {timeout_s} s"
             )
-        )
-        worker.start()
-        self.assertTrue(entered.wait(1.0), "session_authorized audit not reached")
-        return state, coordinator, acquired, resume, worker, result
+        for thread in workers:
+            thread.join(timeout=0.05)
 
-    def test_poll_of_existing_read_progresses_while_authorization_audit_is_blocked(self) -> None:
-        state, _coordinator, _acquired, resume, worker, _result = self._blocked_authorize()
-        polled: list[tuple[int, dict]] = []
-        poller = threading.Thread(target=lambda: polled.append(accredited_poll(state, "server")))
+
+# --- from test_task7_review_regressions.py ---
+
+
+class ProcessGuardGateContractTest(unittest.TestCase):
+    def test_durable_gate_result_shape_is_regression_checked_without_running_processes(self) -> None:
+        missing = {
+            "terminated": False,
+            "error": "invalid_expected_identity",
+            "exit_code": 3,
+            "pid": None,
+            "identity_scheme": "psutil-argv-v2",
+            "identity_complete": False,
+        }
+        mismatch = {
+            "terminated": False,
+            "error": "process_identity_mismatch",
+            "exit_code": 4,
+            "pid": 102,
+            "identity_scheme": "psutil-argv-v2",
+            "identity_complete": True,
+        }
+        payload = {
+            "schema_version": 1,
+            "gate": "task7_process_guard_registered_vs_foreign",
+            "passed": True,
+            "steps": {
+                "registered_snapshot": {
+                    "pid": 101,
+                    "identity_scheme": "psutil-argv-v2",
+                    "identity_complete": True,
+                    "exit_code": 0,
+                },
+                "foreign_snapshot": {
+                    "pid": 102,
+                    "identity_scheme": "psutil-argv-v2",
+                    "identity_complete": True,
+                    "exit_code": 0,
+                },
+                "missing_field_rejections": {
+                    field: dict(missing)
+                    for field in (
+                        "pid",
+                        "creation_time_utc",
+                        "executable_sha256",
+                        "command_line_sha256",
+                    )
+                },
+                "forged_identity_rejections": {
+                    field: dict(mismatch)
+                    for field in (
+                        "pid",
+                        "creation_time_utc",
+                        "executable_sha256",
+                        "command_line_sha256",
+                    )
+                },
+                "registered_termination": {
+                    "terminated": True,
+                    "pid": 101,
+                    "identity_scheme": "psutil-argv-v2",
+                    "identity_complete": True,
+                    "exit_code": 0,
+                },
+                "terminated_identity_recheck": {
+                    "terminated": False,
+                    "error": "process_not_found",
+                    "pid": 101,
+                    "identity_scheme": "psutil-argv-v2",
+                    "identity_complete": False,
+                    "exit_code": 4,
+                },
+                "foreign_alive_after_rejections": True,
+                "foreign_exact_cleanup": {
+                    "terminated": True,
+                    "pid": 102,
+                    "identity_scheme": "psutil-argv-v2",
+                    "identity_complete": True,
+                    "exit_code": 0,
+                },
+            },
+            "children": [
+                {"slot": "registered", "pid": 101, "final_state": "exited"},
+                {"slot": "foreign", "pid": 102, "final_state": "exited"},
+            ],
+            "errors": [],
+        }
+        self.assertEqual(validate_result_shape(payload), [])
+        payload["steps"]["forged_identity_rejections"]["command_line_sha256"] = {
+            "terminated": True,
+            "exit_code": 0,
+        }
+        self.assertIn("forged_identity_contract", validate_result_shape(payload))
+
+    def test_guard_source_closes_process_objects_and_gate_has_no_generic_kill_primitive(self) -> None:
+        guard_source = (_TOOLS_DIR / "process-guard.ps1").read_text(encoding="utf-8")
+        gate_source = (
+            _TOOLS_DIR / "_session_coordination" / "process_guard_gate.py"
+        ).read_text(encoding="utf-8")
+        self.assertGreaterEqual(guard_source.count("$proc.Dispose()"), 2)
+        self.assertNotIn("taskkill", gate_source.casefold())
+        self.assertNotIn("stop-process", gate_source.casefold())
+        self.assertNotIn(".kill(", gate_source.casefold())
+
+
+class LifecyclePostAuditQuarantineTest(unittest.TestCase):
+    def _switch_probe_on(self, fixture: LifecycleFixture, event_name: str) -> None:
+        def change(event):
+            if event.get("event") == event_name:
+                fixture.probe = {
+                    "known": True,
+                    "processes": [{"pid": 77, "name": "DayZ_x64.exe"}],
+                }
+
+        fixture.audit.on_event = change
+
+    def test_retail_appearing_during_start_audit_blocks_popen_and_manifest(self) -> None:
+        fixture = LifecycleFixture()
         try:
-            poller.start()
-            self.assertTrue(
-                poller.join(0.25) is None and not poller.is_alive(),
-                "poll_blocked_by_authorization_audit",
-            )
-            self.assertEqual(
-                [item["cmd"] for item in polled[0][1]["commands"]],
-                ["query_player_state"],
-            )
+            expected = record(fixture.launcher.handle.pid)
+            fixture.guard.snapshots[expected.pid] = identity(expected)
+            self._switch_probe_on(fixture, "lifecycle_start")
+            result = fixture.lifecycle.start_run(IDENTITY, fixture.token, fixture.request())
+            self.assertEqual(result["error"], "retail_quarantine")
+            self.assertEqual(fixture.launcher.calls, [])
+            self.assertEqual(fixture.store.list_runs(), [])
         finally:
-            resume.set()
-            worker.join(2.0)
-            poller.join(2.0)
+            fixture.close()
 
-    def test_release_invalidates_during_blocked_audit_and_old_reservation_rolls_back(self) -> None:
-        state, coordinator, acquired, resume, worker, result = self._blocked_authorize()
-        released: list[tuple[int, dict[str, object]]] = []
-        release_done = threading.Event()
-
-        def release() -> None:
-            released.append(coordinator.release(IDENTITY, acquired["lease_token"]))
-            release_done.set()
-
-        releaser = threading.Thread(target=release)
+    def test_retail_appearing_during_stop_audit_blocks_manifest_and_guard(self) -> None:
+        fixture = LifecycleFixture()
         try:
-            releaser.start()
-            self.assertTrue(
-                release_done.wait(0.25),
-                "release_blocked_by_session_authorized_audit",
-            )
-            resume.set()
-            worker.join(2.0)
-            releaser.join(2.0)
-            self.assertEqual(released[0][0], 200)
-            self.assertEqual(result[0], (409, {"error": "lease_invalid"}))
-            self.assertEqual(state.status_snapshot()["peers"]["server"]["queue_depth"], 1)
+            expected = record(7201)
+            fixture.add_run(expected)
+            fixture.guard.snapshots[expected.pid] = identity(expected)
+            self._switch_probe_on(fixture, "lifecycle_stop")
+            result = fixture.lifecycle.stop_run(IDENTITY, fixture.token, "existing")
+            self.assertEqual(result["error"], "retail_quarantine")
+            self.assertEqual(fixture.guard.terminate_calls, [])
+            self.assertEqual(fixture.store.get("existing").state, "RUNNING")
         finally:
-            resume.set()
-            worker.join(2.0)
-            releaser.join(2.0)
+            fixture.close()
 
-    def test_audit_callback_never_observes_condition_owned_by_another_thread(self) -> None:
-        holder: dict[str, SessionCoordinator] = {}
-        observations: list[tuple[str, bool]] = []
-
-        def audit(event: dict[str, object]) -> bool:
-            coordinator = holder.get("coordinator")
-            if coordinator is None:
-                return True
-            acquired: list[bool] = []
-
-            def probe() -> None:
-                locked = coordinator._condition.acquire(timeout=0.2)
-                acquired.append(locked)
-                if locked:
-                    coordinator._condition.release()
-
-            thread = threading.Thread(target=probe)
-            thread.start()
-            thread.join(0.5)
-            observations.append((str(event.get("event")), acquired == [True]))
-            return True
-
-        coordinator = SessionCoordinator(
-            token_fn=Sequence("token"), id_fn=Sequence("lease"), audit=audit
-        )
-        holder["coordinator"] = coordinator
-        _, acquired = coordinator.acquire(IDENTITY, "audit-lock")
-        coordinator.authorize(IDENTITY, acquired["lease_token"], "world_time_set")
-        coordinator.release(IDENTITY, acquired["lease_token"])
-        self.assertTrue(observations)
-        self.assertEqual(
-            [event for event, free in observations if not free],
-            [],
-            observations,
-        )
-
-    def test_stale_admin_release_cannot_release_the_next_lease(self) -> None:
-        entered = threading.Event()
-        resume = threading.Event()
-
-        def audit(event: dict[str, object]) -> bool:
-            if event.get("event") == "admin_release":
-                entered.set()
-                resume.wait(2.0)
-            return True
-
-        coordinator = SessionCoordinator(
-            token_fn=Sequence("token"),
-            id_fn=Sequence("lease"),
-            audit=audit,
-            cleanup=lambda *_args: {},
-        )
-        _, l1 = coordinator.acquire(IDENTITY, "l1")
-        queued_status, ticket = coordinator.acquire(IDENTITY_B, "l2")
-        self.assertEqual((queued_status, ticket["status"]), (202, "queued"))
-        admin_result: list[tuple[int, dict[str, object]]] = []
-        thread = threading.Thread(
-            target=lambda: admin_result.append(
-                coordinator.admin_release(l1["lease_id"], "operator")
-            )
-        )
-        thread.start()
-        self.assertTrue(entered.wait(1.0))
-        coordinator.release(IDENTITY, l1["lease_token"])
-        resume.set()
-        thread.join(1.0)
-        self.assertFalse(thread.is_alive())
-        self.assertNotEqual(admin_result[0][0], 200)
-        claimed = coordinator.wait(IDENTITY_B, ticket["ticket"], 0.0)
-        self.assertEqual((claimed[0], claimed[1]["status"]), (200, "active"))
-        snapshot = coordinator.snapshot_payload()
-        self.assertEqual(
-            snapshot["active"]["session"], IDENTITY_B.session_id[:12]
-        )
-
-    def test_stale_heartbeat_cannot_report_renewal_after_release_wins(self) -> None:
-        entered = threading.Event()
-        resume = threading.Event()
-
-        def audit(event: dict[str, object]) -> bool:
-            if event.get("event") == "session_heartbeat":
-                entered.set()
-                resume.wait(2.0)
-            return True
-
-        coordinator = SessionCoordinator(
-            token_fn=Sequence("token"),
-            id_fn=Sequence("lease"),
-            audit=audit,
-            cleanup=lambda *_args: {},
-        )
-        _, l1 = coordinator.acquire(IDENTITY, "l1")
-        queued_status, ticket = coordinator.acquire(IDENTITY_B, "l2")
-        self.assertEqual((queued_status, ticket["status"]), (202, "queued"))
-        heartbeat_result: list[tuple[int, dict[str, object]]] = []
-        thread = threading.Thread(
-            target=lambda: heartbeat_result.append(
-                coordinator.heartbeat(IDENTITY, l1["lease_token"])
-            )
-        )
-        thread.start()
-        self.assertTrue(entered.wait(1.0))
-        coordinator.release(IDENTITY, l1["lease_token"])
-        resume.set()
-        thread.join(1.0)
-        self.assertFalse(thread.is_alive())
-        self.assertNotEqual(heartbeat_result[0][0], 200)
-        claimed = coordinator.wait(IDENTITY_B, ticket["ticket"], 0.0)
-        self.assertEqual((claimed[0], claimed[1]["status"]), (200, "active"))
-        snapshot = coordinator.snapshot_payload()
-        self.assertEqual(
-            snapshot["active"]["session"],
-            IDENTITY_B.session_id[:12],
-        )
-
-    def test_concurrent_initial_grant_cannot_overwrite_another_lease(self) -> None:
-        entered = threading.Event()
-        resume = threading.Event()
-
-        def audit(event: dict[str, object]) -> bool:
-            client = event.get("client")
-            if (
-                event.get("event") == "session_acquire"
-                and event.get("decision") == "grant"
-                and isinstance(client, dict)
-                and client.get("session") == IDENTITY.session_id[:12]
-            ):
-                entered.set()
-                resume.wait(2.0)
-            return True
-
-        coordinator = SessionCoordinator(
-            token_fn=Sequence("token"), id_fn=Sequence("lease"), audit=audit
-        )
-        first: list[tuple[int, dict[str, object]]] = []
-        thread = threading.Thread(
-            target=lambda: first.append(coordinator.acquire(IDENTITY, "first"))
-        )
-        thread.start()
-        self.assertTrue(entered.wait(1.0))
-        second: list[tuple[int, dict[str, object]]] = []
-        second_thread = threading.Thread(
-            target=lambda: second.append(coordinator.acquire(IDENTITY_B, "second"))
-        )
-        second_thread.start()
-        resume.set()
-        thread.join(1.0)
-        second_thread.join(1.0)
-        self.assertFalse(thread.is_alive())
-        self.assertFalse(second_thread.is_alive())
-        self.assertEqual(second[0][0], 202)
-        self.assertEqual(first[0][0], 200)
-        snapshot = coordinator.snapshot_payload()
-        self.assertEqual(snapshot["active"]["session"], IDENTITY.session_id[:12])
-        self.assertEqual(snapshot["queue"][0]["session"], IDENTITY_B.session_id[:12])
-
-    def test_concurrent_fifo_grant_cannot_pop_or_overwrite_a_granted_ticket(self) -> None:
-        entered = threading.Event()
-        resume = threading.Event()
-        blocked = False
-
-        def audit(event: dict[str, object]) -> bool:
-            nonlocal blocked
-            if (
-                event.get("event") == "session_granted"
-                and event.get("reason") == "fifo_head"
-                and not blocked
-            ):
-                blocked = True
-                entered.set()
-                resume.wait(2.0)
-            return True
-
-        coordinator = SessionCoordinator(
-            token_fn=Sequence("token"),
-            id_fn=Sequence("lease"),
-            audit=audit,
-            cleanup=lambda *_args: {},
-        )
-        _, l1 = coordinator.acquire(IDENTITY, "l1")
-        queued_status, ticket = coordinator.acquire(IDENTITY_B, "l2")
-        self.assertEqual((queued_status, ticket["status"]), (202, "queued"))
-        release_status, _ = coordinator.release(IDENTITY, l1["lease_token"])
-        self.assertEqual(release_status, 200)
-        claimed: list[tuple[int, dict[str, object]]] = []
-        claim_error: list[Exception] = []
-
-        def claim() -> None:
-            try:
-                claimed.append(
-                    coordinator.wait(IDENTITY_B, ticket["ticket"], 0.0)
-                )
-            except Exception as exc:  # pragma: no cover - RED diagnostic
-                claim_error.append(exc)
-
-        thread = threading.Thread(target=claim)
-        thread.start()
-        self.assertTrue(entered.wait(1.0))
-        coordinator.status(IDENTITY_B)
-        resume.set()
-        thread.join(1.0)
-        self.assertFalse(thread.is_alive())
-        self.assertEqual(claim_error, [])
-        self.assertEqual((claimed[0][0], claimed[0][1]["status"]), (200, "active"))
-        snapshot = coordinator.snapshot_payload()
-        self.assertEqual(snapshot["active"]["session"], IDENTITY_B.session_id[:12])
-        self.assertEqual(snapshot["queue"], [])
-
-
-class CleanupBudgetAndFencingTest(unittest.TestCase):
-    def test_releasing_has_injectable_budget_timeout_audit_and_fifo_progress(self) -> None:
-        if "cleanup_timeout_s" not in inspect.signature(SessionCoordinator).parameters:
-            self.fail("cleanup_timeout_s_missing")
-        started = threading.Event()
-        resume = threading.Event()
-        events: list[dict[str, object]] = []
-
-        def cleanup(*_args):
-            started.set()
-            resume.wait(2.0)
-            return {"cancelled": 0}
-
-        coordinator = SessionCoordinator(
-            token_fn=Sequence("token"),
-            id_fn=Sequence("lease"),
-            audit=lambda event: events.append(dict(event)) or True,
-            cleanup=cleanup,
-            cleanup_timeout_s=0.05,
-        )
-        _, first = coordinator.acquire(IDENTITY, "first")
-        status, ticket = coordinator.acquire(IDENTITY_B, "second")
-        self.assertEqual((status, ticket["status"]), (202, "queued"))
+    def test_retail_appearing_during_adopt_audit_blocks_manifest(self) -> None:
+        fixture = LifecycleFixture()
         try:
-            began = time.monotonic()
-            status, released = coordinator.release(IDENTITY, first["lease_token"])
-            elapsed = time.monotonic() - began
-            self.assertTrue(started.is_set())
-            self.assertLess(elapsed, 0.5)
-            self.assertEqual(status, 200)
-            self.assertIn("cleanup_timeout", released["cleanup_degraded"])
-            claimed = coordinator.wait(IDENTITY_B, ticket["ticket"], 0.0)
-            self.assertEqual(
-                (claimed[0], claimed[1]["status"]), (200, "active")
-            )
-            snapshot = coordinator.snapshot_payload()
-            self.assertEqual(
-                snapshot["active"]["session"], IDENTITY_B.session_id[:12]
-            )
-            timeout_events = [
-                item for item in events if item.get("event") == "session_cleanup_timeout"
+            expected = record(7202)
+            fixture.add_run(expected, state="RUNNING_IDLE", owned=False)
+            fixture.guard.snapshots[expected.pid] = identity(expected)
+            self._switch_probe_on(fixture, "lifecycle_adopt")
+            result = fixture.lifecycle.adopt_run(IDENTITY, fixture.token, "existing")
+            self.assertEqual(result["error"], "retail_quarantine")
+            self.assertEqual(fixture.store.get("existing").state, "RUNNING_IDLE")
+        finally:
+            fixture.close()
+
+    def test_retail_appearing_during_admin_audit_blocks_manifest(self) -> None:
+        fixture = LifecycleFixture()
+        try:
+            expected = record(7203)
+            fixture.add_run(expected, state="UNRECONCILED")
+            fixture.guard.snapshots[expected.pid] = identity(expected)
+            fixture.lifecycle.diag_probe = lambda: {
+                "known": True,
+                "processes": [
+                    {"pid": expected.pid, "name": "DayZDiag_x64.exe"}
+                ],
+            }
+            self._switch_probe_on(fixture, "admin_reconcile")
+            result = fixture.lifecycle.admin_reconcile("existing", expected.pid, "incident")
+            self.assertEqual(result["error"], "retail_quarantine")
+            self.assertEqual(fixture.store.get("existing").state, "UNRECONCILED")
+        finally:
+            fixture.close()
+
+
+class RunStateRecoveryTest(unittest.TestCase):
+    def test_supplied_unknown_or_exited_run_id_never_launches(self) -> None:
+        for mode in ("unknown", "exited"):
+            with self.subTest(mode=mode):
+                fixture = LifecycleFixture()
+                try:
+                    supplied = "missing"
+                    if mode == "exited":
+                        supplied = "exited"
+                        fixture.store.add(
+                            RunRecord(
+                                supplied,
+                                None,
+                                None,
+                                "EXITED",
+                                "red",
+                                "@SameMod",
+                                "profiles",
+                                "mission",
+                                [],
+                            )
+                        )
+                    expected = record(fixture.launcher.handle.pid)
+                    fixture.guard.snapshots[expected.pid] = identity(expected)
+                    result = fixture.lifecycle.start_run(
+                        IDENTITY, fixture.token, fixture.request(run_id=supplied)
+                    )
+                    self.assertNotIn("ok", result)
+                    self.assertEqual(fixture.launcher.calls, [])
+                finally:
+                    fixture.close()
+
+    def test_confirmed_handle_exit_after_snapshot_failure_persists_exited(self) -> None:
+        fixture = LifecycleFixture(confirmed_exit=True)
+        try:
+            result = fixture.lifecycle.start_run(IDENTITY, fixture.token, fixture.request())
+            self.assertIn(result["error"], {"identity_unavailable", "manual_cleanup_required"})
+            run = fixture.store.list_runs()[0]
+            self.assertEqual((run.state, run.owner_session_id, run.owner_lease_id), ("EXITED", None, None))
+        finally:
+            fixture.close()
+
+    def test_unconfirmed_handle_exit_requires_manual_cleanup(self) -> None:
+        fixture = LifecycleFixture(confirmed_exit=False)
+        try:
+            result = fixture.lifecycle.start_run(IDENTITY, fixture.token, fixture.request())
+            self.assertEqual(result["error"], "manual_cleanup_required")
+            run = fixture.store.list_runs()[0]
+            self.assertEqual((run.state, run.processes), ("UNRECONCILED", []))
+        finally:
+            fixture.close()
+
+    def test_partial_stop_persists_only_survivors(self) -> None:
+        fixture = LifecycleFixture()
+        try:
+            first, second = record(7302), record(7303)
+            run = fixture.add_run(first)
+            run.processes.append(second)
+            fixture.store.replace(run)
+            fixture.guard.snapshots = {first.pid: identity(first), second.pid: identity(second)}
+            fixture.guard.terminate_results = [
+                {"terminated": True, "exit_code": 0},
+                {"terminated": False, "error": "process_identity_mismatch", "exit_code": 4},
             ]
-            self.assertEqual(len(timeout_events), 1)
-            self.assertEqual(timeout_events[0]["lease_id"], first["lease_id"])
+            result = fixture.lifecycle.stop_run(IDENTITY, fixture.token, "existing")
+            self.assertEqual(result["error"], "partial_cleanup")
+            self.assertEqual(fixture.store.get("existing").processes, [second])
         finally:
-            resume.set()
+            fixture.close()
 
-    def test_late_l1_cleanup_is_fenced_from_same_identity_l2_queue_and_run(self) -> None:
-        coordinator_params = inspect.signature(SessionCoordinator).parameters
-        state_params = inspect.signature(loopback.ServerState.cleanup_owner).parameters
-        lifecycle_params = inspect.signature(ProcessLifecycle.release_owner).parameters
-        if "cleanup_timeout_s" not in coordinator_params:
-            self.fail("cleanup_timeout_s_missing")
-        if "lease_id" not in state_params or "lease_id" not in lifecycle_params:
-            self.fail("exact_cleanup_fencing_missing")
+    def test_reconcile_prunes_only_process_not_found_and_keeps_exact_survivor(self) -> None:
+        fixture = LifecycleFixture()
+        try:
+            gone, survivor = record(7304), record(7305)
+            run = fixture.add_run(gone, state="UNRECONCILED")
+            run.processes.append(survivor)
+            fixture.store.replace(run)
+            fixture.guard.snapshots[gone.pid] = {"error": "process_not_found", "exit_code": 4}
+            fixture.guard.snapshots[survivor.pid] = identity(survivor)
+            fixture.lifecycle.diag_probe = lambda: {
+                "known": True,
+                "processes": [
+                    {"pid": survivor.pid, "name": "DayZDiag_x64.exe"}
+                ],
+            }
+            result = fixture.lifecycle.admin_reconcile("existing", survivor.pid, "incident")
+            self.assertEqual(result["state"], "RUNNING_IDLE")
+            self.assertEqual(fixture.store.get("existing").processes, [survivor])
+        finally:
+            fixture.close()
 
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            paths = RuntimePaths.from_env({"LOCALAPPDATA": temporary})
-            game = root / "DayZ"
-            game.mkdir()
-            (game / "DayZDiag_x64.exe").write_bytes(b"")
-            state = loopback.ServerState("key", coordination=None)
-            bind_both_peers(state)
-            started = threading.Event()
-            resume = threading.Event()
-            finished = threading.Event()
-            lifecycle_holder: dict[str, ProcessLifecycle] = {}
+    def test_reconcile_all_registered_processes_not_found_exits_run(self) -> None:
+        fixture = LifecycleFixture()
+        try:
+            gone = record(7307)
+            fixture.add_run(gone, state="UNRECONCILED")
+            fixture.guard.snapshots[gone.pid] = {
+                "error": "process_not_found",
+                "exit_code": 4,
+            }
+            result = fixture.lifecycle.admin_reconcile("existing", gone.pid, "incident")
+            self.assertEqual(result["state"], "EXITED")
+            run = fixture.store.get("existing")
+            self.assertEqual((run.state, run.processes), ("EXITED", []))
+        finally:
+            fixture.close()
 
-            def cleanup(session_id, lease_id, reason, vehicle_active):
-                started.set()
-                resume.wait(2.0)
-                result = state.cleanup_owner(
-                    session_id, lease_id, reason, vehicle_active
-                )
-                result["runs_released"] = lifecycle_holder["service"].release_owner(
-                    session_id, lease_id
-                )
-                finished.set()
-                return result
-
-            coordinator = SessionCoordinator(
-                token_fn=Sequence("token"),
-                id_fn=Sequence("lease"),
-                audit=lambda _event: True,
-                cleanup=cleanup,
-                cleanup_timeout_s=0.05,
+    def test_empty_unreconciled_requires_explicit_empty_mode_and_known_zero_diag(self) -> None:
+        fixture = LifecycleFixture()
+        try:
+            empty = RunRecord(
+                "empty",
+                IDENTITY.session_id,
+                fixture.lease_id,
+                "UNRECONCILED",
+                "red",
+                "@SameMod",
+                "profiles",
+                "mission",
+                [],
             )
-            state.coordination = coordinator
-            state.retail_probe = lambda: {"known": True, "processes": []}
-            lifecycle = ProcessLifecycle(
-                steam_gate=FakeSteamGate(),
-                coordinator=coordinator,
-                manifest=RunManifestStore(paths),
-                audit=lambda _event: True,
-                guard=Guard(),
-                retail_probe=lambda: {"known": True, "processes": []},
-                diag_probe=lambda: {"known": True, "processes": []},
-                game_path=game,
+            fixture.store.add(empty)
+            fixture.lifecycle.diag_probe = lambda: {"known": True, "processes": []}
+            result = fixture.lifecycle.admin_reconcile(
+                "empty", None, "confirmed empty", empty=True
             )
-            lifecycle_holder["service"] = lifecycle
+            self.assertEqual(result["state"], "EXITED")
+            run = fixture.store.get("empty")
+            self.assertEqual((run.state, run.owner_session_id, run.owner_lease_id), ("EXITED", None, None))
+        finally:
+            fixture.close()
 
-            _, l1 = coordinator.acquire(IDENTITY, "l1")
-            status, released = coordinator.release(IDENTITY, l1["lease_token"])
-            self.assertEqual(status, 200)
-            self.assertIn("cleanup_timeout", released["cleanup_degraded"])
-            _, l2 = coordinator.acquire(IDENTITY, "l2")
-            lifecycle.manifest.add(
-                RunRecord(
-                    "l2-run",
+    def test_empty_reconcile_unknown_or_present_diag_preserves_bytes(self) -> None:
+        for probe in (
+            {"known": False, "processes": []},
+            {"known": True, "processes": [{"pid": 88, "name": "DayZDiag_x64.exe"}]},
+        ):
+            with self.subTest(probe=probe), LifecycleFixtureContext() as fixture:
+                empty = RunRecord(
+                    "empty",
                     IDENTITY.session_id,
-                    l2["lease_id"],
+                    fixture.lease_id,
+                    "UNRECONCILED",
+                    "red",
+                    "@SameMod",
+                    "profiles",
+                    "mission",
+                    [],
+                )
+                fixture.store.add(empty)
+                before = fixture.paths.runs_path.read_bytes()
+                fixture.lifecycle.diag_probe = lambda probe=probe: probe
+                result = fixture.lifecycle.admin_reconcile(
+                    "empty", None, "confirmed empty", empty=True
+                )
+                self.assertNotIn("reconciled", result)
+                self.assertEqual(fixture.paths.runs_path.read_bytes(), before)
+
+    def test_reconcile_unknown_or_mismatch_preserves_manifest_bytes(self) -> None:
+        for response in (
+            {"error": "guard_unavailable", "exit_code": 3},
+            {"error": "process_not_found", "exit_code": 3},
+            identity(record(7306)) | {"creation_time_utc": "different"},
+        ):
+            with self.subTest(response=response.get("error", "mismatch")):
+                fixture = LifecycleFixture()
+                try:
+                    expected = record(7306)
+                    fixture.add_run(expected, state="UNRECONCILED")
+                    before = fixture.paths.runs_path.read_bytes()
+                    fixture.guard.snapshots[expected.pid] = response
+                    result = fixture.lifecycle.admin_reconcile("existing", expected.pid, "incident")
+                    self.assertNotIn("reconciled", result)
+                    self.assertEqual(fixture.paths.runs_path.read_bytes(), before)
+                finally:
+                    fixture.close()
+
+
+class RestartAndManifestTest(unittest.TestCase):
+    def test_activation_releases_previous_generation_running_owner_without_guard(self) -> None:
+        with TemporaryDirectory() as temporary:
+            paths = RuntimePaths.from_env({"LOCALAPPDATA": temporary})
+            store = RunManifestStore(paths)
+            store.add(
+                RunRecord(
+                    "persisted",
+                    "old-session",
+                    "old-lease",
                     "RUNNING",
                     "red",
-                    "@M",
-                    "p",
-                    "m",
-                    [record(8201)],
+                    "@SameMod",
+                    "profiles",
+                    "mission",
+                    [record(7401)],
                 )
             )
-            queued_status, queued = state.enqueue_command(
-                "world_time_set",
-                {},
-                "server",
-                identity_payload=IDENTITY_PAYLOAD,
-                lease_token=l2["lease_token"],
+            state = loopback.ServerState("key")
+            bind_both_peers(state)
+            with patch.dict(os.environ, {"LOCALAPPDATA": temporary}):
+                daemon._activate_server_coordination(state, "new-generation")
+            run = state.lifecycle.manifest.get("persisted")
+            self.assertEqual((run.state, run.owner_session_id, run.owner_lease_id), ("RUNNING_IDLE", None, None))
+
+    def test_restart_release_audit_failure_aborts_activation_without_manifest_change(self) -> None:
+        with TemporaryDirectory() as temporary:
+            paths = RuntimePaths.from_env({"LOCALAPPDATA": temporary})
+            store = RunManifestStore(paths)
+            store.add(
+                RunRecord(
+                    "persisted",
+                    "old-session",
+                    "old-lease",
+                    "RUNNING",
+                    "red",
+                    "@SameMod",
+                    "profiles",
+                    "mission",
+                    [record(7403)],
+                )
             )
-            self.assertEqual(queued_status, 200)
-            resume.set()
-            self.assertTrue(finished.wait(1.0))
-            self.assertEqual(state.pending_for_owner(IDENTITY.session_id), 1)
-            self.assertIsNone(state.take_result(queued["id"]))
-            run = lifecycle.manifest.get("l2-run")
-            self.assertEqual(
-                (run.state, run.owner_lease_id), ("RUNNING", l2["lease_id"])
-            )
+            before = paths.runs_path.read_bytes()
+            state = loopback.ServerState("key")
+            bind_both_peers(state)
+            with (
+                patch.dict(os.environ, {"LOCALAPPDATA": temporary}),
+                patch.object(daemon.JsonlAuditWriter, "write", return_value=False),
+                self.assertRaisesRegex(RuntimeError, "restart.*audit"),
+            ):
+                daemon._activate_server_coordination(state, "new-generation")
+            self.assertEqual(paths.runs_path.read_bytes(), before)
 
-    def test_late_retail_probe_cannot_enqueue_vehicle_release_after_fence_closes(self) -> None:
-        probe_started = threading.Event()
-        resume_probe = threading.Event()
-        cleanup_finished = threading.Event()
-        state = loopback.ServerState("key", coordination=None)
-        bind_both_peers(state)
-
-        def cleanup(session_id, lease_id, reason, vehicle_active):
-            result = state.cleanup_owner(
-                session_id, lease_id, reason, vehicle_active
-            )
-            cleanup_finished.set()
-            return result
-
-        coordinator = SessionCoordinator(
-            token_fn=Sequence("token"),
-            id_fn=Sequence("lease"),
-            audit=lambda _event: True,
-            cleanup=cleanup,
-            cleanup_timeout_s=0.05,
-        )
-        state.coordination = coordinator
-
-        def blocked_probe():
-            probe_started.set()
-            resume_probe.wait(2.0)
-            return {"known": True, "processes": []}
-
-        state.retail_probe = blocked_probe
-        _, l1 = coordinator.acquire(IDENTITY, "l1")
-        with coordinator._condition:
-            coordinator._active.vehicle_active = True
-        coordinator.acquire(IDENTITY_B, "l2")
-        released = coordinator.release(IDENTITY, l1["lease_token"])[1]
-        self.assertTrue(probe_started.is_set())
-        self.assertIn("cleanup_timeout", released["cleanup_degraded"])
-        resume_probe.set()
-        self.assertTrue(cleanup_finished.wait(1.0))
-        _, polled = accredited_poll(state, "client")
-        self.assertEqual(polled["commands"], [])
-
-
-class DispatchAuditDegradationTest(unittest.TestCase):
-    def test_dispatch_rejection_audit_failure_is_attached_to_command_result(self) -> None:
-        def audit(event: dict[str, object]) -> bool:
-            return event.get("event") != "session_rejected"
-
-        coordinator = SessionCoordinator(
-            token_fn=Sequence("token"), id_fn=Sequence("lease"), audit=audit
-        )
-        _, acquired = coordinator.acquire(IDENTITY, "dispatch")
-        state = loopback.ServerState("key", coordination=coordinator)
-        bind_both_peers(state)
-        state.retail_probe = lambda: {"known": True, "processes": []}
-        status, queued = state.enqueue_command(
-            "world_time_set",
-            {},
-            "server",
-            identity_payload=IDENTITY_PAYLOAD,
-            lease_token=acquired["lease_token"],
-        )
-        self.assertEqual(status, 200)
-        state.retail_probe = lambda: {
-            "known": True,
-            "processes": [{"pid": 44, "name": "DayZ_x64.exe"}],
+    def test_corrupt_version_duplicate_and_invalid_strong_record_are_rejected(self) -> None:
+        valid = {
+            "run_id": "r",
+            "owner_session_id": None,
+            "owner_lease_id": None,
+            "state": "EXITED",
+            "label": "red",
+            "mod": "@M",
+            "profiles": "p",
+            "mission": "m",
+            "processes": [],
         }
-        _, polled = accredited_poll(state, "server")
-        self.assertEqual(polled["commands"], [])
-        result = state.take_result(queued["id"])
-        self.assertEqual(result["error"], "retail_quarantine")
-        self.assertEqual(result.get("cleanup_degraded"), ["audit_failed"])
+        payloads: list[object] = [
+            "{",
+            {"version": 2, "runs": []},
+            {"version": 1, "runs": [valid, valid]},
+            {
+                "version": 1,
+                "runs": [valid | {"processes": [{
+                    "pid": 1,
+                    "creation_time_utc": "now",
+                    "executable_sha256": "short",
+                    "command_line_sha256": HASH_B,
+                    "role": "client",
+                }]}],
+            },
+        ]
+        for payload in payloads:
+            with self.subTest(payload=type(payload).__name__), TemporaryDirectory() as temporary:
+                paths = RuntimePaths.from_env({"LOCALAPPDATA": temporary})
+                paths.runs_path.parent.mkdir(parents=True)
+                if isinstance(payload, str):
+                    paths.runs_path.write_text(payload, encoding="utf-8")
+                else:
+                    paths.runs_path.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "invalid_run_manifest"):
+                    RunManifestStore(paths)
+
+    def test_add_replace_and_release_owner_roll_back_memory_and_disk(self) -> None:
+        with TemporaryDirectory() as temporary:
+            paths = RuntimePaths.from_env({"LOCALAPPDATA": temporary})
+            store = RunManifestStore(paths)
+            original = RunRecord(
+                "original", "owner", "lease", "RUNNING", "red", "@M", "p", "m", [record(7402)]
+            )
+            store.add(original)
+            before_bytes = paths.runs_path.read_bytes()
+            before_runs = store.list_runs()
+            with patch.object(store, "_persist_locked", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    store.add(RunRecord("new", None, None, "EXITED", "", "", "", "", []))
+                replacement = store.get("original")
+                replacement.label = "changed"
+                with self.assertRaises(OSError):
+                    store.replace(replacement)
+                with self.assertRaises(OSError):
+                    store.release_owner("owner", "lease")
+            self.assertEqual(store.list_runs(), before_runs)
+            self.assertEqual(paths.runs_path.read_bytes(), before_bytes)
+
+
+class DaemonReleaseWiringTest(unittest.TestCase):
+    def test_owner_admin_and_expiry_release_runs_idle_without_guard_in_clean_or_quarantine(self) -> None:
+        for trigger in ("owner", "admin", "expiry"):
+            for quarantined in (False, True):
+                with self.subTest(trigger=trigger, quarantined=quarantined), TemporaryDirectory() as temporary:
+                    config = ServerConfig(
+                        mode="daemon",
+                        key="key",
+                        port=0,
+                        log_sink=lambda _message: None,
+                    )
+                    with patch.dict(os.environ, {"LOCALAPPDATA": temporary}), patch.object(
+                        daemon, "_ensure_identity_migration", return_value=None
+                    ):
+                        state = daemon.build_server_state(
+                            config,
+                            "key",
+                            daemon_generation=f"{trigger}-{quarantined}",
+                            activate_coordination=True,
+                        )
+                    probe = (
+                        {"known": False, "processes": []}
+                        if quarantined
+                        else {"known": True, "processes": []}
+                    )
+                    state.retail_probe = lambda probe=probe: probe
+                    state.lifecycle.retail_probe = lambda probe=probe: probe
+                    guard = Guard()
+                    state.lifecycle.guard = guard
+                    status, acquired = state.coordination.acquire(IDENTITY, trigger)
+                    self.assertEqual(status, 200)
+                    state.lifecycle.manifest.add(
+                        RunRecord(
+                            "managed",
+                            IDENTITY.session_id,
+                            acquired["lease_id"],
+                            "RUNNING",
+                            "red",
+                            "@SameMod",
+                            "profiles",
+                            "mission",
+                            [record(7701)],
+                        )
+                    )
+                    with state.coordination._condition:
+                        state.coordination._active.vehicle_active = True
+                    if trigger == "owner":
+                        _, response = state.coordination.release(
+                            IDENTITY, acquired["lease_token"]
+                        )
+                    elif trigger == "admin":
+                        _, response = state.coordination.admin_release(
+                            acquired["lease_id"], "incident"
+                        )
+                    else:
+                        with state.coordination._condition:
+                            state.coordination._active.expires_at = -1.0
+                        response = state.coordination.status(IDENTITY)
+                    idle = state.lifecycle.manifest.get("managed")
+                    self.assertEqual(
+                        (idle.state, idle.owner_session_id, idle.owner_lease_id),
+                        ("RUNNING_IDLE", None, None),
+                    )
+                    self.assertEqual(guard.snapshot_calls, [])
+                    self.assertEqual(guard.terminate_calls, [])
+                    degraded = response.get("cleanup_degraded", [])
+                    self.assertEqual(
+                        "retail_quarantine" in degraded,
+                        quarantined,
+                    )
+                    with state.coordination._condition:
+                        terminalized = state.coordination._condition.wait_for(
+                            lambda: (
+                                not state.coordination._handoff_pending
+                                and state.coordination._cleanup_worker_active == 0
+                            ),
+                            timeout=2.0,
+                        )
+                    self.assertTrue(terminalized)
+                    # _persist_snapshot_locked releases the condition lock while
+                    # writing coordination.json (atomic .tmp). handoff_pending can
+                    # therefore clear mid-write; join release-audit/cleanup workers
+                    # so TemporaryDirectory does not hit WinError 32/145 on the tmp.
+                    # If workers outlive the deadline, fail explicitly — never let
+                    # tempfile.WinError 145 be the first signal.
+                    _wait_for_dayz_mcp_background_workers(timeout_s=2.0)
+
+
+# --- from test_task7_rereview_regressions.py ---
 
 
 class FailedLaunchSettlementTest(unittest.TestCase):
@@ -783,42 +862,6 @@ class FailedLaunchSettlementTest(unittest.TestCase):
             self.assertEqual(fixture.store.get(result["run_id"]).state, "STARTING")
         finally:
             fixture.close()
-
-
-class SettlementFlakeProbeExitTest(unittest.TestCase):
-    def test_setup_import_failure_exits_nonzero_and_keeps_fail_counts(self) -> None:
-        # Reviewer: CLASS -> tests.__missing_codex_review__, one loop,
-        # unittest FAILED (errors=1), loops=1 fails=1, but harness exit 0.
-        # A measuring tool that cannot go red is an ornament.
-        import tests._settlement_flake_probe as probe
-
-        stdout = io.StringIO()
-        with patch.object(probe, "CLASS", "tests.__missing_codex_review__"):
-            with patch.object(sys, "argv", ["_settlement_flake_probe.py", "1"]):
-                with patch.object(sys, "stdout", stdout):
-                    with self.assertRaises(SystemExit) as raised:
-                        probe.main()
-        self.assertNotIn(raised.exception.code, (0, None), raised.exception)
-        text = stdout.getvalue()
-        self.assertIn("loops=1", text)
-        self.assertIn("fails=1", text)
-
-    def test_all_green_loops_leave_the_harness_exit_at_zero(self) -> None:
-        import tests._settlement_flake_probe as probe
-
-        stdout = io.StringIO()
-        with patch.object(probe, "_run_class", return_value=(0, "OK")):
-            with patch.object(sys, "argv", ["_settlement_flake_probe.py", "3"]):
-                with patch.object(sys, "stdout", stdout):
-                    try:
-                        probe.main()
-                        code = 0
-                    except SystemExit as exc:
-                        code = 0 if exc.code in (0, None) else exc.code
-        self.assertEqual(code, 0)
-        text = stdout.getvalue()
-        self.assertIn("loops=3", text)
-        self.assertIn("fails=0", text)
 
 
 class LifecycleRecoveryAndOutcomeTest(unittest.TestCase):
