@@ -270,7 +270,9 @@ def _cross_test_imports() -> set[tuple[str, str, str]]:
     Covers `from tests.test_x import y`, `from tests import test_x`,
     `import tests.test_x`, and relative imports of the same targets, in every
     file under tests/ (unittest discovery also runs subpackages). A module
-    importing itself is not coupling and is skipped.
+    importing itself is not coupling and is skipped. `from <package> import
+    test_x` names the submodule when tests/.../test_x exists on disk, so a
+    package's __init__.py importing its own child is still counted.
     """
     found: set[tuple[str, str, str]] = set()
     for path in sorted(_TESTS_DIR.rglob("*.py")):
@@ -290,10 +292,13 @@ def _cross_test_imports() -> set[tuple[str, str, str]]:
                 else:
                     module = node.module or ""
                 for alias in node.names:
-                    if _is_test_module(module):
+                    child = f"{module}.{alias.name}"
+                    if _is_test_module(child) and (
+                        not _is_test_module(module) or _is_submodule(child)
+                    ):
+                        target, name = child, "*"
+                    elif _is_test_module(module):
                         target, name = module, alias.name
-                    elif _is_test_module(f"{module}.{alias.name}"):
-                        target, name = f"{module}.{alias.name}", "*"
                     else:
                         continue
                     if target != own:
@@ -310,6 +315,12 @@ def _cross_test_imports() -> set[tuple[str, str, str]]:
 def _is_test_module(module: str) -> bool:
     parts = module.split(".")
     return len(parts) > 1 and parts[0] == "tests" and parts[-1].startswith("test_")
+
+
+def _is_submodule(module: str) -> bool:
+    """True when the dotted name is a module file or package directory under tests/."""
+    path = _TESTS_DIR.joinpath(*module.split(".")[1:])
+    return path.with_suffix(".py").is_file() or path.is_dir()
 
 
 class CrossTestImportRatchetTest(unittest.TestCase):
