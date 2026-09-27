@@ -3,11 +3,13 @@ from __future__ import annotations
 import ast
 import importlib
 import importlib.util
+import ntpath
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from dayz_mcp.native_process_guard import identity_hashes
 
@@ -360,30 +362,45 @@ class AccreditedDaemonTransportTests(unittest.TestCase):
         with self.subTest("argv_changes_between_the_two_reads"):
             self.assertFalse(accredited([image, *tail], second=list(expected_argv)))
 
-    def test_redirected_argv0_must_be_absolute_even_when_it_resolves_to_the_image(
+    def test_redirected_argv0_needs_a_drive_even_where_samefile_resolves_it(
         self,
     ) -> None:
+        # Python 3.11's ntpath.isabs also calls a drive-less "\path" absolute (a
+        # legacy behaviour dropped in 3.13), and samefile resolves it on the
+        # current drive (#112 review, F1). The legacy isabs is simulated so the
+        # guard holds whatever interpreter runs the test.
         transport = importlib.import_module("dayz_mcp.accredited_daemon_transport")
+        expected = [r"P:\venv\Scripts\python.exe", "-m", "dayz_mcp"]
+        modern_isabs = ntpath.isabs
+
+        def legacy_isabs(value: str) -> bool:
+            return value[:1] in ("\\", "/") or modern_isabs(value)
+
         with tempfile.TemporaryDirectory() as root:
-            image = str(Path(root) / "python.exe")
+            image = str(Path(root).resolve() / "python.exe")
             Path(image).write_bytes(b"")
+            drive, rooted = ntpath.splitdrive(image)
             previous = os.getcwd()
             os.chdir(root)
             try:
-                # samefile would resolve the relative spelling to the image.
-                self.assertTrue(os.path.samefile("python.exe", image))
-                self.assertFalse(
-                    transport.argv_matches_redirected(
-                        ["python.exe", "-m", "dayz_mcp"],
-                        [r"P:\venv\Scripts\python.exe", "-m", "dayz_mcp"],
-                        image,
-                    )
-                )
+                spellings = {
+                    "rooted_backslash": rooted,
+                    "rooted_slash": rooted.replace("\\", "/"),
+                    "drive_relative": drive + "python.exe",
+                    "relative": "python.exe",
+                }
+                for case, first in spellings.items():
+                    with self.subTest(case):
+                        self.assertTrue(os.path.samefile(first, image))
+                        with patch.object(transport.ntpath, "isabs", legacy_isabs):
+                            self.assertFalse(
+                                transport.argv_matches_redirected(
+                                    [first, "-m", "dayz_mcp"], expected, image
+                                )
+                            )
                 self.assertTrue(
                     transport.argv_matches_redirected(
-                        [image, "-m", "dayz_mcp"],
-                        [r"P:\venv\Scripts\python.exe", "-m", "dayz_mcp"],
-                        image,
+                        [image, "-m", "dayz_mcp"], expected, image
                     )
                 )
             finally:

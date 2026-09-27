@@ -112,6 +112,16 @@ def _connected_server_pid(
     return next(iter(owners)) if len(owners) == 1 else None
 
 
+def _drive_qualified_absolute(path: str) -> bool:
+    """A drive (or UNC share) and a root: the same answer on every Python.
+
+    Not ntpath.isabs: on 3.11 it also accepts a drive-less rooted path, which
+    then resolves on the current drive (review of #112, F1).
+    """
+    drive, rest = ntpath.splitdrive(path)
+    return bool(drive) and rest[:1] in ("\\", "/")
+
+
 def argv_matches_redirected(
     observed: object,
     expected: list[str],
@@ -122,7 +132,8 @@ def argv_matches_redirected(
     A Windows venv redirector keeps the venv path in the child's argv[0] on
     Python 3.14 but rewrites it to the base interpreter's own path on 3.11 and
     3.12 (#93). The image is verified separately, so argv[0] may differ only to
-    name that image, by absolute path; every other argument must be identical.
+    name that image, by a drive-qualified absolute path; every other argument
+    must be identical.
     """
     if not isinstance(observed, list) or not observed:
         return False
@@ -133,7 +144,7 @@ def argv_matches_redirected(
         len(observed) == len(expected)
         and observed[1:] == expected[1:]
         and isinstance(first, str)
-        and ntpath.isabs(first)
+        and _drive_qualified_absolute(first)
         and same_path(first, image)
     )
 
