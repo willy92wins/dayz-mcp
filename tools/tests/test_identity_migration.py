@@ -319,6 +319,33 @@ class RunsBackupGateTest(unittest.TestCase):
 
         self.assertEqual(backup.read_bytes(), b"legacy-or-external")
 
+    def test_gate_accepts_a_redirected_ancestor_only_with_the_hash_it_vouched_for(
+        self,
+    ) -> None:
+        current = identity(os.getpid())
+        ancestor = {**identity(os.getppid()), "command_line_sha256": "c" * 64}
+        scans: list[object] = []
+
+        receipt = self.run_gate(
+            allowed_current_identity=current,
+            allowed_launch_ancestor_identity={
+                **ancestor,
+                "launch_child_command_line_sha256": current["command_line_sha256"],
+            },
+            scan_fn=lambda *allowed: scans.append(allowed) or (),
+        )
+
+        self.assertIsInstance(receipt, dict)
+        self.assertEqual(len(scans), 2)
+        with self.assertRaisesRegex(
+            RunsBackupGateError, "invalid_allowed_process_identity"
+        ):
+            self.run_gate(
+                allowed_current_identity=current,
+                allowed_launch_ancestor_identity=ancestor,
+                scan_fn=lambda *allowed: (),
+            )
+
 
 class FakeProcess:
     def __init__(
@@ -401,7 +428,7 @@ class RunsProcessScanTest(unittest.TestCase):
                 "creation_time_utc": child_created.isoformat(
                     timespec="microseconds"
                 ).replace("+00:00", "Z"),
-                "command_line_sha256": hashes["command_line_sha256"],
+                **hashes,
             }
         )
 
@@ -411,6 +438,15 @@ class RunsProcessScanTest(unittest.TestCase):
 
             def ppid(self) -> int:
                 return self.pids.pop(0) if len(self.pids) > 1 else self.pids[0]
+
+            def oneshot(self) -> object:
+                return nullcontext()
+
+            def exe(self) -> str:
+                return str(Path(sys.executable).resolve())
+
+            def cmdline(self) -> list[str]:
+                return list(argv)
 
         class ParentProcess:
             pid = parent_pid
@@ -455,7 +491,13 @@ class RunsProcessScanTest(unittest.TestCase):
             psutil_module=ProcessModule(parent_created, [parent_pid, parent_pid]),
             guard=FakeGuard({parent_pid: parent_identity}),
         )
-        self.assertEqual(accepted, parent_identity)
+        self.assertEqual(
+            accepted,
+            {
+                **parent_identity,
+                "launch_child_command_line_sha256": hashes["command_line_sha256"],
+            },
+        )
 
         newer = capture_launch_ancestor_identity(
             current,
@@ -485,6 +527,99 @@ class RunsProcessScanTest(unittest.TestCase):
             guard=FakeGuard({parent_pid: parent_identity}),
         )
         self.assertIsNone(reparented)
+
+    def test_launch_ancestor_capture_admits_argv0_redirected_to_the_child_image(
+        self,
+    ) -> None:
+        # A Python 3.11/3.12 venv redirector (#93) starts the child with argv[0]
+        # rewritten to the base interpreter's own path; the parent keeps the venv path.
+        parent_pid = 777
+        venv_python = str(Path(sys.executable).resolve())
+        base_python = r"C:\Python312\python.exe"
+        tail = ["-m", "dayz_mcp", "--daemon"]
+        child_created = datetime(2026, 7, 22, 7, 0, tzinfo=UTC)
+        parent_created = child_created.timestamp() - 1.0
+        parent_identity = identity(parent_pid)
+        parent_identity.update(
+            {
+                "creation_time_utc": datetime.fromtimestamp(
+                    parent_created, UTC
+                ).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+                **identity_hashes(venv_python, [venv_python, *tail]),
+            }
+        )
+
+        def capture(
+            child_argv: list[str], vouched_argv: list[str] | None = None
+        ) -> tuple[dict[str, object], dict[str, object] | None]:
+            current = identity(os.getpid())
+            current.update(
+                {
+                    "creation_time_utc": child_created.isoformat(
+                        timespec="microseconds"
+                    ).replace("+00:00", "Z"),
+                    **identity_hashes(base_python, vouched_argv or child_argv),
+                }
+            )
+
+            class CurrentProcess:
+                def ppid(self) -> int:
+                    return parent_pid
+
+                def oneshot(self) -> object:
+                    return nullcontext()
+
+                def exe(self) -> str:
+                    return base_python
+
+                def cmdline(self) -> list[str]:
+                    return list(child_argv)
+
+            class ParentProcess:
+                pid = parent_pid
+
+                def oneshot(self) -> object:
+                    return nullcontext()
+
+                def create_time(self) -> float:
+                    return parent_created
+
+                def exe(self) -> str:
+                    return venv_python
+
+                def cmdline(self) -> list[str]:
+                    return [venv_python, *tail]
+
+            class ProcessModule:
+                def Process(self, pid: int) -> object:
+                    return CurrentProcess() if pid == os.getpid() else ParentProcess()
+
+            return current, capture_launch_ancestor_identity(
+                current,
+                Path(venv_python),
+                psutil_module=ProcessModule(),
+                guard=FakeGuard({parent_pid: parent_identity}),
+            )
+
+        current, accepted = capture([base_python, *tail])
+        self.assertEqual(
+            accepted,
+            {
+                **parent_identity,
+                "launch_child_command_line_sha256": current["command_line_sha256"],
+            },
+        )
+        rejected = {
+            "argv0_names_another_interpreter": capture([r"C:\Other\python.exe", *tail]),
+            "argv0_relative": capture(["python", *tail]),
+            "tail_differs": capture([base_python, "-m", "dayz_mcp", "--daemon", "--x"]),
+            "snapshot_vouches_another_argv": capture(
+                [base_python, *tail], vouched_argv=[base_python, *tail, "--x"]
+            ),
+        }
+        for case, (_current, ancestor) in rejected.items():
+            with self.subTest(case):
+                self.assertIsNone(ancestor)
 
     def test_native_image_name_fallback_classifies_protected_non_python_process(self) -> None:
         protected = FakeProcess(21, "", "", FakeAccessDenied())
@@ -814,6 +949,54 @@ class DaemonStartupElectionTest(unittest.TestCase):
                 psutil_module=FakePsutil([current_process, redirector_process]),
                 guard=guard,
             )
+
+    def test_redirected_launch_ancestor_is_allowed_only_through_the_hash_it_vouched_for(
+        self,
+    ) -> None:
+        current_process = FakeProcess(
+            30,
+            "python.exe",
+            r"C:\Python\python.exe",
+            [r"C:\Python\python.exe", "-m", "dayz_mcp", "--daemon"],
+        )
+        redirector_process = FakeProcess(
+            31,
+            "python.exe",
+            r"C:\venv\Scripts\python.exe",
+            [r"C:\venv\Scripts\python.exe", "-m", "dayz_mcp", "--daemon"],
+        )
+        current = identity(30)
+        redirector = identity(31)
+        redirector["command_line_sha256"] = "c" * 64
+        guard = FakeGuard({30: current, 31: redirector})
+        processes = FakePsutil([current_process, redirector_process])
+
+        vouched = {
+            **redirector,
+            "launch_child_command_line_sha256": current["command_line_sha256"],
+        }
+        self.assertEqual(
+            scan_dayz_mcp_processes(current, vouched, psutil_module=processes, guard=guard),
+            (),
+        )
+        inconsistent = {
+            "no_vouched_hash": (current, redirector),
+            "vouched_for_another_child": (
+                current,
+                {**redirector, "launch_child_command_line_sha256": "d" * 64},
+            ),
+            "current_without_hash": (
+                {**current, "command_line_sha256": None},
+                {**redirector, "launch_child_command_line_sha256": None},
+            ),
+        }
+        for case, (allowed_current, ancestor) in inconsistent.items():
+            with self.subTest(case), self.assertRaisesRegex(
+                RunsBackupGateError, "invalid_allowed_process_identity"
+            ):
+                scan_dayz_mcp_processes(
+                    allowed_current, ancestor, psutil_module=processes, guard=guard
+                )
 
 
 if __name__ == "__main__":

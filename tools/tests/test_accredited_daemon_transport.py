@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import importlib
 import importlib.util
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -298,6 +300,94 @@ class AccreditedDaemonTransportTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.request_stage, "post_request")
         self.assertGreater(raised.exception.http_bytes_sent, 0)
+
+    def test_argv0_redirected_to_the_verified_image_is_accredited_and_nothing_wider(
+        self,
+    ) -> None:
+        transport = importlib.import_module("dayz_mcp.accredited_daemon_transport")
+        # A Python 3.11/3.12 venv (#93): the listener's argv[0] is the base
+        # interpreter's own path, while the expected argv carries the venv path.
+        image = r"P:\Python312\python.exe"
+        cwd = r"P:\DayZ_MCP_dev\tools"
+        tail = ["-m", "dayz_mcp", "--daemon", "--port", "8765"]
+        expected_argv = [r"P:\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe", *tail]
+        established = SimpleNamespace(
+            status=transport.psutil.CONN_ESTABLISHED,
+            laddr=("127.0.0.1", 8765),
+            raddr=("127.0.0.1", 51000),
+            pid=42,
+        )
+
+        def accredited(observed: list[str], second: list[str] | None = None) -> bool:
+            hashes = identity_hashes(image, observed)
+            reads = [list(observed), list(second or observed)]
+
+            class Guard:
+                def snapshot(self, pid: int) -> dict[str, object]:
+                    return {
+                        "pid": pid,
+                        "creation_time_utc": "2026-07-22T00:00:00Z",
+                        "executable_sha256": hashes["executable_sha256"],
+                        "command_line_sha256": hashes["command_line_sha256"],
+                        "identity_scheme": "psutil-argv-v2",
+                        "identity_complete": True,
+                    }
+
+            return transport._connected_daemon_identity_verified(
+                _FakeSocket([]),
+                8765,
+                expected_executable=image,
+                expected_argv=expected_argv,
+                expected_cwd=cwd,
+                connections_fn=lambda: [established],
+                get_executable=lambda _pid: image,
+                get_argv=lambda _pid: reads.pop(0),
+                get_cwd=lambda _pid: cwd,
+                guard=Guard(),
+            )
+
+        self.assertTrue(accredited([image, *tail]))
+        self.assertTrue(accredited(list(expected_argv)))  # 3.14 keeps the venv path
+        refused = {
+            "argv0_names_another_interpreter": [r"P:\Other\python.exe", *tail],
+            "argv0_relative": ["python", *tail],
+            "other_port": [image, "-m", "dayz_mcp", "--daemon", "--port", "8766"],
+            "extra_argument": [image, *tail, "--x"],
+        }
+        for case, observed in refused.items():
+            with self.subTest(case):
+                self.assertFalse(accredited(observed))
+        with self.subTest("argv_changes_between_the_two_reads"):
+            self.assertFalse(accredited([image, *tail], second=list(expected_argv)))
+
+    def test_redirected_argv0_must_be_absolute_even_when_it_resolves_to_the_image(
+        self,
+    ) -> None:
+        transport = importlib.import_module("dayz_mcp.accredited_daemon_transport")
+        with tempfile.TemporaryDirectory() as root:
+            image = str(Path(root) / "python.exe")
+            Path(image).write_bytes(b"")
+            previous = os.getcwd()
+            os.chdir(root)
+            try:
+                # samefile would resolve the relative spelling to the image.
+                self.assertTrue(os.path.samefile("python.exe", image))
+                self.assertFalse(
+                    transport.argv_matches_redirected(
+                        ["python.exe", "-m", "dayz_mcp"],
+                        [r"P:\venv\Scripts\python.exe", "-m", "dayz_mcp"],
+                        image,
+                    )
+                )
+                self.assertTrue(
+                    transport.argv_matches_redirected(
+                        [image, "-m", "dayz_mcp"],
+                        [r"P:\venv\Scripts\python.exe", "-m", "dayz_mcp"],
+                        image,
+                    )
+                )
+            finally:
+                os.chdir(previous)
 
     def test_transport_import_graph_has_no_mutation_or_orphan_guard_dependency(
         self,
