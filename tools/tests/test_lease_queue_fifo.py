@@ -41,12 +41,16 @@ from dayz_mcp.session_coordination import (
     WAIT_MAX_S,
 )
 from tests.lease_helpers import (
+    _coord,
     _identity,
     AuditSink,
     CleanupSink,
     FakeClock,
+    G,
+    MID,
     parse_dpf_table,
     SequentialIds,
+    TTL,
 )
 from tests.lifecycle_helpers import Clock, IDENTITY, IDENTITY_B, Sequence
 
@@ -125,41 +129,10 @@ def _h4_grace_coordinator(clock: FakeClock) -> SessionCoordinator:
 
 
 # --- helpers from test_0ab2_grace.py ---
-TTL = SESSION_TTL_S
-
-
-G = LEASE_GRACE_S
-
-
-MID = TTL + (G / 2.0)
-
-
 AFTER = TTL + G + 0.001
 
 
-def _coord(clock: FakeClock, *, attached: bool) -> SessionCoordinator:
-    return SessionCoordinator(
-        time_fn=clock,
-        token_fn=SequentialIds("token"),
-        id_fn=SequentialIds("id"),
-        audit=AuditSink(),
-        cleanup=CleanupSink(),
-        attached_run_probe=lambda _session, _lease: attached,
-    )
-
-
 # --- helpers from test_0ab2_r9.py ---
-def _coord_0ab2_r9(clock: FakeClock, *, attached: bool, cleanup=None) -> SessionCoordinator:
-    return SessionCoordinator(
-        time_fn=clock,
-        token_fn=SequentialIds("token"),
-        id_fn=SequentialIds("id"),
-        audit=AuditSink(),
-        cleanup=cleanup or CleanupSink(),
-        attached_run_probe=lambda _session, _lease: attached,
-    )
-
-
 @dataclass
 class _AttachedRun:
     owner_session_id: str
@@ -2350,7 +2323,7 @@ class StateMachineR9Tests(unittest.TestCase):
 
     def test_grace_is_null_while_token_is_live(self) -> None:
         clock = FakeClock()
-        coordinator = _coord_0ab2_r9(clock, attached=True)
+        coordinator = _coord(clock, attached=True)
         coordinator.acquire(self.a, "drive")
         clock.advance(TTL - 0.001)
         self.assertIsNone(coordinator.status(self.a)["grace"])
@@ -2358,7 +2331,7 @@ class StateMachineR9Tests(unittest.TestCase):
 
     def test_grace_arms_at_ttl_and_is_consumed_once(self) -> None:
         clock = FakeClock()
-        coordinator = _coord_0ab2_r9(clock, attached=True)
+        coordinator = _coord(clock, attached=True)
         old = coordinator.acquire(self.a, "drive")[1]["lease_token"]
         clock.advance(TTL)
         self.assertIsNotNone(coordinator.status(self.a)["grace"])
@@ -2373,7 +2346,7 @@ class StateMachineR9Tests(unittest.TestCase):
 
     def test_voluntary_release_does_not_arm_grace(self) -> None:
         clock = FakeClock()
-        coordinator = _coord_0ab2_r9(clock, attached=True)
+        coordinator = _coord(clock, attached=True)
         token = coordinator.acquire(self.a, "drive")[1]["lease_token"]
         released = coordinator.release(self.a, token)
         self.assertEqual(released[0], 200)
@@ -2383,7 +2356,7 @@ class StateMachineR9Tests(unittest.TestCase):
 
     def test_third_identity_is_queued_during_grace(self) -> None:
         clock = FakeClock()
-        coordinator = _coord_0ab2_r9(clock, attached=True)
+        coordinator = _coord(clock, attached=True)
         coordinator.acquire(self.a, "drive")
         clock.advance(MID)
         self.assertEqual(coordinator.acquire(self.b, "drive")[0], 202)
@@ -2392,7 +2365,7 @@ class StateMachineR9Tests(unittest.TestCase):
 
     def test_grace_expires_exactly_at_until(self) -> None:
         clock = FakeClock()
-        coordinator = _coord_0ab2_r9(clock, attached=True)
+        coordinator = _coord(clock, attached=True)
         coordinator.acquire(self.a, "drive")
         clock.advance(TTL + G)
         self.assertIsNone(coordinator.status(self.a)["grace"])
@@ -2462,7 +2435,7 @@ class RaceR9Tests(unittest.TestCase):
                 allow_cleanup.wait(5.0)
                 return {"cancelled": 0, "vehicle_release": vehicle_active}
 
-            coordinator = _coord_0ab2_r9(clock, attached=True, cleanup=blocking_cleanup)
+            coordinator = _coord(clock, attached=True, cleanup=blocking_cleanup)
             old = coordinator.acquire(self.a, "drive")[1]["lease_token"]
             clock.advance(MID)
             barrier = threading.Barrier(2)
@@ -2523,7 +2496,7 @@ class RaceR9Tests(unittest.TestCase):
 
     def test_stranger_wait_loses_to_former_wait_claim(self) -> None:
         clock = FakeClock()
-        coordinator = _coord_0ab2_r9(clock, attached=True)
+        coordinator = _coord(clock, attached=True)
         coordinator.acquire(self.a, "drive")
         ticket_b = coordinator.acquire(self.b, "next")[1]["ticket"]
         clock.advance(119.0)

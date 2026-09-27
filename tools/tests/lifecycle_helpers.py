@@ -7,6 +7,7 @@ test_task7_rereview_regressions.py so tests stop importing each other
 from __future__ import annotations
 
 import subprocess
+import threading
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -267,3 +268,39 @@ class LifecycleFixtureContext(LifecycleFixture):
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         self.close()
+
+
+# --- from test_task7_review_regressions.py: shared by several domain files (W4d step 3) ---
+_DAYZ_MCP_WORKER_PREFIXES = (
+    "dayz-mcp-release-audit-",
+    "dayz-mcp-cleanup-",
+    "dayz-mcp-fenced-cleanup-",
+)
+
+
+def _wait_for_dayz_mcp_background_workers(
+    *,
+    timeout_s: float = 2.0,
+    enumerate_fn=threading.enumerate,
+    monotonic_fn=time.monotonic,
+) -> None:
+    """Join dayz-mcp background workers or fail with their names.
+
+    Raises AssertionError if any matching thread is still alive after timeout_s.
+    """
+    deadline = monotonic_fn() + timeout_s
+    while True:
+        workers = [
+            thread
+            for thread in enumerate_fn()
+            if thread.name.startswith(_DAYZ_MCP_WORKER_PREFIXES)
+        ]
+        if not workers:
+            return
+        if monotonic_fn() >= deadline:
+            names = ", ".join(sorted({thread.name for thread in workers}))
+            raise AssertionError(
+                f"los workers {names} no terminaron en {timeout_s} s"
+            )
+        for thread in workers:
+            thread.join(timeout=0.05)

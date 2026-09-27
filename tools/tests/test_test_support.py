@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import io
 import sys
-import threading
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,41 +16,7 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-
-# --- helpers from test_task7_review_regressions.py ---
-_DAYZ_MCP_WORKER_PREFIXES = (
-    "dayz-mcp-release-audit-",
-    "dayz-mcp-cleanup-",
-    "dayz-mcp-fenced-cleanup-",
-)
-
-
-def _wait_for_dayz_mcp_background_workers(
-    *,
-    timeout_s: float = 2.0,
-    enumerate_fn=threading.enumerate,
-    monotonic_fn=time.monotonic,
-) -> None:
-    """Join dayz-mcp background workers or fail with their names.
-
-    Raises AssertionError if any matching thread is still alive after timeout_s.
-    """
-    deadline = monotonic_fn() + timeout_s
-    while True:
-        workers = [
-            thread
-            for thread in enumerate_fn()
-            if thread.name.startswith(_DAYZ_MCP_WORKER_PREFIXES)
-        ]
-        if not workers:
-            return
-        if monotonic_fn() >= deadline:
-            names = ", ".join(sorted({thread.name for thread in workers}))
-            raise AssertionError(
-                f"los workers {names} no terminaron en {timeout_s} s"
-            )
-        for thread in workers:
-            thread.join(timeout=0.05)
+from tests.lifecycle_helpers import _wait_for_dayz_mcp_background_workers
 
 
 # --- from test_task7_review_regressions.py ---

@@ -34,20 +34,9 @@ from dayz_mcp.runtime_state import (
     recover_coordination_startup,
     RuntimePaths,
 )
-from dayz_mcp.session_coordination import (
-    ClientIdentity,
-    LEASE_GRACE_S,
-    SESSION_TTL_S,
-    SessionCoordinator,
-)
+from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 from tests.fence_helpers import accredited_poll, bind_both_peers
-from tests.lease_helpers import (
-    _identity,
-    AuditSink,
-    CleanupSink,
-    FakeClock,
-    SequentialIds,
-)
+from tests.lease_helpers import _coord, _identity, AuditSink, FakeClock, MID
 from tests.lifecycle_helpers import (
     Audit,
     IDENTITY,
@@ -103,27 +92,6 @@ def wait_until(predicate, timeout_s: float = 0.5) -> bool:
             return True
         time.sleep(0.005)
     return bool(predicate())
-
-
-# --- helpers from test_0ab2_r9.py ---
-TTL = SESSION_TTL_S
-
-
-G = LEASE_GRACE_S
-
-
-MID = TTL + (G / 2.0)
-
-
-def _coord(clock: FakeClock, *, attached: bool, cleanup=None) -> SessionCoordinator:
-    return SessionCoordinator(
-        time_fn=clock,
-        token_fn=SequentialIds("token"),
-        id_fn=SequentialIds("id"),
-        audit=AuditSink(),
-        cleanup=cleanup or CleanupSink(),
-        attached_run_probe=lambda _session, _lease: attached,
-    )
 
 
 # --- from test_bug046_audit_fault_recovery.py ---
