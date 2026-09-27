@@ -406,6 +406,30 @@ class AccreditedDaemonTransportTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def test_every_absolute_windows_spelling_counts_as_drive_qualified(self) -> None:
+        # Review of #112, F2: without positive UNC and extended cases, a rule
+        # narrowed to drive letters would stay green.
+        transport = importlib.import_module("dayz_mcp.accredited_daemon_transport")
+        for path in (
+            r"C:\Python312\python.exe",
+            "C:/Python312/python.exe",
+            r"C:\Python312/python.exe",
+            r"\\srv\share\Python312\python.exe",
+            r"\\?\C:\Python312\python.exe",
+            r"\\?\UNC\srv\share\Python312\python.exe",
+        ):
+            with self.subTest(accepted=path):
+                self.assertTrue(transport._drive_qualified_absolute(path))
+        for path in (
+            r"\Python312\python.exe",
+            "/Python312/python.exe",
+            "C:python.exe",
+            "python.exe",
+            r"\\srv\share",
+        ):
+            with self.subTest(refused=path):
+                self.assertFalse(transport._drive_qualified_absolute(path))
+
     def test_transport_import_graph_has_no_mutation_or_orphan_guard_dependency(
         self,
     ) -> None:
