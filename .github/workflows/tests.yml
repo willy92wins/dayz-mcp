@@ -1,0 +1,63 @@
+# Runs the Python unit suite (tools/tests) on every pull request and on main.
+# The job uses no secrets. The suite runs from tools/.venv-mcp, the venv that
+# install-mcp.ps1 creates: the daemon only starts under that interpreter
+# (dayz_mcp/daemon.py, _ensure_identity_migration). Python 3.14 is what that
+# venv runs today; issue #93 reports its identity checks failing on 3.12.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: unittest (windows, Python 3.14)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: tools
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Some tests read files at older commits (git show <sha>:path).
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: tools/requirements-mcp.txt
+
+      # Same steps as install-mcp.ps1: the venv, pinned requirements, then
+      # the package itself in editable mode.
+      - name: Install
+        run: |
+          python -m venv .venv-mcp
+          .\.venv-mcp\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv-mcp\Scripts\python.exe -m pip install -r requirements-mcp.txt
+          .\.venv-mcp\Scripts\python.exe -m pip install -e .
+
+      - name: Run the suite
+        env:
+          # The runner's TEMP is an 8.3 short path (C:\Users\RUNNER~1\...).
+          # Windows reports the long form for an open handle, so every
+          # fail-closed path comparison (keyfile, registrations, installer)
+          # refuses a file created under the short one.
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          # tools/dependency-lock.json pins the owner's MSVC and Windows SDK
+          # bytes; the runner has other builds under the same paths.
+          DAYZ_MCP_FOREIGN_TOOLCHAIN: "1"
+        run: .\.venv-mcp\Scripts\python.exe -B -m unittest discover -s tests -t .

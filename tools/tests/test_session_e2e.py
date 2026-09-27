@@ -358,23 +358,29 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         acquired_a = await runtime_a.session_acquire("A")
         await self.adopt_run(runtime_a, acquired_a["lease_token"])
 
-        owned_mutation = asyncio.create_task(
-            runtime_a.call_bridge("world_spawn", {}, "server", 3.0)
-        )
-        foreign_read = asyncio.create_task(
-            runtime_b.call_bridge("query_player_state", {}, "server", 3.0)
-        )
-        await self.wait_pending_commands(runtime_a, 1)
+        # No peer is bound yet (a live one would drain the queue this test
+        # inspects), so since e72ff5b the client's world-read fail-fast gate
+        # answers B's read with game_not_ready before the daemon sees it.
+        # That gate has its own tests; this one pins the daemon side: a
+        # foreign read is refused with run_not_owned and never delivered.
+        with patch.object(server, "_world_read_not_ready", return_value=None):
+            owned_mutation = asyncio.create_task(
+                runtime_a.call_bridge("world_spawn", {}, "server", 3.0)
+            )
+            foreign_read = asyncio.create_task(
+                runtime_b.call_bridge("query_player_state", {}, "server", 3.0)
+            )
+            await self.wait_pending_commands(runtime_a, 1)
 
-        released = await runtime_a.session_release(acquired_a["lease_token"])
-        self.assertEqual(released["cleanup"]["cancelled"], 1)
-        with self.assertRaisesRegex(ToolError, "owner_release"):
-            await owned_mutation
+            released = await runtime_a.session_release(acquired_a["lease_token"])
+            self.assertEqual(released["cleanup"]["cancelled"], 1)
+            with self.assertRaisesRegex(ToolError, "owner_release"):
+                await owned_mutation
 
-        server_peer = self.peer("server")
-        with self.assertRaisesRegex(ToolError, "run_not_owned"):
-            await foreign_read
-        self.assertEqual(server_peer.command_names(), [])
+            server_peer = self.peer("server")
+            with self.assertRaisesRegex(ToolError, "run_not_owned"):
+                await foreign_read
+            self.assertEqual(server_peer.command_names(), [])
 
     async def test_delivered_command_stays_pending_and_is_never_replayed(self) -> None:
         runtime_a = self.client("codex")
