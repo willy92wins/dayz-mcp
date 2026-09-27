@@ -97,6 +97,7 @@ try:
 except ImportError:  # pragma: no cover - covered by the fail-closed runtime path.
     psutil = None  # type: ignore[assignment]
 
+from dayz_mcp.accredited_daemon_transport import argv_matches_redirected
 from dayz_mcp.native_process_guard import NativeProcessGuard, identity_hashes
 from dayz_mcp.orphan_guard import image_name_of
 from dayz_mcp.runtime_state import RuntimePaths
@@ -134,6 +135,8 @@ _IDENTITY_FIELDS = (
     "command_line_sha256",
     "identity_scheme",
 )
+# Set by capture_launch_ancestor_identity: the child argv hash the redirector vouched for.
+_LAUNCH_CHILD_FIELD = "launch_child_command_line_sha256"
 
 
 class RunsBackupGateError(RuntimeError):
@@ -604,9 +607,12 @@ def capture_launch_ancestor_identity(
 ) -> dict[str, object] | None:
     """Capture the Windows venv redirector that owns the current Python child.
 
-    It is admissible only as the immediate parent, with the exact same argv hash,
-    an approved executable path and a complete strong identity.  Ordinary shells,
-    unrelated daemons and ambiguous parents are never admitted.
+    It is admissible only as the immediate parent, with the child's exact argv
+    (or, on Python 3.11/3.12, that argv with argv[0] rewritten to the child's own
+    image: see ``argv_matches_redirected``), an approved executable path and a
+    complete strong identity.  Ordinary shells, unrelated daemons and ambiguous
+    parents are never admitted.  The returned identity records the child argv
+    hash it vouches for under ``launch_child_command_line_sha256``.
     """
     if not _valid_allowed_identity(current_identity):
         raise RunsBackupGateError("invalid_allowed_process_identity")
@@ -625,6 +631,17 @@ def capture_launch_ancestor_identity(
             creation_time = parent_process.create_time()
             executable = parent_process.exe()
             argv = parent_process.cmdline()
+        with current_process.oneshot():
+            current_executable = current_process.exe()
+            current_argv = current_process.cmdline()
+        current_hashes = identity_hashes(current_executable, current_argv)
+        if (
+            current_hashes["executable_sha256"]
+            != current_identity.get("executable_sha256")
+            or current_hashes["command_line_sha256"]
+            != current_identity.get("command_line_sha256")
+        ):
+            return None
         if (
             observed_pid != parent_pid
             or not isinstance(creation_time, (int, float))
@@ -670,11 +687,26 @@ def capture_launch_ancestor_identity(
         not isinstance(parent_identity, dict)
         or not _valid_allowed_identity(parent_identity)
         or not _identity_matches(expected_parent_identity, parent_identity)
-        or parent_identity.get("command_line_sha256")
-        != current_identity.get("command_line_sha256")
+        or not argv_matches_redirected(current_argv, argv, current_executable)
     ):
         return None
-    return parent_identity
+    return {
+        **parent_identity,
+        _LAUNCH_CHILD_FIELD: current_identity["command_line_sha256"],
+    }
+
+
+def _launch_ancestor_consistent(
+    ancestor: Mapping[str, object], current: Mapping[str, object]
+) -> bool:
+    """The ancestor runs the current argv, or is the redirector that vouched for it."""
+    child = current.get("command_line_sha256")
+    return (
+        isinstance(child, str)
+        and bool(child)
+        and child
+        in (ancestor.get("command_line_sha256"), ancestor.get(_LAUNCH_CHILD_FIELD))
+    )
 
 
 def scan_dayz_mcp_processes(
@@ -697,8 +729,9 @@ def scan_dayz_mcp_processes(
         or allowed_current_identity is None
         or allowed_launch_ancestor_identity.get("pid")
         == allowed_current_identity.get("pid")
-        or allowed_launch_ancestor_identity.get("command_line_sha256")
-        != allowed_current_identity.get("command_line_sha256")
+        or not _launch_ancestor_consistent(
+            allowed_launch_ancestor_identity, allowed_current_identity
+        )
     ):
         raise RunsBackupGateError("invalid_allowed_process_identity")
     native_guard = guard or NativeProcessGuard()
@@ -1274,8 +1307,9 @@ def ensure_runs_v1_backup(
         allowed_current_identity is None
         or not _valid_allowed_identity(allowed_launch_ancestor_identity)
         or allowed_launch_ancestor_identity.get("pid") != os.getppid()
-        or allowed_launch_ancestor_identity.get("command_line_sha256")
-        != allowed_current_identity.get("command_line_sha256")
+        or not _launch_ancestor_consistent(
+            allowed_launch_ancestor_identity, allowed_current_identity
+        )
     ):
         raise RunsBackupGateError("invalid_allowed_process_identity")
     source_path = _absolute(paths.runs_path)

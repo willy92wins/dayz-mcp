@@ -112,6 +112,43 @@ def _connected_server_pid(
     return next(iter(owners)) if len(owners) == 1 else None
 
 
+def _drive_qualified_absolute(path: str) -> bool:
+    """A drive (or UNC share) and a root: the same answer on every Python.
+
+    Not ntpath.isabs: on 3.11 it also accepts a drive-less rooted path, which
+    then resolves on the current drive (review of #112, F1).
+    """
+    drive, rest = ntpath.splitdrive(path)
+    return bool(drive) and rest[:1] in ("\\", "/")
+
+
+def argv_matches_redirected(
+    observed: object,
+    expected: list[str],
+    image: str,
+) -> bool:
+    """Whether an observed argv is the expected one, allowing only a redirected argv[0].
+
+    A Windows venv redirector keeps the venv path in the child's argv[0] on
+    Python 3.14 but rewrites it to the base interpreter's own path on 3.11 and
+    3.12 (#93). The image is verified separately, so argv[0] may differ only to
+    name that image, by a drive-qualified absolute path; every other argument
+    must be identical.
+    """
+    if not isinstance(observed, list) or not observed:
+        return False
+    if observed == expected:
+        return True
+    first = observed[0]
+    return (
+        len(observed) == len(expected)
+        and observed[1:] == expected[1:]
+        and isinstance(first, str)
+        and _drive_qualified_absolute(first)
+        and same_path(first, image)
+    )
+
+
 def _connected_daemon_identity_verified(
     sock: object,
     port: int,
@@ -148,13 +185,12 @@ def _connected_daemon_identity_verified(
     cwd = get_cwd(pid_a)
     if (
         not same_path(executable, expected_executable)
-        or not isinstance(argv, list)
-        or argv != expected_argv
+        or not argv_matches_redirected(argv, expected_argv, expected_executable)
         or not same_path(cwd, expected_cwd)
     ):
         return False
     try:
-        expected_hashes = identity_hashes(expected_executable, expected_argv)
+        expected_hashes = identity_hashes(expected_executable, argv)
         snapshot_a = guard.snapshot(pid_a)  # type: ignore[attr-defined]
     except Exception:
         return False
@@ -189,7 +225,7 @@ def _connected_daemon_identity_verified(
     return (
         _connected_server_pid(sock, connections_fn=connections_fn) == pid_a
         and same_path(executable_b, expected_executable)
-        and argv_b == expected_argv
+        and argv_b == argv
         and same_path(cwd_b, expected_cwd)
         and isinstance(snapshot_b, dict)
         and snapshot_b.get("identity_complete") is True

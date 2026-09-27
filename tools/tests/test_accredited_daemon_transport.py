@@ -3,9 +3,13 @@ from __future__ import annotations
 import ast
 import importlib
 import importlib.util
+import ntpath
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from dayz_mcp.native_process_guard import identity_hashes
 
@@ -298,6 +302,133 @@ class AccreditedDaemonTransportTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.request_stage, "post_request")
         self.assertGreater(raised.exception.http_bytes_sent, 0)
+
+    def test_argv0_redirected_to_the_verified_image_is_accredited_and_nothing_wider(
+        self,
+    ) -> None:
+        transport = importlib.import_module("dayz_mcp.accredited_daemon_transport")
+        # A Python 3.11/3.12 venv (#93): the listener's argv[0] is the base
+        # interpreter's own path, while the expected argv carries the venv path.
+        image = r"P:\Python312\python.exe"
+        cwd = r"P:\DayZ_MCP_dev\tools"
+        tail = ["-m", "dayz_mcp", "--daemon", "--port", "8765"]
+        expected_argv = [r"P:\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe", *tail]
+        established = SimpleNamespace(
+            status=transport.psutil.CONN_ESTABLISHED,
+            laddr=("127.0.0.1", 8765),
+            raddr=("127.0.0.1", 51000),
+            pid=42,
+        )
+
+        def accredited(observed: list[str], second: list[str] | None = None) -> bool:
+            hashes = identity_hashes(image, observed)
+            reads = [list(observed), list(second or observed)]
+
+            class Guard:
+                def snapshot(self, pid: int) -> dict[str, object]:
+                    return {
+                        "pid": pid,
+                        "creation_time_utc": "2026-07-22T00:00:00Z",
+                        "executable_sha256": hashes["executable_sha256"],
+                        "command_line_sha256": hashes["command_line_sha256"],
+                        "identity_scheme": "psutil-argv-v2",
+                        "identity_complete": True,
+                    }
+
+            return transport._connected_daemon_identity_verified(
+                _FakeSocket([]),
+                8765,
+                expected_executable=image,
+                expected_argv=expected_argv,
+                expected_cwd=cwd,
+                connections_fn=lambda: [established],
+                get_executable=lambda _pid: image,
+                get_argv=lambda _pid: reads.pop(0),
+                get_cwd=lambda _pid: cwd,
+                guard=Guard(),
+            )
+
+        self.assertTrue(accredited([image, *tail]))
+        self.assertTrue(accredited(list(expected_argv)))  # 3.14 keeps the venv path
+        refused = {
+            "argv0_names_another_interpreter": [r"P:\Other\python.exe", *tail],
+            "argv0_relative": ["python", *tail],
+            "other_port": [image, "-m", "dayz_mcp", "--daemon", "--port", "8766"],
+            "extra_argument": [image, *tail, "--x"],
+        }
+        for case, observed in refused.items():
+            with self.subTest(case):
+                self.assertFalse(accredited(observed))
+        with self.subTest("argv_changes_between_the_two_reads"):
+            self.assertFalse(accredited([image, *tail], second=list(expected_argv)))
+
+    def test_redirected_argv0_needs_a_drive_even_where_samefile_resolves_it(
+        self,
+    ) -> None:
+        # Python 3.11's ntpath.isabs also calls a drive-less "\path" absolute (a
+        # legacy behaviour dropped in 3.13), and samefile resolves it on the
+        # current drive (#112 review, F1). The legacy isabs is simulated so the
+        # guard holds whatever interpreter runs the test.
+        transport = importlib.import_module("dayz_mcp.accredited_daemon_transport")
+        expected = [r"P:\venv\Scripts\python.exe", "-m", "dayz_mcp"]
+        modern_isabs = ntpath.isabs
+
+        def legacy_isabs(value: str) -> bool:
+            return value[:1] in ("\\", "/") or modern_isabs(value)
+
+        with tempfile.TemporaryDirectory() as root:
+            image = str(Path(root).resolve() / "python.exe")
+            Path(image).write_bytes(b"")
+            drive, rooted = ntpath.splitdrive(image)
+            previous = os.getcwd()
+            os.chdir(root)
+            try:
+                spellings = {
+                    "rooted_backslash": rooted,
+                    "rooted_slash": rooted.replace("\\", "/"),
+                    "drive_relative": drive + "python.exe",
+                    "relative": "python.exe",
+                }
+                for case, first in spellings.items():
+                    with self.subTest(case):
+                        self.assertTrue(os.path.samefile(first, image))
+                        with patch.object(transport.ntpath, "isabs", legacy_isabs):
+                            self.assertFalse(
+                                transport.argv_matches_redirected(
+                                    [first, "-m", "dayz_mcp"], expected, image
+                                )
+                            )
+                self.assertTrue(
+                    transport.argv_matches_redirected(
+                        [image, "-m", "dayz_mcp"], expected, image
+                    )
+                )
+            finally:
+                os.chdir(previous)
+
+    def test_every_absolute_windows_spelling_counts_as_drive_qualified(self) -> None:
+        # Review of #112, F2: without positive UNC and extended cases, a rule
+        # narrowed to drive letters would stay green.
+        transport = importlib.import_module("dayz_mcp.accredited_daemon_transport")
+        for path in (
+            r"C:\Python312\python.exe",
+            "C:/Python312/python.exe",
+            r"C:\Python312/python.exe",
+            r"\\srv\share\Python312\python.exe",
+            r"\\?\C:\Python312\python.exe",
+            r"\\?\UNC\srv\share\Python312\python.exe",
+        ):
+            with self.subTest(accepted=path):
+                self.assertTrue(transport._drive_qualified_absolute(path))
+        for path in (
+            r"\Python312\python.exe",
+            "/Python312/python.exe",
+            "C:python.exe",
+            "python.exe",
+            r"\\srv\share",
+        ):
+            with self.subTest(refused=path):
+                self.assertFalse(transport._drive_qualified_absolute(path))
 
     def test_transport_import_graph_has_no_mutation_or_orphan_guard_dependency(
         self,
