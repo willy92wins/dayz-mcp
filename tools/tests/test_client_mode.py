@@ -8,7 +8,6 @@ import time
 import unittest
 import urllib.error
 import tempfile
-from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 

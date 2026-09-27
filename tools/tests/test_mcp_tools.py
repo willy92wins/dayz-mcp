@@ -5,7 +5,6 @@ import ctypes
 import json
 import os
 import socket
-import threading
 import time
 import unittest
 import urllib.parse
@@ -26,12 +25,7 @@ from dayz_mcp import core
 from dayz_mcp import server as server_module
 from dayz_mcp.server import EXPECTED_BRIDGE_VERSION, ServerConfig, Runtime, build_app
 from tests.catalog_helpers import list_tools_after_lease
-from tests.fence_helpers import (
-    INST_CLIENT,
-    INST_SERVER,
-    bind_both_peers,
-    poll_census_query,
-)
+from tests.fence_helpers import bind_both_peers
 from tests.mcp_helpers import FakePeer, _assert_tool_error, _content_json
 
 
@@ -219,7 +213,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("session_tools_require_client_mode", str(err.exception))
 
     async def test_session_tools_validate_locally_before_http(self) -> None:
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client", key=self.key, port=12345,
@@ -290,7 +284,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_dayz_test_operation_serializes_same_runtime_session_tools(self) -> None:
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -354,7 +348,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         # detail (host paths) does not, and a code that is not a bare token
         # stays mute exactly as before.
         from dayz_mcp.native_launcher_backend import NativeLauncherBackendError
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -401,7 +395,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_fb_c9ca_fine_code_crosses_the_wire_as_a_fourth_part(self) -> None:
         from dayz_mcp.native_launcher_backend import NativeLauncherBackendError
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -492,7 +486,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         # what makes build:true undiagnosable. A non-existent `project` would NOT
         # exercise this branch -- it leaves through DayzTestToolError -- so the
         # gate needs an untyped error, and that typed error is the control below.
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -917,7 +911,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         # let them reach the wire as a bare "dayz_test_failed:ValueError" while run
         # translated them. Both tools go through _typed_dayz_test_value_errors now,
         # so this asserts the pair, not just the tool that happened to get the fix.
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -1011,7 +1005,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_dayz_test_run_names_run_id_matrix_causes_on_the_wire(self) -> None:
         from dayz_mcp import dayz_test_request, dayz_test_tool
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
         from tests.test_dayz_test_tool import _Bundle, _Opened, _policy, _sealed
 
         config = ServerConfig(
@@ -1074,7 +1068,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_dayz_test_run_preflight_client_reattach_keeps_run_id(self) -> None:
         from dayz_mcp import dayz_test_tool
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
         from tests.test_dayz_test_tool import _Bundle, _Opened, _policy, _sealed
 
         run_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -1142,7 +1136,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(payload.get("error_code"), "terminal_invalid")
 
     async def test_dayz_test_run_description_documents_reattach_matrix(self) -> None:
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",

@@ -97,7 +97,7 @@ class DayzTestRunTakeoverTests(unittest.IsolatedAsyncioTestCase):
         execute: object | None = None,
         stop: object | None = None,
     ) -> dict:
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         runtime = _fixture_client_runtime(self._config())
         status = AsyncMock(return_value={"box": box, "self": {"state": "none"}})

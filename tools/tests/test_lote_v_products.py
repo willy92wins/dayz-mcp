@@ -192,7 +192,7 @@ class ReachableCapabilityWireTest(unittest.IsolatedAsyncioTestCase):
     async def _kwargs_from(self, args: dict) -> dict:
         # Client mode, like the caller's own session: dayz_test_run is a session
         # tool and a daemon-mode app refuses it before any parameter is read.
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client",
@@ -262,7 +262,7 @@ class ReachableCapabilityWireTest(unittest.IsolatedAsyncioTestCase):
         """P2: the rejection used to happen inside the executor, so an already
         invalid request could wait in the queue, take a slot and come back as
         box_queue_saturated with its real defect never reported."""
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = ServerConfig(
             mode="client", key="k", port=12345, client_platform="codex",

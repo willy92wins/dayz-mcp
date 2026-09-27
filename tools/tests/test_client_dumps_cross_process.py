@@ -451,7 +451,7 @@ class SessionStatusBindingsTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import AsyncMock, patch
 
         from dayz_mcp import server
-        from tests.test_client_mode import _fixture_client_runtime
+        from tests.client_helpers import _fixture_client_runtime
 
         config = server.ServerConfig(
             mode="client",
