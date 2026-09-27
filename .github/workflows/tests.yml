@@ -29,6 +29,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Some tests read files at older commits (git show <sha>:path).
+          fetch-depth: 0
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -45,4 +47,14 @@ jobs:
           python -m pip install -e .
 
       - name: Run the suite
+        env:
+          # The runner's TEMP is an 8.3 short path (C:\Users\RUNNER~1\...).
+          # Windows reports the long form for an open handle, so every
+          # fail-closed path comparison (keyfile, registrations, installer)
+          # refuses a file created under the short one.
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          # tools/dependency-lock.json pins the owner's MSVC and Windows SDK
+          # bytes; the runner has other builds under the same paths.
+          DAYZ_MCP_FOREIGN_TOOLCHAIN: "1"
         run: python -B -m unittest discover -s tests -t .
