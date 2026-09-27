@@ -12,12 +12,13 @@ from dayz_mcp.session_coordination import (
     SESSION_TTL_S,
     SessionCoordinator,
 )
-from tests.test_session_coordination import (
+from tests.lease_helpers import (
     AuditSink,
     CleanupSink,
     FakeClock,
     SequentialIds,
     _identity,
+    parse_dpf_table,
 )
 
 
@@ -29,39 +30,6 @@ _H4_HEADING = "### H — Coordinación segura de sesiones de agentes"
 # names must still turn the runtime pins red (W3-P2-01).
 _H4_SPEC_GRACE_S = 90.0
 _H4_SPEC_TTL_S = 120.0
-
-
-def parse_dpf_table(markdown: str, heading: str) -> dict[str, dict[str, str]]:
-    """Return the named DPF table as structured criterion records."""
-
-    lines = markdown.splitlines()
-    try:
-        start = lines.index(heading)
-    except ValueError as error:
-        raise AssertionError(f"missing DPF heading: {heading}") from error
-
-    header_index = start + 1
-    while header_index < len(lines) and not lines[header_index].startswith("| # |"):
-        header_index += 1
-    if header_index == len(lines):
-        raise AssertionError(f"missing DPF table after: {heading}")
-
-    rows: dict[str, dict[str, str]] = {}
-    for line in lines[header_index + 2 :]:
-        if not line.startswith("|"):
-            break
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if len(cells) != 4:
-            raise AssertionError(f"malformed DPF row: {line}")
-        key, criterion, verification, state = cells
-        if key in rows:
-            raise AssertionError(f"duplicate DPF criterion: {key}")
-        rows[key] = {
-            "criterion": criterion,
-            "verification": verification,
-            "state": state,
-        }
-    return rows
 
 
 def extract_markdown_segment(markdown: str, start_marker: str, end_marker: str) -> str:

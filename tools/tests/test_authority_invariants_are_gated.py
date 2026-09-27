@@ -29,7 +29,7 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from tests.test_session_coordination import (  # noqa: E402
+from tests.lease_helpers import (  # noqa: E402
     AuditSink,
     CleanupSink,
     FakeClock,

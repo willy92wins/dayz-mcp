@@ -39,7 +39,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp import accredited_daemon_transport, dayz_test_tool, native_launcher_backend, server
 from dayz_mcp.session_coordination import command_requires_lease
-from tests.test_bug046_lease_queue_liveness import parse_dpf_table
+from tests.lease_helpers import parse_dpf_table
 from tests.test_control_client import _policy
 from tests.test_dayz_test_tool import (
     RUN_ID,

@@ -21,7 +21,7 @@ from dayz_mcp.runtime_state import (
     recover_coordination_startup,
 )
 from dayz_mcp.session_coordination import SessionCoordinator
-from tests.test_session_coordination import _identity
+from tests.lease_helpers import _identity
 
 
 def _paths(root: Path) -> RuntimePaths:
@@ -1613,7 +1613,11 @@ class CoordinatorWalIntegrationTests(unittest.TestCase):
         queued = coordinator.acquire(_identity("b"), "camera")[1]
         coordinator.release(_identity("a"), active["lease_token"])
 
-        claimed = coordinator.wait(_identity("b"), queued["ticket"], 0.0)
+        # release() waits at most RELEASE_AUDIT_TIMEOUT_S (50 ms) for its audit
+        # worker, and the FIFO grant waits for that handoff. A zero-timeout
+        # wait lost that race under a loaded suite; a live wait is the path
+        # this test is named after.
+        claimed = coordinator.wait(_identity("b"), queued["ticket"], 1.0)
 
         self.assertEqual((claimed[0], claimed[1]["status"]), (200, "active"))
         self.assertEqual(self.fault_store.load_with_sha(), (None, None))

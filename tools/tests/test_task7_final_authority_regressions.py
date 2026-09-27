@@ -10,13 +10,13 @@ from unittest.mock import patch
 from dayz_mcp import loopback, server, session_coordination as coordination_module
 from dayz_mcp.runtime_state import CoordinationSnapshotStore, RuntimePaths
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
-from tests.test_task7_review_regressions import (
+from tests.lifecycle_helpers import (
     Clock,
     IDENTITY,
+    IDENTITY_B,
     IDENTITY_PAYLOAD,
     Sequence,
 )
-from tests.test_task7_rereview_regressions import IDENTITY_B
 from tests.fence_helpers import INST_SERVER, accredited_poll, bind_both_peers, bound_queue
 
 

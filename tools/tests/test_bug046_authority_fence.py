@@ -5,7 +5,7 @@ import threading
 import unittest
 
 from dayz_mcp.session_coordination import SessionCoordinator
-from tests.test_session_coordination import _identity
+from tests.lease_helpers import _identity
 
 
 class _BlockingWal:

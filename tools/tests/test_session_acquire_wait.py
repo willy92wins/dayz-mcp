@@ -20,7 +20,12 @@ from dayz_mcp.session_coordination import (
     SessionCoordinator,
 )
 from tests.catalog_helpers import list_tools_after_lease
-from tests.test_session_coordination import AuditSink, FakeClock, SequentialIds, _identity
+from tests.lease_helpers import (
+    AuditSink,
+    FakeClock,
+    SequentialIds,
+    _identity,
+)
 from tests.test_client_mode import _fixture_client_runtime
 
 

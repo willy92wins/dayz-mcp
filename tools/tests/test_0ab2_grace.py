@@ -24,7 +24,7 @@ from dayz_mcp.session_coordination import (
     SessionCoordinator,
 )
 from tests.test_mcp_tools import _content_json
-from tests.test_session_coordination import (
+from tests.lease_helpers import (
     AuditSink,
     CleanupSink,
     FakeClock,

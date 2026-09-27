@@ -42,7 +42,7 @@ from dayz_mcp.session_coordination import (
 )
 from tests.steam_helpers import FakeSteamGate
 from tests.test_mcp_tools import _content_json
-from tests.test_session_coordination import (
+from tests.lease_helpers import (
     AuditSink,
     CleanupSink,
     FakeClock,
