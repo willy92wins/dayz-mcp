@@ -277,11 +277,14 @@ def _cross_test_imports() -> set[tuple[str, str, str]]:
         relative = path.relative_to(_TESTS_DIR)
         importer = relative.as_posix()
         package = ("tests",) + relative.parent.parts
-        own = ".".join(package + (path.stem,))
+        # A package's own name is the directory, not "<package>.__init__".
+        own = ".".join(package if path.name == "__init__.py" else package + (path.stem,))
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 if node.level:
+                    if node.level > len(package):
+                        continue  # beyond the top-level package: ImportError, not an import
                     base = package[: len(package) - node.level + 1]
                     module = ".".join(base + ((node.module,) if node.module else ()))
                 else:
