@@ -223,7 +223,12 @@ class DependencyLockTest(unittest.TestCase):
                 self.assertEqual(len(raw), item["size"])
                 self.assertEqual(hashlib.sha256(raw).hexdigest().upper(), item["sha256"])
                 checked += 1
-        for toolchain in () if FOREIGN_TOOLCHAIN else payload["toolchains"].values():
+        self.assertGreater(checked, 0, "no locked artifact was present to verify")
+
+    @unittest.skipIf(FOREIGN_TOOLCHAIN, "DAYZ_MCP_FOREIGN_TOOLCHAIN=1: this host's toolchain is not the locked one")
+    def test_locked_toolchain_files_match_live_bytes(self) -> None:
+        checked = 0
+        for toolchain in self._payload()["toolchains"].values():
             for item in toolchain["files"].values():
                 path = Path(item["path"])
                 if not path.is_file():
@@ -232,8 +237,9 @@ class DependencyLockTest(unittest.TestCase):
                     raw = path.read_bytes()
                     self.assertEqual(len(raw), item["size"])
                     self.assertEqual(hashlib.sha256(raw).hexdigest().upper(), item["sha256"])
-                    checked += 1
-        self.assertGreater(checked, 0, "no locked artifact was present to verify")
+                checked += 1
+        if not checked:
+            self.skipTest("no locked toolchain file is present on this machine")
 
     @unittest.skipIf(FOREIGN_TOOLCHAIN, "DAYZ_MCP_FOREIGN_TOOLCHAIN=1: this host's toolchain is not the locked one")
     def test_tree_digests_match_live_bytes(self) -> None:
