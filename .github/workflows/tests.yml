@@ -1,6 +1,8 @@
 # Runs the Python unit suite (tools/tests) on every pull request and on main.
-# The job uses no secrets. Python 3.14 is what the installer's venv runs today;
-# issue #93 reports the daemon failing its identity checks in a 3.12 venv.
+# The job uses no secrets. The suite runs from tools/.venv-mcp, the venv that
+# install-mcp.ps1 creates: the daemon only starts under that interpreter
+# (dayz_mcp/daemon.py, _ensure_identity_migration). Python 3.14 is what that
+# venv runs today; issue #93 reports its identity checks failing on 3.12.
 name: tests
 
 on:
@@ -38,13 +40,14 @@ jobs:
           cache: pip
           cache-dependency-path: tools/requirements-mcp.txt
 
-      # Same steps as install-mcp.ps1: pinned requirements, then the package
-      # itself in editable mode.
+      # Same steps as install-mcp.ps1: the venv, pinned requirements, then
+      # the package itself in editable mode.
       - name: Install
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-mcp.txt
-          python -m pip install -e .
+          python -m venv .venv-mcp
+          .\.venv-mcp\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv-mcp\Scripts\python.exe -m pip install -r requirements-mcp.txt
+          .\.venv-mcp\Scripts\python.exe -m pip install -e .
 
       - name: Run the suite
         env:
@@ -57,4 +60,4 @@ jobs:
           # tools/dependency-lock.json pins the owner's MSVC and Windows SDK
           # bytes; the runner has other builds under the same paths.
           DAYZ_MCP_FOREIGN_TOOLCHAIN: "1"
-        run: python -B -m unittest discover -s tests -t .
+        run: .\.venv-mcp\Scripts\python.exe -B -m unittest discover -s tests -t .
