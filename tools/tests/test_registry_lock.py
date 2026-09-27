@@ -20,6 +20,10 @@ def _canonical_lock_blocker() -> str | None:
     """
     if not registry_lock._CANONICAL_LOCK.is_file():
         return "canonical registry lock file is absent"
+    # Any acquire now creates a missing lock (#93), so a clone can have the lock
+    # without the registry it guards; the productive open needs both.
+    if not launcher_registry._CANONICAL_REGISTRY.is_file():
+        return "canonical launcher registry is absent"
     try:
         registry_lock.acquire_registry_lock(exclusive=True).close()
     except RuntimeError as error:
