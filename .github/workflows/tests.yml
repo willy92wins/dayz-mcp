@@ -1,0 +1,48 @@
+# Runs the Python unit suite (tools/tests) on every pull request and on main.
+# The job uses no secrets. Python 3.14 is what the installer's venv runs today;
+# issue #93 reports the daemon failing its identity checks in a 3.12 venv.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: unittest (windows, Python 3.14)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: tools
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: tools/requirements-mcp.txt
+
+      # Same steps as install-mcp.ps1: pinned requirements, then the package
+      # itself in editable mode.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-mcp.txt
+          python -m pip install -e .
+
+      - name: Run the suite
+        run: python -B -m unittest discover -s tests -t .
