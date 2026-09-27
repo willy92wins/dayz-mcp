@@ -21,7 +21,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
 
-from dayz_mcp import server  # noqa: E402
+from dayz_mcp import loopback, server  # noqa: E402
 from dayz_mcp.server import ServerConfig, build_app  # noqa: E402
 
 from tests.catalog_helpers import list_tools_after_lease  # noqa: E402
@@ -139,7 +139,10 @@ class TelemetryReadModesContractTest(unittest.IsolatedAsyncioTestCase):
 
 
 def _fake_bridge_state(result: dict) -> SimpleNamespace:
+    # e72ff5b: call_bridge reads Runtime.status() (state.status_snapshot())
+    # before enqueue; give it a real shape, as test_ui_error_diagnostics does.
     return SimpleNamespace(
+        status_snapshot=loopback.ServerState("k").status_snapshot,
         enqueue_command=lambda *args, **kwargs: (200, {"id": 41}),
         take_result=lambda command_id, remove=False: dict(result),
         abandon_command=lambda *args, **kwargs: None,
@@ -155,9 +158,12 @@ class TelemetryReadPublicErrorsAreToolErrorsTest(unittest.IsolatedAsyncioTestCas
 
     async def _call_through_real_conversion(self, arguments: dict, result: dict):
         app, runtime = build_app(ServerConfig(key="k", port=0, log_sink=lambda _m: None))
+        # telemetry_read is a world read: with no peer polled, the fail-fast
+        # gate (e72ff5b) answers game_not_ready before enqueue. That gate has
+        # its own tests; this one pins the ok:0 conversion in wait_for_result.
         with patch.object(runtime, "ensure_peer_allowed", return_value=None), patch.object(
             type(runtime), "state", new_callable=PropertyMock, return_value=_fake_bridge_state(result)
-        ):
+        ), patch.object(server, "_world_read_not_ready", return_value=None):
             return await app.call_tool("telemetry_read", arguments)
 
     async def test_bridge_codes_raise_tool_error_not_ok_false_dict(self) -> None:
