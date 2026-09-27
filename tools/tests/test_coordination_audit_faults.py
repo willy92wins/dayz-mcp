@@ -1,29 +1,54 @@
+"""Audit writes, audit faults and their recovery, WAL and snapshot durability.
+
+Moved verbatim from test_bug046_audit_fault_recovery.py, test_task7_review_regressions.py, test_task7_rereview_regressions.py, test_task7_final_authority_regressions.py, test_0ab2_r9.py
+(review 2026-09-25, W4d step 3).
+"""
+
 from __future__ import annotations
 
-import json
 import io
+import json
 import os
+import sys
 import tempfile
 import threading
 import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import mock
 
+_TOOLS_DIR = Path(__file__).resolve().parents[1]
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
 from dayz_mcp import admin_cli, daemon, loopback, runtime_state
+from dayz_mcp.process_lifecycle import ProcessLifecycle, RunManifestStore, RunRecord
 from dayz_mcp.runtime_state import (
+    _coordination_payload,
     CoordinationFaultStore,
     CoordinationSnapshotStore,
     JsonlAuditWriter,
-    RuntimePaths,
     recover_coordination_fault,
     recover_coordination_startup,
+    RuntimePaths,
 )
-from dayz_mcp.session_coordination import SessionCoordinator
-from tests.lease_helpers import _identity
+from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
+from tests.fence_helpers import accredited_poll, bind_both_peers
+from tests.lease_helpers import _coord, _identity, AuditSink, FakeClock, MID
+from tests.lifecycle_helpers import (
+    Audit,
+    IDENTITY,
+    IDENTITY_B,
+    IDENTITY_PAYLOAD,
+    Sequence,
+)
+from tests.steam_helpers import FakeSteamGate
+from tests.test_process_lifecycle import FakeGuard, FakeLauncher, process
 
 
+# --- helpers from test_bug046_audit_fault_recovery.py ---
 def _paths(root: Path) -> RuntimePaths:
     return RuntimePaths(
         root=root,
@@ -57,6 +82,19 @@ def _marker(**changes: object) -> dict[str, object]:
     }
     marker.update(changes)
     return marker
+
+
+# --- helpers from test_task7_final_authority_regressions.py ---
+def wait_until(predicate, timeout_s: float = 0.5) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return bool(predicate())
+
+
+# --- from test_bug046_audit_fault_recovery.py ---
 
 
 class CoordinationFaultStoreTests(unittest.TestCase):
@@ -1785,6 +1823,274 @@ class AuditRepairCliTests(unittest.TestCase):
                 },
             )
             self.assertNotIn("secret-key", output.getvalue())
+
+
+# --- from test_task7_review_regressions.py ---
+
+
+class ReleaseAuditTest(unittest.TestCase):
+    def test_release_finished_persists_deduplicated_cleanup_degraded(self) -> None:
+        audit = Audit()
+        coordinator = SessionCoordinator(
+            token_fn=Sequence("token"),
+            id_fn=Sequence("lease"),
+            audit=audit,
+            cleanup=lambda *_args: {
+                "cancelled": 1,
+                "cleanup_degraded": ["retail_quarantine", "retail_quarantine"],
+            },
+        )
+        _, acquired = coordinator.acquire(IDENTITY, "release")
+        status, result = coordinator.release(IDENTITY, acquired["lease_token"])
+        self.assertEqual(status, 200)
+        self.assertEqual(result["cleanup_degraded"], ["retail_quarantine"])
+        finished = [event for event in audit.events if event.get("event") == "session_release_finished"][-1]
+        self.assertEqual(finished["cleanup_degraded"], ["retail_quarantine"])
+
+    def test_release_finished_audit_failure_remains_surfaced_after_cleanup(self) -> None:
+        audit = Audit()
+        coordinator = SessionCoordinator(
+            token_fn=Sequence("token"),
+            id_fn=Sequence("lease"),
+            audit=audit,
+            cleanup=lambda *_args: {"cancelled": 0},
+        )
+        _, acquired = coordinator.acquire(IDENTITY, "release")
+        audit.fail_events.add("session_release_finished")
+        status, result = coordinator.release(IDENTITY, acquired["lease_token"])
+        self.assertEqual((status, result["released"]), (200, True))
+        self.assertIn("audit_failed", result["cleanup_degraded"])
+
+
+# --- from test_task7_rereview_regressions.py ---
+
+
+class DispatchAuditDegradationTest(unittest.TestCase):
+    def test_dispatch_rejection_audit_failure_is_attached_to_command_result(self) -> None:
+        def audit(event: dict[str, object]) -> bool:
+            return event.get("event") != "session_rejected"
+
+        coordinator = SessionCoordinator(
+            token_fn=Sequence("token"), id_fn=Sequence("lease"), audit=audit
+        )
+        _, acquired = coordinator.acquire(IDENTITY, "dispatch")
+        state = loopback.ServerState("key", coordination=coordinator)
+        bind_both_peers(state)
+        state.retail_probe = lambda: {"known": True, "processes": []}
+        status, queued = state.enqueue_command(
+            "world_time_set",
+            {},
+            "server",
+            identity_payload=IDENTITY_PAYLOAD,
+            lease_token=acquired["lease_token"],
+        )
+        self.assertEqual(status, 200)
+        state.retail_probe = lambda: {
+            "known": True,
+            "processes": [{"pid": 44, "name": "DayZ_x64.exe"}],
+        }
+        _, polled = accredited_poll(state, "server")
+        self.assertEqual(polled["commands"], [])
+        result = state.take_result(queued["id"])
+        self.assertEqual(result["error"], "retail_quarantine")
+        self.assertEqual(result.get("cleanup_degraded"), ["audit_failed"])
+
+
+# --- from test_task7_final_authority_regressions.py ---
+
+
+class CleanupWorkerCapacityTest(unittest.TestCase):
+    def test_timed_out_workers_are_capped_and_saturation_advances_fifo(self) -> None:
+        expected_capacity = 4
+        resume_cleanup = threading.Event()
+        starts = 0
+        starts_lock = threading.Lock()
+
+        def cleanup(*_args):
+            nonlocal starts
+            with starts_lock:
+                starts += 1
+            resume_cleanup.wait(2.0)
+            return {"cancelled": 0}
+
+        coordinator = SessionCoordinator(
+            token_fn=Sequence("token"),
+            id_fn=Sequence("lease"),
+            audit=lambda _event: True,
+            cleanup=cleanup,
+            cleanup_timeout_s=0.01,
+        )
+        try:
+            for index in range(expected_capacity):
+                status, lease = coordinator.acquire(IDENTITY, f"fill-{index}")
+                self.assertEqual(status, 200)
+                released = coordinator.release(IDENTITY, lease["lease_token"])[1]
+                self.assertIn("cleanup_timeout", released["cleanup_degraded"])
+
+            _, saturated_lease = coordinator.acquire(IDENTITY, "saturated")
+            coordinator.acquire(IDENTITY_B, "fifo")
+            saturated = coordinator.release(
+                IDENTITY, saturated_lease["lease_token"]
+            )[1]
+            snapshot = coordinator.snapshot_payload()
+
+            self.assertEqual(starts, expected_capacity)
+            self.assertIn(
+                "cleanup_worker_saturated", saturated["cleanup_degraded"]
+            )
+            self.assertIsNone(snapshot["active"])
+            self.assertEqual(snapshot["queue"][0]["session"], IDENTITY_B.session_id[:12])
+            granted = coordinator.wait(
+                IDENTITY_B, snapshot["queue"][0]["ticket"], 0.0
+            )
+            self.assertEqual((granted[0], granted[1]["status"]), (200, "active"))
+            self.assertEqual(
+                snapshot.get("cleanup_workers"),
+                {
+                    "capacity": expected_capacity,
+                    "active": expected_capacity,
+                    "saturated": 1,
+                },
+            )
+        finally:
+            resume_cleanup.set()
+            wait_until(
+                lambda: (
+                    coordinator.snapshot_payload().get("cleanup_workers") or {}
+                ).get("active")
+                == 0,
+                1.0,
+            )
+
+
+# --- from test_0ab2_r9.py ---
+# W7a DZ-R9 offline for 0ab2 (state-machine, race, identity, data-loss).
+#
+# In-game H8 is W7b / I3 — not this module.
+
+
+class DataLossR9Tests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.a = _identity("a")
+        self.b = _identity("b")
+
+    def test_snapshot_omits_grace_and_pref_used(self) -> None:
+        clock = FakeClock()
+        coordinator = _coord(clock, attached=True)
+        coordinator.acquire(self.a, "drive")
+        clock.advance(MID)
+        coordinator.status(self.a)
+        snapshot = coordinator.snapshot_payload()
+        self.assertNotIn("grace", snapshot)
+        self.assertNotIn("pref_used", snapshot)
+        self.assertIsNotNone(coordinator.status(self.a)["grace"])
+        persisted = _coordination_payload(
+            {
+                **snapshot,
+                "grace": {"remaining_s": 40, "pref_remaining": 1},
+                "pref_used": {self.a.session_id: 1},
+            },
+            "gen-1",
+        )
+        self.assertNotIn("grace", persisted)
+        self.assertNotIn("pref_used", persisted)
+
+    def test_daemon_restart_invalidates_grace_stranger_wins(self) -> None:
+        clock = FakeClock()
+        coordinator = _coord(clock, attached=True)
+        coordinator.acquire(self.a, "drive")
+        clock.advance(MID)
+        self.assertIsNotNone(coordinator.status(self.a)["grace"])
+        restarted = _coord(FakeClock(), attached=True)
+        self.assertIsNone(restarted.status(self.a)["grace"])
+        status, payload = restarted.acquire(self.b, "drive")
+        self.assertEqual((status, payload["status"]), (200, "active"))
+
+    def test_generation_change_drops_injected_grace_from_disk(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            paths = RuntimePaths.from_env({"LOCALAPPDATA": temp_dir})
+            old = CoordinationSnapshotStore(paths, "old")
+            old.write_coordination(
+                {
+                    "revision": 4,
+                    "active": None,
+                    "queue": [],
+                    "grace": {
+                        "remaining_s": 50.0,
+                        "pref_remaining": 1,
+                        "attached_required": True,
+                    },
+                }
+            )
+            new = CoordinationSnapshotStore(paths, "new")
+            loaded = new.consume_previous_generation("new")
+            self.assertEqual(loaded["event"], "daemon_restart_invalidated")
+            text = new.coordination_path.read_text(encoding="utf-8")
+            self.assertNotIn("grace", json.loads(text))
+            self.assertNotIn("pref_remaining", text)
+
+    def test_expiry_cleanup_idles_acknowledged_run_without_terminate(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            game = root / "DayZ"
+            game.mkdir()
+            for name in (
+                "DayZDiag_x64.exe",
+                "DayZ_BE.exe",
+                "DayZ_x64.exe",
+                "DayZServer_x64.exe",
+            ):
+                (game / name).write_bytes(b"")
+            paths = RuntimePaths(
+                root / "runtime",
+                root / "runtime" / "audit",
+                root / "runtime" / "coordination.json",
+                root / "runtime" / "runs.json",
+            )
+            owner = ClientIdentity("codex", 11, 1, "2026-07-15T00:00:00Z", "A", "owner")
+            coordinator = SessionCoordinator(
+                token_fn=lambda: "token-A",
+                id_fn=lambda: "lease-A",
+                audit=AuditSink(),
+            )
+            self.assertEqual(coordinator.acquire(owner, "lifecycle")[0], 200)
+            store = RunManifestStore(paths)
+            guard = FakeGuard()
+            record = process(4242)
+            run = RunRecord(
+                "run-existing",
+                "A",
+                "lease-A",
+                "RUNNING",
+                "same",
+                "@SameMod",
+                "profiles",
+                "mission",
+                [record],
+            )
+            store.add(run)
+            lifecycle = ProcessLifecycle(
+                steam_gate=FakeSteamGate(),
+                coordinator=coordinator,
+                manifest=store,
+                audit=AuditSink(),
+                guard=guard,
+                retail_probe=lambda: {"known": True, "processes": []},
+                diag_probe=lambda: {"known": True, "processes": []},
+                game_path=game,
+                launcher=FakeLauncher(),
+                id_fn=lambda: "run-1",
+            )
+            disposition = lifecycle.begin_release_owner("A", "lease-A")
+            self.assertTrue(disposition.terminal_event.wait(1.0))
+            self.assertTrue(disposition.terminal_result["terminal_safe"])
+            idle = store.get("run-existing")
+            self.assertIsNotNone(idle)
+            assert idle is not None
+            self.assertEqual(idle.state, "RUNNING_IDLE")
+            self.assertIsNone(idle.owner_session_id)
+            self.assertEqual([proc.pid for proc in idle.processes], [4242])
+            self.assertEqual(guard.terminate_calls, [])
 
 
 if __name__ == "__main__":

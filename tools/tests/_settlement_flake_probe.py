@@ -9,7 +9,7 @@ import time
 
 TOOLS_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYTHON = sys.executable
-CLASS = "tests.test_task7_rereview_regressions.FailedLaunchSettlementTest"
+CLASS = "tests.test_process_lifecycle_authority.FailedLaunchSettlementTest"
 
 
 def _run_class() -> tuple[int, str]:
