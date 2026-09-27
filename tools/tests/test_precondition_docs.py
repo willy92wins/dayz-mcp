@@ -22,7 +22,7 @@ from dayz_mcp.server import (
     _compact_initial_catalog,
     build_app,
 )
-from tests.test_client_mode import _fixture_client_runtime
+from tests.client_helpers import _fixture_client_runtime
 from tests.test_vehicle_trace_contract import _method_body
 
 

@@ -24,8 +24,8 @@ from dayz_mcp.session_coordination import (
     ClientIdentity,
     SessionCoordinator,
 )
-from tests.test_client_mode import _fixture_client_runtime
-from tests.test_mcp_tools import _content_json
+from tests.client_helpers import _fixture_client_runtime
+from tests.mcp_helpers import _content_json
 
 _REAL_EXECUTE_WAIT_FOR_BOX = server.execute_wait_for_box
 

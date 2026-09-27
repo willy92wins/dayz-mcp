@@ -12,7 +12,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp import agent_loop, instance_fence, loopback, server
 from dayz_mcp.server import ServerConfig, build_app
-from tests.test_client_mode import _fixture_client_runtime
+from tests.client_helpers import _fixture_client_runtime
 
 _ENQUEUE_ROUTE_FNS = frozenset(
     {

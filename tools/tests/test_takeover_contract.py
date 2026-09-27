@@ -18,8 +18,8 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import server as server_module
 from dayz_mcp.process_lifecycle import occupancy_error_fields, takeover_target_run_id
 from dayz_mcp.server import ServerConfig, TAKEOVER_REQUIRED
-from tests.test_client_mode import _fixture_client_runtime
-from tests.test_mcp_tools import _content_json
+from tests.client_helpers import _fixture_client_runtime
+from tests.mcp_helpers import _content_json
 
 
 # --- from test_0ab2_grace.py ---

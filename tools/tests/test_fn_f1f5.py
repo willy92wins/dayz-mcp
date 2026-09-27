@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from dayz_mcp import server
 from dayz_mcp.server_cli import parse_server_tail_silent
-from tests.test_client_mode import _fixture_client_runtime
-from tests.test_mcp_tools import _content_json
+from tests.client_helpers import _fixture_client_runtime
+from tests.mcp_helpers import _content_json
 
 
 LOCAL8B_NAMES = frozenset(

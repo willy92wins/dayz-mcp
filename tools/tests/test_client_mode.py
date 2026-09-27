@@ -20,47 +20,9 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import control_client, core, host_config, server
 from dayz_mcp.server import ServerConfig
 from tests.test_daemon import DaemonHttpServer, _config, _free_port, _http
-from tests.test_mcp_tools import _content_json
+from tests.client_helpers import _VALID_PEER_VERSION, _fixture_client_runtime
+from tests.mcp_helpers import _content_json
 from tests.fence_helpers import INST_CLIENT, INST_SERVER, poll_census_query
-
-
-_VALID_PEER_VERSION = f"{core.EXPECTED_BRIDGE_VERSION}~1.29.0"
-
-
-def _fixture_client_runtime(
-    config: ServerConfig,
-    **kwargs: object,
-) -> server.ClientRuntime:
-    """Construct a client without consulting live host registrations."""
-    with tempfile.TemporaryDirectory() as directory:
-        keyfile = Path(directory) / "daemon.key"
-        keyfile.write_text(config.key or "fixture-key", encoding="utf-8")
-        fixture_config = replace(config, keyfile=str(keyfile.resolve()))
-        launcher = str(Path(sys.executable).resolve())
-        native = launcher
-        provenance = host_config.DaemonProvenance(
-            launch_executable=launcher,
-            native_executable=native,
-            argv=tuple(server.daemon.build_daemon_argv(fixture_config, python=launcher)),
-            cwd=server.daemon.daemon_runtime_cwd(),
-            port=fixture_config.port,
-            keyfile=str(keyfile.resolve()),
-            auto_spawn_daemon=fixture_config.auto_spawn_daemon,
-        )
-        with (
-            patch.object(
-                host_config,
-                "resolve_daemon_provenance",
-                return_value=provenance,
-            ),
-            patch.object(
-                host_config, "_local_launch_executable", return_value=launcher
-            ),
-            patch.object(
-                host_config, "_local_native_executable", return_value=native
-            ),
-        ):
-            return server.ClientRuntime(fixture_config, **kwargs)
 
 
 class GamePeer:

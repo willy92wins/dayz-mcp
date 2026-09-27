@@ -28,7 +28,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp import playbook_tool as adapter, server, server_freshness as freshness
 from tests.catalog_helpers import list_tools_after_lease
-from tests.test_client_mode import _fixture_client_runtime
+from tests.client_helpers import _fixture_client_runtime
 
 MODULE = "dayz_playbook_runner"
 TAIL = '''

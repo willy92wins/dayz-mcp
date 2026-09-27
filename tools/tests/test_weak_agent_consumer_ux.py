@@ -18,8 +18,8 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import agent_loop, inbox, server
 from dayz_mcp.server import ServerConfig, build_app
 from tests.fence_helpers import announced_capabilities
-from tests.test_client_mode import _fixture_client_runtime
-from tests.test_mcp_tools import _content_json
+from tests.client_helpers import _fixture_client_runtime
+from tests.mcp_helpers import _content_json
 
 
 LOW_LEVEL_TOOLS = (

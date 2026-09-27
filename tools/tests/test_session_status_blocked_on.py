@@ -15,8 +15,8 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import server
 from dayz_mcp.server import ServerConfig, build_app
 from tests.catalog_helpers import list_tools_after_lease
-from tests.test_client_mode import _fixture_client_runtime
-from tests.test_mcp_tools import _content_json
+from tests.client_helpers import _fixture_client_runtime
+from tests.mcp_helpers import _content_json
 
 
 LEASE_BLOCKED_ON = (

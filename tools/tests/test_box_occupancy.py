@@ -33,7 +33,7 @@ from dayz_mcp.session_coordination import (
     ClientIdentity,
     SessionCoordinator,
 )
-from tests.test_mcp_tools import _content_json
+from tests.mcp_helpers import _content_json
 from tests.test_process_lifecycle import (
     IDENTITY_A,
     HASH_A,

@@ -10,7 +10,7 @@ from typing import Any
 from dayz_mcp import control_client, server
 from dayz_mcp.server import ServerConfig, build_app
 from tests._addon_paths import addon_root
-from tests.test_mcp_tools import _content_json
+from tests.mcp_helpers import _content_json
 
 
 RETAIL_QUARANTINE_RECIPE = (
