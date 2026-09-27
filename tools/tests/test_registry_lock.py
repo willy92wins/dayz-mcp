@@ -1,12 +1,61 @@
 from __future__ import annotations
 
+import ctypes
 import os
 import stat
+import struct
 import tempfile
 import unittest
 from pathlib import Path
 
 from dayz_mcp import launcher_registry, registry_lock
+
+
+def _set_junction_in_place(directory: Path, target: Path) -> None:
+    """Turn the existing empty ``directory`` into a junction to ``target``, without renaming it.
+
+    Opened with FILE_WRITE_ATTRIBUTES only, which share modes do not restrict,
+    so a directory held by another handle can still be converted.
+    """
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    )
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.DeviceIoControl.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+        wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID,
+    )
+    kernel32.DeviceIoControl.restype = wintypes.BOOL
+    file_write_attributes, share_all, open_existing = 0x100, 0x7, 3
+    backup_semantics_open_reparse_point = 0x02000000 | 0x00200000
+    handle = kernel32.CreateFileW(
+        str(directory), file_write_attributes, share_all, None, open_existing,
+        backup_semantics_open_reparse_point, None,
+    )
+    if handle in (None, ctypes.c_void_p(-1).value):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        substitute = ("\\??\\" + str(target)).encode("utf-16-le")
+        printable = str(target).encode("utf-16-le")
+        body = struct.pack(
+            "<HHHH", 0, len(substitute), len(substitute) + 2, len(printable)
+        ) + substitute + b"\0\0" + printable + b"\0\0"
+        mount_point, set_reparse_point = 0xA0000003, 0x000900A4
+        data = struct.pack("<IHH", mount_point, len(body), 0) + body
+        buffer = ctypes.create_string_buffer(data)
+        returned = wintypes.DWORD()
+        if not kernel32.DeviceIoControl(
+            handle, set_reparse_point, buffer, len(data), None, 0,
+            ctypes.byref(returned), None,
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _canonical_lock_blocker() -> str | None:
@@ -121,14 +170,14 @@ class RegistryLockTest(unittest.TestCase):
         original = registry_lock._create_missing_lock
         attempts: list[str] = []
 
-        def swap_then_create(path: Path) -> None:
+        def swap_then_create(handle: int, name: str) -> None:
             try:
                 parent.rename(moved)
                 _winapi.CreateJunction(str(redirected), str(parent))
                 attempts.append("swapped")
             except OSError as error:
                 attempts.append(f"blocked: {error}")
-            original(path)
+            original(handle, name)
 
         self.addCleanup(lambda: parent.is_junction() and os.rmdir(parent))
         with patch.object(registry_lock, "_create_missing_lock", swap_then_create):
@@ -140,6 +189,35 @@ class RegistryLockTest(unittest.TestCase):
         self.assertTrue(lock.is_file())
         self.assertFalse(moved.exists())
         self.assertEqual(list(redirected.iterdir()), [])
+
+    def test_a_parent_turned_into_a_junction_in_place_gets_nothing_created(self) -> None:
+        # Review of #114, round 2: an empty parent can become a junction without
+        # being renamed, through a FILE_WRITE_ATTRIBUTES handle that share modes
+        # do not stop. The lock is created relative to the held parent, so that
+        # create stops at the reparse point instead of going through it.
+        from unittest.mock import patch
+
+        root = self.lock_path.with_name("in-place")
+        parent, target = root / "parent", root / "target"
+        parent.mkdir(parents=True)
+        target.mkdir()
+        original = registry_lock._create_missing_lock
+        converted: list[bool] = []
+
+        def convert_then_create(handle: int, name: str) -> None:
+            _set_junction_in_place(parent, target)
+            converted.append(parent.is_junction())
+            original(handle, name)
+
+        self.addCleanup(lambda: parent.is_junction() and os.rmdir(parent))
+        with patch.object(registry_lock, "_create_missing_lock", convert_then_create):
+            with self.assertRaisesRegex(RuntimeError, "invalid_launcher_registry_lock"):
+                registry_lock.acquire_registry_lock(
+                    exclusive=True, path=parent / "approved-launchers.lock"
+                )
+
+        self.assertEqual(converted, [True])
+        self.assertEqual(list(target.iterdir()), [])
 
     def test_failed_productive_open_releases_its_shared_lock(self) -> None:
         # Stays on the canonical lock deliberately: the claim is about the

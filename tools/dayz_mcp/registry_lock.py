@@ -36,7 +36,45 @@ if os.name == "nt":
             ("ReparseTag", wintypes.DWORD),
         )
 
+    class _UNICODE_STRING(ctypes.Structure):
+        _fields_ = (
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", wintypes.LPWSTR),
+        )
+
+    class _OBJECT_ATTRIBUTES(ctypes.Structure):
+        _fields_ = (
+            ("Length", wintypes.ULONG),
+            ("RootDirectory", wintypes.HANDLE),
+            ("ObjectName", ctypes.POINTER(_UNICODE_STRING)),
+            ("Attributes", wintypes.ULONG),
+            ("SecurityDescriptor", wintypes.LPVOID),
+            ("SecurityQualityOfService", wintypes.LPVOID),
+        )
+
+    class _IO_STATUS_BLOCK(ctypes.Structure):
+        _fields_ = (
+            ("Status", ctypes.c_void_p),
+            ("Information", ctypes.c_size_t),
+        )
+
     _files = bind_common_kernel32()
+    _ntdll = ctypes.WinDLL("ntdll")
+    _ntdll.NtCreateFile.argtypes = (
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        ctypes.POINTER(_OBJECT_ATTRIBUTES),
+        ctypes.POINTER(_IO_STATUS_BLOCK),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.LPVOID,
+        wintypes.ULONG,
+    )
+    _ntdll.NtCreateFile.restype = ctypes.c_long
 
 
 _CANONICAL_LOCK = Path(__file__).resolve().parents[1] / "approved-launchers.lock"
@@ -55,6 +93,14 @@ _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _FILE_STANDARD_INFO_CLASS = 1
 _FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_GENERIC_WRITE = 0x40000000
+_SYNCHRONIZE = 0x00100000
+_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_FILE_CREATE = 2
+_FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
+_FILE_NON_DIRECTORY_FILE = 0x00000040
+_OBJ_CASE_INSENSITIVE = 0x00000040
+_STATUS_OBJECT_NAME_COLLISION = 0xC0000035
 
 if os.name == "nt":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -101,14 +147,15 @@ class RegistryLock:
 
 
 @contextmanager
-def _frozen_directory(directory: Path) -> Iterator[None]:
+def _frozen_directory(directory: Path) -> Iterator[int]:
     """Hold ``directory`` so that neither it nor an ancestor can be renamed or replaced.
 
     A handle with data access (list/traverse) and no FILE_SHARE_DELETE makes a
     rename of the directory fail with a sharing violation, and a rename of any
     ancestor with access denied; an attributes-only handle does not block the
     directory itself (measured 2026-09-27). The directory is opened without
-    following a reparse point and must be a plain directory.
+    following a reparse point and must be a plain directory. Yields the handle,
+    for creating inside the directory without resolving its path again.
     """
     handle = _files.CreateFileW(
         str(directory),
@@ -136,26 +183,56 @@ def _frozen_directory(directory: Path) -> Iterator[None]:
             or standard.DeletePending
         ):
             raise ValueError("invalid_launcher_registry_lock")
-        yield
+        yield int(handle)
     finally:
         _files.CloseHandle(handle)
 
 
-def _create_missing_lock(path: Path) -> None:
-    """Create an empty lock file where nothing exists yet, create-only.
+def _create_missing_lock(directory_handle: int, name: str) -> None:
+    """Create an empty lock file named ``name`` inside the held directory, create-only.
 
     The lock is gitignored, so a fresh clone has none and every acquire failed
-    with invalid_launcher_registry_lock (#93). O_EXCL never reuses or follows
-    whatever is already at the path; the new file is then opened and checked
-    exactly like one that already existed. Callers hold the parent frozen.
+    with invalid_launcher_registry_lock (#93). The file is created relative to
+    the directory handle (NtCreateFile with RootDirectory), so the parent's path
+    is never resolved again: a junction set on that directory in place after it
+    was opened makes the create fail with STATUS_REPARSE_POINT_ENCOUNTERED and
+    nothing is created (review of #114, F1; measured 2026-09-27). FILE_CREATE
+    never reuses an existing file; that one is then checked like any other.
     """
-    try:
-        descriptor = os.open(
-            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600
-        )
-    except FileExistsError:
+    if not name or name in {".", ".."} or any(mark in name for mark in "\\/:"):
+        raise ValueError("invalid_launcher_registry_lock")
+    buffer = ctypes.create_unicode_buffer(name)
+    object_name = _UNICODE_STRING(
+        len(name) * 2, len(name) * 2 + 2, ctypes.cast(buffer, wintypes.LPWSTR)
+    )
+    attributes = _OBJECT_ATTRIBUTES(
+        ctypes.sizeof(_OBJECT_ATTRIBUTES),
+        directory_handle,
+        ctypes.pointer(object_name),
+        _OBJ_CASE_INSENSITIVE,
+        None,
+        None,
+    )
+    status_block = _IO_STATUS_BLOCK()
+    created = wintypes.HANDLE()
+    status = _ntdll.NtCreateFile(
+        ctypes.byref(created),
+        _GENERIC_WRITE | _SYNCHRONIZE,
+        ctypes.byref(attributes),
+        ctypes.byref(status_block),
+        None,
+        _FILE_ATTRIBUTE_NORMAL,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        _FILE_CREATE,
+        _FILE_NON_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT,
+        None,
+        0,
+    ) & 0xFFFFFFFF
+    if status == _STATUS_OBJECT_NAME_COLLISION:
         return  # created concurrently: the checks below decide
-    os.close(descriptor)
+    if status != 0:
+        raise OSError(0, f"launcher registry lock not created (NTSTATUS {status:#010x})")
+    _files.CloseHandle(created)
 
 
 def acquire_registry_lock(*, exclusive: bool, path: Path = _CANONICAL_LOCK) -> RegistryLock:
@@ -164,13 +241,13 @@ def acquire_registry_lock(*, exclusive: bool, path: Path = _CANONICAL_LOCK) -> R
     try:
         if not os.path.lexists(path):
             # Freeze the parent chain, check it is free of links and junctions,
-            # and create inside it: nothing can swap a directory in between
-            # (review of #114, F1).
-            with _frozen_directory(path.parent):
+            # and create relative to the held parent: nothing can swap or convert
+            # a directory in between (review of #114, F1).
+            with _frozen_directory(path.parent) as parent:
                 _reject_path_name_surrogates(
                     path.parent, error_code="invalid_launcher_registry_lock"
                 )
-                _create_missing_lock(path)
+                _create_missing_lock(parent, path.name)
         _reject_path_name_surrogates(
             path, error_code="invalid_launcher_registry_lock"
         )
