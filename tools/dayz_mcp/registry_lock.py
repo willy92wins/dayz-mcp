@@ -202,9 +202,10 @@ def _create_missing_lock(directory_handle: int, name: str) -> None:
     if not name or name in {".", ".."} or any(mark in name for mark in "\\/:"):
         raise ValueError("invalid_launcher_registry_lock")
     buffer = ctypes.create_unicode_buffer(name)
-    object_name = _UNICODE_STRING(
-        len(name) * 2, len(name) * 2 + 2, ctypes.cast(buffer, wintypes.LPWSTR)
-    )
+    # UNICODE_STRING lengths are in bytes of UTF-16: a character outside the
+    # BMP takes two code units (review of #114, round 3).
+    size = len(name.encode("utf-16-le"))
+    object_name = _UNICODE_STRING(size, size + 2, ctypes.cast(buffer, wintypes.LPWSTR))
     attributes = _OBJECT_ATTRIBUTES(
         ctypes.sizeof(_OBJECT_ATTRIBUTES),
         directory_handle,

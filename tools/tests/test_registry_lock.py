@@ -126,6 +126,17 @@ class RegistryLockTest(unittest.TestCase):
         with registry_lock.acquire_registry_lock(exclusive=False, path=missing):
             pass
 
+    def test_a_lock_name_outside_the_bmp_is_created_whole(self) -> None:
+        # Review of #114, round 3: the UNICODE_STRING length counted characters,
+        # not UTF-16 code units, and truncated this name to "lock-\U0001F512.tx".
+        lock = self.lock_path.with_name("lock-\U0001F512.txt")
+
+        with registry_lock.acquire_registry_lock(exclusive=True, path=lock):
+            pass
+
+        self.assertTrue(lock.is_file())
+        self.assertFalse(lock.with_name("lock-\U0001F512.tx").exists())
+
     def test_lock_is_not_created_in_a_missing_directory_or_through_a_junction(
         self,
     ) -> None:
