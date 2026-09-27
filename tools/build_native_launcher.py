@@ -1041,15 +1041,22 @@ def _publish_bundle(staging: Path, output: Path, fingerprint: dict[str, str]) ->
     os.replace then fails with WinError 17 (#93). The bundle is first copied
     beside the output and checked to be the same artifact, so every rename
     stays inside the output's directory.
+
+    The last valid bundle is never lost. Windows has no atomic directory swap,
+    so between the two renames only ``.previous`` holds it; a publish stopped
+    there is repaired by the next one, which restores ``.previous`` before
+    anything else (review of #114, F2).
     """
     output.parent.mkdir(parents=True, exist_ok=True)
     incoming = output.with_name(output.name + ".incoming")
     previous = output.with_name(output.name + ".previous")
+    if previous.exists() and not output.exists():
+        os.replace(previous, output)
     for stale in (incoming, previous):
         if stale.exists():
             shutil.rmtree(stale)
-    shutil.copytree(staging, incoming)
     try:
+        shutil.copytree(staging, incoming)
         verify_bundle(incoming, require_receipt=False)
         if _artifact_fingerprint(incoming) != fingerprint:
             raise ValueError("final_copy_mismatch")

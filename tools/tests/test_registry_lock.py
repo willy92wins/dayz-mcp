@@ -98,6 +98,49 @@ class RegistryLockTest(unittest.TestCase):
             )
         self.assertEqual(list(target.iterdir()), [])
 
+        # A junction higher up: the parent itself is a plain directory reached
+        # through it, so only the check of the whole chain refuses it.
+        (target / "sub").mkdir()
+        with self.assertRaisesRegex(RuntimeError, "invalid_launcher_registry_lock"):
+            registry_lock.acquire_registry_lock(
+                exclusive=True, path=junction / "sub" / "approved-launchers.lock"
+            )
+        self.assertEqual(list((target / "sub").iterdir()), [])
+
+    def test_the_parent_chain_cannot_move_while_the_lock_is_created(self) -> None:
+        # Review of #114, F1: the parent was checked, then swapped for a junction
+        # before the create. The chain is now frozen while the file is created.
+        import _winapi
+        from unittest.mock import patch
+
+        root = self.lock_path.with_name("chain")
+        parent, moved, redirected = root / "parent", root / "moved", root / "redirected"
+        parent.mkdir(parents=True)
+        redirected.mkdir()
+        lock = parent / "approved-launchers.lock"
+        original = registry_lock._create_missing_lock
+        attempts: list[str] = []
+
+        def swap_then_create(path: Path) -> None:
+            try:
+                parent.rename(moved)
+                _winapi.CreateJunction(str(redirected), str(parent))
+                attempts.append("swapped")
+            except OSError as error:
+                attempts.append(f"blocked: {error}")
+            original(path)
+
+        self.addCleanup(lambda: parent.is_junction() and os.rmdir(parent))
+        with patch.object(registry_lock, "_create_missing_lock", swap_then_create):
+            with registry_lock.acquire_registry_lock(exclusive=True, path=lock):
+                pass
+
+        self.assertEqual(len(attempts), 1)
+        self.assertTrue(attempts[0].startswith("blocked"), attempts)
+        self.assertTrue(lock.is_file())
+        self.assertFalse(moved.exists())
+        self.assertEqual(list(redirected.iterdir()), [])
+
     def test_failed_productive_open_releases_its_shared_lock(self) -> None:
         # Stays on the canonical lock deliberately: the claim is about the
         # production call site, and open_approved_launcher is hard-wired to it.

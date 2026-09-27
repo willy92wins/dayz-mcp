@@ -119,6 +119,46 @@ class PublishStaysOnTheOutputVolumeTest(unittest.TestCase):
             sorted(path.name for path in self.output.parent.iterdir()), ["dayz-test-v1"]
         )
 
+    def test_a_publish_stopped_between_its_renames_is_restored_first(self) -> None:
+        # Review of #114, F2: output gone and .previous holding the last bundle.
+        # A retry whose copy fails must not lose it.
+        previous = self.output.with_name(self.output.name + ".previous")
+        previous.mkdir(parents=True)
+        (previous / "app.pyz").write_bytes(b"old")
+
+        with patch.object(
+            build_native_launcher.shutil, "copytree", side_effect=OSError("copy failed")
+        ):
+            with self.assertRaisesRegex(OSError, "copy failed"):
+                build_native_launcher._publish_bundle(
+                    self.staging, self.output, self.fingerprint
+                )
+
+        self.assertEqual((self.output / "app.pyz").read_bytes(), b"old")
+        self.assertEqual(
+            sorted(path.name for path in self.output.parent.iterdir()), ["dayz-test-v1"]
+        )
+
+    def test_a_copy_that_fails_halfway_leaves_no_incoming_behind(self) -> None:
+        self.output.mkdir(parents=True)
+        (self.output / "app.pyz").write_bytes(b"old")
+
+        def half_copy(_source: object, destination: object, **_kwargs: object) -> None:
+            Path(destination).mkdir()
+            (Path(destination) / "app.pyz").write_bytes(b"partial")
+            raise OSError("disk full")
+
+        with patch.object(build_native_launcher.shutil, "copytree", half_copy):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                build_native_launcher._publish_bundle(
+                    self.staging, self.output, self.fingerprint
+                )
+
+        self.assertEqual((self.output / "app.pyz").read_bytes(), b"old")
+        self.assertEqual(
+            sorted(path.name for path in self.output.parent.iterdir()), ["dayz-test-v1"]
+        )
+
     def test_a_copy_that_is_not_the_staged_artifact_leaves_the_output_alone(self) -> None:
         self.output.mkdir(parents=True)
         (self.output / "app.pyz").write_bytes(b"old")
