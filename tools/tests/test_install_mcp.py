@@ -1376,5 +1376,75 @@ class PublicToolCountDocsTest(unittest.TestCase):
             self.assertIn(f"`{name}`", architecture)
 
 
+# Evaluates only the two pure argument validators and the argv block of
+# install-mcp.ps1 (review of #113, F1): no installer, CLI or registry action runs.
+_PS_ARGV_PROBE = r'''
+param([string]$SourcePath)
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($SourcePath, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count) { throw 'PowerShell source did not parse' }
+foreach ($name in @('Test-CanonicalTextArguments', 'Test-CanonicalArrayArguments')) {
+    $functionAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
+    if ($null -eq $functionAst) { throw "Missing function $name" }
+    . ([scriptblock]::Create($functionAst.Extent.Text))
+}
+$source = [IO.File]::ReadAllText($SourcePath)
+$begin = $source.IndexOf('$serverArgs = @(')
+$end = $source.IndexOf('$quotedClaudeArgs =', $begin)
+if ($begin -lt 0 -or $end -lt 0) { throw 'Missing argv block' }
+$argvBlock = [scriptblock]::Create($source.Substring($begin, $end - $begin))
+$KeyFile = Join-Path $PSScriptRoot 'key with spaces.key'
+$Port = 18765
+$ExpectedGameVersion = ''
+$AllowLegacy = $false
+$IdleTimeoutSeconds = 1800
+foreach ($enabled in @($false, $true)) {
+    $ClaudeNoProgressiveDisclosure = $enabled
+    . $argvBlock
+    if (($claudeArgs -contains '--no-progressive-disclosure') -ne $enabled) { throw 'Claude flag not preserved' }
+    if ($codexArgs -contains '--no-progressive-disclosure') { throw 'Flag leaked to Codex' }
+    $textArgs = ($claudeArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+    if (-not (Test-CanonicalTextArguments $textArgs $claudeArgs)) { throw 'Claude text rejected' }
+    if (-not (Test-CanonicalArrayArguments $claudeArgs $claudeArgs)) { throw 'Array rejected' }
+    if ($enabled) {
+        if (Test-CanonicalTextArguments ($textArgs + ' --no-progressive-disclosure') $claudeArgs) { throw 'Duplicate accepted' }
+        if (Test-CanonicalArrayArguments ($claudeArgs + '--no-progressive-disclosure') ($claudeArgs + '--no-progressive-disclosure')) { throw 'Array duplicate accepted' }
+    }
+}
+'PASS'
+'''
+
+
+@unittest.skipUnless(os.name == "nt", "install-mcp.ps1 runs on Windows PowerShell")
+class PowerShellInstallerArgvTest(unittest.TestCase):
+    def test_claude_switch_adds_the_disclosure_opt_out_to_claude_only(self) -> None:
+        with TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "argv_probe.ps1"
+            probe.write_text(_PS_ARGV_PROBE, encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(probe),
+                    "-SourcePath",
+                    str(TOOLS_DIR / "install-mcp.ps1"),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(
+            (completed.returncode, completed.stdout.strip()),
+            (0, "PASS"),
+            completed.stderr,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
