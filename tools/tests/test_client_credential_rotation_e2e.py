@@ -224,9 +224,10 @@ class LiveClientCredentialRotationE2ETest(unittest.TestCase):
                 # On 3.11 and 3.12 the venv redirector rewrites the child's
                 # argv[0] to the base interpreter (#93); accept exactly what the
                 # daemon's own accreditation accepts (argv_matches_redirected).
+                observed_argv = native_process_snapshot.command_argv_of(listener_pid)
                 self.assertTrue(
                     accredited_daemon_transport.argv_matches_redirected(
-                        native_process_snapshot.command_argv_of(listener_pid),
+                        observed_argv,
                         argv,
                         native_executable,
                     )
@@ -239,9 +240,11 @@ class LiveClientCredentialRotationE2ETest(unittest.TestCase):
                         cwd,
                     )
                 )
+                # Hash the argv the process actually has, once it passed the
+                # redirect rule above: accredited_daemon_transport does the same.
                 expected_hashes = identity_hashes(
                     native_executable,
-                    argv,
+                    observed_argv,
                 )
                 identity = NativeProcessGuard().snapshot(listener_pid)
                 self.assertIs(identity.get("identity_complete"), True)

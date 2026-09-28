@@ -541,7 +541,10 @@ class ClientNotPollingWaitContractTest(unittest.IsolatedAsyncioTestCase):
         wall = time.monotonic() - t0
         self.assertTrue(result["timed_out"])
         self.assertEqual(result["last_error"], not_ready)
-        self.assertEqual(runtime.bridge_calls, 1)
+        # One probe, or two on a coarse clock: asyncio treats a timer within one
+        # clock resolution as due, and on Windows before 3.13 time.monotonic
+        # ticks every ~15.6 ms (see tests.test_wait_for).
+        self.assertIn(runtime.bridge_calls, (1, 2))
         self.assertLess(wall, 0.3, f"deadline exceeded: {wall:.3f}s for timeout_s=0.1")
 
     async def test_version_blocked_still_aborts_the_first_probe(self) -> None:
