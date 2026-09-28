@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import stat
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,6 +15,15 @@ from dayz_mcp import (
     native_bundle,
     request_path_authority,
 )
+
+
+def _is_junction(path: Path) -> bool:
+    # Path.is_junction arrived in 3.12 and the floor is 3.11 (pyproject.toml).
+    # This is what it does: an lstat whose reparse tag is a mount point.
+    try:
+        return os.lstat(path).st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+    except OSError:
+        return False
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -311,7 +321,7 @@ class SealedRootTest(unittest.TestCase):
 
     def test_host_p_mods_junction(self) -> None:
         junction = Path(r"P:\Mods")
-        if not junction.exists() or not junction.is_junction():
+        if not junction.exists() or not _is_junction(junction):
             self.skipTest(r"P:\Mods exact junction is unavailable")
         with self.assertRaisesRegex(ValueError, "unexpected_root_reparse:"):
             self.builder._sealed_root(r"P:\Mods", allow_root_junction=False)

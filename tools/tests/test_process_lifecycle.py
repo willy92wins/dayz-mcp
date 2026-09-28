@@ -2540,7 +2540,10 @@ class ProcessLifecycleTest(unittest.TestCase):
         )
         self.assertEqual(row["activity_state"], "unknown")
         self.assertIsNone(row["last_activity_age_s"])
-        after_at = time.time()
+        # Strictly after the tombstone: on Windows before Python 3.13 time.time()
+        # ticks every ~15.6 ms, and a credit stamped in the tombstone's own tick
+        # is, rightly, not trusted.
+        after_at = time.time() + 0.05
         self.assertTrue(
             self.lifecycle.record_command_activity("run-existing", now=after_at)
         )
@@ -2592,7 +2595,7 @@ class ProcessLifecycleTest(unittest.TestCase):
         )
         self.assertEqual(row["activity_state"], "unknown")
         self.assertIsNone(row["last_activity_age_s"])
-        after_at = time.time()
+        after_at = time.time() + 0.05  # strictly after the tombstone, see above
         self.assertTrue(
             self.lifecycle.record_command_activity("run-existing", now=after_at)
         )
@@ -2623,7 +2626,7 @@ class ProcessLifecycleTest(unittest.TestCase):
             self.request() | {"run_id": "run-existing", "role": "server"},
         )
         self.assertIn("error", result, result)
-        after_at = time.time()
+        after_at = time.time() + 0.05  # strictly after the tombstone, see above
         self.assertTrue(
             self.lifecycle.record_command_activity("run-existing", now=after_at)
         )

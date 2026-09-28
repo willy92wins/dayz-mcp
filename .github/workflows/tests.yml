@@ -1,8 +1,10 @@
 # Runs the Python unit suite (tools/tests) on every pull request and on main.
 # The job uses no secrets. The suite runs from tools/.venv-mcp, the venv that
 # install-mcp.ps1 creates: the daemon only starts under that interpreter
-# (dayz_mcp/daemon.py, _ensure_identity_migration). Python 3.14 is what that
-# venv runs today; issue #93 reports its identity checks failing on 3.12.
+# (dayz_mcp/daemon.py, _ensure_identity_migration). Two interpreters: 3.14,
+# what the owner's venv runs, and 3.11, the floor pyproject.toml declares.
+# Issue #93 was a 3.11/3.12-only identity failure (the venv redirector's
+# argv[0], fixed in #112) that a 3.14-only CI could not see.
 name: tests
 
 on:
@@ -20,9 +22,15 @@ concurrency:
 
 jobs:
   unit:
-    name: unittest (windows, Python 3.14)
+    name: unittest (windows, Python ${{ matrix.python }})
     runs-on: windows-latest
     timeout-minutes: 30
+    strategy:
+      # A red on one interpreter must not cancel the other: the point of the
+      # matrix is to see which one fails.
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
     defaults:
       run:
         shell: pwsh
@@ -36,7 +44,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.14"
+          python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: tools/requirements-mcp.txt
 

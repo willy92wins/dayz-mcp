@@ -316,7 +316,9 @@ def parse_dayz_test_request(
             object_pairs_hook=_reject_duplicate_pairs,
             parse_constant=_reject_json_constant,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        # RecursionError: on Python 3.11 and 3.12 the decoder itself gives up on
+        # deep nesting that 3.14 parses and _valid_unicode_tree then refuses.
         _invalid("json_undecodable")
     if not isinstance(value, dict) or not set(value).issubset(_REQUEST_KEYS):
         _invalid("unknown_key")

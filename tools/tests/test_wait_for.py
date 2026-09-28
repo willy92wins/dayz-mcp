@@ -247,7 +247,8 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
         self.assertEqual(result["last_error"], not_ready)
-        self.assertEqual(runtime.bridge_calls, 1)
+        # One probe, or two on a coarse clock (see test_deadline_bounds_the_sleep).
+        self.assertIn(runtime.bridge_calls, (1, 2))
         self.assertLess(wall, 0.3, f"deadline exceeded: {wall:.3f}s for timeout_s=0.1")
 
     async def test_bare_client_not_polling_token_is_retried_and_named(self) -> None:
@@ -349,8 +350,10 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
-        self.assertEqual(result["probes"], 1)
-        self.assertEqual(result["not_ready_probes"], 1)
+        # One probe, or two on a coarse clock (see test_deadline_bounds_the_sleep);
+        # every probe met client_not_polling.
+        self.assertIn(result["probes"], (1, 2))
+        self.assertEqual(result["not_ready_probes"], result["probes"])
         self.assertEqual(result["last_error"], _MAPPED_CLIENT_NOT_POLLING)
         self.assertEqual(result["tool"], "wait_for")
         self.assertGreater(result["elapsed_s"], 0.0)
@@ -404,7 +407,11 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         wall = time.monotonic() - t0
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
-        self.assertEqual(runtime.bridge_calls, 1)
+        # One probe, or two when the clock is coarse: asyncio treats a timer
+        # within one clock resolution as due, and on Windows before 3.13
+        # time.monotonic ticks every ~15.6 ms, so the capped sleep can end
+        # just before the deadline and leave room for a last probe.
+        self.assertIn(runtime.bridge_calls, (1, 2))
         self.assertLess(wall, 0.3, f"deadline exceeded: {wall:.3f}s for timeout_s=0.1")
 
     async def test_sleep_does_not_hold_tool_lock(self) -> None:
