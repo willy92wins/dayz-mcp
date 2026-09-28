@@ -311,6 +311,9 @@ def _activity_from_snapshot(
 # 250f: the roles a person can play in. An offline run is a client with its
 # own mission (dayz_test_worker treats it as one), never a server alone.
 _PLAYER_ROLES = frozenset({"client", "offline"})
+# 250f: past this many remembered exclusions, the ones no active run holds any
+# more are pruned. Live ones are never dropped (review #125 R3).
+_EXCLUSION_PRUNE_AT = 256
 
 
 def _client_liveness(run: RunRecord, probes: _BoxProbes) -> str:
@@ -1409,7 +1412,8 @@ class ProcessLifecycle:
         # Registered processes confirmed gone or reused, by the full record
         # (generation, run, pid, creation time): a later failed guard read can
         # never make them count again (review #125 R2-1). A new process that
-        # reuses the pid is another record and is not excluded.
+        # reuses the pid is another record and is not excluded. Bounded by the
+        # manifest: only exclusions of records no active run holds are pruned.
         self._excluded_use_records: dict[tuple[str, str, int, str], None] = {}
         self._use_clock_origin = time.time()
         # Retired-run diagnostics live in daemon memory and start empty after a
@@ -1709,11 +1713,30 @@ class ProcessLifecycle:
                         )
                     ):
                         with self._activity_lock:
-                            self._excluded_use_records[record_key] = None
-                            while len(self._excluded_use_records) > 1024:
-                                self._excluded_use_records.pop(
-                                    next(iter(self._excluded_use_records))
-                                )
+                            # A read still in flight when the run was retired
+                            # leaves nothing behind (review #125 R3-1).
+                            if self._activity_key(run.run_id) not in self._retired_use_keys:
+                                self._excluded_use_records[record_key] = None
+                            if len(self._excluded_use_records) > _EXCLUSION_PRUNE_AT:
+                                # Never forget a live exclusion: only records no
+                                # active run holds any more are dropped, so the
+                                # table stays bounded by the manifest itself
+                                # (review #125 R3, R2-1 at the cap).
+                                live = {
+                                    (
+                                        *self._activity_key(item.run_id),
+                                        held.pid,
+                                        held.creation_time_utc,
+                                    )
+                                    for item in runs
+                                    for held in item.processes
+                                }
+                                for stale in [
+                                    key
+                                    for key in self._excluded_use_records
+                                    if key not in live
+                                ]:
+                                    self._excluded_use_records.pop(stale, None)
                         return None
                     return run.run_id, False
             return None

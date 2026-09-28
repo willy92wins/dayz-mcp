@@ -427,6 +427,46 @@ class BoxUseStateTest(unittest.TestCase):
         self.guard.snapshots[802] = snapshot(fresh)
         self.assertEqual(self.human_input(now - 1.0), ["run-x"])
 
+    def _confirm_reused(self, pid: int, at: float) -> None:
+        """The guard shows another process on this registered pid, with input."""
+
+        reused = dict(self.guard.snapshots[pid])
+        reused["creation_time_utc"] = "2026-09-29T00:00:00.0000000Z"
+        self.guard.snapshots[pid] = reused
+        self.assertEqual(self.human_input(at, pid=pid), [])
+
+    def test_r3_a_live_exclusion_is_never_pruned(self) -> None:
+        # Review #125 R3: past the prune threshold only records no active run
+        # holds any more go away; the live exclusion of run-x stays.
+        self.add_run("run-x")
+        self.add_run(
+            "run-y", processes=[process(901, role="server"), process(902, role="client")]
+        )
+        now = time.time()
+        self._confirm_reused(802, now)
+        key = (GENERATION, "run-x", 802, "2026-07-15T00:00:22.0000000Z")
+        self.assertIn(key, self.lifecycle._excluded_use_records)
+        for index in range(300):
+            run = self.store.get("run-y")
+            fresh = process(2000 + index, role="client")
+            run.processes = [run.processes[0], fresh]
+            self.store.replace(run)
+            self.guard.snapshots[fresh.pid] = snapshot(fresh)
+            self._confirm_reused(fresh.pid, now + 1.0 + index)
+        self.assertIn(key, self.lifecycle._excluded_use_records)
+        self.assertLess(len(self.lifecycle._excluded_use_records), 260)
+        # And the retained exclusion still holds when the guard read fails.
+        self.guard.snapshots[802] = {"error": "identity_unavailable", "exit_code": 3}
+        self.assertEqual(self.human_input(now + 400.0), [])
+
+    def test_r3_1_a_read_in_flight_after_retirement_leaves_no_exclusion(self) -> None:
+        self.add_run()
+        self.lifecycle._seal_terminal("run-x", time.time())
+        self._confirm_reused(802, time.time())
+        self.assertFalse(
+            [key for key in self.lifecycle._excluded_use_records if key[1] == "run-x"]
+        )
+
     def test_f4_a_stale_stretch_restarts_the_clock_at_the_recovery(self) -> None:
         released = self.release_to_idle()
         self.bindings.bound.add("run-x")
