@@ -72,7 +72,7 @@ class KnowledgePrepareConflict(RuntimeError):
 _PREPARE_TEST_HOOK: Callable[[], None] | None = None
 
 _TARGET_BUILD_RE = re.compile(
-    r"^Target stable build:\s+\*\*DayZ PC\s+([0-9]+(?:\.[0-9]+){3})\*\*",
+    r"^Target stable build:\s+\*\*DayZ PC\s+([0-9]+(?:\.[0-9]+){3})\*\*",  # drive-letters: not a path
     re.MULTILINE,
 )
 _EVIDENCE_RE = re.compile(

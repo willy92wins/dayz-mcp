@@ -3566,10 +3566,12 @@ async def _tool_lock_until(runtime: Any, deadline: float) -> AsyncIterator[bool]
 
     Yields whether it was acquired. wait_for fixes its deadline before it asks
     for the lock, so an unbounded wait lets a sibling tool that holds the lock
-    stretch the call past timeout_s (fb-20260928-001643-f280). A free lock is
-    taken even with no time left: acquire does not yield then, so the timeout
-    cannot fire first. If the timeout fires while acquire waits, asyncio.Lock
-    hands the wake-up to the next waiter, so nothing is left held.
+    stretch the call past timeout_s (fb-20260928-001643-f280). A lock that is
+    free, with nobody queued for it, is taken even with no time left: acquire
+    does not yield then, so the timeout cannot fire first. With waiters queued,
+    the call waits its turn inside the deadline like any other. If the timeout
+    fires while acquire waits, asyncio.Lock hands the wake-up to the next
+    waiter, so nothing is left held.
     """
     acquired = False
     try:

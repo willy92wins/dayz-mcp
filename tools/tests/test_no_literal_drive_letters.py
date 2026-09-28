@@ -11,6 +11,9 @@ Exceptions (short, each with a reason):
 3. `tools/tests/**` is out of scope. Those tests build fake Windows paths on
    purpose (`test_doctor.py`, `test_install_mcp.py`, `test_secure_launcher.py`).
    This scan is the published package only.
+4. A string on a line that carries `# drive-letters: not a path`. Only for text
+   that provably is not a path, such as a regex whose `build:\\s` reads as
+   drive `d:\\`; the mark stays visible at the line it exempts.
 """
 
 from __future__ import annotations
@@ -34,10 +37,9 @@ _ALLOWED_DRIVE_PREFIXES = (
     "c:\\program files",  # declared Steam/Windows default-install fallback
 )
 
-# A drive letter starts its token: no letter, digit or underscore right before
-# it. Without the lookbehind the regex text `build:\s` read as drive `d:\`, and
-# dayz_mcp/knowledge.py had to split a pattern across two literals to dodge it.
-_DRIVE_IN_STRING = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:\\")
+_DRIVE_IN_STRING = re.compile(r"[A-Za-z]:\\")
+# Exception 4. A comment, so the exemption sits on the line it exempts.
+_NOT_A_PATH_PRAGMA = "drive-letters: not a path"
 
 
 def _docstring_lines(source: str) -> set[int]:
@@ -80,6 +82,11 @@ def _decoded_string_tokens(source: str) -> list[tuple[int, str]]:
     except tokenize.TokenError:
         return out
     fstring_middle = getattr(tokenize, "FSTRING_MIDDLE", None)
+    skip = skip | {
+        tok.start[0]
+        for tok in tokens
+        if tok.type == tokenize.COMMENT and _NOT_A_PATH_PRAGMA in tok.string
+    }
     for tok in tokens:
         if tok.type == tokenize.STRING:
             if tok.start[0] in skip:
@@ -177,14 +184,13 @@ class NoLiteralDriveLettersTest(unittest.TestCase):
             self.assertTrue(hits)
             self.assertTrue(any("C:\\Users\\guill" in row for row in hits))
 
-    def test_letter_inside_a_word_is_not_a_drive(self) -> None:
-        # The regex text that used to trip the scanner, next to two real paths
-        # that must still be caught: one at the start of a string, one after a
-        # space.
+    def test_pragma_exempts_only_its_own_line(self) -> None:
+        # The regex text that trips the scanner is exempt on the line that
+        # carries the pragma, and nowhere else.
         source = (
-            'PATTERN = r"^Target stable build:\\s+\\*\\*DayZ PC"\n'
+            'MARKED = r"^Target stable build:\\s+"  # drive-letters: not a path\n'
+            'UNMARKED = r"^Target stable build:\\s+"\n'
             'LEAK = r"D:\\Games\\DayZ"\n'
-            'NOTE = "copied to E:\\\\Temp"\n'
         )
         with tempfile.TemporaryDirectory() as raw:
             pkg = Path(raw) / "dayz_mcp"
@@ -192,9 +198,25 @@ class NoLiteralDriveLettersTest(unittest.TestCase):
             (pkg / "mixed.py").write_text(source, encoding="utf-8")
             hits = drive_letter_hits(pkg)
         self.assertEqual(len(hits), 2, hits)
-        self.assertTrue(any("D:\\Games" in row for row in hits))
-        self.assertTrue(any("E:\\Temp" in row for row in hits))
-        self.assertFalse(any("build" in row for row in hits))
+        self.assertFalse(any(row.startswith("mixed.py:1:") for row in hits), hits)
+        self.assertTrue(any(row.startswith("mixed.py:2:") for row in hits), hits)
+        self.assertTrue(any("D:\\Games" in row for row in hits), hits)
+
+    def test_paths_after_escapes_or_flags_are_still_reported(self) -> None:
+        # Review R1 of #118: a lookbehind on the character before the letter
+        # missed all three, because an f-string reaches the scanner with its
+        # escapes undecoded (the n of a newline sits right before C:).
+        source = (
+            'A = f"{root}\\nC:\\\\Users\\\\guill"\n'
+            'B = "\\tD:\\\\Games"\n'
+            'C = "/IC:\\\\SDK\\\\include"\n'
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            pkg = Path(raw) / "dayz_mcp"
+            pkg.mkdir()
+            (pkg / "escaped.py").write_text(source, encoding="utf-8")
+            hits = drive_letter_hits(pkg)
+        self.assertEqual(len(hits), 3, hits)
 
     def test_published_package_has_no_literal_drive_letters(self) -> None:
         self.assertTrue(PACKAGE.is_dir(), f"missing package {PACKAGE}")
