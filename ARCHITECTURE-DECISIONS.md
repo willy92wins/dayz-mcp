@@ -8,12 +8,12 @@ If you are about to change one of these rules, you are changing the design, not 
 
 ## Authority and transport
 
-1. **World state is read and written on the server.** Positions and state come from `MissionServer`.
-   - The client peer does what only the player's own client can do:
-     - the camera, the UI and key input;
-     - player actions, started the way the player would start them (`action_use`);
-     - the owner's side of a vehicle: get-in, engine and `vehicle_control`.
-   - Driving is the one piece of world state that moves from the client. A car under `NetworkMoveStrategy.PHYSICS` only moves from its owning client.
+1. **The server is the authority by default.** Unless a verb is routed to the client, world state is read and written on the server peer, in `MissionServer`.
+   - The client peer does what only the player's own client can do, and reads what only it sees:
+     - the camera, the UI and input (`camera_*`, `ui_*`, `key_press`, `restore_gameplay`);
+     - player actions, started the way the player would start them (`action_use`, `action_use_target`, `player_respawn`);
+     - the owner's side of a vehicle: get-in, engine, `vehicle_control` and its release, plus the owner-side readings `vehicle_telemetry` and `vehicle_trace`.
+   - Driving is the one piece of world state that moves from the client. A car under `NetworkMoveStrategy.PHYSICS` only moves from its owning client, so its position and speed are read there too.
    - *Why:* engine-native reads and writes cannot be spoofed by the agent. `ActionStartEngine` returns early on the server under PHYSICS; this is the B3 probe in the README.
    - *Where:* `SERVER_COMMANDS` and `CLIENT_COMMANDS` in `tools/dayz_mcp/loopback.py`, which route each verb to its peer.
    - *Decisions:* D-01, D-06 and D-12.
