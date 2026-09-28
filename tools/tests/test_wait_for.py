@@ -350,8 +350,10 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
-        self.assertEqual(result["probes"], 1)
-        self.assertEqual(result["not_ready_probes"], 1)
+        # One probe, or two on a coarse clock (see test_deadline_bounds_the_sleep);
+        # every probe met client_not_polling.
+        self.assertIn(result["probes"], (1, 2))
+        self.assertEqual(result["not_ready_probes"], result["probes"])
         self.assertEqual(result["last_error"], _MAPPED_CLIENT_NOT_POLLING)
         self.assertEqual(result["tool"], "wait_for")
         self.assertGreater(result["elapsed_s"], 0.0)

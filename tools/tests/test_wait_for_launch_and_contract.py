@@ -581,8 +581,10 @@ class ClientNotPollingWaitContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
-        self.assertEqual(result["probes"], 1)
-        self.assertEqual(result["not_ready_probes"], 1)
+        # One probe, or two on a coarse clock (see tests.test_wait_for); every
+        # probe met client_not_polling.
+        self.assertIn(result["probes"], (1, 2))
+        self.assertEqual(result["not_ready_probes"], result["probes"])
         self.assertEqual(result["last_error"], _MAPPED_CLIENT_NOT_POLLING)
 
     async def test_real_runtime_client_not_polling_then_players_satisfies(self) -> None:
