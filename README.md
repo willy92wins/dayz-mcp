@@ -78,7 +78,9 @@ vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
 Several agent sessions can share one running game through a single daemon that owns
 the port and hands out leases. The full surface, the transport and the security
 model are in [`dayz-mcp-architecture.md`](dayz-mcp-architecture.md);
-the acceptance contract is in [`product-spec.md`](product-spec.md).
+the acceptance contract is in [`product-spec.md`](product-spec.md). The rules that
+hold the design together, and why each one exists, are in
+[`ARCHITECTURE-DECISIONS.md`](ARCHITECTURE-DECISIONS.md).
 
 ## In-game numbers
 
