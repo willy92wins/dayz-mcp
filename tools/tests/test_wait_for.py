@@ -21,6 +21,7 @@ from dayz_mcp import loopback, server
 from dayz_mcp.server import ServerConfig, build_app
 from tests.client_helpers import _fixture_client_runtime
 from tests.mcp_helpers import _content_json
+from tests._tiers import slow_test
 
 def _live_run(profiles: Path) -> dict:
     """A RUNNING run: a process stamped just now, so its logs clear the floor.
@@ -122,6 +123,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["observed"], 2)
         self.assertFalse(result["timed_out"])
 
+    @slow_test
     async def test_satisfied_on_third_probe(self) -> None:
         runtime = _FakeRuntime(player_counts=[0, 1, 3])
         result = await server.execute_wait_for(
@@ -132,6 +134,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["observed"], 3)
         self.assertFalse(result["timed_out"])
 
+    @slow_test
     async def test_timeout_returns_unsatisfied_without_raising(self) -> None:
         runtime = _FakeRuntime(fallback=0)
         result = await server.execute_wait_for(
@@ -184,6 +187,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["satisfied"])
         self.assertEqual(runtime.bridge_calls, 1)
 
+    @slow_test
     async def test_waits_through_server_poll_stale(self) -> None:
         stale = "game_not_ready:reason=server_poll_stale"
         runtime = _FakeRuntime(player_counts=[stale, stale, 1])
@@ -195,6 +199,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["not_ready_probes"], 2)
         self.assertEqual(runtime.bridge_calls, 3)
 
+    @slow_test
     async def test_server_poll_stale_timeout_reports_last_error(self) -> None:
         stale = "game_not_ready:reason=server_poll_stale"
         runtime = _FakeRuntime(fallback=stale)
@@ -207,6 +212,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["last_error"], stale)
         self.assertGreaterEqual(result["not_ready_probes"], 2)
 
+    @slow_test
     async def test_waits_through_client_not_polling(self) -> None:
         not_ready = "game_not_ready:reason=client_not_polling"
         runtime = _FakeRuntime(player_counts=[not_ready, not_ready, 1])
@@ -220,6 +226,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.bridge_calls, 3)
         self.assertEqual(result["last_error"], not_ready)
 
+    @slow_test
     async def test_client_not_polling_timeout_reports_last_error(self) -> None:
         not_ready = "game_not_ready:reason=client_not_polling"
         runtime = _FakeRuntime(fallback=not_ready)
@@ -251,6 +258,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(runtime.bridge_calls, (1, 2))
         self.assertLess(wall, 0.3, f"deadline exceeded: {wall:.3f}s for timeout_s=0.1")
 
+    @slow_test
     async def test_bare_client_not_polling_token_is_retried_and_named(self) -> None:
         runtime = _FakeRuntime(player_counts=["client_not_polling", 1])
         result = await server.execute_wait_for(
@@ -261,6 +269,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["last_error"], "game_not_ready:reason=client_not_polling")
         self.assertEqual(runtime.bridge_calls, 2)
 
+    @slow_test
     async def test_structured_not_ready_result_is_retried_and_named(self) -> None:
         runtime = _FakeRuntime(
             player_counts=[
@@ -358,6 +367,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["tool"], "wait_for")
         self.assertGreater(result["elapsed_s"], 0.0)
 
+    @slow_test
     async def test_real_runtime_client_not_polling_then_players_satisfies(self) -> None:
         transport = _HttpClientNotPollingThenPlayers(player_count=1)
         runtime = _real_client_runtime_http_only(transport)
@@ -445,6 +455,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(waiter, rival, return_exceptions=True)
         self.assertTrue(acquired.is_set())
 
+    @slow_test
     async def test_log_matches_ignores_preexisting_lines(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             profiles = Path(directory) / "_server" / "profiles"
@@ -499,6 +510,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertIn("BTCOpenResponse", str(result["observed"]))
 
+    @slow_test
     async def test_log_matches_lookback_misses_line_outside_window(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             profiles = Path(directory) / "_server" / "profiles"
@@ -525,6 +537,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
 
+    @slow_test
     async def test_log_matches_lookback_zero_misses_preexisting_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             profiles = Path(directory) / "_server" / "profiles"
@@ -700,6 +713,7 @@ class WaitForBug086EvidenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["satisfied"])
         self.assertIn(needle, str(result["observed"]))
 
+    @slow_test
     async def test_lookback_zero_reads_the_file_and_does_not_match(self) -> None:
         seen = {"calls": 0}
         with tempfile.TemporaryDirectory() as directory:
@@ -739,6 +753,7 @@ class WaitForBug086EvidenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(entries, scanned)
         self.assertTrue(all(item["readable"] for item in entries), scanned)
 
+    @slow_test
     async def test_same_bytes_default_sees_and_zero_misses(self) -> None:
         """Both arms of the contract on ONE file, byte-identical between calls.
 
@@ -793,6 +808,7 @@ class WaitForBug086EvidenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(by_zero["timed_out"])
         self.assertGreaterEqual(by_zero["probes"], 1)
 
+    @slow_test
     async def test_window_edge_is_inclusive_at_two_hundred(self) -> None:
         for label, fillers, satisfied, lines_total in _WINDOW_CASES:
             with self.subTest(label):

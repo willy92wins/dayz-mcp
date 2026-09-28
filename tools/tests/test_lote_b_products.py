@@ -14,6 +14,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 from dayz_mcp import server
 from dayz_mcp.server import ServerConfig, build_app
+from tests._tiers import slow_test
 
 EXPECTED = {
     "entities_query": (
@@ -40,6 +41,7 @@ EXPECTED = {
 
 
 class LoteBWireDescriptionsTest(unittest.IsolatedAsyncioTestCase):
+    @slow_test
     async def test_description_sentences_reach_a_real_client_session(self) -> None:
         app, _runtime = build_app(ServerConfig(key="k", port=0, log_sink=lambda _m: None))
         async with create_connected_server_and_client_session(app._mcp_server) as session:

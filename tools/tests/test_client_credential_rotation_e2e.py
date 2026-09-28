@@ -27,6 +27,7 @@ from dayz_mcp import (
 from dayz_mcp.daemon_contract import build_daemon_argv, daemon_runtime_cwd
 from dayz_mcp.daemon_policy import AccreditedDaemonPolicy
 from dayz_mcp.native_process_guard import NativeProcessGuard, identity_hashes
+from tests._tiers import slow_test
 
 
 def _unused_port() -> int:
@@ -148,6 +149,7 @@ def _tool_payload(result: object) -> dict[str, object]:
 
 
 class LiveClientCredentialRotationE2ETest(unittest.TestCase):
+    @slow_test
     def test_same_live_client_recovers_across_authorized_daemon_restart(
         self,
     ) -> None:
@@ -397,6 +399,7 @@ class LiveClientCredentialRotationE2ETest(unittest.TestCase):
                     if child.poll() is None:
                         _finish_owned_fixture(child, timeout=1.0)
 
+    @slow_test
     def test_same_stdio_mcp_process_recovers_without_reinitialization(
         self,
     ) -> None:

@@ -31,6 +31,7 @@ from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.server import LEASE_TOOL_LINE, ServerConfig, build_app
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 from dayz_mcp.window_close import WM_CLOSE, Win32WindowFns
+from tests._tiers import slow_test
 
 
 IDENTITY_A = ClientIdentity("codex", 11, 1, "2026-07-15T00:00:00Z", "A", "owner")
@@ -494,6 +495,7 @@ class Route8604Test(unittest.TestCase):
         self.httpd.server_close()
         self.thread.join(timeout=2.0)
 
+    @slow_test
     def test_8604_lifecycle_close_route_dispatches_close_run(self) -> None:
         if "/lifecycle/close" not in loopback.LIFECYCLE_ROUTES:
             self.fail("/lifecycle/close is not registered")
@@ -760,6 +762,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["run_id"], RUN_ID)
         self.assertFalse(_serialized_has_host_path(result, self.root))
 
+    @slow_test
     async def test_8604_tool_line_without_retirement_is_process_alive(self) -> None:
         runtime = self._runtime()
         runtime.append_on_close = TERMINATION
@@ -769,6 +772,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reason"], "process_alive")
         self.assertFalse(_serialized_has_host_path(result, self.root))
 
+    @slow_test
     async def test_8604_tool_existing_termination_line_is_not_new(self) -> None:
         runtime = self._runtime()
         _write_rpt(runtime.client_rpt, "boot client\n" + TERMINATION)
@@ -777,6 +781,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["graceful"])
         self.assertFalse(_serialized_has_host_path(result, self.root))
 
+    @slow_test
     async def test_8604_tool_rotated_rpt_is_rpt_rotated(self) -> None:
         runtime = self._runtime()
         runtime.rotate_on_close = True
@@ -786,6 +791,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(item["rpt_rotated"] for item in result["roles"]))
         self.assertFalse(_serialized_has_host_path(result, self.root))
 
+    @slow_test
     async def test_8604_tool_launched_role_without_rpt_is_role_without_rpt(
         self,
     ) -> None:
@@ -863,6 +869,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
                 return True
         return False
 
+    @slow_test
     async def test_8604_r3_rpt_reads_are_incremental_and_capped(self) -> None:
         runtime = self._runtime()
         chunk = 2 * 1024 * 1024
@@ -918,6 +925,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(size <= 1024 * 1024 for size in read_sizes))
         self.assertLessEqual(sum(read_sizes), growth["n"] + 4096)
 
+    @slow_test
     async def test_8604_r3_profiles_outside_policy_roots_open_no_file(self) -> None:
         touches: list[tuple[str, str]] = []
         real_iterdir = Path.iterdir
@@ -1056,6 +1064,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["graceful"])
         self.assertFalse(any(item["rpt_rotated"] for item in result["roles"]))
 
+    @slow_test
     async def test_8604_r3_reap_is_rate_limited(self) -> None:
         runtime = self._runtime()
         try:
@@ -1270,6 +1279,7 @@ def _reap_child(proc: subprocess.Popen | None, timeout: float = 3.0) -> None:
 
 
 class RealWindow8604Test(unittest.TestCase):
+    @slow_test
     def test_8604_real_window_exits_on_posted_wm_close_other_child_untouched(
         self,
     ) -> None:

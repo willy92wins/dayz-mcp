@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from dayz_mcp import knowledge
+from tests._tiers import slow_test
 
 
 class KnowledgeExtractTest(unittest.TestCase):
@@ -166,6 +167,7 @@ is verified at `scripts/1_core/proto/enphysics.c:123`.
         self.assertTrue(entries)
         self.assertIs(knowledge.validate_index(entries), entries)
 
+    @slow_test
     def test_module_cli_writes_the_same_deterministic_json(self) -> None:
         output = Path(self._temporary.name) / "knowledge.json"
         completed = subprocess.run(

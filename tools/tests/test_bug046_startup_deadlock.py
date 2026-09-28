@@ -31,6 +31,7 @@ from tests._tree_identity import (
     checkout_root,
     editable_mapped_tools_dir,
 )
+from tests._tiers import slow_test
 
 
 DAEMON_FIXTURE_SITE = Path(__file__).resolve().parent / "fixtures" / "dayz_mcp"
@@ -760,6 +761,7 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
                 _stdout, stderr = communicate_owned_fixture(child, 10.0)
             self.assertEqual(child.returncode, 0, stderr)
 
+    @slow_test
     def test_isolated_dash_I_client_argv_is_not_a_blocker(self) -> None:
         """``-Imdayz_mcp`` is an argv classifier, not copy accreditation.
 
@@ -773,6 +775,7 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
             ["-Imdayz_mcp", "--client", "--idle-timeout", "-1"]
         )
 
+    @slow_test
     def test_compact_module_client_with_equals_value_is_not_a_blocker(self) -> None:
         """``-mdayz_mcp`` without ``-I`` is scanned as a client, not a writer.
 
@@ -794,6 +797,7 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         assert_same_checkout(Path(__file__), Path(completed.stdout.strip()))
 
+    @slow_test
     def test_module_main_entrypoint_is_observed_as_real_writer_process(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -837,6 +841,7 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
                 _stdout, stderr = communicate_owned_fixture(child, 10.0)
             self.assertEqual(child.returncode, 0, stderr)
 
+    @slow_test
     def test_real_run_daemon_crash_boundaries_recover_in_second_wave(self) -> None:
         stages = ("migration", "bind", "activation", "status")
         for stage in stages:
@@ -918,6 +923,7 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
                     (migration / "runs-backup-transaction.json").exists()
                 )
 
+    @slow_test
     def test_run_daemon_candidate_wave_and_cross_port_publish_one_generation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -1010,6 +1016,7 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
             )
             self.assertEqual(coordination["daemon_generation"], generation)
 
+    @slow_test
     def test_owner_process_death_releases_election_for_next_wave(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "runtime"
@@ -1043,6 +1050,7 @@ raise SystemExit(92)
             with daemon_startup_election(paths) as elected:
                 self.assertTrue(elected)
 
+    @slow_test
     def test_candidate_wave_elects_one_owner_and_second_wave_progresses(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "runtime"
@@ -1382,6 +1390,7 @@ print(before, after, sep='\\n', flush=True)
 
 
 class FixturePythonGuardTest(unittest.TestCase):
+    @slow_test
     def test_same_shape_venv_is_rejected_by_independent_host_reference(self) -> None:
         """A second ``<root>/.venv-mcp/Scripts/python.exe`` must not be approved.
 

@@ -9,6 +9,7 @@ from typing import Any
 
 from dayz_mcp import control_client, server
 from dayz_mcp.server import ServerConfig, build_app
+from tests._tiers import slow_test
 
 
 RETAIL_QUARANTINE_RECIPE = (
@@ -123,6 +124,7 @@ class BadArgsMessagesTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(message, "bad_pos")
 
+    @slow_test
     def test_server_has_no_bare_bad_args_tool_error(self) -> None:
         tree = ast.parse(inspect.getsource(server))
         bare_lines = [

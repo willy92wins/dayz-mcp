@@ -37,6 +37,7 @@ from dayz_mcp.process_lifecycle import (
 )
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
+from tests._tiers import slow_test
 
 
 INST_C1 = "11111111-1111-4111-8111-111111111111"
@@ -1152,6 +1153,7 @@ class Round3FenceRegressionTest(unittest.TestCase):
         self.assertIn("hint", payload)
         self.assertNotEqual(payload["error"], "legacy_unbound")
 
+    @slow_test
     def test_retire_does_not_accumulate_bindings(self) -> None:
         state = loopback.ServerState("k")
         with TemporaryDirectory() as raw:

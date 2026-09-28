@@ -29,6 +29,7 @@ from tests.fence_helpers import (
     bind_both_peers,
     poll_census_query,
 )
+from tests._tiers import slow_test
 
 
 class IntegrationDaemon:
@@ -260,6 +261,7 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
         self.fail("pending_command_count_not_reached")
 
+    @slow_test
     async def test_parallel_reads_and_mutations_are_fifo_non_interleaved(self) -> None:
         runtime_a = self.client("codex")
         runtime_b = self.client("claude")
@@ -302,6 +304,7 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
             mutations, ["world_spawn", "world_time_set", "world_weather_set"]
         )
 
+    @slow_test
     async def test_abandoned_head_is_never_blind_granted_and_next_live_wait_claims(self) -> None:
         runtime_a = self.client("codex")
         runtime_b = self.client("claude")
@@ -352,6 +355,7 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
             runtime_b.identity.public_payload()["session"],
         )
 
+    @slow_test
     async def test_release_cancels_only_owner_queued_commands(self) -> None:
         runtime_a = self.client("codex")
         runtime_b = self.client("claude")
@@ -382,6 +386,7 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
                 await foreign_read
             self.assertEqual(server_peer.command_names(), [])
 
+    @slow_test
     async def test_delivered_command_stays_pending_and_is_never_replayed(self) -> None:
         runtime_a = self.client("codex")
         server_peer = self.peer("server", respond=False)
@@ -402,6 +407,7 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         with contextlib.suppress(asyncio.CancelledError):
             await delivered
 
+    @slow_test
     async def test_vehicle_release_cleanup_is_enqueued_exactly_once(self) -> None:
         runtime_a = self.client("codex")
         client_peer = self.peer("client")
@@ -418,6 +424,7 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
             == ["vehicle_control", "vehicle_release"]
         )
 
+    @slow_test
     async def test_acquire_adopts_delivers_then_fifo_wait_adopts(self) -> None:
         runtime_a = self.client("codex")
         runtime_b = self.client("claude")
@@ -454,6 +461,7 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(wait_adopted.get("run_id"), "test-run")
         await runtime_b.session_release(granted["lease_token"])
 
+    @slow_test
     async def test_pin_is_capped_at_300_and_result_clears_it(self) -> None:
         runtime_a = self.client("codex")
         server_peer = self.peer("server", respond=False)
@@ -475,6 +483,7 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(unpinned["owner"]["expires_in_s"], 120.0)
         await runtime_a.session_release(acquired_a["lease_token"])
 
+    @slow_test
     async def test_restart_invalidates_old_lease_and_ticket_without_secret_leak(self) -> None:
         runtime_a = self.client("codex")
         runtime_b = self.client("claude")

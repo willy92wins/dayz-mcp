@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 from dayz_mcp import dayz_test_modes, inbox, server
 from dayz_mcp.server import ServerConfig, build_app
+from tests._tiers import slow_test
 
 _PNG_1x1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="
@@ -45,6 +46,7 @@ class LoteMProductsTest(unittest.IsolatedAsyncioTestCase):
             })
         self.assertIn("bad_args: unexpected arguments", str(ctx.exception))
 
+    @slow_test
     async def test_p0_closed_schema_rejects_extras_wire(self) -> None:
         from mcp.shared.memory import create_connected_server_and_client_session
 
@@ -82,6 +84,7 @@ class LoteMProductsTest(unittest.IsolatedAsyncioTestCase):
             })
         self.assertIn("evidence_ref", str(ctx.exception))
 
+    @slow_test
     async def test_p2_knowledge_empty_args_ok(self) -> None:
         err = None
         try:
@@ -121,6 +124,7 @@ class LoteMProductsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured[-1]["crop_space"], "window")
         self.assertEqual(len(blocks), 2)
 
+    @slow_test
     async def test_p3_bad_crop_space_rejected(self) -> None:
         self.runtime.lifecycle_status = AsyncMock(return_value={"runs": []})
         with self.assertRaises(Exception) as ctx:
@@ -179,12 +183,14 @@ class LoteMProductsTest(unittest.IsolatedAsyncioTestCase):
         mode = tool.parameters["properties"]["mode"]
         self.assertEqual(mode.get("enum"), ["reload", "close"])
 
+    @slow_test
     async def test_p5_mode_enum_from_authority(self) -> None:
         tool = self.app._tool_manager.get_tool("dayz_test_run")
         enum = tool.parameters["properties"]["mode"]["enum"]
         self.assertEqual(set(enum), set(dayz_test_modes.public_mode_names()))
         self.assertNotIn("offline", enum)
 
+    @slow_test
     async def test_p5_enum_follows_a_substituted_authority_in_a_new_app(self) -> None:
         # Codex B-01 (2026-09-04): the enum must be read from the authority when the app is
         # built and on every call, never frozen at import of server.py.

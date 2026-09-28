@@ -19,6 +19,7 @@ from dayz_mcp.session_coordination import (
     SessionCoordinator,
 )
 from tests.fence_helpers import INST_CLIENT, INST_SERVER, accredited_poll, bind_both_peers
+from tests._tiers import slow_test
 
 
 class LoopbackTest(unittest.TestCase):
@@ -1469,6 +1470,7 @@ class LoopbackHttpBodyTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("id", body)
 
+    @slow_test
     def test_idle_tcp_connections_do_not_spawn_past_http_worker_ceiling(self) -> None:
         # F-03: a connecting socket used to cost a thread before auth.
         self.assertEqual(loopback.MAX_HTTP_WORKERS, MAX_SESSION_QUEUE + 32)

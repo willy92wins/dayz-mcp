@@ -19,6 +19,7 @@ from dayz_mcp.server import ServerConfig, build_app
 from tests.catalog_helpers import list_tools_after_lease
 from tests.client_helpers import _fixture_client_runtime
 from tests.mcp_helpers import _content_json
+from tests._tiers import slow_test
 
 
 def _live_process() -> dict[str, object]:
@@ -104,6 +105,7 @@ class WaitForMarkerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("after", result["observed"])
         self.assertNotIn("before", result["observed"])
 
+    @slow_test
     async def test_marker_does_not_match_when_the_pattern_only_precedes_it(self) -> None:
         marker = await self._capture_marker()
 

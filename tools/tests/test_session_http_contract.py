@@ -35,6 +35,7 @@ from tests.lifecycle_helpers import (
     LifecycleFixture,
     record,
 )
+from tests._tiers import slow_test
 
 
 # --- helpers from test_task7_review_regressions.py ---
@@ -102,6 +103,7 @@ def _http(base, method, path, key, payload=None, query=None, timeout=2.0):
 
 
 class RealLifecycleHttpQuarantineTest(unittest.TestCase):
+    @slow_test
     def test_real_lifecycle_quarantine_blocks_mutations_but_status_and_release_work(self) -> None:
         fixture = LifecycleFixture()
         state = loopback.ServerState("key", coordination=fixture.coordinator)
@@ -152,6 +154,7 @@ class RealLifecycleHttpQuarantineTest(unittest.TestCase):
             thread.join(2.0)
             fixture.close()
 
+    @slow_test
     def test_real_lifecycle_clean_routes_cover_start_stop_adopt_reconcile_and_empty(self) -> None:
         fixture = LifecycleFixture()
         state = loopback.ServerState("key", coordination=fixture.coordinator)

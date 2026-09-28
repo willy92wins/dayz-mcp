@@ -35,6 +35,7 @@ from tests.lease_helpers import (
     _identity,
 )
 from tests.test_session_status_blocked_on import _status_payload
+from tests._tiers import slow_test
 
 _COMMIT_RETIREMENT_TRIPLES = (
     ("lifecycle_stop_outcome", "stopped", "stopped"),
@@ -113,6 +114,7 @@ class PlenoLeaseAndOrphansTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(server, "ClientRuntime", return_value=self.runtime):
             self.app, _built = build_app(config)
 
+    @slow_test
     async def test_t2_four_descriptions_name_heartbeat_and_drop_internal_renewal(
         self,
     ) -> None:
@@ -140,6 +142,7 @@ class PlenoLeaseAndOrphansTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
+    @slow_test
     async def test_t2_session_acquire_wait_fresh_registry_is_not_stale(self) -> None:
         result = await self._acquire_wait(_fresh_snapshot())
         self.assertIs(result["caller_tool_registry_stale"], False)

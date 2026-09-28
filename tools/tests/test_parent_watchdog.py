@@ -17,6 +17,7 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 from dayz_mcp import loopback, orphan_guard
+from tests._tiers import slow_test
 
 
 class WatchdogDecisionTest(unittest.TestCase):
@@ -28,6 +29,7 @@ class WatchdogDecisionTest(unittest.TestCase):
 
 
 class WatchdogInstallTest(unittest.TestCase):
+    @slow_test
     def test_missing_handle_disables_without_firing(self) -> None:
         fired = threading.Event()
         logs: list[str] = []
@@ -54,6 +56,7 @@ class WatchdogInstallTest(unittest.TestCase):
         self.assertEqual(action, orphan_guard.ARMED)
         self.assertTrue(fired.wait(timeout=2.0), "on_parent_death was not invoked")
 
+    @slow_test
     def test_wait_failed_does_not_fire_parent_death(self) -> None:
         fired = threading.Event()
         logs: list[str] = []
@@ -252,6 +255,7 @@ while True:
 
 
 class WatchdogIntegrationTest(unittest.TestCase):
+    @slow_test
     def test_ancestor_walk_frees_port_when_true_grandparent_dies(self) -> None:
         # Real topology: base-python grandparent G -> venv launcher A -> child B.
         # B's watchdog must skip A and watch G; killing only G must free B's port.
@@ -342,6 +346,7 @@ class WatchdogIntegrationTest(unittest.TestCase):
                     pass
 
 
+    @slow_test
     def test_cleanup_reaps_all_descendants_when_readiness_times_out(self) -> None:
         sig = Path(tempfile.gettempdir()) / f"c1fix_{os.getpid()}.sig"
         pid_files = {

@@ -29,6 +29,7 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import playbook_tool as adapter, server, server_freshness as freshness
 from tests.catalog_helpers import list_tools_after_lease
 from tests.client_helpers import _fixture_client_runtime
+from tests._tiers import slow_test
 
 MODULE = "dayz_playbook_runner"
 TAIL = '''
@@ -112,6 +113,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.old_runner._IMPLEMENTATION, "old")
         self.assertEqual(self.watch._hashes, self.boot_hashes)
 
+    @slow_test
     async def test_wire_reload_changes_behavior_and_normal_status_without_reanchoring(self):
         app2, _ = self.build()
         handler = self.app._mcp_server.request_handlers[types.CallToolRequest]
@@ -153,6 +155,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
                     adapter.reload_runner(target)
         self.assert_preserved()
 
+    @slow_test
     async def test_wire_requires_exact_explicit_module(self):
         tools = {
             tool.name: tool
@@ -168,6 +171,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(result.isError)
                 self.assert_preserved()
 
+    @slow_test
     async def test_in_flight_runs_across_apps_refuse_until_last_run_finishes(self):
         app2, runtime2 = self.build()
         entered = [asyncio.Event(), asyncio.Event()]
@@ -204,6 +208,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
                 event.set()
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    @slow_test
     async def test_cancellation_releases_execution_admission(self):
         entered = asyncio.Event()
 
@@ -223,12 +228,14 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter._active_runs, 0)
         self.assertFalse((await self.reload()).isError)
 
+    @slow_test
     async def test_schema_error_releases_execution_admission(self):
         (self.root / "fixture.toml").write_text('status = "INVALID"\n', encoding="utf-8")
         self.assertTrue((await self.run_book()).isError)
         self.assertEqual(adapter._active_runs, 0)
         self.assertFalse((await self.reload()).isError)
 
+    @slow_test
     async def test_admission_covers_synchronous_playbook_loading(self):
         load = self.old_runner.load_playbook
 
@@ -241,6 +248,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse((await self.run_book()).isError)
         self.assertEqual(adapter._active_runs, 0)
 
+    @slow_test
     async def test_playbook_cannot_invoke_reload_as_a_step(self):
         book = PLAYBOOK.replace("query_all_players", "playbook_reload").replace(
             "args = {}", 'args = { module = "dayz_playbook_runner" }')
@@ -250,6 +258,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("not allowed inside a playbook", result.structuredContent["reason"])
         self.assert_preserved()
 
+    @slow_test
     async def test_mid_execution_failure_restores_module_and_allows_recovery(self):
         self.path.write_text(self.new_source + '\n_IMPLEMENTATION = "partial"\nraise RuntimeError("fixture")\n',
                              encoding="utf-8")
@@ -263,6 +272,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((await self.reload()).isError)
         self.assertEqual((await self.run_book()).structuredContent["implementation"], "new")
 
+    @slow_test
     async def test_syntax_failure_preserves_old_runner(self):
         self.path.write_text("def broken(:\n", encoding="utf-8")
         result = await self.reload()
@@ -278,6 +288,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
         self.assert_preserved()
         self.assertEqual(self.watch.snapshot()["unreadable_reasons"][MODULE], "source_unreadable_now")
 
+    @slow_test
     async def test_module_level_exit_is_an_error_and_keeps_old_runner(self):
         self.path.write_text(self.new_source + "\nraise SystemExit(7)\n", encoding="utf-8")
         result = await self.reload()
@@ -285,6 +296,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("SystemExit", result.content[0].text)
         self.assert_preserved()
 
+    @slow_test
     async def test_invalid_runner_api_is_not_published(self):
         for suffix in ("_async_run = None", "SchemaError = lambda *args: None",
                        "def _async_run(*args): return {}"):
@@ -295,6 +307,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("required_api_missing", result.content[0].text)
                 self.assert_preserved()
 
+    @slow_test
     async def test_failed_first_load_cleans_import_slot_and_can_retry(self):
         adapter._runner = None
         adapter._runner_source = None
@@ -307,6 +320,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
         self.path.write_text(self.new_source, encoding="utf-8")
         self.assertEqual(adapter.load_runner()._IMPLEMENTATION, "new")
 
+    @slow_test
     async def test_reload_bypasses_valid_old_pyc_and_refreshes_same_stat_cache(self):
         py_compile.compile(str(self.path), doraise=True)
         before = self.path.stat()
@@ -322,6 +336,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.watch.snapshot()["status"], "fresh")
         self.assertEqual(self.watch._hashes, self.boot_hashes)
 
+    @slow_test
     async def test_source_change_during_exec_rejects_candidate(self):
         execute = adapter._RunnerSourceLoader.exec_module
 
@@ -335,6 +350,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("source_changed_during_load", result.content[0].text)
         self.assert_preserved()
 
+    @slow_test
     async def test_concurrent_reload_and_run_refuse_during_module_construction(self):
         entered, release = threading.Event(), threading.Event()
         execute = adapter._RunnerSourceLoader.exec_module
@@ -364,6 +380,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "reloaded")
         self.assertEqual(adapter._active_runs, 0)
 
+    @slow_test
     async def test_generation_change_during_observation_is_unknown_then_fresh(self):
         self.path.write_text(self.new_source + "\n", encoding="utf-8")
         digest = freshness._digest
@@ -383,6 +400,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.watch.snapshot()["status"], "fresh")
         self.assertEqual(self.watch._hashes, self.boot_hashes)
 
+    @slow_test
     async def test_unaccredited_import_slot_replacement_cannot_turn_fresh(self):
         replacement = python_types.ModuleType(MODULE)
         replacement.__file__ = str(self.path)
@@ -393,6 +411,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
         sys.modules[MODULE] = self.old_runner
         self.assertEqual(self.watch.snapshot()["status"], "fresh")
 
+    @slow_test
     async def test_reload_does_not_clear_other_modules_drift(self):
         path = self.root / "unrelated.py"
         path.write_text("value = 1\n", encoding="utf-8")
@@ -405,6 +424,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((await self.reload()).isError)
         self.assertEqual(watch.snapshot()["stale"], [module.__name__])
 
+    @slow_test
     async def test_subsequent_edit_is_stale_and_second_reload_uses_latest_bytes(self):
         self.path.write_text(self.new_source, encoding="utf-8")
         self.assertFalse((await self.reload()).isError)
@@ -418,6 +438,7 @@ class PlaybookReloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.run_book()).structuredContent["implementation"], "third")
         self.assertEqual(self.watch.snapshot()["status"], "fresh")
 
+    @slow_test
     async def test_reload_supports_module_level_dataclasses(self):
         self.path.write_text(
             self.new_source + "\nfrom dataclasses import dataclass\n"

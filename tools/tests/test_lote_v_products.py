@@ -16,6 +16,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp import server
 from dayz_mcp.server import ServerConfig, ToolError, build_app
+from tests._tiers import slow_test
 
 
 def _content_json(result) -> dict:
@@ -42,6 +43,7 @@ class BridgeStatusDescriptionTest(unittest.TestCase):
         self.assertIn("whitelist", low)
         self.assertIn("shape", low)
 
+    @slow_test
     def test_fence_mutant_surfaces_in_new_app_only(self) -> None:
         with patch.dict(server._FENCE_BLOCK_READY, {"ZZZ_PROBE": "zzz_fence_probe"}):
             app_fence, _ = build_app(
@@ -107,6 +109,7 @@ class WaitForWireTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ActionUseDescriptionTest(unittest.TestCase):
+    @slow_test
     def test_description_names_class_name_contract(self) -> None:
         app, _ = build_app(ServerConfig(key="k", port=0, log_sink=lambda _m: None))
         desc = _tool_desc(app, "action_use")
@@ -231,6 +234,7 @@ class ReachableCapabilityWireTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen.get("client_start_budget_s"), 5.0)
         self.assertIs(seen.get("auto_remediate_steam"), True)
 
+    @slow_test
     async def test_a_coerced_bool_cannot_disable_the_startup_guard(self) -> None:
         """P1 of the cross-family review, reproduced before it was fixed.
 
@@ -244,6 +248,7 @@ class ReachableCapabilityWireTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(bad=bad), self.assertRaises(ToolError):
                 await self._kwargs_from({"mode": "server", "client_start_budget_s": bad})
 
+    @slow_test
     async def test_an_out_of_range_budget_names_the_field_and_the_range(self) -> None:
         """P2: a bare ValueError from the executor reached the caller as
         ``dayz_test_failed:ValueError``, naming neither."""

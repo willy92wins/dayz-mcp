@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from tests._bundle_paths import requires_installed_launcher
+from tests._tiers import slow_test
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -45,6 +46,7 @@ requires_legacy_evidence = unittest.skipUnless(
 
 
 class LauncherMigrationContainmentTest(unittest.TestCase):
+    @slow_test
     def test_secure_launcher_has_no_process_creation_surface(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "dayz_mcp.security_runtime_audit", AUDITOR_PATH

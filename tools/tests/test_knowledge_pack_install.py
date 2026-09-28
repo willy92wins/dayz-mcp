@@ -20,6 +20,7 @@ if str(TOOLS_DIR) not in sys.path:
 
 import install_mcp as installer
 from dayz_mcp import knowledge
+from tests._tiers import slow_test
 
 try:
     knowledge_pack = importlib.import_module("dayz_mcp.knowledge_pack")
@@ -350,6 +351,7 @@ class KnowledgePackInstallTest(unittest.TestCase):
             },
         )
 
+    @slow_test
     def test_prepare_operations_are_exclusive_and_atomic_between_windows_processes(self) -> None:
         # "spawn" reproduces two independent Windows windows; fork is the
         # POSIX equivalent and inherits the same lock primitives, so the

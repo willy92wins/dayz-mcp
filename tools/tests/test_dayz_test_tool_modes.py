@@ -31,6 +31,7 @@ from tests.dayz_test_tool_helpers import (
     _sealed,
     _terminal,
 )
+from tests._tiers import slow_test
 
 
 class _Reached(RuntimeError):
@@ -498,6 +499,7 @@ class ModeContractM19Test(unittest.IsolatedAsyncioTestCase):
                 extra_mods=["@DayZ_MCP"],
             )
 
+    @slow_test
     async def test_a_dead_client_fails_every_mode_that_started_one(self) -> None:
         """client is the mode the literal set omitted; server is the control.
 

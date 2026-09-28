@@ -22,6 +22,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from dayz_mcp import control_client, daemon_policy, host_config, server
+from tests._tiers import slow_test
 
 # Independent raw Win32 caller, using Microsoft's documented access/share values.
 # It never imports dayz_mcp and never writes the opened file.
@@ -201,6 +202,7 @@ class ShareConflictWindowsTests(unittest.TestCase):
         self.spawn.assert_not_called()
         return text
 
+    @slow_test
     def test_real_open_matrix_before_pin_and_after_release(self):
         expected = self.resolve()
         for platform, path in self.paths.items():
@@ -235,6 +237,7 @@ class ShareConflictWindowsTests(unittest.TestCase):
                     self.assertEqual(self._status(), {"status": "ok"})
                     self.send.assert_called_once()
 
+    @slow_test
     def test_real_open_matrix_pin_first(self):
         for platform, path in self.paths.items():
             for label, access, share, compatible in _CASES:
@@ -250,6 +253,7 @@ class ShareConflictWindowsTests(unittest.TestCase):
                     finally:
                         pinned.close()
 
+    @slow_test
     def test_real_sharing_cause_reaches_public_mcp_error(self):
         for platform, path in self.paths.items():
             with self.subTest(platform=platform), _held_by_child(
@@ -258,6 +262,7 @@ class ShareConflictWindowsTests(unittest.TestCase):
                 text = self._assert_public_rejection("HostConfigError:32")
                 print(f"MCP_REAL_SHARE {platform}: {text}", flush=True)
 
+    @slow_test
     def test_changed_registration_has_distinct_public_cause(self):
         for platform, path in self.paths.items():
             with self.subTest(platform=platform):
@@ -275,6 +280,7 @@ class ShareConflictWindowsTests(unittest.TestCase):
                 finally:
                     self._write(path, before)
 
+    @slow_test
     def test_unrelated_temp_handle_and_completed_rename_do_not_reject(self):
         expected = self.resolve()
         for platform, path in self.paths.items():
@@ -292,6 +298,7 @@ class ShareConflictWindowsTests(unittest.TestCase):
             self.assertEqual(self.resolve(), expected)
             print(f"RENAME_COMPLETED {platform}: accepted", flush=True)
 
+    @slow_test
     def test_raw_message_never_reaches_public_response(self):
         cases = [
             (PermissionError(13, "PRIVATE_MESSAGE", str(self.root)),

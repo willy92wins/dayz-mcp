@@ -11,6 +11,7 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 
 from dayz_mcp import loopback
+from tests._tiers import slow_test
 
 
 class MCPServerTest(unittest.TestCase):
@@ -121,6 +122,7 @@ class MCPServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(body, {"error": "bad_peer"})
 
+    @slow_test
     def test_queue_cap_returns_429(self) -> None:
         for _ in range(loopback.MAX_QUEUE):
             status, body = self.request("POST", "/enqueue", {"cmd": "query_player_state", "args": {}})

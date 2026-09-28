@@ -14,6 +14,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from dayz_mcp import server
+from tests._tiers import slow_test
 
 HOLD_S = 2.0
 TIMEOUT_S = 0.5
@@ -51,6 +52,7 @@ class WaitForLockDeadlineTest(unittest.IsolatedAsyncioTestCase):
         await held.wait()
         return holder
 
+    @slow_test
     async def test_players_wait_keeps_its_deadline_while_the_lock_is_held(self) -> None:
         runtime = _FakeRuntime()
         holder = await self._held_for(runtime, HOLD_S)
@@ -69,6 +71,7 @@ class WaitForLockDeadlineTest(unittest.IsolatedAsyncioTestCase):
         await holder
         self.assertFalse(runtime.tool_lock.locked())
 
+    @slow_test
     async def test_log_wait_keeps_its_deadline_while_the_lock_is_held(self) -> None:
         runtime = _FakeRuntime()
         holder = await self._held_for(runtime, HOLD_S)
@@ -84,6 +87,7 @@ class WaitForLockDeadlineTest(unittest.IsolatedAsyncioTestCase):
         await holder
         self.assertFalse(runtime.tool_lock.locked())
 
+    @slow_test
     async def test_lock_freed_before_the_deadline_is_taken(self) -> None:
         runtime = _FakeRuntime()
         holder = await self._held_for(runtime, 0.2)
@@ -96,6 +100,7 @@ class WaitForLockDeadlineTest(unittest.IsolatedAsyncioTestCase):
         await holder
         self.assertFalse(runtime.tool_lock.locked())
 
+    @slow_test
     async def test_free_lock_behaves_as_before(self) -> None:
         # Control: with nobody on the lock the wait probes until its own
         # deadline and names no lock error.

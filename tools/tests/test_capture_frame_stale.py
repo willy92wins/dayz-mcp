@@ -37,6 +37,7 @@ from unittest import mock
 from PIL import Image, ImageDraw
 
 import mcp_capture
+from tests._tiers import slow_test
 
 
 WINDOW = {"pid": 4242, "class": "DayZ", "title": "DayZ", "left": 0, "top": 0, "width": 400, "height": 300}
@@ -182,6 +183,7 @@ class FrameStaleTest(unittest.TestCase):
         self.assertEqual(2, after_restart["meta"]["frame_stale_detail"]["repeat_count"])
 
     # -- 7. intra-call evidence, available on the FIRST capture ----------------
+    @slow_test
     def test_intra_call_frame_distinctness_is_published(self) -> None:
         frozen = self._capture(seed=7, frames=4)
         live = self._capture(seed=500, frames=4, distinct_per_frame=True)

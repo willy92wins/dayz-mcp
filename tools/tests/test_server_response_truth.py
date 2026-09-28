@@ -11,6 +11,7 @@ from dayz_mcp import control_client, server
 from dayz_mcp.server import ServerConfig, build_app
 from tests._addon_paths import addon_root
 from tests.mcp_helpers import _content_json
+from tests._tiers import slow_test
 
 
 RETAIL_QUARANTINE_RECIPE = (
@@ -203,6 +204,7 @@ class WorldTimeSetResponseTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result.get("date_applied"), True)
         self.assertIs(result.get("multiplier_applied"), True)
 
+    @slow_test
     async def test_requested_multiplier_without_readback_is_unconfirmed(self) -> None:
         requested, _calls = await _call_tool_with_bridge_result(
             "world_time_set",
@@ -537,6 +539,7 @@ class ToolDescriptionTruthTest(unittest.IsolatedAsyncioTestCase):
         app, _runtime = build_app(ServerConfig(log_sink=lambda _message: None))
         self.tools = {tool.name: tool for tool in await app.list_tools()}
 
+    @slow_test
     async def test_vehicle_enter_distinguishes_accepted_order_from_final_state(self) -> None:
         description = self.tools["vehicle_enter"].description or ""
         self.assertIn("seated=1 confirms the command was accepted", description)
@@ -544,6 +547,7 @@ class ToolDescriptionTruthTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("client-side ownership", description)
         self.assertIn("vehicle_get_in_client", description)
 
+    @slow_test
     async def test_capture_screenshot_warns_about_focus_and_two_clients(self) -> None:
         description = self.tools["capture_screenshot"].description or ""
         self.assertIn("Without window focus", description)

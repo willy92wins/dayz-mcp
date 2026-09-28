@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from tests._addon_paths import addon_root
+from tests._tiers import slow_test
 
 
 BRIDGE = addon_root() / "scripts/5_Mission/MCPClientBridge.c"
@@ -203,6 +204,7 @@ ILLEGIBLE_WIRE = (
 
 @unittest.skipUnless(sys.platform == "win32", "restore consumer imports the Win32 MCP server")
 class CameraRestoreConsumerTest(unittest.IsolatedAsyncioTestCase):
+    @slow_test
     async def test_actual_restore_tool_keeps_every_unavailable_state_unverified(self) -> None:
         from dayz_mcp import server
 

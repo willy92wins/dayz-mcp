@@ -42,6 +42,7 @@ from install_mcp import (
     pin_installer_clis,
     register_transaction,
 )
+from tests._tiers import slow_test
 
 
 def write_fake_x64_pe(path: Path) -> None:
@@ -1468,6 +1469,7 @@ class PublicBoundaryPinLocalTest(unittest.TestCase):
 
 
 class PublicToolCountDocsTest(unittest.TestCase):
+    @slow_test
     def test_readme_tool_count_matches_instantiated_app(self) -> None:
         from dayz_mcp.server import ServerConfig, build_app
 
@@ -1635,6 +1637,7 @@ $codexArgs | ForEach-Object { '[' + $_ + ']' }
 
 @unittest.skipUnless(os.name == "nt", "install-mcp.ps1 runs on Windows PowerShell")
 class PowerShellInstallerArgvTest(unittest.TestCase):
+    @slow_test
     def test_claude_switch_adds_the_disclosure_opt_out_to_claude_only(self) -> None:
         with TemporaryDirectory() as tmp:
             probe = Path(tmp) / "argv_probe.ps1"
@@ -1661,6 +1664,7 @@ class PowerShellInstallerArgvTest(unittest.TestCase):
             completed.stderr,
         )
 
+    @slow_test
     def test_both_installers_register_the_same_argv(self) -> None:
         cases = (
             ([], []),

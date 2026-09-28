@@ -52,6 +52,7 @@ from tests.process_lifecycle_helpers import (
     snapshot,
 )
 from tests.lifecycle_helpers import HASH_A, HASH_B
+from tests._tiers import slow_test
 
 RUN_ID = "run-existing"
 LAUNCH_PID = 9001
@@ -1717,6 +1718,7 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["phase"], "validating")
         self.assertIn("dayz_test_stop", str(result["remediation"]))
 
+    @slow_test
     async def test_the_budget_override_crosses_the_executor(self) -> None:
         """The ONLY control that spans the executor-to-decision hop.
 
@@ -1807,6 +1809,7 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["client_replace_reason"], "bridge_status_unknown")
         self.assertEqual(result["bridge_status_cause"], "TimeoutError")
 
+    @slow_test
     async def test_distinct_unreadability_kinds_stay_distinct(self) -> None:
         """A discriminator that is the same for every exception discriminates nothing."""
         timeout, _ = await self.run_extension(bridge_error=TimeoutError())
@@ -1861,6 +1864,7 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
             result["bridge_status_cause"], "ToolError:daemon_unavailable"
         )
 
+    @slow_test
     async def test_a_readable_bridge_does_not_publish_a_cause(self) -> None:
         """A successful snapshot must keep today's shape: no sibling field at all."""
         polling, sent_polling = await self.run_extension(
@@ -1894,6 +1898,7 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["error_code"], "client_already_polling")
         self.assertEqual(result["client_replace_reason"], "client_polling")
 
+    @slow_test
     async def test_a_malformed_process_list_refuses_instead_of_authorising(self) -> None:
         """Codex C-01: una fila con `processes` malformado NO es «no hay cliente».
 
@@ -1930,6 +1935,7 @@ class ClientReplacementGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(result["client_replace_reason"], "no_client_to_replace")
 
+    @slow_test
     async def test_a_peer_row_without_any_usable_age_refuses(self) -> None:
         """Codex C-02: ser un dict no es ser legible.
 

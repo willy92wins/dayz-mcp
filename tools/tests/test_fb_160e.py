@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from dayz_mcp import runtime_state
 from dayz_mcp.runtime_state import LifecycleRecoveryFaultStore, RuntimePaths
+from tests._tiers import slow_test
 
 
 def _raw(seq: int) -> bytes:
@@ -401,6 +402,7 @@ class Fb160eManifestBackupRetentionTest(unittest.TestCase):
             self.assertEqual(again, receipt)
             self.assertGreater(directory.lstat().st_mtime_ns, before)
 
+    @slow_test
     def test_fb_160e_checkpoint_holds_lock_across_pointer_write(self) -> None:
         with TemporaryDirectory() as temp_dir:
             paths = RuntimePaths.from_env({"LOCALAPPDATA": temp_dir})

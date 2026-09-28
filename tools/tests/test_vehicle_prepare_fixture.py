@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 from tests._addon_paths import addon_root
 from dayz_mcp import loopback, server
 from dayz_mcp.session_coordination import command_requires_lease
+from tests._tiers import slow_test
 
 
 COMMAND = "vehicle_prepare_fixture"
@@ -285,6 +286,7 @@ class FixtureNotReadyDiagnosticsTest(unittest.TestCase):
 
 
 class FixtureNotReadyWireTest(unittest.IsolatedAsyncioTestCase):
+    @slow_test
     async def test_client_sees_wheel_count(self) -> None:
         from tests.test_ui_error_diagnostics import _wire_error_text
 
@@ -300,6 +302,7 @@ class FixtureNotReadyWireTest(unittest.IsolatedAsyncioTestCase):
             "vehicle_fixture_ready=False",
         )
 
+    @slow_test
     async def test_world_spawn_timeout_with_fixture_payload_stays_bare(self) -> None:
         from tests.test_ui_error_diagnostics import _wire_error_text
 

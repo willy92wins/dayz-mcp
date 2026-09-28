@@ -7,6 +7,7 @@ or Remove in memory to prove that a silently accumulating queue is detected.
 import re
 import unittest
 from tests.test_leak_callback_lifetime import body, clean, source
+from tests._tiers import slow_test
 
 
 class SourceDrain:
@@ -82,6 +83,7 @@ class CallbackDrainTest(unittest.TestCase):
         self.assertEqual(model.allocations, 1, "one native RestCallback allocation per poll amplifies native retention")
         self.assertFalse(model.blocked())
 
+    @slow_test
     def test_success_error_timeout_and_result_completions_all_drain(self):
         for event in ("Success", "Error", "Timeout"):
             model = SourceDrain()

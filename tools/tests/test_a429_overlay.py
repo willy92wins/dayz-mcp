@@ -28,6 +28,7 @@ from tests.fence_helpers import bind_both_peers
 from tests.client_helpers import _fixture_client_runtime
 from tests.mcp_helpers import FakePeer, _content_json
 from tests.test_session_status_blocked_on import BOX_BLOCKED_ON
+from tests._tiers import slow_test
 
 
 ADOPT_BLOCKED_ON = (
@@ -317,6 +318,7 @@ class A429EmbeddedOverlayTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.02)
         self.fail("condition not reached")
 
+    @slow_test
     async def test_p3_n3_ready_true_with_historical_counters(self) -> None:
         app, runtime = self.build_started()
         version = f"{EXPECTED_BRIDGE_VERSION}~1.29.0"
@@ -352,6 +354,7 @@ class A429EmbeddedOverlayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["fence"]["mutation_rejects_by_code"]["legacy_unbound"], 1)
         self.assertIs(type(status["fence"]["mutation_rejects_by_code"]["legacy_unbound"]), int)
 
+    @slow_test
     async def test_n6_http_status_keeps_int_counters_and_omits_mcp_overlay(self) -> None:
         _app, runtime = self.build_started()
         host, port = runtime.loopback.httpd.server_address

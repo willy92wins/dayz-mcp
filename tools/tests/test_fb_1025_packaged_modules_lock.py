@@ -23,6 +23,7 @@ from write_packaged_modules_lock import (
     problems,
     render,
 )
+from tests._tiers import slow_test
 
 
 def _committed_files() -> dict[str, object]:
@@ -99,6 +100,7 @@ class PackagedModulesLockTest(unittest.TestCase):
                 problems(committed, compute_lock(root=root)),
             )
 
+    @slow_test
     def test_fb_1025_normalization_keeps_lone_cr(self) -> None:
         self.assertEqual(normalize_crlf_to_lf(b"a\rb\r\nc\n"), b"a\rb\nc\n")
         edited = expected_paths()[0]
@@ -116,6 +118,7 @@ class PackagedModulesLockTest(unittest.TestCase):
             lock_b = compute_lock(root=root_b)
             self.assertNotEqual(lock_a["files"][edited], lock_b["files"][edited])
 
+    @slow_test
     def test_fb_1025_check_fails_safe(self) -> None:
         lock_relative = "tools/packaged-modules.lock.json"
         one_source = "tools/native-launchers/dayz-test-v1/src/app_main.py"

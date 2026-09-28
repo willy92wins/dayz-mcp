@@ -23,6 +23,7 @@ from __future__ import annotations
 import ast
 import unittest
 from pathlib import Path
+from tests._tiers import slow_test
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 UTF8_BOM = b"\xef\xbb\xbf"
@@ -55,6 +56,7 @@ class SourcesAreStaticallyAnalysableTest(unittest.TestCase):
             "UTF-8 without BOM (PowerShell: -Encoding utf8NoBOM).",
         )
 
+    @slow_test
     def test_every_python_source_parses_the_way_the_audits_read_it(self) -> None:
         failures: list[str] = []
         for path in _sources():

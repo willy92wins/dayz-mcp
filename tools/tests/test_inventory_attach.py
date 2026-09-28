@@ -7,6 +7,7 @@ from dayz_mcp import loopback, server
 from dayz_mcp.session_coordination import READ_ONLY_COMMANDS, command_requires_lease
 from tests._addon_paths import addon_root
 from tests.fence_helpers import bind_both_peers
+from tests._tiers import slow_test
 
 
 COMMAND = "inventory_attach"
@@ -270,6 +271,7 @@ class InventoryAttachAppToolTest(unittest.IsolatedAsyncioTestCase):
             await app.call_tool(COMMAND, {**expected, "timeout_s": 1.0})
         call.assert_awaited_once_with(COMMAND, expected, "server", 1.0)
 
+    @slow_test
     async def test_rejects_cross_field_and_target_errors_before_enqueue(self) -> None:
         cases = (
             {"object_id": 7, "classname": "SparkPlug", "dest": "attachment"},

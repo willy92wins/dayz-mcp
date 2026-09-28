@@ -34,6 +34,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from pydantic import Strict, StrictBool, StrictFloat, StrictInt
 
 from dayz_mcp.server import ServerConfig, ToolError, build_app
+from tests._tiers import slow_test
 
 
 # Floor against an empty census, which would otherwise read as "all clear".
@@ -776,6 +777,7 @@ class WireCoercionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ToolError):
             await _arrived(app, "probe_strict_on", {"value": False})
 
+    @slow_test
     async def test_classifier_is_not_more_permissive_than_the_wire(self) -> None:
         """Fail-open guard: if false converts, the classifier must say so."""
         forms: list[tuple[str, object]] = [

@@ -36,6 +36,7 @@ from dayz_mcp.session_handoff import (
     write_handoff,
 )
 from tests.test_control_client import _clean_session_status, _policy
+from tests._tiers import slow_test
 
 
 # --- helpers from test_session_handoff.py ---
@@ -432,6 +433,7 @@ class ReloadLeaseRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.carrier.exists())
         self.assertTrue(self.coordinator.authorize(foreign, lease["lease_token"], "world_spawn").allowed)
 
+    @slow_test
     async def test_unprovable_idle_never_clears_inherited_state_or_carrier(self):
         clean = _clean_session_status()
         bad = [

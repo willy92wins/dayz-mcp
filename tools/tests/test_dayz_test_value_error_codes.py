@@ -19,6 +19,7 @@ from pathlib import Path
 
 from dayz_mcp import dayz_test_tool, server
 from dayz_mcp.server import _DAYZ_TEST_VALUE_ERROR_CODES, _is_safe_error_token
+from tests._tiers import slow_test
 
 
 PACKAGE = Path(__file__).resolve().parents[1] / "dayz_mcp"
@@ -56,6 +57,7 @@ def _constant_value_error_tokens(source: str) -> set[str]:
 
 
 class DayzTestValueErrorCodesTest(unittest.TestCase):
+    @slow_test
     def test_every_token_on_the_path_reaches_the_caller_named(self) -> None:
         """Named via the map, or via the safe-token fallback. Never mute.
 

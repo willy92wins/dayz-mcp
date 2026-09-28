@@ -15,6 +15,7 @@ from dayz_mcp.server import (
     _compare_bridge_capabilities,
     build_app,
 )
+from tests._tiers import slow_test
 
 
 COMMAND = "action_use"
@@ -194,6 +195,7 @@ class Fb3fc1ActionUseToolTest(unittest.IsolatedAsyncioTestCase):
         forwarded = call.await_args.args[1]
         return result, forwarded
 
+    @slow_test
     async def test_3fc1_default_and_world_omit_target_hands_self_send_it(self) -> None:
         with _exceptions_are_fails(self):
             _result, default_args = await self._call(
@@ -336,6 +338,7 @@ class Fb3fc1ActionUseToolTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(forwarded["target"], "hands")
             self.assertEqual(result, echoed)
 
+    @slow_test
     async def test_3fc1_r2_old_addon_is_refused_before_any_bridge_call(self) -> None:
         with _exceptions_are_fails(self):
             statuses = (
@@ -373,6 +376,7 @@ class Fb3fc1ActionUseToolTest(unittest.IsolatedAsyncioTestCase):
                     )
                     call.assert_not_awaited()
 
+    @slow_test
     async def test_3fc1_r2_legacy_error_cannot_mask_the_refusal(self) -> None:
         with _exceptions_are_fails(self):
             statuses = (

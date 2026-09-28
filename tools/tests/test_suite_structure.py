@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import unittest
 from pathlib import Path
+from tests._tiers import slow_test
 
 _TESTS_DIR = Path(__file__).resolve().parent
 
@@ -174,6 +175,7 @@ def _is_submodule(module: str) -> bool:
 
 
 class CrossTestImportRatchetTest(unittest.TestCase):
+    @slow_test
     def test_no_new_import_between_test_modules(self) -> None:
         new = sorted(_cross_test_imports() - KNOWN_CROSS_TEST_IMPORTS)
         self.assertEqual(
@@ -183,6 +185,7 @@ class CrossTestImportRatchetTest(unittest.TestCase):
             "fake into a tests/*_helpers.py module and import it from there.",
         )
 
+    @slow_test
     def test_known_list_only_shrinks(self) -> None:
         gone = sorted(KNOWN_CROSS_TEST_IMPORTS - _cross_test_imports())
         self.assertEqual(

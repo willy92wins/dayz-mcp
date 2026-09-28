@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from dayz_mcp import loopback, server
 from dayz_mcp.session_coordination import READ_ONLY_COMMANDS
 from tests._addon_paths import addon_root
+from tests._tiers import slow_test
 
 
 MOD_SCRIPTS = addon_root() / "scripts"
@@ -272,6 +273,7 @@ class RestoreGameplayPostconditionContractTest(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(type(raised.exception).__name__, "ToolError")
         self.assertIn("camera_still_active", str(raised.exception))
 
+    @slow_test
     async def test_an_unreadable_probe_fails_closed(self) -> None:
         app, runtime = self._app()
         with patch.object(
@@ -311,6 +313,7 @@ class RestoreGameplayPostconditionContractTest(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(type(raised.exception).__name__, "ToolError")
         self.assertIn("restore_unverified", str(raised.exception))
 
+    @slow_test
     async def test_a_probe_that_could_not_look_fails_closed(self) -> None:
         # camera.ok=false is BuildCameraResult's client_not_in_game exit
         # (MCPClientBridge.c:3654-3660): the probe answered, and its answer is

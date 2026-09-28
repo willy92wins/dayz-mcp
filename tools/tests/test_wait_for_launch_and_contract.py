@@ -41,6 +41,7 @@ from tests.test_wait_for import (
     _http_always_client_not_polling,
     _real_client_runtime_http_only,
 )
+from tests._tiers import slow_test
 
 
 def _live_process(pid: int = 4242) -> dict:
@@ -89,6 +90,7 @@ def _profiles(directory: str) -> Path:
 class PatternIsASubstringTest(unittest.IsolatedAsyncioTestCase):
     """The contract is substring matching, and it has to be stated somewhere."""
 
+    @slow_test
     async def test_regex_escaped_pattern_does_not_match_the_plain_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             profiles = _profiles(directory)
@@ -158,6 +160,7 @@ class LaunchScanReachesTheStartOfTheLaunchTest(unittest.IsolatedAsyncioTestCase)
             **kwargs,
         )
 
+    @slow_test
     async def test_max_lookback_cannot_reach_it_but_launch_can(self) -> None:
         beyond = server.WAIT_FOR_LOOKBACK_MAX + 500
         with tempfile.TemporaryDirectory() as directory:
@@ -190,6 +193,7 @@ class LaunchScanReachesTheStartOfTheLaunchTest(unittest.IsolatedAsyncioTestCase)
         self.assertTrue(result["satisfied"])
         self.assertNotIn("\r", str(result["observed"]))
 
+    @slow_test
     async def test_a_line_written_after_the_scan_is_still_caught(self) -> None:
         """Markers are taken before the scan, so the tail resumes at the end."""
         with tempfile.TemporaryDirectory() as directory:
@@ -220,6 +224,7 @@ class LaunchScanReachesTheStartOfTheLaunchTest(unittest.IsolatedAsyncioTestCase)
 class LaunchScanIsBoundedTest(unittest.IsolatedAsyncioTestCase):
     """The scan runs under tool_lock, so it is capped -- and says when it capped."""
 
+    @slow_test
     async def test_a_file_past_the_ceiling_reports_scan_truncated(self) -> None:
         original = server.WAIT_FOR_LAUNCH_SCAN_MAX_BYTES
         server.WAIT_FOR_LAUNCH_SCAN_MAX_BYTES = 64
@@ -268,6 +273,7 @@ class LaunchScanIsBoundedTest(unittest.IsolatedAsyncioTestCase):
 class ScannedReportTest(unittest.IsolatedAsyncioTestCase):
     """A no-match has to be visible as a no-match, per file."""
 
+    @slow_test
     async def test_every_file_read_is_named_with_its_line_count(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             profiles = _profiles(directory)
@@ -296,6 +302,7 @@ class ScannedReportTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertGreater(scanned["lines_total"], 0)
 
+    @slow_test
     async def test_names_carry_no_host_path(self) -> None:
         """This crosses the MCP wire; a profiles path names the machine's user."""
         with tempfile.TemporaryDirectory() as directory:
@@ -465,6 +472,7 @@ class LookbackFromArgumentTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("bad_args", message)
         self.assertIn("lookback_from", message)
 
+    @slow_test
     async def test_the_default_still_tails_from_the_end(self) -> None:
         """Default behaviour is unchanged: a new parameter must not move it."""
         with tempfile.TemporaryDirectory() as directory:
@@ -506,6 +514,7 @@ class _PlayerProbeRuntime:
 class ClientNotPollingWaitContractTest(unittest.IsolatedAsyncioTestCase):
     """players_* must carry client_not_polling and stay inside timeout_s."""
 
+    @slow_test
     async def test_a_client_not_polling_probe_reaches_the_caller_on_timeout(self) -> None:
         not_ready = "game_not_ready:reason=client_not_polling"
         runtime = _PlayerProbeRuntime([], fallback=not_ready)
@@ -519,6 +528,7 @@ class ClientNotPollingWaitContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(result["not_ready_probes"], 1)
         self.assertGreaterEqual(result["probes"], result["not_ready_probes"])
 
+    @slow_test
     async def test_waits_through_client_not_polling_then_succeeds(self) -> None:
         not_ready = "game_not_ready:reason=client_not_polling"
         runtime = _PlayerProbeRuntime([not_ready, 1], fallback=0)
@@ -587,6 +597,7 @@ class ClientNotPollingWaitContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["not_ready_probes"], result["probes"])
         self.assertEqual(result["last_error"], _MAPPED_CLIENT_NOT_POLLING)
 
+    @slow_test
     async def test_real_runtime_client_not_polling_then_players_satisfies(self) -> None:
         transport = _HttpClientNotPollingThenPlayers(player_count=1)
         runtime = _real_client_runtime_http_only(transport)

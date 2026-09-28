@@ -1,10 +1,16 @@
 # Runs the Python unit suite (tools/tests) on every pull request and on main.
-# The job uses no secrets. The suite runs from tools/.venv-mcp, the venv that
+# The jobs use no secrets. The suite runs from tools/.venv-mcp, the venv that
 # install-mcp.ps1 creates: the daemon only starts under that interpreter
 # (dayz_mcp/daemon.py, _ensure_identity_migration). Two interpreters: 3.14,
 # what the owner's venv runs, and 3.11, the floor pyproject.toml declares.
 # Issue #93 was a 3.11/3.12-only identity failure (the venv redirector's
 # argv[0], fixed in #112) that a 3.14-only CI could not see.
+#
+# Two tiers (tools/tests/_tiers.py). On a pull request the fast tier gives the
+# first answer and the whole suite runs beside it, also when the pull request
+# changes only Markdown: slow-tier tests read the docs (test_docs_truth). On
+# main the whole suite runs on every push, and the concurrency group folds
+# merges that land close together into one run.
 name: tests
 
 on:
@@ -21,8 +27,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  unit:
-    name: unittest (windows, Python ${{ matrix.python }})
+  full:
+    name: unittest, whole suite (windows, Python ${{ matrix.python }})
     runs-on: windows-latest
     timeout-minutes: 30
     strategy:
@@ -57,7 +63,7 @@ jobs:
           .\.venv-mcp\Scripts\python.exe -m pip install -r requirements-mcp.txt
           .\.venv-mcp\Scripts\python.exe -m pip install -e .
 
-      - name: Run the suite
+      - name: Run the whole suite
         env:
           # The runner's TEMP is an 8.3 short path (C:\Users\RUNNER~1\...).
           # Windows reports the long form for an open handle, so every
@@ -68,4 +74,45 @@ jobs:
           # tools/dependency-lock.json pins the owner's MSVC and Windows SDK
           # bytes; the runner has other builds under the same paths.
           DAYZ_MCP_FOREIGN_TOOLCHAIN: "1"
+        run: .\.venv-mcp\Scripts\python.exe -B -m unittest discover -s tests -t .
+
+  fast:
+    name: unittest, fast tier (windows, Python ${{ matrix.python }})
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: tools
+    # The whole-suite job's steps, with the slow tier left out.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: tools/requirements-mcp.txt
+
+      - name: Install
+        run: |
+          python -m venv .venv-mcp
+          .\.venv-mcp\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv-mcp\Scripts\python.exe -m pip install -r requirements-mcp.txt
+          .\.venv-mcp\Scripts\python.exe -m pip install -e .
+
+      - name: Run the fast tier
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          DAYZ_MCP_FOREIGN_TOOLCHAIN: "1"
+          DAYZ_MCP_FAST_TESTS: "1"
         run: .\.venv-mcp\Scripts\python.exe -B -m unittest discover -s tests -t .

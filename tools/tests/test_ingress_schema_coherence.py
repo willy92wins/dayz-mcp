@@ -19,6 +19,7 @@ from typing import Any
 
 from dayz_mcp import loopback, server
 from dayz_mcp.server import ServerConfig, build_app
+from tests._tiers import slow_test
 
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -193,6 +194,7 @@ async def _captured_calls(
 
 
 class IngressSchemaCoherenceTest(unittest.IsolatedAsyncioTestCase):
+    @slow_test
     async def test_every_tool_payload_passes_the_ingress(self) -> None:
         for tool, arguments, verb in _TOOL_CALLS:
             with self.subTest(tool=tool, arguments=arguments):

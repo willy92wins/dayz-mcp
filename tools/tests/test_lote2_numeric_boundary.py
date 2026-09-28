@@ -12,6 +12,7 @@ from types import UnionType
 from unittest.mock import AsyncMock, patch
 
 from dayz_mcp import server
+from tests._tiers import slow_test
 
 
 def numeric_shape(annotation):
@@ -106,6 +107,7 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
                         self.assertIn(param, str(caught.exception))
                         self.assertEqual(seen, {}, "invalid argument reached handler")
 
+    @slow_test
     async def test_every_numeric_parameter_accepts_real_numbers(self):
         for name, param, shape in self.rows:
             wire_param = "from" if (name, param) == ("scene_raycast", "from_pos") else param

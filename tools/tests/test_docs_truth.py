@@ -54,6 +54,7 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from tests._tiers import slow_test
 
 REPO = Path(
     os.environ.get("DAYZ_MCP_WATCHDOG_REPO")
@@ -128,6 +129,7 @@ class LeaseListDocsTest(unittest.TestCase):
     (A2). Ground truth: loopback command sets minus READ_ONLY_COMMANDS,
     intersected with the MCP tool names parsed from server.py."""
 
+    @slow_test
     def test_lease_list_equals_code_partition(self) -> None:
         from dayz_mcp.loopback import CLIENT_COMMANDS, SERVER_COMMANDS
         from dayz_mcp.session_coordination import READ_ONLY_COMMANDS
@@ -272,6 +274,7 @@ class LogsSinceTailCapDocsTest(unittest.TestCase):
             int(m.group(1)), self._max_tail_kib(),
             "README-mcp tail cap disagrees with log_tail.MAX_TAIL_BYTES")
 
+    @slow_test
     def test_tool_description_states_tail_cap(self) -> None:
         tree = ast.parse(_doc("tools/dayz_mcp/server.py"))
         fn = next((n for n in ast.walk(tree)
@@ -418,6 +421,7 @@ class VanillaSymbolCitationsDocsTest(unittest.TestCase):
     the shape the rotated aiworld citations had. Absent tree => named skip;
     files not found (or found twice) => not checked."""
 
+    @slow_test
     def test_symbol_line_citations_resolve(self) -> None:
         if not VANILLA.is_dir():
             self.skipTest(f"vanilla scripts tree not present: {VANILLA}")

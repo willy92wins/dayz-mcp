@@ -9,6 +9,7 @@ from dayz_mcp import server
 from dayz_mcp.server_cli import parse_server_tail_silent
 from tests.client_helpers import _fixture_client_runtime
 from tests.mcp_helpers import _content_json
+from tests._tiers import slow_test
 
 
 LOCAL8B_NAMES = frozenset(
@@ -190,6 +191,7 @@ class ToolPackCliTest(unittest.IsolatedAsyncioTestCase):
 
 
 class Local8BToolPackTest(unittest.IsolatedAsyncioTestCase):
+    @slow_test
     async def test_local8b_catalog_is_small_and_exact(self) -> None:
         full_app, _ = server.build_app(
             server.ServerConfig(log_sink=lambda _message: None)
@@ -213,6 +215,7 @@ class Local8BToolPackTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("lease_acquire", local_names)
         self.assertNotIn("session_cancel", local_names)
 
+    @slow_test
     async def test_local8b_census_matches_and_fingerprint_reflects_pack(self) -> None:
         full_app, full_runtime = server.build_app(
             server.ServerConfig(log_sink=lambda _message: None)
@@ -305,6 +308,7 @@ class BridgeSuccessHintTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(nonempty_calls[0], {"tool": "query_player_state", "args": {}})
         self.assertNotEqual(empty_calls[0], nonempty_calls[0])
 
+    @slow_test
     async def test_entities_query_uses_object_inspect_only_when_visible(self) -> None:
         full_app, full_runtime = self._embedded_runtime()
         full_registered = {tool.name for tool in await full_app.list_tools()}
@@ -369,6 +373,7 @@ class BridgeSuccessHintTest(unittest.IsolatedAsyncioTestCase):
         calls = _assert_suggestions(self, result, registered)
         self.assertEqual(calls[0]["tool"], "wait_for")
 
+    @slow_test
     async def test_not_ready_envelope_has_no_success_hints(self) -> None:
         _app, runtime = self._embedded_runtime()
         runtime.status = MagicMock(

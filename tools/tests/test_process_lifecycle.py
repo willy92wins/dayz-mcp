@@ -42,6 +42,7 @@ from tests.process_lifecycle_helpers import (
     process,
     snapshot,
 )
+from tests._tiers import slow_test
 
 
 class ProcessRecordIdentitySchemeTest(unittest.TestCase):
@@ -4295,6 +4296,7 @@ class RetiredRunDiagnosticsAndGenerationTest(unittest.TestCase):
         self.assertEqual(hits[0]["state"], "EXITED")
         self.assertEqual(set(hits[0]), DIAG_KEYS)
 
+    @slow_test
     def test_ring_caps_at_32_keeping_the_most_recent(self) -> None:
         total = 40
         ids = [f"seed-{index:02d}" for index in range(total)]

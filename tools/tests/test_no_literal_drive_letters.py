@@ -25,6 +25,7 @@ import tempfile
 import tokenize
 import unittest
 from pathlib import Path
+from tests._tiers import slow_test
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -218,6 +219,7 @@ class NoLiteralDriveLettersTest(unittest.TestCase):
             hits = drive_letter_hits(pkg)
         self.assertEqual(len(hits), 3, hits)
 
+    @slow_test
     def test_the_pragma_marks_one_line_only(self) -> None:
         # Review R2 of #118: every mark is a place a real path could hide, so
         # the marks are counted. Today there is one, on the build regex. A new
@@ -235,6 +237,7 @@ class NoLiteralDriveLettersTest(unittest.TestCase):
         self.assertEqual(where, "knowledge.py")
         self.assertIn("Target stable build", line)
 
+    @slow_test
     def test_published_package_has_no_literal_drive_letters(self) -> None:
         self.assertTrue(PACKAGE.is_dir(), f"missing package {PACKAGE}")
         hits = drive_letter_hits(PACKAGE)

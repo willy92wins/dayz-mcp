@@ -25,6 +25,7 @@ from dayz_mcp.runtime_state import (
     RuntimePaths,
 )
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
+from tests._tiers import slow_test
 
 
 IDENTITY = {
@@ -127,6 +128,7 @@ class LifecycleHttpTest(unittest.TestCase):
         self.httpd.server_close()
         self.thread.join(timeout=2.0)
 
+    @slow_test
     def test_lifecycle_routes_validate_identity_and_transport_http_status(self) -> None:
         status, result = request(self.base, "/lifecycle/start", {"identity": {}, "request": {}})
         self.assertEqual((status, result["error"]), (400, "invalid_identity"))
@@ -166,6 +168,7 @@ class LifecycleHttpTest(unittest.TestCase):
         )
         self.assertEqual((status, result["retail_quarantine"]), (200, False))
 
+    @slow_test
     def test_lifecycle_targeted_status_filters_exact_run_and_retains_envelope(
         self,
     ) -> None:
@@ -193,6 +196,7 @@ class LifecycleHttpTest(unittest.TestCase):
         self.assertIs(result["retail_quarantine"], False)
         self.assertIn(("status", IDENTITY["session_id"]), self.lifecycle.calls)
 
+    @slow_test
     def test_admin_release_requires_exact_confirmation_and_reconcile_is_quarantinable(self) -> None:
         client = ClientIdentity.from_payload(IDENTITY)
         _, acquired = self.state.coordination.acquire(client, "admin")
@@ -226,6 +230,7 @@ class LifecycleHttpTest(unittest.TestCase):
         )
         self.assertEqual((status, result["reconciled"]), (200, True))
 
+    @slow_test
     def test_admin_audit_repair_is_confirmed_idempotent_and_unblocks_grants(self) -> None:
         self.httpd.shutdown()
         self.httpd.server_close()
@@ -320,6 +325,7 @@ class LifecycleHttpTest(unittest.TestCase):
                 ["fault-1:compensation", "fault-1:repaired"],
             )
 
+    @slow_test
     def test_admin_lifecycle_recovery_repair_is_exactly_confirmed_and_cas_bound(self) -> None:
         fault_id = "11111111-1111-4111-8111-111111111111"
         head = "A" * 64
@@ -371,6 +377,7 @@ class LifecycleHttpTest(unittest.TestCase):
         )
         self.assertIn(("repair-recovery", fault_id), self.lifecycle.calls)
 
+    @slow_test
     def test_manifest_scope_restores_only_hash_bound_backup_before_repaired(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -411,6 +418,7 @@ class LifecycleHttpTest(unittest.TestCase):
             self.assertIn(("repair-manifest", valid_raw), self.lifecycle.calls)
             self.assertEqual(store.load_active()["event"]["state"], "repaired")
 
+    @slow_test
     def test_manifest_scope_receipt_drift_returns_to_armed_without_reconcile(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -461,6 +469,7 @@ class LifecycleHttpTest(unittest.TestCase):
                 any(call[0] == "repair-manifest" for call in self.lifecycle.calls)
             )
 
+    @slow_test
     def test_lifecycle_recovery_repair_resumes_from_repairing(self) -> None:
         # F-02: a failed re-arm used to leave the pointer in repairing, and the
         # gate only admitted repaired/armed, so retry 409'd on both heads.
