@@ -1606,9 +1606,10 @@ foreach ($optOut in @($false, $true)) {
 'PASS'
 '''
 
-# Prints the argv block's two argument lists for the parameters it is given, so
-# the PowerShell argv can be compared with the Python installer's (0f68, review
-# of #121: comparing it with itself let a dropped --require-version through).
+# Prints the argv block's two argument lists for the parameters it is given, one
+# bracketed element per line, so the PowerShell argv can be compared exactly with
+# the Python installer's (0f68, review of #121: comparing it with itself let a
+# dropped --require-version through).
 _PS_ARGV_DUMP = r'''
 param(
     [string]$SourcePath,
@@ -1626,9 +1627,9 @@ $begin = $source.IndexOf('$serverArgs = @(')
 $end = $source.IndexOf('$quotedClaudeArgs =', $begin)
 if ($begin -lt 0 -or $end -lt 0) { throw 'Missing argv block' }
 . ([scriptblock]::Create($source.Substring($begin, $end - $begin)))
-$claudeArgs
+$claudeArgs | ForEach-Object { '[' + $_ + ']' }
 '---'
-$codexArgs
+$codexArgs | ForEach-Object { '[' + $_ + ']' }
 '''
 
 
@@ -1706,10 +1707,22 @@ class PowerShellInstallerArgvTest(unittest.TestCase):
                         check=False,
                     )
                     self.assertEqual(completed.returncode, 0, completed.stderr)
-                    claude, separator, codex = completed.stdout.strip().partition("\n---\n")
-                    self.assertEqual(separator, "\n---\n", completed.stdout)
-                    self.assertEqual(claude.splitlines(), build_client_args(options, "claude"))
-                    self.assertEqual(codex.splitlines(), build_client_args(options, "codex"))
+                    lines = completed.stdout.splitlines()
+                    self.assertEqual(lines.count("---"), 1, completed.stdout)
+                    split = lines.index("---")
+                    for role, platform, dumped in (
+                        ("CLAUDE", "claude", lines[:split]),
+                        ("CODEX", "codex", lines[split + 1 :]),
+                    ):
+                        self.assertTrue(
+                            all(line[:1] == "[" and line[-1:] == "]" for line in dumped),
+                            (role, dumped),
+                        )
+                        self.assertEqual(
+                            [line[1:-1] for line in dumped],
+                            build_client_args(options, platform),
+                            role,
+                        )
 
 
 if __name__ == "__main__":
