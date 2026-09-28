@@ -637,27 +637,565 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("expr_wrong_type", {"expr": 1}, (False, "bad_args")),
         ("timeout_not_positive", {"timeout_s": 0.0}, (False, "bad_args")),
     ),
+    # inventory_attach had a schema but no cases; the coverage test below
+    # found the gap.
+    "inventory_attach": (
+        (
+            "valid_attachment_by_id",
+            {"object_id": 1, "classname": "Headtorch_Black", "dest": "attachment", "slot": "Eyewear"},
+            (True, None),
+        ),
+        (
+            "valid_attachment_by_pos",
+            {
+                "type": "CivilianSedan",
+                "pos": [0.0, 0.0, 0.0],
+                "classname": "CarBattery",
+                "dest": "attachment",
+                "slot": "CarBattery",
+            },
+            (True, None),
+        ),
+        (
+            "valid_cargo_by_id",
+            {"object_id": 1, "classname": "Apple", "dest": "cargo"},
+            (True, None),
+        ),
+        (
+            "valid_cargo_by_pos",
+            {"type": "SeaChest", "pos": [0.0, 0.0, 0.0], "classname": "Apple", "dest": "cargo"},
+            (True, None),
+        ),
+        (
+            "cargo_with_slot",
+            {"object_id": 1, "classname": "Apple", "dest": "cargo", "slot": "Eyewear"},
+            (False, "bad_args"),
+        ),
+        (
+            "attachment_without_slot",
+            {"object_id": 1, "classname": "Apple", "dest": "attachment"},
+            (False, "bad_args"),
+        ),
+        (
+            "id_and_pos_together",
+            {
+                "object_id": 1,
+                "type": "SeaChest",
+                "pos": [0.0, 0.0, 0.0],
+                "classname": "Apple",
+                "dest": "cargo",
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "zero_object_id",
+            {"object_id": 0, "classname": "Apple", "dest": "cargo"},
+            (False, "bad_args"),
+        ),
+        (
+            "extra_key",
+            {"object_id": 1, "classname": "Apple", "dest": "cargo", "extra": None},
+            (False, "bad_args"),
+        ),
+    ),
+    # The sixteen verbs that had no schema until fb-20260822-191204-6ce4.
+    "query_player_state": (
+        ("valid_empty", {}, (True, None)),
+        ("extra_key", {"unchecked": True}, (False, "bad_args")),
+    ),
+    "query_all_players": (
+        ("valid_empty", {}, (True, None)),
+        ("extra_key", {"unchecked": True}, (False, "bad_args")),
+    ),
+    "vehicle_telemetry": (
+        ("valid_empty", {}, (True, None)),
+        ("extra_key", {"unchecked": True}, (False, "bad_args")),
+    ),
+    "vehicle_release": (
+        ("valid_empty", {}, (True, None)),
+        ("extra_key", {"unchecked": True}, (False, "bad_args")),
+    ),
+    "world_spawn": (
+        (
+            "valid",
+            {"type": "CivilianSedan", "pos": [1.0, 2.0, 3.0], "flags": 0, "rotation": 0},
+            (True, None),
+        ),
+        (
+            "valid_empty_type_like_the_tool",
+            {"type": "", "pos": [1.0, 2.0, 3.0], "flags": 0, "rotation": 0},
+            (True, None),
+        ),
+        (
+            "missing_rotation",
+            {"type": "CivilianSedan", "pos": [1.0, 2.0, 3.0], "flags": 0},
+            (False, "bad_args"),
+        ),
+        (
+            "negative_flags",
+            {"type": "CivilianSedan", "pos": [1.0, 2.0, 3.0], "flags": -1, "rotation": 0},
+            (False, "bad_args"),
+        ),
+        (
+            "bool_flags",
+            {"type": "CivilianSedan", "pos": [1.0, 2.0, 3.0], "flags": True, "rotation": 0},
+            (False, "bad_args"),
+        ),
+        (
+            "non_finite_pos",
+            {"type": "CivilianSedan", "pos": [1.0, float("inf"), 3.0], "flags": 0, "rotation": 0},
+            (False, "bad_args"),
+        ),
+        (
+            "type_wrong_type",
+            {"type": 1, "pos": [1.0, 2.0, 3.0], "flags": 0, "rotation": 0},
+            (False, "bad_args"),
+        ),
+        (
+            "extra_key",
+            {"type": "CivilianSedan", "pos": [1.0, 2.0, 3.0], "flags": 0, "rotation": 0, "extra": None},
+            (False, "bad_args"),
+        ),
+    ),
+    "vehicle_enter": (
+        ("valid", {"pos": [0.0, 0.0, 0.0]}, (True, None)),
+        ("missing_pos", {}, (False, "bad_args")),
+        ("pos_wrong_type", {"pos": "0,0,0"}, (False, "bad_args")),
+        ("extra_key", {"pos": [0.0, 0.0, 0.0], "extra": None}, (False, "bad_args")),
+    ),
+    "vehicle_get_in_client": (
+        ("valid", {"pos": [0.0, 0.0, 0.0]}, (True, None)),
+        ("missing_pos", {}, (False, "bad_args")),
+        ("pos_two_components", {"pos": [0.0, 0.0]}, (False, "bad_args")),
+        ("extra_key", {"pos": [0.0, 0.0, 0.0], "extra": None}, (False, "bad_args")),
+    ),
+    "scene_raycast": (
+        (
+            "valid_tool_defaults",
+            {
+                "from": [0.0, 10.0, 0.0],
+                "to": [0.0, -5.0, 0.0],
+                "method": "rvproxy",
+                "ignore": "",
+                "radius": 0.05,
+                "intersect": "view",
+            },
+            (True, None),
+        ),
+        (
+            "valid_bullet_fire_ignore_player",
+            {
+                "from": [0.0, 10.0, 0.0],
+                "to": [0.0, -5.0, 0.0],
+                "method": "bullet",
+                "ignore": "player",
+                "radius": 0.0,
+                "intersect": "fire",
+            },
+            (True, None),
+        ),
+        (
+            "bad_method",
+            {
+                "from": [0.0, 10.0, 0.0],
+                "to": [0.0, -5.0, 0.0],
+                "method": "raycast",
+                "ignore": "",
+                "radius": 0.05,
+                "intersect": "view",
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "bad_ignore",
+            {
+                "from": [0.0, 10.0, 0.0],
+                "to": [0.0, -5.0, 0.0],
+                "method": "rvproxy",
+                "ignore": "self",
+                "radius": 0.05,
+                "intersect": "view",
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "negative_radius",
+            {
+                "from": [0.0, 10.0, 0.0],
+                "to": [0.0, -5.0, 0.0],
+                "method": "rvproxy",
+                "ignore": "",
+                "radius": -0.1,
+                "intersect": "view",
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "bad_intersect",
+            {
+                "from": [0.0, 10.0, 0.0],
+                "to": [0.0, -5.0, 0.0],
+                "method": "rvproxy",
+                "ignore": "",
+                "radius": 0.05,
+                "intersect": "all",
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "missing_to",
+            {
+                "from": [0.0, 10.0, 0.0],
+                "method": "rvproxy",
+                "ignore": "",
+                "radius": 0.05,
+                "intersect": "view",
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "extra_key",
+            {
+                "from": [0.0, 10.0, 0.0],
+                "to": [0.0, -5.0, 0.0],
+                "method": "rvproxy",
+                "ignore": "",
+                "radius": 0.05,
+                "intersect": "view",
+                "extra": None,
+            },
+            (False, "bad_args"),
+        ),
+    ),
+    "telemetry_read": (
+        (
+            "valid_object_at",
+            {"mode": "object_at", "type": "CarScript", "pos": [0.0, 0.0, 0.0], "radius": 5.0},
+            (True, None),
+        ),
+        (
+            "valid_fixture_jsonl",
+            {"mode": "fixture_jsonl", "path": "fixture.jsonl", "max_lines": 0},
+            (True, None),
+        ),
+        (
+            "object_at_empty_type",
+            {"mode": "object_at", "type": "", "pos": [0.0, 0.0, 0.0], "radius": 5.0},
+            (False, "bad_args"),
+        ),
+        (
+            "object_at_zero_radius",
+            {"mode": "object_at", "type": "CarScript", "pos": [0.0, 0.0, 0.0], "radius": 0.0},
+            (False, "bad_args"),
+        ),
+        (
+            "mixed_variants",
+            {"mode": "object_at", "path": "fixture.jsonl", "max_lines": 1},
+            (False, "bad_args"),
+        ),
+        (
+            "unknown_mode",
+            {"mode": "nearest", "type": "CarScript", "pos": [0.0, 0.0, 0.0], "radius": 5.0},
+            (False, "bad_args"),
+        ),
+        (
+            "bool_max_lines",
+            {"mode": "fixture_jsonl", "path": "fixture.jsonl", "max_lines": True},
+            (False, "bad_args"),
+        ),
+        (
+            "extra_key",
+            {
+                "mode": "object_at",
+                "type": "CarScript",
+                "pos": [0.0, 0.0, 0.0],
+                "radius": 5.0,
+                "extra": None,
+            },
+            (False, "bad_args"),
+        ),
+    ),
+    "query_get_in_condition": (
+        ("valid", {"pos": [0.0, 0.0, 0.0], "component": -1}, (True, None)),
+        ("missing_component", {"pos": [0.0, 0.0, 0.0]}, (False, "bad_args")),
+        ("bool_component", {"pos": [0.0, 0.0, 0.0], "component": False}, (False, "bad_args")),
+        (
+            "extra_key",
+            {"pos": [0.0, 0.0, 0.0], "component": -1, "extra": None},
+            (False, "bad_args"),
+        ),
+    ),
+    "world_time_set": (
+        (
+            "valid_without_multiplier",
+            {"year": 2026, "month": 9, "day": 28, "hour": 9, "minute": 0},
+            (True, None),
+        ),
+        (
+            "valid_keep_multiplier",
+            {"year": 2026, "month": 9, "day": 28, "hour": 9, "minute": 0, "time_multiplier": -1.0},
+            (True, None),
+        ),
+        (
+            "valid_multiplier_64",
+            {"year": 2026, "month": 9, "day": 28, "hour": 9, "minute": 0, "time_multiplier": 64.0},
+            (True, None),
+        ),
+        (
+            "multiplier_over_64",
+            {"year": 2026, "month": 9, "day": 28, "hour": 9, "minute": 0, "time_multiplier": 64.5},
+            (False, "bad_args"),
+        ),
+        (
+            "multiplier_negative_not_minus_one",
+            {"year": 2026, "month": 9, "day": 28, "hour": 9, "minute": 0, "time_multiplier": -0.5},
+            (False, "bad_args"),
+        ),
+        (
+            "month_13",
+            {"year": 2026, "month": 13, "day": 28, "hour": 9, "minute": 0},
+            (False, "bad_args"),
+        ),
+        (
+            "year_1969",
+            {"year": 1969, "month": 9, "day": 28, "hour": 9, "minute": 0},
+            (False, "bad_args"),
+        ),
+        (
+            "minute_60",
+            {"year": 2026, "month": 9, "day": 28, "hour": 9, "minute": 60},
+            (False, "bad_args"),
+        ),
+        (
+            "float_hour",
+            {"year": 2026, "month": 9, "day": 28, "hour": 9.0, "minute": 0},
+            (False, "bad_args"),
+        ),
+        (
+            "missing_minute",
+            {"year": 2026, "month": 9, "day": 28, "hour": 9},
+            (False, "bad_args"),
+        ),
+        (
+            "extra_key",
+            {"year": 2026, "month": 9, "day": 28, "hour": 9, "minute": 0, "extra": None},
+            (False, "bad_args"),
+        ),
+    ),
+    "world_weather_set": (
+        ("valid_rain_only", {"rain": 0.5, "time": 0.0, "min_duration": 0.0}, (True, None)),
+        (
+            "valid_all_levels",
+            {"overcast": 1.0, "rain": 0.0, "fog": 0.25, "time": 30.0, "min_duration": 60.0},
+            (True, None),
+        ),
+        ("no_levels", {"time": 0.0, "min_duration": 0.0}, (False, "bad_args")),
+        ("missing_time", {"rain": 0.5, "min_duration": 0.0}, (False, "bad_args")),
+        ("rain_above_one", {"rain": 1.5, "time": 0.0, "min_duration": 0.0}, (False, "bad_args")),
+        (
+            "negative_min_duration",
+            {"fog": 0.5, "time": 0.0, "min_duration": -1.0},
+            (False, "bad_args"),
+        ),
+        ("level_wrong_type", {"rain": "0.5", "time": 0.0, "min_duration": 0.0}, (False, "bad_args")),
+        (
+            "extra_key",
+            {"rain": 0.5, "time": 0.0, "min_duration": 0.0, "extra": None},
+            (False, "bad_args"),
+        ),
+    ),
+    "camera_set": (
+        (
+            "valid_orient",
+            {
+                "cam_mode": "orient",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "cam_orientation": [90.0, 0.0, 0.0],
+                "fov": 0.0,
+                "settle_ticks": 3,
+            },
+            (True, None),
+        ),
+        (
+            "valid_lookat",
+            {
+                "cam_mode": "lookat",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "look_at": [5.0, 1.0, 5.0],
+                "fov": 0.9,
+                "settle_ticks": 3,
+            },
+            (True, None),
+        ),
+        (
+            "valid_matrix",
+            {"cam_mode": "matrix", "cam_matrix": [0.0] * 12, "fov": 0.0, "settle_ticks": 0},
+            (True, None),
+        ),
+        (
+            "valid_free_look_at",
+            {
+                "cam_mode": "free",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "look_at": [5.0, 1.0, 5.0],
+                "fov": 0.0,
+                "settle_ticks": 3,
+            },
+            (True, None),
+        ),
+        (
+            "valid_free_orientation",
+            {
+                "cam_mode": "free",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "cam_orientation": [90.0, 0.0, 0.0],
+                "fov": 0.0,
+                "settle_ticks": 3,
+            },
+            (True, None),
+        ),
+        (
+            "alias_never_on_the_wire",
+            {
+                "cam_mode": "look_at",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "look_at": [5.0, 1.0, 5.0],
+                "fov": 0.0,
+                "settle_ticks": 3,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "free_with_both_targets",
+            {
+                "cam_mode": "free",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "look_at": [5.0, 1.0, 5.0],
+                "cam_orientation": [90.0, 0.0, 0.0],
+                "fov": 0.0,
+                "settle_ticks": 3,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "orient_missing_orientation",
+            {"cam_mode": "orient", "cam_pos": [0.0, 2.0, 0.0], "fov": 0.0, "settle_ticks": 3},
+            (False, "bad_args"),
+        ),
+        (
+            "matrix_11_numbers",
+            {"cam_mode": "matrix", "cam_matrix": [0.0] * 11, "fov": 0.0, "settle_ticks": 0},
+            (False, "bad_args"),
+        ),
+        (
+            "negative_fov",
+            {
+                "cam_mode": "orient",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "cam_orientation": [90.0, 0.0, 0.0],
+                "fov": -0.1,
+                "settle_ticks": 3,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "bool_settle_ticks",
+            {
+                "cam_mode": "orient",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "cam_orientation": [90.0, 0.0, 0.0],
+                "fov": 0.0,
+                "settle_ticks": True,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "extra_key",
+            {
+                "cam_mode": "orient",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "cam_orientation": [90.0, 0.0, 0.0],
+                "fov": 0.0,
+                "settle_ticks": 3,
+                "extra": None,
+            },
+            (False, "bad_args"),
+        ),
+    ),
+    "camera_get": (
+        ("valid_empty", {}, (True, None)),
+        ("valid_get", {"cam_mode": "get"}, (True, None)),
+        ("empty_cam_mode", {"cam_mode": ""}, (False, "bad_args")),
+        ("extra_key", {"cam_mode": "get", "extra": None}, (False, "bad_args")),
+    ),
+    "engine_set": (
+        ("valid_start", {"mode": "start"}, (True, None)),
+        ("valid_stop", {"mode": "stop"}, (True, None)),
+        ("bad_mode", {"mode": "idle"}, (False, "bad_args")),
+        ("unhashable_mode", {"mode": ["start"]}, (False, "bad_args")),
+        ("missing_mode", {}, (False, "bad_args")),
+        ("extra_key", {"mode": "start", "extra": None}, (False, "bad_args")),
+    ),
+    "vehicle_control": (
+        (
+            "valid_neutral",
+            {"throttle": 0.0, "steer": 0.0, "brake": 0.0, "handbrake": 0.0, "hold_ttl_s": 0.0},
+            (True, None),
+        ),
+        (
+            "valid_limits",
+            {"throttle": 1.0, "steer": -1.0, "brake": 1.0, "handbrake": 1.0, "hold_ttl_s": 30.0},
+            (True, None),
+        ),
+        (
+            "throttle_above_one",
+            {"throttle": 1.5, "steer": 0.0, "brake": 0.0, "handbrake": 0.0, "hold_ttl_s": 0.0},
+            (False, "bad_args"),
+        ),
+        (
+            "steer_below_minus_one",
+            {"throttle": 0.0, "steer": -1.5, "brake": 0.0, "handbrake": 0.0, "hold_ttl_s": 0.0},
+            (False, "bad_args"),
+        ),
+        (
+            "handbrake_half",
+            {"throttle": 0.0, "steer": 0.0, "brake": 0.0, "handbrake": 0.5, "hold_ttl_s": 0.0},
+            (False, "bad_args"),
+        ),
+        (
+            "handbrake_bool",
+            {"throttle": 0.0, "steer": 0.0, "brake": 0.0, "handbrake": True, "hold_ttl_s": 0.0},
+            (False, "bad_args"),
+        ),
+        (
+            "ttl_over_max",
+            {"throttle": 0.0, "steer": 0.0, "brake": 0.0, "handbrake": 0.0, "hold_ttl_s": 30.5},
+            (False, "bad_args"),
+        ),
+        (
+            "huge_int_throttle",
+            {"throttle": 10**400, "steer": 0.0, "brake": 0.0, "handbrake": 0.0, "hold_ttl_s": 0.0},
+            (False, "bad_args"),
+        ),
+        (
+            "missing_brake",
+            {"throttle": 0.0, "steer": 0.0, "handbrake": 0.0, "hold_ttl_s": 0.0},
+            (False, "bad_args"),
+        ),
+        (
+            "extra_key",
+            {
+                "throttle": 0.0,
+                "steer": 0.0,
+                "brake": 0.0,
+                "handbrake": 0.0,
+                "hold_ttl_s": 0.0,
+                "extra": None,
+            },
+            (False, "bad_args"),
+        ),
+    ),
 }
-
-
-_SCHEMALESS_COMMANDS = (
-    "query_player_state",
-    "query_all_players",
-    "world_spawn",
-    "vehicle_enter",
-    "scene_raycast",
-    "telemetry_read",
-    "query_get_in_condition",
-    "world_time_set",
-    "world_weather_set",
-    "camera_set",
-    "camera_get",
-    "vehicle_get_in_client",
-    "engine_set",
-    "vehicle_control",
-    "vehicle_telemetry",
-    "vehicle_release",
-)
 
 
 class ValidateCommandArgsTableTest(unittest.TestCase):
@@ -680,13 +1218,21 @@ for _command in _COMMAND_CASES:
 
 
 class ValidateCommandArgsFallbackTest(unittest.TestCase):
-    def test_schemaless_commands_preserve_unchecked_payloads(self) -> None:
-        for command in _SCHEMALESS_COMMANDS:
-            with self.subTest(command=command):
-                self.assertEqual(
-                    loopback.validate_command_args(command, {"unchecked": object()}),
-                    (True, None),
-                )
+    def test_every_whitelisted_verb_has_a_schema(self) -> None:
+        # No verb reaches the ingress unchecked any more: a verb added to a
+        # command set without a schema fails here, not in production.
+        verbs = (
+            loopback.SERVER_COMMANDS
+            | loopback.CLIENT_COMMANDS
+            | loopback.EXEC_COMMANDS
+        )
+        self.assertTrue(verbs, "no commands declared; test is vacuous")
+        self.assertEqual(sorted(verbs - set(loopback._COMMAND_ARG_SCHEMAS)), [])
+
+    def test_every_schema_has_table_cases(self) -> None:
+        self.assertEqual(
+            sorted(set(loopback._COMMAND_ARG_SCHEMAS) - set(_COMMAND_CASES)), []
+        )
 
     def test_unknown_command_is_rejected(self) -> None:
         self.assertEqual(

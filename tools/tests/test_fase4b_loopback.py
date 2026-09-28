@@ -51,8 +51,12 @@ class Fase4BLoopbackTest(unittest.TestCase):
 
     def test_fase4b_whitelist_extends_world_commands_and_gates_exec(self) -> None:
         self.start_server(enable_exec_enforce=False)
-        for cmd in ("world_time_set", "world_weather_set"):
-            status, body = self.request("POST", "/enqueue", {"cmd": cmd, "args": {}})
+        # The payload each tool sends; since 6ce4 the ingress checks it.
+        for cmd, args in (
+            ("world_time_set", {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0}),
+            ("world_weather_set", {"rain": 0.0, "time": 0.0, "min_duration": 0.0}),
+        ):
+            status, body = self.request("POST", "/enqueue", {"cmd": cmd, "args": args})
             self.assertEqual(status, 200)
             self.assertIn("id", body)
 

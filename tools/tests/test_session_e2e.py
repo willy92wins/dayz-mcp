@@ -277,20 +277,20 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
 
         before_reject = list(server_peer.command_names())
         with self.assertRaisesRegex(ToolError, "lease_required"):
-            await runtime_b.call_bridge("world_spawn", {}, "server", 2.0)
+            await runtime_b.call_bridge("world_spawn", {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0}, "server", 2.0)
         await asyncio.sleep(0.05)
         self.assertEqual(server_peer.command_names(), before_reject)
 
         queued_b = await runtime_b.session_acquire("B")
         self.assertEqual((queued_b["status"], queued_b["position"]), ("queued", 1))
-        await runtime_a.call_bridge("world_spawn", {}, "server", 2.0)
-        await runtime_a.call_bridge("world_time_set", {}, "server", 2.0)
+        await runtime_a.call_bridge("world_spawn", {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0}, "server", 2.0)
+        await runtime_a.call_bridge("world_time_set", {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0}, "server", 2.0)
         await runtime_a.session_release(acquired_a["lease_token"])
 
         acquired_b = await runtime_b.session_wait(queued_b["ticket"], 1.0)
         self.assertEqual(acquired_b["status"], "active")
         await self.adopt_run(runtime_b, acquired_b["lease_token"])
-        await runtime_b.call_bridge("world_weather_set", {}, "server", 2.0)
+        await runtime_b.call_bridge("world_weather_set", {"rain": 0.0, "time": 0.0, "min_duration": 0.0}, "server", 2.0)
         await runtime_b.session_release(acquired_b["lease_token"])
 
         mutations = [
@@ -365,7 +365,7 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         # foreign read is refused with run_not_owned and never delivered.
         with patch.object(server, "_world_read_not_ready", return_value=None):
             owned_mutation = asyncio.create_task(
-                runtime_a.call_bridge("world_spawn", {}, "server", 3.0)
+                runtime_a.call_bridge("world_spawn", {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0}, "server", 3.0)
             )
             foreign_read = asyncio.create_task(
                 runtime_b.call_bridge("query_player_state", {}, "server", 3.0)
@@ -388,7 +388,7 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         acquired_a = await runtime_a.session_acquire("A")
         await self.adopt_run(runtime_a, acquired_a["lease_token"])
         delivered = asyncio.create_task(
-            runtime_a.call_bridge("world_spawn", {}, "server", 5.0)
+            runtime_a.call_bridge("world_spawn", {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0}, "server", 5.0)
         )
         await self.wait_until(lambda: server_peer.command_names() == ["world_spawn"])
 
@@ -408,7 +408,7 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         acquired_a = await runtime_a.session_acquire("drive")
         await self.adopt_run(runtime_a, acquired_a["lease_token"])
         await runtime_a.call_bridge(
-            "vehicle_control", {"throttle": 1.0}, "client", 2.0
+            "vehicle_control", {"throttle": 1.0, "steer": 0.0, "brake": 0.0, "handbrake": 0.0, "hold_ttl_s": 0.0}, "client", 2.0
         )
 
         released = await runtime_a.session_release(acquired_a["lease_token"])
@@ -435,7 +435,7 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         read = await runtime_a.call_bridge("camera_get", {}, "client", 2.0)
         self.assertTrue(read["ok"], read)
         mutation = await runtime_a.call_bridge(
-            "vehicle_control", {"throttle": 1.0}, "client", 2.0
+            "vehicle_control", {"throttle": 1.0, "steer": 0.0, "brake": 0.0, "handbrake": 0.0, "hold_ttl_s": 0.0}, "client", 2.0
         )
         self.assertTrue(mutation["ok"], mutation)
         await self.wait_until(
@@ -460,7 +460,7 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         acquired_a = await runtime_a.session_acquire("long mutation")
         await self.adopt_run(runtime_a, acquired_a["lease_token"])
         mutation = asyncio.create_task(
-            runtime_a.call_bridge("world_spawn", {}, "server", 400.0)
+            runtime_a.call_bridge("world_spawn", {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0}, "server", 400.0)
         )
         await self.wait_until(lambda: server_peer.command_names() == ["world_spawn"])
 

@@ -1879,7 +1879,7 @@ class DispatchAuditDegradationTest(unittest.TestCase):
         state.retail_probe = lambda: {"known": True, "processes": []}
         status, queued = state.enqueue_command(
             "world_time_set",
-            {},
+            {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0},
             "server",
             identity_payload=IDENTITY_PAYLOAD,
             lease_token=acquired["lease_token"],

@@ -49,7 +49,15 @@ DEFAULT_PORT = 8765
 DEFAULT_PEER = "client"
 DEFAULT_TIMEOUT_S = 5.0
 MUTATION_CMD = "camera_set"
-MUTATION_ARGS = {"cam_mode": "orient"}
+# A payload the camera_set tool could send: since fb-20260822-191204-6ce4 the
+# ingress checks it, and a partial one is bad_args before the fence decides.
+MUTATION_ARGS = {
+    "cam_mode": "orient",
+    "cam_pos": [0, 0, 0],
+    "cam_orientation": [0, 0, 0],
+    "fov": 0,
+    "settle_ticks": 0,
+}
 _AUTH_OR_LEASE = frozenset(
     {"lease_required", "invalid_identity", "unauthorized", "lease_invalid"}
 )

@@ -27,7 +27,13 @@ from tests.fence_helpers import INST_CLIENT, PID_CLIENT
 
 PROBE_PID = 59999
 MUTATION_CMD = "camera_set"
-MUTATION_ARGS = {"cam_mode": "orient"}
+MUTATION_ARGS = {
+    "cam_mode": "orient",
+    "cam_pos": [0, 0, 0],
+    "cam_orientation": [0, 0, 0],
+    "fov": 0,
+    "settle_ticks": 0,
+}
 
 
 def _rich(
