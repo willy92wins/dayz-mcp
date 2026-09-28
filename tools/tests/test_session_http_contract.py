@@ -331,7 +331,7 @@ class SessionHttpTest(unittest.TestCase):
             {
                 "identity": IDENTITY_A,
                 "cmd": "world_spawn",
-                "args": {"type": "X", "pos": [1, 2, 3]},
+                "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                 "peer": "server",
             },
         )
@@ -415,7 +415,7 @@ class SessionHttpTest(unittest.TestCase):
                     {
                         "identity": IDENTITY_A,
                         "cmd": "world_spawn",
-                        "args": {"type": "X", "pos": [1, 2, 3]},
+                        "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                         "peer": peer,
                     },
                 )
@@ -430,7 +430,7 @@ class SessionHttpTest(unittest.TestCase):
                         "identity": IDENTITY_A,
                         "lease_token": token,
                         "cmd": "world_spawn",
-                        "args": {"type": "X", "pos": [1, 2, 3]},
+                        "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                         "peer": peer,
                     },
                 )
@@ -449,7 +449,7 @@ class SessionHttpTest(unittest.TestCase):
                         "identity": IDENTITY_A,
                         "lease_token": malformed_token,
                         "cmd": "world_spawn",
-                        "args": {"type": "X", "pos": [1, 2, 3]},
+                        "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                     },
                 )
                 self.assertEqual((status, body), (403, {"error": "lease_invalid"}))
@@ -469,7 +469,7 @@ class SessionHttpTest(unittest.TestCase):
                     {
                         "identity": IDENTITY_A,
                         "cmd": "world_spawn",
-                        "args": {"type": "X", "pos": [1, 2, 3]},
+                        "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                         "operation_timeout_s": timeout,
                     },
                 )
@@ -482,7 +482,7 @@ class SessionHttpTest(unittest.TestCase):
                         "identity": IDENTITY_A,
                         "lease_token": token,
                         "cmd": "world_spawn",
-                        "args": {"type": "X", "pos": [1, 2, 3]},
+                        "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                         "operation_timeout_s": timeout,
                     },
                 )
@@ -515,7 +515,7 @@ class SessionHttpTest(unittest.TestCase):
                 "identity": IDENTITY_B,
                 "lease_token": token,
                 "cmd": "world_spawn",
-                "args": {"type": "X", "pos": [1, 2, 3]},
+                "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                 "peer": "server",
             },
         )
@@ -596,7 +596,7 @@ class SessionHttpTest(unittest.TestCase):
                 "identity": IDENTITY_A,
                 "lease_token": token,
                 "cmd": "world_spawn",
-                "args": {"type": "X", "pos": [1, 2, 3]},
+                "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                 "peer": "server",
             },
         )
@@ -621,7 +621,7 @@ class SessionHttpTest(unittest.TestCase):
                 "identity": IDENTITY_A,
                 "lease_token": token,
                 "cmd": "world_spawn",
-                "args": {"type": "X", "pos": [1, 2, 3]},
+                "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                 "peer": "server",
             },
         )
@@ -668,7 +668,7 @@ class SessionHttpTest(unittest.TestCase):
                 "identity": IDENTITY_A,
                 "lease_token": token,
                 "cmd": "vehicle_control",
-                "args": {"throttle": 1.0},
+                "args": {"throttle": 1.0, "steer": 0.0, "brake": 0.0, "handbrake": 0.0, "hold_ttl_s": 0.0},
                 "peer": "client",
             },
         )
@@ -706,7 +706,7 @@ class SessionHttpTest(unittest.TestCase):
                 "identity": IDENTITY_A,
                 "lease_token": token,
                 "cmd": "world_spawn",
-                "args": {"type": "X", "pos": [1, 2, 3]},
+                "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                 "peer": "server",
             },
         )
@@ -732,7 +732,7 @@ class SessionHttpTest(unittest.TestCase):
                 "identity": IDENTITY_A,
                 "lease_token": token,
                 "cmd": "world_spawn",
-                "args": {"type": "X", "pos": [1, 2, 3]},
+                "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                 "peer": "server",
                 "operation_timeout_s": 9999,
             },
@@ -765,7 +765,7 @@ class SessionHttpTest(unittest.TestCase):
                 "identity": IDENTITY_A,
                 "lease_token": acquired["lease_token"],
                 "cmd": "world_spawn",
-                "args": {"type": "X", "pos": [1, 2, 3]},
+                "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                 "peer": "server",
             },
         )

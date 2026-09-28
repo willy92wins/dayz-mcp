@@ -169,7 +169,7 @@ class RecordPollFenceTest(unittest.TestCase):
         state = loopback.ServerState("k")
         _bind(state, INST_C2, "client", 2002, run_id="run-c2")
         status, sealed = state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(status, 200, sealed)
         _bind(state, INST_C1, "client", 2001, run_id="run-c1")
@@ -265,7 +265,7 @@ class RecordPollFenceTest(unittest.TestCase):
         state = loopback.ServerState("k")
         _bind(state, INST_C1, "client", 2001)
         status, payload = state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(status, 200, payload)
         _status, first = state.record_poll(
@@ -277,7 +277,7 @@ class RecordPollFenceTest(unittest.TestCase):
         )
         self.assertEqual(second["commands"], [])
         blocked, body = state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(blocked, 409)
         self.assertEqual(body["error"], "instance_ambiguous")
@@ -571,7 +571,7 @@ class LifecycleFenceTest(unittest.TestCase):
         )["instance"]
         self.assertNotEqual(client_v1, client_v2)
         status, queued = self.state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(status, 200, queued)
         _status, stale = self.state.record_poll(
@@ -594,7 +594,7 @@ class LifecycleFenceTest(unittest.TestCase):
         )["instance"]
         self.assertEqual(self.state._bindings[instance].state, "BOUND")
         status, payload = self.state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(status, 200, payload)
         self.assertGreater(len(self.state._bound_queues.get(instance, [])), 0)
@@ -633,7 +633,7 @@ class LifecycleFenceTest(unittest.TestCase):
         self.assertIn(instance, self.state._bindings)
         self.assertEqual(self.state._bindings[instance].state, "BOUND")
         blocked, body = self.state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(blocked, 409, body)
         self.assertEqual(body.get("error"), "run_not_owned")
@@ -655,7 +655,7 @@ class LifecycleFenceTest(unittest.TestCase):
         self.assertEqual(adopted.get("state"), "RUNNING")
         self.assertIs(adopted.get("dispatchable"), True, adopted)
         status, payload = self.state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(status, 200, payload)
 
@@ -1037,7 +1037,7 @@ class ProductionAttributionFenceTest(unittest.TestCase):
 
     def test_second_socket_same_instance_does_not_receive_mutation(self) -> None:
         status, payload = self.state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(status, 200, payload)
         registered_pid = self.state.resolve_poll_pid(
@@ -1054,7 +1054,7 @@ class ProductionAttributionFenceTest(unittest.TestCase):
         )
 
         status, second_cmd = self.state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(status, 200, second_cmd)
         intruder_pid = self.state.resolve_poll_pid(
@@ -1070,7 +1070,7 @@ class ProductionAttributionFenceTest(unittest.TestCase):
         self.assertEqual(second["commands"], [])
         self.assertEqual(self.state._bindings[self.instance].state, "AMBIGUOUS")
         blocked, body = self.state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(blocked, 409)
         self.assertEqual(body["error"], "instance_ambiguous")
@@ -1081,7 +1081,7 @@ class Round3FenceRegressionTest(unittest.TestCase):
         state = loopback.ServerState("k")
         _bind(state, INST_C1, "client", 2001)
         status, payload = state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(status, 200, payload)
         _status, poll = state.record_poll(
@@ -1135,7 +1135,7 @@ class Round3FenceRegressionTest(unittest.TestCase):
         state.confirm(minted, object())
         self.assertEqual(state._bindings[minted].state, "STARTING")
         status, payload = state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(status, 409)
         self.assertEqual(payload["error"], "binding_not_ready")
@@ -1145,7 +1145,7 @@ class Round3FenceRegressionTest(unittest.TestCase):
         _bind(state, INST_C1, "client", 2001, run_id="run-a")
         _bind(state, INST_C2, "client", 2002, run_id="run-b")
         status, payload = state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(status, 409)
         self.assertEqual(payload["error"], "instance_peer_collision")
@@ -1194,7 +1194,7 @@ class Round4FenceRegressionTest(unittest.TestCase):
         run_id = next(iter(state._bindings.values())).run_id
         _ensure_dispatchable_lifecycle(state, run_id)
         status, payload = state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(status, 200, payload)
         return payload
@@ -1446,7 +1446,7 @@ class Round4FenceRegressionTest(unittest.TestCase):
         _ensure_dispatchable_lifecycle(state, "run-r4")
         state._creation_time_fn = lambda _pid: record.creation_time_utc
         status, payload = state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(status, 200, payload)
         snapshot = state.status_snapshot()
@@ -1572,7 +1572,7 @@ class Round5FenceRegressionTest(unittest.TestCase):
         state.confirm(minted, record)
         _ensure_dispatchable_lifecycle(state, "run-r5-unread")
         status, queued = state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(status, 200, queued)
         _status, poll = state.record_poll(
@@ -1583,7 +1583,7 @@ class Round5FenceRegressionTest(unittest.TestCase):
         self.assertNotEqual(state._bindings[minted].state, "AMBIGUOUS")
         self.assertEqual(state._bindings[minted].state, "creation_time_unreadable")
         blocked, body = state.enqueue_command(
-            "camera_set", {"cam_mode": "orient"}, peer="client"
+            "camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}, peer="client"
         )
         self.assertEqual(blocked, 409)
         self.assertEqual(body["error"], "creation_time_unreadable")

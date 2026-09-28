@@ -124,7 +124,7 @@ class Fb3bb4EscAndDriveRetireTest(unittest.TestCase):
             self.assertNotIn(command, loopback.SERVER_COMMANDS)
             self.assertNotIn(command, loopback.CLIENT_COMMANDS)
             self.assertNotIn(command, loopback.WHITELISTED_COMMANDS)
-            self.assertNotIn(command, loopback._SCHEMALESS_COMMANDS)
+            self.assertNotIn(command, loopback._COMMAND_ARG_SCHEMAS)
 
         self.assertNotIn("vehicle_drive", server._BRIDGE_COMMAND_TOOLS["server"])
         self.assertNotIn("drive_probe_client", server._BRIDGE_COMMAND_TOOLS["client"])
@@ -162,8 +162,14 @@ class Fb3bb4EscAndDriveRetireTest(unittest.TestCase):
             self.assertEqual(body, {"error": "not_whitelisted"})
 
         try:
-            enter_status, _enter = state.enqueue_command("vehicle_enter", {})
-            engine_status, _engine = state.enqueue_command("engine_set", {})
+            # Payloads the tools actually send: since 6ce4 these verbs have a
+            # schema, and an empty payload is bad_args.
+            enter_status, _enter = state.enqueue_command(
+                "vehicle_enter", {"pos": [0.0, 0.0, 0.0]}
+            )
+            engine_status, _engine = state.enqueue_command(
+                "engine_set", {"mode": "start"}
+            )
             key_status, _key = state.enqueue_command("key_press", {"dik": 1})
             dialog_status, _dialog = state.enqueue_command(
                 "ui_dialog",

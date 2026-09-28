@@ -1,12 +1,12 @@
 """Anti-regression: every whitelisted verb must survive validate_command_args.
 
-The previous D18 test iterated _SCHEMALESS_COMMANDS, which by construction could
-not detect a verb that was missing from that set. This test walks the UNION of
-all three command sets (SERVER_COMMANDS | CLIENT_COMMANDS | EXEC_COMMANDS) and,
-for each verb, asserts that validate_command_args accepts a minimal valid
-payload. If a new verb is added to any of the three sets without a matching
-`if cmd == ...` branch (or an entry in _SCHEMALESS_COMMANDS), it falls through
-to the final `return False, "bad_args"` and this test fails naming the verb.
+The previous D18 test iterated the schemaless set, which by construction could
+not detect a verb that was missing from it. This test walks the UNION of all
+three command sets (SERVER_COMMANDS | CLIENT_COMMANDS | EXEC_COMMANDS) and, for
+each verb, asserts that validate_command_args accepts a minimal valid payload.
+Every verb has a schema since fb-20260822-191204-6ce4, so a new verb added to
+any of the three sets without one falls through to the final
+`return False, "bad_args"` and this test fails naming the verb.
 """
 from __future__ import annotations
 
@@ -19,15 +19,54 @@ def _minimal_args(cmd: str) -> dict:
     """Return a minimal payload that validate_command_args must accept for `cmd`.
 
     This is the contract: a verb is "wired" iff its minimal valid payload passes
-    validation. A verb that is whitelisted but has no validation branch and is
-    not in _SCHEMALESS_COMMANDS will reject even its minimal payload, which is
-    exactly the bug this test guards against.
+    validation. A verb that is whitelisted but has no schema will reject even
+    its minimal payload, which is exactly the bug this test guards against.
     """
-    # Schema-less verbs: empty payload is the minimal valid one.
-    if cmd in loopback._SCHEMALESS_COMMANDS:
+    # Verbs whose minimal payload is empty.
+    if cmd in {
+        "query_player_state",
+        "query_all_players",
+        "vehicle_telemetry",
+        "vehicle_release",
+        "camera_get",
+    }:
         return {}
 
-    # Verbs with their own `if cmd == ...` branch in validate_command_args.
+    # The rest of the verbs that were schemaless before 6ce4.
+    if cmd == "world_spawn":
+        return {"type": "Item", "pos": [0.0, 0.0, 0.0], "flags": 0, "rotation": 0}
+    if cmd in {"vehicle_enter", "vehicle_get_in_client"}:
+        return {"pos": [0.0, 0.0, 0.0]}
+    if cmd == "scene_raycast":
+        return {
+            "from": [0.0, 1.0, 0.0],
+            "to": [0.0, 0.0, 0.0],
+            "method": "rvproxy",
+            "ignore": "",
+            "radius": 0.05,
+            "intersect": "view",
+        }
+    if cmd == "telemetry_read":
+        return {"mode": "object_at", "type": "CarScript", "pos": [0.0, 0.0, 0.0], "radius": 1.0}
+    if cmd == "query_get_in_condition":
+        return {"pos": [0.0, 0.0, 0.0], "component": -1}
+    if cmd == "world_time_set":
+        return {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0}
+    if cmd == "world_weather_set":
+        return {"rain": 0.0, "time": 0.0, "min_duration": 0.0}
+    if cmd == "camera_set":
+        return {
+            "cam_mode": "orient",
+            "cam_pos": [0.0, 0.0, 0.0],
+            "cam_orientation": [0.0, 0.0, 0.0],
+            "fov": 0.0,
+            "settle_ticks": 0,
+        }
+    if cmd == "engine_set":
+        return {"mode": "start"}
+    if cmd == "vehicle_control":
+        return {"throttle": 0.0, "steer": 0.0, "brake": 0.0, "handbrake": 0.0, "hold_ttl_s": 0.0}
+
     if cmd == "restore_gameplay":
         return {}
     if cmd == "player_respawn":
@@ -72,9 +111,8 @@ def _minimal_args(cmd: str) -> dict:
     if cmd == "ui_click":
         return {"path": "p"}
     if cmd == "ui_focus":
-        # Same shape as ui_click: a widget NAME. NOT schemaless -- ui_focus
-        # rejects an empty path and any extra key, so an entry in
-        # _SCHEMALESS_COMMANDS would silently drop that validation.
+        # Same shape as ui_click: a widget NAME. ui_focus rejects an empty
+        # path and any extra key.
         return {"path": "p"}
     if cmd == "ui_reload_layout":
         return {"mode": "close"}
@@ -116,7 +154,7 @@ class CommandValidationCoverageTest(unittest.TestCase):
             failures,
             [],
             "whitelisted verbs rejected by validate_command_args (missing "
-            "validation branch or _SCHEMALESS_COMMANDS entry): " + "; ".join(failures),
+            "schema): " + "; ".join(failures),
         )
 
     def test_infected_drive_still_passes_validation(self) -> None:
@@ -135,8 +173,9 @@ class CommandValidationCoverageTest(unittest.TestCase):
         self.assertTrue(ok_release, f"infected_drive (release) rejected: {err_release!r}")
 
     def test_schemed_verbs_reject_unexpected_keys(self) -> None:
-        # F-12: verbs that already have a schema must fail closed on extra keys.
-        # _SCHEMALESS_COMMANDS are intentionally not covered here.
+        # F-12: verbs with a schema must fail closed on extra keys. Since 6ce4
+        # every verb has one; tests/test_validate_command_args_table.py covers
+        # the extra key for each of them.
         ok_delete, err_delete = loopback.validate_command_args(
             "object_delete", {"object_id": 1, "unexpected": "x"}
         )

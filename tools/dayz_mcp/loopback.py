@@ -24,6 +24,7 @@ from dayz_mcp.client_dump_registry import ClientDumpRegistry
 from dayz_mcp.core import (
     BLOCKED_VERSION_STATES,
     EXPECTED_BRIDGE_VERSION,
+    is_allowed_spawn_flags,
 )
 from dayz_mcp.instance_fence import (
     BINDING_AMBIGUOUS,
@@ -103,31 +104,6 @@ _RUN_NOT_OWNED_HINT = (
     "its grant adopts the single ownerless run"
 )
 _DURABLE_UNREADABLE = "run_state_unavailable"
-# Whitelisted verbs that validate_command_args does NOT schema-check. Each is
-# either read-only / single-arg or validated by its server.py tool. Keep in sync
-# with SERVER_COMMANDS | CLIENT_COMMANDS: any whitelisted verb not in this set
-# and not handled by an `if cmd == ...` branch is rejected as bad_args.
-# Extra keys are not rejected here. Closing these 18 key sets means copying
-# each verb's bridge/tool arg contract into this ingress; that is a separate
-# change. Schemed verbs below already fail closed on unknown keys.
-_SCHEMALESS_COMMANDS = {
-    "query_player_state",
-    "query_all_players",
-    "world_spawn",
-    "vehicle_enter",
-    "scene_raycast",
-    "telemetry_read",
-    "query_get_in_condition",
-    "world_time_set",
-    "world_weather_set",
-    "camera_set",
-    "camera_get",
-    "vehicle_get_in_client",
-    "engine_set",
-    "vehicle_control",
-    "vehicle_telemetry",
-    "vehicle_release",
-}
 VALID_PEERS = {"server", "client"}
 SESSION_ROUTES = {
     "/session/acquire": "acquire",
@@ -507,6 +483,91 @@ _SAFE_POSITIVE_REAL = _reject_numeric_errors(
 _SAFE_RADIUS_200 = _reject_numeric_errors(
     _real_in_range(minimum=0.0, maximum=200.0, minimum_inclusive=False)
 )
+_SAFE_NON_NEGATIVE_REAL = _reject_numeric_errors(_real_in_range(minimum=0.0))
+_SAFE_UNIT_REAL = _reject_numeric_errors(_real_in_range(minimum=0.0, maximum=1.0))
+_SAFE_SIGNED_UNIT_REAL = _reject_numeric_errors(
+    _real_in_range(minimum=-1.0, maximum=1.0)
+)
+# Mirrors server.VEHICLE_CONTROL_MAX_TTL_S and MCPClientBridge.c:114. A test
+# keeps the two Python copies equal.
+_VEHICLE_CONTROL_MAX_TTL_S = 30.0
+
+
+def _is_real_list(length: int) -> _FieldValidator:
+    def validate(value: object) -> bool:
+        if not isinstance(value, list) or len(value) != length:
+            return False
+        try:
+            return all(_is_real_number(item) for item in value)
+        except (OverflowError, ValueError):
+            return False
+
+    return validate
+
+
+def _is_time_multiplier(value: object) -> bool:
+    # world_time_set: -1 keeps the current multiplier, anything else is 0..64.
+    try:
+        if not _is_real_number(value):
+            return False
+        number = float(value)
+    except (OverflowError, ValueError):
+        return False
+    return number == -1.0 or 0.0 <= number <= 64.0
+
+
+def _is_spawn_flags(value: object) -> bool:
+    # The same ECE mask policy the world_spawn tool applies (core).
+    return (
+        isinstance(value, int)
+        and not _is_strict_bool(value)
+        and is_allowed_spawn_flags(value)
+    )
+
+
+def _is_handbrake(value: object) -> bool:
+    # vehicle_control sends the handbrake as 0.0 or 1.0, never in between.
+    try:
+        return _is_real_number(value) and float(value) in (0.0, 1.0)
+    except (OverflowError, ValueError):
+        return False
+
+
+_WEATHER_LEVELS = frozenset({"overcast", "rain", "fog"})
+_WEATHER_TIMES = frozenset({"time", "min_duration"})
+
+
+def _validate_world_weather_set_args(args: dict) -> tuple[bool, str | None]:
+    # time and min_duration always travel, plus at least one level: the rule
+    # world_weather_set applies before it calls the bridge (no_weather_fields).
+    # "At least one of three" is not a variant, so it is spelled out here.
+    keys = set(args)
+    if keys - _WEATHER_LEVELS - _WEATHER_TIMES or not _WEATHER_TIMES <= keys:
+        return False, "bad_args"
+    levels = keys & _WEATHER_LEVELS
+    if not levels:
+        return False, "bad_args"
+    if not all(_SAFE_UNIT_REAL(args[level]) for level in levels):
+        return False, "bad_args"
+    if not all(_SAFE_NON_NEGATIVE_REAL(args[field]) for field in _WEATHER_TIMES):
+        return False, "bad_args"
+    return True, None
+
+
+def _camera_variant(mode: str, *vectors: str) -> _SchemaVariant:
+    # One camera_set shape per cam_mode the tool emits; fov and settle_ticks
+    # travel with every one of them.
+    validators: dict[str, _FieldValidator] = {
+        "cam_mode": _equal_to(mode),
+        "fov": _SAFE_NON_NEGATIVE_REAL,
+        "settle_ticks": _integer_in_range(),
+    }
+    for field in vectors:
+        validators[field] = _is_real_list(12) if field == "cam_matrix" else _is_real_vector3
+    return _schema_variant(
+        required=("cam_mode", *vectors, "fov", "settle_ticks"),
+        validators=validators,
+    )
 
 
 # Command schemas keep the authenticated ingress contract in one place. Variants
@@ -832,6 +893,120 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             },
         )
     ),
+    # The sixteen verbs below had no schema until fb-20260822-191204-6ce4.
+    # Each mirrors the args its server.py tool builds: the ingress refuses extra
+    # keys, missing keys and wrong types, and accepts everything the tool sends
+    # (tests/test_ingress_schema_coherence.py).
+    "query_player_state": _command_schema(_schema_variant()),
+    "query_all_players": _command_schema(_schema_variant()),
+    "vehicle_telemetry": _command_schema(_schema_variant()),
+    "vehicle_release": _command_schema(_schema_variant()),
+    # flags goes through the same ECE mask policy as the tool
+    # (core.is_allowed_spawn_flags), which mirrors the bridge's IsAllowedSpawnFlags.
+    "world_spawn": _command_schema(
+        _schema_variant(
+            required=("type", "pos", "flags", "rotation"),
+            validators={
+                "type": _is_string,
+                "pos": _is_real_vector3,
+                "flags": _is_spawn_flags,
+                "rotation": _integer_in_range(),
+            },
+        )
+    ),
+    "vehicle_enter": _command_schema(
+        _schema_variant(required=("pos",), validators={"pos": _is_real_vector3})
+    ),
+    "vehicle_get_in_client": _command_schema(
+        _schema_variant(required=("pos",), validators={"pos": _is_real_vector3})
+    ),
+    "scene_raycast": _command_schema(
+        _schema_variant(
+            required=("from", "to", "method", "ignore", "radius", "intersect"),
+            validators={
+                "from": _is_real_vector3,
+                "to": _is_real_vector3,
+                "method": _one_of("rvproxy", "bullet"),
+                "ignore": _one_of("", "player"),
+                "radius": _SAFE_NON_NEGATIVE_REAL,
+                "intersect": _one_of("view", "fire", "geom", "ifire"),
+            },
+        )
+    ),
+    # object_at also carries wait_for(entity_state)'s probe (_entity_wait_request).
+    "telemetry_read": _command_schema(
+        _schema_variant(
+            required=("mode", "type", "pos", "radius"),
+            validators={
+                "mode": _equal_to("object_at"),
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "radius": _SAFE_POSITIVE_REAL,
+            },
+        ),
+        _schema_variant(
+            required=("mode", "path", "max_lines"),
+            validators={
+                "mode": _equal_to("fixture_jsonl"),
+                "path": _is_string,
+                "max_lines": _integer_in_range(),
+            },
+        ),
+    ),
+    "query_get_in_condition": _command_schema(
+        _schema_variant(
+            required=("pos", "component"),
+            validators={"pos": _is_real_vector3, "component": _integer_in_range()},
+        )
+    ),
+    "world_time_set": _command_schema(
+        _schema_variant(
+            required=("year", "month", "day", "hour", "minute"),
+            optional=("time_multiplier",),
+            validators={
+                "year": _integer_in_range(minimum=1970, maximum=2100),
+                "month": _integer_in_range(minimum=1, maximum=12),
+                "day": _integer_in_range(minimum=1, maximum=31),
+                "hour": _integer_in_range(minimum=0, maximum=23),
+                "minute": _integer_in_range(minimum=0, maximum=59),
+                "time_multiplier": _is_time_multiplier,
+            },
+        )
+    ),
+    "world_weather_set": _command_schema(delegated=_validate_world_weather_set_args),
+    # The tool rewrites the look_at alias to lookat before it builds args.
+    "camera_set": _command_schema(
+        _camera_variant("orient", "cam_pos", "cam_orientation"),
+        _camera_variant("lookat", "cam_pos", "look_at"),
+        _camera_variant("matrix", "cam_matrix"),
+        _camera_variant("free", "cam_pos", "look_at"),
+        _camera_variant("free", "cam_pos", "cam_orientation"),
+    ),
+    # camera_get sends {} when cam_mode is empty.
+    "camera_get": _command_schema(
+        _schema_variant(
+            optional=("cam_mode",), validators={"cam_mode": _is_non_empty_string}
+        )
+    ),
+    "engine_set": _command_schema(
+        _schema_variant(
+            required=("mode",), validators={"mode": _one_of("start", "stop")}
+        )
+    ),
+    "vehicle_control": _command_schema(
+        _schema_variant(
+            required=("throttle", "steer", "brake", "handbrake", "hold_ttl_s"),
+            validators={
+                "throttle": _SAFE_UNIT_REAL,
+                "steer": _SAFE_SIGNED_UNIT_REAL,
+                "brake": _SAFE_UNIT_REAL,
+                "handbrake": _is_handbrake,
+                "hold_ttl_s": _reject_numeric_errors(
+                    _real_in_range(minimum=0.0, maximum=_VEHICLE_CONTROL_MAX_TTL_S)
+                ),
+            },
+        )
+    ),
 }
 
 
@@ -860,9 +1035,6 @@ def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
         if any(_matches_schema_variant(args, keys, variant) for variant in variants):
             return True, None
         return False, "bad_args"
-
-    if cmd in _SCHEMALESS_COMMANDS:
-        return True, None
 
     return False, "bad_args"
 
