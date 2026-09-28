@@ -16,6 +16,7 @@ from dayz_mcp.steam_prepare_helper import GuardedHost
 from dayz_mcp.steam_prepare_supervisor import Helper, SteamPreparationGate
 from tests.test_steamfastpath_repair import MemoryProvider, MemoryHost
 from tests import test_process_lifecycle as lifecycle
+from tests import process_lifecycle_helpers as lifecycle_fakes
 from tests import test_dayz_test_worker as worker_tests
 
 
@@ -367,17 +368,17 @@ class SteamAdmissionTests(unittest.TestCase):
         self.addCleanup(self.f.tearDown)
         self.life = self.f.lifecycle
         self.gate = self.life.steam_gate
-        self.f.guard.snapshots[9001] = lifecycle.snapshot(lifecycle.process(9001))
+        self.f.guard.snapshots[9001] = lifecycle_fakes.snapshot(lifecycle_fakes.process(9001))
 
     def start(self, **overrides):
-        return self.life.start_run(lifecycle.IDENTITY_A, self.f.token_a, self.f.request() | overrides)
+        return self.life.start_run(lifecycle_fakes.IDENTITY_A, self.f.token_a, self.f.request() | overrides)
 
     def test_nonexistent_run_never_enters_preparation(self):
         self.assertEqual(self.start(run_id="missing", auto_remediate_steam=True)["error"], "run_not_found")
         self.assertEqual(self.gate.preparations, [])
 
     def test_foreign_run_never_enters_preparation(self):
-        run = self.f.add_run(lifecycle.process(55))
+        run = self.f.add_run(lifecycle_fakes.process(55))
         run.owner_session_id = "another-owner"
         self.f.store.replace(run)
         self.assertEqual(self.start(run_id=run.run_id)["error"], "run_not_adopted")
@@ -435,7 +436,7 @@ class SteamAdmissionTests(unittest.TestCase):
         server_request["argv"].append("-server")
         server_request["role"] = "server"
         with patch.object(self.life, "_rotate_storage_for_launch", return_value=None):
-            result = self.life.start_run(lifecycle.IDENTITY_A, self.f.token_a, server_request)
+            result = self.life.start_run(lifecycle_fakes.IDENTITY_A, self.f.token_a, server_request)
         self.assertTrue(result.get("ok"), result)
         self.assertEqual(self.gate.preparations, [])
 
@@ -444,9 +445,9 @@ class SteamAdmissionTests(unittest.TestCase):
         self.assertEqual(len(self.gate.preparations), 1)
 
     def test_live_client_refuses_mutation_without_replacement(self):
-        old = lifecycle.process(77)
+        old = lifecycle_fakes.process(77)
         run = self.f.add_run(old)
-        self.f.guard.snapshots[77] = lifecycle.snapshot(old)
+        self.f.guard.snapshots[77] = lifecycle_fakes.snapshot(old)
         self.life.diag_probe = lambda: {"known": True, "processes": [{"pid": 77}]}
         def action(**kwargs):
             self.assertFalse(kwargs["mutation_allowed"]())
@@ -490,7 +491,7 @@ class SteamAdmissionTests(unittest.TestCase):
 
     def test_lease_release_cancels_pending_preparation(self):
         def action(**kwargs):
-            self.f.coordinator.release(lifecycle.IDENTITY_A, self.f.token_a)
+            self.f.coordinator.release(lifecycle_fakes.IDENTITY_A, self.f.token_a)
             self.assertFalse(kwargs["authority_active"]())
             return guard.Preparation(error_code="steam_prepare_cancelled")
         self.gate.action = action
@@ -511,7 +512,7 @@ class SteamAdmissionTests(unittest.TestCase):
         self.assertEqual(self.f.launcher.calls, [])
 
     def test_ownership_change_during_wait_is_rejected_on_readmission(self):
-        run = self.f.add_run(lifecycle.process(77))
+        run = self.f.add_run(lifecycle_fakes.process(77))
         def action(**kwargs):
             changed = self.f.store.get(run.run_id)
             changed.owner_lease_id = "replacement-lease"
@@ -522,7 +523,7 @@ class SteamAdmissionTests(unittest.TestCase):
         self.assertEqual(self.f.launcher.calls, [])
 
     def test_old_idle_client_without_lease_still_prevents_steam_mutation(self):
-        record = lifecycle.process(77)
+        record = lifecycle_fakes.process(77)
         run = self.f.add_run(record)
         run.state = "RUNNING_IDLE"
         run.owner_session_id = run.owner_lease_id = None
@@ -531,9 +532,9 @@ class SteamAdmissionTests(unittest.TestCase):
         self.assertFalse(self.life._steam_mutation_allowed())
 
     def test_only_verified_actual_server_is_exempt_from_client_exclusion(self):
-        record = lifecycle.process(77, role="server")
+        record = lifecycle_fakes.process(77, role="server")
         self.f.add_run(record)
-        self.f.guard.snapshots[77] = lifecycle.snapshot(record)
+        self.f.guard.snapshots[77] = lifecycle_fakes.snapshot(record)
         self.life.diag_probe = lambda: {"known": True, "processes": [{"pid": 77}]}
         self.life.argv_of = lambda pid: ["DayZDiag_x64.exe", "-server"]
         self.assertTrue(self.life._steam_mutation_allowed())
@@ -541,9 +542,9 @@ class SteamAdmissionTests(unittest.TestCase):
         self.assertFalse(self.life._steam_mutation_allowed())
 
     def test_hung_argv_probe_cannot_hold_lifecycle_lock_after_prepare_timeout(self):
-        record = lifecycle.process(77, role="server")
+        record = lifecycle_fakes.process(77, role="server")
         run = self.f.add_run(record)
-        self.f.guard.snapshots[77] = lifecycle.snapshot(record)
+        self.f.guard.snapshots[77] = lifecycle_fakes.snapshot(record)
         self.life.diag_probe = lambda: {"known": True, "processes": [{"pid": 77}]}
         entered, resume, done = threading.Event(), threading.Event(), threading.Event()
         def argv(pid):

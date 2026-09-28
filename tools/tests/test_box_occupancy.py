@@ -34,13 +34,12 @@ from dayz_mcp.session_coordination import (
     SessionCoordinator,
 )
 from tests.mcp_helpers import _content_json
-from tests.test_process_lifecycle import (
-    IDENTITY_A,
-    HASH_A,
-    HASH_B,
+from tests.lifecycle_helpers import HASH_A, HASH_B
+from tests.process_lifecycle_helpers import (
     AuditSink,
     FakeGuard,
     FakeLauncher,
+    IDENTITY_A,
     process,
     snapshot,
 )

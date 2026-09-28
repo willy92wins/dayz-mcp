@@ -45,7 +45,7 @@ from tests.lifecycle_helpers import (
     Sequence,
 )
 from tests.steam_helpers import FakeSteamGate
-from tests.test_process_lifecycle import FakeGuard, FakeLauncher, process
+from tests.process_lifecycle_helpers import FakeGuard, FakeLauncher, process
 
 
 # --- helpers from test_bug046_audit_fault_recovery.py ---

@@ -7,7 +7,7 @@ from unittest.mock import patch
 from dayz_mcp import dayz_test_request, dayz_test_tool, native_launcher_transaction
 from dayz_mcp import steam_preflight
 from dayz_mcp.steam_launch_guard import Preparation, SteamIdentity
-from tests.test_dayz_test_tool import (
+from tests.dayz_test_tool_helpers import (
     RUN_ID,
     _Bundle,
     _Opened,
@@ -17,6 +17,8 @@ from tests.test_dayz_test_tool import (
     _terminal,
 )
 from tests import test_process_lifecycle as lifecycle
+from dayz_mcp.session_coordination import ClientIdentity
+from tests import process_lifecycle_helpers as lifecycle_fakes
 
 
 class SteamPreparationDaemonEnvelopeTests(unittest.TestCase):
@@ -26,11 +28,11 @@ class SteamPreparationDaemonEnvelopeTests(unittest.TestCase):
         self.addCleanup(self.f.tearDown)
         self.life = self.f.lifecycle
         self.gate = self.life.steam_gate
-        self.f.guard.snapshots[9001] = lifecycle.snapshot(lifecycle.process(9001))
+        self.f.guard.snapshots[9001] = lifecycle_fakes.snapshot(lifecycle_fakes.process(9001))
 
     def start(self, **overrides):
         return self.life.start_run(
-            lifecycle.IDENTITY_A, self.f.token_a, self.f.request() | overrides
+            lifecycle_fakes.IDENTITY_A, self.f.token_a, self.f.request() | overrides
         )
 
     def test_fb_1f21_status_keeps_wire_safe_projection_for_launching_session(self) -> None:
@@ -42,7 +44,7 @@ class SteamPreparationDaemonEnvelopeTests(unittest.TestCase):
         )
         self.gate.action = lambda **kwargs: prepared
         self.assertTrue(self.start()["ok"])
-        own = self.life.status(lifecycle.IDENTITY_A)
+        own = self.life.status(lifecycle_fakes.IDENTITY_A)
         projection = own.get("steam_preparation")
         self.assertEqual(
             projection,
@@ -60,19 +62,19 @@ class SteamPreparationDaemonEnvelopeTests(unittest.TestCase):
 
     def test_fb_1f21_status_for_another_session_lacks_steam_preparation(self) -> None:
         self.assertTrue(self.start()["ok"])
-        self.assertIn("steam_preparation", self.life.status(lifecycle.IDENTITY_A))
-        other = self.life.status(lifecycle.IDENTITY_B)
+        self.assertIn("steam_preparation", self.life.status(lifecycle_fakes.IDENTITY_A))
+        other = self.life.status(lifecycle_fakes.IDENTITY_B)
         self.assertNotIn("steam_preparation", other)
         self.assertEqual(
-            other["client"]["session"], lifecycle.IDENTITY_B.session_id[:12]
+            other["client"]["session"], lifecycle_fakes.IDENTITY_B.session_id[:12]
         )
 
     def test_fb_1f21_r2_failed_relaunch_same_run_does_not_reuse_previous_preparation(
         self,
     ) -> None:
-        server = lifecycle.process(701, "server")
+        server = lifecycle_fakes.process(701, "server")
         self.f.add_run(server)
-        self.f.guard.snapshots[701] = lifecycle.snapshot(server)
+        self.f.guard.snapshots[701] = lifecycle_fakes.snapshot(server)
         first_prep = Preparation(
             identity=SteamIdentity(41, 134000000000000000),
             startup="old_stable_unobserved",
@@ -81,7 +83,7 @@ class SteamPreparationDaemonEnvelopeTests(unittest.TestCase):
         )
         self.gate.action = lambda **kwargs: first_prep
         self.assertTrue(self.start(run_id="run-existing")["ok"])
-        self.assertIn("steam_preparation", self.life.status(lifecycle.IDENTITY_A))
+        self.assertIn("steam_preparation", self.life.status(lifecycle_fakes.IDENTITY_A))
 
         second_prep = Preparation(
             identity=SteamIdentity(41, 134000000000000000),
@@ -101,7 +103,7 @@ class SteamPreparationDaemonEnvelopeTests(unittest.TestCase):
         second = self.start(run_id="run-existing")
         self.assertEqual(second.get("error"), "lifecycle_start_failed")
         self.assertEqual(len(launcher_attempts), 1)
-        own = self.life.status(lifecycle.IDENTITY_A)
+        own = self.life.status(lifecycle_fakes.IDENTITY_A)
         self.assertNotIn("steam_preparation", own)
         startup, repair, restarted = dayz_test_tool._steam_fields_from_status(
             own, "run-existing"
@@ -122,7 +124,7 @@ class SteamPreparationDaemonEnvelopeTests(unittest.TestCase):
         self.gate.claimed = True
         self.start(run_id="run-1")
         self.assertNotIn(
-            "steam_preparation", self.life.status(lifecycle.IDENTITY_A)
+            "steam_preparation", self.life.status(lifecycle_fakes.IDENTITY_A)
         )
 
     def test_fb_1f21_r2_daemon_projection_drops_hostile_values(self) -> None:
@@ -134,7 +136,7 @@ class SteamPreparationDaemonEnvelopeTests(unittest.TestCase):
         )
         self.gate.action = lambda **kwargs: prepared
         self.assertTrue(self.start()["ok"])
-        projection = self.life.status(lifecycle.IDENTITY_A)["steam_preparation"]
+        projection = self.life.status(lifecycle_fakes.IDENTITY_A)["steam_preparation"]
         self.assertEqual(
             projection,
             {
@@ -146,7 +148,7 @@ class SteamPreparationDaemonEnvelopeTests(unittest.TestCase):
         )
 
     def test_fb_1f21_r2_projection_is_bounded(self) -> None:
-        self.f.coordinator.release(lifecycle.IDENTITY_A, self.f.token_a)
+        self.f.coordinator.release(lifecycle_fakes.IDENTITY_A, self.f.token_a)
         minted = {"n": 0}
 
         def next_run_id() -> str:
@@ -154,10 +156,10 @@ class SteamPreparationDaemonEnvelopeTests(unittest.TestCase):
             return f"run-{minted['n']}"
 
         self.life.id_fn = next_run_id
-        identities: list[lifecycle.ClientIdentity] = []
+        identities: list[ClientIdentity] = []
         run_ids: list[str] = []
         for index in range(40):
-            identity = lifecycle.ClientIdentity(
+            identity = ClientIdentity(
                 "codex",
                 2000 + index,
                 1,
@@ -170,8 +172,8 @@ class SteamPreparationDaemonEnvelopeTests(unittest.TestCase):
             token = acquired["lease_token"]
             pid = 9100 + index
             self.f.launcher.pid = pid
-            self.f.guard.snapshots[pid] = lifecycle.snapshot(
-                lifecycle.process(pid)
+            self.f.guard.snapshots[pid] = lifecycle_fakes.snapshot(
+                lifecycle_fakes.process(pid)
             )
             started = self.life.start_run(identity, token, self.f.request())
             self.assertTrue(started.get("ok"), started)
@@ -209,7 +211,7 @@ class SteamPreparationDaemonEnvelopeTests(unittest.TestCase):
         captured: dict[str, object] = {}
 
         def call_status() -> None:
-            captured["payload"] = self.life.status(lifecycle.IDENTITY_A)
+            captured["payload"] = self.life.status(lifecycle_fakes.IDENTITY_A)
 
         holder = threading.Thread(target=hold_operation_lock)
         status_thread = threading.Thread(target=call_status)
@@ -228,8 +230,8 @@ class SteamPreparationDaemonEnvelopeTests(unittest.TestCase):
                 status_thread.join(timeout=1.0)
 
     def test_fb_1f21_r3_long_session_id_is_not_kept_as_a_key(self) -> None:
-        self.f.coordinator.release(lifecycle.IDENTITY_A, self.f.token_a)
-        identity = lifecycle.ClientIdentity(
+        self.f.coordinator.release(lifecycle_fakes.IDENTITY_A, self.f.token_a)
+        identity = ClientIdentity(
             "codex",
             3000,
             1,

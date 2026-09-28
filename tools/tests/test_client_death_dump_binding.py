@@ -35,7 +35,7 @@ from dayz_mcp.client_steam_bootstrap import (
     diagnose_retired_client_death,
     snapshot_client_dumps,
 )
-from tests.test_dayz_test_tool import (
+from tests.dayz_test_tool_helpers import (
     _Bundle,
     _Opened,
     _Runtime,

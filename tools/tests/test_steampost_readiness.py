@@ -348,9 +348,10 @@ class WindowsSteamStartupTests(unittest.TestCase):
 
 class SteamBranchEnvelopeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        from tests import test_dayz_test_tool as fixtures
+        from dayz_mcp import dayz_test_tool
+        from tests import dayz_test_tool_helpers as fixtures
         self.fixtures = fixtures
-        self.tool = fixtures.dayz_test_tool
+        self.tool = dayz_test_tool
         self.enterContext(patch.object(self.tool, "open_approved_launcher",
                                       return_value=fixtures._Opened()))
         self.enterContext(patch.object(

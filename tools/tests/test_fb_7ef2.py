@@ -20,7 +20,7 @@ from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.server import ServerConfig
 from dayz_mcp.session_coordination import SessionCoordinator
 from tests.steam_helpers import FakeSteamGate
-from tests.test_dayz_test_tool import (
+from tests.dayz_test_tool_helpers import (
     RUN_ID,
     _Bundle,
     _Opened,
@@ -28,11 +28,11 @@ from tests.test_dayz_test_tool import (
     _policy,
     _sealed,
 )
-from tests.test_process_lifecycle import (
-    IDENTITY_A,
+from tests.process_lifecycle_helpers import (
     AuditSink,
     FakeGuard,
     FakeLauncher,
+    IDENTITY_A,
     process,
     snapshot,
 )

@@ -1006,7 +1006,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
     async def test_dayz_test_run_names_run_id_matrix_causes_on_the_wire(self) -> None:
         from dayz_mcp import dayz_test_request, dayz_test_tool
         from tests.client_helpers import _fixture_client_runtime
-        from tests.test_dayz_test_tool import _Bundle, _Opened, _policy, _sealed
+        from tests.dayz_test_tool_helpers import _Bundle, _Opened, _policy, _sealed
 
         config = ServerConfig(
             mode="client",
@@ -1069,7 +1069,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
     async def test_dayz_test_run_preflight_client_reattach_keeps_run_id(self) -> None:
         from dayz_mcp import dayz_test_tool
         from tests.client_helpers import _fixture_client_runtime
-        from tests.test_dayz_test_tool import _Bundle, _Opened, _policy, _sealed
+        from tests.dayz_test_tool_helpers import _Bundle, _Opened, _policy, _sealed
 
         run_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
         config = ServerConfig(

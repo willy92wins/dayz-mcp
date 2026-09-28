@@ -27,7 +27,7 @@ from tests.steam_helpers import FakeSteamGate
 from tests.client_helpers import _fixture_client_runtime
 from tests.mcp_helpers import _content_json
 from tests.test_daemon import IDENTITY, _http
-from tests.test_process_lifecycle import FakeGuard, legacy_process
+from tests.process_lifecycle_helpers import FakeGuard, legacy_process
 from tests.lease_helpers import (
     CleanupSink,
     FakeClock,
