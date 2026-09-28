@@ -271,8 +271,10 @@ class _BoxSnapshot:
     # 250f: who is using each run, from daemon memory of this generation.
     ownerless_since: Mapping[str, float] = field(default_factory=dict)
     human_input: Mapping[str, float] = field(default_factory=dict)
+    uncertain_input: Mapping[str, float] = field(default_factory=dict)
     launched_by: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     input_good_at: float | None = None
+    signal_recovered_at: float | None = None
     use_clock_origin: float | None = None
     bound_runs: frozenset[str] = field(default_factory=frozenset)
 
@@ -306,14 +308,22 @@ def _activity_from_snapshot(
     return "stale", round(age, 3)
 
 
-def _client_liveness(run: RunRecord, probes: _BoxProbes) -> str:
-    """alive, dead or unknown for the run's client processes (250f).
+# 250f: the roles a person can play in. An offline run is a client with its
+# own mission (dayz_test_worker treats it as one), never a server alone.
+_PLAYER_ROLES = frozenset({"client", "offline"})
 
-    A run without a client record is a server alone: nobody can be playing in
-    it, so it reads dead. An unknown diag scan never confirms a death.
+
+def _client_liveness(run: RunRecord, probes: _BoxProbes) -> str:
+    """alive, dead or unknown for the run's player processes (250f).
+
+    A run without a client or offline record is a server alone: nobody can be
+    playing in it, so it reads dead. An unknown diag scan never confirms a
+    death.
     """
 
-    clients = [record.pid for record in run.processes if record.role == "client"]
+    clients = [
+        record.pid for record in run.processes if record.role in _PLAYER_ROLES
+    ]
     if not clients:
         return "dead"
     if probes.live_pids is None:
@@ -354,9 +364,19 @@ def _use_projection(
         return fields
     if run.state != "RUNNING_IDLE":
         return fields
+    client = _client_liveness(run, probes)
+    uncertain_at = snapshot.uncertain_input.get(run.run_id)
+    if uncertain_at is not None and uncertain_at > clock:
+        uncertain_at = None
+    # A stretch without a valid signal may have held use that nobody saw: with
+    # a client that may be alive, the clock restarts where the signal came
+    # back (review #125 F4).
+    recovered_at = snapshot.signal_recovered_at if client != "dead" else None
     since = snapshot.ownerless_since.get(run.run_id, snapshot.use_clock_origin)
     anchors = [
-        value for value in (since, human_at) if value is not None and value <= clock
+        value
+        for value in (since, human_at, uncertain_at, recovered_at)
+        if value is not None and value <= clock
     ]
     if not anchors:
         fields["use_state"] = "unknown"
@@ -364,7 +384,6 @@ def _use_projection(
         return fields
     idle_s = max(0.0, clock - max(anchors))
     fields["idle_s"] = round(idle_s, 3)
-    client = _client_liveness(run, probes)
     good_at = snapshot.input_good_at
     signal_ok = good_at is not None and 0.0 <= clock - good_at <= INPUT_SIGNAL_STALE_S
     if client != "dead" and not signal_ok:
@@ -373,6 +392,12 @@ def _use_projection(
         return fields
     if human_at is not None and clock - human_at < RUN_IDLE_CUT_S:
         fields["use_state"] = "human"
+        return fields
+    if uncertain_at is not None and clock - uncertain_at < RUN_IDLE_CUT_S:
+        # Input went to a window whose identity could not be read: a doubt,
+        # published as such, never as idle (review #125 F2).
+        fields["use_state"] = "unknown"
+        fields["use_reason"] = "identity_unverified"
         return fields
     if idle_s < RUN_IDLE_CUT_S:
         fields["use_state"] = "idle"
@@ -1373,9 +1398,14 @@ class ProcessLifecycle:
         # clock at _use_clock_origin and forgets every launcher.
         self._ownerless_since: dict[tuple[str, str], float] = {}
         self._human_input_at: dict[tuple[str, str], float] = {}
+        self._uncertain_input_at: dict[tuple[str, str], float] = {}
         self._launched_by: dict[tuple[str, str], ClientIdentity] = {}
-        self._input_attributor = InputAttributor()
+        self._input_attributor = InputAttributor(bridge_s=INPUT_SIGNAL_STALE_S)
         self._input_good_at: float | None = None
+        self._signal_recovered_at: float | None = None
+        # Runs already retired: a sample still in flight never writes to them
+        # (review #125 F6). Bounded; retirement is rare.
+        self._retired_use_keys: dict[tuple[str, str], None] = {}
         self._use_clock_origin = time.time()
         # Retired-run diagnostics live in daemon memory and start empty after a
         # restart; the audit file is never read to reconstruct them.
@@ -1630,21 +1660,24 @@ class ProcessLifecycle:
                     self._seal_activity_locked(key, max(stamps))
             self._bump_box_revision_locked()
 
-    def record_input_sample(self, sample: InputSample) -> str | None:
-        """250f: attribute one input sample to the run whose window has the focus.
+    def record_input_sample(self, sample: InputSample) -> list[str]:
+        """250f: attribute one input sample to the runs whose windows had the focus.
 
-        A foreground pid counts only while the full registered identity of
-        that process still matches, so a reused pid never attributes input.
-        A sample that is not ok never refreshes the signal: without a good one
-        for INPUT_SIGNAL_STALE_S the runs read use_state unknown. Returns the
-        run id the input went to, or None.
+        A foreground pid counts as verified use only while the full registered
+        identity of that process still matches. A complete identity that does
+        not match, or a process that is gone, is not that run any more, so a
+        reused pid never attributes input. An identity the guard cannot read
+        is a doubt, kept apart as uncertain input (the run reads unknown).
+        A sample that is not ok never refreshes the signal; the first good one
+        after a stale stretch restarts the clocks from that instant. Returns
+        the run ids the input went to.
         """
 
         runs = [
             run for run in self.manifest.list_runs() if run.state in _ACTIVE_STATES
         ]
 
-        def owner_of(pid: int) -> str | None:
+        def owner_of(pid: int) -> tuple[str, bool] | None:
             for run in runs:
                 for record in run.processes:
                     if record.pid != pid:
@@ -1652,24 +1685,38 @@ class ProcessLifecycle:
                     try:
                         actual = self.guard.snapshot(pid)
                     except Exception:
-                        return None
+                        return run.run_id, False
                     if self._identity_matches(record, actual):
-                        return run.run_id
-                    return None
+                        return run.run_id, True
+                    if isinstance(actual, dict) and (
+                        actual.get("identity_complete") is True
+                        or (
+                            actual.get("error") == "process_not_found"
+                            and actual.get("exit_code") == 4
+                        )
+                    ):
+                        return None
+                    return run.run_id, False
             return None
 
         attributed = self._input_attributor.observe(sample, owner_of)
+        credited: list[str] = []
         with self._activity_lock:
             if sample.ok:
+                previous = self._input_good_at
+                if previous is None or sample.at - previous > INPUT_SIGNAL_STALE_S:
+                    self._signal_recovered_at = sample.at
                 self._input_good_at = sample.at
-            if attributed is None:
-                return None
-            run_id, epoch = attributed
-            key = self._activity_key(run_id)
-            current = self._human_input_at.get(key)
-            if current is None or epoch > current:
-                self._human_input_at[key] = epoch
-        return run_id
+            for run_id, epoch, verified in attributed:
+                key = self._activity_key(run_id)
+                if key in self._retired_use_keys:
+                    continue
+                table = self._human_input_at if verified else self._uncertain_input_at
+                current = table.get(key)
+                if current is None or epoch > current:
+                    table[key] = epoch
+                credited.append(run_id)
+        return credited
 
     def record_command_activity(self, run_id: str, *, now: float | None = None) -> bool:
         if not isinstance(run_id, str) or not run_id:
@@ -1756,10 +1803,19 @@ class ProcessLifecycle:
                 self._activity_unknown.discard(key)
                 self._compensating_runs.discard(key)
                 self._raise_activity_tombstone_locked(key, frontier)
-            # 250f: a retired run keeps no clock, input or launcher.
-            for table in (self._ownerless_since, self._human_input_at, self._launched_by):
+            # 250f: a retired run keeps no clock, input or launcher, and a
+            # sample still in flight cannot write to it afterwards.
+            for table in (
+                self._ownerless_since,
+                self._human_input_at,
+                self._uncertain_input_at,
+                self._launched_by,
+            ):
                 for key in [key for key in table if key[1] == run_id]:
                     table.pop(key, None)
+            self._retired_use_keys[current] = None
+            while len(self._retired_use_keys) > 256:
+                self._retired_use_keys.pop(next(iter(self._retired_use_keys)))
             self._bump_box_revision_locked()
         bindings = self.bindings
         unfence = getattr(bindings, "unfence_runs", None)
@@ -4583,6 +4639,12 @@ class ProcessLifecycle:
                 for (gen, run_id), stamp in self._human_input_at.items()
                 if gen == generation
             }
+            uncertain = {
+                run_id: stamp
+                for (gen, run_id), stamp in self._uncertain_input_at.items()
+                if gen == generation
+            }
+            recovered_at = self._signal_recovered_at
             launched = {
                 run_id: MappingProxyType(identity.public_payload())
                 for (gen, run_id), identity in self._launched_by.items()
@@ -4607,8 +4669,10 @@ class ProcessLifecycle:
             compensating=compensating,
             ownerless_since=MappingProxyType(ownerless),
             human_input=MappingProxyType(human),
+            uncertain_input=MappingProxyType(uncertain),
             launched_by=MappingProxyType(launched),
             input_good_at=input_good_at,
+            signal_recovered_at=recovered_at,
             use_clock_origin=origin,
             bound_runs=bound,
         )

@@ -11,7 +11,11 @@ doubt counts.
 One case is not seen, and is declared (plan residue C1): a full focus
 excursion shorter than one interval, where the run's window gains the focus,
 gets input and loses it between two samples that both show another window.
-Input in other windows never counts for a run (D-81).
+A failed sample is bridged, so the same holds across a short gap of failed
+samples. Input in other windows never counts for a run (D-81).
+
+An identity that cannot be read is a doubt, and a doubt counts as possible
+use: the lifecycle keeps such input apart and publishes the run as unknown.
 
 Nothing here reads window titles, keys or any other input content: only the
 tick of the last input and the pid of the foreground window.
@@ -72,11 +76,15 @@ def bind_real_win32() -> Win32InputFns:
     def foreground_pid() -> int | None:
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
+            # No foreground window (activation in transit, a locked desktop):
+            # nobody is using a run's window, which is a reading, not a failure.
             return None
         pid = wintypes.DWORD(0)
-        if not user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)):
-            return None
-        return int(pid.value) or None
+        if not user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)) or not pid.value:
+            # A window whose owner cannot be read is a failed read: the sample
+            # must not pass for one without a run in front (review #125 F3).
+            raise OSError(ctypes.get_last_error(), "GetWindowThreadProcessId failed")
+        return int(pid.value)
 
     return Win32InputFns(last_input_tick, tick_count, foreground_pid)
 
@@ -149,36 +157,53 @@ def tick_advanced(before: int, after: int) -> bool:
 
 
 class InputAttributor:
-    """Attributes new input to the run whose window had the focus.
+    """Attributes new input to the runs whose windows had the focus.
 
-    ``owner_of(pid)`` answers the run id of a registered process whose full
-    identity still matches, or None; it is only asked when there is new input.
+    ``owner_of(pid)`` answers ``(run_id, verified)`` for a registered process
+    of an active run, or None when the pid is not (or no longer) one of them;
+    a doubt about the identity comes back with ``verified`` False. It is only
+    asked when there is new input.
+
+    A failed sample never replaces the last good one, so a short gap is
+    bridged: the next good sample is compared with the last good one. A gap
+    longer than ``bridge_s`` attributes nothing; the lifecycle restarts the
+    clocks of every run that may have been in use from the recovery instead.
     """
 
-    def __init__(self) -> None:
-        self._previous: InputSample | None = None
+    def __init__(self, bridge_s: float = 2.0) -> None:
+        self._last_ok: InputSample | None = None
+        self._bridge_s = bridge_s
 
     def observe(
         self,
         sample: InputSample,
-        owner_of: Callable[[int], str | None],
-    ) -> tuple[str, float] | None:
-        previous, self._previous = self._previous, sample
-        if previous is None or not previous.ok or not sample.ok:
-            return None
+        owner_of: Callable[[int], tuple[str, bool] | None],
+    ) -> list[tuple[str, float, bool]]:
+        if not sample.ok:
+            return []
+        previous, self._last_ok = self._last_ok, sample
+        if previous is None or sample.at - previous.at > self._bridge_s:
+            return []
         if previous.last_input_tick is None or sample.last_input_tick is None:
-            return None
+            return []
         if not tick_advanced(previous.last_input_tick, sample.last_input_tick):
-            return None
+            return []
         epoch = sample.last_input_epoch
         if epoch is None:
-            return None
+            return []
+        found: dict[str, tuple[str, float, bool]] = {}
         asked: set[int] = set()
+        # Both ends count: with the focus moving from one run to another, the
+        # input may belong to either, and a doubt counts (review #125 F5).
         for pid in (sample.foreground_pid, previous.foreground_pid):
             if pid is None or pid in asked:
                 continue
             asked.add(pid)
-            run_id = owner_of(pid)
-            if run_id is not None:
-                return run_id, epoch
-        return None
+            owner = owner_of(pid)
+            if owner is None:
+                continue
+            run_id, verified = owner
+            prior = found.get(run_id)
+            if prior is None or (verified and not prior[2]):
+                found[run_id] = (run_id, epoch, verified)
+        return list(found.values())

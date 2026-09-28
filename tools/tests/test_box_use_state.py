@@ -159,7 +159,20 @@ class BoxUseStateTest(unittest.TestCase):
             InputSample(at=at, ok=True, last_input_tick=tick, idle_ms=0, foreground_pid=foreground)
         )
 
-    def human_input(self, at: float, pid: int = 802) -> str | None:
+    def healthy_signal(self, start: float, until: float, step: float = 1.5) -> None:
+        """A continuous good signal with no input, as the sampler would give it.
+
+        The first sample is the recovery of the signal, so every clock of a run
+        with a live client counts from ``start`` at the latest.
+        """
+
+        at = start
+        while at < until:
+            self.good_signal(at)
+            at += step
+        self.good_signal(until)
+
+    def human_input(self, at: float, pid: int = 802) -> list[str]:
         """Two samples with the run's window in front and the tick advancing."""
 
         self.good_signal(at - 0.25, foreground=pid, tick=1000)
@@ -206,7 +219,7 @@ class BoxUseStateTest(unittest.TestCase):
     def test_input_in_the_run_window_reads_human(self) -> None:
         self.add_run()
         now = time.time()
-        self.assertEqual(self.human_input(now - 1.0), "run-x")
+        self.assertEqual(self.human_input(now - 1.0), ["run-x"])
         self.good_signal(now)
         row = self.row(now)
         self.assertEqual(row["use_state"], "human")
@@ -216,10 +229,11 @@ class BoxUseStateTest(unittest.TestCase):
         self.release_to_idle()
         now = time.time()
         self.good_signal(now - 0.25, tick=1000)
-        self.assertIsNone(
+        self.assertEqual(
             self.lifecycle.record_input_sample(
                 InputSample(at=now, ok=True, last_input_tick=1100, idle_ms=0, foreground_pid=OTHER_WINDOW_PID)
-            )
+            ),
+            [],
         )
         row = self.row(now)
         self.assertEqual(row["use_state"], "idle")
@@ -232,7 +246,7 @@ class BoxUseStateTest(unittest.TestCase):
         reused["creation_time_utc"] = "2026-07-15T09:09:09.0000000Z"
         self.guard.snapshots[802] = reused
         now = time.time()
-        self.assertIsNone(self.human_input(now))
+        self.assertEqual(self.human_input(now), [])
 
     def test_ownerless_clock_starts_at_the_transition(self) -> None:
         released = self.release_to_idle()
@@ -254,14 +268,14 @@ class BoxUseStateTest(unittest.TestCase):
         released = self.release_to_idle()
         self.bindings.bound.add("run-x")
         now = released + RUN_IDLE_CUT_S + 1.0
-        self.good_signal(now)
+        self.healthy_signal(released, now)
         row = self.row(now)
         self.assertEqual((row["use_state"], row["use_reason"]), ("abandoned", None))
 
     def test_past_the_cut_without_a_bound_bridge_waits(self) -> None:
         released = self.release_to_idle()
         now = released + RUN_IDLE_CUT_S + 1.0
-        self.good_signal(now)
+        self.healthy_signal(released, now)
         row = self.row(now)
         self.assertEqual(
             (row["use_state"], row["use_reason"]), ("idle_waiting", "bridge_not_ready")
@@ -270,8 +284,9 @@ class BoxUseStateTest(unittest.TestCase):
     def test_a_run_of_another_generation_waits(self) -> None:
         self.add_run(generation="gen-before")
         self.bindings.bound.add("run-x")
-        now = time.time() + RUN_IDLE_CUT_S + 1.0
-        self.good_signal(now)
+        start = time.time()
+        now = start + RUN_IDLE_CUT_S + 1.0
+        self.healthy_signal(start, now)
         row = self.row(now)
         self.assertEqual(
             (row["use_state"], row["use_reason"]), ("idle_waiting", "previous_generation")
@@ -301,8 +316,9 @@ class BoxUseStateTest(unittest.TestCase):
             "run-y", processes=[process(901, role="server"), process(902, role="client")]
         )
         self.bindings.bound.update({"run-x", "run-y"})
-        now = time.time() + RUN_IDLE_CUT_S + 1.0
-        self.good_signal(now)
+        start = time.time()
+        now = start + RUN_IDLE_CUT_S + 1.0
+        self.healthy_signal(start, now)
         row = self.row(now)
         self.assertEqual(
             (row["use_state"], row["use_reason"]), ("idle_waiting", "multiple_active_runs")
@@ -315,9 +331,87 @@ class BoxUseStateTest(unittest.TestCase):
         restarted = self._lifecycle()
         self.lifecycle = restarted
         now = restarted._use_clock_origin + 10.0
-        self.good_signal(now)
+        self.healthy_signal(restarted._use_clock_origin, now)
         row = self.row(now)
         self.assertAlmostEqual(row["idle_s"], 10.0, places=2)
+
+    # -- review #125 ---------------------------------------------------------------
+
+    def test_f1_a_live_offline_run_is_a_player_not_a_server_alone(self) -> None:
+        # An offline run is a playable client: without a signal it is a doubt.
+        self.add_run(processes=[process(802, role="offline")])
+        now = time.time() + RUN_IDLE_CUT_S + 1.0
+        row = self.row(now)
+        self.assertEqual(
+            (row["use_state"], row["use_reason"]), ("unknown", "input_signal_unavailable")
+        )
+
+    def test_f1_a_dead_offline_run_is_abandoned(self) -> None:
+        self.add_run(processes=[process(802, role="offline")], live=False)
+        now = time.time() + RUN_IDLE_CUT_S + 1.0
+        row = self.row(now)
+        self.assertEqual((row["use_state"], row["use_reason"]), ("abandoned", "client_gone"))
+
+    def test_f2_input_behind_an_unreadable_identity_is_a_doubt(self) -> None:
+        released = self.release_to_idle()
+        self.bindings.bound.add("run-x")
+
+        def unreadable(pid: int) -> dict[str, object]:
+            raise OSError("access denied")
+
+        self.guard.snapshot = unreadable  # type: ignore[method-assign]
+        now = released + RUN_IDLE_CUT_S + 30.0
+        self.assertEqual(self.human_input(now - 1.0), ["run-x"])
+        self.good_signal(now)
+        row = self.row(now)
+        self.assertEqual(
+            (row["use_state"], row["use_reason"]), ("unknown", "identity_unverified")
+        )
+        self.assertIsNone(row["human_input_age_s"])
+
+    def test_f2_an_incomplete_identity_is_a_doubt_too(self) -> None:
+        released = self.release_to_idle()
+        self.guard.snapshots[802] = {"error": "identity_unavailable", "exit_code": 3}
+        now = released + RUN_IDLE_CUT_S + 30.0
+        self.human_input(now - 1.0)
+        self.good_signal(now)
+        self.assertEqual(self.row(now)["use_reason"], "identity_unverified")
+
+    def test_f2_a_gone_process_is_not_the_run_any_more(self) -> None:
+        released = self.release_to_idle()
+        self.bindings.bound.add("run-x")
+        self.guard.snapshots[802] = {"error": "process_not_found", "exit_code": 4}
+        now = released + RUN_IDLE_CUT_S + 30.0
+        self.healthy_signal(released, now - 2.0)
+        self.assertEqual(self.human_input(now - 1.0), [])
+        self.good_signal(now)
+        self.assertEqual(self.row(now)["use_state"], "abandoned")
+
+    def test_f4_a_stale_stretch_restarts_the_clock_at_the_recovery(self) -> None:
+        released = self.release_to_idle()
+        self.bindings.bound.add("run-x")
+        self.good_signal(released + 1.0)
+        recovered = released + RUN_IDLE_CUT_S + 100.0
+        self.good_signal(recovered)
+        row = self.row(recovered + 1.0)
+        self.assertEqual(row["use_state"], "idle")
+        self.assertAlmostEqual(row["idle_s"], 1.0, places=2)
+
+    def test_f4_the_recovery_does_not_hold_a_server_alone(self) -> None:
+        self.add_run(processes=[process(801, role="server")])
+        recovered = time.time() + RUN_IDLE_CUT_S + 100.0
+        self.good_signal(recovered)
+        self.assertEqual(self.row(recovered + 1.0)["use_state"], "abandoned")
+
+    def test_f6_a_sample_in_flight_never_writes_to_a_retired_run(self) -> None:
+        self.add_run()
+        self.lifecycle._seal_terminal("run-x", time.time())
+        # The manifest still lists the run: this is the sample that read the
+        # runs before the retirement and writes after it.
+        self.assertEqual(self.human_input(time.time()), [])
+        self.assertFalse(
+            [key for key in self.lifecycle._human_input_at if key[1] == "run-x"]
+        )
 
     # -- launched_by ---------------------------------------------------------------
 
