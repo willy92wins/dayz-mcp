@@ -1606,6 +1606,31 @@ foreach ($optOut in @($false, $true)) {
 'PASS'
 '''
 
+# Prints the argv block's two argument lists for the parameters it is given, so
+# the PowerShell argv can be compared with the Python installer's (0f68, review
+# of #121: comparing it with itself let a dropped --require-version through).
+_PS_ARGV_DUMP = r'''
+param(
+    [string]$SourcePath,
+    [string]$KeyFile,
+    [int]$Port,
+    [string]$ExpectedGameVersion = '',
+    [double]$IdleTimeoutSeconds = 1800,
+    [switch]$AllowLegacy,
+    [switch]$ClaudeNoProgressiveDisclosure,
+    [switch]$NoSupervised
+)
+$ErrorActionPreference = 'Stop'
+$source = [IO.File]::ReadAllText($SourcePath)
+$begin = $source.IndexOf('$serverArgs = @(')
+$end = $source.IndexOf('$quotedClaudeArgs =', $begin)
+if ($begin -lt 0 -or $end -lt 0) { throw 'Missing argv block' }
+. ([scriptblock]::Create($source.Substring($begin, $end - $begin)))
+$claudeArgs
+'---'
+$codexArgs
+'''
+
 
 @unittest.skipUnless(os.name == "nt", "install-mcp.ps1 runs on Windows PowerShell")
 class PowerShellInstallerArgvTest(unittest.TestCase):
@@ -1634,6 +1659,57 @@ class PowerShellInstallerArgvTest(unittest.TestCase):
             (0, "PASS"),
             completed.stderr,
         )
+
+    def test_both_installers_register_the_same_argv(self) -> None:
+        cases = (
+            ([], []),
+            (["--no-supervised"], ["-NoSupervised"]),
+            (
+                ["--allow-legacy", "--claude-no-progressive-disclosure"],
+                ["-AllowLegacy", "-ClaudeNoProgressiveDisclosure"],
+            ),
+            (
+                ["--expected-game-version", "1.28.159000", "--idle-timeout-seconds", "2.5"],
+                ["-ExpectedGameVersion", "1.28.159000", "-IdleTimeoutSeconds", "2.5"],
+            ),
+        )
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            keyfile = root / "key with spaces.key"
+            probe = root / "argv_dump.ps1"
+            probe.write_text(_PS_ARGV_DUMP, encoding="utf-8")
+            for python_flags, powershell_flags in cases:
+                with self.subTest(python_flags=python_flags):
+                    options = parse_args(
+                        ["--port", "18765", "--keyfile", str(keyfile), *python_flags],
+                        tools_root=root,
+                    )
+                    completed = subprocess.run(
+                        [
+                            "powershell.exe",
+                            "-NoProfile",
+                            "-NonInteractive",
+                            "-ExecutionPolicy",
+                            "Bypass",
+                            "-File",
+                            str(probe),
+                            "-SourcePath",
+                            str(TOOLS_DIR / "install-mcp.ps1"),
+                            "-KeyFile",
+                            str(keyfile),
+                            "-Port",
+                            "18765",
+                            *powershell_flags,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    claude, separator, codex = completed.stdout.strip().partition("\n---\n")
+                    self.assertEqual(separator, "\n---\n", completed.stdout)
+                    self.assertEqual(claude.splitlines(), build_client_args(options, "claude"))
+                    self.assertEqual(codex.splitlines(), build_client_args(options, "codex"))
 
 
 if __name__ == "__main__":
