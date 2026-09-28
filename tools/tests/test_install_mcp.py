@@ -1135,6 +1135,45 @@ class InstallerOrchestrationTest(unittest.TestCase):
 
         self.assertEqual(seen, [True])
 
+    def test_main_reports_a_refused_drop_with_its_code_and_the_options(self) -> None:
+        provider = FakeRegistrationProvider(
+            {
+                role: RegistrationSpec(
+                    command=self.venv_python,
+                    arguments=(
+                        "-m", "dayz_mcp", "--client", "--supervised",
+                        "--client-platform", platform,
+                    ),
+                )
+                for role, platform in (("CLAUDE", "claude"), ("CODEX", "codex"))
+            }
+        )
+        stderr = io.StringIO()
+        with (
+            patch.object(
+                installer,
+                "install_runtime",
+                return_value={"venv_python": str(self.venv_python)},
+            ),
+            patch.object(installer, "load_installer_cli_manifest", return_value=object()),
+            patch.object(installer, "load_installer_not_found_fixtures", return_value=object()),
+            patch.object(installer, "CliRegistrationProvider", return_value=provider),
+            patch.object(
+                installer,
+                "run_runs_backup_gate",
+                return_value={"status": "verified", "source_absent": False},
+            ),
+            redirect_stderr(stderr),
+        ):
+            code = installer.main(["--register", "--no-supervised", "--skip-knowledge-pack"])
+
+        self.assertEqual(code, 2)
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["error"], "registration_would_drop_options")
+        self.assertIn("CLAUDE:--supervised;CODEX:--supervised", payload["detail"])
+        self.assertIn("--allow-option-removal", payload["detail"])
+        self.assertEqual(provider.events, [("get", "CLAUDE"), ("get", "CODEX")])
+
     def test_backup_failure_prevents_registration_transaction(self) -> None:
         with (
             patch.object(
