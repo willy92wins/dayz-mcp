@@ -117,6 +117,10 @@ MAX_TIMEOUT_S = 300.0
 # the tool lock, so it gets its own short ceiling instead of the 5.0 s default of
 # _request_once. A slow daemon degrades the message; it must not extend the call.
 LIVENESS_STATUS_TIMEOUT_S = 1.0
+# At most one lease carrier write per this many seconds while the daemon keeps
+# renewing the lease (ClientRuntime._refresh_lease_carrier, 1e06). The carrier
+# can lag the lease by this much, against a MAX_HANDOFF_AGE_S of 120 s.
+_CARRIER_REFRESH_S = 5.0
 POLL_INTERVAL_S = 0.05
 WAIT_FOR_MAX_TIMEOUT_S = 600.0
 BOX_WAIT_MAX_S = 600.0
@@ -1820,6 +1824,7 @@ class ClientRuntime:
         # worse than carrying none (session_coordination.py:2766 then refuses a fresh
         # acquire too). Measured in REHEARSAL-LEASE.md, 34/34.
         self._handoff_path = os.environ.get(session_handoff.HANDOFF_ENV) or None
+        self._carrier_written_at = float("-inf")
         carried = (
             session_handoff.consume_handoff(self._handoff_path)
             if self._handoff_path
@@ -1878,12 +1883,35 @@ class ClientRuntime:
                     lease_id=lease_id,
                     generation=0,
                 )
+                self._carrier_written_at = self._time_fn()
             else:
                 session_handoff.clear_handoff(self._handoff_path)
         except (OSError, ValueError, TypeError) as exc:
             # Losing the carrier costs a lease across the next recycle; it must never
             # cost the call that happened to change the lease.
             self._log(f"SESSION: carrier write failed: {exc}")
+
+    def _refresh_lease_carrier(self, lease_token: str) -> None:
+        """Rewrite the carrier when the daemon has just renewed the lease it names.
+
+        The daemon renews the lease on every heartbeat and on every command it
+        authorizes (session_coordination heartbeat/authorize), but the carrier used
+        to be written only when the lease changed. A recycle more than
+        MAX_HANDOFF_AGE_S after the acquire then found the carrier too old and
+        started without a lease it still held (fb-20260927-205523-1e06). At most one
+        write per _CARRIER_REFRESH_S, so a wait_for probe loop does not write a file
+        per probe.
+        """
+        if not self._handoff_path:
+            return
+        now = self._time_fn()
+        if now - self._carrier_written_at < _CARRIER_REFRESH_S:
+            return
+        active_token = self._control.active_lease_token
+        lease_id = self._control.active_lease_id
+        if active_token != lease_token or not lease_id:
+            return
+        self._mirror_lease_to_carrier(active_token, lease_id)
 
     def touch(self) -> None:
         # No local idle watchdog in client mode; the daemon tracks its own idle.
@@ -1996,9 +2024,11 @@ class ClientRuntime:
         )
 
     async def session_heartbeat(self, lease_token: str) -> dict[str, Any]:
-        return await self._control_with_lazy_spawn(
+        result = await self._control_with_lazy_spawn(
             self._control.session_heartbeat, lease_token
         )
+        self._refresh_lease_carrier(lease_token)
+        return result
 
     async def session_release(self, lease_token: str) -> dict[str, Any]:
         return await self._control_with_lazy_spawn(
@@ -2348,6 +2378,9 @@ class ClientRuntime:
             if "id" not in payload:
                 raise ToolError("daemon_bad_enqueue_response")
             command_id = int(payload["id"])
+            if lease_token is not None:
+                # Accepted with the lease: authorize just renewed it (1e06).
+                self._refresh_lease_carrier(lease_token)
             result = await self._await_result(
                 cmd, command_id, peer, timeout_s, deadline=deadline
             )

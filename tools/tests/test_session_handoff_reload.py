@@ -488,5 +488,180 @@ class ReloadLeaseRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 listener.assert_not_called()
 
 
+# --- fb-20260927-205523-1e06: the carrier follows lease renewals ---
+
+
+class CarrierFollowsLeaseRenewalTests(unittest.IsolatedAsyncioTestCase):
+    """The daemon renews a lease on every heartbeat and every authorized command.
+
+    The carrier used to be written only when the lease changed, so a recycle more
+    than MAX_HANDOFF_AGE_S after the acquire found it too old and started without a
+    lease the session still held: 236 s after the acquire on 2026-09-27. Here one
+    clock drives the coordinator and the worker, and another stamps and reads the
+    carrier.
+    """
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.keyfile = self.root / "daemon.key"
+        self.keyfile.write_text("test-key\n", encoding="utf-8")
+        self.carrier = self.root / "handoff.json"
+        self.identity = ClientIdentity(
+            platform="codex", pid=123, ppid=45,
+            started_at_utc="2026-09-25T00:00:00Z",
+            session_id="12345678-1234-4234-8234-1234567890ab", task_label="renewal",
+        )
+        self.clock = 0.0
+        self.wall = 1000.0
+        self.coordinator = SessionCoordinator(
+            time_fn=lambda: self.clock,
+            audit=lambda _: None, cleanup=lambda *_: {}, daemon_generation="test-generation",
+        )
+        code, self.lease = self.coordinator.acquire(self.identity, "before renewal")
+        self.assertEqual(code, 200)
+        self.writes = 0
+        real_write, real_consume = write_handoff, consume_handoff
+
+        def stamped_write(*args, **kwargs):
+            self.writes += 1
+            return real_write(*args, **{**kwargs, "now": lambda: self.wall})
+
+        def stamped_consume(path, **kwargs):
+            return real_consume(path, **{**kwargs, "now": lambda: self.wall})
+
+        for name, fake in (("write_handoff", stamped_write), ("consume_handoff", stamped_consume)):
+            patcher = patch.object(session_handoff, name, side_effect=fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def worker(self):
+        """A worker that inherited the lease through a carrier, as after a recycle."""
+        session_handoff.write_handoff(
+            self.carrier, identity=self.identity, lease_token=self.lease["lease_token"],
+            lease_id=self.lease["lease_id"], generation=1,
+        )
+        policy = _policy(self.keyfile)
+        provenance = SimpleNamespace(
+            port=policy.port, argv=policy.argv, keyfile=policy.keyfile,
+            cwd=policy.cwd, native_executable=policy.native_executable,
+            launch_executable=policy.native_executable, auto_spawn_daemon=False,
+        )
+        with (
+            patch.dict(os.environ, {session_handoff.HANDOFF_ENV: str(self.carrier)}),
+            patch.object(server, "load_normal_daemon_policy", return_value=policy),
+            patch.object(server.host_config, "resolve_daemon_provenance", return_value=provenance),
+            patch.object(server.host_config, "_local_launch_executable", return_value=policy.native_executable),
+            patch.object(server.host_config, "_local_native_executable", return_value=policy.native_executable),
+        ):
+            runtime = server.ClientRuntime(
+                server.ServerConfig(
+                    mode="client", port=policy.port, keyfile=str(self.keyfile),
+                    auto_spawn_daemon=False, log_sink=lambda _: None,
+                ),
+                time_fn=lambda: self.clock,
+            )
+        self.assertEqual(runtime.active_lease_token, self.lease["lease_token"])
+        runtime._control._announce_lease()
+        self.assertTrue(self.carrier.exists())
+        return runtime
+
+    def written_at(self) -> float:
+        return json.loads(self.carrier.read_text(encoding="utf-8"))["written_at"]
+
+    def advance(self, seconds: float) -> None:
+        self.clock += seconds
+        self.wall += seconds
+
+    async def daemon(self, path, payload=None, **_kwargs):
+        payload = payload or {}
+        if path == "/session/heartbeat":
+            code, result = self.coordinator.heartbeat(self.identity, payload["lease_token"])
+            self.assertEqual(code, 200, result)
+            return result
+        self.fail(f"unexpected control call: {path}")
+
+    def enqueue_through_the_coordinator(self, method, path, payload, *_args):
+        self.assertEqual((method, path), ("POST", "/enqueue"))
+        decision = self.coordinator.authorize(
+            self.identity, payload.get("lease_token"), payload["cmd"]
+        )
+        if not decision.allowed:
+            return decision.http_status, {"error": decision.error}
+        return 200, {"id": 7}
+
+    def recycle_keeps_the_lease(self) -> bool:
+        carried = session_handoff.consume_handoff(self.carrier)
+        if carried is None:
+            return False
+        return self.coordinator.authorize(
+            carried.identity, carried.lease_token, "world_spawn"
+        ).allowed
+
+    async def test_a_heartbeat_carries_the_lease_past_the_acquire_ttl(self):
+        runtime = self.worker()
+        self.advance(100.0)
+        with patch.object(runtime._control, "_session_call", side_effect=self.daemon):
+            await runtime.session_heartbeat(self.lease["lease_token"])
+        self.assertEqual(self.written_at(), 1100.0)
+        # 130 s after the acquire, 30 s after the renewal: the lease is alive, and
+        # the replacement must get it.
+        self.advance(30.0)
+        self.assertTrue(self.recycle_keeps_the_lease())
+
+    async def test_an_accepted_command_carries_the_lease_past_the_acquire_ttl(self):
+        runtime = self.worker()
+        self.advance(100.0)
+        runtime._call = self.enqueue_through_the_coordinator
+        with (
+            patch.object(runtime, "_await_result", AsyncMock(return_value={"ok": 1})),
+            patch.object(server, "_with_bridge_success_hints", side_effect=lambda _r, _c, result: result),
+        ):
+            await runtime.call_bridge(
+                "world_spawn",
+                {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
+                "server",
+                2.0,
+            )
+        self.assertEqual(self.written_at(), 1100.0)
+        self.advance(30.0)
+        self.assertTrue(self.recycle_keeps_the_lease())
+
+    async def test_without_a_renewal_the_old_carrier_still_expires(self):
+        # Control: nothing renews the lease, so neither the carrier nor the lease
+        # survives past the TTL. The refresh does not keep dead leases alive.
+        self.worker()
+        self.advance(SESSION_TTL_S + 10.0)
+        self.assertFalse(self.recycle_keeps_the_lease())
+
+    async def test_refresh_writes_at_most_once_per_interval(self):
+        runtime = self.worker()
+        after_announce = self.writes
+        with patch.object(runtime._control, "_session_call", side_effect=self.daemon):
+            self.advance(1.0)
+            await runtime.session_heartbeat(self.lease["lease_token"])
+            self.assertEqual(self.writes, after_announce)
+            self.advance(server._CARRIER_REFRESH_S)
+            await runtime.session_heartbeat(self.lease["lease_token"])
+            self.assertEqual(self.writes, after_announce + 1)
+
+    async def test_a_refused_command_and_a_foreign_token_write_nothing(self):
+        runtime = self.worker()
+        self.advance(100.0)
+        before = self.writes
+        runtime._refresh_lease_carrier("some-other-token")
+        self.assertEqual(self.writes, before)
+        runtime._call = lambda *_args: (409, {"error": "lease_invalid"})
+        with self.assertRaises(server.ToolError):
+            await runtime.call_bridge(
+                "world_spawn",
+                {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
+                "server",
+                2.0,
+            )
+        self.assertEqual(self.writes, before)
+
+
 if __name__ == "__main__":
     unittest.main()
