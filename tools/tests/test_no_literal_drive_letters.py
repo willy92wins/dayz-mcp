@@ -218,6 +218,23 @@ class NoLiteralDriveLettersTest(unittest.TestCase):
             hits = drive_letter_hits(pkg)
         self.assertEqual(len(hits), 3, hits)
 
+    def test_the_pragma_marks_one_line_only(self) -> None:
+        # Review R2 of #118: every mark is a place a real path could hide, so
+        # the marks are counted. Today there is one, on the build regex. A new
+        # one has to change this test on purpose.
+        marks = []
+        for path in sorted(PACKAGE.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            source = path.read_text(encoding="utf-8")
+            for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+                if tok.type == tokenize.COMMENT and _NOT_A_PATH_PRAGMA in tok.string:
+                    marks.append((path.relative_to(PACKAGE).as_posix(), tok.line))
+        self.assertEqual(len(marks), 1, marks)
+        where, line = marks[0]
+        self.assertEqual(where, "knowledge.py")
+        self.assertIn("Target stable build", line)
+
     def test_published_package_has_no_literal_drive_letters(self) -> None:
         self.assertTrue(PACKAGE.is_dir(), f"missing package {PACKAGE}")
         hits = drive_letter_hits(PACKAGE)
