@@ -19,7 +19,7 @@ from dayz_mcp.process_lifecycle import ProcessLifecycle, RunManifestStore
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import SessionCoordinator
 from tests.steam_helpers import FakeSteamGate
-from tests.test_process_lifecycle import AuditSink, FakeGuard
+from tests.process_lifecycle_helpers import AuditSink, FakeGuard
 
 
 class FbF298LaunchStartupinfoTest(unittest.TestCase):

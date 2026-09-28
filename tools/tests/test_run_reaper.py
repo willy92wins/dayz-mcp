@@ -18,12 +18,12 @@ from dayz_mcp import daemon
 from dayz_mcp.process_lifecycle import ProcessLifecycle, RunManifestStore, RunRecord
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import SessionCoordinator
-from tests.test_process_lifecycle import (
-    IDENTITY_A,
-    IDENTITY_B,
+from tests.process_lifecycle_helpers import (
     AuditSink,
     FakeGuard,
     FakeLauncher,
+    IDENTITY_A,
+    IDENTITY_B,
     process,
 )
 

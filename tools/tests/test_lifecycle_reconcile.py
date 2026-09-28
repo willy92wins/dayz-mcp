@@ -34,7 +34,7 @@ from dayz_mcp.runtime_state import JsonlAuditWriter
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import SessionCoordinator
 from tests._bundle_paths import requires_closure_manifest
-from tests.test_dayz_test_tool import (
+from tests.dayz_test_tool_helpers import (
     RUN_ID as TOOL_RUN_ID,
     _Bundle,
     _Opened,
@@ -43,16 +43,15 @@ from tests.test_dayz_test_tool import (
     _sealed,
     _terminal,
 )
-from tests.test_process_lifecycle import (
-    HASH_A,
-    HASH_B,
-    IDENTITY_A,
+from tests.process_lifecycle_helpers import (
     AuditSink,
     FakeGuard,
     FakeLauncher,
+    IDENTITY_A,
     process,
     snapshot,
 )
+from tests.lifecycle_helpers import HASH_A, HASH_B
 
 RUN_ID = "run-existing"
 LAUNCH_PID = 9001

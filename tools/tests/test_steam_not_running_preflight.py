@@ -34,7 +34,7 @@ from dayz_mcp import dayz_test_tool as tool
 from dayz_mcp import steam_launch_guard, steam_prepare_helper
 from dayz_mcp import steam_preflight as steam
 from dayz_mcp.steam_preflight import evaluate_steam_session
-from tests import test_dayz_test_tool as fixtures
+from tests import dayz_test_tool_helpers as fixtures
 from tests.test_steam_preflight import (
     FakeSteamProvider,
     _MutableSteamProvider,

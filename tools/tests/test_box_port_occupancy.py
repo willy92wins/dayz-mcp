@@ -33,11 +33,11 @@ from dayz_mcp.process_lifecycle import (
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import SessionCoordinator
 from tests.test_box_occupancy import _argv_lookup
-from tests.test_process_lifecycle import (
-    IDENTITY_A,
+from tests.process_lifecycle_helpers import (
     AuditSink,
     FakeGuard,
     FakeLauncher,
+    IDENTITY_A,
     process,
     snapshot,
 )

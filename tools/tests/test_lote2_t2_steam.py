@@ -77,8 +77,8 @@ class SteamWaitT2Tests(unittest.TestCase):
 
 class SteamEnvelopeT2Tests(unittest.IsolatedAsyncioTestCase):
     async def test_without_consent_stale_refuses_without_running_the_remediator(self):
-        from tests import test_dayz_test_tool as fixtures
-        tool = fixtures.dayz_test_tool
+        from dayz_mcp import dayz_test_tool as tool
+        from tests import dayz_test_tool_helpers as fixtures
         stale = sp.SteamSessionResult(sp.STEAM_SESSION_STALE, 41, (41,), sp.REMEDIATION)
         failed = SimpleNamespace(error_code=sp.STEAM_SESSION_STALE,
             steam_registered_pid=41, steam_live_pids=(41,), remediation=sp.REMEDIATION,

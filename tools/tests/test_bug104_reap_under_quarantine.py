@@ -17,11 +17,11 @@ from dayz_mcp import process_lifecycle as process_lifecycle_mod
 from dayz_mcp.process_lifecycle import ProcessLifecycle, RunManifestStore
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import SessionCoordinator
-from tests.test_process_lifecycle import (
-    IDENTITY_A,
+from tests.process_lifecycle_helpers import (
     AuditSink,
     FakeGuard,
     FakeLauncher,
+    IDENTITY_A,
     process,
     snapshot,
 )

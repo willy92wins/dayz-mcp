@@ -17,7 +17,7 @@ import mcp_capture
 from dayz_mcp import dayz_test_tool
 from dayz_mcp import server
 from dayz_mcp import steam_preflight
-from tests.test_dayz_test_tool import (
+from tests.dayz_test_tool_helpers import (
     RUN_ID,
     _Bundle,
     _Opened,

@@ -41,7 +41,7 @@ from dayz_mcp import accredited_daemon_transport, dayz_test_tool, native_launche
 from dayz_mcp.session_coordination import command_requires_lease
 from tests.lease_helpers import parse_dpf_table
 from tests.test_control_client import _policy
-from tests.test_dayz_test_tool import (
+from tests.dayz_test_tool_helpers import (
     RUN_ID,
     _Bundle,
     _Opened,
