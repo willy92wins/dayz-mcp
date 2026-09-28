@@ -196,6 +196,15 @@ the start: `.\install-mcp.ps1 -Register -ClaudeNoProgressiveDisclosure` or
 `python install_mcp.py --register --claude-no-progressive-disclosure`. Lease-gated
 tools still refuse to run without a lease, and Codex keeps the default.
 
+Both installers register the client with `--supervised`: it serves the host from a
+worker the supervisor can replace, so `server_reload` picks up edited sources without
+the host reconnecting, and the lease crosses each replacement. `--no-supervised` /
+`-NoSupervised` opts out. `python install_mcp.py --register` refuses to drop an
+option the current registrations carry (`registration_would_drop_options` names each
+one) unless you add `--allow-option-removal`. `.\install-mcp.ps1 -Register` replaces
+both registrations with the command it prints, so repeat the switches you registered
+with.
+
 Three run modes (`python -m dayz_mcp`; `tools/dayz_mcp/server_cli.py:96-118`):
 
 - `--client` — what the installer registers. Does not bind; proxies to the daemon

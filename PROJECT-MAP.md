@@ -71,12 +71,13 @@ Los módulos unittest están en `tools/tests/`; el gate de este mapa es `tests.t
 Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar autorreferencia.
 - `HANDOFF.md` - estado vivo; leer hasta `LIVE-STATE:END`.
 - `AGENTS.md` - 381 B, touched 2026-07-15 (UTC)
+- `ARCHITECTURE-DECISIONS.md` - 8 KB, touched 2026-09-28 (UTC)
 - `AUDITORIA_2026-08-23.md` - 26 KB, touched 2026-09-14 (UTC)
 - `AUDITORIA_ANGULOS_ADICIONALES_2026-08-23.md` - 20 KB, touched 2026-09-14 (UTC)
 - `AUDITORIA_MCP_2026-09-07.md` - 51 KB, touched 2026-09-07 (UTC)
 - `AUDITORIA_PROFUNDA_2026-08-22.md` - 45 KB, touched 2026-09-14 (UTC)
 - `AUDITORIA_SOBREINGENIERIA_RONDA2_2026-08-22.md` - 39 KB, touched 2026-09-14 (UTC)
-- `CHANGELOG.md` - 8 KB, touched 2026-09-24 (UTC)
+- `CHANGELOG.md` - 8 KB, touched 2026-09-28 (UTC)
 - `CLAUDE.md` - 7 KB, touched 2026-09-25 (UTC)
 - `dayz-harness-apis.md` - 26 KB, touched 2026-08-22 (UTC)
 - `dayz-mcp-architecture.md` - 20 KB, touched 2026-09-16 (UTC)
@@ -84,7 +85,7 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `HANDOFF-ARCHIVE.md` - 272 KB, touched 2026-08-29 (UTC)
 - `product-spec.md` - 58 KB, touched 2026-09-14 (UTC)
 - `QUICKSTART.md` - 3 KB, touched 2026-09-19 (UTC)
-- `README.md` - 19 KB, touched 2026-09-27 (UTC)
+- `README.md` - 20 KB, touched 2026-09-28 (UTC)
 
 ## Reparse points omitidos
 
