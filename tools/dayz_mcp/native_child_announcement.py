@@ -83,8 +83,10 @@ class ChildAnnouncementDecoder:
                     path = path_raw.decode("utf-8")
                 except UnicodeError:
                     _invalid()
+                # The broker announces its fixed default C: path, whatever
+                # DAYZ_TOOLS_PATH says (launcher.cpp, BuildAddonCommand).
                 expected_path = (
-                    addon_builder_exe()
+                    addon_builder_exe(environ={})
                     if kind is BrokerKind.ADDON_BUILDER
                     else _PYTHON_PATH
                 )

@@ -234,10 +234,11 @@ Each of these fails closed with a named error instead of guessing (#93):
   Any other executable is `executable_not_allowed` (the retail executables of
   that install give `retail_manual_lifecycle_required`). For a second install
   such as `DayZ Exp`, start the daemon with `DAYZ_GAME_PATH` set to it.
-- **DayZ Tools on another drive.** Set `DAYZ_TOOLS_PATH` to the DayZ Tools
-  folder. The bundle builder also finds Tools through the registry, but the bundle
-  verifier does not yet: without the variable it checks the default `C:` paths and
-  fails with `invalid_native_launcher_bundle`.
+- **DayZ Tools on another drive.** The bundle builder and the bundle verifier find
+  DayZ Tools the same way: `DAYZ_TOOLS_PATH` if it points at them, then the
+  registry, then the default `C:` path. `dayz_test_run(build=true)` still needs
+  DayZ Tools under the default `C:` path, whatever `DAYZ_TOOLS_PATH` says,
+  because the sealed launcher starts AddonBuilder from that fixed path.
 
 ## Security model
 

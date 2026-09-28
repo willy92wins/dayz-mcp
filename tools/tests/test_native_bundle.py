@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import json
+import ntpath
+import os
+import re
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from dayz_mcp import launcher_registry, native_bundle
+import build_native_launcher
+from dayz_mcp import dayz_tools_paths, launcher_registry, native_bundle, native_child_announcement
 from dayz_mcp.dayz_tools_paths import addon_helper_exes
 from dayz_mcp.native_broker_protocol import BrokerKind
-from dayz_mcp.native_child_announcement import ChildAnnouncement
+from dayz_mcp.native_child_announcement import ChildAnnouncement, ChildAnnouncementDecoder
 from dayz_mcp.request_path_authority import PathIdentity
 from tests._bundle_paths import requires_built_bundle, requires_closure_manifest
 
@@ -272,6 +276,165 @@ class NativeBundleTest(unittest.TestCase):
             self.assertFalse(authority.approve_addon_helper_process(12))
             paths[11] = r"C:\other\binarize.exe"
             self.assertFalse(authority.approve_addon_helper_process(11))
+
+
+
+class Fb19b5ToolsLayoutTest(unittest.TestCase):
+    """#93 P3A: DayZ Tools off C: without DAYZ_TOOLS_PATH, and the registry's spelling."""
+
+    F_TOOLS = Path(r"F:\SteamLibrary\steamapps\common\DayZ Tools")
+
+    def test_external_paths_check_matches_the_builder_resolution(self) -> None:
+        tools = self.F_TOOLS
+        present = {
+            ntpath.normcase(str(path))
+            for path in (
+                tools.joinpath("Bin", "AddonBuilder", "AddonBuilder.exe"),
+                tools.parents[2] / "steamclient.dll",
+                tools.parent / "DayZ" / "DayZDiag_x64.exe",
+            )
+        }
+
+        def registry(hive: str, subkey: str, value: str) -> str | None:
+            if (hive, subkey, value) == (
+                "HKEY_CURRENT_USER", r"Software\Bohemia Interactive\DayZ Tools", "path"
+            ):
+                return str(tools)
+            return None
+
+        environ = {key: value for key, value in os.environ.items() if key != "DAYZ_TOOLS_PATH"}
+        with patch.dict(os.environ, environ, clear=True), patch.object(
+            dayz_tools_paths, "read_registry_string", side_effect=registry
+        ), patch.object(
+            Path, "is_file", autospec=True, side_effect=lambda path: ntpath.normcase(str(path)) in present
+        ):
+            builder = {ntpath.normcase(str(path)) for path in build_native_launcher.external_files()}
+            verifier = native_bundle._external_paths()
+        self.assertEqual(verifier, frozenset(builder))
+        self.assertIn(
+            ntpath.normcase(str(tools.joinpath("Bin", "AddonBuilder", "AddonBuilder.exe"))),
+            verifier,
+        )
+
+    def test_announced_addon_builder_path_ignores_the_manifest_spelling(self) -> None:
+        # The builder recorded the registry's lower-case SteamPath; the broker announces
+        # its fixed C: path (launcher.cpp, BuildAddonCommand).
+        manifest_path = (
+            r"c:\program files (x86)\steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\AddonBuilder.exe"
+        )
+        broker_path = (
+            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\AddonBuilder.exe"
+        )
+        identity = PathIdentity(3, "0A" * 16)
+        descriptor = native_bundle.DebugProcessDescriptor(
+            kind=BrokerKind.ADDON_BUILDER,
+            announced_path=manifest_path,
+            final_path=broker_path,
+            image_sha256="AB" * 32,
+            identity=identity,
+        )
+        authority = native_bundle.DebugImageAuthority(
+            process_identities=frozenset({identity}),
+            module_identities=frozenset(),
+            system_directory=r"C:\Windows\System32",
+            process_descriptors=(descriptor,),
+        )
+        announcement = ChildAnnouncement(
+            sequence=1,
+            kind=BrokerKind.ADDON_BUILDER,
+            announced_path=broker_path,
+            image_sha256="AB" * 32,
+            identity=identity,
+        )
+        with patch.object(native_bundle, "_file_identity", return_value=identity), patch.object(
+            native_bundle, "_final_handle_path", return_value=broker_path
+        ):
+            self.assertTrue(authority.approve_announced_process(11, announcement))
+            self.assertFalse(
+                authority.approve_announced_process(
+                    11, replace(announcement, announced_path=r"C:\Other\AddonBuilder.exe")
+                )
+            )
+
+    def _broker_frame(self, path: str, image_sha256: str, identity: PathIdentity) -> bytes:
+        raw = path.encode("utf-8")
+        return native_child_announcement._HEADER.pack(
+            native_child_announcement._MAGIC,
+            native_child_announcement._VERSION,
+            int(BrokerKind.ADDON_BUILDER),
+            0,
+            1,
+            len(raw),
+            bytes.fromhex(image_sha256),
+            identity.volume_serial_number,
+            bytes.fromhex(identity.file_id),
+        ) + raw
+
+    def test_the_broker_view_ignores_dayz_tools_path(self) -> None:
+        broker = dayz_tools_paths.addon_builder_exe(environ={})
+        helpers = frozenset(
+            ntpath.normcase(path) for path in dayz_tools_paths.addon_helper_exes(environ={})
+        )
+        for value in (r"E:\missing\DayZ Tools", str(dayz_tools_paths.DEFAULT_TOOLS_ROOT).lower()):
+            with self.subTest(dayz_tools_path=value), patch.dict(
+                os.environ, {"DAYZ_TOOLS_PATH": value}
+            ):
+                self.assertEqual(native_bundle._addon_builder_path(), broker)
+                self.assertEqual(native_bundle._addon_helper_paths(), helpers)
+                announcement = ChildAnnouncementDecoder().feed(
+                    self._broker_frame(broker, "CD" * 32, PathIdentity(5, "0B" * 16))
+                )[0]
+                self.assertEqual(announcement.announced_path, broker)
+
+    def test_the_cpp_addon_builder_literal_is_the_python_broker_view(self) -> None:
+        source = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
+        literals = re.findall(r'L"([^"]*AddonBuilder\.exe)"', source)
+        self.assertGreaterEqual(len(literals), 2)
+        for literal in literals:
+            self.assertEqual(
+                literal.replace("\\\\", "\\"), dayz_tools_paths.addon_builder_exe(environ={})
+            )
+
+    @requires_built_bundle
+    def test_built_bundle_consumer_chain_accepts_the_broker_under_each_variable(self) -> None:
+        broker = dayz_tools_paths.addon_builder_exe(environ={})
+        if not Path(broker).is_file():
+            self.skipTest("DayZ Tools are not at the broker's fixed path on this host")
+        entry = launcher_registry._create_registry_entry_for_test(
+            "dayz-test-v1", BUNDLE_DIR, "dayz-test-launcher.exe"
+        )
+        clean = {key: value for key, value in os.environ.items() if key != "DAYZ_TOOLS_PATH"}
+        for label, value in (
+            ("unset", None),
+            ("stale", r"E:\missing\DayZ Tools"),
+            ("lowercase_default", str(dayz_tools_paths.DEFAULT_TOOLS_ROOT).lower()),
+        ):
+            env = dict(clean)
+            if value is not None:
+                env["DAYZ_TOOLS_PATH"] = value
+            with self.subTest(dayz_tools_path=label), patch.dict(os.environ, env, clear=True):
+                with launcher_registry._open_registry_entry_for_test(entry) as opened:
+                    with native_bundle.load_verified_bundle(opened) as verified:
+                        authority = verified.debug_image_authority
+                        builders = [
+                            descriptor
+                            for descriptor in authority.process_descriptors
+                            if descriptor.kind is BrokerKind.ADDON_BUILDER
+                        ]
+                        self.assertEqual(len(builders), 1)
+                        self.assertEqual(len(authority.addon_helper_descriptors), 3)
+                        announcement = ChildAnnouncementDecoder().feed(
+                            self._broker_frame(
+                                broker, builders[0].image_sha256, builders[0].identity
+                            )
+                        )[0]
+                        import msvcrt
+
+                        with launcher_registry._open_pinned_read(Path(broker)) as stream:
+                            handle = msvcrt.get_osfhandle(stream.fileno())
+                            self.assertTrue(
+                                authority.approve_announced_process(handle, announcement)
+                            )
 
 
 if __name__ == "__main__":

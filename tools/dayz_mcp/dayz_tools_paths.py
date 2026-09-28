@@ -261,6 +261,25 @@ def require_dayz_layout(
     return DayZLayout(tools=tools, steam=steam, dayz=dayz)
 
 
+def resolved_layout(
+    *,
+    environ: Mapping[str, str] | None = None,
+    is_file: Callable[[Path], bool] | None = None,
+    registry: Callable[[str, str, str], str | None] | None = None,
+) -> DayZLayout:
+    """The layout the bundle builder seals: require_dayz_layout, else selected_layout.
+
+    build_native_launcher resolves through the env var, the registry and marker files.
+    A check that asked selected_layout instead compared a bundle sealed with DayZ Tools
+    on another drive against C: and refused it (fb-20260927-170437-19b5). When nothing
+    is found the builder cannot seal, and this falls back to the pure selection.
+    """
+    try:
+        return require_dayz_layout(environ=environ, is_file=is_file, registry=registry)
+    except ValueError:
+        return selected_layout(environ)
+
+
 def external_file_paths(layout: DayZLayout) -> tuple[Path, ...]:
     files = [layout.tools.joinpath(*parts) for parts in TOOLS_RELATIVE_FILES]
     files.extend(layout.steam / name for name in STEAM_RELATIVE_FILES)

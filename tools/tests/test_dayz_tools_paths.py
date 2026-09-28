@@ -320,5 +320,53 @@ class RegistryStepTests(unittest.TestCase):
                 )
 
 
+
+_F_TOOLS = Path(r"F:\SteamLibrary\steamapps\common\DayZ Tools")
+_BOHEMIA_KEY = ("HKEY_CURRENT_USER", r"Software\Bohemia Interactive\DayZ Tools", "path")
+
+
+def _tools_on_f() -> tuple[object, object]:
+    """A host whose DayZ Tools, Steam and DayZDiag all live under F: (issue #93, 3A)."""
+    present = _markers(
+        _F_TOOLS.joinpath(*dayz_tools_paths.ADDON_BUILDER_RELATIVE),
+        _F_TOOLS.parents[2] / dayz_tools_paths.STEAM_CLIENT_DLL,
+        _F_TOOLS.parent / "DayZ" / DIAG_NAME,
+    )
+
+    def registry(hive: str, subkey: str, value: str) -> str | None:
+        return str(_F_TOOLS) if (hive, subkey, value) == _BOHEMIA_KEY else None
+
+    return _is_file(present), registry
+
+
+class ResolvedLayoutTest(unittest.TestCase):
+    """The bundle verifier resolves like the builder, else like before (fb-...-19b5)."""
+
+    def test_tools_on_another_drive_resolve_like_the_builder(self) -> None:
+        is_file, registry = _tools_on_f()
+        resolved = dayz_tools_paths.resolved_layout(environ={}, is_file=is_file, registry=registry)
+        self.assertEqual(
+            resolved,
+            require_dayz_layout(environ={}, is_file=is_file, registry=registry),
+        )
+        self.assertEqual(resolved.tools, _F_TOOLS)
+        self.assertNotEqual(resolved, selected_layout(environ={}))
+
+    def test_nothing_found_falls_back_to_the_pure_selection(self) -> None:
+        resolved = dayz_tools_paths.resolved_layout(
+            environ={}, is_file=lambda _path: False, registry=_null_registry
+        )
+        self.assertEqual(resolved, selected_layout(environ={}))
+
+    def test_an_env_path_without_tools_is_skipped_like_the_builder(self) -> None:
+        is_file, registry = _tools_on_f()
+        environ = {TOOLS_ENV: r"E:\empty"}
+        resolved = dayz_tools_paths.resolved_layout(
+            environ=environ, is_file=is_file, registry=registry
+        )
+        self.assertEqual(resolved.tools, _F_TOOLS)
+        self.assertEqual(selected_layout(environ=environ).tools, Path(r"E:\empty"))
+
+
 if __name__ == "__main__":
     unittest.main()
