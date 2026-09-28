@@ -1902,10 +1902,12 @@ class ClientRuntime:
         write per _CARRIER_REFRESH_S, so a wait_for probe loop does not write a file
         per probe.
         """
-        if not self._handoff_path:
+        # getattr: tests build a bare ClientRuntime (object.__new__) to check how
+        # its session methods compose; such an instance has no carrier.
+        if not getattr(self, "_handoff_path", None):
             return
         now = self._time_fn()
-        if now - self._carrier_written_at < _CARRIER_REFRESH_S:
+        if now - getattr(self, "_carrier_written_at", float("-inf")) < _CARRIER_REFRESH_S:
             return
         active_token = self._control.active_lease_token
         lease_id = self._control.active_lease_id
