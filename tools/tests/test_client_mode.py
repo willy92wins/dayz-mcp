@@ -130,6 +130,21 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.02)
         self.fail(f"bridge did not become ready: {last.get('ready')}")
 
+    async def _wait_ready_reason(
+        self, runtime: server.ClientRuntime, reason: str, timeout_s: float = 5.0
+    ) -> None:
+        # Both peers have to be bound and polling before the verdict settles:
+        # until then it reads binding_not_ready, whatever the versions say
+        # (fb-20260927-154818-fd01, seen on a loaded CI runner).
+        deadline = time.monotonic() + timeout_s
+        verdict: dict = {}
+        while time.monotonic() < deadline:
+            verdict = server.compute_bridge_ready(await runtime.bridge_status_payload())
+            if verdict["reason"] == reason:
+                return
+            await asyncio.sleep(0.02)
+        self.fail(f"bridge ready.reason never became {reason!r}: last {verdict}")
+
     @staticmethod
     def _attach_fixture_transport(
         runtime: server.ClientRuntime, srv: DaemonHttpServer
@@ -664,12 +679,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self._peer(srv, "server")  # polls with no version → legacy_blocked
         self._peer(srv, "client", _VALID_PEER_VERSION)
         runtime = self._client(srv)
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline:
-            status = await runtime.bridge_status_payload()
-            if (status.get("server_peer") or {}).get("last_poll_age_s") is not None:
-                break
-            await asyncio.sleep(0.02)
+        await self._wait_ready_reason(runtime, "version_mismatch")
         result = await runtime.call_bridge("query_player_state", {}, "server", 1.0)
         self.assertEqual(result["code"], "not_ready")
         self.assertEqual(result["reason"], "version_mismatch")
