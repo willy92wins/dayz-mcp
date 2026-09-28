@@ -117,9 +117,9 @@ MAX_TIMEOUT_S = 300.0
 # the tool lock, so it gets its own short ceiling instead of the 5.0 s default of
 # _request_once. A slow daemon degrades the message; it must not extend the call.
 LIVENESS_STATUS_TIMEOUT_S = 1.0
-# At most one lease carrier write per this many seconds while the daemon keeps
-# renewing the lease (ClientRuntime._refresh_lease_carrier, 1e06). The carrier
-# can lag the lease by this much, against a MAX_HANDOFF_AGE_S of 120 s.
+# At most one heartbeat-driven lease carrier write per this many seconds
+# (ClientRuntime._refresh_lease_carrier, 1e06), so a caller that heartbeats in a
+# loop does not write a file per call.
 _CARRIER_REFRESH_S = 5.0
 POLL_INTERVAL_S = 0.05
 WAIT_FOR_MAX_TIMEOUT_S = 600.0
@@ -1825,6 +1825,9 @@ class ClientRuntime:
         # acquire too). Measured in REHEARSAL-LEASE.md, 34/34.
         self._handoff_path = os.environ.get(session_handoff.HANDOFF_ENV) or None
         self._carrier_written_at = float("-inf")
+        # Carrier writes and clears take this lock, so a refresh cannot land after
+        # the clear of a release or an invalidation it raced with.
+        self._carrier_lock = threading.Lock()
         carried = (
             session_handoff.consume_handoff(self._handoff_path)
             if self._handoff_path
@@ -1874,6 +1877,12 @@ class ClientRuntime:
         """
         if not self._handoff_path:
             return
+        with self._carrier_lock:
+            self._write_carrier_locked(lease_token, lease_id)
+
+    def _write_carrier_locked(
+        self, lease_token: str | None, lease_id: str | None
+    ) -> None:
         try:
             if lease_token and lease_id:
                 session_handoff.write_handoff(
@@ -1892,28 +1901,32 @@ class ClientRuntime:
             self._log(f"SESSION: carrier write failed: {exc}")
 
     def _refresh_lease_carrier(self, lease_token: str) -> None:
-        """Rewrite the carrier when the daemon has just renewed the lease it names.
+        """Rewrite the carrier after a heartbeat the daemon accepted for this lease.
 
-        The daemon renews the lease on every heartbeat and on every command it
-        authorizes (session_coordination heartbeat/authorize), but the carrier used
-        to be written only when the lease changed. A recycle more than
-        MAX_HANDOFF_AGE_S after the acquire then found the carrier too old and
-        started without a lease it still held (fb-20260927-205523-1e06). At most one
-        write per _CARRIER_REFRESH_S, so a wait_for probe loop does not write a file
-        per probe.
+        The carrier used to be written only when the lease changed, so a recycle
+        more than MAX_HANDOFF_AGE_S after the acquire found it too old and started
+        without a lease the session had kept alive by heartbeating
+        (fb-20260927-205523-1e06). A successful heartbeat is the one answer that
+        proves the daemon renewed this very lease. An accepted command is not: the
+        daemon authorizes reads with no valid lease at all, and the enqueue answer
+        does not say which lease, if any, it renewed. So only the heartbeat path
+        calls this, and a session that wants its lease across a server_reload
+        heartbeats inside the TTL.
         """
         # getattr: tests build a bare ClientRuntime (object.__new__) to check how
         # its session methods compose; such an instance has no carrier.
         if not getattr(self, "_handoff_path", None):
             return
-        now = self._time_fn()
-        if now - getattr(self, "_carrier_written_at", float("-inf")) < _CARRIER_REFRESH_S:
-            return
-        active_token = self._control.active_lease_token
-        lease_id = self._control.active_lease_id
-        if active_token != lease_token or not lease_id:
-            return
-        self._mirror_lease_to_carrier(active_token, lease_id)
+        with self._carrier_lock:
+            if self._time_fn() - self._carrier_written_at < _CARRIER_REFRESH_S:
+                return
+            # Re-read under the lock. A release or an invalidation clears the local
+            # lease before it clears the carrier, so once it has started this sees
+            # it and writes nothing; if this wins, that clear still runs after.
+            lease_id = self._control.active_lease_id
+            if self._control.active_lease_token != lease_token or not lease_id:
+                return
+            self._write_carrier_locked(lease_token, lease_id)
 
     def touch(self) -> None:
         # No local idle watchdog in client mode; the daemon tracks its own idle.
@@ -2380,9 +2393,6 @@ class ClientRuntime:
             if "id" not in payload:
                 raise ToolError("daemon_bad_enqueue_response")
             command_id = int(payload["id"])
-            if lease_token is not None:
-                # Accepted with the lease: authorize just renewed it (1e06).
-                self._refresh_lease_carrier(lease_token)
             result = await self._await_result(
                 cmd, command_id, peer, timeout_s, deadline=deadline
             )
