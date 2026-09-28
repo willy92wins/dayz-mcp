@@ -155,8 +155,9 @@ Choose the setup that matches the agent:
 | [`tools/`](tools/) | The Python MCP server, its installer, and the offline gates. |
 
 The mod **pulls** commands and **pushes** results; the Python side is a passive
-endpoint. Nothing is client-authoritative: positions and state are read in
-`MissionServer`.
+endpoint. Positions and state are read in `MissionServer`, the authority. The one
+exception is driving: a PHYSICS car only moves from its owning client, so
+`vehicle_control` runs there (the B3 probe above).
 
 ## Install
 

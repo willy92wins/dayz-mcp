@@ -34,7 +34,10 @@ _ALLOWED_DRIVE_PREFIXES = (
     "c:\\program files",  # declared Steam/Windows default-install fallback
 )
 
-_DRIVE_IN_STRING = re.compile(r"[A-Za-z]:\\")
+# A drive letter starts its token: no letter, digit or underscore right before
+# it. Without the lookbehind the regex text `build:\s` read as drive `d:\`, and
+# dayz_mcp/knowledge.py had to split a pattern across two literals to dodge it.
+_DRIVE_IN_STRING = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:\\")
 
 
 def _docstring_lines(source: str) -> set[int]:
@@ -173,6 +176,25 @@ class NoLiteralDriveLettersTest(unittest.TestCase):
             hits = drive_letter_hits(pkg)
             self.assertTrue(hits)
             self.assertTrue(any("C:\\Users\\guill" in row for row in hits))
+
+    def test_letter_inside_a_word_is_not_a_drive(self) -> None:
+        # The regex text that used to trip the scanner, next to two real paths
+        # that must still be caught: one at the start of a string, one after a
+        # space.
+        source = (
+            'PATTERN = r"^Target stable build:\\s+\\*\\*DayZ PC"\n'
+            'LEAK = r"D:\\Games\\DayZ"\n'
+            'NOTE = "copied to E:\\\\Temp"\n'
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            pkg = Path(raw) / "dayz_mcp"
+            pkg.mkdir()
+            (pkg / "mixed.py").write_text(source, encoding="utf-8")
+            hits = drive_letter_hits(pkg)
+        self.assertEqual(len(hits), 2, hits)
+        self.assertTrue(any("D:\\Games" in row for row in hits))
+        self.assertTrue(any("E:\\Temp" in row for row in hits))
+        self.assertFalse(any("build" in row for row in hits))
 
     def test_published_package_has_no_literal_drive_letters(self) -> None:
         self.assertTrue(PACKAGE.is_dir(), f"missing package {PACKAGE}")

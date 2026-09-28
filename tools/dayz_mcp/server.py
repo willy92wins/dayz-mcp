@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Any, Awaitable, Callable, Iterator, Literal
+from typing import Annotated, Any, AsyncIterator, Awaitable, Callable, Iterator, Literal
 
 import anyio
 from mcp.server.fastmcp import Context, FastMCP, Image
@@ -3557,6 +3557,34 @@ def _structured_not_ready_message(result: object) -> str | None:
     return f"game_not_ready:reason={reason}"
 
 
+_TOOL_LOCK_BUSY = "tool_lock_busy"
+
+
+@asynccontextmanager
+async def _tool_lock_until(runtime: Any, deadline: float) -> AsyncIterator[bool]:
+    """Hold ``runtime.tool_lock`` if it can be had before ``deadline``.
+
+    Yields whether it was acquired. wait_for fixes its deadline before it asks
+    for the lock, so an unbounded wait lets a sibling tool that holds the lock
+    stretch the call past timeout_s (fb-20260928-001643-f280). A free lock is
+    taken even with no time left: acquire does not yield then, so the timeout
+    cannot fire first. If the timeout fires while acquire waits, asyncio.Lock
+    hands the wake-up to the next waiter, so nothing is left held.
+    """
+    acquired = False
+    try:
+        async with asyncio.timeout(max(deadline - time.monotonic(), 0.0)):
+            await runtime.tool_lock.acquire()
+        acquired = True
+    except TimeoutError:
+        pass
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            runtime.tool_lock.release()
+
+
 async def execute_wait_for(
     runtime: Any,
     condition: str,
@@ -3649,7 +3677,17 @@ async def execute_wait_for(
         )
 
     if condition == "log_matches":
-        async with runtime.tool_lock:
+        async with _tool_lock_until(runtime, deadline) as held:
+            if not held:
+                return _wait_for_response(
+                    condition=condition,
+                    started=started,
+                    probes=0,
+                    observed=observed,
+                    satisfied=False,
+                    scanned=scan_summary(),
+                    last_error=_TOOL_LOCK_BUSY,
+                )
             probe_paths = await _wait_for_script_log_paths(runtime)
             # Markers FIRST, then the launch scan. A line written between the
             # two is read twice, which costs nothing; the other order drops it.
@@ -3687,7 +3725,10 @@ async def execute_wait_for(
                         )
 
     while time.monotonic() < deadline:
-        async with runtime.tool_lock:
+        async with _tool_lock_until(runtime, deadline) as held:
+            if not held:
+                last_error = _TOOL_LOCK_BUSY
+                break
             probes += 1
             remaining = deadline - time.monotonic()
             if condition == "entity_state":

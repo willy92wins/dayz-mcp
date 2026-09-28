@@ -72,11 +72,7 @@ class KnowledgePrepareConflict(RuntimeError):
 _PREPARE_TEST_HOOK: Callable[[], None] | None = None
 
 _TARGET_BUILD_RE = re.compile(
-    # Split so the "build:" token and the "\s" escape never share a source
-    # line: together they form the substring "d:\s", which trips the
-    # no-literal-drive-letters package scanner.
-    r"^Target stable build:"
-    r"\s+\*\*DayZ PC\s+([0-9]+(?:\.[0-9]+){3})\*\*",
+    r"^Target stable build:\s+\*\*DayZ PC\s+([0-9]+(?:\.[0-9]+){3})\*\*",
     re.MULTILINE,
 )
 _EVIDENCE_RE = re.compile(
