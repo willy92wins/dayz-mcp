@@ -63,7 +63,7 @@ class EntityWaitTest(unittest.IsolatedAsyncioTestCase):
     async def run_wait(self, runtime, entity=None, **kwargs):
         clock = Clock(runtime)
         self.clock = clock
-        with patch.object(subject, "time", types.SimpleNamespace(monotonic=lambda: clock.now)), patch.object(subject, "asyncio", types.SimpleNamespace(sleep=clock.sleep)):
+        with patch.object(subject, "time", types.SimpleNamespace(monotonic=lambda: clock.now)), patch.object(subject, "asyncio", types.SimpleNamespace(sleep=clock.sleep, timeout=asyncio.timeout)):
             return await subject.execute_wait_for(runtime, "entity_state", entity=predicate() if entity is None else entity, timeout_s=kwargs.pop("timeout_s", 2.0), poll_interval_s=kwargs.pop("poll_interval_s", 0.5), **kwargs)
 
     async def test_real_polling_uses_existing_server_verb_and_satisfies_third_probe(self):
