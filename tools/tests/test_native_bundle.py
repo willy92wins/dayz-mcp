@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import ntpath
+import os
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from dayz_mcp import launcher_registry, native_bundle
+import build_native_launcher
+from dayz_mcp import dayz_tools_paths, launcher_registry, native_bundle
 from dayz_mcp.dayz_tools_paths import addon_helper_exes
 from dayz_mcp.native_broker_protocol import BrokerKind
 from dayz_mcp.native_child_announcement import ChildAnnouncement
@@ -272,6 +275,85 @@ class NativeBundleTest(unittest.TestCase):
             self.assertFalse(authority.approve_addon_helper_process(12))
             paths[11] = r"C:\other\binarize.exe"
             self.assertFalse(authority.approve_addon_helper_process(11))
+
+
+
+class Fb19b5ToolsLayoutTest(unittest.TestCase):
+    """#93 P3A: DayZ Tools off C: without DAYZ_TOOLS_PATH, and the registry's spelling."""
+
+    F_TOOLS = Path(r"F:\SteamLibrary\steamapps\common\DayZ Tools")
+
+    def test_external_paths_check_matches_the_builder_resolution(self) -> None:
+        tools = self.F_TOOLS
+        present = {
+            ntpath.normcase(str(path))
+            for path in (
+                tools.joinpath("Bin", "AddonBuilder", "AddonBuilder.exe"),
+                tools.parents[2] / "steamclient.dll",
+                tools.parent / "DayZ" / "DayZDiag_x64.exe",
+            )
+        }
+
+        def registry(hive: str, subkey: str, value: str) -> str | None:
+            if (hive, subkey, value) == (
+                "HKEY_CURRENT_USER", r"Software\Bohemia Interactive\DayZ Tools", "path"
+            ):
+                return str(tools)
+            return None
+
+        environ = {key: value for key, value in os.environ.items() if key != "DAYZ_TOOLS_PATH"}
+        with patch.dict(os.environ, environ, clear=True), patch.object(
+            dayz_tools_paths, "read_registry_string", side_effect=registry
+        ), patch.object(
+            Path, "is_file", autospec=True, side_effect=lambda path: ntpath.normcase(str(path)) in present
+        ):
+            builder = {ntpath.normcase(str(path)) for path in build_native_launcher.external_files()}
+            verifier = native_bundle._external_paths()
+        self.assertEqual(verifier, frozenset(builder))
+        self.assertIn(
+            ntpath.normcase(str(tools.joinpath("Bin", "AddonBuilder", "AddonBuilder.exe"))),
+            verifier,
+        )
+
+    def test_announced_addon_builder_path_ignores_the_manifest_spelling(self) -> None:
+        # The builder recorded the registry's lower-case SteamPath; the broker announces
+        # its fixed C: path (launcher.cpp, BuildAddonCommand).
+        manifest_path = (
+            r"c:\program files (x86)\steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\AddonBuilder.exe"
+        )
+        broker_path = (
+            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\AddonBuilder.exe"
+        )
+        identity = PathIdentity(3, "0A" * 16)
+        descriptor = native_bundle.DebugProcessDescriptor(
+            kind=BrokerKind.ADDON_BUILDER,
+            announced_path=manifest_path,
+            final_path=broker_path,
+            image_sha256="AB" * 32,
+            identity=identity,
+        )
+        authority = native_bundle.DebugImageAuthority(
+            process_identities=frozenset({identity}),
+            module_identities=frozenset(),
+            system_directory=r"C:\Windows\System32",
+            process_descriptors=(descriptor,),
+        )
+        announcement = ChildAnnouncement(
+            sequence=1,
+            kind=BrokerKind.ADDON_BUILDER,
+            announced_path=broker_path,
+            image_sha256="AB" * 32,
+            identity=identity,
+        )
+        with patch.object(native_bundle, "_file_identity", return_value=identity), patch.object(
+            native_bundle, "_final_handle_path", return_value=broker_path
+        ):
+            self.assertTrue(authority.approve_announced_process(11, announcement))
+            self.assertFalse(
+                authority.approve_announced_process(
+                    11, replace(announcement, announced_path=r"C:\Other\AddonBuilder.exe")
+                )
+            )
 
 
 if __name__ == "__main__":

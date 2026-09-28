@@ -20,7 +20,7 @@ from dayz_mcp.dayz_tools_paths import (
     addon_builder_exe,
     addon_helper_exes,
     external_file_paths,
-    selected_layout,
+    resolved_layout,
 )
 from dayz_mcp.native_child_announcement import ChildAnnouncement
 from dayz_mcp.launcher_registry import (
@@ -105,6 +105,9 @@ _FINGERPRINT_KEYS = frozenset(
     }
 )
 _REPRODUCIBILITY_MODES = ("clean-1", "clean-2", "offline")
+# AddonBuilder and its helpers stay on the broker's view: launcher.cpp starts the
+# fixed C: path (BuildAddonCommand) and announces it, so a build still needs DayZ
+# Tools there until the broker takes the sealed path.
 def _addon_builder_path() -> str:
     return addon_builder_exe()
 
@@ -114,8 +117,10 @@ def _addon_helper_paths() -> frozenset[str]:
 
 
 def _external_paths() -> frozenset[str]:
+    # The builder seals what require_dayz_layout finds, registry included; this check
+    # has to resolve the same way (fb-20260927-170437-19b5).
     return frozenset(
-        ntpath.normcase(str(path)) for path in external_file_paths(selected_layout())
+        ntpath.normcase(str(path)) for path in external_file_paths(resolved_layout())
     )
 
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -249,7 +254,11 @@ class DebugImageAuthority:
         normalized_final = ntpath.normcase(ntpath.normpath(final_path))
         return any(
             descriptor.kind is announcement.kind
-            and descriptor.announced_path == announcement.announced_path
+            # The manifest keeps the builder's spelling (the registry's SteamPath is lower
+            # case) and the broker announces its own. Windows paths compare
+            # case-insensitively; identity, hash and final path pin the file.
+            and ntpath.normcase(descriptor.announced_path)
+            == ntpath.normcase(announcement.announced_path)
             and descriptor.image_sha256 == announcement.image_sha256
             and descriptor.identity == identity
             and ntpath.normcase(ntpath.normpath(descriptor.final_path)) == normalized_final
