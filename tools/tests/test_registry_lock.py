@@ -11,6 +11,15 @@ from pathlib import Path
 from dayz_mcp import launcher_registry, registry_lock
 
 
+def _is_junction(path: Path) -> bool:
+    # Path.is_junction arrived in 3.12 and the floor is 3.11 (pyproject.toml).
+    # This is what it does: an lstat whose reparse tag is a mount point.
+    try:
+        return os.lstat(path).st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+    except OSError:
+        return False
+
+
 def _set_junction_in_place(directory: Path, target: Path) -> None:
     """Turn the existing empty ``directory`` into a junction to ``target``, without renaming it.
 
@@ -190,7 +199,7 @@ class RegistryLockTest(unittest.TestCase):
                 attempts.append(f"blocked: {error}")
             original(handle, name)
 
-        self.addCleanup(lambda: parent.is_junction() and os.rmdir(parent))
+        self.addCleanup(lambda: _is_junction(parent) and os.rmdir(parent))
         with patch.object(registry_lock, "_create_missing_lock", swap_then_create):
             with registry_lock.acquire_registry_lock(exclusive=True, path=lock):
                 pass
@@ -217,10 +226,10 @@ class RegistryLockTest(unittest.TestCase):
 
         def convert_then_create(handle: int, name: str) -> None:
             _set_junction_in_place(parent, target)
-            converted.append(parent.is_junction())
+            converted.append(_is_junction(parent))
             original(handle, name)
 
-        self.addCleanup(lambda: parent.is_junction() and os.rmdir(parent))
+        self.addCleanup(lambda: _is_junction(parent) and os.rmdir(parent))
         with patch.object(registry_lock, "_create_missing_lock", convert_then_create):
             with self.assertRaisesRegex(RuntimeError, "invalid_launcher_registry_lock"):
                 registry_lock.acquire_registry_lock(

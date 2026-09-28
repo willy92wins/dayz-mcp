@@ -221,11 +221,15 @@ class LiveClientCredentialRotationE2ETest(unittest.TestCase):
                     listener_pid
                 )
                 self.assertIsInstance(native_executable, str)
-                self.assertEqual(
-                    native_process_snapshot.command_argv_of(
-                        listener_pid
-                    ),
-                    argv,
+                # On 3.11 and 3.12 the venv redirector rewrites the child's
+                # argv[0] to the base interpreter (#93); accept exactly what the
+                # daemon's own accreditation accepts (argv_matches_redirected).
+                self.assertTrue(
+                    accredited_daemon_transport.argv_matches_redirected(
+                        native_process_snapshot.command_argv_of(listener_pid),
+                        argv,
+                        native_executable,
+                    )
                 )
                 self.assertTrue(
                     native_process_snapshot.same_path(

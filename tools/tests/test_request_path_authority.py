@@ -5,11 +5,22 @@ import importlib
 import inspect
 import json
 import os
+import stat
 import subprocess
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+
+def _is_junction(path: Path) -> bool:
+    # Path.is_junction arrived in 3.12 and the floor is 3.11 (pyproject.toml).
+    # This is what it does: an lstat whose reparse tag is a mount point.
+    try:
+        return os.lstat(path).st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+    except OSError:
+        return False
+
 
 _SYMBOLIC_LINK_FLAG_DIRECTORY = 0x1
 _SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE = 0x2
@@ -20,7 +31,7 @@ def _make_junction(link: Path, target: Path) -> Path:
         ["cmd", "/c", "mklink", "/J", str(link), str(target)],
         capture_output=True,
     )
-    if completed.returncode != 0 or not link.is_junction():
+    if completed.returncode != 0 or not _is_junction(link):
         detail = (completed.stderr or completed.stdout).decode(
             "oem", errors="replace"
         ).strip()
@@ -29,7 +40,7 @@ def _make_junction(link: Path, target: Path) -> Path:
 
 
 def _remove_junction(link: Path) -> None:
-    if link.exists() and link.is_junction():
+    if link.exists() and _is_junction(link):
         link.rmdir()
 
 
@@ -200,7 +211,7 @@ class RequestPathAuthorityTests(unittest.TestCase):
     def test_host_p_mods_junction_requires_and_preserves_exact_mount_point(self) -> None:
         authority = importlib.import_module("dayz_mcp.request_path_authority")
         junction = Path(r"P:\Mods")
-        if not junction.exists() or not junction.is_junction():
+        if not junction.exists() or not _is_junction(junction):
             self.skipTest(r"P:\Mods exact junction is unavailable")
 
         with self.assertRaisesRegex(
