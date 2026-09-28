@@ -622,7 +622,9 @@ async def _run() -> dict[str, object]:
             before_reject = server_peer.count("world_spawn")
             rejection = ""
             try:
-                await runtime_b.call_bridge("world_spawn", {}, "server", 2.0)
+                await runtime_b.call_bridge(
+                    "world_spawn", {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0}, "server", 2.0
+                )
             except ToolError as exc:
                 rejection = _error_code(exc)
             await asyncio.sleep(0.1)
@@ -639,15 +641,25 @@ async def _run() -> dict[str, object]:
             queued_b = await runtime_b.session_acquire("B")
             queued_c = await runtime_c.session_acquire("C")
             transient_secrets.append(str(active_a["lease_token"]))
-            await runtime_a.call_bridge("world_spawn", {}, "server", 3.0)
+            await runtime_a.call_bridge("world_spawn", {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0}, "server", 3.0)
             await runtime_a.session_release(active_a["lease_token"])
             active_b = await runtime_b.session_wait(queued_b["ticket"], 0.0)
             transient_secrets.append(str(active_b["lease_token"]))
-            await runtime_b.call_bridge("world_time_set", {}, "server", 3.0)
+            await runtime_b.call_bridge(
+                "world_time_set",
+                {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0},
+                "server",
+                3.0,
+            )
             await runtime_b.session_release(active_b["lease_token"])
             active_c = await runtime_c.session_wait(queued_c["ticket"], 0.0)
             transient_secrets.append(str(active_c["lease_token"]))
-            await runtime_c.call_bridge("world_weather_set", {}, "server", 3.0)
+            await runtime_c.call_bridge(
+                "world_weather_set",
+                {"rain": 0.0, "time": 0.0, "min_duration": 0.0},
+                "server",
+                3.0,
+            )
             await runtime_c.session_release(active_c["lease_token"])
             expected_order = ["world_spawn", "world_time_set", "world_weather_set"]
             observed_order = [

@@ -727,6 +727,26 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             (True, None),
         ),
         (
+            "valid_flags_createphysics_trace",
+            {"type": "CivilianSedan", "pos": [1.0, 2.0, 3.0], "flags": 1028, "rotation": 0},
+            (True, None),
+        ),
+        (
+            "valid_flags_surface_initai_physics",
+            {"type": "ZmbM_CitizenASkinny", "pos": [1.0, 2.0, 3.0], "flags": 3108, "rotation": 0},
+            (True, None),
+        ),
+        (
+            "flags_the_tool_refuses",
+            {"type": "CivilianSedan", "pos": [1.0, 2.0, 3.0], "flags": 1, "rotation": 0},
+            (False, "bad_args"),
+        ),
+        (
+            "flags_keepheight_not_allowed",
+            {"type": "CivilianSedan", "pos": [1.0, 2.0, 3.0], "flags": 524288, "rotation": 0},
+            (False, "bad_args"),
+        ),
+        (
             "missing_rotation",
             {"type": "CivilianSedan", "pos": [1.0, 2.0, 3.0], "flags": 0},
             (False, "bad_args"),

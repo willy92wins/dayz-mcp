@@ -24,6 +24,7 @@ from dayz_mcp.client_dump_registry import ClientDumpRegistry
 from dayz_mcp.core import (
     BLOCKED_VERSION_STATES,
     EXPECTED_BRIDGE_VERSION,
+    is_allowed_spawn_flags,
 )
 from dayz_mcp.instance_fence import (
     BINDING_AMBIGUOUS,
@@ -515,6 +516,15 @@ def _is_time_multiplier(value: object) -> bool:
     return number == -1.0 or 0.0 <= number <= 64.0
 
 
+def _is_spawn_flags(value: object) -> bool:
+    # The same ECE mask policy the world_spawn tool applies (core).
+    return (
+        isinstance(value, int)
+        and not _is_strict_bool(value)
+        and is_allowed_spawn_flags(value)
+    )
+
+
 def _is_handbrake(value: object) -> bool:
     # vehicle_control sends the handbrake as 0.0 or 1.0, never in between.
     try:
@@ -891,15 +901,15 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "query_all_players": _command_schema(_schema_variant()),
     "vehicle_telemetry": _command_schema(_schema_variant()),
     "vehicle_release": _command_schema(_schema_variant()),
-    # flags is an ECE mask that the tool (is_allowed_spawn_flags) and the
-    # bridge (IsAllowedSpawnFlags) check; only its type and sign are checked here.
+    # flags goes through the same ECE mask policy as the tool
+    # (core.is_allowed_spawn_flags), which mirrors the bridge's IsAllowedSpawnFlags.
     "world_spawn": _command_schema(
         _schema_variant(
             required=("type", "pos", "flags", "rotation"),
             validators={
                 "type": _is_string,
                 "pos": _is_real_vector3,
-                "flags": _integer_in_range(minimum=0),
+                "flags": _is_spawn_flags,
                 "rotation": _integer_in_range(),
             },
         )

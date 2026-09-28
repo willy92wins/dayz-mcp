@@ -47,7 +47,20 @@ from dayz_mcp.camera_restore import (
     RESTORE_NOT_VERIFIED,
     restore_camera_verdict as _restore_camera_verdict,
 )
-from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
+from dayz_mcp.core import (
+    ECE_CREATEPHYSICS,
+    ECE_EQUIP_ATTACHMENTS,
+    ECE_INITAI,
+    ECE_KEEPHEIGHT,
+    ECE_KEEPHEIGHT_NOLIFETIME,
+    ECE_NOLIFETIME,
+    ECE_NOPERSISTENCY_WORLD,
+    ECE_PLACE_ON_SURFACE,
+    ECE_TRACE,
+    EXPECTED_BRIDGE_VERSION,
+    WORLD_SPAWN_ALLOWED_EXTRA_FLAGS,
+    is_allowed_spawn_flags,
+)
 from dayz_mcp.effective_schema_core import project_server_config_identity
 from dayz_mcp.tool_registry_fingerprint import capture_registry_snapshot
 from dayz_mcp.agent_loop import PUBLIC_NEXT_TOOLS, next_step, ok_next_step, with_next_step
@@ -157,22 +170,6 @@ _RETAIL_QUARANTINE_REASONS = frozenset({
 })
 LEASE_TOOL_LINE = "Requires a lease (session_acquire_wait)."
 
-# Vanilla ECE_* from centraleconomy.c. world_spawn flags=0 is the documented
-# surface default (bridge applies ECE_PLACE_ON_SURFACE). Non-zero values must
-# match MCPBridge.IsAllowedSpawnFlags; ECE_KEEPHEIGHT / ECE_NOLIFETIME are
-# engine-defined but not in that allowlist (Enforce widening is out of scope).
-ECE_TRACE = 4
-ECE_CREATEPHYSICS = 1024
-ECE_INITAI = 2048
-ECE_EQUIP_ATTACHMENTS = 8192
-ECE_PLACE_ON_SURFACE = 1060
-ECE_KEEPHEIGHT = 524288
-ECE_NOLIFETIME = 4194304
-ECE_NOPERSISTENCY_WORLD = 8388608
-ECE_KEEPHEIGHT_NOLIFETIME = ECE_KEEPHEIGHT | ECE_NOLIFETIME  # 4718592
-WORLD_SPAWN_ALLOWED_EXTRA_FLAGS = (
-    ECE_INITAI | ECE_EQUIP_ATTACHMENTS | ECE_NOPERSISTENCY_WORLD | ECE_CREATEPHYSICS
-)
 WORLD_SPAWN_FLAGS_LINE = (
     "flags=0 uses ECE_PLACE_ON_SURFACE. Allowed non-zero values are the exact "
     "pair ECE_CREATEPHYSICS|ECE_TRACE, or any value that includes "
@@ -2535,23 +2532,6 @@ def required_keyfile(config: ServerConfig) -> str:
 
 def _bad_args(field: str, value: object, requirement: str) -> str:
     return f"bad_args: {field} {value!r} must {requirement}"
-
-
-def is_allowed_spawn_flags(flags: int) -> bool:
-    """True when world_spawn will not return bad_flags for this ECE mask.
-
-    Mirrors MCPBridge.IsAllowedSpawnFlags, plus flags==0 which ValidateSpawnArgs
-    accepts as the ECE_PLACE_ON_SURFACE default.
-    """
-    if flags == 0:
-        return True
-    no_pathgraph_flags = ECE_CREATEPHYSICS | ECE_TRACE
-    if flags == no_pathgraph_flags:
-        return True
-    if (flags & ECE_PLACE_ON_SURFACE) != ECE_PLACE_ON_SURFACE:
-        return False
-    extra_flags = flags - ECE_PLACE_ON_SURFACE
-    return (extra_flags | WORLD_SPAWN_ALLOWED_EXTRA_FLAGS) == WORLD_SPAWN_ALLOWED_EXTRA_FLAGS
 
 
 def _require_vec3(value: list[float] | None, name: str) -> list[float]:

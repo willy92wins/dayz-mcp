@@ -11,14 +11,17 @@ wait_for(entity_state) and the clearance raycast of player_teleport.
 """
 from __future__ import annotations
 
+import ast
 import copy
 import unittest
+from pathlib import Path
 from typing import Any
 
 from dayz_mcp import loopback, server
 from dayz_mcp.server import ServerConfig, build_app
 
 
+_TOOLS_DIR = Path(__file__).resolve().parents[1]
 _POS = [10.0, 0.0, 20.0]
 _DATE = {"year": 2026, "month": 9, "day": 28, "hour": 9, "minute": 0}
 
@@ -109,6 +112,50 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ),
     ("vehicle_telemetry", {}, "vehicle_telemetry"),
     ("vehicle_release", {}, "vehicle_release"),
+    # Edges of what the tools accept. A schema that is narrower than its tool
+    # anywhere inside these ranges fails here (review R1 of this change: a
+    # hypothetical fov <= 0.9 cap passed the first 30 shapes).
+    ("world_spawn", {"type": "ZmbM_CitizenASkinny", "pos": _POS, "flags": 3108}, "world_spawn"),
+    ("world_spawn", {"type": "CivilianSedan", "pos": _POS, "flags": 1028}, "world_spawn"),
+    (
+        "camera_set",
+        {
+            "cam_mode": "orient",
+            "cam_pos": [0.0, 2.0, 0.0],
+            "cam_orientation": [360.0, -90.0, 180.0],
+            "fov": 3.1,
+            "settle_ticks": 600,
+        },
+        "camera_set",
+    ),
+    (
+        "scene_raycast",
+        {"from_pos": [0.0, 10.0, 0.0], "to": [0.0, -5.0, 0.0], "radius": 100.0, "intersect": "geom"},
+        "scene_raycast",
+    ),
+    (
+        "telemetry_read",
+        {"mode": "object_at", "type": "CarScript", "pos": _POS, "radius": 5000.0},
+        "telemetry_read",
+    ),
+    ("query_get_in_condition", {"pos": _POS, "component": 7}, "query_get_in_condition"),
+    (
+        "world_time_set",
+        {"year": 1970, "month": 1, "day": 1, "hour": 0, "minute": 0, "time_multiplier": 0.0},
+        "world_time_set",
+    ),
+    (
+        "world_time_set",
+        {"year": 2100, "month": 12, "day": 31, "hour": 23, "minute": 59},
+        "world_time_set",
+    ),
+    ("world_weather_set", {"overcast": 0.0}, "world_weather_set"),
+    ("world_weather_set", {"fog": 1.0, "time": 1e6, "min_duration": 1e6}, "world_weather_set"),
+    (
+        "vehicle_control",
+        {"throttle": 0.5, "steer": 1.0, "brake": 0.25, "handbrake": 0.0, "hold_ttl_s": 0.5},
+        "vehicle_control",
+    ),
 )
 
 # A bridge answer per verb, enough for each tool to reach its bridge call and
@@ -183,6 +230,34 @@ class IngressSchemaCoherenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             loopback._VEHICLE_CONTROL_MAX_TTL_S, server.VEHICLE_CONTROL_MAX_TTL_S
         )
+
+    def test_the_session_e2e_binary_sends_valid_payloads(self) -> None:
+        # _session_coordination/e2e_agent_sessions.py calls call_bridge directly,
+        # not through a tool, so the coherence cases above cannot see it. Review R1
+        # found three of its payloads refused after this change. Every literal
+        # payload it sends must pass the ingress.
+        source = (_TOOLS_DIR / "_session_coordination" / "e2e_agent_sessions.py").read_text(
+            encoding="utf-8"
+        )
+        checked = 0
+        for node in ast.walk(ast.parse(source)):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "call_bridge"
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                continue
+            payload = ast.literal_eval(node.args[1])
+            with self.subTest(line=node.lineno, command=node.args[0].value):
+                self.assertEqual(
+                    loopback.validate_command_args(node.args[0].value, payload),
+                    (True, None),
+                )
+            checked += 1
+        self.assertGreaterEqual(checked, 6, "the scan found too few call_bridge calls")
 
 
 if __name__ == "__main__":
