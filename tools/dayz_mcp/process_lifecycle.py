@@ -1406,6 +1406,11 @@ class ProcessLifecycle:
         # Runs already retired: a sample still in flight never writes to them
         # (review #125 F6). Bounded; retirement is rare.
         self._retired_use_keys: dict[tuple[str, str], None] = {}
+        # Registered processes confirmed gone or reused, by the full record
+        # (generation, run, pid, creation time): a later failed guard read can
+        # never make them count again (review #125 R2-1). A new process that
+        # reuses the pid is another record and is not excluded.
+        self._excluded_use_records: dict[tuple[str, str, int, str], None] = {}
         self._use_clock_origin = time.time()
         # Retired-run diagnostics live in daemon memory and start empty after a
         # restart; the audit file is never read to reconstruct them.
@@ -1682,6 +1687,14 @@ class ProcessLifecycle:
                 for record in run.processes:
                     if record.pid != pid:
                         continue
+                    record_key = (
+                        *self._activity_key(run.run_id),
+                        record.pid,
+                        record.creation_time_utc,
+                    )
+                    with self._activity_lock:
+                        if record_key in self._excluded_use_records:
+                            return None
                     try:
                         actual = self.guard.snapshot(pid)
                     except Exception:
@@ -1695,6 +1708,12 @@ class ProcessLifecycle:
                             and actual.get("exit_code") == 4
                         )
                     ):
+                        with self._activity_lock:
+                            self._excluded_use_records[record_key] = None
+                            while len(self._excluded_use_records) > 1024:
+                                self._excluded_use_records.pop(
+                                    next(iter(self._excluded_use_records))
+                                )
                         return None
                     return run.run_id, False
             return None
@@ -1813,6 +1832,8 @@ class ProcessLifecycle:
             ):
                 for key in [key for key in table if key[1] == run_id]:
                     table.pop(key, None)
+            for key in [key for key in self._excluded_use_records if key[1] == run_id]:
+                self._excluded_use_records.pop(key, None)
             self._retired_use_keys[current] = None
             while len(self._retired_use_keys) > 256:
                 self._retired_use_keys.pop(next(iter(self._retired_use_keys)))

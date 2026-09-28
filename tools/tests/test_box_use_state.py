@@ -387,6 +387,46 @@ class BoxUseStateTest(unittest.TestCase):
         self.good_signal(now)
         self.assertEqual(self.row(now)["use_state"], "abandoned")
 
+    def test_r2_1_a_pid_confirmed_reused_stays_excluded_after_a_failed_read(self) -> None:
+        # Review #125 R2-1: a later unreadable identity must not revive it.
+        released = self.release_to_idle()
+        self.bindings.bound.add("run-x")
+        now = released + RUN_IDLE_CUT_S + 1.0
+        self.healthy_signal(released, now - 3.0)
+        reused = dict(self.guard.snapshots[802])
+        reused["creation_time_utc"] = "2026-09-29T00:00:00.0000000Z"
+        self.guard.snapshots[802] = reused
+        self.assertEqual(self.human_input(now - 2.0), [])
+        self.guard.snapshots[802] = {"error": "identity_unavailable", "exit_code": 3}
+        self.assertEqual(self.human_input(now - 1.0), [])
+        self.good_signal(now)
+        row = self.row(now)
+        self.assertEqual((row["use_state"], row["use_reason"]), ("abandoned", None))
+
+    def test_r2_1_a_new_process_on_the_same_pid_is_not_excluded(self) -> None:
+        released = self.release_to_idle()
+        now = released + 30.0
+        self.healthy_signal(released, now - 3.0)
+        reused = dict(self.guard.snapshots[802])
+        reused["creation_time_utc"] = "2026-09-29T00:00:00.0000000Z"
+        self.guard.snapshots[802] = reused
+        self.assertEqual(self.human_input(now - 2.0), [])
+        # The run registers the new process as its client (a reattach).
+        run = self.store.get("run-x")
+        fresh = process(802, role="client")
+        fresh = type(fresh)(
+            fresh.pid,
+            "2026-09-29T00:00:00.0000000Z",
+            fresh.executable_sha256,
+            fresh.command_line_sha256,
+            fresh.role,
+            identity_scheme=fresh.identity_scheme,
+        )
+        run.processes = [record for record in run.processes if record.pid != 802] + [fresh]
+        self.store.replace(run)
+        self.guard.snapshots[802] = snapshot(fresh)
+        self.assertEqual(self.human_input(now - 1.0), ["run-x"])
+
     def test_f4_a_stale_stretch_restarts_the_clock_at_the_recovery(self) -> None:
         released = self.release_to_idle()
         self.bindings.bound.add("run-x")
