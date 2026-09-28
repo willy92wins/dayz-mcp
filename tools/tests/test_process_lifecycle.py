@@ -2427,7 +2427,7 @@ class ProcessLifecycleTest(unittest.TestCase):
 
     def _world_spawn(self, state: loopback.ServerState):
         return state.enqueue_command(
-            "world_spawn", {"classname": "SurvivorM_Mirek"}, peer="server"
+            "world_spawn", {"type": "SurvivorM_Mirek", "pos": [1, 2, 3], "flags": 0, "rotation": 0}, peer="server"
         )
 
     def test_acknowledged_begin_release_owner_rejects_world_spawn(self) -> None:
@@ -3278,7 +3278,7 @@ class ProcessLifecycleTest(unittest.TestCase):
 
         def _encolador() -> None:
             returned["r"] = state.enqueue_command(
-                "world_spawn", {"classname": "SurvivorM_Mirek"}, peer="server"
+                "world_spawn", {"type": "SurvivorM_Mirek", "pos": [1, 2, 3], "flags": 0, "rotation": 0}, peer="server"
             )
 
         thread = threading.Thread(target=_encolador, daemon=True)
@@ -4000,7 +4000,7 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertIn("restart", str(hint).lower())
         self.assertIn("stop_run", str(hint))
         st, payload = state2.enqueue_command(
-            "world_spawn", {"classname": "SurvivorM_Mirek"}, peer="server"
+            "world_spawn", {"type": "SurvivorM_Mirek", "pos": [1, 2, 3], "flags": 0, "rotation": 0}, peer="server"
         )
         self.assertNotEqual(st, 200, payload)
 

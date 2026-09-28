@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Any, Awaitable, Callable, Iterator, Literal
+from typing import Annotated, Any, AsyncIterator, Awaitable, Callable, Iterator, Literal
 
 import anyio
 from mcp.server.fastmcp import Context, FastMCP, Image
@@ -47,7 +47,20 @@ from dayz_mcp.camera_restore import (
     RESTORE_NOT_VERIFIED,
     restore_camera_verdict as _restore_camera_verdict,
 )
-from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
+from dayz_mcp.core import (
+    ECE_CREATEPHYSICS,
+    ECE_EQUIP_ATTACHMENTS,
+    ECE_INITAI,
+    ECE_KEEPHEIGHT,
+    ECE_KEEPHEIGHT_NOLIFETIME,
+    ECE_NOLIFETIME,
+    ECE_NOPERSISTENCY_WORLD,
+    ECE_PLACE_ON_SURFACE,
+    ECE_TRACE,
+    EXPECTED_BRIDGE_VERSION,
+    WORLD_SPAWN_ALLOWED_EXTRA_FLAGS,
+    is_allowed_spawn_flags,
+)
 from dayz_mcp.effective_schema_core import project_server_config_identity
 from dayz_mcp.tool_registry_fingerprint import capture_registry_snapshot
 from dayz_mcp.agent_loop import PUBLIC_NEXT_TOOLS, next_step, ok_next_step, with_next_step
@@ -117,6 +130,10 @@ MAX_TIMEOUT_S = 300.0
 # the tool lock, so it gets its own short ceiling instead of the 5.0 s default of
 # _request_once. A slow daemon degrades the message; it must not extend the call.
 LIVENESS_STATUS_TIMEOUT_S = 1.0
+# At most one heartbeat-driven lease carrier write per this many seconds
+# (ClientRuntime._refresh_lease_carrier, 1e06), so a caller that heartbeats in a
+# loop does not write a file per call.
+_CARRIER_REFRESH_S = 5.0
 POLL_INTERVAL_S = 0.05
 WAIT_FOR_MAX_TIMEOUT_S = 600.0
 BOX_WAIT_MAX_S = 600.0
@@ -157,22 +174,6 @@ _RETAIL_QUARANTINE_REASONS = frozenset({
 })
 LEASE_TOOL_LINE = "Requires a lease (session_acquire_wait)."
 
-# Vanilla ECE_* from centraleconomy.c. world_spawn flags=0 is the documented
-# surface default (bridge applies ECE_PLACE_ON_SURFACE). Non-zero values must
-# match MCPBridge.IsAllowedSpawnFlags; ECE_KEEPHEIGHT / ECE_NOLIFETIME are
-# engine-defined but not in that allowlist (Enforce widening is out of scope).
-ECE_TRACE = 4
-ECE_CREATEPHYSICS = 1024
-ECE_INITAI = 2048
-ECE_EQUIP_ATTACHMENTS = 8192
-ECE_PLACE_ON_SURFACE = 1060
-ECE_KEEPHEIGHT = 524288
-ECE_NOLIFETIME = 4194304
-ECE_NOPERSISTENCY_WORLD = 8388608
-ECE_KEEPHEIGHT_NOLIFETIME = ECE_KEEPHEIGHT | ECE_NOLIFETIME  # 4718592
-WORLD_SPAWN_ALLOWED_EXTRA_FLAGS = (
-    ECE_INITAI | ECE_EQUIP_ATTACHMENTS | ECE_NOPERSISTENCY_WORLD | ECE_CREATEPHYSICS
-)
 WORLD_SPAWN_FLAGS_LINE = (
     "flags=0 uses ECE_PLACE_ON_SURFACE. Allowed non-zero values are the exact "
     "pair ECE_CREATEPHYSICS|ECE_TRACE, or any value that includes "
@@ -1820,6 +1821,10 @@ class ClientRuntime:
         # worse than carrying none (session_coordination.py:2766 then refuses a fresh
         # acquire too). Measured in REHEARSAL-LEASE.md, 34/34.
         self._handoff_path = os.environ.get(session_handoff.HANDOFF_ENV) or None
+        self._carrier_written_at = float("-inf")
+        # Carrier writes and clears take this lock, so a refresh cannot land after
+        # the clear of a release or an invalidation it raced with.
+        self._carrier_lock = threading.Lock()
         carried = (
             session_handoff.consume_handoff(self._handoff_path)
             if self._handoff_path
@@ -1869,6 +1874,12 @@ class ClientRuntime:
         """
         if not self._handoff_path:
             return
+        with self._carrier_lock:
+            self._write_carrier_locked(lease_token, lease_id)
+
+    def _write_carrier_locked(
+        self, lease_token: str | None, lease_id: str | None
+    ) -> None:
         try:
             if lease_token and lease_id:
                 session_handoff.write_handoff(
@@ -1878,12 +1889,41 @@ class ClientRuntime:
                     lease_id=lease_id,
                     generation=0,
                 )
+                self._carrier_written_at = self._time_fn()
             else:
                 session_handoff.clear_handoff(self._handoff_path)
         except (OSError, ValueError, TypeError) as exc:
             # Losing the carrier costs a lease across the next recycle; it must never
             # cost the call that happened to change the lease.
             self._log(f"SESSION: carrier write failed: {exc}")
+
+    def _refresh_lease_carrier(self, lease_token: str) -> None:
+        """Rewrite the carrier after a heartbeat the daemon accepted for this lease.
+
+        The carrier used to be written only when the lease changed, so a recycle
+        more than MAX_HANDOFF_AGE_S after the acquire found it too old and started
+        without a lease the session had kept alive by heartbeating
+        (fb-20260927-205523-1e06). A successful heartbeat is the one answer that
+        proves the daemon renewed this very lease. An accepted command is not: the
+        daemon authorizes reads with no valid lease at all, and the enqueue answer
+        does not say which lease, if any, it renewed. So only the heartbeat path
+        calls this, and a session that wants its lease across a server_reload
+        heartbeats inside the TTL.
+        """
+        # getattr: tests build a bare ClientRuntime (object.__new__) to check how
+        # its session methods compose; such an instance has no carrier.
+        if not getattr(self, "_handoff_path", None):
+            return
+        with self._carrier_lock:
+            if self._time_fn() - self._carrier_written_at < _CARRIER_REFRESH_S:
+                return
+            # Re-read under the lock. A release or an invalidation clears the local
+            # lease before it clears the carrier, so once it has started this sees
+            # it and writes nothing; if this wins, that clear still runs after.
+            lease_id = self._control.active_lease_id
+            if self._control.active_lease_token != lease_token or not lease_id:
+                return
+            self._write_carrier_locked(lease_token, lease_id)
 
     def touch(self) -> None:
         # No local idle watchdog in client mode; the daemon tracks its own idle.
@@ -1996,9 +2036,11 @@ class ClientRuntime:
         )
 
     async def session_heartbeat(self, lease_token: str) -> dict[str, Any]:
-        return await self._control_with_lazy_spawn(
+        result = await self._control_with_lazy_spawn(
             self._control.session_heartbeat, lease_token
         )
+        self._refresh_lease_carrier(lease_token)
+        return result
 
     async def session_release(self, lease_token: str) -> dict[str, Any]:
         return await self._control_with_lazy_spawn(
@@ -2535,23 +2577,6 @@ def required_keyfile(config: ServerConfig) -> str:
 
 def _bad_args(field: str, value: object, requirement: str) -> str:
     return f"bad_args: {field} {value!r} must {requirement}"
-
-
-def is_allowed_spawn_flags(flags: int) -> bool:
-    """True when world_spawn will not return bad_flags for this ECE mask.
-
-    Mirrors MCPBridge.IsAllowedSpawnFlags, plus flags==0 which ValidateSpawnArgs
-    accepts as the ECE_PLACE_ON_SURFACE default.
-    """
-    if flags == 0:
-        return True
-    no_pathgraph_flags = ECE_CREATEPHYSICS | ECE_TRACE
-    if flags == no_pathgraph_flags:
-        return True
-    if (flags & ECE_PLACE_ON_SURFACE) != ECE_PLACE_ON_SURFACE:
-        return False
-    extra_flags = flags - ECE_PLACE_ON_SURFACE
-    return (extra_flags | WORLD_SPAWN_ALLOWED_EXTRA_FLAGS) == WORLD_SPAWN_ALLOWED_EXTRA_FLAGS
 
 
 def _require_vec3(value: list[float] | None, name: str) -> list[float]:
@@ -3557,6 +3582,36 @@ def _structured_not_ready_message(result: object) -> str | None:
     return f"game_not_ready:reason={reason}"
 
 
+_TOOL_LOCK_BUSY = "tool_lock_busy"
+
+
+@asynccontextmanager
+async def _tool_lock_until(runtime: Any, deadline: float) -> AsyncIterator[bool]:
+    """Hold ``runtime.tool_lock`` if it can be had before ``deadline``.
+
+    Yields whether it was acquired. wait_for fixes its deadline before it asks
+    for the lock, so an unbounded wait lets a sibling tool that holds the lock
+    stretch the call past timeout_s (fb-20260928-001643-f280). A lock that is
+    free, with nobody queued for it, is taken even with no time left: acquire
+    does not yield then, so the timeout cannot fire first. With waiters queued,
+    the call waits its turn inside the deadline like any other. If the timeout
+    fires while acquire waits, asyncio.Lock hands the wake-up to the next
+    waiter, so nothing is left held.
+    """
+    acquired = False
+    try:
+        async with asyncio.timeout(max(deadline - time.monotonic(), 0.0)):
+            await runtime.tool_lock.acquire()
+        acquired = True
+    except TimeoutError:
+        pass
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            runtime.tool_lock.release()
+
+
 async def execute_wait_for(
     runtime: Any,
     condition: str,
@@ -3649,7 +3704,17 @@ async def execute_wait_for(
         )
 
     if condition == "log_matches":
-        async with runtime.tool_lock:
+        async with _tool_lock_until(runtime, deadline) as held:
+            if not held:
+                return _wait_for_response(
+                    condition=condition,
+                    started=started,
+                    probes=0,
+                    observed=observed,
+                    satisfied=False,
+                    scanned=scan_summary(),
+                    last_error=_TOOL_LOCK_BUSY,
+                )
             probe_paths = await _wait_for_script_log_paths(runtime)
             # Markers FIRST, then the launch scan. A line written between the
             # two is read twice, which costs nothing; the other order drops it.
@@ -3687,7 +3752,10 @@ async def execute_wait_for(
                         )
 
     while time.monotonic() < deadline:
-        async with runtime.tool_lock:
+        async with _tool_lock_until(runtime, deadline) as held:
+            if not held:
+                last_error = _TOOL_LOCK_BUSY
+                break
             probes += 1
             remaining = deadline - time.monotonic()
             if condition == "entity_state":

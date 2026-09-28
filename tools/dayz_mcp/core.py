@@ -317,3 +317,41 @@ def make_exec_auditor(audit_path: Path) -> Callable[[str, str, str, int | None],
             handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
     return audit
+
+
+# world_spawn flag policy. server.py's tool and loopback's ingress schema
+# both check it (fb-20260822-191204-6ce4), so it lives here, next to the
+# other policy both processes import.
+# Vanilla ECE_* from centraleconomy.c. world_spawn flags=0 is the documented
+# surface default (bridge applies ECE_PLACE_ON_SURFACE). Non-zero values must
+# match MCPBridge.IsAllowedSpawnFlags; ECE_KEEPHEIGHT / ECE_NOLIFETIME are
+# engine-defined but not in that allowlist (Enforce widening is out of scope).
+ECE_TRACE = 4
+ECE_CREATEPHYSICS = 1024
+ECE_INITAI = 2048
+ECE_EQUIP_ATTACHMENTS = 8192
+ECE_PLACE_ON_SURFACE = 1060
+ECE_KEEPHEIGHT = 524288
+ECE_NOLIFETIME = 4194304
+ECE_NOPERSISTENCY_WORLD = 8388608
+ECE_KEEPHEIGHT_NOLIFETIME = ECE_KEEPHEIGHT | ECE_NOLIFETIME  # 4718592
+WORLD_SPAWN_ALLOWED_EXTRA_FLAGS = (
+    ECE_INITAI | ECE_EQUIP_ATTACHMENTS | ECE_NOPERSISTENCY_WORLD | ECE_CREATEPHYSICS
+)
+
+
+def is_allowed_spawn_flags(flags: int) -> bool:
+    """True when world_spawn will not return bad_flags for this ECE mask.
+
+    Mirrors MCPBridge.IsAllowedSpawnFlags, plus flags==0 which ValidateSpawnArgs
+    accepts as the ECE_PLACE_ON_SURFACE default.
+    """
+    if flags == 0:
+        return True
+    no_pathgraph_flags = ECE_CREATEPHYSICS | ECE_TRACE
+    if flags == no_pathgraph_flags:
+        return True
+    if (flags & ECE_PLACE_ON_SURFACE) != ECE_PLACE_ON_SURFACE:
+        return False
+    extra_flags = flags - ECE_PLACE_ON_SURFACE
+    return (extra_flags | WORLD_SPAWN_ALLOWED_EXTRA_FLAGS) == WORLD_SPAWN_ALLOWED_EXTRA_FLAGS

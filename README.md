@@ -78,7 +78,9 @@ vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
 Several agent sessions can share one running game through a single daemon that owns
 the port and hands out leases. The full surface, the transport and the security
 model are in [`dayz-mcp-architecture.md`](dayz-mcp-architecture.md);
-the acceptance contract is in [`product-spec.md`](product-spec.md).
+the acceptance contract is in [`product-spec.md`](product-spec.md). The rules that
+hold the design together, and why each one exists, are in
+[`ARCHITECTURE-DECISIONS.md`](ARCHITECTURE-DECISIONS.md).
 
 ## In-game numbers
 
@@ -155,8 +157,9 @@ Choose the setup that matches the agent:
 | [`tools/`](tools/) | The Python MCP server, its installer, and the offline gates. |
 
 The mod **pulls** commands and **pushes** results; the Python side is a passive
-endpoint. Nothing is client-authoritative: positions and state are read in
-`MissionServer`.
+endpoint. Positions and state are read in `MissionServer`, the authority. The one
+exception is driving: a PHYSICS car only moves from its owning client, so
+`vehicle_control` runs there (the B3 probe above).
 
 ## Install
 
@@ -192,6 +195,15 @@ verbs (#93). Register it with `--no-progressive-disclosure` to list every tool f
 the start: `.\install-mcp.ps1 -Register -ClaudeNoProgressiveDisclosure` or
 `python install_mcp.py --register --claude-no-progressive-disclosure`. Lease-gated
 tools still refuse to run without a lease, and Codex keeps the default.
+
+Both installers register the client with `--supervised`: it serves the host from a
+worker the supervisor can replace, so `server_reload` picks up edited sources without
+the host reconnecting, and the lease crosses each replacement. `--no-supervised` /
+`-NoSupervised` opts out. `python install_mcp.py --register` refuses to drop an
+option the current registrations carry (`registration_would_drop_options` names each
+one) unless you add `--allow-option-removal`. `.\install-mcp.ps1 -Register` replaces
+both registrations with the command it prints, so repeat the switches you registered
+with.
 
 Three run modes (`python -m dayz_mcp`; `tools/dayz_mcp/server_cli.py:96-118`):
 

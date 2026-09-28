@@ -471,6 +471,8 @@ class ControlClient:
             if self.active_ticket is None:
                 self.active_operation_id = None
                 self.state = "CLOSED"
+        # The daemon disowned the token: nothing should hand it on (1e06).
+        self._announce_lease()
 
     def _begin_operation(self, operation_id: str) -> None:
         with self._state_lock:
@@ -694,11 +696,15 @@ class ControlClient:
                     ) from error
                 raise
             with self._state_lock:
-                if self.active_lease_token == lease_token:
+                released = self.active_lease_token == lease_token
+                if released:
                     self.active_lease_token = None
                     self.active_ticket = None
                     self.active_operation_id = None
                     self.state = "CLOSED"
+            if released:
+                # A released lease leaves nothing to inherit (1e06).
+                self._announce_lease()
             return response
 
     def _clear_operation(self, operation_id: str) -> None:

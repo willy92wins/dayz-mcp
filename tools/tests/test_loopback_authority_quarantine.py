@@ -56,7 +56,7 @@ class DispatchAuthorityAndQuarantineTest(unittest.TestCase):
         state, coordinator, acquired, _ = self._state(clock=clock)
         status, queued = state.enqueue_command(
             "world_time_set",
-            {},
+            {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0},
             "server",
             identity_payload=IDENTITY_PAYLOAD,
             lease_token=acquired["lease_token"],
@@ -77,7 +77,7 @@ class DispatchAuthorityAndQuarantineTest(unittest.TestCase):
         state, _coordinator, acquired, events = self._state()
         mutation = state.enqueue_command(
             "world_time_set",
-            {},
+            {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0},
             "server",
             identity_payload=IDENTITY_PAYLOAD,
             lease_token=acquired["lease_token"],
@@ -98,7 +98,7 @@ class DispatchAuthorityAndQuarantineTest(unittest.TestCase):
         state, _coordinator, acquired, _events = self._state()
         queued = state.enqueue_command(
             "world_time_set",
-            {},
+            {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0},
             "server",
             identity_payload=IDENTITY_PAYLOAD,
             lease_token=acquired["lease_token"],
@@ -112,7 +112,7 @@ class DispatchAuthorityAndQuarantineTest(unittest.TestCase):
         state.retail_probe = None
         status, result = state.enqueue_command(
             "world_time_set",
-            {},
+            {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0},
             "server",
             identity_payload=IDENTITY_PAYLOAD,
             lease_token=acquired["lease_token"],
@@ -124,7 +124,7 @@ class DispatchAuthorityAndQuarantineTest(unittest.TestCase):
         state, coordinator, acquired, _events = self._state()
         queued = state.enqueue_command(
             "world_time_set",
-            {},
+            {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0},
             "server",
             identity_payload=IDENTITY_PAYLOAD,
             lease_token=acquired["lease_token"],
@@ -162,7 +162,7 @@ class DispatchAuthorityAndQuarantineTest(unittest.TestCase):
         state, coordinator, acquired, _events = self._state()
         queued = state.enqueue_command(
             "world_time_set",
-            {},
+            {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0},
             "server",
             identity_payload=IDENTITY_PAYLOAD,
             lease_token=acquired["lease_token"],
@@ -238,7 +238,7 @@ class AuthorityIoBoundaryTest(unittest.TestCase):
             target=lambda: result.append(
                 state.enqueue_command(
                     "world_time_set",
-                    {},
+                    {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0},
                     "server",
                     identity_payload=IDENTITY_PAYLOAD,
                     lease_token=acquired["lease_token"],
@@ -563,7 +563,7 @@ class StateLockIoBoundaryTest(unittest.TestCase):
         with patch.object(coordination_module, "RELEASE_AUDIT_TIMEOUT_S", 5.0):
             status, payload = state.enqueue_command(
                 "world_time_set",
-                {},
+                {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0},
                 "server",
                 identity_payload=IDENTITY_PAYLOAD,
                 lease_token=lease["lease_token"],
@@ -598,7 +598,7 @@ class StateLockIoBoundaryTest(unittest.TestCase):
         _, lease = coordinator.acquire(IDENTITY, "claim-expiry")
         queued = state.enqueue_command(
             "world_time_set",
-            {},
+            {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0},
             "server",
             identity_payload=IDENTITY_PAYLOAD,
             lease_token=lease["lease_token"],
@@ -661,7 +661,7 @@ class StateLockIoBoundaryTest(unittest.TestCase):
         _, lease = coordinator.acquire(IDENTITY, "poll-probe")
         state.enqueue_command(
             "world_time_set",
-            {},
+            {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0},
             "server",
             identity_payload=IDENTITY_PAYLOAD,
             lease_token=lease["lease_token"],

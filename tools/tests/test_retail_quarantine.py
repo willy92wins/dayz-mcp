@@ -142,7 +142,7 @@ class RetailQuarantineTest(unittest.TestCase):
             "camera_get", {}, "client", identity_payload=IDENTITY
         )
         mutate_status, mutate = self.state.enqueue_command(
-            "world_time_set", {}, "server", identity_payload=IDENTITY, lease_token=self.token
+            "world_time_set", {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0}, "server", identity_payload=IDENTITY, lease_token=self.token
         )
         self.assertEqual(read_status, 200)
         self.assertEqual((mutate_status, mutate["error"]), (409, "retail_quarantine"))
@@ -161,7 +161,7 @@ class RetailQuarantineTest(unittest.TestCase):
             lambda event: event.get("event") != "session_rejected"
         )
         status, result = self.state.enqueue_command(
-            "world_time_set", {}, "server", identity_payload=IDENTITY, lease_token=self.token
+            "world_time_set", {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0}, "server", identity_payload=IDENTITY, lease_token=self.token
         )
         self.assertEqual((status, result["error"]), (503, "audit_failed"))
         self.assertGreaterEqual(probe_calls, 1)
@@ -172,7 +172,7 @@ class RetailQuarantineTest(unittest.TestCase):
         self.coordinator._audit = lambda _event: True
         self.state.retail_probe = lambda: {"known": True, "processes": []}
         retry_status, _ = self.state.enqueue_command(
-            "world_time_set", {}, "server", identity_payload=IDENTITY, lease_token=self.token
+            "world_time_set", {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0}, "server", identity_payload=IDENTITY, lease_token=self.token
         )
         self.assertEqual(retry_status, 200)
 

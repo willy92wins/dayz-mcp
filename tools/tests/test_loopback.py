@@ -100,7 +100,7 @@ class LoopbackTest(unittest.TestCase):
             "/enqueue",
             {
                 "cmd": "world_spawn",
-                "args": {"type": "X", "pos": [1, 2, 3]},
+                "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                 "identity": identity_payload,
                 "lease_token": lease_token,
             },
@@ -347,11 +347,11 @@ class LoopbackTest(unittest.TestCase):
         self.assertEqual(loopback.peer_for_command("query_get_in_condition"), "server")
         self.assertIn("query_get_in_condition", loopback.WHITELISTED_COMMANDS)
 
-        status, body = self.state.enqueue_command("query_get_in_condition", {"pos": [1.0, 2.0, 3.0]})
+        status, body = self.state.enqueue_command("query_get_in_condition", {"pos": [1.0, 2.0, 3.0], "component": -1})
         self.assertEqual(status, 200)
         self.assertEqual(body["peer"], "server")
 
-        status, body = self.state.enqueue_command("query_get_in_condition", {"pos": [1.0, 2.0, 3.0]}, peer="client")
+        status, body = self.state.enqueue_command("query_get_in_condition", {"pos": [1.0, 2.0, 3.0], "component": -1}, peer="client")
         self.assertEqual(status, 400)
         self.assertEqual(body, {"error": "bad_peer"})
 
@@ -405,24 +405,31 @@ class LoopbackTest(unittest.TestCase):
         self.assertEqual(body, {"error": "unauthorized"})
 
     def test_vehicle_tramo_a_commands_route_to_client_peer(self) -> None:
-        verbs = [
-            "vehicle_get_in_client",
-            "engine_set",
-            "vehicle_control",
-            "vehicle_telemetry",
-            "vehicle_release",
-        ]
+        # The payload each tool sends; since 6ce4 the ingress checks it.
+        verbs = {
+            "vehicle_get_in_client": {"pos": [0.0, 0.0, 0.0]},
+            "engine_set": {"mode": "start"},
+            "vehicle_control": {
+                "throttle": 0.0,
+                "steer": 0.0,
+                "brake": 0.0,
+                "handbrake": 0.0,
+                "hold_ttl_s": 0.0,
+            },
+            "vehicle_telemetry": {},
+            "vehicle_release": {},
+        }
 
-        for verb in verbs:
+        for verb, args in verbs.items():
             with self.subTest(verb=verb):
                 self.assertEqual(loopback.peer_for_command(verb), "client")
                 self.assertIn(verb, loopback.WHITELISTED_COMMANDS)
 
-                status, body = self.state.enqueue_command(verb, {})
+                status, body = self.state.enqueue_command(verb, dict(args))
                 self.assertEqual(status, 200)
                 self.assertEqual(body["peer"], "client")
 
-                status, body = self.state.enqueue_command(verb, {}, peer="server")
+                status, body = self.state.enqueue_command(verb, dict(args), peer="server")
                 self.assertEqual(status, 400)
                 self.assertEqual(body, {"error": "bad_peer"})
 
@@ -535,7 +542,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         state, coordinator, client, token, _clock = self._coordinated_state()
         status, queued = state.enqueue_command(
             "world_spawn",
-            {"type": "X", "pos": [1, 2, 3]},
+            {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
             peer="server",
             identity_payload=COORDINATED_IDENTITY,
             lease_token=token,
@@ -554,7 +561,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
                 {
                     "id": command_id,
                     "cmd": "world_spawn",
-                    "args": {"type": "X", "pos": [1, 2, 3]},
+                    "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                 }
             ],
         )
@@ -588,7 +595,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
                 )
                 state.enqueue_command(
                     "vehicle_control",
-                    {"throttle": 1.0},
+                    {"throttle": 1.0, "steer": 0.0, "brake": 0.0, "handbrake": 0.0, "hold_ttl_s": 0.0},
                     peer="client",
                     identity_payload=COORDINATED_IDENTITY,
                     lease_token=token,
@@ -628,7 +635,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         )
         state.enqueue_command(
             "vehicle_control",
-            {"throttle": 1.0},
+            {"throttle": 1.0, "steer": 0.0, "brake": 0.0, "handbrake": 0.0, "hold_ttl_s": 0.0},
             peer="client",
             identity_payload=COORDINATED_IDENTITY,
             lease_token=token,
@@ -649,7 +656,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         state, _coordinator, client, token, _clock = self._coordinated_state()
         _, owned = state.enqueue_command(
             "world_spawn",
-            {"type": "X", "pos": [1, 2, 3]},
+            {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
             identity_payload=COORDINATED_IDENTITY,
             lease_token=token,
         )
@@ -669,7 +676,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         for _ in range(owned_n):
             status, _queued = state.enqueue_command(
                 "world_spawn",
-                {"type": "X", "pos": [1, 2, 3]},
+                {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                 identity_payload=COORDINATED_IDENTITY,
                 lease_token=token,
             )
@@ -686,7 +693,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         state, coordinator, client, token, clock = self._coordinated_state()
         _, queued = state.enqueue_command(
             "world_spawn",
-            {"type": "X", "pos": [1, 2, 3]},
+            {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
             identity_payload=COORDINATED_IDENTITY,
             lease_token=token,
             operation_timeout_s=300.0,
@@ -721,7 +728,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
             target=lambda: enqueue_result.append(
                 state.enqueue_command(
                     "world_spawn",
-                    {"type": "X", "pos": [1, 2, 3]},
+                    {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                     identity_payload=COORDINATED_IDENTITY,
                     lease_token=token,
                 )
@@ -785,7 +792,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
             ("object_delete", {}, None, 400, "bad_args"),
             (
                 "world_spawn",
-                {"type": "X", "pos": [1, 2, 3]},
+                {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                 "client",
                 400,
                 "bad_peer",
@@ -817,13 +824,13 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
             client,
             token,
             "world_spawn",
-            {"type": "X", "pos": [1, 2, 3]},
+            {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
             409,
             "version_blocked",
         )
         status, payload = state.enqueue_command(
             "world_spawn",
-            {"type": "X", "pos": [1, 2, 3]},
+            {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
             peer="server",
             identity_payload=COORDINATED_IDENTITY,
             lease_token=token,
@@ -846,7 +853,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         self.assertNotEqual(fields["detail"], "poll did not include ver=")
         status, payload = state.enqueue_command(
             "world_spawn",
-            {"type": "X", "pos": [1, 2, 3]},
+            {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
             peer="server",
             identity_payload=COORDINATED_IDENTITY,
             lease_token=token,
@@ -868,7 +875,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         )
         status, payload = state.enqueue_command(
             "world_spawn",
-            {"type": "X", "pos": [1, 2, 3]},
+            {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
             peer="server",
             identity_payload=COORDINATED_IDENTITY,
             lease_token=None,
@@ -887,7 +894,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         state.record_poll("server", version="wrong~1.29.0")
         status, payload = state.enqueue_command(
             "world_spawn",
-            {"type": "X", "pos": [1, 2, 3]},
+            {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
             peer="server",
             identity_payload=COORDINATED_IDENTITY,
             lease_token=None,
@@ -911,7 +918,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
             client,
             token,
             "world_spawn",
-            {"type": "X", "pos": [1, 2, 3]},
+            {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
             429,
             "queue_full",
         )
@@ -1011,7 +1018,7 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "test_enqueue_exception"):
                 state.enqueue_command(
                     "world_spawn",
-                    {"type": "X", "pos": [1, 2, 3]},
+                    {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
                     identity_payload=COORDINATED_IDENTITY,
                     lease_token=token,
                     operation_timeout_s=300.0,

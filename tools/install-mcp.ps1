@@ -9,7 +9,8 @@ param(
   [switch]$AllowLegacy,
   [switch]$Register,
   [switch]$SkipKnowledgePack,
-  [switch]$ClaudeNoProgressiveDisclosure
+  [switch]$ClaudeNoProgressiveDisclosure,
+  [switch]$NoSupervised
 )
 
 $ErrorActionPreference = "Stop"
@@ -201,7 +202,7 @@ function Test-CanonicalTextArguments {
   )
   $booleanFlags = @(
     '--require-version', '--enable-exec-enforce', '--no-daemon-autospawn',
-    '--no-progressive-disclosure', '--client', '--daemon', '--embedded'
+    '--no-progressive-disclosure', '--client', '--supervised', '--daemon', '--embedded'
   )
   $allowed = @($valueFlags) + @($booleanFlags)
   $matches = [regex]::Matches($ArgsText, '(?<!\S)(-{1,2}\S+)')
@@ -334,7 +335,7 @@ function Test-CanonicalArrayArguments {
   )
   $booleanFlags = @(
     '--require-version', '--enable-exec-enforce', '--no-daemon-autospawn',
-    '--no-progressive-disclosure', '--client', '--daemon', '--embedded'
+    '--no-progressive-disclosure', '--client', '--supervised', '--daemon', '--embedded'
   )
   $allowed = @($valueFlags) + @($booleanFlags)
   $seen = @{}
@@ -494,7 +495,13 @@ if ($MissionPath -ne "") {
 # so MANY Cowork sessions can drive ONE game at once. The daemon-policy flags
 # below travel in this command and are forwarded to the daemon spawn. Bare
 # `-m dayz_mcp` (no mode flag) stays EMBEDDED for CI/offline and the in-game gates.
-$serverArgs = @("-m", "dayz_mcp", "--client", "--keyfile", $KeyFile, "--port", "$Port")
+$serverArgs = @("-m", "dayz_mcp", "--client")
+# The supervisor gives server_reload and the lease handoff across a worker
+# recycle; the box runs this way. -NoSupervised opts out (0f68).
+if (-not $NoSupervised) {
+  $serverArgs += @("--supervised")
+}
+$serverArgs += @("--keyfile", $KeyFile, "--port", "$Port")
 if ($ExpectedGameVersion -ne "") {
   $serverArgs += @("--expected-game-version", $ExpectedGameVersion)
 }

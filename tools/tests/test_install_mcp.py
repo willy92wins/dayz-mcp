@@ -275,6 +275,7 @@ class InstallerArgumentsTest(unittest.TestCase):
             "-m",
             "dayz_mcp",
             "--client",
+            "--supervised",
             "--keyfile",
             str((self.tools_root / "shared.key").resolve()),
             "--port",
@@ -315,6 +316,29 @@ class InstallerArgumentsTest(unittest.TestCase):
         )
         self.assertEqual(
             build_client_args(opted, "codex"), build_client_args(default, "codex")
+        )
+
+    def test_supervisor_is_registered_by_default_and_can_be_opted_out(self) -> None:
+        default = parse_args([], tools_root=self.tools_root)
+        opted_out = parse_args(["--no-supervised"], tools_root=self.tools_root)
+
+        for platform in ("claude", "codex"):
+            with self.subTest(platform=platform):
+                arguments = build_client_args(default, platform)
+                self.assertEqual(
+                    arguments[:4], ["-m", "dayz_mcp", "--client", "--supervised"]
+                )
+                self.assertEqual(
+                    build_client_args(opted_out, platform),
+                    [argument for argument in arguments if argument != "--supervised"],
+                )
+
+    def test_option_removal_is_refused_unless_asked(self) -> None:
+        self.assertFalse(parse_args([], tools_root=self.tools_root).allow_option_removal)
+        self.assertTrue(
+            parse_args(
+                ["--allow-option-removal"], tools_root=self.tools_root
+            ).allow_option_removal
         )
 
     def test_invalid_platform_is_rejected(self) -> None:
@@ -625,6 +649,70 @@ class InstallerRegistrationTransactionTest(unittest.TestCase):
         self.assertEqual(str(raised.exception), "registration_transaction_failed")
         self.assertNotIn("private-config-content", repr(raised.exception))
 
+    @staticmethod
+    def _client(command: str, *extra: str) -> dict[str, RegistrationSpec]:
+        return {
+            role: RegistrationSpec(
+                command=Path(command),
+                arguments=("-m", "dayz_mcp", "--client", *extra, "--client-platform", platform),
+            )
+            for role, platform in (("CLAUDE", "claude"), ("CODEX", "codex"))
+        }
+
+    def test_refuses_to_drop_an_option_the_current_registration_has(self) -> None:
+        # The box's registrations carried --supervised that no installer emitted
+        # (fb-20260927-210146-0f68); Claude's may also carry the disclosure opt-out.
+        live = self._client(r"C:\old\python.exe", "--supervised")
+        live["CLAUDE"] = RegistrationSpec(
+            command=live["CLAUDE"].command,
+            arguments=live["CLAUDE"].arguments + ("--no-progressive-disclosure",),
+        )
+        provider = FakeRegistrationProvider(live)
+
+        with self.assertRaises(InstallerContractError) as raised:
+            register_transaction(provider, self._client(r"C:\new\python.exe"))
+
+        self.assertEqual(raised.exception.code, "registration_would_drop_options")
+        self.assertIn(
+            "CLAUDE:--no-progressive-disclosure,--supervised;CODEX:--supervised",
+            str(raised.exception),
+        )
+        self.assertEqual(provider.states, live)
+        self.assertEqual(provider.events, [("get", "CLAUDE"), ("get", "CODEX")])
+
+    def test_an_unknown_codex_option_counts_as_dropped_too(self) -> None:
+        live = self._client(r"C:\old\python.exe")
+        live["CODEX"] = RegistrationSpec(
+            command=live["CODEX"].command,
+            arguments=live["CODEX"].arguments + ("--exec-audit-path", r"C:\audit"),
+        )
+        provider = FakeRegistrationProvider(live)
+
+        with self.assertRaises(InstallerContractError) as raised:
+            register_transaction(provider, self._client(r"C:\new\python.exe"))
+
+        self.assertIn("CODEX:--exec-audit-path ", str(raised.exception))
+        self.assertNotIn("CLAUDE:", str(raised.exception))
+        self.assertEqual(provider.states, live)
+
+    def test_allow_option_removal_lets_the_registration_drop_options(self) -> None:
+        provider = FakeRegistrationProvider(
+            self._client(r"C:\old\python.exe", "--supervised")
+        )
+        desired = self._client(r"C:\new\python.exe")
+
+        register_transaction(provider, desired, allow_option_removal=True)
+
+        self.assertEqual(provider.states, desired)
+
+    def test_adding_the_supervisor_to_an_older_registration_is_not_a_drop(self) -> None:
+        provider = FakeRegistrationProvider(self._client(r"C:\old\python.exe"))
+        desired = self._client(r"C:\new\python.exe", "--supervised")
+
+        register_transaction(provider, desired)
+
+        self.assertEqual(provider.states, desired)
+
 
 class InstallerRegistrationParserTest(unittest.TestCase):
     def test_claude_text_accepts_current_user_scope_label(self) -> None:
@@ -698,6 +786,20 @@ class InstallerRegistrationParserTest(unittest.TestCase):
         spec = parse_claude_registration(text)
 
         self.assertEqual(spec.arguments[-1], "--no-progressive-disclosure")
+
+    def test_claude_text_reads_back_a_supervised_registration(self) -> None:
+        text = """dayz-mcp:
+  Scope: User config
+  Type: stdio
+  Command: C:\\Python\\python.exe
+  Args: -m dayz_mcp --client --supervised --keyfile C:\\k\\.dayz_mcp.key --port 8765 --require-version --idle-timeout 3600 --client-platform claude
+  Environment:
+"""
+
+        spec = parse_claude_registration(text)
+
+        self.assertEqual(spec.arguments[:4], ("-m", "dayz_mcp", "--client", "--supervised"))
+        self.assertEqual(spec.arguments[-2:], ("--client-platform", "claude"))
 
     def test_claude_text_rejects_duplicate_unknown_or_nonempty_environment(self) -> None:
         base = """dayz-mcp:
@@ -949,15 +1051,19 @@ class InstallerOrchestrationTest(unittest.TestCase):
 
         host_configs_seen: list[tuple[Path, Path] | None] = []
 
+        removal_seen: list[bool] = []
+
         def register(
             _provider: object,
             desired: dict[str, RegistrationSpec],
             *,
             host_configs: tuple[Path, Path] | None = None,
+            allow_option_removal: bool = False,
         ) -> None:
             order.append("register")
             desired_seen.update(desired)
             host_configs_seen.append(host_configs)
+            removal_seen.append(allow_option_removal)
 
         with (
             patch.object(
@@ -995,7 +1101,78 @@ class InstallerOrchestrationTest(unittest.TestCase):
         self.assertEqual(desired_seen["CLAUDE"].command, self.venv_python)
         self.assertEqual(desired_seen["CLAUDE"].arguments[-1], "claude")
         self.assertEqual(desired_seen["CODEX"].arguments[-1], "codex")
+        self.assertIn("--supervised", desired_seen["CLAUDE"].arguments)
+        self.assertIn("--supervised", desired_seen["CODEX"].arguments)
+        self.assertEqual(removal_seen, [False])
         self.assertEqual(result["status"], "installed_and_registered")
+
+    def test_allow_option_removal_reaches_the_registration_transaction(self) -> None:
+        options = parse_args(["--register", "--allow-option-removal"], tools_root=self.root)
+        seen: list[object] = []
+        with (
+            patch.object(
+                installer,
+                "install_runtime",
+                return_value={"status": "installed", "venv_python": str(self.venv_python)},
+            ),
+            patch.object(installer, "load_installer_cli_manifest", return_value=object()),
+            patch.object(installer, "load_installer_not_found_fixtures", return_value=object()),
+            patch.object(installer, "CliRegistrationProvider", return_value=object()),
+            patch.object(
+                installer,
+                "run_runs_backup_gate",
+                return_value={"status": "verified", "source_absent": False},
+            ),
+            patch.object(
+                installer,
+                "register_transaction",
+                side_effect=lambda *_args, **kwargs: seen.append(
+                    kwargs.get("allow_option_removal")
+                ),
+            ),
+        ):
+            installer.run_installer(options, base_python=Path(sys.executable))
+
+        self.assertEqual(seen, [True])
+
+    def test_main_reports_a_refused_drop_with_its_code_and_the_options(self) -> None:
+        provider = FakeRegistrationProvider(
+            {
+                role: RegistrationSpec(
+                    command=self.venv_python,
+                    arguments=(
+                        "-m", "dayz_mcp", "--client", "--supervised",
+                        "--client-platform", platform,
+                    ),
+                )
+                for role, platform in (("CLAUDE", "claude"), ("CODEX", "codex"))
+            }
+        )
+        stderr = io.StringIO()
+        with (
+            patch.object(
+                installer,
+                "install_runtime",
+                return_value={"venv_python": str(self.venv_python)},
+            ),
+            patch.object(installer, "load_installer_cli_manifest", return_value=object()),
+            patch.object(installer, "load_installer_not_found_fixtures", return_value=object()),
+            patch.object(installer, "CliRegistrationProvider", return_value=provider),
+            patch.object(
+                installer,
+                "run_runs_backup_gate",
+                return_value={"status": "verified", "source_absent": False},
+            ),
+            redirect_stderr(stderr),
+        ):
+            code = installer.main(["--register", "--no-supervised", "--skip-knowledge-pack"])
+
+        self.assertEqual(code, 2)
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["error"], "registration_would_drop_options")
+        self.assertIn("CLAUDE:--supervised;CODEX:--supervised", payload["detail"])
+        self.assertIn("--allow-option-removal", payload["detail"])
+        self.assertEqual(provider.events, [("get", "CLAUDE"), ("get", "CODEX")])
 
     def test_backup_failure_prevents_registration_transaction(self) -> None:
         with (
@@ -1400,6 +1577,7 @@ $Port = 18765
 $ExpectedGameVersion = ''
 $AllowLegacy = $false
 $IdleTimeoutSeconds = 1800
+$NoSupervised = $false
 foreach ($enabled in @($false, $true)) {
     $ClaudeNoProgressiveDisclosure = $enabled
     . $argvBlock
@@ -1413,7 +1591,45 @@ foreach ($enabled in @($false, $true)) {
         if (Test-CanonicalArrayArguments ($claudeArgs + '--no-progressive-disclosure') ($claudeArgs + '--no-progressive-disclosure')) { throw 'Array duplicate accepted' }
     }
 }
+$ClaudeNoProgressiveDisclosure = $false
+foreach ($optOut in @($false, $true)) {
+    $NoSupervised = $optOut
+    . $argvBlock
+    foreach ($arguments in @(, $claudeArgs) + @(, $codexArgs)) {
+        if (($arguments -ccontains '--supervised') -eq $optOut) { throw 'Supervisor flag wrong' }
+        if (($arguments[0..2] -join ' ') -cne '-m dayz_mcp --client') { throw 'Mode prefix moved' }
+        if (-not (Test-CanonicalArrayArguments $arguments $arguments)) { throw 'Supervised array rejected' }
+    }
+    $textArgs = ($claudeArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+    if (-not (Test-CanonicalTextArguments $textArgs $claudeArgs)) { throw 'Supervised text rejected' }
+}
 'PASS'
+'''
+
+# Prints the argv block's two argument lists for the parameters it is given, one
+# bracketed element per line, so the PowerShell argv can be compared exactly with
+# the Python installer's (0f68, review of #121: comparing it with itself let a
+# dropped --require-version through).
+_PS_ARGV_DUMP = r'''
+param(
+    [string]$SourcePath,
+    [string]$KeyFile,
+    [int]$Port,
+    [string]$ExpectedGameVersion = '',
+    [double]$IdleTimeoutSeconds = 1800,
+    [switch]$AllowLegacy,
+    [switch]$ClaudeNoProgressiveDisclosure,
+    [switch]$NoSupervised
+)
+$ErrorActionPreference = 'Stop'
+$source = [IO.File]::ReadAllText($SourcePath)
+$begin = $source.IndexOf('$serverArgs = @(')
+$end = $source.IndexOf('$quotedClaudeArgs =', $begin)
+if ($begin -lt 0 -or $end -lt 0) { throw 'Missing argv block' }
+. ([scriptblock]::Create($source.Substring($begin, $end - $begin)))
+$claudeArgs | ForEach-Object { '[' + $_ + ']' }
+'---'
+$codexArgs | ForEach-Object { '[' + $_ + ']' }
 '''
 
 
@@ -1444,6 +1660,69 @@ class PowerShellInstallerArgvTest(unittest.TestCase):
             (0, "PASS"),
             completed.stderr,
         )
+
+    def test_both_installers_register_the_same_argv(self) -> None:
+        cases = (
+            ([], []),
+            (["--no-supervised"], ["-NoSupervised"]),
+            (
+                ["--allow-legacy", "--claude-no-progressive-disclosure"],
+                ["-AllowLegacy", "-ClaudeNoProgressiveDisclosure"],
+            ),
+            (
+                ["--expected-game-version", "1.28.159000", "--idle-timeout-seconds", "2.5"],
+                ["-ExpectedGameVersion", "1.28.159000", "-IdleTimeoutSeconds", "2.5"],
+            ),
+        )
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            keyfile = root / "key with spaces.key"
+            probe = root / "argv_dump.ps1"
+            probe.write_text(_PS_ARGV_DUMP, encoding="utf-8")
+            for python_flags, powershell_flags in cases:
+                with self.subTest(python_flags=python_flags):
+                    options = parse_args(
+                        ["--port", "18765", "--keyfile", str(keyfile), *python_flags],
+                        tools_root=root,
+                    )
+                    completed = subprocess.run(
+                        [
+                            "powershell.exe",
+                            "-NoProfile",
+                            "-NonInteractive",
+                            "-ExecutionPolicy",
+                            "Bypass",
+                            "-File",
+                            str(probe),
+                            "-SourcePath",
+                            str(TOOLS_DIR / "install-mcp.ps1"),
+                            "-KeyFile",
+                            str(keyfile),
+                            "-Port",
+                            "18765",
+                            *powershell_flags,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    lines = completed.stdout.splitlines()
+                    self.assertEqual(lines.count("---"), 1, completed.stdout)
+                    split = lines.index("---")
+                    for role, platform, dumped in (
+                        ("CLAUDE", "claude", lines[:split]),
+                        ("CODEX", "codex", lines[split + 1 :]),
+                    ):
+                        self.assertTrue(
+                            all(line[:1] == "[" and line[-1:] == "]" for line in dumped),
+                            (role, dumped),
+                        )
+                        self.assertEqual(
+                            [line[1:-1] for line in dumped],
+                            build_client_args(options, platform),
+                            role,
+                        )
 
 
 if __name__ == "__main__":

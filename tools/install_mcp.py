@@ -82,6 +82,12 @@ class InstallerOptions:
     tools_root: Path
     skip_knowledge_pack: bool = False
     claude_no_progressive_disclosure: bool = False
+    # Register under the MCP supervisor (server_reload, lease handoff across a
+    # worker recycle). The box runs this way; --no-supervised opts out.
+    supervised: bool = True
+    # --register refuses to drop a flag the current registration has unless
+    # this is set (fb-20260927-210146-0f68).
+    allow_option_removal: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -513,6 +519,7 @@ _BOOLEAN_FLAGS = frozenset(
         "--no-daemon-autospawn",
         "--no-progressive-disclosure",
         "--client",
+        "--supervised",
         "--daemon",
         "--embedded",
     }
@@ -758,6 +765,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Register Claude Code with --no-progressive-disclosure: it does not re-list tools after a lease.",
     )
+    parser.add_argument(
+        "--no-supervised",
+        dest="supervised",
+        action="store_false",
+        help="Register without the MCP supervisor: no server_reload, and no lease handoff across a worker recycle.",
+    )
+    parser.add_argument(
+        "--allow-option-removal",
+        action="store_true",
+        help="Let --register drop flags the current registrations have (for example --supervised).",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--register", action="store_true")
     mode.add_argument("--pin-clis", action="store_true")
@@ -802,6 +820,8 @@ def parse_args(
         tools_root=canonical_tools,
         skip_knowledge_pack=args.skip_knowledge_pack,
         claude_no_progressive_disclosure=args.claude_no_progressive_disclosure,
+        supervised=args.supervised,
+        allow_option_removal=args.allow_option_removal,
     )
 
 
@@ -812,15 +832,10 @@ def _format_number(value: float) -> str:
 def build_client_args(options: InstallerOptions, platform: str) -> list[str]:
     if platform not in {"claude", "codex"}:
         raise InstallerContractError("invalid_client_platform")
-    arguments = [
-        "-m",
-        "dayz_mcp",
-        "--client",
-        "--keyfile",
-        str(options.keyfile),
-        "--port",
-        str(options.port),
-    ]
+    arguments = ["-m", "dayz_mcp", "--client"]
+    if options.supervised:
+        arguments.append("--supervised")
+    arguments.extend(("--keyfile", str(options.keyfile), "--port", str(options.port)))
     if options.expected_game_version:
         arguments.extend(("--expected-game-version", options.expected_game_version))
     if not options.allow_legacy:
@@ -1054,11 +1069,26 @@ def _rollback_registrations(
             raise RegistrationRollbackError("registration_rollback_verify_failed")
 
 
+def _option_names(spec: RegistrationSpec) -> set[str]:
+    # Every option token, known or not: a Codex registration is not checked
+    # against the flag grammar, and an unknown flag there was added on purpose too.
+    names: set[str] = set()
+    skip_value = False
+    for argument in spec.arguments:
+        if skip_value:
+            skip_value = False
+        elif argument.startswith("-"):
+            names.add(argument.split("=", 1)[0])
+            skip_value = argument in _VALUE_FLAGS
+    return names
+
+
 def register_transaction(
     provider: RegistrationProvider,
     desired: dict[str, RegistrationSpec],
     *,
     host_configs: tuple[Path, Path] | None = None,
+    allow_option_removal: bool = False,
 ) -> None:
     roles = ("CLAUDE", "CODEX")
     if set(desired) != set(roles) or any(
@@ -1077,6 +1107,24 @@ def register_transaction(
     try:
         for role in roles:
             previous[role] = provider.get(role)
+    except Exception as error:
+        raise RegistrationTransactionError("registration_probe_failed") from error
+    # Re-registering must not silently strip what someone added on purpose:
+    # the live registrations carried --supervised that no installer emitted
+    # (fb-20260927-210146-0f68). Nothing has been touched yet.
+    dropped = {
+        role: sorted(_option_names(previous[role]) - _option_names(desired[role]))
+        for role in roles
+        if previous[role] is not None
+    }
+    dropped = {role: flags for role, flags in dropped.items() if flags}
+    if dropped and not allow_option_removal:
+        detail = ";".join(f"{role}:{','.join(flags)}" for role, flags in sorted(dropped.items()))
+        raise InstallerContractError(
+            "registration_would_drop_options",
+            f"{detail} (re-run with --allow-option-removal to drop them)",
+        )
+    try:
         for role in roles:
             if previous[role] is not None:
                 provider.remove(role)
@@ -1093,8 +1141,6 @@ def register_transaction(
                 if provider.get(role) != desired[role]:
                     raise RegistrationTransactionError("registration_verify_mismatch")
     except Exception as error:
-        if len(previous) != len(roles):
-            raise RegistrationTransactionError("registration_probe_failed") from error
         try:
             _rollback_registrations(provider, previous, touched)
         except Exception as rollback_error:
@@ -1209,6 +1255,7 @@ def run_installer(
     register_transaction(
         provider,
         desired,
+        allow_option_removal=options.allow_option_removal,
         host_configs=(
             Path.home() / ".claude.json",
             Path.home() / ".codex" / "config.toml",

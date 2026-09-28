@@ -68,8 +68,17 @@ class MCPServerTest(unittest.TestCase):
                 exc.close()
 
     def test_new_commands_are_whitelisted_and_unknown_is_rejected(self) -> None:
-        for cmd in ("world_spawn", "vehicle_enter", "camera_set", "camera_get"):
-            status, body = self.request("POST", "/enqueue", {"cmd": cmd, "args": {}})
+        # The payload each tool sends; since 6ce4 the ingress checks it.
+        for cmd, args in (
+            ("world_spawn", {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0}),
+            ("vehicle_enter", {"pos": [0, 0, 0]}),
+            (
+                "camera_set",
+                {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0},
+            ),
+            ("camera_get", {}),
+        ):
+            status, body = self.request("POST", "/enqueue", {"cmd": cmd, "args": args})
             self.assertEqual(status, 200)
             self.assertIn("id", body)
 
@@ -80,7 +89,7 @@ class MCPServerTest(unittest.TestCase):
     def test_two_peer_routing_and_default_server_poll(self) -> None:
         status, server_body = self.request("POST", "/enqueue", {"cmd": "query_player_state", "args": {}})
         self.assertEqual(status, 200)
-        status, client_body = self.request("POST", "/enqueue", {"cmd": "camera_set", "args": {"cam_mode": "orient"}})
+        status, client_body = self.request("POST", "/enqueue", {"cmd": "camera_set", "args": {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}})
         self.assertEqual(status, 200)
 
         status, body = self.request("GET", "/poll", query={"inst": self.inst_server})

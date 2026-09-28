@@ -214,7 +214,10 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(own_identity["pid"], runtime.identity.pid)
         self._adopt_run(srv, runtime, acquired["lease_token"])
         result = await runtime.call_bridge(
-            "world_spawn", {"type": "X", "pos": [1, 2, 3]}, "server", 2.0
+            "world_spawn",
+            {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
+            "server",
+            2.0,
         )
         self.assertTrue(result["ok"])
 
