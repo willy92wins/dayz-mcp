@@ -19,6 +19,7 @@ import dayz_mcp.launcher_registry as registry
 import dayz_mcp.native_broker_protocol as broker
 import dayz_mcp.secure_launcher as launcher
 from tests._bundle_paths import requires_installed_launcher
+from tests._tiers import slow_test
 
 
 def _x64_pe() -> bytes:
@@ -457,6 +458,7 @@ class PrivateIncrementalRedactorTests(unittest.TestCase):
         self.assertEqual(current, legacy)
         self.assertEqual(current, payload)
 
+    @slow_test
     def test_repeated_and_absent_real_secrets_stay_linear_across_sizes(self) -> None:
         identity = '{"session_id":"identity-secret"}'
         lease = "lease-secret"

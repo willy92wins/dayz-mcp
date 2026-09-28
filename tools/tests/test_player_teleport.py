@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 from tests._addon_paths import addon_root
 from dayz_mcp import loopback, server
 from dayz_mcp.session_coordination import READ_ONLY_COMMANDS, command_requires_lease
+from tests._tiers import slow_test
 
 
 COMMAND = "player_teleport"
@@ -165,6 +166,7 @@ class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
             (COMMAND, {"pos": [7500.0, 0.0, 7500.0]}, "server", 1.0),
         )
 
+    @slow_test
     async def test_clear_column_probes_then_teleports(self) -> None:
         app, runtime = await self._build()
         responses = [
@@ -245,6 +247,7 @@ class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
         awaited = [item.args[0] for item in call.await_args_list]
         self.assertEqual(awaited, ["vehicle_telemetry", "surface_query", COMMAND])
 
+    @slow_test
     async def test_client_seated_occupant_is_refused_without_teleporting(self) -> None:
         app, runtime = await self._build()
         telemetry = {
@@ -269,6 +272,7 @@ class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.get("error"), "occupant_client_seated")
         self.assertEqual([item.args[0] for item in call.await_args_list], ["vehicle_telemetry"])
 
+    @slow_test
     async def test_authority_owned_occupant_still_teleports(self) -> None:
         app, runtime = await self._build()
         responses = [

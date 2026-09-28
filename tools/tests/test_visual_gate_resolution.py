@@ -20,6 +20,7 @@ import unittest
 from PIL import Image
 
 import mcp_capture
+from tests._tiers import slow_test
 
 EVIDENCE = os.path.join(os.path.dirname(__file__), "..", "fase3-evidence-subject.png")
 BUDGET_TOKENS = 25000
@@ -107,6 +108,7 @@ class VisualGateResolutionTest(unittest.TestCase):
 
 
 class VisualGateNegativeTest(unittest.TestCase):
+    @slow_test
     def test_window_not_found_surfaces_error(self) -> None:
         result = mcp_capture.grab_stable_frame(frames=1, process_name="__DayZ_MCP_missing_window__")
         self.assertIsInstance(result, dict)

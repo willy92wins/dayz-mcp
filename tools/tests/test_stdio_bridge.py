@@ -31,6 +31,7 @@ from dayz_mcp.stdio_bridge import (
 )
 from dayz_mcp.server import parse_args as parse_server_args
 from install_mcp import build_client_args, parse_args as parse_installer_args
+from tests._tiers import slow_test
 
 
 _MINIMAL_MCP_SERVER = r"""
@@ -344,6 +345,7 @@ class ListToolsOnceTransportTest(unittest.TestCase):
         )
         self.assertEqual(names, ["bridge_status"])
 
+    @slow_test
     def test_hung_handshake_times_out_and_closes_child(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -369,6 +371,7 @@ class ListToolsOnceTransportTest(unittest.TestCase):
             time.sleep(0.05)
         self.assertFalse(_pid_alive(pid))
 
+    @slow_test
     def test_probe_budget_survives_hung_attempts(self) -> None:
         script = self._script(_HUNG_MCP_SERVER, "hung_budget.py")
         started = time.monotonic()

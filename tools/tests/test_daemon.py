@@ -29,6 +29,7 @@ from dayz_mcp.process_lifecycle import ProcessRecord, RunRecord
 from dayz_mcp.server import ServerConfig
 from dayz_mcp.session_coordination import ClientIdentity
 from tests.fence_helpers import bind_both_peers
+from tests._tiers import slow_test
 
 
 IDENTITY = {
@@ -372,6 +373,7 @@ class DaemonEndpointTest(unittest.TestCase):
         self.assertNotIn("session", serialized.casefold())
         self.assertNotIn("identity", serialized.casefold())
 
+    @slow_test
     def test_credential_retry_does_not_change_active_lease_or_run_owner(
         self,
     ) -> None:
@@ -464,6 +466,7 @@ class DaemonEndpointTest(unittest.TestCase):
             before_status["pending_commands"],
         )
 
+    @slow_test
     def test_enqueue_version_blocked_when_require_version(self) -> None:
         srv = self._daemon(require_version=True)
         status, body = _http(
@@ -479,6 +482,7 @@ class DaemonEndpointTest(unittest.TestCase):
         self.assertEqual(body["detail"], "never_polled_this_generation")
         self.assertNotEqual(body.get("detail"), "poll did not include ver=")
 
+    @slow_test
     def test_enqueue_ok_when_version_matches(self) -> None:
         srv = self._daemon(require_version=True, expected_game_version="1.29.0")
         _http(srv.base, "GET", "/poll", srv.key, query={"peer": "server", "ver": f"{core.EXPECTED_BRIDGE_VERSION}~1.29.0"})
@@ -532,6 +536,7 @@ class DaemonEndpointTest(unittest.TestCase):
         self.assertEqual(run.state, "RUNNING")
         self.assertEqual(run.owner_session_id, IDENTITY["session_id"])
 
+    @slow_test
     def test_acquire_adopts_the_ownerless_unreconciled_run(self) -> None:
         srv = self._daemon(adopt_fixture=False)
         run = srv.state.lifecycle.manifest.get("test-run")
@@ -652,6 +657,7 @@ class DaemonEndpointTest(unittest.TestCase):
         self.assertIsNone(srv.state.lifecycle.manifest.get("test-run").owner_session_id)
         self.assertIsNone(srv.state.lifecycle.manifest.get("other-idle").owner_session_id)
 
+    @slow_test
     def test_wait_on_grant_adopts_the_idle_run(self) -> None:
         srv = self._daemon(adopt_fixture=False)
         status_a, acquired_a = _http(
@@ -724,6 +730,7 @@ class DaemonEndpointTest(unittest.TestCase):
             {"ok": False, "run_id": None, "error": "run_state_unavailable"},
         )
 
+    @slow_test
     def test_acquire_survives_adopt_run_manifest_get_failure(self) -> None:
         srv = self._daemon(adopt_fixture=False)
         manifest = srv.state.lifecycle.manifest
@@ -775,6 +782,7 @@ class DaemonEndpointTest(unittest.TestCase):
         self.assertEqual(status_b, 200, acquired_b)
         self.assertEqual(acquired_b.get("status"), "active")
 
+    @slow_test
     def test_acquire_survives_adopt_run_when_abort_reservation_raises(self) -> None:
         srv = self._daemon(adopt_fixture=False)
         manifest = srv.state.lifecycle.manifest
@@ -1012,6 +1020,7 @@ class ProbeStatusHealthyTest(unittest.TestCase):
         )
         self.assertTrue(orphan_guard.probe_listener_responsive(srv.port, timeout=2.0))
 
+    @slow_test
     def test_responsive_probe_false_when_no_listener(self) -> None:
         port = _free_port()  # nobody is listening here
         self.assertFalse(orphan_guard.probe_listener_responsive(port, timeout=0.5))

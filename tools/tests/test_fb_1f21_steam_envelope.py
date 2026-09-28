@@ -19,6 +19,7 @@ from tests.dayz_test_tool_helpers import (
 from tests import test_process_lifecycle as lifecycle
 from dayz_mcp.session_coordination import ClientIdentity
 from tests import process_lifecycle_helpers as lifecycle_fakes
+from tests._tiers import slow_test
 
 
 class SteamPreparationDaemonEnvelopeTests(unittest.TestCase):
@@ -147,6 +148,7 @@ class SteamPreparationDaemonEnvelopeTests(unittest.TestCase):
             },
         )
 
+    @slow_test
     def test_fb_1f21_r2_projection_is_bounded(self) -> None:
         self.f.coordinator.release(lifecycle_fakes.IDENTITY_A, self.f.token_a)
         minted = {"n": 0}
@@ -325,6 +327,7 @@ class SteamPreparationToolEnvelopeTests(unittest.IsolatedAsyncioTestCase):
                 extra_mods=["@DayZ_MCP"],
             )
 
+    @slow_test
     async def test_fb_1f21_tool_result_carries_fields_only_for_matching_run_id(self) -> None:
         matching = await self._run_with_status(
             {
@@ -355,6 +358,7 @@ class SteamPreparationToolEnvelopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(mismatched.get("steam_pid_repair"))
         self.assertIsNone(mismatched.get("steam_restarted"))
 
+    @slow_test
     async def test_fb_1f21_hostile_preparation_values_never_reach_the_result(self) -> None:
         cases = (
             {

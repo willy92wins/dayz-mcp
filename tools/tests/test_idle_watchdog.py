@@ -13,6 +13,7 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 from dayz_mcp import loopback, orphan_guard, server
+from tests._tiers import slow_test
 
 
 class ComputeIdleSecondsTest(unittest.TestCase):
@@ -34,6 +35,7 @@ class ComputeIdleSecondsTest(unittest.TestCase):
 
 
 class InstallIdleWatchdogTest(unittest.TestCase):
+    @slow_test
     def test_nonpositive_timeout_disables(self) -> None:
         fired = threading.Event()
         logs: list[str] = []
@@ -59,6 +61,7 @@ class InstallIdleWatchdogTest(unittest.TestCase):
         self.assertEqual(action, orphan_guard.ARMED)
         self.assertTrue(fired.wait(timeout=2.0), "idle watchdog did not fire")
 
+    @slow_test
     def test_does_not_fire_below_timeout(self) -> None:
         fired = threading.Event()
         stop = threading.Event()
@@ -127,6 +130,7 @@ class IdleWatchdogReleaseIntegrationTest(unittest.TestCase):
     free the bound port, not just invoke the callback. Closes the seam the unit
     tests cannot reach short of the in-vivo gate."""
 
+    @slow_test
     def test_idle_watchdog_frees_real_loopback_port(self) -> None:
         state = loopback.ServerState("k")
         httpd = loopback.create_http_server(0, state, reclaim_orphans=False)

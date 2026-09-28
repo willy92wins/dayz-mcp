@@ -33,6 +33,7 @@ from dayz_mcp import (
     dayz_test_worker,
     native_launcher_transaction as transaction,
 )
+from tests._tiers import slow_test
 
 
 RUN_ID = "12345678-1234-4234-8234-1234567890ab"
@@ -1202,6 +1203,7 @@ class VppPreflightCallSiteTest(unittest.TestCase):
                     callers.add(path.name)
         return callers
 
+    @slow_test
     def test_the_launcher_is_reached_through_one_transaction_only(self) -> None:
         # h9_native_probe.py is host-local and untracked (tests/test_lote_w_h9.py
         # :18-21 says so and skips without it), so a clean checkout has one
@@ -1477,6 +1479,7 @@ class DayzTestRunVppGateTest(unittest.IsolatedAsyncioTestCase):
             self, str(result["remediation"])
         )
 
+    @slow_test
     async def test_a_single_root_success_does_not_carry_candidate_roots(
         self,
     ) -> None:

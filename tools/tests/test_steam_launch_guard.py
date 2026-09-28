@@ -18,6 +18,7 @@ from tests.test_steamfastpath_repair import MemoryProvider, MemoryHost
 from tests import test_process_lifecycle as lifecycle
 from tests import process_lifecycle_helpers as lifecycle_fakes
 from tests import test_dayz_test_worker as worker_tests
+from tests._tiers import slow_test
 
 
 WALL = 2_000_000_000.0
@@ -332,6 +333,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(result.error_code, "steam_prepare_busy")
         self.assertNotIn({"permit": True}, helper.sent)
 
+    @slow_test
     def test_hung_real_helper_is_terminated_after_deadline_without_host_access(self):
         created = []
         def factory():
@@ -347,6 +349,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertIsNotNone(created[0].process.poll())
         self.assertFalse(gate.degraded)
 
+    @slow_test
     def test_hung_real_helper_is_terminated_on_authority_loss(self):
         created = []
         active = [True]
@@ -541,6 +544,7 @@ class SteamAdmissionTests(unittest.TestCase):
         self.life.argv_of = lambda pid: ["DayZDiag_x64.exe"]
         self.assertFalse(self.life._steam_mutation_allowed())
 
+    @slow_test
     def test_hung_argv_probe_cannot_hold_lifecycle_lock_after_prepare_timeout(self):
         record = lifecycle_fakes.process(77, role="server")
         run = self.f.add_run(record)

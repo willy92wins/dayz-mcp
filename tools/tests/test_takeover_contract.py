@@ -20,6 +20,7 @@ from dayz_mcp.process_lifecycle import occupancy_error_fields, takeover_target_r
 from dayz_mcp.server import ServerConfig, TAKEOVER_REQUIRED
 from tests.client_helpers import _fixture_client_runtime
 from tests.mcp_helpers import _content_json
+from tests._tiers import slow_test
 
 
 # --- from test_0ab2_grace.py ---
@@ -142,6 +143,7 @@ class DayzTestRunTakeoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("takeover=true", hint)
         self.assertNotIn("stop it with dayz_test_stop", hint)
 
+    @slow_test
     async def test_n6_ownerless_idle_is_takeover_required(self) -> None:
         execute = AsyncMock(side_effect=AssertionError("must not launch"))
         payload = await self._call(

@@ -24,6 +24,7 @@ from dayz_mcp.server import (
 )
 from tests.client_helpers import _fixture_client_runtime
 from tests.test_vehicle_trace_contract import _method_body
+from tests._tiers import slow_test
 
 
 MOD_SCRIPTS = addon_root() / "scripts"
@@ -189,6 +190,7 @@ class PreconditionDocsTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(head.index("session_release"), head.index("dayz_test_run"), head)
         self.assertLess(head.index("dayz_test_run"), head.index("session_acquire_wait"), head)
 
+    @slow_test
     def test_instructions_name_the_dayz_test_run_cycle(self) -> None:
         instructions = self.app.instructions or ""
         self.assertIn("call dayz_test_run without a lease", instructions)

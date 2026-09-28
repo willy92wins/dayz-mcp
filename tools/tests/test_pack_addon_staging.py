@@ -18,6 +18,7 @@ import unittest
 import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from tests._tiers import slow_test
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -282,6 +283,7 @@ class PackAddonStagingTest(unittest.TestCase):
     def setUp(self) -> None:
         _require_stage_only_switch(self, PACK_PS1)
 
+    @slow_test
     def test_fb_63c9_git_mode_packs_commit_tree_not_worktree(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -377,6 +379,7 @@ class PackAddonStagingTest(unittest.TestCase):
             finally:
                 _remove_junction(addon / "linked")
 
+    @slow_test
     def test_fb_63c9_folder_mode_copies_positives_and_names_exclusions(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -439,6 +442,7 @@ class PackAddonStagingTest(unittest.TestCase):
             finally:
                 _remove_junction(source / "linked")
 
+    @slow_test
     def test_fb_63c9_git_mode_poisoned_psmodulepath_exits_0(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -466,6 +470,7 @@ class PackAddonStagingTest(unittest.TestCase):
             self.assertEqual(manifest["source"], "git")
             self.assertIsInstance(manifest["files"], list)
 
+    @slow_test
     def test_fb_63c9_folder_mode_poisoned_psmodulepath_exits_0(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -492,6 +497,7 @@ class PackAddonStagingTest(unittest.TestCase):
             self.assertEqual(manifest["source"], "folder")
             self.assertIsNone(manifest["commit"])
 
+    @slow_test
     def test_fb_63c9_workspace_head_matches_git_addon(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -599,6 +605,7 @@ class PackAddonStagingTest(unittest.TestCase):
             ),
         )
 
+    @slow_test
     def test_fb_63c9_r2_git_mode_refuses_stage_that_differs_from_tree(self) -> None:
         cases = (
             (
@@ -640,6 +647,7 @@ class PackAddonStagingTest(unittest.TestCase):
                         "manifest printed on mismatch: {0!r}".format(line),
                     )
 
+    @slow_test
     def test_fb_63c9_r3_export_subst_is_not_expanded(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -680,6 +688,7 @@ class PackAddonStagingTest(unittest.TestCase):
             ).stdout
             self.assertEqual((stage / "config.cpp").read_bytes(), blob)
 
+    @slow_test
     def test_fb_63c9_r2_git_warning_on_stderr_does_not_abort(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -705,6 +714,7 @@ class PackAddonStagingTest(unittest.TestCase):
             manifest = _manifest_from_stdout(completed.stdout)
             self.assertEqual(manifest["commit"], sha)
 
+    @slow_test
     def test_fb_63c9_r2_refuses_stage_root_inside_source(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -726,6 +736,7 @@ class PackAddonStagingTest(unittest.TestCase):
             self.assertIn("overlaps", combined)
             self.assertFalse(stage_root.exists())
 
+    @slow_test
     def test_fb_63c9_r2_refuses_stage_root_equal_to_destination(self) -> None:
         with TemporaryDirectory() as tmp:
             missing = Path(tmp) / "same-missing"
@@ -743,6 +754,7 @@ class PackAddonStagingTest(unittest.TestCase):
             self.assertIn("overlaps", combined)
             self.assertFalse(missing.exists())
 
+    @slow_test
     def test_fb_63c9_r2_missing_source_creates_nothing(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -762,6 +774,7 @@ class PackAddonStagingTest(unittest.TestCase):
             self.assertFalse(source.exists())
             self.assertFalse(stage_root.exists())
 
+    @slow_test
     def test_fb_63c9_r2_folder_mode_excludes_backups_in_any_case(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

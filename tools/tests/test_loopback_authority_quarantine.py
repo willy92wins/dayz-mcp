@@ -27,6 +27,7 @@ from tests.lifecycle_helpers import (
     IDENTITY_PAYLOAD,
     Sequence,
 )
+from tests._tiers import slow_test
 
 
 # --- from test_task7_review_regressions.py ---
@@ -331,6 +332,7 @@ class AuthorityIoBoundaryTest(unittest.TestCase):
             observations,
         )
 
+    @slow_test
     def test_stale_admin_release_cannot_release_the_next_lease(self) -> None:
         entered = threading.Event()
         resume = threading.Event()
@@ -370,6 +372,7 @@ class AuthorityIoBoundaryTest(unittest.TestCase):
             snapshot["active"]["session"], IDENTITY_B.session_id[:12]
         )
 
+    @slow_test
     def test_stale_heartbeat_cannot_report_renewal_after_release_wins(self) -> None:
         entered = threading.Event()
         resume = threading.Event()

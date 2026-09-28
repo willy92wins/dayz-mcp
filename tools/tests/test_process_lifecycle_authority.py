@@ -38,6 +38,7 @@ from tests.lifecycle_helpers import (
     LifecycleFixtureContext,
     record,
 )
+from tests._tiers import slow_test
 
 
 # --- from test_task7_review_regressions.py ---
@@ -508,6 +509,7 @@ class RestartAndManifestTest(unittest.TestCase):
 
 
 class DaemonReleaseWiringTest(unittest.TestCase):
+    @slow_test
     def test_owner_admin_and_expiry_release_runs_idle_without_guard_in_clean_or_quarantine(self) -> None:
         for trigger in ("owner", "admin", "expiry"):
             for quarantined in (False, True):

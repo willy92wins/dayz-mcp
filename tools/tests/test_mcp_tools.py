@@ -27,6 +27,7 @@ from dayz_mcp.server import EXPECTED_BRIDGE_VERSION, ServerConfig, Runtime, buil
 from tests.catalog_helpers import list_tools_after_lease
 from tests.fence_helpers import bind_both_peers
 from tests.mcp_helpers import FakePeer, _assert_tool_error, _content_json
+from tests._tiers import slow_test
 
 
 _VALID_PEER_VERSION = f"{EXPECTED_BRIDGE_VERSION}~1.29.0"
@@ -68,6 +69,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             lambda: server_module.compute_bridge_ready(runtime.status())["ready"]
         )
 
+    @slow_test
     async def test_happy_path_server_and_client_tools(self) -> None:
         app, runtime = self.build_started()
         self.start_peer(runtime, "server", version=_VALID_PEER_VERSION)
@@ -99,6 +101,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(camera["ok"])
         self.assertEqual(camera["camera"]["pos"], [1.0, 2.0, 3.0])
 
+    @slow_test
     async def test_notify_players_with_zero_players_reports_sent_zero(self) -> None:
         app, runtime = self.build_started()
         server_peer = self.start_peer(runtime, "server", version=_VALID_PEER_VERSION)
@@ -138,6 +141,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(notify_cmds, [])
 
+    @slow_test
     async def test_notify_players_preflight_failure_still_sends(self) -> None:
         app, runtime = self.build_started()
         server_peer = self.start_peer(runtime, "server", version=_VALID_PEER_VERSION)
@@ -175,6 +179,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(notify_cmds), 1)
 
+    @slow_test
     async def test_notify_players_shares_one_timeout_budget(self) -> None:
         app, runtime = self.build_started()
         self.start_peer(runtime, "server", version=_VALID_PEER_VERSION)
@@ -203,6 +208,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(notify_timeout, 2.0 + 1e-3)
         self.assertGreater(notify_timeout, 0.0)
 
+    @slow_test
     async def test_session_tools_require_client_mode(self) -> None:
         app, _runtime = self.build_started()
 
@@ -341,6 +347,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session_status.await_count, peek_count + 1)
 
+    @slow_test
     async def test_dayz_test_launcher_backend_code_travels_without_its_detail(self) -> None:
         # Ficha ae65: build=true died as dayz_test_failed:NativeLauncherBackendError
         # and the code, one frame away, never reached the caller. The backend
@@ -393,6 +400,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("secret", message, expected)
             self.assertNotIn("host", message, expected)
 
+    @slow_test
     async def test_fb_c9ca_fine_code_crosses_the_wire_as_a_fourth_part(self) -> None:
         from dayz_mcp.native_launcher_backend import NativeLauncherBackendError
         from tests.client_helpers import _fixture_client_runtime
@@ -481,6 +489,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("drain_s", message, expected)
             self.assertNotIn("open_handles", message, expected)
 
+    @slow_test
     async def test_dayz_test_untyped_failure_carries_the_exception_type(self) -> None:
         # The bare `except Exception` swallowed the cause, which is exactly
         # what makes build:true undiagnosable. A non-existent `project` would NOT
@@ -541,6 +550,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("bad_project", typed_message)
         self.assertNotIn("dayz_test_failed", typed_message)
 
+    @slow_test
     async def test_negative_args_are_tool_errors(self) -> None:
         app, runtime = self.build_started()
         self.start_peer(runtime, "server")
@@ -566,6 +576,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         _assert_tool_error(self, bad_notify.exception)
         self.assertIn("bad_args", str(bad_notify.exception))
 
+    @slow_test
     async def test_object_inspect_rejects_invalid_type_and_echoes_it(self) -> None:
         app, _runtime = self.build_started()
         invalid = "Not A Classname"
@@ -586,6 +597,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(invalid, message)
         self.assertIn(repr(invalid), message)
 
+    @slow_test
     async def test_camera_set_look_at_alias_is_normalized_for_the_wire(self) -> None:
         # `lookat` is the value the game matches on
         # (MCPClientBridge.c:1741), but the vector argument beside it is spelled
@@ -620,6 +632,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         for mode in ("orient", "lookat", "matrix", "free"):
             self.assertIn(mode, message)
 
+    @slow_test
     async def test_timeout_has_an_upper_bound(self) -> None:
         # Only <=0 and non-finite were rejected, so a caller could
         # pin an operation far past MAX_OPERATION_PIN_S. The 299 s call below is
@@ -641,6 +654,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(accepted["ok"])
 
+    @slow_test
     async def test_bridge_business_error_is_tool_error(self) -> None:
         # A bridge result with int ok=0 must surface as a ToolError,
         # not be returned as success (0 is not False, so `is False` missed it).
@@ -658,6 +672,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         _assert_tool_error(self, err.exception)
         self.assertIn("no_players", str(err.exception))
 
+    @slow_test
     async def test_world_read_not_ready_includes_liveness_reason(self) -> None:
         app, _runtime = self.build_started()
         result = _content_json(
@@ -666,6 +681,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["code"], "not_ready")
         self.assertEqual(result["reason"], "binding_not_ready")
 
+    @slow_test
     async def test_mutex_serializes_dayz_touching_tools(self) -> None:
         app, runtime = self.build_started()
         fake_client = self.start_peer(runtime, "client", result_delay_s=0.12)
@@ -677,6 +693,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["args"]["cam_pos"] for item in parsed], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
         self.assertEqual(fake_client.max_batch_size, 1)
 
+    @slow_test
     async def test_version_state_legacy_and_legacy_blocked(self) -> None:
         app, runtime = self.build_started()
         self.start_peer(runtime, "server")
@@ -714,6 +731,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         status = _content_json(await blocked_app.call_tool("bridge_status", {}))
         self.assertEqual(status["version_state"]["server"], "legacy_blocked")
 
+    @slow_test
     async def test_never_polled_is_game_not_ready_before_enqueue(self) -> None:
         app, runtime = self.build_started(require_version=True)
         enqueue_calls: list[object] = []
@@ -738,6 +756,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             status["client_peer"]["version_state"], "never_polled_this_generation"
         )
 
+    @slow_test
     async def test_version_state_mismatch_and_ok(self) -> None:
         app, runtime = self.build_started(expected_game_version="1.29.0")
         self.start_peer(runtime, "server", version="wrong~1.29.0")
@@ -786,6 +805,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         status = _content_json(await ok_app.call_tool("bridge_status", {}))
         self.assertEqual(status["version_state"]["server"], "ok")
 
+    @slow_test
     async def test_bridge_status_ready_true_with_fresh_versioned_peers(self) -> None:
         app, runtime = self.build_started()
         version = f"{EXPECTED_BRIDGE_VERSION}~1.29.0"
@@ -807,6 +827,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("next_step", ready)
         self.assertIn(ready["reason"], server_module.READY_REASONS)
 
+    @slow_test
     async def test_bridge_status_ready_false_without_peers(self) -> None:
         app, _runtime = self.build_started()
         status = _content_json(await app.call_tool("bridge_status", {}))
@@ -817,6 +838,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(ready)[:3], ["ready", "reason", "next_step"])
         self.assertIn(ready["next_step"], {"bridge_status", "dayz_test_run", "session_status"})
 
+    @slow_test
     async def test_bridge_status_publishes_frozen_tool_registry_overlay(self) -> None:
         app, _runtime = self.build_started()
         status = _content_json(await app.call_tool("bridge_status", {}))
@@ -850,6 +872,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             again["tool_registry_captured_at"], status["tool_registry_captured_at"]
         )
 
+    @slow_test
     async def test_bridge_status_source_stale_is_boolean_for_all_three_states(self) -> None:
         app, _runtime = self.build_started()
         description = next(tool.description for tool in await app.list_tools() if tool.name == "bridge_status")
@@ -874,6 +897,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
                 }[state]
                 self.assertEqual(status["tool_registry_schema_signal"], signal)
 
+    @slow_test
     async def test_loopback_status_omits_tool_registry_overlay(self) -> None:
         _app, runtime = self.build_started()
         assert runtime.loopback is not None and runtime.loopback.httpd is not None
@@ -895,6 +919,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(key, raw)
             self.assertNotIn(key, encoded)
 
+    @slow_test
     async def test_shutdown_reuses_port(self) -> None:
         _app, runtime = self.build_started()
         self.assertIsNotNone(runtime.loopback)
@@ -905,6 +930,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("127.0.0.1", port))
 
+    @slow_test
     async def test_dayz_test_value_errors_are_typed_for_run_and_stop(self) -> None:
         # dayz_test_stop shares _execute_request with dayz_test_run, so the parse
         # and the path accreditation raise it the SAME constant tokens; it used to
@@ -1003,6 +1029,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(token, mapping)
                 self.assertTrue(mapping[token].isidentifier(), token)
 
+    @slow_test
     async def test_dayz_test_run_names_run_id_matrix_causes_on_the_wire(self) -> None:
         from dayz_mcp import dayz_test_request, dayz_test_tool
         from tests.client_helpers import _fixture_client_runtime
@@ -1066,6 +1093,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn(token, message)
                     self.assertNotIn("dayz_test_failed", message)
 
+    @slow_test
     async def test_dayz_test_run_preflight_client_reattach_keeps_run_id(self) -> None:
         from dayz_mcp import dayz_test_tool
         from tests.client_helpers import _fixture_client_runtime
@@ -1202,6 +1230,7 @@ class UiPublicSurfaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("mode", props, props)
         self.assertIn("bubble", props, props)
 
+    @slow_test
     async def test_root_reaches_the_bridge_when_the_caller_sends_it(self) -> None:
         for tool in self._UI_TOOLS:
             with self.subTest(tool):
@@ -1210,6 +1239,7 @@ class UiPublicSurfaceTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(sent)
                 self.assertEqual(sent.get("root"), "MiRoot")
 
+    @slow_test
     async def test_root_does_not_travel_when_omitted(self) -> None:
         for tool in self._UI_TOOLS:
             with self.subTest(tool):
@@ -1225,6 +1255,7 @@ class UiPublicSurfaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent.get("mode"), "direct")
         self.assertIs(sent.get("bubble"), False)
 
+    @slow_test
     async def test_ui_click_forwards_complete_mode_and_true_bubble(self) -> None:
         sent, err = await self._call(
             "ui_click", {"path": "Btn", "mode": "complete", "bubble": True}
@@ -1234,6 +1265,7 @@ class UiPublicSurfaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent.get("mode"), "complete")
         self.assertIs(sent.get("bubble"), True)
 
+    @slow_test
     async def test_fail_closed_rejects_before_enqueue(self) -> None:
         cases = (
             ("ui_click", {"path": "Btn", "mode": "otro"}),
@@ -1278,6 +1310,7 @@ class UiPublicSurfaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(err)
         _assert_tool_error(self, err)
 
+    @slow_test
     async def test_existing_path_and_button_guards_still_reject(self) -> None:
         cases = (
             ("ui_click", {"path": ""}),

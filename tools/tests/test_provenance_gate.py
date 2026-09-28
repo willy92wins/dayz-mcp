@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dayz_mcp import control_client, daemon_policy, host_config
+from tests._tiers import slow_test
 
 
 class ProvenanceGateTests(unittest.TestCase):
@@ -148,6 +149,7 @@ class ProvenanceGateTests(unittest.TestCase):
                         self.assertEqual(self._status(), {"status": "ok"})
                     self.send.assert_called_once()
 
+    @slow_test
     def test_t2_changed_registration_is_rejected_without_http(self):
         for platform in self.paths:
             for mutation in ("command", "keyfile", "timeout", "idle_timeout", "missing",

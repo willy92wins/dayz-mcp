@@ -42,6 +42,7 @@ if sys.platform != "win32":
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from dayz_mcp.server import ServerConfig, build_app
+from tests._tiers import slow_test
 
 
 LEASE_REVEAL_PREFIXES = ("world_", "vehicle_", "ui_")
@@ -132,6 +133,7 @@ class ProgressiveDisclosureTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ui_click", after)
         self.assertGreater(_catalog_bytes(await app.list_tools()), INITIAL_CATALOG_MAX_BYTES)
 
+    @slow_test
     async def test_protocol_tools_list_is_compact_before_lease(self) -> None:
         app, runtime = self._client_app()
         self.assertIsNone(runtime.active_lease_token)
@@ -191,6 +193,7 @@ class ProgressiveDisclosureTest(unittest.IsolatedAsyncioTestCase):
             parse_args([*base, "--no-progressive-disclosure"]).progressive_disclosure
         )
 
+    @slow_test
     async def test_protocol_tools_list_reveals_after_lease(self) -> None:
         app, runtime = self._client_app()
         before = _names(await _protocol_list_tools(app))

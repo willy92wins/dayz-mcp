@@ -22,6 +22,7 @@ from tests.test_daemon import DaemonHttpServer, _config, _free_port, _http
 from tests.client_helpers import _VALID_PEER_VERSION, _fixture_client_runtime
 from tests.mcp_helpers import _content_json
 from tests.fence_helpers import INST_CLIENT, INST_SERVER, poll_census_query
+from tests._tiers import slow_test
 
 
 class GamePeer:
@@ -190,6 +191,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    @slow_test
     async def test_client_call_bridge_round_trip(self) -> None:
         srv = self._daemon()
         self._peer(srv, "server", _VALID_PEER_VERSION)
@@ -200,6 +202,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["state"]["pos"], [1.0, 2.0, 3.0])
 
+    @slow_test
     async def test_client_acquire_stores_token_and_mutation_transports_it(self) -> None:
         srv = self._daemon(adopt_fixture=False)
         self._peer(srv, "server")
@@ -221,6 +224,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result["ok"])
 
+    @slow_test
     async def test_wait_stores_granted_token_and_release_clears_local_state(self) -> None:
         srv = self._daemon(adopt_fixture=False)
         owner = self._client(srv, client_platform="codex")
@@ -459,6 +463,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(runtime.active_lease_token)
                 self.assertEqual(runtime.active_ticket, "ticket-stays")
 
+    @slow_test
     async def test_release_serializes_acquire_and_new_token_reaches_bridge(self) -> None:
         runtime = self._standalone_client()
         release_started = threading.Event()
@@ -504,6 +509,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         await runtime.call_bridge("query_player_state", {}, "server", 1.0)
         self.assertEqual(sent_tokens, ["new-token"])
 
+    @slow_test
     async def test_acquire_serializes_release_and_success_matches_local_state(self) -> None:
         runtime = self._standalone_client()
         acquire_started = threading.Event()
@@ -543,6 +549,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(runtime.active_lease_token)
         self.assertIsNone(runtime.active_ticket)
 
+    @slow_test
     async def test_wait_serializes_release_and_success_matches_local_state(self) -> None:
         runtime = self._standalone_client()
         wait_started = threading.Event()
@@ -585,6 +592,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(runtime.active_lease_token)
         self.assertIsNone(runtime.active_ticket)
 
+    @slow_test
     async def test_heartbeat_serializes_acquire(self) -> None:
         runtime = self._standalone_client()
         heartbeat_started = threading.Event()
@@ -662,6 +670,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent_tokens, ["old-token"])
         self.assertEqual(runtime.active_lease_token, "new-token")
 
+    @slow_test
     async def test_two_clients_one_daemon_both_get_results(self) -> None:
         # F1: multiple sessions driving one game (offline proxy form).
         srv = self._daemon()
@@ -677,6 +686,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result_a["ok"])
         self.assertTrue(result_b["ok"])
 
+    @slow_test
     async def test_version_blocked_world_read_surfaces_not_ready(self) -> None:
         srv = self._daemon(require_version=True)
         self._peer(srv, "server")  # polls with no version → legacy_blocked
@@ -687,6 +697,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["code"], "not_ready")
         self.assertEqual(result["reason"], "version_mismatch")
 
+    @slow_test
     async def test_bridge_status_is_proxied(self) -> None:
         srv = self._daemon()
         self._peer(srv, "server")
@@ -695,6 +706,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("server_peer", status)
         self.assertEqual(status["server_version"], core.EXPECTED_BRIDGE_VERSION)
 
+    @slow_test
     async def test_business_error_is_tool_error(self) -> None:
         srv = self._daemon()
         peer = GamePeer(srv.base, srv.key, "server",
@@ -710,6 +722,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(type(err.exception).__name__, "ToolError")
         self.assertIn("no_players", str(err.exception))
 
+    @slow_test
     async def test_world_read_fail_fast_includes_liveness_reason(self) -> None:
         # A trustworthy readiness snapshot now avoids both enqueue and timeout.
         srv = self._daemon()  # no game peer → command never resolves
@@ -720,6 +733,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["code"], "not_ready")
         self.assertEqual(result["reason"], "binding_not_ready")
 
+    @slow_test
     async def test_timeout_degrades_when_peer_status_is_unavailable(self) -> None:
         # Negative control: inject a bridge_status_payload failure. The happy
         # path alone would stay green even if the degradation path were broken.
@@ -737,6 +751,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("server peer status unavailable", message)
         self.assertNotIn("queue_depth", message)
 
+    @slow_test
     async def test_malformed_status_never_replaces_the_timeout_error(self) -> None:
         # The guard covered only the fetch, so a /status
         # answering 200 with an odd shape raised INSIDE the timeout handler and
@@ -763,6 +778,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(type(err.exception).__name__, "ToolError")
                 self.assertIn("timeout waiting for", str(err.exception))
 
+    @slow_test
     async def test_build_app_client_mode_routes_tools_through_daemon(self) -> None:
         # Exercises the FastMCP wiring (build_app branch + bridge_status tool using
         # the async accessor), not just ClientRuntime in isolation.
@@ -783,6 +799,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("server_peer", status)
         self.assertEqual(status["server_version"], core.EXPECTED_BRIDGE_VERSION)
 
+    @slow_test
     async def test_client_mode_session_tool_enables_existing_mutation(self) -> None:
         srv = self._daemon(adopt_fixture=False)
         self._peer(srv, "server")
@@ -827,6 +844,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(released["released"])
 
+    @slow_test
     async def test_pure_read_of_all_players_needs_no_lease_while_mutations_do(self) -> None:
         # The observable is the MCP contract, not the HTTP layer. With no
         # lease held, query_all_players completes; the mutating verbs below are
@@ -859,6 +877,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
                 await app.call_tool(name, args)
             self.assertIn("lease_required", str(denied.exception), name)
 
+    @slow_test
     async def test_full_catalog_opt_out_lists_lease_verbs_but_they_still_need_a_lease(
         self,
     ) -> None:
@@ -886,6 +905,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertIn("lease_required", str(denied.exception))
 
+    @slow_test
     async def test_all_players_read_is_not_blocked_by_another_sessions_lease(self) -> None:
         # Second acceptance clause: with ANOTHER session holding
         # the lease, the pure read still completes. Negative control: the foreign
@@ -921,6 +941,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
 
         await holder.session_release(acquired["lease_token"])
 
+    @slow_test
     async def test_logs_since_streams_only_new_lines_and_needs_no_lease(self) -> None:
         # F2.1 through the MCP contract: the profile comes from the active run,
         # the second call returns only what was appended, and no lease is held.
@@ -976,6 +997,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(second["marker"], first["marker"])
         self.assertFalse(second["files"][0]["rotated"])
 
+    @slow_test
     async def test_logs_since_rejects_bad_input_and_reports_no_active_run(self) -> None:
         srv = self._daemon()
         config = ServerConfig(
@@ -1018,6 +1040,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
                 await app.call_tool("logs_since", {})
             self.assertIn("bad_profiles", str(refused.exception))
 
+    @slow_test
     async def test_connection_refused_triggers_spawn_and_retry(self) -> None:
         # No daemon initially: the first call must spawn one (self-healing) and retry.
         port = _free_port()

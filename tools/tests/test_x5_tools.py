@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from dayz_mcp.server import Runtime, ServerConfig, build_app
 from tests.mcp_helpers import FakePeer, _assert_tool_error, _content_json
+from tests._tiers import slow_test
 
 
 class X5ToolsTest(unittest.IsolatedAsyncioTestCase):
@@ -53,6 +54,7 @@ class X5ToolsTest(unittest.IsolatedAsyncioTestCase):
         self.peers.append(fake)
         return fake
 
+    @slow_test
     async def test_exec_audit_failure_does_not_enqueue(self) -> None:
         expr = "void main() { Print(\"ok\"); }"
         allowlist = self.tmp_path / "allowlist.json"
@@ -70,6 +72,7 @@ class X5ToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("audit_failed", str(err.exception))
         self.assertEqual(fake.commands_seen, [])
 
+    @slow_test
     async def test_exec_audit_entries_include_main_fn_and_bom_allowlist_loads(self) -> None:
         expr = "void main() { Print(\"ok\"); }"
         allowlist = self.tmp_path / "allowlist-bom.json"
@@ -92,6 +95,7 @@ class X5ToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lines[1]["verdict"], "allowed")
         self.assertEqual(lines[1]["main_fn"], "AllowedMain")
 
+    @slow_test
     async def test_exec_empty_expr_is_denied_and_audited(self) -> None:
         allowlist = self.tmp_path / "allowlist.json"
         allowlist.write_text(json.dumps(["allowed"]), encoding="utf-8")
@@ -107,6 +111,7 @@ class X5ToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lines[0]["expr"], "")
         self.assertEqual(lines[0]["main_fn"], "main")
 
+    @slow_test
     async def test_world_time_year_range(self) -> None:
         app, runtime = self.build_started()
         fake = self.start_peer(runtime, "server")

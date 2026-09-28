@@ -47,6 +47,7 @@ from dayz_mcp import agent_loop, instance_fence, knowledge, knowledge_pack, loop
 from dayz_mcp.control_client import ControlClient, ControlClientError
 from dayz_mcp.peer_liveness import PEER_STALE_S
 from dayz_mcp.server import ServerConfig, build_app
+from tests._tiers import slow_test
 
 
 INST_S1 = "33333333-3333-4333-8333-333333333333"
@@ -439,6 +440,7 @@ class KnowledgeDeadEndTest(unittest.IsolatedAsyncioTestCase):
 
 
 class WaitForBindingNotReadyTest(unittest.IsolatedAsyncioTestCase):
+    @slow_test
     async def test_waits_through_binding_not_ready(self) -> None:
         class _Runtime:
             tool_lock = __import__("asyncio").Lock()
@@ -462,6 +464,7 @@ class WaitForBindingNotReadyTest(unittest.IsolatedAsyncioTestCase):
 
 
 class CatalogDoesNotExposeLifecycleStatus(unittest.IsolatedAsyncioTestCase):
+    @slow_test
     async def test_public_catalog_has_no_lifecycle_status_tool(self) -> None:
         app, _runtime = build_app(ServerConfig(log_sink=lambda _m: None))
         names = {tool.name for tool in await app.list_tools()}

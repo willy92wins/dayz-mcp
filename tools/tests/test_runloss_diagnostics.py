@@ -9,6 +9,7 @@ from unittest.mock import patch
 from dayz_mcp import loopback, server
 from tests import test_instance_fence as fixtures
 from tests.client_helpers import _fixture_client_runtime
+from tests._tiers import slow_test
 
 
 class RunlossRetirementTest(unittest.IsolatedAsyncioTestCase):
@@ -195,6 +196,7 @@ class RunlossWaitBudgetTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("station snapshot:", message)
         self.assertIn("last poll 140.4s ago", message)
 
+    @slow_test
     async def test_retryable_not_ready_still_retries_and_unknown_reason_aborts(self):
         runtime = SimpleNamespace(tool_lock=asyncio.Lock())
         replies = ["game_not_ready:reason=server_poll_stale", {"ok": 1, "players": [{}]}]

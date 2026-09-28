@@ -53,6 +53,7 @@ from tests.lease_helpers import (
     TTL,
 )
 from tests.lifecycle_helpers import Clock, IDENTITY, IDENTITY_B, Sequence
+from tests._tiers import slow_test
 
 
 # --- helpers from test_session_coordination.py ---
@@ -2418,6 +2419,7 @@ class RaceR9Tests(unittest.TestCase):
         box.cleanup("session-a", "lease-1", "lease_expired", False)
         self.assertFalse(box.probe("session-a", "lease-1"))
 
+    @slow_test
     def test_concurrent_former_and_stranger_acquire_one_active(self) -> None:
         for _ in range(8):
             clock = FakeClock()
@@ -2561,6 +2563,7 @@ class OperationQueueCoordinatorTests(unittest.TestCase):
         self.assertEqual(snapshot["queue"], [])
         self.assertIsNone(snapshot["active"])
 
+    @slow_test
     def test_cancel_during_prepared_prevents_publish_and_next_waiter_progresses(self) -> None:
         prepared = threading.Event()
         resume = threading.Event()

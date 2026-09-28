@@ -19,6 +19,7 @@ from dayz_mcp.identity_migration import (
 )
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.native_process_guard import identity_hashes
+from tests._tiers import slow_test
 
 
 class RunsBackupGateTest(unittest.TestCase):
@@ -205,6 +206,7 @@ class RunsBackupGateTest(unittest.TestCase):
         self.assertFalse((self.migration / "runs-backup-receipt.pending").exists())
         self.assertEqual(receipt["source"], receipt["backup"])
 
+    @slow_test
     def test_crash_after_each_published_phase_is_reentrant(self) -> None:
         class SimulatedCrash(BaseException):
             pass

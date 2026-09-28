@@ -53,6 +53,7 @@ from tests.lifecycle_helpers import (
     Sequence,
 )
 from tests.steam_helpers import FakeSteamGate
+from tests._tiers import slow_test
 
 
 # --- helpers from test_bug046_lease_queue_liveness.py ---
@@ -1648,6 +1649,7 @@ class GrantLedgerLinearizationTest(unittest.TestCase):
                     )
                 )
 
+    @slow_test
     def test_last_session_queue_slot_has_one_durable_queued_event(self) -> None:
         candidate_a = ClientIdentity(
             "codex", 801, 1, "2026-07-15T00:00:00Z", "candidate-a", "queue-a"
@@ -2060,6 +2062,7 @@ class GrantLedgerLinearizationTest(unittest.TestCase):
         self.assertFalse(claim_thread.is_alive())
         self.assertEqual(claim_result[0][0], 200)
 
+    @slow_test
     def test_concurrent_initial_grant_has_one_allowed_event_matching_active(self) -> None:
         entered = threading.Event()
         resume = threading.Event()

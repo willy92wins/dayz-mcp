@@ -16,6 +16,7 @@ from dayz_mcp.server import ServerConfig, build_app
 from tests.client_helpers import _fixture_client_runtime
 from tests.mcp_helpers import _content_json
 from tests.test_control_client import _policy
+from tests._tiers import slow_test
 
 _STARTED_AT = "2026-09-14T12:48:11Z"
 _STALE_WARNING = "tool_registry_stale_reopen_client"
@@ -248,6 +249,7 @@ class Fb050eDayzTestRunTests(unittest.IsolatedAsyncioTestCase):
         )
         self._assert_unchanged(original, result)
 
+    @slow_test
     async def test_fb_050e_dayz_test_run_unknown_observation_warns_and_keeps_result(
         self,
     ) -> None:

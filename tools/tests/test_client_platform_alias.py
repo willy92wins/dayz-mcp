@@ -25,6 +25,7 @@ from dayz_mcp import control_client, host_config, server
 from dayz_mcp.server import ServerConfig
 from dayz_mcp.session_coordination import ClientIdentity
 from tests.test_daemon import DaemonHttpServer, _config, _http
+from tests._tiers import slow_test
 
 
 def _fixture_client_runtime(
@@ -126,6 +127,7 @@ class ClientPlatformAliasTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.client_platform, "unknown")
         self.assertEqual(config.client_platform_raw, "grok")
 
+    @slow_test
     async def test_g2_normalized_identity_crosses_daemon_and_releases_lease(self) -> None:
         daemon_server = self._daemon()
         config = replace(

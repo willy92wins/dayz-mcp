@@ -15,6 +15,7 @@ import build_native_launcher
 from dayz_mcp import launcher_registry
 from dayz_mcp import launcher_registry_update as updater
 from tests._bundle_paths import requires_built_bundle
+from tests._tiers import slow_test
 
 
 BASELINE = b'{\n  "format_version": 1,\n  "launchers": []\n}\n'
@@ -528,6 +529,7 @@ class AbortedPreparedRecoveryTest(unittest.TestCase):
         self.assertEqual(len(list(receipts.glob("*/committed.json"))), 2)
         return sha_b
 
+    @slow_test
     def test_aborted_before_swap_retry_does_not_block_later_transitions(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -870,6 +872,7 @@ class AbortedPreparedRecoveryTest(unittest.TestCase):
         self.assertIsNotNone(live_tx)
         return dead, live_tx
 
+    @slow_test
     def test_recovery_is_independent_of_orphan_visit_order(self) -> None:
         # F2: visiting the dead-temp orphan before the promotable one must not
         # raise identity_drift. Both directory orders restore the baseline.

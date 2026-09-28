@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from dayz_mcp.server import ServerConfig, Runtime, build_app
 from tests.mcp_helpers import FakePeer, _assert_tool_error, _content_json
+from tests._tiers import slow_test
 
 
 class Fase4BToolsTest(unittest.IsolatedAsyncioTestCase):
@@ -53,6 +54,7 @@ class Fase4BToolsTest(unittest.IsolatedAsyncioTestCase):
         self.peers.append(fake)
         return fake
 
+    @slow_test
     async def test_world_tools_happy_path_enqueue_to_server_peer(self) -> None:
         app, runtime = self.build_started()
         fake = self.start_peer(runtime, "server")
@@ -75,6 +77,7 @@ class Fase4BToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(commands[1][1]["overcast"], 0.5)
         self.assertEqual(commands[1][1]["rain"], 0.0)
 
+    @slow_test
     async def test_world_tool_negatives_raise_before_enqueue(self) -> None:
         app, runtime = self.build_started()
         fake = self.start_peer(runtime, "server")
@@ -95,12 +98,14 @@ class Fase4BToolsTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(fake.commands_seen, [])
 
+    @slow_test
     async def test_exec_tool_absent_without_flag(self) -> None:
         app, _runtime = self.build_started()
         tools = await app.list_tools()
         names = {tool.name for tool in tools}
         self.assertNotIn("exec_enforce", names)
 
+    @slow_test
     async def test_exec_allowlist_denied_and_allowed_are_audited(self) -> None:
         expr = "void main() { Print(\"ok\"); }"
         allowlist = self.tmp_path / "allowlist.json"

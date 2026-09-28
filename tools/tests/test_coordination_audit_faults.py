@@ -46,6 +46,7 @@ from tests.lifecycle_helpers import (
 )
 from tests.steam_helpers import FakeSteamGate
 from tests.process_lifecycle_helpers import FakeGuard, FakeLauncher, process
+from tests._tiers import slow_test
 
 
 # --- helpers from test_bug046_audit_fault_recovery.py ---
@@ -1692,6 +1693,7 @@ class CoordinatorWalIntegrationTests(unittest.TestCase):
         names = [event["event"] for event in self.events]
         self.assertLess(names.index("session_release_started"), names.index("session_release_finished"))
 
+    @slow_test
     def test_slow_successful_release_audit_is_not_reported_failed(self) -> None:
         finished = threading.Event()
 

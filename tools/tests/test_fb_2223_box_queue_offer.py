@@ -26,6 +26,7 @@ from dayz_mcp.session_coordination import (
 )
 from tests.client_helpers import _fixture_client_runtime
 from tests.mcp_helpers import _content_json
+from tests._tiers import slow_test
 
 _REAL_EXECUTE_WAIT_FOR_BOX = server.execute_wait_for_box
 
@@ -392,6 +393,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(wired["port"], 2302)
         self.assertIs(wired["foreign"], True)
 
+    @slow_test
     async def test_fb_2223_queue_launches_once_when_box_frees(self) -> None:
         runtime, app = _build()
         harness = _BoxHarness(runs=[_run_row()])
@@ -436,6 +438,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(harness.done), 1)
         self.assertEqual(harness.coordinator.box_queue_public(), [])
 
+    @slow_test
     async def test_fb_2223_queue_fifo_b_launches_before_c(self) -> None:
         config = _config()
         runtime_b = _fixture_client_runtime(config)
@@ -572,6 +575,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload.get("error_code"), TAKEOVER_REQUIRED)
         self.assertIsNone(payload.get("queue_offer"))
 
+    @slow_test
     async def test_fb_2223_queue_becomes_adoptable_while_waiting(self) -> None:
         runtime, app = _build()
         harness = _BoxHarness(runs=[_run_row()])
@@ -617,6 +621,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(harness.done)
         self.assertEqual(harness.coordinator.box_queue_public(), [])
 
+    @slow_test
     async def test_fb_2223_queue_timeout_with_short_wait_carries_offer(self) -> None:
         runtime, app = _build()
         harness = _BoxHarness(runs=[_run_row()])
@@ -646,6 +651,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
             {"tool": "dayz_test_run", "on_busy": "queue", "same_args": True},
         )
 
+    @slow_test
     async def test_fb_2223_on_busy_rejects_later_empty_and_uppercase(self) -> None:
         runtime, app = _build()
         status = AsyncMock(return_value={"box": _busy_box()})
@@ -710,6 +716,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(free["box"]["queue_offer"])
         self.assertIsNone(free["blocked_on"])
 
+    @slow_test
     async def test_2223_r2_anyio_cancel_while_waiting_leaves_no_ticket(self) -> None:
         runtime, app = _build()
         harness = _BoxHarness(runs=[_run_row()])
@@ -750,6 +757,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.coordinator.box_queue_public(), [])
         self.assertTrue(harness.done)
 
+    @slow_test
     async def test_2223_r2_anyio_cancel_while_launching_leaves_no_ticket_or_claim(
         self,
     ) -> None:
@@ -834,6 +842,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
             _fail_product(self, exc)
         self.assertEqual(payload.get("status"), "succeeded")
 
+    @slow_test
     async def test_2223_r2_wait_for_box_s_cancel_leaves_no_ticket(self) -> None:
         runtime, app = _build()
         harness = _BoxHarness(runs=[_run_row()])
@@ -873,6 +882,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.coordinator.box_queue_public(), [])
         self.assertTrue(harness.done)
 
+    @slow_test
     async def test_2223_r2_second_waiter_stays_behind_a_fresh_launch(self) -> None:
         config = _config()
         runtime_b = _fixture_client_runtime(config)
@@ -1099,6 +1109,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload.get("error_code"), TAKEOVER_REQUIRED)
         self.assertIsNone(payload.get("queue_offer"))
 
+    @slow_test
     async def test_2223_r3_cancel_before_the_ticket_id_leaves_no_ticket(self) -> None:
         runtime, app = _build()
         harness = _BoxHarness(runs=[_run_row()])
@@ -1139,6 +1150,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.coordinator.box_queue_public(), [])
         self.assertIn(None, harness.done)
 
+    @slow_test
     async def test_2223_r3_release_does_not_wait_for_the_tool_lock(self) -> None:
         runtime, app = _build()
         harness = _BoxHarness(runs=[_run_row()])
@@ -1295,6 +1307,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
                 except (asyncio.CancelledError, Exception):
                     pass
 
+    @slow_test
     async def test_2223_r3_own_run_matches_any_run_in_the_snapshot(self) -> None:
         runtime, app = _build()
         box = _busy_box(
@@ -1400,6 +1413,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(harness.public_in_queue(runtime.identity.session_id))
         self.assertEqual(payload.get("error_code"), "box_queue_saturated")
 
+    @slow_test
     async def test_2223_r4_release_beats_the_join_and_still_leaves_no_ticket(
         self,
     ) -> None:
@@ -1445,6 +1459,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
             any(isinstance(item, str) and item for item in harness.done)
         )
 
+    @slow_test
     async def test_2223_r4_sibling_without_the_claim_does_not_launch(self) -> None:
         runtime_a, app_a = _build()
         runtime_b = _fixture_client_runtime(_config())

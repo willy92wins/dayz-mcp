@@ -19,6 +19,7 @@ from dayz_mcp.mcp_supervisor import (  # noqa: E402
     REPLAY_ID,
     Supervisor,
 )
+from tests._tiers import slow_test
 
 
 DEADLINE_S = 5.0
@@ -322,6 +323,7 @@ class RecycleTest(SupervisorTestBase):
                 for m in self.workers[-1].sent)
         )
 
+    @slow_test
     def test_a_worker_holding_no_lease_does_not_abort_the_recycle(self) -> None:
         self.auto_answer = False
         first = self.start()
@@ -341,6 +343,7 @@ class RecycleTest(SupervisorTestBase):
         self.assertEqual(result_text(message)["lease_heartbeat"], "timeout")
         self.assertEqual(result_text(message)["status"], "recycled")
 
+    @slow_test
     def test_a_call_in_flight_refuses_the_recycle_rather_than_orphaning_it(self) -> None:
         worker = self.start()
         self.handshake()

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from dayz_mcp.dayz_tools_paths import addon_builder_exe
+from tests._tiers import slow_test
 
 _ADDON_BUILDER_ANNOUNCE = addon_builder_exe().encode("utf-8")
 
@@ -864,6 +865,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
             fake.events.index("continue:703:704"),
         )
 
+    @slow_test
     def test_rejected_descendant_closes_job_before_its_single_continue(self) -> None:
         backend = self._backend()
         fake = _FakeKernel32()
@@ -965,6 +967,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
                         fake.events.index("continue:900:901"),
                     )
 
+    @slow_test
     def test_exact_helper_without_announcement_is_allowed_only_during_active_addon_builder(self) -> None:
         backend = self._backend()
         fake = _FakeKernel32()
@@ -1020,6 +1023,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
             fake.events.index("continue:910:911"),
         )
 
+    @slow_test
     def test_second_simultaneous_addon_helper_fails_before_continue(self) -> None:
         backend = self._backend()
         fake = _FakeKernel32()
@@ -1084,6 +1088,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
             fake.events.index("continue:920:921"),
         )
 
+    @slow_test
     def test_addon_helper_after_builder_exit_fails_before_continue(self) -> None:
         backend = self._backend()
         fake = _FakeKernel32()
@@ -1142,6 +1147,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
             fake.events.index("continue:910:911"),
         )
 
+    @slow_test
     def test_addon_helper_lifetime_cap_fails_closed(self) -> None:
         backend = self._backend()
         self.assertEqual(backend._MAX_ADDON_HELPER_LAUNCHES, 64)
@@ -1267,6 +1273,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
             fake.events.index("continue:910:911"),
         )
 
+    @slow_test
     def test_unannounced_helper_without_active_addon_builder_fails_before_continue(self) -> None:
         backend = self._backend()
         fake = _FakeKernel32()
@@ -1309,6 +1316,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
             backend._kernel32 = original
         self.assertEqual(authority.helper_calls, [])
 
+    @slow_test
     def test_partial_pending_announcement_blocks_addon_helper_fallback(self) -> None:
         backend = self._backend()
         fake = _FakeKernel32()
@@ -1796,6 +1804,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
         )
         self.assertEqual(len(wait_calls), 2)
 
+    @slow_test
     def test_unretired_job_new_process_does_not_proceed_without_zero(self) -> None:
         backend = self._backend()
 
@@ -2006,6 +2015,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
                     ]
                     self.assertLess(fake.events.index("close:501"), continue_indices[1])
 
+    @slow_test
     def test_gate_rejection_preserves_fine_code_kind_and_pid(self) -> None:
         """Gate rejections keep the stable code and surface the fine detail."""
         backend = self._backend()
@@ -2072,6 +2082,7 @@ class NativeDebugOwnershipTests(unittest.TestCase):
         # assertRaisesRegex / re.search still match the stable code as a substring.
         self.assertRegex(message, "native_debug_gate_rejected")
 
+    @slow_test
     def test_failing_detail_capture_never_breaks_the_cleanup(self) -> None:
         """Observability must not alter control flow.
 

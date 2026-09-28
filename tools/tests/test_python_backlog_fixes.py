@@ -19,6 +19,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from dayz_mcp import daemon, host_config, loopback, server
 from dayz_mcp.accredited_daemon_transport import AccreditedTransportError
+from tests._tiers import slow_test
 
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -430,6 +431,7 @@ class PythonBacklogFixesTest(unittest.IsolatedAsyncioTestCase):
             "synchronous audit I/O blocked the event loop heartbeat",
         )
 
+    @slow_test
     def test_bug026_e4_bind_failure_exits_cleanly_with_code_2(self) -> None:
         script = "\n".join(
             (

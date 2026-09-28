@@ -296,6 +296,19 @@ Tests that need a built launcher, an installed registry or development-only
 evidence skip with the reason named. Everything else passes on a fresh clone, so
 anything red is worth reporting.
 
+For the edit-run loop there is a fast tier. With `DAYZ_MCP_FAST_TESTS=1` the
+tests marked `@slow_test` in `tools/tests/_tiers.py` skip with their reason: a
+few hundred that start real processes or wait on real time, and most of the
+suite's run time. The rest runs in about a minute. It is a subset, not a
+verdict: CI runs the whole suite on every pull request, and that run is the
+one that has to pass.
+
+```powershell
+$env:DAYZ_MCP_FAST_TESTS = "1"
+.\.venv-mcp\Scripts\python.exe -m unittest discover -s tests -t .
+Remove-Item Env:DAYZ_MCP_FAST_TESTS   # back to the whole suite
+```
+
 The virtualenv has to be the one the installer creates, at `tools/.venv-mcp`:
 the daemon resolves that path when it checks its own identity, and an environment
 somewhere else fails at startup rather than falling back.

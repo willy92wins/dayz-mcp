@@ -25,6 +25,7 @@ from tempfile import TemporaryDirectory
 
 from dayz_mcp import dayz_test_storage as storage
 from dayz_mcp import dayz_test_worker
+from tests._tiers import slow_test
 
 
 MODS_ROOT = r"P:\Mods"
@@ -566,6 +567,7 @@ class CrashBetweenEveryPairOfIoTest(unittest.TestCase):
                 found[hashlib.sha256(path.read_bytes()).hexdigest()] = str(path)
         return found
 
+    @slow_test
     def test_every_io_boundary(self) -> None:
         real_rename = os.rename
         real_replace = os.replace

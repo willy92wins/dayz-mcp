@@ -21,6 +21,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import install_mcp as installer
+from tests._tiers import slow_test
 
 PYPROJECT = TOOLS_DIR / "pyproject.toml"
 INSTALL_PS1 = TOOLS_DIR / "install-mcp.ps1"
@@ -168,6 +169,7 @@ class HostPythonSelectorTest(unittest.TestCase):
         self.above_path = rf"C:\Python{self.above.replace('.', '')}\python.exe"
         self.astral_path = rf"C:\uv\python\cpython-{self.floor}.16\python.exe"
 
+    @slow_test
     def test_selects_highest_at_or_above_floor(self) -> None:
         listing = (
             f" -V:{self.above} *        {self.above_path}\n"
@@ -176,6 +178,7 @@ class HostPythonSelectorTest(unittest.TestCase):
         )
         self.assertEqual(_run_selector(listing), self.above_path)
 
+    @slow_test
     def test_selects_astral_tagged_floor_when_it_is_the_newest_match(self) -> None:
         listing = (
             f" -V:{self.below}          {self.below_path}\n"
@@ -183,6 +186,7 @@ class HostPythonSelectorTest(unittest.TestCase):
         )
         self.assertEqual(_run_selector(listing), self.astral_path)
 
+    @slow_test
     def test_rejects_listing_with_nothing_at_or_above_floor(self) -> None:
         listing = (
             f" -V:{self.below}          {self.below_path}\n"
@@ -190,11 +194,13 @@ class HostPythonSelectorTest(unittest.TestCase):
         )
         self.assertEqual(_run_selector(listing), "NONE")
 
+    @slow_test
     def test_rejects_empty_listing(self) -> None:
         self.assertEqual(_run_selector(""), "NONE")
 
 
 class HostPythonLiveInterpreterTest(unittest.TestCase):
+    @slow_test
     def test_python_installer_refuses_a_below_floor_interpreter(self) -> None:
         major, minor = _floor_tuple()
         below = f"{major}.{minor - 1}"
@@ -214,6 +220,7 @@ class HostPythonLiveInterpreterTest(unittest.TestCase):
         )
         self.assertIn(below, completed.stderr)
 
+    @slow_test
     def test_real_below_floor_interpreter_is_older_than_the_constant(self) -> None:
         major, minor = _floor_tuple()
         below = f"{major}.{minor - 1}"
@@ -225,6 +232,7 @@ class HostPythonLiveInterpreterTest(unittest.TestCase):
         parts = [int(p) for p in reported.split(".")]
         self.assertLess(tuple(parts[:2]), (major, minor))
 
+    @slow_test
     def test_resolve_host_python_on_this_machine_meets_the_floor(self) -> None:
         with TemporaryDirectory() as tmp:
             script_file = Path(tmp) / "resolve.ps1"

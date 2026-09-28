@@ -26,6 +26,7 @@ from dayz_mcp.server_freshness import (
     source_stale,
 )
 from tests.client_helpers import _fixture_client_runtime
+from tests._tiers import slow_test
 
 _MODULE = "dayz_mcp.dayz_test_tool"
 _OLD = '''on_call = None
@@ -126,6 +127,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
 
         return patch.object(Path, "read_bytes", read)
 
+    @slow_test
     async def test_fresh_response_has_no_marker(self) -> None:
         result = await self.call()
         self.assertFalse(result.isError)
@@ -133,6 +135,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(MARKER, result.meta or {})
         self.assertEqual(len(result.content), 1)
 
+    @slow_test
     async def test_dayz_run_keeps_old_behavior_and_marks_stale_on_wire(self) -> None:
         self.path.write_text(_NEW, encoding="utf-8")
         for _ in range(2):
@@ -145,6 +148,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(marker["stale"], [_MODULE])
             self.assertEqual(marker["unreadable"], [])
 
+    @slow_test
     async def test_bridge_status_is_live_but_registry_fingerprint_is_frozen(self) -> None:
         fresh = (await self.call("bridge_status", {})).structuredContent
         self.assertIsNone(fresh["tool_registry_remediation"])
@@ -168,18 +172,21 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stale["tool_registry_captured_at"], fresh["tool_registry_captured_at"])
         self.assertEqual(stale["daemon_modules"], fresh["daemon_modules"])
 
+    @slow_test
     async def test_rebuilding_app_does_not_reanchor_loaded_code(self) -> None:
         self.path.write_text(_NEW, encoding="utf-8")
         app, _runtime = self.build()
         result = await self.call(app=app)
         self.assertEqual(self.marker(result)["stale"], [_MODULE])
 
+    @slow_test
     async def test_identical_content_touch_is_fresh(self) -> None:
         stat = self.path.stat()
         os.utime(self.path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000_000))
         result = await self.call()
         self.assertNotIn(MARKER, result.meta or {})
 
+    @slow_test
     async def test_same_stat_edit_is_the_documented_cache_miss(self) -> None:
         stat = self.path.stat()
         self.path.write_text(_NEW, encoding="utf-8")
@@ -189,6 +196,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.path.stat().st_ino, stat.st_ino)
         self.assertNotIn(MARKER, (await self.call()).meta or {})
 
+    @slow_test
     async def test_deleted_source_is_unknown_and_call_still_succeeds(self) -> None:
         self.path.unlink()
         result = await self.call()
@@ -203,6 +211,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
             _MODULE: "source_unreadable_now",
         })
 
+    @slow_test
     async def test_read_denied_after_stat_change_is_unknown_and_recovers(self) -> None:
         self.path.write_text(_NEW + "\n", encoding="utf-8")
         with self.deny_source_read():
@@ -220,6 +229,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(source_stale(snapshot), True)
         self.assertEqual(snapshot["status"], "unknown")
 
+    @slow_test
     async def test_late_import_has_explicit_unknown_reason(self) -> None:
         name = "dayz_mcp.s3_late_fixture"
         module = python_types.ModuleType(name)
@@ -230,22 +240,26 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(marker["unreadable_reasons"][name],
                                  "loaded_after_server_snapshot")
 
+    @slow_test
     async def test_changed_module_origin_is_unknown(self) -> None:
         with patch.object(self.module, "__file__", str(self.path.with_name("other.py"))):
             marker = self.marker(await self.call())
         self.assertEqual(marker["unreadable_reasons"][_MODULE],
                          "loaded_module_path_changed")
 
+    @slow_test
     async def test_stale_at_entry_is_retained_if_source_is_restored_in_call(self) -> None:
         self.path.write_text(_NEW, encoding="utf-8")
         self.module.on_call = lambda: self.path.write_text(_OLD, encoding="utf-8")
         self.assertEqual(self.marker(await self.call())["stale"], [_MODULE])
         self.assertNotIn(MARKER, (await self.call()).meta or {})
 
+    @slow_test
     async def test_source_edit_during_call_is_marked(self) -> None:
         self.module.on_call = lambda: self.path.write_text(_NEW, encoding="utf-8")
         self.assertEqual(self.marker(await self.call())["stale"], [_MODULE])
 
+    @slow_test
     async def test_stale_witness_wins_over_another_unreadable_source(self) -> None:
         self.path.write_text(_NEW, encoding="utf-8")
         module = python_types.ModuleType("dayz_mcp.s3_missing_fixture")
@@ -256,6 +270,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(marker["status"], "stale")
         self.assertIn(module.__name__, marker["unreadable"])
 
+    @slow_test
     async def test_error_flag_and_original_error_text_are_preserved(self) -> None:
         @self.app.tool()
         async def s3_error() -> dict:
@@ -268,6 +283,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stale.content[:-1], fresh.content)
         self.assertEqual(self.marker(stale)["status"], "stale")
 
+    @slow_test
     async def test_closed_argument_validation_is_preserved_and_marked(self) -> None:
         self.path.write_text(_NEW, encoding="utf-8")
         result = await self.call(arguments={
@@ -291,6 +307,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(stale.structuredContent)
         self.marker(stale)
 
+    @slow_test
     async def test_list_result_and_output_schema_are_preserved(self) -> None:
         @self.app.tool()
         async def s3_list() -> list[dict[str, str]]:
@@ -304,6 +321,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stale.content[:-1], fresh.content)
         self.marker(stale)
 
+    @slow_test
     async def test_existing_result_metadata_is_preserved(self) -> None:
         @self.app.tool()
         async def s3_metadata() -> types.CallToolResult:
@@ -336,12 +354,14 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["status"], "unknown")
 
 
+    @slow_test
     async def test_named_capture_helper_is_watched_through_a_drive_alias(self) -> None:
         import mcp_capture
         with patch.object(mcp_capture, "__file__", r"Q:\alias\tools\mcp_capture.py"):
             files = loaded_source_files()
         self.assertIn("mcp_capture", files)
 
+    @slow_test
     async def test_stale_marker_survives_a_real_mcp_client_session(self) -> None:
         from mcp.shared.memory import create_connected_server_and_client_session
         self.path.write_text(_NEW, encoding="utf-8")
@@ -354,12 +374,14 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.marker(result)["stale"], [_MODULE])
 
 
+    @slow_test
     async def test_unchanged_calls_do_not_read_source_bytes(self) -> None:
         with patch.object(Path, "read_bytes", autospec=True, side_effect=Path.read_bytes) as reads:
             await self.call()
             await self.call("bridge_status", {})
         reads.assert_not_called()
 
+    @slow_test
     async def test_changed_source_is_hashed_once_then_stale_is_cached(self) -> None:
         self.path.write_text(_NEW + "\n", encoding="utf-8")
         with patch.object(Path, "read_bytes", autospec=True, side_effect=Path.read_bytes) as reads:
@@ -369,6 +391,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
         reads.assert_called_once_with(self.path)
         self.assertIs(status["tool_registry_source_stale"], True)
 
+    @slow_test
     async def test_identical_touch_is_hashed_once_then_fresh_is_cached(self) -> None:
         stat = self.path.stat()
         os.utime(self.path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000_000))
@@ -377,6 +400,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(MARKER, (await self.call()).meta or {})
         reads.assert_called_once_with(self.path)
 
+    @slow_test
     async def test_file_id_change_detects_same_size_and_mtime_replacement(self) -> None:
         stat = self.path.stat()
         replacement = self.path.with_name("replacement.py")
@@ -389,10 +413,12 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(current.st_ino, stat.st_ino)
         self.assertEqual(self.marker(await self.call())["stale"], [_MODULE])
 
+    @slow_test
     async def test_same_stat_read_deny_is_the_documented_cache_miss(self) -> None:
         with self.deny_source_read():
             self.assertNotIn(MARKER, (await self.call()).meta or {})
 
+    @slow_test
     async def test_cached_playbook_runner_stays_old_and_is_marked_on_wire(self) -> None:
         adapter = server.playbook_tool_mod
         runner_path = self.path.with_name("runner.py")
@@ -422,6 +448,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(runner, "__file__", r"Q:\alias\playbooks\runner.py"):
             self.assertIn("dayz_playbook_runner", loaded_source_files())
 
+    @slow_test
     async def test_other_playbooks_module_is_censused_with_unknown_for_late_import(self) -> None:
         module = python_types.ModuleType("other_playbook_helper")
         module.__file__ = str(server.playbook_tool_mod.PLAYBOOKS_DIR / "helper.py")
@@ -430,6 +457,7 @@ class ServerFreshnessTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.marker(await self.call())["unreadable_reasons"][module.__name__],
                              "loaded_after_server_snapshot")
 
+    @slow_test
     async def test_fresh_process_preloads_production_import_closure(self) -> None:
         # Fresh interpreter: unittest discovery must not accidentally warm the
         # closure and make this gate pass. Import only; never invoke a launcher.
@@ -474,6 +502,7 @@ print(json.dumps({'before': before, 'after': after, 'missing_imports': missing})
         self.assertEqual(payload["missing_imports"], [])
         self.assertEqual(payload["after"]["status"], "fresh")
 
+    @slow_test
     async def test_detached_hook_is_unknown_in_real_bridge_status_payload(self) -> None:
         from mcp.shared.memory import create_connected_server_and_client_session
         lowlevel = self.app._mcp_server
@@ -489,6 +518,7 @@ print(json.dumps({'before': before, 'after': after, 'missing_imports': missing})
         })
         self.assertEqual(json.loads(result.content[0].text)["server_modules"], status["server_modules"])
 
+    @slow_test
     async def test_fossil_handler_dictionary_cannot_report_fresh(self) -> None:
         lowlevel = self.app._mcp_server
         fossil = lowlevel.request_handlers
@@ -503,6 +533,7 @@ print(json.dumps({'before': before, 'after': after, 'missing_imports': missing})
         self.assertEqual(status["server_modules"]["observation_errors"]["call_tool_hook"],
                          "call_tool_handler_not_wrapper")
 
+    @slow_test
     async def test_equal_but_different_live_handler_is_unknown(self) -> None:
         handlers = self.app._mcp_server.request_handlers
         wrapped = handlers[types.CallToolRequest]
@@ -519,6 +550,7 @@ print(json.dumps({'before': before, 'after': after, 'missing_imports': missing})
         self.assertEqual(marker["status"], "unknown")
         self.assertEqual(marker["observation_errors"]["call_tool_hook"], "call_tool_handler_not_wrapper")
 
+    @slow_test
     async def test_hook_detached_during_call_is_unknown_at_exit(self) -> None:
         handlers = self.app._mcp_server.request_handlers
         self.module.on_call = lambda: handlers.pop(types.CallToolRequest)
@@ -526,6 +558,7 @@ print(json.dumps({'before': before, 'after': after, 'missing_imports': missing})
         self.assertEqual(marker["status"], "unknown")
         self.assertIn("call_tool_hook", marker["observation_errors"])
 
+    @slow_test
     async def test_replaced_lowlevel_server_is_unknown(self) -> None:
         wrapper = self.app._mcp_server.request_handlers[types.CallToolRequest]
         request = types.CallToolRequest(method="tools/call", params=types.CallToolRequestParams(
@@ -537,6 +570,7 @@ print(json.dumps({'before': before, 'after': after, 'missing_imports': missing})
         self.assertEqual(marker["status"], "unknown")
         self.assertEqual(marker["observation_errors"]["call_tool_hook"], "mcp_server_replaced")
 
+    @slow_test
     async def test_unexpected_result_type_is_visible_unknown_not_omitted(self) -> None:
         app = FastMCP("incompatible-result")
         app._mcp_server.request_handlers[types.CallToolRequest] = AsyncMock(
@@ -552,6 +586,7 @@ print(json.dumps({'before': before, 'after': after, 'missing_imports': missing})
         })
         self.assertEqual(observe()["status"], "unknown")
 
+    @slow_test
     async def test_apps_sharing_source_baseline_have_independent_canaries(self) -> None:
         app, _ = self.build()
         self.assertNotIn(MARKER, (await self.call(app=app)).meta or {})

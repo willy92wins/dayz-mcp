@@ -9,6 +9,7 @@ from __future__ import annotations
 import unittest
 
 from dayz_mcp.server import VEHICLE_CONTROL_MAX_TTL_S, ServerConfig, ToolError, build_app
+from tests._tiers import slow_test
 
 
 class LoteMsgsF5a7DescriptionsTest(unittest.IsolatedAsyncioTestCase):
@@ -38,6 +39,7 @@ class LoteMsgsF5a7DescriptionsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("without human intervention", description)
         self.assertIn("viable night session", description)
 
+    @slow_test
     def test_capture_screenshot_names_frozen_render_signal(self) -> None:
         description = self.tools["capture_screenshot"].description or ""
         self.assertIn("frames>=2", description)

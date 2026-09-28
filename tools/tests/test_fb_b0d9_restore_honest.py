@@ -16,6 +16,7 @@ import mcp_capture
 from dayz_mcp import server
 from tests.test_capture_frame_stale import CMDLINE, _backend
 from tests.test_restore_gameplay_contract import _camera_probe, _content_json
+from tests._tiers import slow_test
 
 
 def _warnings(payload: dict[str, Any] | None) -> list[Any]:
@@ -184,6 +185,7 @@ class CaptureFrozenSignalB0d9Test(unittest.TestCase):
                 raise
             self.fail(str(exc))
 
+    @slow_test
     def test_b0d9_frames_4_identical_carry_render_frozen_signal(self) -> None:
         try:
             result = self._capture(seed=7, frames=4)
@@ -193,6 +195,7 @@ class CaptureFrozenSignalB0d9Test(unittest.TestCase):
             self.fail(str(exc))
         self.assertIn("render_frozen_signal", _warnings(result.get("meta")))
 
+    @slow_test
     def test_b0d9_frames_4_distinct_do_not_carry_render_frozen_signal(self) -> None:
         try:
             frozen = self._capture(seed=7, frames=4)
@@ -204,6 +207,7 @@ class CaptureFrozenSignalB0d9Test(unittest.TestCase):
         self.assertIn("render_frozen_signal", _warnings(frozen.get("meta")))
         self.assertNotIn("render_frozen_signal", _warnings(live.get("meta")))
 
+    @slow_test
     def test_b0d9_frames_1_does_not_carry_render_frozen_signal(self) -> None:
         try:
             frozen = self._capture(seed=7, frames=4)
@@ -215,6 +219,7 @@ class CaptureFrozenSignalB0d9Test(unittest.TestCase):
         self.assertIn("render_frozen_signal", _warnings(frozen.get("meta")))
         self.assertNotIn("render_frozen_signal", _warnings(single.get("meta")))
 
+    @slow_test
     def test_b0d9_missing_metrics_do_not_carry_render_frozen_signal(self) -> None:
         try:
             frozen = self._capture(seed=7, frames=4)
@@ -253,6 +258,7 @@ class CaptureFrozenSignalB0d9Test(unittest.TestCase):
             self.assertNotIn("render_frozen_signal", _warnings(payload))
         self.assertNotIn("render_frozen_signal", _warnings(missing.get("meta")))
 
+    @slow_test
     def test_b0d9_existing_warnings_survive_and_token_is_not_duplicated(self) -> None:
         try:
             result = self._capture(seed=7, frames=4)
@@ -267,6 +273,7 @@ class CaptureFrozenSignalB0d9Test(unittest.TestCase):
         self.assertIn("already_there", twice["warnings"])
         self.assertEqual(twice["warnings"].count("render_frozen_signal"), 1)
 
+    @slow_test
     def test_b0d9_token_leaves_other_meta_fields_identical(self) -> None:
         try:
             result = self._capture(seed=7, frames=4)

@@ -20,6 +20,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 from dayz_mcp import loopback, server
 from dayz_mcp.server import ServerConfig, build_app
+from tests._tiers import slow_test
 
 NOT_HANDLED: dict[str, Any] = {
     "ok": 0,
@@ -173,6 +174,7 @@ async def _wire_error_text(tool: str, arguments: dict[str, Any], result: dict[st
 
 
 class UiClickWireTest(unittest.IsolatedAsyncioTestCase):
+    @slow_test
     async def test_not_handled_reaches_the_client_with_its_diagnostics(self) -> None:
         text = await _wire_error_text("ui_click", {"path": "BtnCloseX"}, NOT_HANDLED)
         self.assertEqual(
@@ -182,12 +184,14 @@ class UiClickWireTest(unittest.IsolatedAsyncioTestCase):
             "matched_path='LFPG_Sorter/BtnCloseX'",
         )
 
+    @slow_test
     async def test_world_spawn_timeout_with_flat_scalars_stays_bare(self) -> None:
         text = await _wire_error_text(
             "world_spawn", {"type": "SurvivorM_Mirek", "pos": [7500.0, 0.0, 7500.0]}, FLAT_TIMEOUT
         )
         self.assertEqual(text, "Error executing tool world_spawn: timeout")
 
+    @slow_test
     async def test_world_spawn_with_a_loaded_payload_stays_bare(self) -> None:
         text = await _wire_error_text(
             "world_spawn", {"type": "SurvivorM_Mirek", "pos": [7500.0, 0.0, 7500.0]}, LOADED_TIMEOUT

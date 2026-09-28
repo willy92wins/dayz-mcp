@@ -26,6 +26,7 @@ from dayz_mcp.server import ServerConfig, build_app  # noqa: E402
 
 from tests.catalog_helpers import list_tools_after_lease  # noqa: E402
 from tests.client_helpers import _fixture_client_runtime
+from tests._tiers import slow_test
 
 
 class TelemetryReadModesContractTest(unittest.IsolatedAsyncioTestCase):
@@ -166,6 +167,7 @@ class TelemetryReadPublicErrorsAreToolErrorsTest(unittest.IsolatedAsyncioTestCas
         ), patch.object(server, "_world_read_not_ready", return_value=None):
             return await app.call_tool("telemetry_read", arguments)
 
+    @slow_test
     async def test_bridge_codes_raise_tool_error_not_ok_false_dict(self) -> None:
         cases = (
             (

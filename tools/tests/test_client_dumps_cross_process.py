@@ -23,6 +23,7 @@ from pathlib import Path
 
 from dayz_mcp import loopback
 from dayz_mcp.session_coordination import SessionCoordinator
+from tests._tiers import slow_test
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
 _WORKER = Path(__file__).resolve().parent / "_client_dumps_mcp_process.py"
@@ -133,6 +134,7 @@ class CrossProcessClientDumpTests(unittest.TestCase):
         self.addCleanup(process.close)
         return process
 
+    @slow_test
     def test_sol_r2_b1_other_process_dump_does_not_name_the_earlier_run(self) -> None:
         a, b = self._mcp("A"), self._mcp("B")
         self.assertNotEqual(a.ask(op="pid"), b.ask(op="pid"))
@@ -150,6 +152,7 @@ class CrossProcessClientDumpTests(unittest.TestCase):
             self.assertIsNone(projected[run1])
             self.assertEqual(projected[run2], "steam_bootstrap")
 
+    @slow_test
     def test_positive_bound_in_a_named_in_b(self) -> None:
         a, b = self._mcp("A"), self._mcp("B")
         run1 = a.ask(op="launch", root=self.client_root)
@@ -157,6 +160,7 @@ class CrossProcessClientDumpTests(unittest.TestCase):
         self.lifecycle.retired = [_retired_row(run1)]
         self.assertEqual(b.ask(op="project")[run1], "steam_bootstrap")
 
+    @slow_test
     def test_a_dump_before_the_other_process_launches_stays_with_the_first_run(
         self,
     ) -> None:
@@ -172,6 +176,7 @@ class CrossProcessClientDumpTests(unittest.TestCase):
         self.assertEqual(projected[run1], "steam_bootstrap")
         self.assertIsNone(projected[run2])
 
+    @slow_test
     def test_no_daemon_record_is_null(self) -> None:
         b = self._mcp("B")
         unknown = "12345678-1234-4234-8234-999999999999"
@@ -179,6 +184,7 @@ class CrossProcessClientDumpTests(unittest.TestCase):
         self.lifecycle.retired = [_retired_row(unknown)]
         self.assertIsNone(b.ask(op="project")[unknown])
 
+    @slow_test
     def test_restarted_daemon_knows_no_run_and_publishes_null(self) -> None:
         a = self._mcp("A")
         run1 = a.ask(op="launch", root=self.client_root)
@@ -190,6 +196,7 @@ class CrossProcessClientDumpTests(unittest.TestCase):
         b = self._mcp("B")
         self.assertIsNone(b.ask(op="project")[run1])
 
+    @slow_test
     def test_a_launch_that_recorded_no_snapshot_closes_the_earlier_run(self) -> None:
         # An older MCP (or a failed open) launches without a snapshot: the
         # daemon cannot tell which dumps are its own, so run 1 is null.
@@ -200,6 +207,7 @@ class CrossProcessClientDumpTests(unittest.TestCase):
         self.lifecycle.retired = [_retired_row(run1)]
         self.assertIsNone(a.ask(op="project")[run1])
 
+    @slow_test
     def test_r4_b1_late_bind_after_a_launch_without_snapshot_is_null(self) -> None:
         # Astra r3 B1: A's bind follows the lease release, so B can launch
         # without a snapshot (older MCP, failed open) before it. B's dump must
@@ -216,6 +224,7 @@ class CrossProcessClientDumpTests(unittest.TestCase):
         for reader in (a, b):
             self.assertIsNone(reader.ask(op="project")[run1])
 
+    @slow_test
     def test_r4_b1_late_bind_after_its_own_start_alone_still_names(self) -> None:
         # The run's own start is not a foreign launch: bound after the lease
         # release with nothing in between, its dump still names it.
@@ -227,6 +236,7 @@ class CrossProcessClientDumpTests(unittest.TestCase):
         self.lifecycle.retired = [_retired_row(run1)]
         self.assertEqual(b.ask(op="project")[run1], "steam_bootstrap")
 
+    @slow_test
     def test_r4_b2_other_launch_between_get_and_scan_is_null(self) -> None:
         # Astra r3 B2: A reads run 1's binding (no ceiling yet) and is paused
         # before scanning the profile; B launches normally and writes a marked
@@ -244,6 +254,7 @@ class CrossProcessClientDumpTests(unittest.TestCase):
         self.assertIsNone(fresh[run1])
         self.assertEqual(fresh[run2], "steam_bootstrap")
 
+    @slow_test
     def test_r4_b3_open_with_a_control_character_in_a_root_is_rejected(self) -> None:
         identity = {
             "platform": "claude",
@@ -282,6 +293,7 @@ class CrossProcessClientDumpTests(unittest.TestCase):
             finally:
                 error.close()
 
+    @slow_test
     def test_route_is_bounded_and_session_status_is_unchanged(self) -> None:
         identity = {
             "platform": "claude",

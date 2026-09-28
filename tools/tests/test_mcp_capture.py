@@ -13,9 +13,11 @@ from unittest import mock
 from PIL import Image, ImageDraw
 
 import mcp_capture
+from tests._tiers import slow_test
 
 
 class MCPCaptureTest(unittest.TestCase):
+    @slow_test
     def test_grab_self_test_covers_client_area_liveness_contract(self) -> None:
         proc = subprocess.run(
             [
@@ -88,6 +90,7 @@ class MCPCaptureTest(unittest.TestCase):
         if isinstance(result, Image.Image):
             result.close()
 
+    @slow_test
     def test_capture_dual_reports_the_selected_frames_identity_and_hashes(self) -> None:
         colors = ((10, 20, 30), (80, 100, 120), (81, 101, 121))
         windows = (
@@ -209,6 +212,7 @@ class MCPCaptureTest(unittest.TestCase):
         content = mcp_capture.image_content_from_image(img, scale="small", max_tokens=25000, fmt="png")
         self.assertEqual(content["mimeType"], "image/png")
 
+    @slow_test
     def test_capture_window_not_found_returns_is_error(self) -> None:
         # This pins the error for a missing window, not the 8 s grab budget of
         # grab_stable_frame: a cold PowerShell on a loaded CI runner can take
@@ -417,6 +421,7 @@ class CaptureDualCropSpaceTest(unittest.TestCase):
         self.assertIsNone(result["fullres_path"])
         self.assertIsNone(meta["fullres_file_sha256"])
 
+    @slow_test
     def test_client_additional_crop_normalizes_over_the_viewport(self) -> None:
         cases = (
             ("0.5,0.5,1,1", BLUE_RECT),
@@ -455,6 +460,7 @@ class CaptureDualCropSpaceTest(unittest.TestCase):
             result["meta"]["effective_surface"]["native_pixel_sha256"],
         )
 
+    @slow_test
     def test_client_rejects_an_unverifiable_client_rect(self) -> None:
         cases: tuple[tuple[str, object], ...] = (
             ("absent", _ABSENT),
@@ -502,6 +508,7 @@ class CaptureDualCropSpaceTest(unittest.TestCase):
         self.assertEqual(meta["frame_sha256"], meta["client_surface"]["pixel_sha256"])
         self.assertEqual(meta["frame_sha256"], meta["effective_surface"]["native_pixel_sha256"])
 
+    @slow_test
     def test_client_rejects_every_invalid_crop_class(self) -> None:
         cases: tuple[tuple[str, object], ...] = (
             ("syntax_words", "not,a,box"),
@@ -561,6 +568,7 @@ class CaptureDualCropSpaceTest(unittest.TestCase):
         unverified, _, _, _ = self._capture(client=None, crop="not,a,box", fmt="png")
         self.assertEqual("frame_client_rect_unverified", unverified["error"])
 
+    @slow_test
     def test_window_mode_keeps_the_legacy_fail_open_crop(self) -> None:
         window = _expected_region(0, 0, WINDOW_W, WINDOW_H)
         whole = (0, 0, WINDOW_W, WINDOW_H)
@@ -691,6 +699,7 @@ class CaptureDualCropSpaceTest(unittest.TestCase):
         # No chrome in the JPEG either: the red channel stays far below the chrome's 200.
         self.assertLess(delivered.getextrema()[0][1], 100)
 
+    @slow_test
     def test_grab_stable_frame_keeps_the_chosen_frames_client_rect(self) -> None:
         rects = (_rect(0, 0, WINDOW_W, WINDOW_H), _rect(*CLIENT_RECT), _rect(10, 10, 600, 300))
         capture_index = 0
@@ -754,6 +763,7 @@ class CaptureDualCropSpaceTest(unittest.TestCase):
         self.assertEqual(("client", "window"), mcp_capture.CROP_SPACES)
         self.assertEqual("client", mcp_capture.DEFAULT_CROP_SPACE)
 
+    @slow_test
     def test_head_identity_scenario_keeps_frame_sha256_as_the_window_hash_in_both_spaces(self) -> None:
         """Companion of MCPCaptureTest.test_capture_dual_reports_the_selected_frames_identity_and_hashes,
         which stays byte-identical to HEAD. There the backend client rect covers the whole 2x2

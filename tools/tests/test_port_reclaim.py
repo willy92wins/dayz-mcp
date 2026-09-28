@@ -19,6 +19,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp import loopback, native_process_snapshot, orphan_guard
 from dayz_mcp.native_process_guard import identity_hashes
+from tests._tiers import slow_test
 
 
 def _process_snapshot(
@@ -578,6 +579,7 @@ class ReclaimIntegrationTest(unittest.TestCase):
             except OSError:
                 pass
 
+    @slow_test
     def test_dead_parent_orphan_is_reclaimed_end_to_end(self) -> None:
         package_root, env = self._make_squatter_package("dayz_mcp_squatter_pkg")
         proc = None
@@ -633,6 +635,7 @@ class ReclaimIntegrationTest(unittest.TestCase):
                     proc.kill()
             self._remove_squatter_package(package_root)
 
+    @slow_test
     def test_live_parent_dayz_mcp_listener_is_not_reclaimed_end_to_end(self) -> None:
         package_root, env = self._make_squatter_package("dayz_mcp_live_squatter_pkg")
         proc = None

@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from tests._tiers import slow_test
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -32,6 +33,7 @@ class SecurityRuntimeAuditTest(unittest.TestCase):
         path.write_text(source, encoding="utf-8")
         return path
 
+    @slow_test
     def test_productive_runtime_closure_has_no_unaccredited_http_path(self) -> None:
         auditor = self._auditor()
         violations = auditor.audit_runtime_http(TOOLS_DIR)
@@ -1177,6 +1179,7 @@ def carriers(obj, name, args, kwargs):
             },
         )
 
+    @slow_test
     def test_real_tree_has_only_the_canonical_native_backend_call_site(self) -> None:
         auditor = self._auditor()
         self.assertTrue((TOOLS_DIR / "dayz_mcp" / "native_launcher_backend.py").is_file())

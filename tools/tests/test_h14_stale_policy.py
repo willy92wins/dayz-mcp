@@ -50,6 +50,7 @@ from tests.dayz_test_tool_helpers import (
     _sealed,
     _terminal,
 )
+from tests._tiers import slow_test
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -746,6 +747,7 @@ async def _mcp_untrusted_dayz_test_stop(run: dict[str, object]):
 
 
 class H14NestedToolLockAstTests(unittest.TestCase):
+    @slow_test
     def test_head_mcp_tools_await_inside_client_tool_lock(self) -> None:
         for name in (
             "dayz_test_stop",
@@ -1036,6 +1038,7 @@ class H14OwnedStopWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generic, [False])
         self.assertEqual(kill_path, [True])
 
+    @slow_test
     async def test_owned_stop_post_kill_status_verify_does_not_reject_tool(
         self,
     ) -> None:

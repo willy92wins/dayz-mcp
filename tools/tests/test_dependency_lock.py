@@ -9,6 +9,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
+from tests._tiers import slow_test
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -241,6 +242,7 @@ class DependencyLockTest(unittest.TestCase):
         if not checked:
             self.skipTest("no locked toolchain file is present on this machine")
 
+    @slow_test
     @unittest.skipIf(FOREIGN_TOOLCHAIN, "DAYZ_MCP_FOREIGN_TOOLCHAIN=1: this host's toolchain is not the locked one")
     def test_tree_digests_match_live_bytes(self) -> None:
         checked = 0
@@ -268,6 +270,7 @@ class DependencyLockTest(unittest.TestCase):
         self.assertNotIn("path", cpython)
         self.assertEqual((cpython["version"], cpython["architecture"], cpython["license"]), ("3.14.3", "AMD64", "PSF-2.0"))
 
+    @slow_test
     def test_registry_is_empty_and_ps1_remains_static_non_launcher_evidence(self) -> None:
         payload = self._payload()
         registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
