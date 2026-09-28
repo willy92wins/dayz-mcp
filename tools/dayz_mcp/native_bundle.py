@@ -105,15 +105,16 @@ _FINGERPRINT_KEYS = frozenset(
     }
 )
 _REPRODUCIBILITY_MODES = ("clean-1", "clean-2", "offline")
-# AddonBuilder and its helpers stay on the broker's view: launcher.cpp starts the
-# fixed C: path (BuildAddonCommand) and announces it, so a build still needs DayZ
-# Tools there until the broker takes the sealed path.
+# AddonBuilder and its helpers are the broker's view: launcher.cpp starts the fixed
+# default C: path (BuildAddonCommand) whatever DAYZ_TOOLS_PATH or the registry say,
+# so these ignore the variable (environ={}); a build still needs DayZ Tools there
+# until the broker takes the sealed path (fb-20260928-124739-a2d5).
 def _addon_builder_path() -> str:
-    return addon_builder_exe()
+    return addon_builder_exe(environ={})
 
 
 def _addon_helper_paths() -> frozenset[str]:
-    return frozenset(ntpath.normcase(path) for path in addon_helper_exes())
+    return frozenset(ntpath.normcase(path) for path in addon_helper_exes(environ={}))
 
 
 def _external_paths() -> frozenset[str]:
