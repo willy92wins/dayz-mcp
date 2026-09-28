@@ -23,6 +23,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping, TypeVar
 
 from dayz_mcp import dayz_test_storage, window_close
+from dayz_mcp.input_activity import InputAttributor, InputSample
 from dayz_mcp.instance_fence import BindingPrepareError
 from dayz_mcp.steam_launch_guard import Preparation
 from dayz_mcp.steam_prepare_supervisor import SteamPreparationGate
@@ -65,6 +66,12 @@ _PORT_SCAN_UNKNOWN_HINT = (
     "(psutil/netstat); waiting does not help, restore that first"
 )
 _ACTIVITY_STALE_S = 900.0
+# 250f (D-80): an ownerless run with no input in its windows for this long is
+# past the cut. The use_state published in box rows is measured against it.
+RUN_IDLE_CUT_S = 600.0
+# 250f (plan residue C1): with no good input sample for this long, the signal
+# is unknown and a run with a live client reads use_state unknown.
+INPUT_SIGNAL_STALE_S = 2.0
 _ACTIVE_RUN_STOP_HINT = "stop it with dayz_test_stop(run_id={run_id})"
 _ACTIVE_RUN_WAIT_HINT = "retry with wait_for_box_s=<n>"
 _ACTIVE_RUN_TAKEOVER_HINT = (
@@ -261,6 +268,13 @@ class _BoxSnapshot:
     revision: int
     daemon_generation: str = ""
     compensating: frozenset[str] = field(default_factory=frozenset)
+    # 250f: who is using each run, from daemon memory of this generation.
+    ownerless_since: Mapping[str, float] = field(default_factory=dict)
+    human_input: Mapping[str, float] = field(default_factory=dict)
+    launched_by: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    input_good_at: float | None = None
+    use_clock_origin: float | None = None
+    bound_runs: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)
@@ -272,6 +286,8 @@ class _BoxProbes:
     port_scan_reason: str | None = None
     foreign_ports: tuple[int, ...] = ()
     foreign_ports_dayz_related: tuple[int, ...] = ()
+    # 250f: registered pids the diag scan saw alive; None when it did not run.
+    live_pids: frozenset[int] | None = None
 
 
 def _activity_from_snapshot(
@@ -288,6 +304,98 @@ def _activity_from_snapshot(
     if age <= _ACTIVITY_STALE_S:
         return "recent", round(age, 3)
     return "stale", round(age, 3)
+
+
+def _client_liveness(run: RunRecord, probes: _BoxProbes) -> str:
+    """alive, dead or unknown for the run's client processes (250f).
+
+    A run without a client record is a server alone: nobody can be playing in
+    it, so it reads dead. An unknown diag scan never confirms a death.
+    """
+
+    clients = [record.pid for record in run.processes if record.role == "client"]
+    if not clients:
+        return "dead"
+    if probes.live_pids is None:
+        return "unknown"
+    return "alive" if any(pid in probes.live_pids for pid in clients) else "dead"
+
+
+def _use_projection(
+    run: RunRecord,
+    snapshot: _BoxSnapshot,
+    probes: _BoxProbes,
+    active_count: int,
+) -> dict[str, object]:
+    """250f (plan v2.1 §3.3): use_state and what it was measured from.
+
+    Observation only: nothing reads these fields to decide an action yet.
+    Precedence: agent, unknown, human, idle, then past RUN_IDLE_CUT_S
+    idle_waiting (with a reason) or abandoned. STARTING, STOPPING and
+    UNRECONCILED runs are not classified.
+    """
+
+    clock = snapshot.clock
+    launcher = snapshot.launched_by.get(run.run_id)
+    fields: dict[str, object] = {
+        "use_state": None,
+        "use_reason": None,
+        "idle_s": None,
+        "human_input_age_s": None,
+        "launched_by": dict(launcher) if launcher is not None else None,
+    }
+    human_at = snapshot.human_input.get(run.run_id)
+    if human_at is not None and human_at > clock:
+        human_at = None
+    if human_at is not None:
+        fields["human_input_age_s"] = round(clock - human_at, 3)
+    if run.state == "RUNNING" and run.owner_session_id:
+        fields["use_state"] = "agent"
+        return fields
+    if run.state != "RUNNING_IDLE":
+        return fields
+    since = snapshot.ownerless_since.get(run.run_id, snapshot.use_clock_origin)
+    anchors = [
+        value for value in (since, human_at) if value is not None and value <= clock
+    ]
+    if not anchors:
+        fields["use_state"] = "unknown"
+        fields["use_reason"] = "clock_unavailable"
+        return fields
+    idle_s = max(0.0, clock - max(anchors))
+    fields["idle_s"] = round(idle_s, 3)
+    client = _client_liveness(run, probes)
+    good_at = snapshot.input_good_at
+    signal_ok = good_at is not None and 0.0 <= clock - good_at <= INPUT_SIGNAL_STALE_S
+    if client != "dead" and not signal_ok:
+        fields["use_state"] = "unknown"
+        fields["use_reason"] = "input_signal_unavailable"
+        return fields
+    if human_at is not None and clock - human_at < RUN_IDLE_CUT_S:
+        fields["use_state"] = "human"
+        return fields
+    if idle_s < RUN_IDLE_CUT_S:
+        fields["use_state"] = "idle"
+        return fields
+    reason: str | None = None
+    if active_count > 1:
+        reason = "multiple_active_runs"
+    elif not probes.scan_known or not probes.port_scan_known:
+        reason = "scan_unknown"
+    elif client == "dead":
+        fields["use_state"] = "abandoned"
+        fields["use_reason"] = "client_gone"
+        return fields
+    elif run.daemon_generation_at_launch != snapshot.daemon_generation:
+        reason = "previous_generation"
+    elif run.run_id not in snapshot.bound_runs:
+        reason = "bridge_not_ready"
+    if reason is not None:
+        fields["use_state"] = "idle_waiting"
+        fields["use_reason"] = reason
+        return fields
+    fields["use_state"] = "abandoned"
+    return fields
 
 
 # Generation ids are minted as uuid4().hex and projections and stop envelopes publish
@@ -520,6 +628,7 @@ _RECOVERY_REPAIR_STATES = frozenset(
 
 def _derive_box(snapshot: _BoxSnapshot, probes: _BoxProbes) -> dict[str, object]:
     runs: list[dict[str, object]] = []
+    active_count = sum(1 for run in snapshot.runs if run.state in _ACTIVE_STATES)
     for run in snapshot.runs:
         if run.state not in _ACTIVE_STATES:
             continue
@@ -538,6 +647,7 @@ def _derive_box(snapshot: _BoxSnapshot, probes: _BoxProbes) -> dict[str, object]
             "last_activity_age_s": last_activity_age_s,
         }
         row.update(_generation_projection(run, snapshot.daemon_generation))
+        row.update(_use_projection(run, snapshot, probes, active_count))
         runs.append(row)
     scans_known = probes.scan_known and probes.port_scan_known
     occupied = True if not scans_known else bool(runs or probes.foreign)
@@ -1258,6 +1368,15 @@ class ProcessLifecycle:
         self._activity_unknown: set[tuple[str, str]] = set()
         self._activity_tombstone: dict[tuple[str, str], float] = {}
         self._compensating_runs: set[tuple[str, str]] = set()
+        # 250f: who is using each run. Daemon memory only, keyed like
+        # _last_activity; runs.json is untouched, so a restart starts every
+        # clock at _use_clock_origin and forgets every launcher.
+        self._ownerless_since: dict[tuple[str, str], float] = {}
+        self._human_input_at: dict[tuple[str, str], float] = {}
+        self._launched_by: dict[tuple[str, str], ClientIdentity] = {}
+        self._input_attributor = InputAttributor()
+        self._input_good_at: float | None = None
+        self._use_clock_origin = time.time()
         # Retired-run diagnostics live in daemon memory and start empty after a
         # restart; the audit file is never read to reconstruct them.
         self._retired_diagnostics: deque[RetiredRunDiagnostic] = deque(maxlen=32)
@@ -1511,6 +1630,47 @@ class ProcessLifecycle:
                     self._seal_activity_locked(key, max(stamps))
             self._bump_box_revision_locked()
 
+    def record_input_sample(self, sample: InputSample) -> str | None:
+        """250f: attribute one input sample to the run whose window has the focus.
+
+        A foreground pid counts only while the full registered identity of
+        that process still matches, so a reused pid never attributes input.
+        A sample that is not ok never refreshes the signal: without a good one
+        for INPUT_SIGNAL_STALE_S the runs read use_state unknown. Returns the
+        run id the input went to, or None.
+        """
+
+        runs = [
+            run for run in self.manifest.list_runs() if run.state in _ACTIVE_STATES
+        ]
+
+        def owner_of(pid: int) -> str | None:
+            for run in runs:
+                for record in run.processes:
+                    if record.pid != pid:
+                        continue
+                    try:
+                        actual = self.guard.snapshot(pid)
+                    except Exception:
+                        return None
+                    if self._identity_matches(record, actual):
+                        return run.run_id
+                    return None
+            return None
+
+        attributed = self._input_attributor.observe(sample, owner_of)
+        with self._activity_lock:
+            if sample.ok:
+                self._input_good_at = sample.at
+            if attributed is None:
+                return None
+            run_id, epoch = attributed
+            key = self._activity_key(run_id)
+            current = self._human_input_at.get(key)
+            if current is None or epoch > current:
+                self._human_input_at[key] = epoch
+        return run_id
+
     def record_command_activity(self, run_id: str, *, now: float | None = None) -> bool:
         if not isinstance(run_id, str) or not run_id:
             return False
@@ -1596,6 +1756,10 @@ class ProcessLifecycle:
                 self._activity_unknown.discard(key)
                 self._compensating_runs.discard(key)
                 self._raise_activity_tombstone_locked(key, frontier)
+            # 250f: a retired run keeps no clock, input or launcher.
+            for table in (self._ownerless_since, self._human_input_at, self._launched_by):
+                for key in [key for key in table if key[1] == run_id]:
+                    table.pop(key, None)
             self._bump_box_revision_locked()
         bindings = self.bindings
         unfence = getattr(bindings, "unfence_runs", None)
@@ -2195,6 +2359,13 @@ class ProcessLifecycle:
                 leftover.append(run_id)
         if leftover:
             self._unfence_runs(leftover)
+        confirmed = [run_id for run_id in runs if run_id not in leftover]
+        if confirmed:
+            # 250f: the ownerless clock of each run starts at its transition.
+            stamp = time.time()
+            with self._activity_lock:
+                for run_id in confirmed:
+                    self._ownerless_since[self._activity_key(run_id)] = stamp
         return result
 
     def _quiesce_then_release_owner(self, session_id: str, lease_id: str) -> list[str]:
@@ -2827,6 +2998,13 @@ class ProcessLifecycle:
                         attempt_started_at=attempt_started_at,
                     )
                 self._capture_start_activity(completed, launched=record)
+                if supplied_run_id is None:
+                    # 250f: the session that created the run is its launcher
+                    # for this generation; an extension never replaces it.
+                    with self._activity_lock:
+                        self._launched_by.setdefault(
+                            self._activity_key(run_id), client
+                        )
 
                 result: dict[str, object] = {
                     "ok": True,
@@ -4395,6 +4573,30 @@ class ProcessLifecycle:
                 for (gen, run_id) in self._compensating_runs
                 if gen == generation
             )
+            ownerless = {
+                run_id: stamp
+                for (gen, run_id), stamp in self._ownerless_since.items()
+                if gen == generation
+            }
+            human = {
+                run_id: stamp
+                for (gen, run_id), stamp in self._human_input_at.items()
+                if gen == generation
+            }
+            launched = {
+                run_id: MappingProxyType(identity.public_payload())
+                for (gen, run_id), identity in self._launched_by.items()
+                if gen == generation
+            }
+            input_good_at = self._input_good_at
+            origin = self._use_clock_origin
+        # No lifecycle lock is held here, so the documented order
+        # (_operation_lock before ServerState._lock) is kept.
+        bound = frozenset(
+            run.run_id
+            for run in runs
+            if run.state in _ACTIVE_STATES and self._adopt_dispatchable(run.run_id)
+        )
         return _BoxSnapshot(
             clock=clock,
             runs=runs,
@@ -4403,6 +4605,12 @@ class ProcessLifecycle:
             revision=revision,
             daemon_generation=generation,
             compensating=compensating,
+            ownerless_since=MappingProxyType(ownerless),
+            human_input=MappingProxyType(human),
+            launched_by=MappingProxyType(launched),
+            input_good_at=input_good_at,
+            use_clock_origin=origin,
+            bound_runs=bound,
         )
 
     def _collect_probes(self, snapshot: _BoxSnapshot) -> _BoxProbes:
@@ -4438,6 +4646,11 @@ class ProcessLifecycle:
                 ports_in_use=tuple(ports),
                 scan_known=False,
             )
+        live_pids = frozenset(
+            int(process["pid"])
+            for process in observed
+            if int(process["pid"]) in registered_pids
+        )
         foreign: list[dict[str, object]] = []
         diag_foreign_pids: set[int] = set()
         for process in observed:
@@ -4472,6 +4685,7 @@ class ProcessLifecycle:
                 scan_known=True,
                 port_scan_known=False,
                 port_scan_reason=port_reason or "port_scan_unknown",
+                live_pids=live_pids,
             )
         rows_by_pid: dict[int, dict[str, object]] = {}
         unattributed = False
@@ -4524,6 +4738,7 @@ class ProcessLifecycle:
                 foreign_ports_dayz_related=tuple(
                     sorted(foreign_ports_dayz_related)
                 ),
+                live_pids=live_pids,
             )
         return _BoxProbes(
             foreign=tuple(foreign),
@@ -4534,6 +4749,7 @@ class ProcessLifecycle:
             foreign_ports_dayz_related=tuple(
                 sorted(foreign_ports_dayz_related)
             ),
+            live_pids=live_pids,
         )
 
     def _probes_for_snapshot(

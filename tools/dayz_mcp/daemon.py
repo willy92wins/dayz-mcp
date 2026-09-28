@@ -30,7 +30,7 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, Callable
 
-from dayz_mcp import core, orphan_guard, wmi_host
+from dayz_mcp import core, input_activity, orphan_guard, wmi_host
 from dayz_mcp.daemon_contract import build_daemon_argv, daemon_runtime_cwd
 from dayz_mcp.identity_migration import (
     RunsBackupGateError,
@@ -919,6 +919,50 @@ def install_run_reaper(
     return thread
 
 
+def install_input_sampler(
+    lifecycle: Any,
+    fns: "input_activity.Win32InputFns | None",
+    *,
+    interval_s: float = input_activity.SAMPLE_INTERVAL_S,
+    log: Callable[[str], None] = _noop,
+    stop: "threading.Event | None" = None,
+    clock: Callable[[], float] = time.time,
+) -> threading.Thread | None:
+    """Arm the 250f input sampler (plan v2.1 §3.1).
+
+    Every ``interval_s`` it reads the session's last-input tick and the pid of
+    the foreground window, and hands the sample to the lifecycle, which
+    attributes new input to the run whose window has the focus. It never
+    touches a process and never reads window titles or input content. Without
+    Win32 reads (``fns`` None) nothing is armed and every run with a live
+    client reads use_state unknown.
+    """
+
+    if fns is None:
+        log("INPUT: no Win32 input reads here; runs with a live client read use_state unknown")
+        return None
+
+    def _loop() -> None:
+        failed = False
+        while stop is None or not stop.is_set():
+            try:
+                lifecycle.record_input_sample(input_activity.take_sample(fns, clock()))
+                failed = False
+            except Exception as exc:  # never let a bad sample kill the sampler
+                if not failed:
+                    log(f"INPUT: sample failed: {exc}")
+                failed = True
+            if stop is not None:
+                if stop.wait(interval_s):
+                    return
+            else:
+                time.sleep(interval_s)
+
+    thread = threading.Thread(target=_loop, name="dayz-mcp-input-sampler", daemon=True)
+    thread.start()
+    return thread
+
+
 # ---------------------------------------------------------------------------
 # Startup observability (ficha fb-20260901-225325-76dd).
 #
@@ -1605,6 +1649,9 @@ def run_daemon(config: Any, *, stop: threading.Event | None = None) -> int:
 
     if state.lifecycle is not None:
         install_run_reaper(state.lifecycle, log=log, stop=stop)
+        install_input_sampler(
+            state.lifecycle, input_activity.real_win32(), log=log, stop=stop
+        )
 
     # Block until idle shutdown or external termination. No parent-death watchdog:
     # the daemon is meant to outlive the session that spawned it.
