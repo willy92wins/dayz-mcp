@@ -113,6 +113,7 @@ class LoopbackTest(unittest.TestCase):
                 {
                     "error": "retail_quarantine",
                     "reason": expected_reason,
+                    "lease_id": "retail-lease",
                 },
             ),
         )

@@ -6,11 +6,14 @@ Moved verbatim from test_session_handoff.py, test_reload_lease_recovery.py
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -108,6 +111,40 @@ class HandoffRoundTripTest(unittest.TestCase):
         clear_handoff(self.path)
         self.assertFalse(self.path.exists())
         clear_handoff(self.path)
+
+    def test_a_failed_unlink_is_retried_and_then_the_file_is_gone(self) -> None:
+        self._write()
+        real_unlink = os.unlink
+        calls = {"n": 0}
+
+        def flaky(path: object) -> None:
+            if Path(path) == self.path and calls["n"] == 0:
+                calls["n"] += 1
+                raise PermissionError("busy")
+            real_unlink(path)
+
+        with patch.object(session_handoff.os, "unlink", side_effect=flaky):
+            with self.assertLogs("dayz_mcp.session_handoff", level="WARNING") as logs:
+                clear_handoff(self.path)
+        self.assertFalse(self.path.exists())
+        self.assertEqual(calls["n"], 1)
+        self.assertIn("retrying", logs.output[0])
+
+    def test_a_stuck_unlink_is_replaced_with_a_document_the_reader_rejects(self) -> None:
+        self._write()
+        real_unlink = os.unlink
+
+        def stuck(path: object) -> None:
+            if Path(path) == self.path:
+                raise PermissionError("busy")
+            real_unlink(path)
+
+        with patch.object(session_handoff.os, "unlink", side_effect=stuck):
+            with self.assertLogs("dayz_mcp.session_handoff", level="WARNING") as logs:
+                clear_handoff(self.path)
+        self.assertEqual(self.path.read_bytes(), b"{}")
+        self.assertTrue(any("rejected" in line for line in logs.output))
+        self.assertIsNone(consume_handoff(self.path, now=lambda: 1000.0))
 
 
 class HandoffRefusalTest(unittest.TestCase):
@@ -323,7 +360,7 @@ class ReloadLeaseRecoveryTests(unittest.IsolatedAsyncioTestCase):
         code, self.lease = self.coordinator.acquire(self.identity, "before reload")
         self.assertEqual(code, 200)
 
-    def replacement(self):
+    async def replacement(self):
         session_handoff.write_handoff(
             self.carrier, identity=self.identity, lease_token=self.lease["lease_token"],
             lease_id=self.lease["lease_id"], generation=1,
@@ -350,6 +387,7 @@ class ReloadLeaseRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(runtime.active_operation_id)
         # A heartbeat may re-mirror the carried token before reconciliation.
         runtime._control._announce_lease()
+        await runtime._finish_carrier_io()
         self.assertTrue(self.carrier.exists())
         return runtime
 
@@ -376,7 +414,7 @@ class ReloadLeaseRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(code, 200)
 
     async def test_replacement_reaches_run_launcher_gate_then_acquires_without_reconnect(self):
-        runtime = self.replacement()
+        runtime = await self.replacement()
         self.release_old()
         class ReachedLauncher(Exception):
             pass
@@ -402,7 +440,7 @@ class ReloadLeaseRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.release_old()
         for state in ("NEW", "ACTIVE"):
             with self.subTest(state=state):
-                runtime = self.replacement()
+                runtime = await self.replacement()
                 runtime._control.state = state
                 with patch.object(runtime._control, "_session_call", side_effect=self.remote):
                     acquired = await runtime.session_acquire("after reload")
@@ -410,7 +448,7 @@ class ReloadLeaseRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 self.coordinator.release(self.identity, acquired["lease_token"])
 
     async def test_live_inherited_lease_is_preserved_and_still_authorized(self):
-        runtime = self.replacement()
+        runtime = await self.replacement()
         with patch.object(runtime._control, "_session_call", side_effect=self.remote):
             with self.assertRaises(server.ToolError):
                 await runtime.reconcile_idle_session()
@@ -419,7 +457,7 @@ class ReloadLeaseRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.coordinator.authorize(self.identity, runtime.active_lease_token, "world_spawn").allowed)
 
     async def test_foreign_owner_is_not_released_while_local_ghost_is_cleared(self):
-        runtime = self.replacement()
+        runtime = await self.replacement()
         self.release_old()
         foreign = ClientIdentity(
             platform="codex", pid=124, ppid=45,
@@ -453,7 +491,7 @@ class ReloadLeaseRecoveryTests(unittest.IsolatedAsyncioTestCase):
         for status in bad:
             for final in (False, True):
                 with self.subTest(status=status, final=final):
-                    runtime = self.replacement()
+                    runtime = await self.replacement()
                     replies = [clean, status] if final else [status]
                     call = AsyncMock(side_effect=replies)
                     with patch.object(runtime._control, "_session_call", call):
@@ -466,7 +504,7 @@ class ReloadLeaseRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_transport_failure_and_concurrent_state_change_preserve_local_authority(self):
         for kind in ("transport", "lease_id", "operation"):
             with self.subTest(kind=kind):
-                runtime = self.replacement()
+                runtime = await self.replacement()
                 listener = Mock()
                 runtime._control.on_lease_change = listener
                 calls = 0
@@ -490,18 +528,22 @@ class ReloadLeaseRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 listener.assert_not_called()
 
 
-# --- fb-20260927-205523-1e06: the carrier follows heartbeats, and only them ---
+# --- the carrier follows a renewal the daemon names (1e06, 3272) ---
+
+
+_SPAWN = {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0}
 
 
 class CarrierFollowsLeaseRenewalTests(unittest.IsolatedAsyncioTestCase):
-    """A heartbeat the daemon accepted refreshes the carrier; nothing else does.
+    """A renewal the daemon names refreshes the carrier. Anything else does not.
 
     The carrier used to be written only when the lease changed, so a recycle more
     than MAX_HANDOFF_AGE_S after the acquire lost a lease the session had kept
-    alive by heartbeating: 236 s after the acquire on 2026-09-27. Review R1 of #119
-    showed why accepted commands cannot refresh it: the daemon authorizes reads
-    with no valid lease. One clock drives the coordinator and the worker, and
-    another stamps and reads the carrier.
+    alive: 236 s after the acquire on 2026-09-27. A heartbeat is proof because
+    the daemon accepted this token. A command is proof only when its response
+    names the lease this client holds right now (fb-20260928-021456-3272). One
+    clock drives the coordinator and the worker, and another stamps and reads
+    the carrier.
     """
 
     def setUp(self):
@@ -540,7 +582,7 @@ class CarrierFollowsLeaseRenewalTests(unittest.IsolatedAsyncioTestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def worker(self):
+    async def worker(self):
         """A worker that inherited the lease through a carrier, as after a recycle."""
         session_handoff.write_handoff(
             self.carrier, identity=self.identity, lease_token=self.token,
@@ -568,6 +610,7 @@ class CarrierFollowsLeaseRenewalTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(runtime.active_lease_token, self.token)
         runtime._control._announce_lease()
+        await runtime._finish_carrier_io()
         self.assertTrue(self.carrier.exists())
         return runtime
 
@@ -599,10 +642,13 @@ class CarrierFollowsLeaseRenewalTests(unittest.IsolatedAsyncioTestCase):
         )
         if not decision.allowed:
             return decision.http_status, {"error": decision.error}
-        return 200, {"id": 7}
+        body = {"id": 7}
+        if isinstance(decision.lease_id, str) and decision.lease_id:
+            body["lease_id"] = decision.lease_id
+        return 200, body
 
-    async def send(self, runtime, command, args, peer):
-        runtime._call = self.enqueue_through_the_coordinator
+    async def send(self, runtime, command, args, peer, caller=None):
+        runtime._call = caller or self.enqueue_through_the_coordinator
         with (
             patch.object(runtime, "_await_result", AsyncMock(return_value={"ok": 1})),
             patch.object(runtime, "bridge_status_payload", AsyncMock(side_effect=RuntimeError("no bridge"))),
@@ -619,7 +665,7 @@ class CarrierFollowsLeaseRenewalTests(unittest.IsolatedAsyncioTestCase):
         ).allowed
 
     async def test_a_heartbeat_carries_the_lease_past_the_acquire_ttl(self):
-        runtime = self.worker()
+        runtime = await self.worker()
         self.advance(100.0)
         with patch.object(runtime._control, "_session_call", side_effect=self.daemon):
             await runtime.session_heartbeat(self.token)
@@ -633,37 +679,222 @@ class CarrierFollowsLeaseRenewalTests(unittest.IsolatedAsyncioTestCase):
         # Review R1 of #119, F1: past the TTL the lease is gone, yet the daemon
         # still accepts a read that carries the dead token. That must not stamp
         # the token into a fresh carrier.
-        runtime = self.worker()
+        runtime = await self.worker()
         self.advance(SESSION_TTL_S + 10.0)
         before = self.writes
         await self.send(runtime, "camera_get", {}, "client")
         self.assertEqual(self.writes, before)
         self.assertFalse(self.recycle_keeps_the_lease())
 
-    async def test_only_a_heartbeat_refreshes(self):
-        # An accepted mutation renews the lease in the daemon, but its answer does
-        # not say which lease it renewed, so it does not refresh the carrier.
-        runtime = self.worker()
+    async def test_commands_alone_keep_the_lease_across_a_recycle(self):
+        # No heartbeat. 130 s after the acquire the original stamp is too old,
+        # but the command at 100 s named this lease, so the replacement gets it.
+        runtime = await self.worker()
+        self.advance(100.0)
+        await self.send(runtime, "world_spawn", _SPAWN, "server")
+        self.assertEqual(self.written_at(), 1100.0)
+        self.advance(30.0)
+        self.assertTrue(self.recycle_keeps_the_lease())
+
+    async def test_a_read_the_daemon_renewed_refreshes_the_carrier(self):
+        runtime = await self.worker()
+        self.advance(100.0)
+        await self.send(runtime, "camera_get", {}, "client")
+        self.assertEqual(self.written_at(), 1100.0)
+
+    async def test_a_command_burst_refreshes_at_most_once_per_interval(self):
+        runtime = await self.worker()
+        after_announce = self.writes
+        self.advance(1.0)
+        await self.send(runtime, "world_spawn", _SPAWN, "server")
+        self.assertEqual(self.writes, after_announce)
+        self.advance(server._CARRIER_REFRESH_S)
+        await self.send(runtime, "world_spawn", _SPAWN, "server")
+        self.assertEqual(self.writes, after_announce + 1)
+        await self.send(runtime, "world_spawn", _SPAWN, "server")
+        self.assertEqual(self.writes, after_announce + 1)
+
+    async def test_a_foreign_or_malformed_lease_id_does_not_refresh(self):
+        runtime = await self.worker()
         self.advance(100.0)
         before = self.writes
-        await self.send(
-            runtime,
-            "world_spawn",
-            {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
-            "server",
-        )
-        runtime._refresh_lease_carrier("some-other-token")
+        foreign = "someone-elses-lease"
+
+        def other_lease(method, path, payload, *_args):
+            self.assertEqual((method, path), ("POST", "/enqueue"))
+            return 200, {"id": 7, "lease_id": foreign}
+
+        await self.send(runtime, "world_spawn", _SPAWN, "server", caller=other_lease)
+        for bad in ("", 7, True, [], {}):
+            await runtime._accept_command_renewal({"id": 1, "lease_id": bad})
+        await runtime._accept_command_renewal({"id": 1})
+        await runtime._accept_command_renewal({"id": 1, "lease_id": foreign})
+        await runtime._accept_command_renewal(None)
+        await runtime._accept_command_renewal("nope")
+        await runtime._refresh_lease_carrier("some-other-token")
         self.assertEqual(self.writes, before)
+
+    async def test_an_old_enqueue_body_still_works_and_does_not_refresh(self):
+        runtime = await self.worker()
+        self.advance(100.0)
+        before = self.writes
+
+        def old_shape(method, path, payload, *_args):
+            self.assertEqual((method, path), ("POST", "/enqueue"))
+            return 200, {"id": 7}
+
+        result = await self.send(runtime, "camera_get", {}, "client", caller=old_shape)
+        self.assertEqual(result["ok"], 1)
+        self.assertEqual(self.writes, before)
+
+    async def test_a_rejected_command_that_names_this_lease_still_refreshes(self):
+        runtime = await self.worker()
+        self.advance(100.0)
+
+        def bad_peer(method, path, payload, *_args):
+            decision = self.coordinator.authorize(
+                self.identity, payload.get("lease_token"), payload["cmd"]
+            )
+            self.assertTrue(decision.allowed)
+            return 400, {"error": "bad_peer", "lease_id": decision.lease_id}
+
+        with self.assertRaises(server.ToolError):
+            await self.send(runtime, "world_spawn", _SPAWN, "server", caller=bad_peer)
+        self.assertEqual(self.written_at(), 1100.0)
+        self.assertEqual(runtime.active_lease_token, self.token)
+
+    async def test_enqueue_bridge_refreshes_when_the_response_names_this_lease(self):
+        runtime = await self.worker()
+        self.advance(100.0)
+        runtime._call = self.enqueue_through_the_coordinator
+        command_id = await runtime.enqueue_bridge("world_spawn", _SPAWN, "server", 2.0)
+        self.assertEqual(command_id, 7)
+        self.assertEqual(self.written_at(), 1100.0)
+
+    async def test_lifecycle_close_and_reap_refresh_and_strip_the_lease_id(self):
+        runtime = await self.worker()
+        self.advance(100.0)
+        held = runtime._control.active_lease_id
+
+        async def close(run_id):
+            return {
+                "ok": True,
+                "run_id": run_id,
+                "lease_id": held,
+                "client": {"state": "EXITED"},
+            }
+
+        runtime._control.lifecycle_close = close
+        closed = await runtime.lifecycle_close("run-1")
+        self.assertNotIn("lease_id", closed)
+        self.assertEqual(closed["client"], {"state": "EXITED"})
+        self.assertEqual(self.written_at(), 1100.0)
+
+        self.advance(server._CARRIER_REFRESH_S)
+        before = self.writes
+
+        async def reap_foreign(run_id):
+            return {"ok": True, "run_id": run_id, "lease_id": "someone-elses-lease"}
+
+        runtime._control.lifecycle_reap = reap_foreign
+        reaped = await runtime.lifecycle_reap("run-1")
+        self.assertEqual(reaped, {"ok": True, "run_id": "run-1"})
+        self.assertEqual(self.writes, before)
+
+    async def test_a_stale_lease_error_does_not_leave_the_carrier(self):
+        runtime = await self.worker()
+        self.advance(100.0)
+
+        def stale(method, path, payload, *_args):
+            return 409, {"error": "lease_invalid", "lease_id": self.lease["lease_id"]}
+
+        with self.assertRaises(server.ToolError):
+            await self.send(runtime, "world_spawn", _SPAWN, "server", caller=stale)
+        self.assertIsNone(runtime.active_lease_token)
+        self.assertFalse(self.carrier.exists())
+
+    async def test_an_older_write_cannot_land_after_a_newer_clear(self):
+        runtime = await self.worker()
+        self.advance(server._CARRIER_REFRESH_S)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def hook(generation, refresh):
+            if not refresh:
+                return
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("carrier hook was not released")
+
+        runtime._carrier_io_hook = hook
+        with patch.object(runtime._control, "_session_call", side_effect=self.daemon):
+            started = asyncio.create_task(runtime.session_heartbeat(self.token))
+            self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+            runtime._control._clear_matching_lease(self.token)
+            release.set()
+            await started
+            await runtime._finish_carrier_io()
+        self.assertFalse(self.carrier.exists())
+
+    @slow_test
+    async def test_carrier_fsync_does_not_block_the_event_loop(self):
+        runtime = await self.worker()
+        self.advance(server._CARRIER_REFRESH_S)
+        fired_at: list[float] = []
+
+        async def timer() -> None:
+            await asyncio.sleep(0.01)
+            fired_at.append(time.monotonic())
+
+        def slow_fsync(_fd: int) -> None:
+            slow_fsync.called = True
+            time.sleep(0.2)
+
+        slow_fsync.called = False
+        with (
+            patch.object(runtime._control, "_session_call", side_effect=self.daemon),
+            patch.object(session_handoff.os, "fsync", side_effect=slow_fsync),
+        ):
+            timer_task = asyncio.create_task(timer())
+            started = time.monotonic()
+            await runtime.session_heartbeat(self.token)
+            await timer_task
+        self.assertTrue(slow_fsync.called)
+        self.assertEqual(len(fired_at), 1)
+        self.assertLess(fired_at[0] - started, 0.15)
+        self.assertGreaterEqual(time.monotonic() - started, 0.18)
+
+    async def test_a_release_that_cannot_unlink_leaves_a_rejected_carrier(self):
+        runtime = await self.worker()
+        real_unlink = os.unlink
+
+        def stuck(path: object) -> None:
+            if Path(path) == self.carrier:
+                raise PermissionError("busy")
+            real_unlink(path)
+
+        with self.assertLogs("dayz_mcp.session_handoff", level="WARNING") as logs:
+            with (
+                patch.object(runtime._control, "_session_call", side_effect=self.daemon),
+                patch.object(session_handoff.os, "unlink", side_effect=stuck),
+            ):
+                released = await runtime.session_release(self.token)
+        self.assertTrue(released.get("released"))
+        self.assertIsNone(runtime.active_lease_token)
+        self.assertTrue(any("retrying" in line for line in logs.output))
+        self.assertTrue(any("rejected" in line for line in logs.output))
+        self.assertEqual(self.carrier.read_bytes(), b"{}")
+        self.assertIsNone(session_handoff.consume_handoff(self.carrier))
 
     async def test_without_a_heartbeat_the_old_carrier_still_expires(self):
         # Control: nothing renews the lease, so neither the carrier nor the lease
         # survives past the TTL.
-        self.worker()
+        await self.worker()
         self.advance(SESSION_TTL_S + 10.0)
         self.assertFalse(self.recycle_keeps_the_lease())
 
     async def test_heartbeat_refresh_writes_at_most_once_per_interval(self):
-        runtime = self.worker()
+        runtime = await self.worker()
         after_announce = self.writes
         with patch.object(runtime._control, "_session_call", side_effect=self.daemon):
             self.advance(1.0)
@@ -674,13 +905,13 @@ class CarrierFollowsLeaseRenewalTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.writes, after_announce + 1)
 
     async def test_a_release_clears_the_carrier(self):
-        runtime = self.worker()
+        runtime = await self.worker()
         with patch.object(runtime._control, "_session_call", side_effect=self.daemon):
             await runtime.session_release(self.token)
         self.assertFalse(self.carrier.exists())
 
     async def test_an_invalidated_lease_clears_the_carrier(self):
-        runtime = self.worker()
+        runtime = await self.worker()
         self.advance(SESSION_TTL_S + 10.0)
         with patch.object(runtime._control, "_session_call", side_effect=self.daemon):
             with self.assertRaises(Exception):
@@ -693,7 +924,7 @@ class CarrierFollowsLeaseRenewalTests(unittest.IsolatedAsyncioTestCase):
         # before the refresh runs, as a concurrent release or invalidation would
         # do. The refresh re-reads the lease under the carrier lock and writes
         # nothing, so the clear stands.
-        runtime = self.worker()
+        runtime = await self.worker()
         self.advance(100.0)
 
         async def heartbeat_then_lose_the_lease(path, payload=None, **kwargs):

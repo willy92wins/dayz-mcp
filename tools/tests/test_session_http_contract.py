@@ -353,6 +353,88 @@ class SessionHttpTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(set(body), {"id"})
 
+    def test_enqueue_names_only_the_lease_the_command_renewed(self) -> None:
+        token, acquired = self.acquire()
+        status, body = self.request(
+            "/enqueue",
+            {
+                "identity": IDENTITY_A,
+                "lease_token": token,
+                "cmd": "world_spawn",
+                "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
+                "peer": "server",
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(set(body), {"id", "lease_id"})
+        self.assertEqual(body["lease_id"], acquired["lease_id"])
+        # An old client that only reads id still parses the additive body.
+        self.assertIsInstance(int(body["id"]), int)
+
+        status, body = self.request(
+            "/enqueue",
+            {
+                "identity": IDENTITY_A,
+                "lease_token": "not-this-lease",
+                "cmd": "query_player_state",
+                "args": {},
+                "peer": "server",
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(set(body), {"id"})
+
+    def test_lifecycle_close_names_the_lease_authorize_renewed(self) -> None:
+        token, acquired = self.acquire()
+        coordinator = self.coordinator
+
+        class AuthorizingLifecycle:
+            def close_run(self, client, lease_token, run_id):
+                decision = coordinator.authorize(
+                    client, lease_token, "lifecycle_close"
+                )
+                if not decision.allowed:
+                    return {
+                        "error": decision.error,
+                        "_http_status": decision.http_status,
+                    }
+                return {"ok": True, "run_id": run_id}
+
+            def status(self, client):
+                return {"runs": [], "retail_quarantine": False}
+
+        self.state.lifecycle = AuthorizingLifecycle()
+        status, body = self.request(
+            "/lifecycle/close",
+            {"identity": IDENTITY_A, "lease_token": token, "run_id": "run-1"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["ok"], True)
+        self.assertEqual(body["lease_id"], acquired["lease_id"])
+        self.assertNotIn("_http_status", body)
+
+        # status does not authorize. A reused worker must not repeat the lease.
+        # state is a property of the live server, so this handler only needs that.
+        handler = loopback.Handler.__new__(loopback.Handler)
+        handler.server = type("_Srv", (), {"state": self.state})()
+        coordinator._note_renewed_lease(acquired["lease_id"])
+        handler._clear_request_renewed_lease()
+        self.assertIsNone(coordinator.renewed_lease_id())
+        self.assertEqual(handler._with_renewed_lease({"runs": []}), {"runs": []})
+
+        status, quiet = self.request(
+            "/lifecycle/status", {"identity": IDENTITY_A}
+        )
+        self.assertEqual(status, 200)
+        self.assertNotIn("lease_id", quiet)
+
+        status, refused = self.request(
+            "/lifecycle/close",
+            {"identity": IDENTITY_A, "run_id": "run-1"},
+        )
+        self.assertNotIn("lease_id", refused)
+        self.assertEqual(refused["error"], "lease_required")
+
     def test_enqueue_requires_valid_identity_and_unknown_is_mutating_first(self) -> None:
         status, body = self.request(
             "/enqueue", {"cmd": "query_player_state", "args": {}, "peer": "server"}
@@ -382,7 +464,7 @@ class SessionHttpTest(unittest.TestCase):
                 self.assertNotIn("raw-list-command-marker", audit_wire)
                 self.assertNotIn("raw-object-command-marker", audit_wire)
 
-        token, _ = self.acquire()
+        token, acquired = self.acquire()
         for malformed in malformed_commands:
             with self.subTest(kind=type(malformed).__name__, lease=True):
                 audit_start = len(self.audit_events)
@@ -395,7 +477,16 @@ class SessionHttpTest(unittest.TestCase):
                         "args": {},
                     },
                 )
-                self.assertEqual((status, body), (400, {"error": "not_whitelisted"}))
+                self.assertEqual(
+                    (status, body),
+                    (
+                        400,
+                        {
+                            "error": "not_whitelisted",
+                            "lease_id": acquired["lease_id"],
+                        },
+                    ),
+                )
                 active = self.coordinator._active  # type: ignore[attr-defined]
                 self.assertIsNotNone(active)
                 self.assertEqual(active.pending_authorizations, [])
@@ -424,7 +515,7 @@ class SessionHttpTest(unittest.TestCase):
                 )
                 self.assertEqual((status, body), (423, {"error": "lease_required"}))
 
-        token, _ = self.acquire()
+        token, acquired = self.acquire()
         for peer in (["raw-peer-list"], {"raw-peer-object": True}):
             with self.subTest(field="peer", kind=type(peer).__name__, lease=True):
                 status, body = self.request(
@@ -437,7 +528,10 @@ class SessionHttpTest(unittest.TestCase):
                         "peer": peer,
                     },
                 )
-                self.assertEqual((status, body), (400, {"error": "bad_peer"}))
+                self.assertEqual(
+                    (status, body),
+                    (400, {"error": "bad_peer", "lease_id": acquired["lease_id"]}),
+                )
                 self._assert_no_pending_reservation()
 
         for malformed_token in (
@@ -490,7 +584,14 @@ class SessionHttpTest(unittest.TestCase):
                     },
                 )
                 self.assertEqual(
-                    (status, body), (400, {"error": "bad_operation_timeout"})
+                    (status, body),
+                    (
+                        400,
+                        {
+                            "error": "bad_operation_timeout",
+                            "lease_id": acquired["lease_id"],
+                        },
+                    ),
                 )
                 self._assert_no_pending_reservation()
 

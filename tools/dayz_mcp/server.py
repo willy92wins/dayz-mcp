@@ -130,9 +130,9 @@ MAX_TIMEOUT_S = 300.0
 # the tool lock, so it gets its own short ceiling instead of the 5.0 s default of
 # _request_once. A slow daemon degrades the message; it must not extend the call.
 LIVENESS_STATUS_TIMEOUT_S = 1.0
-# At most one heartbeat-driven lease carrier write per this many seconds
-# (ClientRuntime._refresh_lease_carrier, 1e06), so a caller that heartbeats in a
-# loop does not write a file per call.
+# At most one lease-carrier rewrite per this many seconds
+# (ClientRuntime._refresh_lease_carrier). Heartbeats and commands the daemon
+# just renewed share it, so a burst does not fsync once per call.
 _CARRIER_REFRESH_S = 5.0
 POLL_INTERVAL_S = 0.05
 WAIT_FOR_MAX_TIMEOUT_S = 600.0
@@ -1822,9 +1822,14 @@ class ClientRuntime:
         # acquire too). Measured in REHEARSAL-LEASE.md, 34/34.
         self._handoff_path = os.environ.get(session_handoff.HANDOFF_ENV) or None
         self._carrier_written_at = float("-inf")
-        # Carrier writes and clears take this lock, so a refresh cannot land after
-        # the clear of a release or an invalidation it raced with.
+        # Writes and clears share the lock. The generation is bumped on the
+        # caller before the file work is handed to a thread, and that thread
+        # re-checks it under the lock, so an older write cannot land after a
+        # newer clear once the fsync is off the event loop.
         self._carrier_lock = threading.Lock()
+        self._carrier_gen = 0
+        self._carrier_tasks: set[asyncio.Task[None]] = set()
+        self._carrier_io_hook: Callable[[int, bool], None] | None = None
         carried = (
             session_handoff.consume_handoff(self._handoff_path)
             if self._handoff_path
@@ -1870,60 +1875,160 @@ class ClientRuntime:
 
         Written on every change rather than only when a recycle is requested: a worker
         that dies unplanned leaves the carrier behind for its replacement, and a worker
-        that releases its lease leaves nothing to inherit.
+        that releases its lease leaves nothing to inherit. The file work runs off the
+        event loop; this only reserves a generation.
         """
-        if not self._handoff_path:
+        if not getattr(self, "_handoff_path", None):
             return
-        with self._carrier_lock:
-            self._write_carrier_locked(lease_token, lease_id)
+        lock = getattr(self, "_carrier_lock", None)
+        if lock is None:
+            return
+        token = lease_token if lease_token and lease_id else None
+        named = lease_id if token else None
+        with lock:
+            self._carrier_gen += 1
+            generation = self._carrier_gen
+        self._submit_carrier_io(generation, token, named, refresh=False)
 
-    def _write_carrier_locked(
-        self, lease_token: str | None, lease_id: str | None
+    def _submit_carrier_io(
+        self,
+        generation: int,
+        lease_token: str | None,
+        lease_id: str | None,
+        *,
+        refresh: bool,
     ) -> None:
+        """Run one carrier write or clear off the loop when a loop is running.
+
+        The generation was already bumped. The optional hook runs before the
+        lock so a newer clear can be reserved while this write is still waiting.
+        """
+
+        def run() -> None:
+            hook = getattr(self, "_carrier_io_hook", None)
+            if hook is not None:
+                hook(generation, refresh)
+            self._apply_carrier_io(
+                generation, lease_token, lease_id, refresh=refresh
+            )
+
         try:
-            if lease_token and lease_id:
-                session_handoff.write_handoff(
-                    self._handoff_path,
-                    identity=self.identity,
-                    lease_token=lease_token,
-                    lease_id=lease_id,
-                    generation=0,
-                )
-                self._carrier_written_at = self._time_fn()
-            else:
-                session_handoff.clear_handoff(self._handoff_path)
-        except (OSError, ValueError, TypeError) as exc:
-            # Losing the carrier costs a lease across the next recycle; it must never
-            # cost the call that happened to change the lease.
-            self._log(f"SESSION: carrier write failed: {exc}")
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            run()
+            return
+        task = loop.create_task(asyncio.to_thread(run))
+        tasks = self._carrier_tasks
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
 
-    def _refresh_lease_carrier(self, lease_token: str) -> None:
-        """Rewrite the carrier after a heartbeat the daemon accepted for this lease.
+    def _apply_carrier_io(
+        self,
+        generation: int,
+        lease_token: str | None,
+        lease_id: str | None,
+        *,
+        refresh: bool,
+    ) -> None:
+        lock = getattr(self, "_carrier_lock", None)
+        if lock is None:
+            return
+        with lock:
+            if generation != self._carrier_gen:
+                return
+            if refresh:
+                # The interval was reserved at submit time. Checking it again
+                # here would skip the write that reservation just paid for.
+                live_id = self._control.active_lease_id
+                if (
+                    self._control.active_lease_token != lease_token
+                    or not isinstance(live_id, str)
+                    or not live_id
+                ):
+                    return
+                lease_id = live_id
+            try:
+                if lease_token and lease_id:
+                    session_handoff.write_handoff(
+                        self._handoff_path,
+                        identity=self.identity,
+                        lease_token=lease_token,
+                        lease_id=lease_id,
+                        generation=0,
+                    )
+                    self._carrier_written_at = self._time_fn()
+                else:
+                    session_handoff.clear_handoff(self._handoff_path)
+            except (OSError, ValueError, TypeError) as exc:
+                # Losing the carrier costs a lease across the next recycle; it
+                # must never cost the call that happened to change the lease.
+                self._log(f"SESSION: carrier write failed: {exc}")
 
-        The carrier used to be written only when the lease changed, so a recycle
-        more than MAX_HANDOFF_AGE_S after the acquire found it too old and started
-        without a lease the session had kept alive by heartbeating
-        (fb-20260927-205523-1e06). A successful heartbeat is the one answer that
-        proves the daemon renewed this very lease. An accepted command is not: the
-        daemon authorizes reads with no valid lease at all, and the enqueue answer
-        does not say which lease, if any, it renewed. So only the heartbeat path
-        calls this, and a session that wants its lease across a server_reload
-        heartbeats inside the TTL.
+    async def _finish_carrier_io(self) -> None:
+        """Wait for carrier tasks already scheduled. A bare runtime has none."""
+        pending = getattr(self, "_carrier_tasks", None)
+        if not pending:
+            return
+        current = [task for task in list(pending) if not task.done()]
+        if current:
+            await asyncio.gather(*current)
+
+    async def _refresh_lease_carrier(self, lease_token: str) -> None:
+        """Rewrite the carrier after the daemon renewed this lease.
+
+        Heartbeats do this on success. Commands do it only when the response
+        names the lease this client holds (fb-20260928-021456-3272): a read
+        with no valid lease is authorized, and a foreign id is not proof.
+        At most one rewrite per _CARRIER_REFRESH_S. The stamp is reserved
+        here, under the lock, before the thread runs, so a burst cannot all
+        pass the check. The thread re-reads the live lease and skips the
+        write if a release has since cleared it.
         """
         # getattr: tests build a bare ClientRuntime (object.__new__) to check how
         # its session methods compose; such an instance has no carrier.
         if not getattr(self, "_handoff_path", None):
             return
-        with self._carrier_lock:
+        lock = getattr(self, "_carrier_lock", None)
+        if lock is None:
+            return
+        with lock:
             if self._time_fn() - self._carrier_written_at < _CARRIER_REFRESH_S:
                 return
-            # Re-read under the lock. A release or an invalidation clears the local
-            # lease before it clears the carrier, so once it has started this sees
-            # it and writes nothing; if this wins, that clear still runs after.
-            lease_id = self._control.active_lease_id
-            if self._control.active_lease_token != lease_token or not lease_id:
+            live_id = self._control.active_lease_id
+            if (
+                self._control.active_lease_token != lease_token
+                or not isinstance(live_id, str)
+                or not live_id
+            ):
                 return
-            self._write_carrier_locked(lease_token, lease_id)
+            self._carrier_written_at = self._time_fn()
+            self._carrier_gen += 1
+            generation = self._carrier_gen
+        self._submit_carrier_io(generation, lease_token, live_id, refresh=True)
+        await self._finish_carrier_io()
+
+    async def _accept_command_renewal(self, payload: object) -> None:
+        """Refresh only if this response names the lease held right now.
+
+        Absence, a non-string, an empty string, or any other id means the
+        daemon did not just renew this client's lease. Fail closed: do not
+        re-seal a token it did not name.
+        """
+        if not isinstance(payload, dict):
+            return
+        renewed = payload.get("lease_id")
+        if not isinstance(renewed, str) or not renewed:
+            return
+        control = getattr(self, "_control", None)
+        if control is None:
+            return
+        held = getattr(control, "active_lease_id", None)
+        if not isinstance(held, str) or held != renewed:
+            return
+        token = getattr(control, "active_lease_token", None)
+        if not isinstance(token, str) or not token:
+            return
+        await self._refresh_lease_carrier(token)
 
     def touch(self) -> None:
         # No local idle watchdog in client mode; the daemon tracks its own idle.
@@ -1987,22 +2092,25 @@ class ClientRuntime:
             return "remote_error"
 
         try:
-            return await invoke()
-        except ControlClientError as error:
-            retryable = (
-                error.code == "daemon_unavailable"
-                and error.request_stage == "pre_request"
-                and error.http_bytes_sent == 0
-            )
-            if retryable:
-                spawned = await asyncio.to_thread(self._ensure_daemon)
-                if not spawned:
-                    raise ToolError(self._daemon_missing_error()) from None
-                try:
-                    return await invoke()
-                except ControlClientError as retry_error:
-                    raise ToolError(public_error_code(retry_error)) from None
-            raise ToolError(public_error_code(error)) from None
+            try:
+                return await invoke()
+            except ControlClientError as error:
+                retryable = (
+                    error.code == "daemon_unavailable"
+                    and error.request_stage == "pre_request"
+                    and error.http_bytes_sent == 0
+                )
+                if retryable:
+                    spawned = await asyncio.to_thread(self._ensure_daemon)
+                    if not spawned:
+                        raise ToolError(self._daemon_missing_error()) from None
+                    try:
+                        return await invoke()
+                    except ControlClientError as retry_error:
+                        raise ToolError(public_error_code(retry_error)) from None
+                raise ToolError(public_error_code(error)) from None
+        finally:
+            await self._finish_carrier_io()
 
     async def session_acquire(self, purpose: str) -> dict[str, Any]:
         return await self._control_with_lazy_spawn(
@@ -2039,7 +2147,7 @@ class ClientRuntime:
         result = await self._control_with_lazy_spawn(
             self._control.session_heartbeat, lease_token
         )
-        self._refresh_lease_carrier(lease_token)
+        await self._refresh_lease_carrier(lease_token)
         return result
 
     async def session_release(self, lease_token: str) -> dict[str, Any]:
@@ -2092,14 +2200,22 @@ class ClientRuntime:
         return await self._control_with_lazy_spawn(self._control.lifecycle_status)
 
     async def lifecycle_close(self, run_id: str) -> dict[str, Any]:
-        return await self._control_with_lazy_spawn(
+        result = await self._control_with_lazy_spawn(
             self._control.lifecycle_close, run_id
         )
+        await self._accept_command_renewal(result)
+        if isinstance(result, dict):
+            result.pop("lease_id", None)
+        return result
 
     async def lifecycle_reap(self, run_id: str) -> dict[str, Any]:
-        return await self._control_with_lazy_spawn(
+        result = await self._control_with_lazy_spawn(
             self._control.lifecycle_reap, run_id
         )
+        await self._accept_command_renewal(result)
+        if isinstance(result, dict):
+            result.pop("lease_id", None)
+        return result
 
     def _default_spawn(self) -> int | None:
         # outside_app: the daemon must not inherit the client app's registry
@@ -2372,10 +2488,12 @@ class ClientRuntime:
                 timeout_s,
                 deadline,
             )
+            await self._accept_command_renewal(payload)
             if status != 200:
                 error = self._enqueue_error(payload)
                 if _remote_error_code(payload) in _STALE_LEASE_ERRORS and lease_token is not None:
                     self._control._clear_matching_lease(lease_token)
+                    await self._finish_carrier_io()
                 if _remote_error_code(payload) in {"version_blocked", "lease_required"}:
                     try:
                         snapshot = await self.bridge_status_payload(
@@ -2472,10 +2590,12 @@ class ClientRuntime:
                 timeout_s,
                 deadline,
             )
+            await self._accept_command_renewal(payload)
             if status != 200:
                 error = self._enqueue_error(payload)
                 if _remote_error_code(payload) in _STALE_LEASE_ERRORS and lease_token is not None:
                     self._control._clear_matching_lease(lease_token)
+                    await self._finish_carrier_io()
                 if _remote_error_code(payload) in {"version_blocked", "lease_required"}:
                     try:
                         snapshot = await self.bridge_status_payload(

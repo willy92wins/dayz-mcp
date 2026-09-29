@@ -26,6 +26,7 @@ daemon's coordinator, which re-validates on every authorize.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import tempfile
@@ -53,6 +54,8 @@ MAX_HANDOFF_AGE_S = SESSION_TTL_S
 MAX_CLOCK_SKEW_S = 5.0
 
 MAX_SECRET_LEN = 512
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -194,8 +197,52 @@ def consume_handoff(
 
 
 def clear_handoff(path: str | os.PathLike[str]) -> None:
-    """Drop the carrier because the lease it names is gone (released, or never held)."""
-    _unlink_quietly(path)
+    """Drop the carrier because the lease it names is gone (released, or never held).
+
+    A delete that fails is logged and retried once. If it still fails, the file
+    is replaced with ``{}``, which consume_handoff rejects, so the released
+    token cannot be inherited (fb-20260928-021501-83be).
+    """
+    target = Path(path)
+    ok, error = _unlink_once(target)
+    if ok:
+        return
+    _LOG.warning("carrier unlink failed (%s); retrying delete: %s", error, target)
+    ok, error = _unlink_once(target)
+    if ok:
+        return
+    _LOG.warning(
+        "carrier unlink failed again (%s); replacing with a rejected carrier: %s",
+        error,
+        target,
+    )
+    _overwrite_rejected(target)
+
+
+def _unlink_once(path: Path) -> tuple[bool, OSError | None]:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return True, None
+    except OSError as exc:
+        return False, exc
+    return True, None
+
+
+def _overwrite_rejected(path: Path) -> None:
+    """Replace path with ``{}``. It has no version, so consume_handoff returns None."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = f"{path}.tmp"
+    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(handle, b"{}")
+        os.fsync(handle)
+    except BaseException:
+        os.close(handle)
+        _unlink_quietly(temporary)
+        raise
+    os.close(handle)
+    os.replace(temporary, path)
 
 
 def _unlink_quietly(path: str | os.PathLike[str]) -> None:
