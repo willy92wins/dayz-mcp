@@ -693,6 +693,18 @@ def _valve_signature_of_handle(file_handle: int, path: str) -> bool:
         _close_kernel_handle(opened)
 
 
+def _is_steam_executable_path(path: object) -> bool:
+    return (
+        type(path) is str
+        and bool(path)
+        and "\0" not in path
+        and '"' not in path
+        and ntpath.isabs(path)
+        and not _path_has_dot_segment(path)
+        and ntpath.basename(path).casefold() == "steam.exe"
+    )
+
+
 def _open_share_read(path: str) -> int | None:
     if (
         type(path) is not str
@@ -707,6 +719,35 @@ def _open_share_read(path: str) -> int | None:
         ntpath.normpath(path),
         _GENERIC_READ,
         _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+        None,
+        _OPEN_EXISTING,
+        _FILE_ATTRIBUTE_NORMAL,
+        None,
+    )
+    numeric = _usable_handle(handle)
+    if numeric is None:
+        return None
+    try:
+        if int(_path_kernel32.GetFileType(numeric)) != _FILE_TYPE_DISK:
+            raise OSError("opened file is not a disk file")
+    except (OSError, ValueError):
+        _close_kernel_handle(numeric)
+        return None
+    return numeric
+
+
+def _open_exclusive_read(path: str) -> int | None:
+    """GENERIC_READ that denies write and delete for as long as the handle lives.
+
+    FILE_SHARE_READ is the only share. os.replace and a writer both fail with a
+    sharing violation until the handle is closed.
+    """
+    if not _is_steam_executable_path(path):
+        return None
+    handle = _path_kernel32.CreateFileW(
+        ntpath.normpath(path),
+        _GENERIC_READ,
+        _FILE_SHARE_READ,
         None,
         _OPEN_EXISTING,
         _FILE_ATTRIBUTE_NORMAL,
@@ -791,16 +832,28 @@ def _resolve_addon_tree_steam_directory(
     provider: object | None = None,
     host: object | None = None,
 ) -> _PinnedSteamInstall | None:
-    # Both facts have to agree. steam_preflight._steam_executable
-    # (steam_preflight.py:543) prefers a live steam.exe image and otherwise
-    # reads HKCU Software\Valve\Steam SteamExe (steam_preflight.py:517).
-    # Here a missing side, a second steam.exe, a signer that is not Valve,
-    # or a directory whose file id cannot be pinned leaves the rule off.
-    # The signature is WinVerifyTrust on a GENERIC_READ handle of the live
-    # image path; that handle's file id has to equal the registry steam.exe.
-    # The readers are copied: importing steam_preflight would put
-    # invoke_steam's subprocess.Popen (steam_preflight.py:530) in the
-    # audited process-creation closure.
+    """Choose the Steam directory, or leave the DLL rule off.
+
+    One live steam.exe and HKCU Software\\Valve\\Steam SteamExe have to be the
+    same file as a GENERIC_READ handle opened with FILE_SHARE_READ only. While
+    that handle is held, the live image path is queried again and both paths
+    are opened; the held handle, the re-query and the registry path must share
+    one PathIdentity. WinVerifyTrust then runs on the held handle.
+
+    Residual: the running image can already have been renamed away before this
+    open. Binding that image section to a handle would need an undocumented
+    API, which this does not call. A rename that lands before the open is
+    visible to the re-query (the process path follows the file); a rename
+    after the open fails because the handle shares neither delete nor write.
+    steam.exe only chooses the directory. A LOAD_DLL is approved only when
+    that DLL's own event handle is Valve-signed and its parent is this
+    directory.
+
+    The readers are copied from steam_preflight (steam_process_pids,
+    process_image_path, steam_executable). Importing that module would put
+    invoke_steam's subprocess.Popen (steam_preflight.py:530) in the audited
+    process-creation closure.
+    """
     try:
         selected_provider = _LiveSteamProcessReader() if provider is None else provider
         selected_host = _RegistrySteamExecutable() if host is None else host
@@ -817,52 +870,68 @@ def _resolve_addon_tree_steam_directory(
             image = selected_provider.process_image_path(pid)
         except Exception:
             return None
-        if type(image) is not str or ntpath.basename(image).casefold() != "steam.exe":
+        if not _is_steam_executable_path(image):
             return None
-        live = _install_directory_of_steam_executable(image)
-        if live is None:
-            return None
-        try:
-            registry_value = selected_host.steam_executable()
-        except Exception:
-            return None
-        if type(registry_value) is not str:
-            return None
-        registry_directory = _install_directory_of_steam_executable(registry_value)
-        if (
-            registry_directory is None
-            or ntpath.normcase(registry_directory) != ntpath.normcase(live)
-        ):
-            return None
-        image_handle = _open_share_read(image)
+        image_handle = _open_exclusive_read(image)
         if image_handle is None:
             return None
+        requery_handle = None
         registry_handle = None
         try:
-            pinned_image = _steam_image_pin(image_handle, live)
-            if pinned_image is None:
+            try:
+                held_identity = _file_identity(image_handle)
+                image_final = _final_handle_path(image_handle)
+            except (OSError, ValueError):
                 return None
-            image_identity, image_final = pinned_image
-            registry_handle = _open_share_read(registry_value)
+            if type(held_identity) is not PathIdentity:
+                return None
+            if PureWindowsPath(image_final).name.casefold() != "steam.exe":
+                return None
+            parent = ntpath.dirname(image_final)
+            if not parent or ntpath.normpath(parent) != parent:
+                return None
+            try:
+                requery = selected_provider.process_image_path(pid)
+            except Exception:
+                return None
+            if not _is_steam_executable_path(requery):
+                return None
+            requery_handle = _open_exclusive_read(requery)
+            if requery_handle is None:
+                return None
+            try:
+                if _file_identity(requery_handle) != held_identity:
+                    return None
+            except (OSError, ValueError):
+                return None
+            try:
+                registry_value = selected_host.steam_executable()
+            except Exception:
+                return None
+            if not _is_steam_executable_path(registry_value):
+                return None
+            registry_handle = _open_exclusive_read(registry_value)
             if registry_handle is None:
                 return None
-            pinned_registry = _steam_image_pin(registry_handle, live)
-            if pinned_registry is None or pinned_registry[0] != image_identity:
+            try:
+                if _file_identity(registry_handle) != held_identity:
+                    return None
+            except (OSError, ValueError):
                 return None
             if _valve_signature_of_handle(image_handle, image_final) is not True:
                 return None
-            if _file_identity(image_handle) != image_identity:
+            try:
+                if _file_identity(image_handle) != held_identity:
+                    return None
+            except (OSError, ValueError):
                 return None
-            parent = ntpath.dirname(image_final)
             identity = _directory_identity(parent)
-            if (
-                type(identity) is not PathIdentity
-                or _directory_identity(live) != identity
-            ):
+            if type(identity) is not PathIdentity:
                 return None
-            return _PinnedSteamInstall(live, identity)
+            return _PinnedSteamInstall(parent, identity)
         finally:
             _close_kernel_handle(image_handle)
+            _close_kernel_handle(requery_handle)
             _close_kernel_handle(registry_handle)
     except Exception:
         return None

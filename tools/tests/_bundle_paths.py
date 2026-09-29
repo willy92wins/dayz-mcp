@@ -12,6 +12,7 @@ clone's first run is red for a reason that is not a defect. Companion of
 between the author's tree and a clone.
 """
 
+import os
 import unittest
 from pathlib import Path
 
@@ -42,4 +43,21 @@ requires_installed_launcher = unittest.skipUnless(
     LAUNCHER_PE.is_file() and REGISTRY.is_file(),
     "no installed launcher: build the bundle, then "
     "python -m dayz_mcp.launcher_registry_update install-dayz-test-v1",
+)
+
+# GitHub's Windows runners have no Steam client. DAYZ_MCP_STEAM_CLIENT=absent
+# forces that probe off even on a machine where the file exists, so CI can be
+# simulated. The production resolver does not read this variable.
+_STEAM_CLIENT = Path(r"C:\Program Files (x86)\Steam\steam.exe")
+
+
+def steam_client_installed() -> bool:
+    if os.environ.get("DAYZ_MCP_STEAM_CLIENT") == "absent":
+        return False
+    return _STEAM_CLIENT.is_file()
+
+
+requires_installed_steam = unittest.skipUnless(
+    steam_client_installed(),
+    r"Valve Steam client not installed at C:\Program Files (x86)\Steam\steam.exe",
 )

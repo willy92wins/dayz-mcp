@@ -62,22 +62,23 @@ class AuthenticodeSubjectTest(unittest.TestCase):
             self.assertFalse(authenticode.is_valve_signed(r"C:\signed.dll"))
 
     def test_unsigned_handle_loses_to_a_signed_path(self) -> None:
-        signed = Path(r"C:\Program Files (x86)\Steam\steamclient.dll")
-        self.assertTrue(signed.is_file())
-        self.assertTrue(authenticode.is_valve_signed(str(signed)))
+        # kernel32.dll is Microsoft-signed. The path is signed; the handle is not.
+        self.assertEqual(authenticode.signer_subject(_KERNEL32), _MICROSOFT_SUBJECT)
         with tempfile.TemporaryDirectory() as temporary:
-            unsigned = Path(temporary) / "steamclient.dll"
+            unsigned = Path(temporary) / "unsigned.dll"
             unsigned.write_bytes(b"not a signed image")
             handle = authenticode._open_read_handle(str(unsigned))
             self.assertIsNotNone(handle)
             assert handle is not None
             try:
-                self.assertFalse(
-                    authenticode.is_valve_signed_handle(handle, path=str(signed))
+                self.assertIsNone(
+                    authenticode.signer_subject_handle(handle, path=_KERNEL32)
                 )
-                self.assertNotIn(
-                    authenticode.signer_subject_handle(handle, path=str(signed)),
-                    authenticode.VALVE_SIGNER_SUBJECTS,
+                self.assertFalse(
+                    authenticode.is_valve_signed_handle(handle, path=_KERNEL32)
+                )
+                self.assertEqual(
+                    authenticode.signer_subject(_KERNEL32), _MICROSOFT_SUBJECT
                 )
             finally:
                 authenticode._close_handle(handle)

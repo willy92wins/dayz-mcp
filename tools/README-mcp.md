@@ -143,6 +143,12 @@ Locate the file with `--policy PATH`, then `DAYZ_MCP_LAUNCHER_POLICY`, then `%LO
 
 Exceptional `python -m dayz_mcp.admin_cli` release/reconcile operations require a real interactive TTY, a non-empty reason, and exact typed confirmation. They are not MCP tools and are not a normal queue-bypass mechanism.
 
+## Steam client DLLs in the AddonBuilder tree
+
+A LOAD_DLL is approved only for an AddonBuilder-tree process, only for one of six basenames (`cserhelper.dll`, `gameoverlayrenderer.dll`, `gameoverlayrenderer64.dll`, `steamclient.dll`, `tier0_s.dll`, `vstdlib_s.dll`), only when the file's parent is the pinned Steam directory, and only when WinVerifyTrust accepts that DLL on the debug event's own file handle as Valve-signed. `steam.exe` does not authorize the load. It only chooses the directory: exactly one live `steam.exe`, opened `GENERIC_READ` with `FILE_SHARE_READ` and no write or delete share, must be the same file (volume serial and file id) as a re-query of that process image and as HKCU `Software\Valve\Steam` `SteamExe`, and that held handle must itself be Valve-signed.
+
+Residual: the running image can be renamed away before that open. Binding the process image section to a file handle would need an undocumented API, which this check does not call. A rename before the open is rejected when the re-query names a different file; a rename or replace after the open fails because the handle shares neither delete nor write. The property that authorizes the load remains the DLL's own handle plus the pinned directory.
+
 ## Idle warden
 
 The daemon reads `%LOCALAPPDATA%\DayZ_MCP\idle-warden.json` on every warden cycle. The file sits next to `runs.json`. It has one field, `enabled`, and only the JSON object `{"enabled": true}` turns the warden on. A missing file, a file that cannot be read, and any other JSON (including `"enabled": "true"`, `1`, `false`, or extra fields) leave it off. While it is off the warden does not take a lease, adopt a run, enqueue a bridge command, or change `use_state`.

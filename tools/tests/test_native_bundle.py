@@ -6,7 +6,9 @@ import ntpath
 import os
 import re
 import shutil
+import subprocess
 import tempfile
+import time
 import unittest
 import zipfile
 from dataclasses import replace
@@ -25,7 +27,11 @@ from dayz_mcp.dayz_tools_paths import addon_helper_exes
 from dayz_mcp.native_broker_protocol import BrokerKind
 from dayz_mcp.native_child_announcement import ChildAnnouncement, ChildAnnouncementDecoder
 from dayz_mcp.request_path_authority import PathIdentity
-from tests._bundle_paths import requires_built_bundle, requires_closure_manifest
+from tests._bundle_paths import (
+    requires_built_bundle,
+    requires_closure_manifest,
+    requires_installed_steam,
+)
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -566,8 +572,13 @@ def _sealed_root(path: str) -> dict[str, object]:
     }
 
 
-def _write_loadable_bundle(root: Path) -> None:
-    """A bundle load_verified_bundle accepts, sealed against this tree's sources."""
+def _write_loadable_bundle(root: Path, external_dir: Path) -> tuple[Path, ...]:
+    """A bundle load_verified_bundle accepts, sealed against this tree's sources.
+
+    External closure entries are fixture files under external_dir, not the
+    machine's DayZ Tools. The caller patches native_bundle._external_paths to
+    those paths for the duration of the load.
+    """
     package = Path(native_bundle.__file__).resolve().parent
     members = {
         "__main__.py": b"\n",
@@ -627,8 +638,6 @@ def _write_loadable_bundle(root: Path) -> None:
         "src/launcher.cpp": launcher_source,
         "worker-runtime.json": worker_runtime,
     }
-    from dayz_mcp.dayz_tools_paths import external_file_paths, resolved_layout
-
     entries: list[dict[str, object]] = []
     for relative, raw in bundle_files.items():
         entries.append(
@@ -639,7 +648,13 @@ def _write_loadable_bundle(root: Path) -> None:
                 "size": len(raw),
             }
         )
-    for external in external_file_paths(resolved_layout()):
+    external_dir.mkdir(parents=True, exist_ok=True)
+    externals: list[Path] = []
+    for name in ("fixture.exe", "fixture.dll", "fixture.txt"):
+        written = external_dir / name
+        written.write_bytes(b"sealed-external:" + name.encode("ascii"))
+        externals.append(Path(ntpath.normpath(str(written.resolve(strict=True)))))
+    for external in externals:
         info = external.stat()
         entries.append(
             {
@@ -689,6 +704,7 @@ def _write_loadable_bundle(root: Path) -> None:
         }
     )
     (root / "reproducibility.json").write_bytes(receipt)
+    return tuple(externals)
 
 
 class AddonTreeSteamDllTest(unittest.TestCase):
@@ -859,13 +875,20 @@ class AddonTreeSteamDllTest(unittest.TestCase):
         )
         listed = self._STEAM + r"\steamclient.dll"
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            _write_loadable_bundle(root)
+            base = Path(temporary)
+            root = base / "bundle"
+            externals = _write_loadable_bundle(root, base / "externals")
             entry = launcher_registry._create_registry_entry_for_test(
                 "dayz-test-v1", root, "dayz-test-launcher.exe"
             )
             with launcher_registry._open_registry_entry_for_test(entry) as opened:
                 with patch.object(
+                    native_bundle,
+                    "_external_paths",
+                    return_value=frozenset(
+                        ntpath.normcase(str(path)) for path in externals
+                    ),
+                ), patch.object(
                     native_bundle,
                     "_resolve_addon_tree_steam_directory",
                     return_value=pinned,
@@ -900,93 +923,211 @@ class AddonTreeSteamDllTest(unittest.TestCase):
                             )
 
     def test_steam_resolution_fails_closed(self) -> None:
-        steam_exe = self._STEAM + r"\steam.exe"
-        other_exe = r"D:\OtherSteam\steam.exe"
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            steam_exe = directory / "steam.exe"
+            steam_exe.write_bytes(b"steam-image")
+            other_dir = directory / "other"
+            other_dir.mkdir()
+            other_exe = other_dir / "steam.exe"
+            other_exe.write_bytes(b"other-steam-image")
+            image = str(steam_exe)
+            other = str(other_exe)
+            registry = image.replace("\\", "/")
 
-        def install(path: str) -> str | None:
-            folded = ntpath.normcase(ntpath.normpath(path))
-            if folded == ntpath.normcase(steam_exe):
-                return self._STEAM
-            if folded == ntpath.normcase(other_exe):
-                return r"D:\OtherSteam"
-            return None
+            class Provider:
+                def __init__(
+                    self, pids: tuple[object, ...], images: dict[int, object]
+                ) -> None:
+                    self._pids = pids
+                    self._images = images
+                    self._calls = 0
 
-        class Provider:
-            def __init__(self, pids: tuple[object, ...], images: dict[int, object]) -> None:
-                self._pids = pids
-                self._images = images
+                def steam_process_pids(self) -> tuple[object, ...]:
+                    if self._pids == ("raise",):
+                        raise OSError("unreadable")
+                    return self._pids
 
-            def steam_process_pids(self) -> tuple[object, ...]:
-                if self._pids == ("raise",):
-                    raise OSError("unreadable")
-                return self._pids
+                def process_image_path(self, pid: int) -> object:
+                    self._calls += 1
+                    image_path = self._images[pid]
+                    if image_path == "raise":
+                        raise OSError("unreadable")
+                    if type(image_path) is tuple:
+                        return image_path[min(self._calls - 1, len(image_path) - 1)]
+                    return image_path
 
-            def process_image_path(self, pid: int) -> object:
-                image = self._images[pid]
-                if image == "raise":
-                    raise OSError("unreadable")
-                return image
+            class Host:
+                def __init__(self, executable: object) -> None:
+                    self._executable = executable
 
-        class Host:
-            def __init__(self, executable: object) -> None:
-                self._executable = executable
+                def steam_executable(self) -> object:
+                    if self._executable == "raise":
+                        raise OSError("unreadable")
+                    return self._executable
 
-            def steam_executable(self) -> object:
-                if self._executable == "raise":
-                    raise OSError("unreadable")
-                return self._executable
+            def resolve(
+                pids: tuple[object, ...],
+                images: dict[int, object],
+                registry_value: object,
+            ) -> native_bundle._PinnedSteamInstall | None:
+                return native_bundle._resolve_addon_tree_steam_directory(
+                    provider=Provider(pids, images),
+                    host=Host(registry_value),
+                )
 
-        def resolve(
-            pids: tuple[object, ...], images: dict[int, object], registry: object
-        ) -> native_bundle._PinnedSteamInstall | None:
-            return native_bundle._resolve_addon_tree_steam_directory(
-                provider=Provider(pids, images),
-                host=Host(registry),
+            with patch.object(
+                native_bundle, "_valve_signature_of_handle", return_value=True
+            ):
+                agreed = resolve((4,), {4: image}, registry)
+                self.assertIsInstance(agreed, native_bundle._PinnedSteamInstall)
+                assert agreed is not None
+                self.assertEqual(
+                    ntpath.normcase(agreed.directory),
+                    ntpath.normcase(str(directory)),
+                )
+                self.assertEqual(
+                    agreed.identity,
+                    native_bundle._directory_identity(agreed.directory),
+                )
+                self.assertIsNone(resolve((), {}, image))
+                self.assertIsNone(resolve((4,), {4: image}, None))
+                self.assertIsNone(resolve((), {}, None))
+                self.assertIsNone(resolve((), {}, r"C:\missing\steam.exe"))
+                self.assertIsNone(resolve(("raise",), {}, image))
+                self.assertIsNone(resolve((4,), {4: "raise"}, image))
+                self.assertIsNone(
+                    resolve((4,), {4: r"C:\Windows\notepad.exe"}, None)
+                )
+                self.assertIsNone(
+                    resolve((4, 5), {4: image, 5: image}, image)
+                )
+                self.assertIsNone(resolve((4, 5), {4: image, 5: other}, None))
+                self.assertIsNone(resolve((4,), {4: image}, other))
+                self.assertIsNone(
+                    resolve((4,), {4: (image, other)}, image)
+                )
+                self.assertIsNone(resolve((0,), {}, None))
+                self.assertIsNone(resolve(tuple(range(1, 10)), {}, None))
+                self.assertIsNone(resolve((), {}, "raise"))
+                self.assertIsNone(resolve((4,), {4: image}, "raise"))
+            with patch.object(
+                native_bundle, "_valve_signature_of_handle", return_value=False
+            ):
+                self.assertIsNone(resolve((4,), {4: image}, image))
+            with patch.object(
+                native_bundle, "_valve_signature_of_handle", return_value=True
+            ), patch.object(native_bundle, "_directory_identity", return_value=None):
+                self.assertIsNone(resolve((4,), {4: image}, image))
+
+    def test_held_steam_image_cannot_be_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            image = directory / "steam.exe"
+            held = directory / "held.exe"
+            image.write_bytes(b"steam-image")
+            seen: dict[str, OSError | None] = {"error": None}
+
+            def signed(file_handle: int, path: str) -> bool:
+                try:
+                    os.replace(image, held)
+                except OSError as error:
+                    seen["error"] = error
+                return True
+
+            class Provider:
+                def steam_process_pids(self) -> tuple[int, ...]:
+                    return (4,)
+
+                def process_image_path(self, pid: int) -> str:
+                    return str(image)
+
+            class Host:
+                def steam_executable(self) -> str:
+                    return str(image)
+
+            with patch.object(
+                native_bundle, "_valve_signature_of_handle", side_effect=signed
+            ):
+                pinned = native_bundle._resolve_addon_tree_steam_directory(
+                    provider=Provider(), host=Host()
+                )
+            self.assertIsInstance(seen["error"], OSError)
+            assert seen["error"] is not None
+            self.assertEqual(seen["error"].winerror, 32)
+            self.assertTrue(image.is_file())
+            self.assertFalse(held.exists())
+            self.assertIsNotNone(pinned)
+
+    def test_live_image_swap_during_the_query_does_not_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            running = directory / "steam.exe"
+            held = directory / "held-cmd.exe"
+            replacement = directory / "signed-steam.exe"
+            shutil.copyfile(r"C:\Windows\System32\cmd.exe", running)
+            replacement.write_bytes(b"replacement-not-the-running-image")
+            process = subprocess.Popen(
+                [str(running), "/Q", "/K"],
+                cwd=directory,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
+            try:
+                reader = native_bundle._LiveSteamProcessReader()
+                ready = False
+                for _ in range(50):
+                    if process.poll() is not None:
+                        self.fail("test process exited early")
+                    try:
+                        reader.process_image_path(process.pid)
+                    except OSError:
+                        time.sleep(0.05)
+                    else:
+                        ready = True
+                        break
+                self.assertTrue(ready)
 
-        def signed(file_handle: int, path: str) -> bool:
-            return ntpath.normcase(ntpath.normpath(path)) == ntpath.normcase(steam_exe)
+                class Race:
+                    def __init__(self) -> None:
+                        self.swapped = False
 
-        with patch.object(
-            native_bundle, "_install_directory_of_steam_executable", side_effect=install
-        ), patch.object(
-            native_bundle, "_valve_signature_of_handle", side_effect=signed
-        ):
-            agreed = resolve(
-                (4,), {4: steam_exe}, r"c:/program files (x86)/steam/steam.exe"
-            )
-            self.assertIsInstance(agreed, native_bundle._PinnedSteamInstall)
-            assert agreed is not None
-            self.assertEqual(agreed.directory, self._STEAM)
-            self.assertEqual(
-                agreed.identity, native_bundle._directory_identity(self._STEAM)
-            )
-            self.assertIsNone(resolve((), {}, steam_exe))
-            self.assertIsNone(resolve((4,), {4: steam_exe}, None))
-            self.assertIsNone(resolve((), {}, None))
-            self.assertIsNone(resolve((), {}, r"C:\missing\steam.exe"))
-            self.assertIsNone(resolve(("raise",), {}, steam_exe))
-            self.assertIsNone(resolve((4,), {4: "raise"}, steam_exe))
-            self.assertIsNone(resolve((4,), {4: r"C:\Windows\notepad.exe"}, None))
-            self.assertIsNone(resolve((4, 5), {4: steam_exe, 5: steam_exe}, steam_exe))
-            self.assertIsNone(resolve((4, 5), {4: steam_exe, 5: other_exe}, None))
-            self.assertIsNone(resolve((4,), {4: steam_exe}, other_exe))
-            self.assertIsNone(resolve((0,), {}, None))
-            self.assertIsNone(resolve(tuple(range(1, 10)), {}, None))
-            self.assertIsNone(resolve((), {}, "raise"))
-        with patch.object(
-            native_bundle, "_install_directory_of_steam_executable", side_effect=install
-        ), patch.object(
-            native_bundle, "_valve_signature_of_handle", return_value=False
-        ):
-            self.assertIsNone(resolve((4,), {4: steam_exe}, steam_exe))
-        with patch.object(
-            native_bundle, "_install_directory_of_steam_executable", side_effect=install
-        ), patch.object(
-            native_bundle, "_valve_signature_of_handle", return_value=True
-        ), patch.object(native_bundle, "_directory_identity", return_value=None):
-            self.assertIsNone(resolve((4,), {4: steam_exe}, steam_exe))
+                    def steam_process_pids(self) -> tuple[int, ...]:
+                        return (process.pid,)
 
+                    def process_image_path(self, pid: int) -> str:
+                        path = reader.process_image_path(pid)
+                        if not self.swapped:
+                            os.replace(running, held)
+                            os.replace(replacement, running)
+                            self.swapped = True
+                        return path
+
+                class Host:
+                    def steam_executable(self) -> str:
+                        return str(running)
+
+                race = Race()
+                with patch.object(
+                    native_bundle, "_valve_signature_of_handle", return_value=True
+                ):
+                    pinned = native_bundle._resolve_addon_tree_steam_directory(
+                        provider=race, host=Host()
+                    )
+                self.assertTrue(race.swapped)
+                self.assertIsNone(process.poll())
+                self.assertFalse(authenticode.is_valve_signed(str(held)))
+                self.assertIsNone(pinned)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                process.wait(timeout=10)
+                if process.stdin is not None:
+                    process.stdin.close()
+
+    @requires_installed_steam
     def test_unsigned_handle_is_rejected_when_the_path_is_swapped(self) -> None:
         real = Path(r"C:\Program Files (x86)\Steam\steamclient.dll")
         self.assertTrue(real.is_file())
@@ -1037,27 +1178,20 @@ class AddonTreeSteamDllTest(unittest.TestCase):
             self.assertFalse(authenticode.is_valve_signed(str(module)))
 
     def test_steam_image_rejects_unsigned_handle_when_its_path_is_swapped(self) -> None:
-        real = Path(r"C:\Program Files (x86)\Steam\steam.exe")
-        self.assertTrue(real.is_file())
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             image = directory / "steam.exe"
             held = directory / "held-unsigned.exe"
-            signed = directory / "signed-copy.exe"
             image.write_bytes(b"unsigned steam image")
-            shutil.copyfile(real, signed)
-            seen = {"calls": 0, "path_valve": False}
+            seen: dict[str, object] = {"calls": 0, "error": None}
 
             def swap(file_handle: int, *, path: str) -> bool:
-                seen["calls"] += 1
-                os.replace(image, held)
-                os.replace(signed, image)
+                seen["calls"] = int(seen["calls"]) + 1
                 try:
-                    seen["path_valve"] = authenticode.is_valve_signed(path)
-                    return authenticode.is_valve_signed_handle(file_handle, path=path)
-                finally:
-                    os.replace(image, signed)
-                    os.replace(held, image)
+                    os.replace(image, held)
+                except OSError as error:
+                    seen["error"] = error
+                return authenticode.is_valve_signed_handle(file_handle, path=path)
 
             class Provider:
                 def steam_process_pids(self) -> tuple[int, ...]:
@@ -1078,9 +1212,13 @@ class AddonTreeSteamDllTest(unittest.TestCase):
                 )
             self.assertIsNone(pinned)
             self.assertEqual(seen["calls"], 1)
-            self.assertTrue(seen["path_valve"])
-            self.assertFalse(authenticode.is_valve_signed(str(image)))
+            self.assertIsInstance(seen["error"], OSError)
+            assert isinstance(seen["error"], OSError)
+            self.assertEqual(seen["error"].winerror, 32)
+            self.assertTrue(image.is_file())
+            self.assertFalse(held.exists())
 
+    @requires_installed_steam
     def test_attributes_only_handle_is_approved_by_the_same_file_id(self) -> None:
         dll = self._STEAM + r"\steamclient.dll"
         pinned = native_bundle._directory_identity(self._STEAM)
