@@ -48,7 +48,7 @@ PRUNABLE_FIELDS = (
     "dialog",
     "weapon_state",
     # Nested probe (ficha 4f50) lives inside this object. prune does not
-    # recurse, so a filled probe and the unset {} both stay.
+    # recurse, so the nested object stays with or without fields.
     "input_describe",
     "building_doors",
 )

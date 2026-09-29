@@ -58,6 +58,66 @@ def _class_body(source: str, class_name: str) -> str:
     raise AssertionError(f"unterminated class: {class_name}")
 
 
+def _brace_body_after(source: str, header: str) -> str:
+    """Brace body of the single `header` (an `if (...)` with its condition)."""
+    count = source.count(header)
+    if count != 1:
+        raise AssertionError(f"{header!r} occurs {count} times")
+    at = source.index(header)
+    brace = source.index("{", at)
+    if source[at + len(header) : brace].strip() != "":
+        raise AssertionError(f"tokens between {header!r} and its brace")
+    depth = 0
+    for index in range(brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[brace + 1 : index]
+    raise AssertionError(f"unterminated guard: {header}")
+
+
+# Each true write is the body of its own guard, and the flag is false before
+# that guard. Replacing the condition with `if (true)` drops the header.
+_PROBE_TRUE_GUARDS = (
+    (
+        "probe.by_id_found",
+        "if (byId)",
+        "UAInput byId = api.GetInputByID(inputId);",
+    ),
+    (
+        "probe.by_id_same_hash",
+        "if (byIdHash == nameHash)",
+        "int byIdHash = byId.NameHash();",
+    ),
+    (
+        "probe.in_active_inputs",
+        "if (activeIndex >= 0)",
+        "int activeIndex = activeIds.Find(inputId);",
+    ),
+)
+
+
+def _assert_probe_true_guards(body: str) -> None:
+    for field, guard, prelude in _PROBE_TRUE_GUARDS:
+        guarded = _brace_body_after(body, guard)
+        true_at = body.index(f"{field} = true")
+        false_at = body.index(f"{field} = false")
+        guard_at = body.index(guard)
+        prelude_at = body.index(prelude)
+        if body.count(f"{field} = true") != 1:
+            raise AssertionError(f"{field} = true occurs {body.count(f'{field} = true')} times")
+        if not (false_at < prelude_at < guard_at < true_at):
+            raise AssertionError(
+                f"{field} is not false, then {prelude}, then {guard}, then true"
+            )
+        if f"{field} = true" not in guarded:
+            raise AssertionError(f"{field} = true is outside {guard}")
+        if f"{field} = false" in guarded:
+            raise AssertionError(f"{field} = false is inside {guard}")
+
+
 def _sample_probe() -> dict[str, int]:
     return {
         "input_id": 17,
@@ -122,7 +182,7 @@ class InputDescribeIngressTest(unittest.TestCase):
     def test_probe_survives_store_and_prune(self) -> None:
         # Field names come from the Enforce class, so this fails if the probe
         # type is removed. store_result copies the body; prune must not eat
-        # the nested object or the unset {}.
+        # the nested object, filled or empty.
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
         probe_body = _class_body(messages, "MCPInputProbe")
         for _kind, field in PROBE_FIELDS:
@@ -223,7 +283,8 @@ class InputDescribeFastMCPTest(unittest.IsolatedAsyncioTestCase):
         tools = {tool.name: tool for tool in await app.list_tools()}
         description = tools[COMMAND].description or ""
         self.assertIn(CAVEAT_SENTENCE, description)
-        self.assertIn("as an empty object", description)
+        self.assertIn("none of its fields are present", description)
+        self.assertNotIn("empty object", description)
         for _kind, field in PROBE_FIELDS:
             self.assertIn(field, description)
         self.assertNotIn("exists false means the name is not registered", description)
@@ -346,6 +407,7 @@ class InputDescribeEnforceContractTest(unittest.TestCase):
         self.assertIn("return true", body[unreadable:probe_at])
         self.assertNotIn("described.probe", body[unreadable:probe_at])
         self.assertLess(body.index("described.exists = true"), probe_at)
+        _assert_probe_true_guards(body)
 
         for token in (
             "input.ID()",
@@ -372,7 +434,8 @@ class InputDescribeEnforceContractTest(unittest.TestCase):
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
         self.assertNotIn("exists false means the name is not registered", messages)
         self.assertIn("ficha 4f50", messages)
-        self.assertIn("serializes as {}", messages)
+        self.assertIn("none of its fields are present", messages)
+        self.assertNotIn("serializes as {}", messages)
         probe_body = _class_body(messages, "MCPInputProbe")
         for kind, field in PROBE_FIELDS:
             with self.subTest(field=field):

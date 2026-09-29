@@ -485,7 +485,7 @@ class MCPInputProbe
 // input_describe payload. exists is true when GetInputByName returns non-null.
 // In 1.29 an unknown name can also return exists true (ficha 4f50). probe is
 // raw engine values published to measure that rule, and is left unset when
-// GetInputByName returns null (an unassigned class ref serializes as {}).
+// GetInputByName returns null, so none of its fields are present.
 // binding_count, locked, conflict_count and keys are meaningful only when
 // exists is true.
 class MCPInputDescribe
