@@ -127,6 +127,14 @@ def write_handoff(
         _unlink_quietly(f"{target}.tmp")
         raise
     os.replace(f"{target}.tmp", target)
+    # A clear that could not replace this path may have left a tombstone.
+    # This document is the live lease, so the tombstone must not hide it.
+    _unlink_quietly(_tombstone_path(target))
+
+
+def _tombstone_path(path: Path) -> Path:
+    """Side file that invalidates ``path`` when the carrier itself cannot be replaced."""
+    return Path(f"{path}.invalid")
 
 
 def consume_handoff(
@@ -137,6 +145,10 @@ def consume_handoff(
 ) -> SessionHandoff | None:
     """Read the carrier once and remove it, whatever it turned out to contain.
 
+    A tombstone beside the carrier is checked first. It means a clear could not
+    delete or replace the file, so the bytes still on disk must not be inherited.
+    The tombstone stays while the carrier file does, and is removed with it.
+
     Consume-once: a carrier that survived its read could be replayed by a later worker
     against a lease that has since changed hands. Removing it before returning also
     means a malformed one cannot be retried into the same failure on every restart.
@@ -145,6 +157,12 @@ def consume_handoff(
     worker starts without a lease, which is what a worker did before any of this.
     """
     target = Path(path)
+    tombstone = _tombstone_path(target)
+    if tombstone.exists():
+        _unlink_quietly(target)
+        if not target.exists():
+            _unlink_quietly(tombstone)
+        return None
     try:
         raw = target.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
@@ -201,22 +219,31 @@ def clear_handoff(path: str | os.PathLike[str]) -> None:
 
     A delete that fails is logged and retried once. If it still fails, the file
     is replaced with ``{}``, which consume_handoff rejects, so the released
-    token cannot be inherited (fb-20260928-021501-83be).
+    token cannot be inherited (fb-20260928-021501-83be). If that replace also
+    fails, a side tombstone is sealed and consume_handoff refuses the file
+    that is still there. The tombstone's own failure propagates.
     """
     target = Path(path)
     ok, error = _unlink_once(target)
     if ok:
+        _unlink_quietly(_tombstone_path(target))
         return
     _LOG.warning("carrier unlink failed (%s); retrying delete: %s", error, target)
     ok, error = _unlink_once(target)
     if ok:
+        _unlink_quietly(_tombstone_path(target))
         return
     _LOG.warning(
         "carrier unlink failed again (%s); replacing with a rejected carrier: %s",
         error,
         target,
     )
-    _overwrite_rejected(target)
+    try:
+        _overwrite_rejected(target)
+    except OSError:
+        _seal_tombstone(target)
+        return
+    _unlink_quietly(_tombstone_path(target))
 
 
 def _unlink_once(path: Path) -> tuple[bool, OSError | None]:
@@ -243,6 +270,27 @@ def _overwrite_rejected(path: Path) -> None:
         raise
     os.close(handle)
     os.replace(temporary, path)
+
+
+def _seal_tombstone(path: Path) -> None:
+    """Mark ``path`` rejected without replacing it. Raises if the mark cannot be sealed."""
+    marker = _tombstone_path(path)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    temporary = f"{marker}.tmp"
+    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(handle, b"invalid")
+        os.fsync(handle)
+    except BaseException:
+        os.close(handle)
+        _unlink_quietly(temporary)
+        raise
+    os.close(handle)
+    try:
+        os.replace(temporary, marker)
+    except OSError:
+        _unlink_quietly(temporary)
+        raise
 
 
 def _unlink_quietly(path: str | os.PathLike[str]) -> None:

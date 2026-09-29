@@ -146,6 +146,30 @@ class HandoffRoundTripTest(unittest.TestCase):
         self.assertTrue(any("rejected" in line for line in logs.output))
         self.assertIsNone(consume_handoff(self.path, now=lambda: 1000.0))
 
+    def test_unlink_and_replace_both_failing_seals_a_tombstone(self) -> None:
+        self._write()
+        real_unlink, real_replace = os.unlink, os.replace
+
+        def stuck(path: object) -> None:
+            if Path(path) == self.path:
+                raise PermissionError("busy")
+            real_unlink(path)
+
+        def stuck_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+            if Path(dst) == self.path:
+                raise PermissionError("busy")
+            real_replace(src, dst, *args, **kwargs)
+
+        with (
+            patch.object(session_handoff.os, "unlink", side_effect=stuck),
+            patch.object(session_handoff.os, "replace", side_effect=stuck_replace),
+        ):
+            clear_handoff(self.path)
+        self.assertTrue(self.path.exists())
+        self.assertIn(b"token-abc", self.path.read_bytes())
+        self.assertTrue(session_handoff._tombstone_path(self.path).exists())
+        self.assertIsNone(consume_handoff(self.path, now=lambda: 1000.0))
+
 
 class HandoffRefusalTest(unittest.TestCase):
     """Every refusal returns None -- start leaseless -- and never raises."""
@@ -880,6 +904,7 @@ class CarrierFollowsLeaseRenewalTests(unittest.IsolatedAsyncioTestCase):
             ):
                 released = await runtime.session_release(self.token)
         self.assertTrue(released.get("released"))
+        self.assertNotIn("carrier_clear", released)
         self.assertIsNone(runtime.active_lease_token)
         self.assertTrue(any("retrying" in line for line in logs.output))
         self.assertTrue(any("rejected" in line for line in logs.output))
@@ -937,6 +962,230 @@ class CarrierFollowsLeaseRenewalTests(unittest.IsolatedAsyncioTestCase):
             await runtime.session_heartbeat(self.token)
         self.assertEqual(self.writes, before)
         self.assertFalse(self.carrier.exists())
+
+    async def test_a_lifecycle_404_refreshes_and_a_409_clears(self):
+        # Real handler plus the real client. A renewed 404 names this lease.
+        # A 409 lease_invalid is what ProcessLifecycle returns when the
+        # reservation is already gone: authorize has renewed, so the handler
+        # still adds lease_id, and the client must clear rather than keep it.
+        from tests.test_session_http_contract import SessionHttpTest
+
+        runtime = await self.worker()
+        self.assertEqual(runtime.identity, self.identity)
+        self.advance(100.0)
+        http = SessionHttpTest("test_mutation_requires_lease_but_read_is_admitted")
+        http.setUp()
+        coordinator = self.coordinator
+        http.state.coordination = coordinator
+
+        class RejectingLifecycle:
+            def __init__(self) -> None:
+                self.invalid = False
+
+            def reap_dead_run(self, client, token, run_id):
+                decision = coordinator.authorize(client, token, "lifecycle_reap")
+                if not decision.allowed:
+                    return {
+                        "error": decision.error,
+                        "_http_status": decision.http_status,
+                    }
+                coordinator.reject_reservation(
+                    decision.owner_session_id,
+                    decision.lease_id,
+                    decision.reservation_id,
+                    "run_not_found",
+                    404,
+                )
+                if self.invalid:
+                    return {"error": "lease_invalid", "_http_status": 409}
+                return {"error": "run_not_found", "_http_status": 404}
+
+        lifecycle = RejectingLifecycle()
+        http.state.lifecycle = lifecycle
+        seen: list[tuple[int, dict]] = []
+
+        def transport(**kwargs):
+            payload = json.loads(kwargs.get("body") or b"{}")
+            status, response = http.request(kwargs["path"], payload)
+            seen.append((status, response))
+            return status, json.dumps(response).encode("utf-8")
+
+        try:
+            with patch.object(
+                runtime._control._credential_provider,
+                "request_with_refresh",
+                side_effect=transport,
+            ):
+                with self.assertRaises(control_client.ControlClientError) as direct:
+                    runtime._control._request_once(
+                        "/lifecycle/reap",
+                        {
+                            "identity": runtime.identity.to_payload(),
+                            "run_id": "missing-run",
+                            "lease_token": self.token,
+                        },
+                        5.0,
+                    )
+                self.assertEqual(direct.exception.code, "run_not_found")
+                self.assertIsInstance(
+                    direct.exception.body, control_client.VerifiedErrorBody
+                )
+                self.assertEqual(direct.exception.body.lease_id, self.lease["lease_id"])
+                self.assertEqual(self.written_at(), 1000.0)
+
+                with self.assertRaises(server.ToolError):
+                    await runtime.lifecycle_reap("missing-run")
+                self.assertEqual(self.written_at(), 1100.0)
+                self.assertEqual(runtime.active_lease_token, self.token)
+                self.assertEqual(seen[0], seen[1])
+                self.assertEqual(seen[0][0], 404)
+                self.assertEqual(seen[0][1]["lease_id"], self.lease["lease_id"])
+
+                self.advance(server._CARRIER_REFRESH_S)
+                before = self.writes
+                await runtime._observe_lifecycle_error(
+                    True,
+                    control_client.ControlClientError(
+                        "run_not_found",
+                        request_stage="post_request",
+                        http_bytes_sent=1,
+                        body=control_client.VerifiedErrorBody(
+                            code="run_not_found", lease_id="other-lease"
+                        ),
+                    ),
+                    self.token,
+                )
+                self.assertEqual(self.writes, before)
+
+                lifecycle.invalid = True
+                with self.assertRaises(control_client.ControlClientError) as invalid:
+                    runtime._control._request_once(
+                        "/lifecycle/reap",
+                        {
+                            "identity": runtime.identity.to_payload(),
+                            "run_id": "missing-run",
+                            "lease_token": self.token,
+                        },
+                        5.0,
+                    )
+                self.assertEqual(invalid.exception.code, "lease_invalid")
+                self.assertIsInstance(
+                    invalid.exception.body, control_client.VerifiedErrorBody
+                )
+                self.assertEqual(invalid.exception.body.lease_id, self.lease["lease_id"])
+                self.assertEqual(runtime.active_lease_token, self.token)
+                self.assertTrue(self.carrier.exists())
+
+                with self.assertRaises(server.ToolError):
+                    await runtime.lifecycle_reap("missing-run")
+        finally:
+            http.tearDown()
+        self.assertIsNone(runtime.active_lease_token)
+        self.assertFalse(self.carrier.exists())
+        self.assertIsNone(session_handoff.consume_handoff(self.carrier))
+        self.assertEqual([status for status, _body in seen], [404, 404, 409, 409])
+        self.assertEqual(seen[2][1]["error"], "lease_invalid")
+        self.assertEqual(seen[2][1]["lease_id"], self.lease["lease_id"])
+        self.assertEqual(seen[3][1]["lease_id"], self.lease["lease_id"])
+
+    async def test_a_clear_neither_unlink_nor_replace_can_do_is_not_inherited(self):
+        runtime = await self.worker()
+        real_unlink, real_replace = os.unlink, os.replace
+
+        def stuck(path: object) -> None:
+            if Path(path) == self.carrier:
+                raise PermissionError("busy")
+            real_unlink(path)
+
+        def stuck_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+            if Path(dst) == self.carrier:
+                raise PermissionError("busy")
+            real_replace(src, dst, *args, **kwargs)
+
+        with (
+            patch.object(runtime._control, "_session_call", side_effect=self.daemon),
+            patch.object(session_handoff.os, "unlink", side_effect=stuck),
+            patch.object(session_handoff.os, "replace", side_effect=stuck_replace),
+        ):
+            released = await runtime.session_release(self.token)
+        self.assertTrue(released.get("released"))
+        self.assertNotIn("carrier_clear", released)
+        self.assertIsNone(runtime.active_lease_token)
+        self.assertTrue(self.carrier.exists())
+        self.assertIsNone(session_handoff.consume_handoff(self.carrier))
+
+    async def test_a_clear_that_cannot_seal_a_tombstone_is_degraded(self):
+        runtime = await self.worker()
+        real_unlink, real_replace = os.unlink, os.replace
+        tombstone = session_handoff._tombstone_path(self.carrier)
+
+        def stuck(path: object) -> None:
+            if Path(path) == self.carrier:
+                raise PermissionError("busy")
+            real_unlink(path)
+
+        def stuck_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+            if Path(dst) in {self.carrier, tombstone}:
+                raise PermissionError("busy")
+            real_replace(src, dst, *args, **kwargs)
+
+        with (
+            patch.object(runtime._control, "_session_call", side_effect=self.daemon),
+            patch.object(session_handoff.os, "unlink", side_effect=stuck),
+            patch.object(session_handoff.os, "replace", side_effect=stuck_replace),
+        ):
+            released = await runtime.session_release(self.token)
+        self.assertTrue(released.get("released"))
+        self.assertEqual(released.get("carrier_clear"), "degraded")
+        self.assertIsNone(runtime.active_lease_token)
+        carried = session_handoff.consume_handoff(self.carrier)
+        self.assertIsNotNone(carried)
+        self.assertEqual(carried.lease_token, self.token)
+
+    async def test_a_failed_refresh_does_not_burn_the_next_one(self):
+        runtime = await self.worker()
+        self.advance(100.0)
+        original = session_handoff.write_handoff
+        calls = 0
+
+        def one_failure(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise PermissionError("transient write failure")
+            return original(*args, **kwargs)
+
+        with patch.object(session_handoff, "write_handoff", side_effect=one_failure):
+            await self.send(runtime, "world_spawn", _SPAWN, "server")
+            self.advance(1.0)
+            await self.send(runtime, "world_spawn", _SPAWN, "server")
+        self.assertEqual(calls, 2)
+        self.assertEqual(self.written_at(), 1101.0)
+        self.advance(29.0)
+        self.assertTrue(
+            self.coordinator._active is not None
+            and self.coordinator._active.expires_at > self.clock
+        )
+        self.assertTrue(self.recycle_keeps_the_lease())
+
+    async def test_a_discarded_refresh_does_not_clobber_a_later_reservation(self):
+        runtime = await self.worker()
+        runtime._carrier_written_at = 50.0
+        runtime._carrier_reserved_at = 40.0
+        runtime._carrier_reserve_gen = 5
+        runtime._carrier_gen = 5
+        with patch.object(
+            session_handoff, "write_handoff", side_effect=PermissionError("no")
+        ):
+            runtime._apply_carrier_io(
+                4,
+                self.token,
+                runtime._control.active_lease_id,
+                refresh=True,
+            )
+        self.assertEqual(runtime._carrier_written_at, 50.0)
+        self.assertEqual(runtime._carrier_reserve_gen, 5)
+        self.assertEqual(runtime._carrier_reserved_at, 40.0)
 
 
 if __name__ == "__main__":

@@ -39,7 +39,12 @@ from dayz_mcp import (
     tool_pack as tool_pack_mod,
     ui_dialog as ui_dialog_mod,
 )
-from dayz_mcp.control_client import ControlClient, ControlClientError, ControlIdentity
+from dayz_mcp.control_client import (
+    ControlClient,
+    ControlClientError,
+    ControlIdentity,
+    VerifiedErrorBody,
+)
 from dayz_mcp.accredited_daemon_transport import AccreditedTransportError
 from dayz_mcp.daemon_policy import load_normal_daemon_policy
 from dayz_mcp.camera_restore import (
@@ -1821,7 +1826,13 @@ class ClientRuntime:
         # worse than carrying none (session_coordination.py:2766 then refuses a fresh
         # acquire too). Measured in REHEARSAL-LEASE.md, 34/34.
         self._handoff_path = os.environ.get(session_handoff.HANDOFF_ENV) or None
+        # Confirmed write time only. A reservation that has not landed yet lives
+        # in _carrier_reserved_at / _carrier_reserve_gen, so a failed fsync does
+        # not burn the next refresh (fb-20260928-021456-3272, review F3).
         self._carrier_written_at = float("-inf")
+        self._carrier_reserved_at = float("-inf")
+        self._carrier_reserve_gen = 0
+        self._carrier_degraded = False
         # Writes and clears share the lock. The generation is bumped on the
         # caller before the file work is handed to a thread, and that thread
         # re-checks it under the lock, so an older write cannot land after a
@@ -1935,6 +1946,7 @@ class ClientRuntime:
             return
         with lock:
             if generation != self._carrier_gen:
+                self._release_carrier_reservation(generation)
                 return
             if refresh:
                 # The interval was reserved at submit time. Checking it again
@@ -1945,6 +1957,7 @@ class ClientRuntime:
                     or not isinstance(live_id, str)
                     or not live_id
                 ):
+                    self._release_carrier_reservation(generation)
                     return
                 lease_id = live_id
             try:
@@ -1957,12 +1970,19 @@ class ClientRuntime:
                         generation=0,
                     )
                     self._carrier_written_at = self._time_fn()
+                    self._carrier_degraded = False
+                    self._release_carrier_reservation(generation)
                 else:
                     session_handoff.clear_handoff(self._handoff_path)
+                    self._carrier_degraded = False
             except (OSError, ValueError, TypeError) as exc:
                 # Losing the carrier costs a lease across the next recycle; it
                 # must never cost the call that happened to change the lease.
                 self._log(f"SESSION: carrier write failed: {exc}")
+                if lease_token and lease_id:
+                    self._release_carrier_reservation(generation)
+                elif generation == self._carrier_gen:
+                    self._carrier_degraded = True
 
     async def _finish_carrier_io(self) -> None:
         """Wait for carrier tasks already scheduled. A bare runtime has none."""
@@ -1979,10 +1999,12 @@ class ClientRuntime:
         Heartbeats do this on success. Commands do it only when the response
         names the lease this client holds (fb-20260928-021456-3272): a read
         with no valid lease is authorized, and a foreign id is not proof.
-        At most one rewrite per _CARRIER_REFRESH_S. The stamp is reserved
-        here, under the lock, before the thread runs, so a burst cannot all
-        pass the check. The thread re-reads the live lease and skips the
-        write if a release has since cleared it.
+        At most one rewrite per _CARRIER_REFRESH_S. The anti-burst reservation
+        is separate from the confirmed write time: it is taken here, under the
+        lock, before the thread runs, and released if that generation fails or
+        is discarded. A later generation's reservation and confirmed time stay.
+        The thread re-reads the live lease and skips the write if a release
+        has since cleared it.
         """
         # getattr: tests build a bare ClientRuntime (object.__new__) to check how
         # its session methods compose; such an instance has no carrier.
@@ -1992,7 +2014,13 @@ class ClientRuntime:
         if lock is None:
             return
         with lock:
-            if self._time_fn() - self._carrier_written_at < _CARRIER_REFRESH_S:
+            now = self._time_fn()
+            if now - self._carrier_written_at < _CARRIER_REFRESH_S:
+                return
+            if (
+                self._carrier_reserve_gen != 0
+                and now - self._carrier_reserved_at < _CARRIER_REFRESH_S
+            ):
                 return
             live_id = self._control.active_lease_id
             if (
@@ -2001,11 +2029,19 @@ class ClientRuntime:
                 or not live_id
             ):
                 return
-            self._carrier_written_at = self._time_fn()
+            self._carrier_reserved_at = now
             self._carrier_gen += 1
             generation = self._carrier_gen
+            self._carrier_reserve_gen = generation
         self._submit_carrier_io(generation, lease_token, live_id, refresh=True)
         await self._finish_carrier_io()
+
+    def _release_carrier_reservation(self, generation: int) -> None:
+        """Drop this generation's anti-burst hold. A newer hold stays."""
+        if self._carrier_reserve_gen != generation:
+            return
+        self._carrier_reserve_gen = 0
+        self._carrier_reserved_at = float("-inf")
 
     async def _accept_command_renewal(self, payload: object) -> None:
         """Refresh only if this response names the lease held right now.
@@ -2070,6 +2106,8 @@ class ClientRuntime:
         async def invoke() -> dict[str, object]:
             return await method(*args, **kwargs)
 
+        lifecycle, held_token = self._lifecycle_held_token(method)
+
         def public_error_code(error: ControlClientError) -> str:
             if error.code == "retail_quarantine":
                 return _retail_quarantine_recipe(error.hint)
@@ -2107,9 +2145,52 @@ class ClientRuntime:
                     try:
                         return await invoke()
                     except ControlClientError as retry_error:
+                        await self._observe_lifecycle_error(
+                            lifecycle, retry_error, held_token
+                        )
                         raise ToolError(public_error_code(retry_error)) from None
+                await self._observe_lifecycle_error(lifecycle, error, held_token)
                 raise ToolError(public_error_code(error)) from None
         finally:
+            await self._finish_carrier_io()
+
+    def _lifecycle_held_token(self, method: object) -> tuple[bool, str | None]:
+        """Whether ``method`` is lifecycle close/reap, and the token it is about to use."""
+        control = getattr(self, "_control", None)
+        if control is None:
+            return False, None
+        # Each attribute access builds a new bound method, so identity does not work.
+        wanted = getattr(method, "__func__", None)
+        implemented = {
+            getattr(getattr(control, "lifecycle_close", None), "__func__", None),
+            getattr(getattr(control, "lifecycle_reap", None), "__func__", None),
+        }
+        if wanted is None or wanted not in implemented:
+            return False, None
+        token = getattr(control, "active_lease_token", None)
+        if not isinstance(token, str) or not token:
+            return True, None
+        return True, token
+
+    async def _observe_lifecycle_error(
+        self,
+        lifecycle: bool,
+        error: ControlClientError,
+        held_token: str | None,
+    ) -> None:
+        """Same lease comparison as enqueue, for a close/reap that did not return.
+
+        A verified ``lease_id`` refreshes only when it is the lease held now.
+        ``lease_invalid`` / ``lease_expired`` then clear that token, so the
+        clear is the newer generation.
+        """
+        if not lifecycle:
+            return
+        body = error.body
+        if isinstance(body, VerifiedErrorBody) and isinstance(body.lease_id, str) and body.lease_id:
+            await self._accept_command_renewal({"lease_id": body.lease_id})
+        if error.code in _STALE_LEASE_ERRORS and held_token is not None:
+            self._control._clear_matching_lease(held_token)
             await self._finish_carrier_io()
 
     async def session_acquire(self, purpose: str) -> dict[str, Any]:
@@ -2151,9 +2232,15 @@ class ClientRuntime:
         return result
 
     async def session_release(self, lease_token: str) -> dict[str, Any]:
-        return await self._control_with_lazy_spawn(
+        result = await self._control_with_lazy_spawn(
             self._control.session_release, lease_token
         )
+        # The daemon has released. A clear that could not even seal a tombstone
+        # must not look like the carrier was cleared (review F2).
+        if getattr(self, "_carrier_degraded", False) and isinstance(result, dict):
+            result = dict(result)
+            result["carrier_clear"] = "degraded"
+        return result
 
     async def session_status(self) -> dict[str, Any]:
         return await self._control_with_lazy_spawn(self._control.session_status)
