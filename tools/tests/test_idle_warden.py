@@ -713,6 +713,12 @@ class IdleWardenTest(unittest.TestCase):
         self.assertIsNone(self.coordinator._active)
 
     def test_reap_not_reapable_then_retry_is_orderly(self) -> None:
+        """A later reap inside the exit budget succeeds.
+
+        The poll stays under ``EXIT_WAIT_S`` so that second attempt starts
+        before the deadline. A reap at or after the deadline is not a retry.
+        """
+
         self.abandon()
         original = self.lifecycle.reap_dead_run
         calls: list[int] = []
@@ -731,7 +737,7 @@ class IdleWardenTest(unittest.TestCase):
 
         self.phases.append(hook)
         try:
-            self.assertEqual(self.drive(), "orderly")
+            self.assertEqual(self.drive(poll_s=5.0), "orderly")
         finally:
             self.lifecycle.reap_dead_run = original
         self.assertGreaterEqual(len(calls), 2)
@@ -739,6 +745,187 @@ class IdleWardenTest(unittest.TestCase):
         self.assertEqual(self.store.get("run-x").state, "EXITED")
         self.assert_retired("orderly")
         self.assertIsNone(self.coordinator._active)
+
+    def test_diag_emptied_after_rejection_reaps_again(self) -> None:
+        """Diag goes empty after reap's scan and before the warden reads it."""
+
+        self.abandon()
+        original = self.lifecycle.reap_dead_run
+        calls: list[int] = []
+        started: dict[str, float] = {}
+
+        def wrapped(client, token, run_id):
+            calls.append(1)
+            result = original(client, token, run_id)
+            if result.get("error") == "run_not_reapable":
+                self.live.clear()
+            return result
+
+        self.lifecycle.reap_dead_run = wrapped
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name != "waiting_exit":
+                return
+            started.setdefault("at", self.mono)
+            self.mark_guard_gone()
+
+        self.phases.append(hook)
+        try:
+            self.assertEqual(self.drive(poll_s=1.0), "orderly")
+        finally:
+            self.lifecycle.reap_dead_run = original
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertIn("at", started)
+        self.assertLess(self.mono - started["at"], EXIT_WAIT_S)
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertEqual(self.store.get("run-x").state, "EXITED")
+        self.assert_retired("orderly")
+        self.assertIsNone(self.coordinator._active)
+
+    def test_clean_rejection_that_persists_does_not_spin(self) -> None:
+        """A second known-clean rejection is ``reap_failed``, not another loop."""
+
+        self.abandon()
+        calls: list[int] = []
+        started: dict[str, float] = {}
+
+        def wrapped(client, token, run_id):
+            _ = (client, token, run_id)
+            calls.append(1)
+            if len(calls) == 1:
+                self.live.clear()
+            return {"ok": False, "error": "run_not_reapable"}
+
+        self.lifecycle.reap_dead_run = wrapped
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name != "waiting_exit":
+                return
+            started.setdefault("at", self.mono)
+            self.mark_guard_gone()
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(poll_s=1.0), "failed")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("at", started)
+        self.assertLess(self.mono - started["at"], EXIT_WAIT_S)
+        self.assertEqual(self._fail_detail(), "reap_failed")
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertNotEqual(self.store.get("run-x").state, "EXITED")
+
+    def test_unknown_scan_after_rejection_does_not_retry(self) -> None:
+        self.abandon()
+        original = self.lifecycle.reap_dead_run
+        calls: list[int] = []
+        started: dict[str, float] = {}
+
+        def wrapped(client, token, run_id):
+            calls.append(1)
+            result = original(client, token, run_id)
+            if result.get("error") == "run_not_reapable":
+                self.diag_known = False
+                self.live.clear()
+            return result
+
+        self.lifecycle.reap_dead_run = wrapped
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name != "waiting_exit":
+                return
+            started.setdefault("at", self.mono)
+            self.mark_guard_gone()
+
+        self.phases.append(hook)
+        try:
+            self.assertEqual(self.drive(poll_s=1.0), "failed")
+        finally:
+            self.lifecycle.reap_dead_run = original
+        self.assertEqual(len(calls), 1)
+        self.assertIn("at", started)
+        self.assertLess(self.mono - started["at"], EXIT_WAIT_S)
+        self.assertEqual(self._fail_detail(), "reap_failed")
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertNotEqual(self.store.get("run-x").state, "EXITED")
+
+    def test_non_reapable_state_after_rejection_does_not_retry(self) -> None:
+        self.abandon()
+        original = self.lifecycle.reap_dead_run
+        calls: list[int] = []
+        started: dict[str, float] = {}
+
+        def wrapped(client, token, run_id):
+            calls.append(1)
+            result = original(client, token, run_id)
+            if result.get("error") == "run_not_reapable":
+                self.live.clear()
+                # get() clones. The witness reads the stored record.
+                self.store._runs["run-x"].state = "STOPPING"
+            return result
+
+        self.lifecycle.reap_dead_run = wrapped
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name != "waiting_exit":
+                return
+            started.setdefault("at", self.mono)
+            self.mark_guard_gone()
+
+        self.phases.append(hook)
+        try:
+            self.assertEqual(self.drive(poll_s=1.0), "failed")
+        finally:
+            self.lifecycle.reap_dead_run = original
+        self.assertEqual(len(calls), 1)
+        self.assertIn("at", started)
+        self.assertLess(self.mono - started["at"], EXIT_WAIT_S)
+        self.assertEqual(self._fail_detail(), "reap_failed")
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertNotEqual(self.store.get("run-x").state, "EXITED")
+
+    def test_reap_that_crosses_the_deadline_does_not_start_another(self) -> None:
+        """A clock jump inside reap does not authorize a reap past EXIT_WAIT_S."""
+
+        self.abandon()
+        original = self.lifecycle.reap_dead_run
+        call_times: list[float] = []
+        delayed = False
+        started: dict[str, float] = {}
+
+        def wrapped(client, token, run_id):
+            nonlocal delayed
+            if "at" not in started:
+                started["at"] = self.mono
+            call_times.append(self.mono - started["at"])
+            if self.mono - started["at"] >= EXIT_WAIT_S - 1 and not delayed:
+                delayed = True
+                self.advance(2.0)
+            return original(client, token, run_id)
+
+        self.lifecycle.reap_dead_run = wrapped
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name != "waiting_exit":
+                return
+            self.mark_guard_gone()
+            if "at" in started and self.mono - started["at"] > EXIT_WAIT_S:
+                self.live.clear()
+
+        self.phases.append(hook)
+        try:
+            self.assertEqual(self.drive(poll_s=1.0), "failed")
+        finally:
+            self.lifecycle.reap_dead_run = original
+        self.assertTrue(delayed)
+        self.assertIn("at", started)
+        self.assertFalse(any(stamp > EXIT_WAIT_S for stamp in call_times))
+        self.assertGreater(self.mono - started["at"], EXIT_WAIT_S)
+        self.assertEqual(
+            self._fail_detail(),
+            "reap_failed; processes=801:server,802:client",
+        )
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertNotEqual(self.store.get("run-x").state, "EXITED")
+        self.assert_not_retired()
 
     def test_mixed_identity_before_close_closes_nothing(self) -> None:
         self.abandon()
