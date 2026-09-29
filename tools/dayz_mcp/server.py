@@ -7384,14 +7384,19 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return confirmed
 
     @app.tool(description=(
-        "Read whether the client registered a UAInput by name, and what the "
-        "selected alternative has bound: binding_count, keys (index, key code, "
-        "device), locked and conflict_count. An unknown name returns ok with "
-        "exists false; the other fields are meaningful only when exists is "
-        "true. The call does not change the selected alternative. Pressing the "
-        "input is out of scope; use key_press for an OnKeyPress handler. The "
-        "client must already be in game (client_not_in_game). "
-        "input_api_unavailable means GetUApi returned null. "
+        "Read GetInputByName for a UAInput name, and what the selected "
+        "alternative has bound: binding_count, keys (index, key code, device), "
+        "locked and conflict_count. exists is true when GetInputByName returns "
+        "non-null. In 1.29 an unknown name can also return exists true "
+        "(ficha 4f50). probe is raw engine values published to measure that "
+        "rule: input_id, name_hash, name_string_hash, by_id_found, "
+        "by_id_same_hash, in_active_inputs. probe is left unset when "
+        "GetInputByName returns null, so none of its fields are present. "
+        "binding_count, locked, conflict_count and keys are "
+        "meaningful only when exists is true. The call does not change the "
+        "selected alternative. Pressing the input is out of scope; use key_press "
+        "for an OnKeyPress handler. The client must already be in game "
+        "(client_not_in_game). input_api_unavailable means GetUApi returned null. "
         "input_bind_unreadable means a negative count or more than 16 keys on "
         "the selected alternative."
     ))

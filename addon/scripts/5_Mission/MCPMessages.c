@@ -475,8 +475,24 @@ class MCPInputKey
 	int device;
 };
 
-// input_describe payload. exists false means the name is not registered.
-// binding_count, locked, conflict_count and keys are meaningful only when exists is true.
+// input_describe probe. Raw UAInput / UAInputAPI values for one GetInputByName
+// hit, published so a later rule can be measured (ficha 4f50). Not a verdict.
+class MCPInputProbe
+{
+	int input_id;
+	int name_hash;
+	int name_string_hash;
+	bool by_id_found;
+	bool by_id_same_hash;
+	bool in_active_inputs;
+};
+
+// input_describe payload. exists is true when GetInputByName returns non-null.
+// In 1.29 an unknown name can also return exists true (ficha 4f50). probe is
+// raw engine values published to measure that rule, and is left unset when
+// GetInputByName returns null, so none of its fields are present.
+// binding_count, locked, conflict_count and keys are meaningful only when
+// exists is true.
 class MCPInputDescribe
 {
 	bool exists;
@@ -484,6 +500,7 @@ class MCPInputDescribe
 	bool locked;
 	int conflict_count;
 	ref array<ref MCPInputKey> keys;
+	ref MCPInputProbe probe;
 
 	void MCPInputDescribe()
 	{
