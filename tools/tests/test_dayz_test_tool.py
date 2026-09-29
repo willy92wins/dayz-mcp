@@ -208,6 +208,17 @@ class DayzTestToolRequestTest(unittest.TestCase):
                         **kwargs,
                     )
                 self.assertEqual(
+                    caught.exception.code,
+                    dayz_test_tool._BRIDGE_MOD_MISSING_IN_BASE_MODS,
+                )
+                self.assertTrue(
+                    caught.exception.code.startswith("bridge_mod_missing:")
+                )
+                self.assertIn("already in base_mods", caught.exception.code)
+                self.assertIn("does not count", caught.exception.code)
+                self.assertIn("extra_mods=['@DayZ_MCP']", caught.exception.code)
+                self.assertNotIn("sealed request", caught.exception.code)
+                self.assertNotEqual(
                     caught.exception.code, dayz_test_tool._BRIDGE_MOD_MISSING
                 )
                 preserved = _preserved_payload(
@@ -325,6 +336,8 @@ class DayzTestToolRequestTest(unittest.TestCase):
         self.assertIn("extra_mods=['@DayZ_MCP']", caught.exception.code)
         self.assertIn("base_mods and server_mods do not count", caught.exception.code)
         self.assertIn("sealed request", caught.exception.code)
+        self.assertIn("would reject that appended entry", caught.exception.code)
+        self.assertNotIn("already in base_mods", caught.exception.code)
 
     def test_bad_extra_mod_still_fails_before_the_bridge_default(self) -> None:
         """Regression control: origin/main already rejected this form as bad_mod."""

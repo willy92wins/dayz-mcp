@@ -230,6 +230,11 @@ class Fb050eDayzTestRunTests(unittest.IsolatedAsyncioTestCase):
         remainder = dict(result)
         remainder.pop("caller_tool_registry_stale")
         remainder.pop("warnings", None)
+        hint = remainder.pop(server._TOOL_REGISTRY_STALE_HINT_KEY, None)
+        if result.get("caller_tool_registry_stale") is True:
+            self.assertEqual(hint, server._TOOL_REGISTRY_STALE_HINT)
+        else:
+            self.assertIsNone(hint)
         expected = dict(original)
         expected.pop("warnings", None)
         self.assertEqual(remainder, expected)
@@ -334,6 +339,40 @@ class Fb050eDayzTestRunTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.get("error_code"), "active_run_exists")
         self.assertIs(result["caller_tool_registry_stale"], True)
         self.assertIn(_STALE_WARNING, result.get("warnings") or [])
+
+    def test_fb_050e_stale_hint_appears_only_when_stale_and_token_is_unchanged(
+        self,
+    ) -> None:
+        self.assertEqual(
+            server._TOOL_REGISTRY_STALE_WARNING, "tool_registry_stale_reopen_client"
+        )
+        fresh = server._annotate_caller_tool_registry({"status": "ok"}, False)
+        self.assertIs(fresh["caller_tool_registry_stale"], False)
+        self.assertNotIn("warnings", fresh)
+        self.assertNotIn(server._TOOL_REGISTRY_STALE_HINT_KEY, fresh)
+
+        stale = server._annotate_caller_tool_registry(
+            {"status": "ok", "warnings": ["already_here"]}, True
+        )
+        self.assertEqual(
+            stale["warnings"],
+            ["already_here", "tool_registry_stale_reopen_client"],
+        )
+        hint = stale[server._TOOL_REGISTRY_STALE_HINT_KEY]
+        self.assertIn("reconnect the dayz-mcp server", hint)
+        self.assertIn("cannot", hint)
+        self.assertIn("/mcp", hint)
+        self.assertIn("tools/list_changed", hint)
+        self.assertIn("--no-progressive-disclosure", hint)
+        self.assertNotIn("not verified in game", hint)
+
+        repeated = server._annotate_caller_tool_registry(
+            {"warnings": ["tool_registry_stale_reopen_client"]}, True
+        )
+        self.assertEqual(
+            repeated["warnings"], ["tool_registry_stale_reopen_client"]
+        )
+        self.assertEqual(repeated[server._TOOL_REGISTRY_STALE_HINT_KEY], hint)
 
     def test_fb_050e_dayz_test_run_description_names_client_tool_timeout(self) -> None:
         app, _runtime = build_app(

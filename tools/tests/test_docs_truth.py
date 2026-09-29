@@ -640,6 +640,57 @@ class ProjectMapSizesDocsTest(unittest.TestCase):
             f"Update PROJECT-MAP.md by hand")
 
 
+class WorldSpawnNopersistFlagDocsTest(unittest.TestCase):
+    """The world_spawn example flag is the sum of the two ECE constants.
+
+    The prose states one integer. That integer is computed from core.py,
+    so a copied example that drifts from the constants fails here.
+    """
+
+    def test_stated_nopersist_flag_equals_constant_sum(self) -> None:
+        core = _module_text("dayz_mcp/core.py")
+        place = re.search(r"^ECE_PLACE_ON_SURFACE = (\d+)$", core, re.M)
+        noper = re.search(r"^ECE_NOPERSISTENCY_WORLD = (\d+)$", core, re.M)
+        self.assertIsNotNone(place, "ECE_PLACE_ON_SURFACE moved in core.py")
+        self.assertIsNotNone(noper, "ECE_NOPERSISTENCY_WORLD moved in core.py")
+        expected = int(place.group(1)) + int(noper.group(1))
+        from dayz_mcp.server import WORLD_SPAWN_FLAGS_LINE
+
+        self.assertIn(f"flags={expected}", WORLD_SPAWN_FLAGS_LINE)
+        self.assertIn(
+            "ECE_PLACE_ON_SURFACE|ECE_NOPERSISTENCY_WORLD",
+            WORLD_SPAWN_FLAGS_LINE,
+        )
+        self.assertIn("Without ECE_NOPERSISTENCY_WORLD", WORLD_SPAWN_FLAGS_LINE)
+        self.assertIn("object_id is no longer valid", WORLD_SPAWN_FLAGS_LINE)
+        self.assertNotIn("not verified in game", WORLD_SPAWN_FLAGS_LINE)
+        tree = ast.parse(_module_text("dayz_mcp/server.py"))
+        fn = next(
+            (
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.AsyncFunctionDef)
+                and node.name == "object_delete"
+            ),
+            None,
+        )
+        self.assertIsNotNone(fn, "object_delete vanished from server.py")
+        description = ""
+        for dec in fn.decorator_list:
+            if not isinstance(dec, ast.Call):
+                continue
+            for kw in dec.keywords:
+                if kw.arg == "description":
+                    description = ast.literal_eval(kw.value)
+        self.assertIn(
+            "Spawn with ECE_NOPERSISTENCY_WORLD so the object is not saved "
+            "into a later run.",
+            description,
+        )
+        self.assertIn("does not survive the run", description)
+        self.assertNotIn("not verified in game", description)
+
+
 class ProjectMapEntryPointsDocsTest(unittest.TestCase):
     """Every entry point PROJECT-MAP lists must exist under tools/ (A11)."""
 
