@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import ntpath
 import struct
 from dataclasses import dataclass
 
-from dayz_mcp.dayz_tools_paths import addon_builder_exe
 from dayz_mcp.native_broker_protocol import BrokerKind
 from dayz_mcp.request_path_authority import PathIdentity
 
@@ -35,8 +35,17 @@ def _invalid() -> None:
     raise ChildAnnouncementError("invalid_native_child_announcement")
 
 
+def _usable_addon_builder_path(path: str | None) -> str | None:
+    if type(path) is not str or not path or "\0" in path:
+        return None
+    return path
+
+
 class ChildAnnouncementDecoder:
-    def __init__(self) -> None:
+    def __init__(self, addon_builder_path: str | None = None) -> None:
+        # Captured once from the loaded bundle. feed() does not read the
+        # environment or the registry again.
+        self._addon_builder_path = _usable_addon_builder_path(addon_builder_path)
         self._buffer = bytearray()
         self._next_sequence = 1
         self._failed = False
@@ -83,14 +92,19 @@ class ChildAnnouncementDecoder:
                     path = path_raw.decode("utf-8")
                 except UnicodeError:
                     _invalid()
-                # The broker announces its fixed default C: path, whatever
-                # DAYZ_TOOLS_PATH says (launcher.cpp, BuildAddonCommand).
-                expected_path = (
-                    addon_builder_exe(environ={})
-                    if kind is BrokerKind.ADDON_BUILDER
-                    else _PYTHON_PATH
-                )
-                if path != expected_path or "\0" in path:
+                # The expected AddonBuilder path is the one captured at
+                # construction from the sealed descriptor. A case-only
+                # difference still matches on Windows. No captured path
+                # refuses the frame (fb-20260928-124739-a2d5).
+                if kind is BrokerKind.ADDON_BUILDER:
+                    expected = self._addon_builder_path
+                    if (
+                        expected is None
+                        or "\0" in path
+                        or ntpath.normcase(path) != ntpath.normcase(expected)
+                    ):
+                        _invalid()
+                elif path != _PYTHON_PATH or "\0" in path:
                     _invalid()
                 decoded.append(
                     ChildAnnouncement(

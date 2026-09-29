@@ -34,6 +34,8 @@ def _wire_result(**filled: object) -> dict[str, object]:
         "pos_real": [],
         "dialog": {},
         "entities": [],
+        "input_describe": {},
+        "building_doors": {},
     }
     empty.update(filled)
     return {"ok": 1, "cmd": "fixture", **empty}

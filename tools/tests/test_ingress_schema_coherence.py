@@ -157,6 +157,14 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
         {"throttle": 0.5, "steer": 1.0, "brake": 0.25, "handbrake": 0.0, "hold_ttl_s": 0.5},
         "vehicle_control",
     ),
+    (
+        "object_doors",
+        {"type": "Land_Garage_Row_Small", "pos": _POS},
+        "object_doors",
+    ),
+    ("object_doors", {"object_id": 1}, "object_doors"),
+    ("input_describe", {"name": "UAMoveForward"}, "input_describe"),
+    ("input_describe", {"name": "a" * 128}, "input_describe"),
 )
 
 # A bridge answer per verb, enough for each tool to reach its bridge call and
