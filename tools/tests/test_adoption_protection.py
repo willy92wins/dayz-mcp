@@ -193,6 +193,7 @@ class AdoptionFixture(unittest.TestCase):
                 life._human_input_at,
                 life._uncertain_input_at,
                 life._launched_by,
+                life._launcher_request_at,
             ):
                 table.pop(key, None)
             life._input_good_at = None
@@ -835,6 +836,7 @@ class HttpAdoptionMatrixTest(unittest.TestCase):
                 self.life._human_input_at,
                 self.life._uncertain_input_at,
                 self.life._launched_by,
+                self.life._launcher_request_at,
             ):
                 table.pop(key, None)
             self.life._input_good_at = None
