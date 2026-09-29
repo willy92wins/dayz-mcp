@@ -378,6 +378,20 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("missing_object_id", {}, (False, "bad_args")),
         ("bool_is_not_int", {"object_id": True}, (False, "bad_args")),
     ),
+    "hands_take": (
+        ("valid", {"object_id": 1}, (True, None)),
+        ("valid_with_uid", {"object_id": 7, "uid": "player-1"}, (True, None)),
+        ("extra_key", {"object_id": 1, "extra": None}, (False, "bad_args")),
+        ("missing_object_id", {}, (False, "bad_args")),
+        ("bool_is_not_int", {"object_id": True}, (False, "bad_args")),
+        ("zero_object_id", {"object_id": 0}, (False, "bad_args")),
+    ),
+    "weapon_state": (
+        ("empty", {}, (True, None)),
+        ("valid_with_uid", {"uid": "player-1"}, (True, None)),
+        ("extra_key", {"extra": None}, (False, "bad_args")),
+        ("uid_not_string", {"uid": 1}, (False, "bad_args")),
+    ),
     "notify_players": (
         (
             "valid_required_only",

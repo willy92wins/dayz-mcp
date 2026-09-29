@@ -292,6 +292,7 @@ COERCIBLE_ALLOWLIST.update(
         ("exec_enforce", "main_fn"): (
             "free text entry function name; empty is the default"
         ),
+        ("hands_take", "uid"): "free text player id, empty means first human",
         ("infected_drive", "type"): "free text classname",
         ("infected_drive", "mode"): _OPTIONAL_ID,
         ("inventory_give", "classname"): "free text classname",
@@ -357,6 +358,7 @@ COERCIBLE_ALLOWLIST.update(
             "keeps this key coercible so a numeric branch cannot hide"
         ),
         ("wait_for", "pattern"): "free text substring",
+        ("weapon_state", "uid"): "free text player id, empty means first human",
         ("world_spawn", "type"): "free text classname",
     }
 )
