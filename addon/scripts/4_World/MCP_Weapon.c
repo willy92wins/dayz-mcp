@@ -331,6 +331,7 @@ class MCPWeaponControl
 
 	static void OnCommandHandler(PlayerBase player)
 	{
+		PlayerBase live;
 		if (!IsBusy())
 		{
 			return;
@@ -345,7 +346,9 @@ class MCPWeaponControl
 			ReleaseAll("no_player");
 			return;
 		}
-		if (player != GetGame().GetPlayer())
+		// GetPlayer() returns DayZPlayer (game.c:946). Identity check needs PlayerBase.Cast.
+		live = PlayerBase.Cast(GetGame().GetPlayer());
+		if (player != live)
 		{
 			return;
 		}
@@ -917,6 +920,7 @@ modded class PlayerBase
 	// outstanding. super runs HandleWeapons first; the shot is after that.
 	override void CommandHandler(float pDt, int pCurrentCommandID, bool pCurrentCommandFinished)
 	{
+		PlayerBase live;
 		super.CommandHandler(pDt, pCurrentCommandID, pCurrentCommandFinished);
 		if (!MCPWeaponControl.IsBusy())
 		{
@@ -926,7 +930,9 @@ modded class PlayerBase
 		{
 			return;
 		}
-		if (this != GetGame().GetPlayer())
+		// GetPlayer() returns DayZPlayer (game.c:946). Identity check needs PlayerBase.Cast.
+		live = PlayerBase.Cast(GetGame().GetPlayer());
+		if (this != live)
 		{
 			return;
 		}
