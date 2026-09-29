@@ -524,6 +524,7 @@ _VALUE_FLAGS = frozenset(
         "--expected-game-version",
         "--idle-timeout",
         "--exec-allowlist",
+        "--exec-audit-path",
         "--client-platform",
         "--task-label",
         "--tool-pack",
