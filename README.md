@@ -173,7 +173,8 @@ cd tools
 
 It creates `tools\.venv-mcp`, installs the pinned dependencies plus this package,
 generates an API key, and writes the client configuration. `-Register` also
-registers the server with your MCP client.
+registers the server with your MCP client when `dayz-mcp` is not already
+registered.
 
 The hardened Python path is different: `python install_mcp.py --register` talks
 only to native x64 `claude.exe` / `codex.exe` recorded on this machine. Pin those
@@ -201,9 +202,13 @@ worker the supervisor can replace, so `server_reload` picks up edited sources wi
 the host reconnecting, and the lease crosses each replacement. `--no-supervised` /
 `-NoSupervised` opts out. `python install_mcp.py --register` refuses to drop an
 option the current registrations carry (`registration_would_drop_options` names each
-one) unless you add `--allow-option-removal`. `.\install-mcp.ps1 -Register` replaces
-both registrations with the command it prints, so repeat the switches you registered
-with.
+one) unless you add `--allow-option-removal`. `.\install-mcp.ps1 -Register` only
+adds `dayz-mcp` when Claude and Codex do not already have it, and that path
+never removes a name. If one of them does, the check cannot be read, or the
+name appears before the add, the script stops. Re-register with
+`python tools/install_mcp.py --register` from the repository root, or pass
+`-ReplaceExistingRegistration` when you really want this script to remove and
+replace the current registration (that drops options it already carries).
 
 Three run modes (`python -m dayz_mcp`; `tools/dayz_mcp/server_cli.py:96-118`):
 
