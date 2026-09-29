@@ -33,6 +33,7 @@ from dayz_mcp.process_lifecycle import (
     ProcessLifecycle,
     RunManifestStore,
     RunRecord,
+    idle_destruction_guard,
 )
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import (
@@ -1554,6 +1555,221 @@ class IdleWardenTest(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertGreaterEqual(calls["release"], 2)
         self.assertIsNone(self.coordinator._active)
+
+    def _post_pid_hook(self, action) -> None:
+        """Run ``action`` on the PID read inside the first ``post_wm_close``."""
+
+        original = self.lifecycle.window_fns
+        reads = {"n": 0}
+
+        def window_pid(hwnd: int) -> int:
+            reads["n"] += 1
+            # Two processes, two windows listed, then the first post's PID read.
+            if reads["n"] == 5:
+                self.assertEqual(self.windows.posted, [])
+                action()
+            return original.window_pid(hwnd)
+
+        self.lifecycle.window_fns = Win32WindowFns(
+            original.enum_windows,
+            window_pid,
+            original.is_visible,
+            original.post_message,
+        )
+
+    def test_switch_off_during_the_post_pid_read_posts_nothing(self) -> None:
+        self.abandon()
+        self._post_pid_hook(
+            lambda: self.settings.write_text(
+                '{"enabled": false}\n', encoding="utf-8"
+            )
+        )
+        self.phases.append(self.on_exit)
+        self.assertEqual(self.drive(), "disabled")
+        self.assertEqual(self.windows.posted, [])
+        self.assertNotEqual(self.store.get("run-x").state, "EXITED")
+        self.assertIsNone(self.coordinator._active)
+
+    def test_launcher_enqueue_during_the_post_pid_read_posts_nothing(self) -> None:
+        self.abandon()
+        self.lifecycle.remember_launcher("run-x", LAUNCHER)
+
+        def enqueue() -> None:
+            status, _body = self.coordinator.enqueue(
+                LAUNCHER, "launch", "during-post-pid"
+            )
+            self.assertEqual(status, 202)
+
+        self._post_pid_hook(enqueue)
+        self.phases.append(self.on_exit)
+        self.assertEqual(self.drive(), "countdown_aborted")
+        self.assertEqual(self.windows.posted, [])
+        self.assertNotEqual(self.store.get("run-x").state, "EXITED")
+        self.assertIsNone(self.coordinator._active)
+        self.assertIn(
+            LAUNCHER.session_id, self.coordinator.queued_session_ids()
+        )
+
+    def test_human_input_during_the_post_pid_read_posts_nothing(self) -> None:
+        self.abandon()
+
+        def credit() -> None:
+            credited = self.human_input(time.time())
+            self.assertEqual(credited, ["run-x"])
+
+        self._post_pid_hook(credit)
+        self.phases.append(self.on_exit)
+        self.assertEqual(self.drive(), "countdown_aborted")
+        self.assertEqual(self.windows.posted, [])
+        self.assertNotEqual(self.store.get("run-x").state, "EXITED")
+        self.assertIsNone(self.coordinator._active)
+
+    def test_foreign_identity_during_the_post_pid_read_posts_nothing(self) -> None:
+        self.abandon()
+        self._post_pid_hook(lambda: self.make_foreign(801))
+        self.phases.append(self.on_exit)
+        self.assertEqual(self.drive(), "failed")
+        self.assertEqual(self.windows.posted, [])
+        self.assertEqual(self.guard.terminate_calls, [])
+        stored = self.store.get("run-x")
+        self.assertNotEqual(stored.state, "EXITED")
+        self.assertEqual(len(stored.processes), 2)
+        self.assertIsNone(self.coordinator._active)
+
+    def test_identity_change_between_posts_is_partial_close(self) -> None:
+        self.abandon()
+        original = self.lifecycle.window_fns
+
+        def post_message(hwnd: int, msg: int, wparam: int, lparam: int) -> bool:
+            posted = original.post_message(hwnd, msg, wparam, lparam)
+            if hwnd == 1802:
+                self.make_foreign(801)
+            return posted
+
+        self.lifecycle.window_fns = Win32WindowFns(
+            original.enum_windows,
+            original.window_pid,
+            original.is_visible,
+            post_message,
+        )
+        result = self.drive()
+        self.assertEqual(result, "partial_close")
+        self.assertEqual(self.windows.posted, [(1802, 16)])
+        self.assertEqual(self.guard.terminate_calls, [])
+        detail = [
+            event.get("detail")
+            for event in self.audit.events
+            if event.get("event") == "idle_timeout"
+            and event.get("decision") == "partial_close"
+        ]
+        self.assertTrue(detail, self.audit.events)
+        self.assertIn("acted_pids=[802]", detail[-1])
+        self.assertIn("untouched_pids=[801]", detail[-1])
+        self.assertIsNone(self.coordinator._active)
+        stored = self.store.get("run-x")
+        self.assertNotEqual(stored.state, "EXITED")
+        self.assertIsNone(stored.owner_session_id)
+
+    def test_identity_change_between_terminates_is_partial_stop(self) -> None:
+        self.abandon()
+        original = self.guard.terminate
+
+        def terminate(record):
+            if record.pid == 801:
+                result = original(record)
+                self.make_foreign(802)
+                return result
+            if record.pid == 802:
+                return {"error": "process_identity_mismatch", "terminated": False}
+            return original(record)
+
+        self.guard.terminate = terminate
+        result = self.drive()
+        self.assertEqual(result, "partial_stop")
+        self.assertEqual(
+            [record.pid for record in self.guard.terminate_calls], [801]
+        )
+        detail = [
+            event.get("detail")
+            for event in self.audit.events
+            if event.get("event") == "idle_timeout"
+            and event.get("decision") == "partial_stop"
+        ]
+        self.assertTrue(detail, self.audit.events)
+        self.assertIn("acted_pids=[801]", detail[-1])
+        self.assertIn("untouched_pids=[802]", detail[-1])
+        stored = self.store.get("run-x")
+        self.assertEqual(stored.state, "UNRECONCILED")
+        self.assertEqual([record.pid for record in stored.processes], [802])
+        self.assertIsNone(stored.owner_session_id)
+        self.assertIsNone(self.coordinator._active)
+
+    def test_release_exception_keeps_the_lease(self) -> None:
+        self.abandon()
+        self.phases.append(self.on_exit)
+
+        def unavailable(*_args, **_kwargs):
+            raise OSError("injected release transport failure")
+
+        self.coordinator.release = unavailable
+        warden = self.make_warden()
+        self.enable()
+        result = warden.run_once()
+        self.assertEqual(result, "release_pending")
+        self.assertEqual(self.store.get("run-x").state, "EXITED")
+        self.assertIsNotNone(self.coordinator._active)
+        self.assertIsNotNone(warden.token)
+        self.assertIsNotNone(warden.lease_id)
+
+    def test_cancel_exception_keeps_the_ticket(self) -> None:
+        self.abandon()
+        status, _body = self.coordinator.acquire(IDENTITY_A, "hold")
+        self.assertEqual(status, 200)
+
+        def unavailable(*_args, **_kwargs):
+            raise OSError("injected cancellation failure")
+
+        def disable_at_queue(name: str, _warden: IdleWarden) -> None:
+            if name == "queued":
+                self.settings.write_text('{"enabled": false}\n', encoding="utf-8")
+
+        self.coordinator.cancel_operation = unavailable
+        self.phases.append(disable_at_queue)
+        warden = self.make_warden()
+        self.enable()
+        result = warden.run_once()
+        self.assertEqual(result, "release_pending")
+        self.assertIsNotNone(warden.ticket_id)
+        self.assertIn(
+            warden.client.session_id, self.coordinator.queued_session_ids()
+        )
+
+    def test_idle_guard_is_bound_to_session_operation_and_run(self) -> None:
+        self.abandon()
+        warden = self.make_warden()
+        client = warden.client
+        with idle_destruction_guard(
+            {
+                "operation": "close",
+                "session_id": client.session_id,
+                "run_id": "run-x",
+            }
+        ):
+            self.assertIsNotNone(
+                self.lifecycle._warden_idle_guard(client, "close", "run-x")
+            )
+            self.assertIsNone(
+                self.lifecycle._warden_idle_guard(client, "close", "run-y")
+            )
+            self.assertIsNone(
+                self.lifecycle._warden_idle_guard(client, "stop", "run-x")
+            )
+        with idle_destruction_guard(
+            {"operation": "close", "session_id": client.session_id}
+        ):
+            self.assertIsNone(
+                self.lifecycle._warden_idle_guard(client, "close", "run-x")
+            )
 
 
 class BoundInstanceTokenTest(unittest.TestCase):

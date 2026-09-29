@@ -108,10 +108,22 @@ def post_wm_close(
     *,
     fns: Win32WindowFns | None = None,
     expected_pid: int | None = None,
+    before_post: Callable[[], bool] | None = None,
 ) -> bool:
-    """Queue WM_CLOSE with PostMessageW. Never SendMessage."""
+    """Queue WM_CLOSE with PostMessageW. Never SendMessage.
+
+    ``before_post`` runs after the Win32 PID read and immediately before
+    PostMessageW. Nothing else runs between that callback and the syscall.
+    A result other than True does not post. Callers that omit it keep the
+    previous PID check and post.
+    """
     api = fns if fns is not None else real_win32()
-    if expected_pid is not None and int(api.window_pid(hwnd)) != int(expected_pid):
+    observed: int | None = None
+    if expected_pid is not None or before_post is not None:
+        observed = int(api.window_pid(hwnd))
+    if before_post is not None and before_post() is not True:
+        return False
+    if expected_pid is not None and observed != int(expected_pid):
         return False
     return bool(api.post_message(int(hwnd), WM_CLOSE, 0, 0))
 

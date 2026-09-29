@@ -188,7 +188,7 @@ class IdleWarden:
         if not read_idle_warden_enabled(self.settings_path):
             if self.token or self.ticket_id:
                 self._drop_authority()
-                if self.token:
+                if self.token or self.ticket_id:
                     return "release_pending"
             return "disabled"
         try:
@@ -232,7 +232,8 @@ class IdleWarden:
     def _continue(self) -> str:
         run_id = self.run_id
         if not isinstance(run_id, str) or not self._still(run_id):
-            self._cancel_ticket()
+            if not self._cancel_ticket():
+                return "release_pending"
             return "cancelled"
         return self._after_enqueue(run_id)
 
@@ -242,7 +243,8 @@ class IdleWarden:
         if off is not None:
             return off
         if not self._still(run_id):
-            self._cancel_ticket()
+            if not self._cancel_ticket():
+                return "release_pending"
             return "cancelled"
         status, body = self.coordinator.wait(
             self.client, self.ticket_id or "", self.wait_slice_s
@@ -266,7 +268,8 @@ class IdleWarden:
         if off is not None:
             return off
         if not self._still(run_id):
-            self._release()
+            if not self._release():
+                return "release_pending"
             return "cancelled"
         return self._own(run_id)
 
@@ -391,17 +394,13 @@ class IdleWarden:
             return off
         if self._reacted(run_id):
             return self._abort(run_id)
-        guard = {
-            "expected": self._baseline,
-            "allow_gone": False,
-            "human_at": self.lifecycle.human_input_at(run_id),
-            "launcher_at": self.lifecycle.launcher_request_at(run_id),
-            "wall": self.wall(),
-            "operation": "close",
-            "session_id": self.client.session_id,
-        }
+        guard = self._destruction_guard(run_id, "close", allow_gone=False)
         with idle_destruction_guard(guard):
             closed = self.lifecycle.close_run(self.client, self.token, run_id)
+        if isinstance(closed, dict) and closed.get("outcome") == "partial_close":
+            return self._named_partial(run_id, "partial_close", closed)
+        if isinstance(closed, dict) and closed.get("error") == "warden_disabled":
+            return self._switch_off(run_id)
         if isinstance(closed, dict) and closed.get("error") == "anchor_changed":
             return self._abort(run_id)
         if not isinstance(closed, dict) or "error" in closed:
@@ -453,14 +452,15 @@ class IdleWarden:
         off = self._switch_off(run_id)
         if off is not None:
             return off
-        guard = {
-            "expected": self._baseline,
-            "allow_gone": True,
-            "operation": "stop",
-            "session_id": self.client.session_id,
-        }
+        guard = self._destruction_guard(run_id, "stop", allow_gone=True)
         with idle_destruction_guard(guard):
             stopped = self.lifecycle.stop_run(self.client, self.token, run_id)
+        if isinstance(stopped, dict) and stopped.get("outcome") == "partial_stop":
+            return self._named_partial(run_id, "partial_stop", stopped)
+        if isinstance(stopped, dict) and stopped.get("error") == "warden_disabled":
+            return self._switch_off(run_id)
+        if isinstance(stopped, dict) and stopped.get("error") == "anchor_changed":
+            return self._abort(run_id)
         if (
             isinstance(stopped, dict)
             and stopped.get("ok") is True
@@ -793,9 +793,12 @@ class IdleWarden:
         if isinstance(target, str):
             self.lifecycle.clear_closing(target)
             self.lifecycle.clear_idle_retirement(target)
-        if self.ticket_id:
-            self._cancel_ticket()
-        return self._finish("disabled")
+        ticket_pending = bool(self.ticket_id) and not self._cancel_ticket()
+        if not self._release():
+            return "release_pending"
+        if ticket_pending or self.ticket_id:
+            return "release_pending"
+        return "disabled"
 
     def _finish(self, outcome: str) -> str:
         """A normal outcome waits until the coordinator has confirmed the release."""
@@ -805,10 +808,17 @@ class IdleWarden:
         return outcome
 
     def _release(self) -> bool:
-        """True when the lease is no longer ours. A failed audit keeps it."""
+        """True only after the coordinator confirms the lease is gone.
+
+        An exception, or any answer that does not confirm the release, keeps
+        the token and the lease. The caller reports release_pending and retries.
+        A confirmed release whose cleanup worker is saturated has already
+        dropped the lease and will not quiesce the run, so this hands the
+        owner to ``begin_release_owner``. That handoff is not used for an
+        unconfirmed answer.
+        """
 
         token = self.token
-        lease_id = self.lease_id
         if not token:
             self.token = None
             self.lease_id = None
@@ -818,32 +828,98 @@ class IdleWarden:
                 self.client, token, "owner_release"
             )
         except Exception:
-            status, body = 503, {"error": "release_failed"}
-        if not isinstance(body, dict):
-            body = {}
-        if status == 503 and body.get("error") == "audit_failed":
+            self.log("WARDEN: release failed")
             return False
-        self.token = None
-        self.lease_id = None
-        degraded = body.get("cleanup_degraded")
-        saturated = (
-            isinstance(degraded, list) and "cleanup_worker_saturated" in degraded
-        )
-        if lease_id and (saturated or status != 200):
-            try:
-                self.lifecycle.begin_release_owner(self.client.session_id, lease_id)
-            except Exception:
-                self.log("WARDEN: direct release failed")
-        return True
+        if (
+            isinstance(body, dict)
+            and status == 200
+            and body.get("released") is True
+        ):
+            lease_id = self.lease_id
+            self.token = None
+            self.lease_id = None
+            degraded = body.get("cleanup_degraded")
+            saturated = (
+                isinstance(degraded, list)
+                and "cleanup_worker_saturated" in degraded
+            )
+            if isinstance(lease_id, str) and lease_id and saturated:
+                try:
+                    self.lifecycle.begin_release_owner(
+                        self.client.session_id, lease_id
+                    )
+                except Exception:
+                    self.log("WARDEN: direct release failed")
+            return True
+        return False
 
-    def _cancel_ticket(self) -> None:
+    def _cancel_ticket(self) -> bool:
+        """True when the cancel is confirmed or the ticket is already terminal.
+
+        Any other answer, including an exception, keeps the ticket id.
+        """
+
         operation_id = self.operation_id
-        self._clear_ticket()
-        if operation_id:
-            try:
-                self.coordinator.cancel_operation(self.client, operation_id)
-            except Exception:
-                self.log("WARDEN: cancel failed")
+        ticket_id = self.ticket_id
+        if not operation_id and not ticket_id:
+            self._clear_ticket()
+            return True
+        try:
+            if operation_id:
+                status, body = self.coordinator.cancel_operation(
+                    self.client, operation_id
+                )
+            else:
+                status, body = self.coordinator.cancel(
+                    self.client, ticket_id or ""
+                )
+        except Exception:
+            self.log("WARDEN: cancel failed")
+            return False
+        if not isinstance(body, dict):
+            return False
+        confirmed = status == 200 and body.get("cancelled") is True
+        terminal = status == 403 and body.get("error") == "ticket_invalid"
+        if confirmed or terminal:
+            self._clear_ticket()
+            return True
+        return False
+
+    def _destruction_guard(
+        self, run_id: str, operation: str, *, allow_gone: bool
+    ) -> dict[str, object]:
+        return {
+            "expected": self._baseline,
+            "allow_gone": allow_gone,
+            "human_at": self.lifecycle.human_input_at(run_id),
+            "launcher_at": self.lifecycle.launcher_request_at(run_id),
+            "wall": self.wall(),
+            "operation": operation,
+            "session_id": self.client.session_id,
+            "run_id": run_id,
+            "settings_path": str(self.settings_path),
+        }
+
+    def _named_partial(
+        self, run_id: str, outcome: str, payload: dict[str, object]
+    ) -> str:
+        """Record who was acted on, then release. Pending if release is not confirmed."""
+
+        acted = payload.get("acted_pids")
+        untouched = payload.get("untouched_pids")
+        reasons = payload.get("untouched_reasons")
+        if not isinstance(acted, list):
+            acted = []
+        if not isinstance(untouched, list):
+            untouched = []
+        detail = f"acted_pids={acted}; untouched_pids={untouched}"
+        if isinstance(reasons, list) and reasons:
+            detail = f"{detail}; untouched_reasons={reasons}"
+        self._closed = True
+        self._clear_closing()
+        self.lifecycle.clear_idle_retirement(run_id)
+        self.lifecycle.audit_idle_timeout(self.client, run_id, outcome, detail)
+        return self._finish(outcome)
 
     def _drop_authority(self) -> None:
         run_id = self.run_id

@@ -40,7 +40,7 @@ from dayz_mcp.session_coordination import (
 # Set by the idle warden around close_run / stop_run. A wrapper that forwards
 # only the public arguments still runs the guarded body, because the
 # authorization travels with the calling thread. Applied only when the client
-# session matches, and only for the named operation.
+# session, the operation, and the run id all match.
 _IDLE_GUARD: contextvars.ContextVar[Mapping[str, object] | None] = contextvars.ContextVar(
     "dayz_idle_guard",
     default=None,
@@ -3580,6 +3580,13 @@ class ProcessLifecycle:
         return [record.pid for record in retiring], None
 
     def stop_run(self, client: ClientIdentity, token: str | None, run_id: object) -> dict[str, object]:
+        """Stop the run. Ordinary callers are unchanged.
+
+        Warden path, residual contract:
+        no effect after any doubt observed up to the final check of the first effect.
+        the only residual window is between that check and the syscall.
+        after the first effect, no foreign target is touched, and the outcome says so.
+        """
         if isinstance(run_id, str) and run_id:
             self.note_launcher_request(client, run_id)
         legacy_error = self._legacy_identity_error()
@@ -3617,7 +3624,7 @@ class ProcessLifecycle:
                 return self._reject_reserved(authority, command, "run_not_adopted")
             # The warden authorizes the whole set. A foreign, gone, or unknown
             # process refuses the stop before any skip-and-continue.
-            stop_guard = self._warden_idle_guard(client, "stop")
+            stop_guard = self._warden_idle_guard(client, "stop", run_id)
             if stop_guard is not None:
                 refusal = self._idle_destruction_refusal(run, stop_guard)
                 if refusal is not None:
@@ -3734,16 +3741,11 @@ class ProcessLifecycle:
                     watched = current_run if current_run is not None else run
                     refusal = self._idle_destruction_refusal(watched, stop_guard)
                     if refusal is not None:
-                        if watched.state == "STOPPING":
-                            watched.state = "RUNNING"
-                            try:
-                                self.manifest.replace(watched)
-                            except Exception:
-                                pass
-                            else:
-                                self._invalidate_box_cache()
+                        self._restore_running_if_stopping(watched)
                         return {"error": refusal, "run_id": run_id}
                 terminated = 0
+                acted_pids: list[int] = []
+                untouched_reasons: list[tuple[int, str]] = []
                 survivors = list(owned)
                 for record in list(owned):
                     if self._quarantined():
@@ -3777,6 +3779,29 @@ class ProcessLifecycle:
                             state="UNRECONCILED",
                             terminated=terminated,
                         )
+                    if stop_guard is not None:
+                        # Snapshot and the warden's switch, queue and anchor
+                        # checks run inside the boundary. terminate is next.
+                        boundary = self._idle_effect_boundary(
+                            run,
+                            run_id,
+                            stop_guard,
+                            record,
+                            first=not acted_pids,
+                        )
+                        if boundary is not None:
+                            scope, reason = boundary
+                            if scope == "operation" and not acted_pids:
+                                self._restore_running_if_stopping(run)
+                                return {"error": reason, "run_id": run_id}
+                            if scope == "operation":
+                                already = {pid for pid, _reason in untouched_reasons}
+                                for pending in survivors:
+                                    if pending.pid not in already:
+                                        untouched_reasons.append((pending.pid, reason))
+                                break
+                            untouched_reasons.append((record.pid, reason))
+                            continue
                     try:
                         guard_result = self.guard.terminate(record)
                     except Exception:
@@ -3789,6 +3814,25 @@ class ProcessLifecycle:
                         not isinstance(guard_result, dict)
                         or guard_result.get("terminated") is not True
                     ):
+                        # The guard refused inside the residual window: the
+                        # process was not killed. Do not record a cleanup of it.
+                        if stop_guard is not None and isinstance(guard_result, dict):
+                            missed = guard_result.get("error")
+                            if missed in {
+                                "process_identity_mismatch",
+                                "process_not_found",
+                                "invalid_expected_identity",
+                                "identity_unavailable",
+                                "guard_unavailable",
+                            }:
+                                if not acted_pids:
+                                    self._restore_running_if_stopping(run)
+                                    return {
+                                        "error": str(missed),
+                                        "run_id": run_id,
+                                    }
+                                untouched_reasons.append((record.pid, str(missed)))
+                                continue
                         run.owner_session_id = None
                         run.owner_lease_id = None
                         run.state = "UNRECONCILED"
@@ -3823,7 +3867,46 @@ class ProcessLifecycle:
                             terminated=terminated,
                         )
                     terminated += 1
+                    acted_pids.append(record.pid)
                     survivors.remove(record)
+                if stop_guard is not None and acted_pids and untouched_reasons:
+                    run.owner_session_id = None
+                    run.owner_lease_id = None
+                    run.state = "UNRECONCILED"
+                    run.processes = list(survivors)
+                    degraded_partial: list[str] = []
+                    try:
+                        self.manifest.replace(run)
+                    except Exception:
+                        degraded_partial.append("manifest_failed")
+                    else:
+                        self._invalidate_box_cache()
+                    self.clear_idle_retirement(run_id)
+                    partial: dict[str, object] = {
+                        "error": "partial_stop",
+                        "outcome": "partial_stop",
+                        "acted_pids": list(acted_pids),
+                        "untouched_pids": [pid for pid, _reason in untouched_reasons],
+                        "untouched_reasons": [
+                            f"{pid}:{reason}" for pid, reason in untouched_reasons
+                        ],
+                        "terminated": len(acted_pids),
+                        "run_id": run_id,
+                        "state": "UNRECONCILED",
+                        "_http_status": 409,
+                    }
+                    if degraded_partial:
+                        partial["cleanup_degraded"] = degraded_partial
+                    return self._terminal_outcome(
+                        partial,
+                        "lifecycle_stop_outcome",
+                        client,
+                        reason="partial_stop",
+                        decision="partial_stop",
+                        run_id=run_id,
+                        state="UNRECONCILED",
+                        terminated=len(acted_pids),
+                    )
                 run.state = "EXITED"
                 run.owner_session_id = None
                 run.owner_lease_id = None
@@ -3893,6 +3976,13 @@ class ProcessLifecycle:
     def close_run(
         self, client: ClientIdentity, token: str | None, run_id: object
     ) -> dict[str, object]:
+        """Close the run's windows. Ordinary callers are unchanged.
+
+        Warden path, residual contract:
+        no effect after any doubt observed up to the final check of the first effect.
+        the only residual window is between that check and the syscall.
+        after the first effect, no foreign target is touched, and the outcome says so.
+        """
         if isinstance(run_id, str) and run_id:
             self.note_launcher_request(client, run_id)
         legacy_error = self._legacy_identity_error()
@@ -3923,7 +4013,7 @@ class ProcessLifecycle:
                     or run.state != "RUNNING"
                 ):
                     return self._reject_reserved(authority, command, "run_not_adopted")
-                close_guard = self._warden_idle_guard(client, "close")
+                close_guard = self._warden_idle_guard(client, "close", run_id)
                 if close_guard is not None:
                     refusal = self._idle_destruction_refusal(run, close_guard)
                     if refusal is not None:
@@ -4235,7 +4325,9 @@ class ProcessLifecycle:
         Gone processes are a mismatch before WM_CLOSE and are ignored before
         the fallback stop: a process that died during the wait is not foreign.
         Anything the guard cannot vouch for, a foreign identity, an unknown
-        scan or a generation change refuses the whole close. No partial close.
+        scan or a generation change refuses the whole close. No partial close
+        from this gate. partial_close is only the degraded result after the
+        first WM_CLOSE has already been posted.
         """
 
         if self.daemon_generation != daemon_generation:
@@ -4262,8 +4354,18 @@ class ProcessLifecycle:
             return "process_changed"
         return None
 
+    def _restore_running_if_stopping(self, run: RunRecord) -> None:
+        if run.state != "STOPPING":
+            return
+        run.state = "RUNNING"
+        try:
+            self.manifest.replace(run)
+        except Exception:
+            return
+        self._invalidate_box_cache()
+
     def _warden_idle_guard(
-        self, client: ClientIdentity, operation: str
+        self, client: ClientIdentity, operation: str, run_id: str
     ) -> Mapping[str, object] | None:
         guard = _IDLE_GUARD.get()
         if not isinstance(guard, dict):
@@ -4272,7 +4374,70 @@ class ProcessLifecycle:
             return None
         if guard.get("session_id") != client.session_id:
             return None
+        if guard.get("run_id") != run_id:
+            return None
         return guard
+
+    def _idle_switch_on(self, guard: Mapping[str, object]) -> bool:
+        """True only when the warden's switch file still reads as enabled."""
+
+        path = guard.get("settings_path")
+        if isinstance(path, Path):
+            settings = path
+        elif isinstance(path, str) and path:
+            settings = Path(path)
+        else:
+            return False
+        try:
+            # idle_warden imports this module, so the reader is loaded lazily.
+            from dayz_mcp.idle_warden import read_idle_warden_enabled
+        except Exception:
+            return False
+        try:
+            return read_idle_warden_enabled(settings) is True
+        except Exception:
+            return False
+
+    def _idle_effect_boundary(
+        self,
+        run: RunRecord,
+        run_id: str,
+        guard: Mapping[str, object],
+        record: ProcessRecord,
+        *,
+        first: bool,
+    ) -> tuple[str, str] | None:
+        """None allows the syscall that the caller must invoke next.
+
+        The switch, the FIFO stamp, the input anchors and the NativeProcessGuard
+        snapshot are this check. ``operation`` refuses this target and every
+        later one. ``target`` refuses only this target. Before the first effect,
+        any doubt is ``operation``.
+        """
+
+        try:
+            if not self._idle_switch_on(guard):
+                return ("operation", "warden_disabled")
+            if self._idle_anchors_changed(run_id, guard):
+                return ("operation", "anchor_changed")
+            if first:
+                refusal = self._idle_destruction_refusal(run, guard)
+                if refusal is not None:
+                    return ("operation", refusal)
+            kind, reason = self._classify_registered_process(record)
+        except Exception:
+            return ("operation", "anchor_changed")
+        if kind == "owned":
+            return None
+        if kind == "gone" and guard.get("allow_gone") is True:
+            return ("target", "process_not_found")
+        if first:
+            return ("operation", reason or "process_identity_mismatch")
+        if kind == "gone":
+            return ("target", "process_not_found")
+        if kind == "unknown":
+            return ("target", reason or "process_identity_mismatch")
+        return ("target", "process_identity_mismatch")
 
     def _idle_destruction_refusal(
         self, run: RunRecord, guard: Mapping[str, object]
@@ -4348,10 +4513,11 @@ class ProcessLifecycle:
     def _close_with_idle_guard(
         self, run: RunRecord, run_id: str, guard: Mapping[str, object]
     ) -> dict[str, object]:
-        """Post WM_CLOSE only when the whole set and the anchors still match.
+        """Post WM_CLOSE only when the boundary check still allows that window.
 
-        Windows are listed first. The identity check and the anchor check are
-        the last reads; the posts that follow do not touch the guard or the disk.
+        Windows are listed first. The binding check runs inside
+        ``post_wm_close``, after that window's PID read and immediately
+        before PostMessageW.
         """
 
         fns = getattr(self, "window_fns", None)
@@ -4370,6 +4536,8 @@ class ProcessLifecycle:
             return {"error": refusal, "run_id": run_id}
         if self._idle_anchors_changed(run_id, guard):
             return {"error": "anchor_changed", "run_id": run_id}
+        if not self._idle_switch_on(guard):
+            return {"error": "warden_disabled", "run_id": run_id}
         rank = {"client": 0, "server": 1}
         ordered = [
             item
@@ -4379,13 +4547,74 @@ class ProcessLifecycle:
             )
         ]
         role_rows: dict[str, dict[str, object]] = {}
+        acted_hwnds: list[int] = []
+        acted_pids: list[int] = []
+        untouched_hwnds: list[int] = []
+        untouched_pids: list[int] = []
+        untouched_reasons: list[str] = []
+        stop_rest = False
+        stop_reason = "anchor_changed"
+
+        def _remember_untouched(record: ProcessRecord, hwnd: int, reason: str) -> None:
+            untouched_hwnds.append(int(hwnd))
+            if record.pid not in untouched_pids:
+                untouched_pids.append(record.pid)
+            label = f"{record.pid}:{reason}"
+            if label not in untouched_reasons:
+                untouched_reasons.append(label)
+
         for record, windows in ordered:
             windows_found = len(windows)
             windows_posted = 0
+            if stop_rest:
+                for hwnd, _window_pid in windows:
+                    _remember_untouched(record, hwnd, stop_reason)
+                continue
             for hwnd, window_pid in windows:
-                if window_close.post_wm_close(hwnd, fns=fns, expected_pid=record.pid):
-                    windows_posted += 1
+                if stop_rest:
+                    _remember_untouched(record, hwnd, stop_reason)
+                    continue
+                decision: dict[str, tuple[str, str] | None] = {"boundary": None}
+
+                def before_post(
+                    record: ProcessRecord = record,
+                    decision: dict[str, tuple[str, str] | None] = decision,
+                ) -> bool:
+                    boundary = self._idle_effect_boundary(
+                        run,
+                        run_id,
+                        guard,
+                        record,
+                        first=not acted_hwnds,
+                    )
+                    decision["boundary"] = boundary
+                    return boundary is None
+
+                posted = window_close.post_wm_close(
+                    hwnd,
+                    fns=fns,
+                    expected_pid=record.pid,
+                    before_post=before_post,
+                )
                 _ = window_pid
+                if posted:
+                    windows_posted += 1
+                    acted_hwnds.append(int(hwnd))
+                    if record.pid not in acted_pids:
+                        acted_pids.append(record.pid)
+                    continue
+                boundary = decision["boundary"]
+                if boundary is None:
+                    reason = "window_not_posted"
+                    scope = "operation" if not acted_hwnds else "target"
+                else:
+                    scope, reason = boundary
+                if not acted_hwnds:
+                    return {"error": reason, "run_id": run_id}
+                _remember_untouched(record, hwnd, reason)
+                if scope == "operation":
+                    stop_rest = True
+                    stop_reason = reason
             existing = role_rows.get(record.role)
             if existing is None:
                 role_rows[record.role] = {
@@ -4398,6 +4627,17 @@ class ProcessLifecycle:
                 existing["windows_posted"] = (
                     int(existing["windows_posted"]) + windows_posted
                 )
+        if acted_hwnds and untouched_hwnds:
+            return {
+                "error": "partial_close",
+                "outcome": "partial_close",
+                "run_id": run_id,
+                "acted_pids": list(acted_pids),
+                "untouched_pids": list(untouched_pids),
+                "acted_hwnds": list(acted_hwnds),
+                "untouched_hwnds": list(untouched_hwnds),
+                "untouched_reasons": list(untouched_reasons),
+            }
         result: dict[str, object] = {"run_id": run_id}
         result.update(role_rows)
         return result
