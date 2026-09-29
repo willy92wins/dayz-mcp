@@ -30,6 +30,7 @@ def _minimal_args(cmd: str) -> dict:
         "vehicle_release",
         "camera_get",
         "weapon_state",
+        "weapon_fire",
     }:
         return {}
 
@@ -107,6 +108,12 @@ def _minimal_args(cmd: str) -> dict:
         return {"object_id": 1}
     if cmd == "hands_take":
         return {"object_id": 1}
+    if cmd == "weapon_raise":
+        return {"raised": True, "hold_ttl_s": 3.0}
+    if cmd == "weapon_aim":
+        return {"dx": 0.0, "dy": 0.0}
+    if cmd == "weapon_sights":
+        return {"mode": "ironsights"}
     if cmd == "notify_players":
         return {"show_time": 1.0, "title": "t", "detail": "", "icon": ""}
     if cmd == "entities_query":

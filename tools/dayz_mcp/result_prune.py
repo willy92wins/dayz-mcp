@@ -51,6 +51,7 @@ PRUNABLE_FIELDS = (
     # recurse, so the nested object stays with or without fields.
     "input_describe",
     "building_doors",
+    "weapon_action",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.

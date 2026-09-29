@@ -52,7 +52,11 @@
       "vehicle_get_in_client": "vehicle_get_in_client",
       "vehicle_release": "vehicle_release",
       "vehicle_telemetry": "vehicle_telemetry",
-      "vehicle_trace": "vehicle_trace"
+      "vehicle_trace": "vehicle_trace",
+      "weapon_aim": "weapon_aim",
+      "weapon_fire": "weapon_fire",
+      "weapon_raise": "weapon_raise",
+      "weapon_sights": "weapon_sights"
     }
   },
   "discriminating": {

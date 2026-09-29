@@ -130,6 +130,11 @@ class MCPArgs
 	// F3.7 infected_drive - heading in DEGREES (bridge converts to radians).
 	float heading;
 	float speed;
+	// weapon_raise. False lowers at once. Other commands leave this false.
+	bool raised;
+	// weapon_aim. Absolute value capped at MCPWeaponControl.AIM_CHANGE_ABS_MAX.
+	float dx;
+	float dy;
 
 	void MCPArgs()
 	{
@@ -517,6 +522,31 @@ class MCPDoorState
 	bool locked;
 };
 
+// Read-back for weapon_raise, weapon_aim, weapon_fire and weapon_sights.
+// Angles are the raw vanilla numbers. GetBaseAimingAngleLR/UD and the aim
+// overrides do not name a unit. aim_change_* are GetAimChange components
+// (human.c:31 documents that vector as radians) in index order.
+class MCPWeaponAction
+{
+	string verb;
+	bool raised;
+	bool input_raised;
+	float expires_at;
+	float hold_ttl_s;
+	float aim_lr_before;
+	float aim_ud_before;
+	float aim_lr_after;
+	float aim_ud_after;
+	float aim_change_0;
+	float aim_change_1;
+	float aim_change_2;
+	bool accepted;
+	string reason;
+	bool ironsights;
+	bool optics;
+	string mode;
+};
+
 // object_doors payload. door_count is GetDoorCount. doors is empty when the
 // count is outside the read cap (the result error names that refusal).
 class MCPBuildingDoors
@@ -609,6 +639,9 @@ class MCPResult
 	ref MCPInputDescribe input_describe;
 	// object_doors. Unassigned on other commands.
 	ref MCPBuildingDoors building_doors;
+	// weapon_raise / weapon_aim / weapon_fire / weapon_sights read-back.
+	// Unassigned on other commands.
+	ref MCPWeaponAction weapon_action;
 };
 
 class MCPJob
@@ -642,6 +675,9 @@ class MCPJob
 	int tick_poll_callback;
 	int tick_dispatch;
 	ref MCPDialogResult dialog;
+	int generation;
+	int sim_seen;
+	ref MCPWeaponAction weapon_action;
 };
 
 class MCPSpawnValidation

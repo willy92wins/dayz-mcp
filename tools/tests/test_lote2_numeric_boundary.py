@@ -79,8 +79,10 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
     def test_census_includes_alias_optional_vectors_and_conditional_tool(self):
         rows = set(self.rows)
         # 123 baseline + 4 from main (object_doors pos/object_id/timeout_s, input_describe timeout_s)
-        # + 3 from fb-0063 (hands_take object_id/timeout_s, weapon_state timeout_s).
-        self.assertEqual(len(rows), 130)
+        # + 3 from fb-0063 part 1 (hands_take object_id/timeout_s, weapon_state timeout_s)
+        # + 7 from fb-0063 part 2 (weapon_raise hold_ttl_s/timeout_s, weapon_aim dx/dy/timeout_s,
+        # weapon_fire timeout_s, weapon_sights timeout_s). raised is a bool, not in this census.
+        self.assertEqual(len(rows), 137)
         self.assertIn(("lease_acquire", "max_wait_s", "float"), rows)
         self.assertIn(("exec_enforce", "timeout_s", "float"), rows)
         self.assertIn(("object_anim", "phase", "float"), rows)
@@ -97,6 +99,13 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("object_doors", "object_id", "int"), rows)
         self.assertIn(("object_doors", "timeout_s", "float"), rows)
         self.assertIn(("input_describe", "timeout_s", "float"), rows)
+        self.assertIn(("weapon_raise", "hold_ttl_s", "float"), rows)
+        self.assertIn(("weapon_raise", "timeout_s", "float"), rows)
+        self.assertIn(("weapon_aim", "dx", "float"), rows)
+        self.assertIn(("weapon_aim", "dy", "float"), rows)
+        self.assertIn(("weapon_aim", "timeout_s", "float"), rows)
+        self.assertIn(("weapon_fire", "timeout_s", "float"), rows)
+        self.assertIn(("weapon_sights", "timeout_s", "float"), rows)
 
     async def test_every_numeric_parameter_rejects_both_booleans_before_handler(self):
         for name, param, shape in self.rows:

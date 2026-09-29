@@ -163,6 +163,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const float DRIVE_CLIENT_PREP_TIMEOUT_S = 5.0;
 	protected const float VEHICLE_CONTROL_DEFAULT_TTL_S = 3.0;
 	protected const float VEHICLE_CONTROL_MAX_TTL_S = 30.0;
+	// One command tick is enough to read an override back. 2s fails closed
+	// when CommandHandler never runs, ahead of the tool's own wait.
+	protected const float WEAPON_READ_TIMEOUT_S = 2.0;
 	protected const float DRIVE_CLIENT_SEARCH_RADIUS = 4.0;
 	protected const int DRIVE_CLIENT_PHASE_PREP = 0;
 	protected const int DRIVE_CLIENT_PHASE_IGNITE = 1;
@@ -180,7 +183,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_use,action_use_target,camera_get,camera_set,engine_set,input_describe,key_press,player_respawn," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace";
+	protected const string CLIENT_POLL_CAPS = "action_use,action_use_target,camera_get,camera_set,engine_set,input_describe,key_press,player_respawn," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -298,6 +301,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	void OnTick(float timeslice)
 	{
 		m_Tick = m_Tick + 1;
+		// Returns before any engine call while no weapon override is armed.
+		MCPWeaponControl.MaintainFromTick();
 
 		if (m_JobRunner)
 		{
@@ -735,12 +740,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	protected bool HasExclusiveJob()
 	{
+		int blocking;
+		int weaponJobs;
 		if (!m_JobRunner)
 		{
 			return false;
 		}
 
-		return m_JobRunner.CountExcluding("ui_dialog") > 0;
+		// weapon_action is a one-tick read-back. It must not refuse camera_set.
+		blocking = m_JobRunner.CountExcluding("ui_dialog");
+		weaponJobs = m_JobRunner.CountOfKind("weapon_action");
+		blocking = blocking - weaponJobs;
+		return blocking > 0;
 	}
 
 	protected void Dispatch(MCPCommand command)
@@ -846,6 +857,22 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "input_describe")
 		{
 			postNow = DispatchInputDescribe(command, result);
+		}
+		else if (command.cmd == "weapon_aim")
+		{
+			postNow = DispatchWeaponAim(command, result);
+		}
+		else if (command.cmd == "weapon_fire")
+		{
+			postNow = DispatchWeaponFire(command, result);
+		}
+		else if (command.cmd == "weapon_raise")
+		{
+			postNow = DispatchWeaponRaise(command, result);
+		}
+		else if (command.cmd == "weapon_sights")
+		{
+			postNow = DispatchWeaponSights(command, result);
 		}
 		else if (command.cmd == "ui_dialog")
 		{
@@ -1251,6 +1278,325 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		result.engine_on_server = car.EngineIsOn();
 		result.ok = true;
 		return true;
+	}
+
+	protected bool IsStrictFinite(float value)
+	{
+		if (value != value)
+		{
+			return false;
+		}
+		if (value >= float.MAX)
+		{
+			return false;
+		}
+		if (value <= -float.MAX)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	// Dead, unconscious, restrained, in a vehicle, or no weapon: fail closed.
+	protected string WeaponActorError(PlayerBase player)
+	{
+		Weapon_Base held;
+		if (!player)
+		{
+			return "no_player";
+		}
+		if (!player.IsAlive())
+		{
+			return "player_dead";
+		}
+		if (player.IsUnconscious())
+		{
+			return "player_unconscious";
+		}
+		if (player.IsRestrained())
+		{
+			return "player_restrained";
+		}
+		if (player.IsInVehicle())
+		{
+			return "player_in_vehicle";
+		}
+		held = Weapon_Base.Cast(player.GetEntityInHands());
+		if (!held)
+		{
+			return "no_weapon_in_hands";
+		}
+		return "";
+	}
+
+	protected MCPJob QueueWeaponJob(MCPCommand command, MCPResult result, string verb, int generation)
+	{
+		MCPJob job = new MCPJob();
+		job.id = command.id;
+		job.kind = "weapon_action";
+		job.generation = generation;
+		job.sim_seen = MCPWeaponControl.SimTick();
+		job.deadline_s = m_JobRunner.GetElapsedS() + WEAPON_READ_TIMEOUT_S;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		job.weapon_action = new MCPWeaponAction();
+		job.weapon_action.verb = verb;
+		m_JobRunner.AddJob(job);
+		return job;
+	}
+
+	protected bool DispatchWeaponRaise(MCPCommand command, MCPResult result)
+	{
+		PlayerBase player;
+		string actorError;
+		float holdTtl;
+		int generation;
+		MCPJob job;
+		if (!m_JobRunner)
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			return true;
+		}
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		actorError = WeaponActorError(player);
+		if (actorError != "")
+		{
+			result.ok = false;
+			result.error = actorError;
+			return true;
+		}
+		if (!player.GetInputController())
+		{
+			result.ok = false;
+			result.error = "no_input_controller";
+			return true;
+		}
+		holdTtl = command.args.hold_ttl_s;
+		if (!IsStrictFinite(holdTtl))
+		{
+			result.ok = false;
+			result.error = "bad_hold_ttl_s";
+			return true;
+		}
+		if (holdTtl <= 0.0)
+		{
+			result.ok = false;
+			result.error = "bad_hold_ttl_s";
+			return true;
+		}
+		if (holdTtl > MCPWeaponControl.RAISE_MAX_TTL_S)
+		{
+			result.ok = false;
+			result.error = "bad_hold_ttl_s";
+			return true;
+		}
+		if (command.args.raised)
+		{
+			generation = MCPWeaponControl.BeginRaise(player, holdTtl);
+		}
+		else
+		{
+			generation = MCPWeaponControl.BeginRelease(player);
+			holdTtl = 0.0;
+		}
+		job = QueueWeaponJob(command, result, "weapon_raise", generation);
+		job.weapon_action.hold_ttl_s = holdTtl;
+		job.weapon_action.expires_at = MCPWeaponControl.RaiseDeadlineS();
+		return false;
+	}
+
+	protected bool DispatchWeaponAim(MCPCommand command, MCPResult result)
+	{
+		PlayerBase player;
+		string actorError;
+		HumanCommandWeapons hcw;
+		float dx;
+		float dy;
+		int generation;
+		MCPJob job;
+		if (!m_JobRunner)
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			return true;
+		}
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		actorError = WeaponActorError(player);
+		if (actorError != "")
+		{
+			result.ok = false;
+			result.error = actorError;
+			return true;
+		}
+		if (!player.GetInputController())
+		{
+			result.ok = false;
+			result.error = "no_input_controller";
+			return true;
+		}
+		dx = command.args.dx;
+		dy = command.args.dy;
+		if (!IsStrictFinite(dx))
+		{
+			result.ok = false;
+			result.error = "bad_dx";
+			return true;
+		}
+		if (dx > MCPWeaponControl.AIM_CHANGE_ABS_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_dx";
+			return true;
+		}
+		if (dx < -MCPWeaponControl.AIM_CHANGE_ABS_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_dx";
+			return true;
+		}
+		if (!IsStrictFinite(dy))
+		{
+			result.ok = false;
+			result.error = "bad_dy";
+			return true;
+		}
+		if (dy > MCPWeaponControl.AIM_CHANGE_ABS_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_dy";
+			return true;
+		}
+		if (dy < -MCPWeaponControl.AIM_CHANGE_ABS_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_dy";
+			return true;
+		}
+		hcw = player.GetCommandModifier_Weapons();
+		if (!hcw)
+		{
+			result.ok = false;
+			result.error = "aim_unreadable";
+			return true;
+		}
+		generation = MCPWeaponControl.BeginAim(player, dx, dy);
+		job = QueueWeaponJob(command, result, "weapon_aim", generation);
+		job.weapon_action.aim_lr_before = hcw.GetBaseAimingAngleLR();
+		job.weapon_action.aim_ud_before = hcw.GetBaseAimingAngleUD();
+		return false;
+	}
+
+	protected bool DispatchWeaponFire(MCPCommand command, MCPResult result)
+	{
+		PlayerBase player;
+		string actorError;
+		int generation;
+		if (!m_JobRunner)
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			return true;
+		}
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		actorError = WeaponActorError(player);
+		if (actorError != "")
+		{
+			result.ok = false;
+			result.error = actorError;
+			return true;
+		}
+		generation = MCPWeaponControl.BeginFire(player);
+		QueueWeaponJob(command, result, "weapon_fire", generation);
+		return false;
+	}
+
+	protected bool DispatchWeaponSights(MCPCommand command, MCPResult result)
+	{
+		PlayerBase player;
+		string actorError;
+		Weapon_Base held;
+		ItemOptics optic;
+		string mode;
+		int generation;
+		MCPJob job;
+		if (!m_JobRunner)
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			return true;
+		}
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		actorError = WeaponActorError(player);
+		if (actorError != "")
+		{
+			result.ok = false;
+			result.error = actorError;
+			return true;
+		}
+		mode = command.args.mode;
+		held = Weapon_Base.Cast(player.GetEntityInHands());
+		// HandleADS (dayzplayerimplement.c:1970-1976). SetOptics only sets
+		// m_CameraOptics (dayzplayerimplement.c:380-393); SwitchOptics enters
+		// the optic (dayzplayerimplement.c:425-449). none is ExitSights
+		// (dayzplayerimplement.c:396-422), which leaves both.
+		if (mode == "ironsights")
+		{
+			if (!held.CanEnterIronsights())
+			{
+				result.ok = false;
+				result.error = "no_ironsights";
+				return true;
+			}
+			optic = held.GetAttachedOptics();
+			player.SwitchOptics(optic, false);
+			player.SetIronsights(true);
+		}
+		else if (mode == "optics")
+		{
+			optic = held.GetAttachedOptics();
+			if (!optic)
+			{
+				result.ok = false;
+				result.error = "no_optics";
+				return true;
+			}
+			player.SetIronsights(false);
+			player.SwitchOptics(optic, true);
+		}
+		else if (mode == "none")
+		{
+			player.ExitSights();
+		}
+		else
+		{
+			result.ok = false;
+			result.error = "bad_mode";
+			return true;
+		}
+		generation = MCPWeaponControl.BeginSights(player);
+		job = QueueWeaponJob(command, result, "weapon_sights", generation);
+		job.weapon_action.mode = mode;
+		return false;
 	}
 
 	protected Transport ResolveLiveSeatedTransport(PlayerBase player)
@@ -2846,8 +3192,97 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 			return false;
 		}
+		else if (job.kind == "weapon_action")
+		{
+			return ProcessWeaponActionJob(job);
+		}
 
 		return false;
+	}
+
+	// Posted one command tick after the override, so the numbers are what
+	// the engine read, not what this call asked for.
+	protected bool ProcessWeaponActionJob(MCPJob job)
+	{
+		string verb;
+		string abort;
+		PlayerBase player;
+		HumanInputController hic;
+		HumanCommandWeapons hcw;
+		vector change;
+		if (!job.weapon_action)
+		{
+			job.error = "bad_args";
+			return true;
+		}
+		verb = job.weapon_action.verb;
+		if (job.generation != MCPWeaponControl.Generation(verb))
+		{
+			abort = MCPWeaponControl.Abort(verb);
+			if (abort == "")
+			{
+				abort = "superseded";
+			}
+			job.error = abort;
+			return true;
+		}
+		if (MCPWeaponControl.SimTick() <= job.sim_seen)
+		{
+			return false;
+		}
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!player)
+		{
+			job.error = "no_player";
+			return true;
+		}
+		if (verb == "weapon_raise")
+		{
+			job.weapon_action.raised = player.IsRaised();
+			hic = player.GetInputController();
+			if (hic)
+			{
+				job.weapon_action.input_raised = hic.IsWeaponRaised();
+			}
+			job.weapon_action.expires_at = MCPWeaponControl.RaiseDeadlineS();
+			return true;
+		}
+		if (verb == "weapon_aim")
+		{
+			hcw = player.GetCommandModifier_Weapons();
+			hic = player.GetInputController();
+			if (!hcw)
+			{
+				job.error = "aim_unreadable";
+				return true;
+			}
+			if (!hic)
+			{
+				job.error = "aim_unreadable";
+				return true;
+			}
+			job.weapon_action.aim_lr_after = hcw.GetBaseAimingAngleLR();
+			job.weapon_action.aim_ud_after = hcw.GetBaseAimingAngleUD();
+			change = hic.GetAimChange();
+			job.weapon_action.aim_change_0 = change[0];
+			job.weapon_action.aim_change_1 = change[1];
+			job.weapon_action.aim_change_2 = change[2];
+			return true;
+		}
+		if (verb == "weapon_fire")
+		{
+			job.weapon_action.accepted = MCPWeaponControl.FireAccepted();
+			job.weapon_action.reason = MCPWeaponControl.FireReason();
+			return true;
+		}
+		if (verb == "weapon_sights")
+		{
+			job.weapon_action.ironsights = player.IsInIronsights();
+			job.weapon_action.optics = player.IsInOptics();
+			return true;
+		}
+		job.error = "unknown_command";
+		return true;
 	}
 
 	override bool MCP_IsJobReady(MCPJob job)
@@ -3615,10 +4050,21 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			PostUiDialogJob(job);
 		}
+
+		if (job.kind == "weapon_action")
+		{
+			PostWeaponActionJob(job, "");
+		}
 	}
 
 	override void MCP_PostJobFailure(MCPJob job)
 	{
+		if (job && job.kind == "weapon_action")
+		{
+			PostWeaponActionJob(job, "");
+			return;
+		}
+
 		if (job && job.kind == "ui_dialog")
 		{
 			if (m_Dialog && m_Dialog.IsOpen())
@@ -3660,6 +4106,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			}
 
 			PostUiDialogJob(job);
+			return;
+		}
+
+		if (job.kind == "weapon_action")
+		{
+			PostWeaponActionJob(job, "weapon_read_timeout");
 			return;
 		}
 
@@ -4301,8 +4753,57 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_ControlsSuppressed = true;
 	}
 
+	protected void PostWeaponActionJob(MCPJob job, string forcedError)
+	{
+		MCPResult result;
+		string verb;
+		if (!job)
+		{
+			return;
+		}
+		verb = "";
+		if (job.weapon_action)
+		{
+			verb = job.weapon_action.verb;
+		}
+		MCPWeaponControl.FinishWatch(verb, job.generation);
+		result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		result.weapon_action = job.weapon_action;
+		if (forcedError != "")
+		{
+			result.ok = false;
+			result.error = forcedError;
+			PostResult(result);
+			return;
+		}
+		if (job.error != "")
+		{
+			result.ok = false;
+			result.error = job.error;
+			PostResult(result);
+			return;
+		}
+		result.ok = true;
+		if (verb == "weapon_fire")
+		{
+			if (job.weapon_action)
+			{
+				result.accepted = job.weapon_action.accepted;
+				result.error = job.weapon_action.reason;
+			}
+		}
+		PostResult(result);
+	}
+
 	protected void RestoreGameplay()
 	{
+		// Drops every override this bridge armed. Same method for the
+		// restore_gameplay command, vehicle get-in cleanup and shutdown.
+		MCPWeaponControl.ReleaseAll("cleared");
 		// Destructor cleanup can outlive CGame, whose destructor nulls g_Game.
 		// Latched: this method has eight call sites and must not log per call.
 		// Log reaches only Print, which needs no CGame, so the line survives the
