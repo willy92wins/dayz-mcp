@@ -29,6 +29,7 @@ def _minimal_args(cmd: str) -> dict:
         "vehicle_telemetry",
         "vehicle_release",
         "camera_get",
+        "weapon_state",
     }:
         return {}
 
@@ -73,6 +74,8 @@ def _minimal_args(cmd: str) -> dict:
         return {}
     if cmd == "key_press":
         return {"dik": 1}
+    if cmd == "input_describe":
+        return {"name": "UAMoveForward"}
     if cmd == "vehicle_trace":
         return {
             "mode": "start",
@@ -98,7 +101,11 @@ def _minimal_args(cmd: str) -> dict:
         return {"object_id": 1, "classname": "Item", "dest": "cargo"}
     if cmd == "object_inspect":
         return {"type": "CarScript", "pos": [0.0, 0.0, 0.0], "want": ["health"]}
+    if cmd == "object_doors":
+        return {"type": "Land_Garage_Row_Small", "pos": [0.0, 0.0, 0.0]}
     if cmd == "object_delete":
+        return {"object_id": 1}
+    if cmd == "hands_take":
         return {"object_id": 1}
     if cmd == "notify_players":
         return {"show_time": 1.0, "title": "t", "detail": "", "icon": ""}

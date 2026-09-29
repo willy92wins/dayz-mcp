@@ -115,6 +115,8 @@ class MCPArgs
 	ref array<string> want;
 	// Optional player identity (GetPlainId). Empty = first human / broadcast.
 	string uid;
+	// input_describe: UAInput name. Empty on every other command.
+	string name;
 	// action_use: ActionBase typename (Type().ToString()), e.g. LFPG_ActionOpenBTCAtm.
 	string action;
 	// action_use_target: hands or self. action_use: empty or world.
@@ -371,6 +373,36 @@ class MCPEntityHit
 	}
 };
 
+// weapon_state muzzle row. magazine_ammo is 0 when no magazine is attached.
+class MCPWeaponMuzzleState
+{
+	int index;
+	bool chamber_empty;
+	bool chamber_fired_out;
+	bool magazine_present;
+	int magazine_ammo;
+	int internal_cartridges;
+};
+
+// weapon_state payload. shots is the server EEFired tally (MCP_Weapon.c).
+class MCPWeaponState
+{
+	int muzzle_index;
+	int mode_index;
+	string mode_name;
+	bool jammed;
+	int shots;
+	ref array<ref MCPWeaponMuzzleState> muzzles;
+
+	void MCPWeaponState()
+	{
+		muzzle_index = -1;
+		mode_index = -1;
+		mode_name = "";
+		muzzles = new array<ref MCPWeaponMuzzleState>();
+	}
+};
+
 // F3.6 object_inspect payload. bounding_center is model-local (GetBoundingCenter).
 class MCPObjectInspect
 {
@@ -428,6 +460,57 @@ class MCPInventoryAttachReceipt
 {
 	string dest;
 	string slot;
+};
+
+// input_describe: one key of the selected alternative. index is BindKeyCount's index.
+class MCPInputKey
+{
+	int index;
+	int key_code;
+	int device;
+};
+
+// input_describe payload. exists false means the name is not registered.
+// binding_count, locked, conflict_count and keys are meaningful only when exists is true.
+class MCPInputDescribe
+{
+	bool exists;
+	int binding_count;
+	bool locked;
+	int conflict_count;
+	ref array<ref MCPInputKey> keys;
+
+	void MCPInputDescribe()
+	{
+		keys = new array<ref MCPInputKey>();
+	}
+};
+
+// object_doors: one Building door index. Flags are the engine door predicates.
+class MCPDoorState
+{
+	int index;
+	bool open;
+	bool opening;
+	bool opening_ajar;
+	bool opened;
+	bool ajar;
+	bool closing;
+	bool closed;
+	bool locked;
+};
+
+// object_doors payload. door_count is GetDoorCount. doors is empty when the
+// count is outside the read cap (the result error names that refusal).
+class MCPBuildingDoors
+{
+	int door_count;
+	ref array<ref MCPDoorState> doors;
+
+	void MCPBuildingDoors()
+	{
+		doors = new array<ref MCPDoorState>();
+	}
 };
 
 class MCPResult
@@ -500,6 +583,15 @@ class MCPResult
 	bool started;
 	// ui_dialog nested payload. Unassigned on other commands.
 	ref MCPDialogResult dialog;
+	// hands_take: accepted means the request passed server checks. confirmed
+	// stays false; the predictive take finishes later. weapon_state is the read.
+	bool accepted;
+	bool confirmed;
+	ref MCPWeaponState weapon_state;
+	// input_describe. Unassigned on other commands.
+	ref MCPInputDescribe input_describe;
+	// object_doors. Unassigned on other commands.
+	ref MCPBuildingDoors building_doors;
 };
 
 class MCPJob

@@ -31,6 +31,19 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("bool_dik", {"dik": True}, (False, "bad_args")),
         ("extra_key", {"dik": 1, "extra": None}, (False, "bad_args")),
     ),
+    "input_describe": (
+        ("valid", {"name": "UAMoveForward"}, (True, None)),
+        ("space_is_printable", {"name": "UA Move"}, (True, None)),
+        ("length_128", {"name": "a" * 128}, (True, None)),
+        ("missing_name", {}, (False, "bad_args")),
+        ("empty_name", {"name": ""}, (False, "bad_args")),
+        ("length_129", {"name": "a" * 129}, (False, "bad_args")),
+        ("newline", {"name": "UA\n"}, (False, "bad_args")),
+        ("tab", {"name": "UA\t"}, (False, "bad_args")),
+        ("del", {"name": "UA\x7f"}, (False, "bad_args")),
+        ("non_ascii", {"name": "UA\u00f1"}, (False, "bad_args")),
+        ("extra_key", {"name": "UAMoveForward", "extra": None}, (False, "bad_args")),
+    ),
     "vehicle_trace": (
         (
             "valid",
@@ -316,11 +329,68 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             (False, "bad_args"),
         ),
     ),
+    "object_doors": (
+        (
+            "valid_type_pos",
+            {"type": "Land_Garage_Row_Small", "pos": [1.0, 2.0, 3.0]},
+            (True, None),
+        ),
+        ("valid_object_id", {"object_id": 1}, (True, None)),
+        ("missing_target", {}, (False, "bad_args")),
+        ("object_id_zero", {"object_id": 0}, (False, "bad_args")),
+        ("bool_object_id", {"object_id": True}, (False, "bad_args")),
+        (
+            "type_without_pos",
+            {"type": "Land_Garage_Row_Small"},
+            (False, "bad_args"),
+        ),
+        (
+            "phase_is_not_this_verb",
+            {
+                "type": "Land_Garage_Row_Small",
+                "pos": [1.0, 2.0, 3.0],
+                "phase": 1.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "both_target_shapes",
+            {
+                "object_id": 1,
+                "type": "Land_Garage_Row_Small",
+                "pos": [1.0, 2.0, 3.0],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "extra_key",
+            {
+                "type": "Land_Garage_Row_Small",
+                "pos": [1.0, 2.0, 3.0],
+                "extra": None,
+            },
+            (False, "bad_args"),
+        ),
+    ),
     "object_delete": (
         ("valid", {"object_id": 1}, (True, None)),
         ("extra_key", {"object_id": 1, "extra": None}, (False, "bad_args")),
         ("missing_object_id", {}, (False, "bad_args")),
         ("bool_is_not_int", {"object_id": True}, (False, "bad_args")),
+    ),
+    "hands_take": (
+        ("valid", {"object_id": 1}, (True, None)),
+        ("valid_with_uid", {"object_id": 7, "uid": "player-1"}, (True, None)),
+        ("extra_key", {"object_id": 1, "extra": None}, (False, "bad_args")),
+        ("missing_object_id", {}, (False, "bad_args")),
+        ("bool_is_not_int", {"object_id": True}, (False, "bad_args")),
+        ("zero_object_id", {"object_id": 0}, (False, "bad_args")),
+    ),
+    "weapon_state": (
+        ("empty", {}, (True, None)),
+        ("valid_with_uid", {"uid": "player-1"}, (True, None)),
+        ("extra_key", {"extra": None}, (False, "bad_args")),
+        ("uid_not_string", {"uid": 1}, (False, "bad_args")),
     ),
     "notify_players": (
         (

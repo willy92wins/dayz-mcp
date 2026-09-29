@@ -33,6 +33,7 @@ from dayz_mcp.session_coordination import (
     SessionCoordinator,
 )
 from tests.fence_helpers import bind_both_peers, INST_CLIENT, INST_SERVER
+from tests.session_http_helpers import SessionLoopback, _http
 from tests.lease_helpers import FakeClock, SequentialIds, SnapshotStore
 from tests.lifecycle_helpers import (
     IDENTITY,
@@ -82,27 +83,6 @@ IDENTITY_B = {
     "session_id": "B",
     "task_label": "reader",
 }
-
-
-def _http(base, method, path, key, payload=None, query=None, timeout=2.0):
-    params = dict(query or {})
-    if key is not None:
-        params["key"] = key
-    url = base + path + "?" + urllib.parse.urlencode(params)
-    data = None
-    headers = {}
-    if payload is not None:
-        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return int(response.status), json.loads(response.read().decode("utf-8") or "{}")
-    except urllib.error.HTTPError as exc:
-        try:
-            return int(exc.code), json.loads(exc.read().decode("utf-8") or "{}")
-        finally:
-            exc.close()
 
 
 # --- from test_task7_review_regressions.py ---
@@ -278,51 +258,7 @@ class RealLifecycleHttpQuarantineTest(unittest.TestCase):
 # --- from test_session_http.py ---
 
 
-class SessionHttpTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.key = "session-key"
-        self.audit_fails = False
-        self.audit_events: list[dict[str, object]] = []
-        self.store = SnapshotStore()
-        self.state = loopback.ServerState(self.key)
-        bind_both_peers(self.state)
-
-        def audit(event: dict[str, object]) -> bool:
-            self.audit_events.append(event)
-            return not self.audit_fails
-
-        self.coordinator = SessionCoordinator(
-            audit=audit,
-            cleanup=lambda session_id, lease_id, reason, vehicle_active: self.state.cleanup_owner(
-                session_id, lease_id, reason, vehicle_active
-            ),
-        )
-        # Task 3 adds these as daemon-composition attributes. Assigning them here
-        # keeps RED focused on the missing routes instead of constructor TypeError.
-        self.state.coordination = self.coordinator  # type: ignore[attr-defined]
-        self.state.retail_probe = lambda: {"known": True, "processes": []}
-        self.state.coordination_store = self.store  # type: ignore[attr-defined]
-        self.state.daemon_generation = "generation-test"  # type: ignore[attr-defined]
-        self.httpd = loopback.create_http_server(
-            0, self.state, log_sink=lambda _message: None, reclaim_orphans=False
-        )
-        self.thread = threading.Thread(
-            target=self.httpd.serve_forever,
-            kwargs={"poll_interval": 0.01},
-            daemon=True,
-        )
-        self.thread.start()
-        host, port = self.httpd.server_address
-        self.base = f"http://{host}:{port}"
-
-    def tearDown(self) -> None:
-        self.httpd.shutdown()
-        self.httpd.server_close()
-        self.thread.join(timeout=2.0)
-
-    def request(self, path: str, payload: dict, *, key: str | None = None) -> tuple[int, dict]:
-        return _http(self.base, "POST", path, self.key if key is None else key, payload)
-
+class SessionHttpTest(SessionLoopback, unittest.TestCase):
     def acquire(self, identity: dict = IDENTITY_A, purpose: str = "test") -> tuple[str, dict]:
         status, body = self.request(
             "/session/acquire", {"identity": identity, "purpose": purpose}
@@ -359,6 +295,88 @@ class SessionHttpTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(set(body), {"id"})
 
+    def test_enqueue_names_only_the_lease_the_command_renewed(self) -> None:
+        token, acquired = self.acquire()
+        status, body = self.request(
+            "/enqueue",
+            {
+                "identity": IDENTITY_A,
+                "lease_token": token,
+                "cmd": "world_spawn",
+                "args": {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0},
+                "peer": "server",
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(set(body), {"id", "lease_id"})
+        self.assertEqual(body["lease_id"], acquired["lease_id"])
+        # An old client that only reads id still parses the additive body.
+        self.assertIsInstance(int(body["id"]), int)
+
+        status, body = self.request(
+            "/enqueue",
+            {
+                "identity": IDENTITY_A,
+                "lease_token": "not-this-lease",
+                "cmd": "query_player_state",
+                "args": {},
+                "peer": "server",
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(set(body), {"id"})
+
+    def test_lifecycle_close_names_the_lease_authorize_renewed(self) -> None:
+        token, acquired = self.acquire()
+        coordinator = self.coordinator
+
+        class AuthorizingLifecycle:
+            def close_run(self, client, lease_token, run_id):
+                decision = coordinator.authorize(
+                    client, lease_token, "lifecycle_close"
+                )
+                if not decision.allowed:
+                    return {
+                        "error": decision.error,
+                        "_http_status": decision.http_status,
+                    }
+                return {"ok": True, "run_id": run_id}
+
+            def status(self, client):
+                return {"runs": [], "retail_quarantine": False}
+
+        self.state.lifecycle = AuthorizingLifecycle()
+        status, body = self.request(
+            "/lifecycle/close",
+            {"identity": IDENTITY_A, "lease_token": token, "run_id": "run-1"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["ok"], True)
+        self.assertEqual(body["lease_id"], acquired["lease_id"])
+        self.assertNotIn("_http_status", body)
+
+        # status does not authorize. A reused worker must not repeat the lease.
+        # state is a property of the live server, so this handler only needs that.
+        handler = loopback.Handler.__new__(loopback.Handler)
+        handler.server = type("_Srv", (), {"state": self.state})()
+        coordinator._note_renewed_lease(acquired["lease_id"])
+        handler._clear_request_renewed_lease()
+        self.assertIsNone(coordinator.renewed_lease_id())
+        self.assertEqual(handler._with_renewed_lease({"runs": []}), {"runs": []})
+
+        status, quiet = self.request(
+            "/lifecycle/status", {"identity": IDENTITY_A}
+        )
+        self.assertEqual(status, 200)
+        self.assertNotIn("lease_id", quiet)
+
+        status, refused = self.request(
+            "/lifecycle/close",
+            {"identity": IDENTITY_A, "run_id": "run-1"},
+        )
+        self.assertNotIn("lease_id", refused)
+        self.assertEqual(refused["error"], "lease_required")
+
     def test_enqueue_requires_valid_identity_and_unknown_is_mutating_first(self) -> None:
         status, body = self.request(
             "/enqueue", {"cmd": "query_player_state", "args": {}, "peer": "server"}
@@ -388,7 +406,7 @@ class SessionHttpTest(unittest.TestCase):
                 self.assertNotIn("raw-list-command-marker", audit_wire)
                 self.assertNotIn("raw-object-command-marker", audit_wire)
 
-        token, _ = self.acquire()
+        token, acquired = self.acquire()
         for malformed in malformed_commands:
             with self.subTest(kind=type(malformed).__name__, lease=True):
                 audit_start = len(self.audit_events)
@@ -401,7 +419,16 @@ class SessionHttpTest(unittest.TestCase):
                         "args": {},
                     },
                 )
-                self.assertEqual((status, body), (400, {"error": "not_whitelisted"}))
+                self.assertEqual(
+                    (status, body),
+                    (
+                        400,
+                        {
+                            "error": "not_whitelisted",
+                            "lease_id": acquired["lease_id"],
+                        },
+                    ),
+                )
                 active = self.coordinator._active  # type: ignore[attr-defined]
                 self.assertIsNotNone(active)
                 self.assertEqual(active.pending_authorizations, [])
@@ -430,7 +457,7 @@ class SessionHttpTest(unittest.TestCase):
                 )
                 self.assertEqual((status, body), (423, {"error": "lease_required"}))
 
-        token, _ = self.acquire()
+        token, acquired = self.acquire()
         for peer in (["raw-peer-list"], {"raw-peer-object": True}):
             with self.subTest(field="peer", kind=type(peer).__name__, lease=True):
                 status, body = self.request(
@@ -443,7 +470,10 @@ class SessionHttpTest(unittest.TestCase):
                         "peer": peer,
                     },
                 )
-                self.assertEqual((status, body), (400, {"error": "bad_peer"}))
+                self.assertEqual(
+                    (status, body),
+                    (400, {"error": "bad_peer", "lease_id": acquired["lease_id"]}),
+                )
                 self._assert_no_pending_reservation()
 
         for malformed_token in (
@@ -496,7 +526,14 @@ class SessionHttpTest(unittest.TestCase):
                     },
                 )
                 self.assertEqual(
-                    (status, body), (400, {"error": "bad_operation_timeout"})
+                    (status, body),
+                    (
+                        400,
+                        {
+                            "error": "bad_operation_timeout",
+                            "lease_id": acquired["lease_id"],
+                        },
+                    ),
                 )
                 self._assert_no_pending_reservation()
 

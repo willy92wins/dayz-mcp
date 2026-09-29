@@ -1095,6 +1095,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
 
     @slow_test
     async def test_dayz_test_run_preflight_client_reattach_keeps_run_id(self) -> None:
+        import mcp_capture
         from dayz_mcp import dayz_test_tool
         from tests.client_helpers import _fixture_client_runtime
         from tests.dayz_test_tool_helpers import _Bundle, _Opened, _policy, _sealed
@@ -1143,6 +1144,17 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
             dayz_test_tool.secure_launcher,
             "load_verified_bundle",
             return_value=_Bundle(sealed),
+        ), patch.object(
+            dayz_test_tool,
+            "evaluate_prerun_desktop",
+            return_value=mcp_capture.PrerunDesktopResult(
+                error_code=None,
+                desktop="unlocked",
+                mean_brightness=80.0,
+                nonblack_ratio=0.9,
+                waited_s=0.01,
+                remediation="",
+            ),
         ), patch.object(
             dayz_test_tool.secure_launcher,
             "execute_secure_launcher_request",

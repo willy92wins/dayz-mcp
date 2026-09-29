@@ -7,6 +7,9 @@ box_occupancy() with no injected now.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import shutil
 import sys
 import time
 import unittest
@@ -20,6 +23,7 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 from dayz_mcp import server as server_module
+from dayz_mcp import session_handoff
 from dayz_mcp.input_activity import InputAttributor, InputSample
 from dayz_mcp.process_lifecycle import (
     INPUT_SIGNAL_STALE_S,
@@ -40,6 +44,13 @@ from dayz_mcp.server import (
 )
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 from tests.client_helpers import _fixture_client_runtime
+from tests.daemon_helpers import (
+    DaemonHttpServer,
+    _attach_fixture_transport,
+    _config,
+    _http,
+    _wait_until_lease_claimable,
+)
 from tests.lifecycle_helpers import stamp_launcher
 from tests.mcp_helpers import _content_json
 from tests.process_lifecycle_helpers import (
@@ -50,12 +61,6 @@ from tests.process_lifecycle_helpers import (
     snapshot,
 )
 from tests.steam_helpers import FakeSteamGate
-from tests.test_daemon import (
-    DaemonHttpServer,
-    _config,
-    _http,
-    _wait_until_lease_claimable,
-)
 
 
 GENERATION = "gen-now"
@@ -355,6 +360,242 @@ class DirectAdoptMatrixTest(AdoptionFixture):
         result = self.lifecycle.adopt_run(REOPENED, token, RUN_ID)
         self.assertEqual(result.get("error"), "run_protected", result)
         self.assertEqual(result.get("use_state"), "unknown")
+        self.assertEqual(self.store.get(RUN_ID).state, "RUNNING_IDLE")
+
+    def test_input_after_the_snapshot_is_not_abandoned(self) -> None:
+        # F2: the sample lands inside _probes_for_snapshot, after the clocks
+        # were copied and before the adopt decides. The deciding read has to
+        # see it.
+        row = self.shape("idle_waiting")
+        self.assertEqual(row["use_state"], "idle_waiting", row)
+        self.bindings.bound.add(RUN_ID)
+        self.lifecycle._invalidate_box_cache()
+        self.assertEqual(self._row()["use_state"], "abandoned")
+        stamp_launcher(self.lifecycle, RUN_ID, LAUNCHER)
+        token = self._lease(OTHER)
+        life = self.lifecycle
+        original = life._probes_for_snapshot
+        observed: dict[str, object] = {}
+
+        def input_during_classification(snapshot, *, use_cache):
+            if "injected" not in observed:
+                observed["injected"] = True
+                self._human(time.time())
+                observed["after_input"] = self._row()["use_state"]
+            return original(snapshot, use_cache=use_cache)
+
+        life._probes_for_snapshot = input_during_classification
+        try:
+            result = life.adopt_run(OTHER, token, RUN_ID)
+        finally:
+            life._probes_for_snapshot = original
+        self.assertEqual(observed.get("after_input"), "human")
+        self.assertEqual(result.get("error"), "run_protected", result)
+        self.assertEqual(result.get("use_state"), "human")
+        stored = self.store.get(RUN_ID)
+        self.assertIsNone(stored.owner_session_id)
+        self.assertEqual(stored.state, "RUNNING_IDLE")
+        self.assertEqual(self._pending(), [])
+
+    def test_deciding_probe_failure_refuses(self) -> None:
+        self.shape("abandoned")
+        stamp_launcher(self.lifecycle, RUN_ID, LAUNCHER)
+        token = self._lease(OTHER)
+        life = self.lifecycle
+        original = life._probes_for_snapshot
+        calls = {"n": 0}
+
+        def fail_the_deciding_probe(snapshot, *, use_cache):
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise RuntimeError("deciding probe down")
+            return original(snapshot, use_cache=use_cache)
+
+        life._probes_for_snapshot = fail_the_deciding_probe
+        try:
+            result = life.adopt_run(OTHER, token, RUN_ID)
+        finally:
+            life._probes_for_snapshot = original
+        self.assertGreater(calls["n"], 1)
+        self.assertEqual(result.get("error"), "run_protected", result)
+        self.assertEqual(result.get("use_reason"), "unclassified")
+        self.assertIsNone(self.store.get(RUN_ID).owner_session_id)
+        self.assertEqual(self.store.get(RUN_ID).state, "RUNNING_IDLE")
+        self.assertEqual(self._pending(), [])
+
+    def _client_config(self) -> ServerConfig:
+        return ServerConfig(
+            mode="client",
+            key="reload-key",
+            port=19437,
+            client_platform="codex",
+            auto_spawn_daemon=False,
+            log_sink=lambda _message: None,
+        )
+
+    def test_reload_after_release_keeps_the_launcher(self) -> None:
+        # F1: the real worker path. session_release clears the lease carrier.
+        # The next ClientRuntime of the same supervisor must still be the launcher.
+        carrier = self.root / "session-handoff.json"
+        config = self._client_config()
+        with patch.dict(os.environ, {session_handoff.HANDOFF_ENV: str(carrier)}):
+            old = _fixture_client_runtime(config)
+            self.shape("idle")
+            stamp_launcher(self.lifecycle, RUN_ID, old.identity)
+            old._mirror_lease_to_carrier("test-token", "test-lease")
+            self.assertTrue(carrier.is_file())
+            old._mirror_lease_to_carrier(None, None)
+            self.assertFalse(carrier.exists())
+            identity_file = session_handoff.supervisor_identity_path(carrier)
+            self.assertTrue(identity_file.is_file())
+            reloaded = _fixture_client_runtime(config)
+        self.assertEqual(reloaded.identity, old.identity)
+        self.assertEqual(reloaded.identity.session_id, old.identity.session_id)
+        token = self._lease(reloaded.identity)
+        result = self.lifecycle.adopt_run(reloaded.identity, token, RUN_ID)
+        self.assertIs(result.get("ok"), True, result)
+        self.assertEqual(self.store.get(RUN_ID).owner_session_id, old.identity.session_id)
+
+    def test_reopen_and_daemon_restart_lose_the_reloaded_launcher(self) -> None:
+        carrier = self.root / "session-handoff.json"
+        reopened_carrier = self.root / "other-supervisor" / "session-handoff.json"
+        config = self._client_config()
+        with patch.dict(os.environ, {session_handoff.HANDOFF_ENV: str(carrier)}):
+            old = _fixture_client_runtime(config)
+            self.shape("idle")
+            stamp_launcher(self.lifecycle, RUN_ID, old.identity)
+            old._mirror_lease_to_carrier("test-token", "test-lease")
+            old._mirror_lease_to_carrier(None, None)
+            reloaded = _fixture_client_runtime(config)
+        self.assertEqual(reloaded.identity.session_id, old.identity.session_id)
+        with patch.dict(os.environ, {session_handoff.HANDOFF_ENV: str(reopened_carrier)}):
+            reopened = _fixture_client_runtime(config)
+        self.assertNotEqual(reopened.identity.session_id, old.identity.session_id)
+        token = self._lease(reopened.identity)
+        refused = self.lifecycle.adopt_run(reopened.identity, token, RUN_ID)
+        self.assertEqual(refused.get("error"), "run_protected", refused)
+        self.assertEqual(self.store.get(RUN_ID).state, "RUNNING_IDLE")
+        with patch.dict(os.environ, {session_handoff.HANDOFF_ENV: ""}):
+            unsupervised = _fixture_client_runtime(config)
+        self.assertNotEqual(unsupervised.identity.session_id, old.identity.session_id)
+        restarted = self._lifecycle()
+        self.lifecycle = restarted
+        self.assertEqual(restarted._launched_by, {})
+        token = self._lease(reloaded.identity)
+        forgotten = restarted.adopt_run(reloaded.identity, token, RUN_ID)
+        self.assertEqual(forgotten.get("error"), "run_protected", forgotten)
+        self.assertEqual(self.store.get(RUN_ID).state, "RUNNING_IDLE")
+
+    def test_live_carrier_beats_the_supervisor_file(self) -> None:
+        carrier = self.root / "session-handoff.json"
+        config = self._client_config()
+        with patch.dict(os.environ, {session_handoff.HANDOFF_ENV: str(carrier)}):
+            first = _fixture_client_runtime(config)
+            session_handoff.write_handoff(
+                carrier,
+                identity=OTHER,
+                lease_token="carried-token",
+                lease_id="carried-lease",
+                generation=1,
+            )
+            carried = _fixture_client_runtime(config)
+        self.assertEqual(carried.identity, OTHER)
+        self.assertNotEqual(carried.identity.session_id, first.identity.session_id)
+        self.assertEqual(carried.active_lease_token, "carried-token")
+
+    def test_input_inside_the_durable_write_stays_protected(self) -> None:
+        # The deciding classification has already dropped _activity_lock.
+        # Input that lands inside manifest.replace, before the bytes, is
+        # still this run's human use and must not leave a foreign owner.
+        self.shape("idle_waiting")
+        self.bindings.bound.add(RUN_ID)
+        self.lifecycle._invalidate_box_cache()
+        self.assertEqual(self._row()["use_state"], "abandoned")
+        stamp_launcher(self.lifecycle, RUN_ID, LAUNCHER)
+        token = self._lease(OTHER)
+        original = self.store.replace
+        observed: dict[str, object] = {}
+
+        def sample_before_replace(run):
+            if "owner_before_replace" not in observed:
+                observed["owner_before_replace"] = self.store.get(RUN_ID).owner_session_id
+                self._human(time.time())
+                observed["use_state_before_replace"] = self._row()["use_state"]
+            return original(run)
+
+        self.store.replace = sample_before_replace
+        try:
+            result = self.lifecycle.adopt_run(OTHER, token, RUN_ID)
+        finally:
+            self.store.replace = original
+        stored = self.store.get(RUN_ID)
+        self.assertIsNone(observed["owner_before_replace"])
+        self.assertEqual(observed["use_state_before_replace"], "human")
+        self.assertIsNone(result.get("ok"))
+        self.assertEqual(result.get("error"), "run_protected", result)
+        self.assertEqual(result.get("use_state"), "human")
+        self.assertIsNone(stored.owner_session_id)
+        self.assertEqual(stored.state, "RUNNING_IDLE")
+        self.assertFalse(self.lifecycle._adoption_marker_path().exists())
+        self.assertEqual(self._pending(), [])
+
+    def test_crash_after_the_owner_write_reverts_and_keeps_the_trace(self) -> None:
+        # Residue of a kill between manifest.replace and the revert: the
+        # foreign owner is durable, and the marker says human input won.
+        self.shape("abandoned")
+        life = self.lifecycle
+        with life._activity_lock:
+            life._note_pending_adoption_locked(RUN_ID, OTHER.session_id, "lease-crash")
+            life._invalidate_pending_adoption_locked(RUN_ID, "human")
+        run = self.store.get(RUN_ID)
+        assert run is not None
+        run.owner_session_id = OTHER.session_id
+        run.owner_lease_id = "lease-crash"
+        run.state = "RUNNING"
+        self.store.replace(run)
+        self.assertEqual(self.store.get(RUN_ID).owner_session_id, OTHER.session_id)
+        restarted = self._lifecycle()
+        self.lifecycle = restarted
+        stored = self.store.get(RUN_ID)
+        assert stored is not None
+        self.assertIsNone(stored.owner_session_id)
+        self.assertEqual(stored.state, "RUNNING_IDLE")
+        self.assertFalse(restarted._adoption_marker_path().exists())
+        settled = json.loads(
+            restarted._adoption_settled_path().read_text(encoding="utf-8")
+        )
+        self.assertTrue(settled["settled"])
+        self.assertTrue(settled["reverted"])
+        self.assertTrue(settled["invalidated"])
+        self.assertEqual(settled["invalidated_by"], "human")
+        self.assertEqual(settled["owner_session_id"], OTHER.session_id)
+
+    def test_copied_supervisor_identity_is_not_the_launcher(self) -> None:
+        carrier_a = self.root / "supervisor-a" / "session-handoff.json"
+        carrier_b = self.root / "supervisor-b" / "session-handoff.json"
+        config = self._client_config()
+        with patch.dict(os.environ, {session_handoff.HANDOFF_ENV: str(carrier_a)}):
+            original = _fixture_client_runtime(config)
+            self.shape("idle")
+            stamp_launcher(self.lifecycle, RUN_ID, original.identity)
+            original._mirror_lease_to_carrier("test-token", "test-lease")
+            original._mirror_lease_to_carrier(None, None)
+        identity_a = session_handoff.supervisor_identity_path(carrier_a)
+        identity_b = session_handoff.supervisor_identity_path(carrier_b)
+        identity_b.parent.mkdir()
+        shutil.copyfile(identity_a, identity_b)
+        session_handoff.clear_supervisor_identity(identity_a)
+        with patch.dict(os.environ, {session_handoff.HANDOFF_ENV: str(carrier_b)}):
+            impostor = _fixture_client_runtime(config)
+        self.assertNotEqual(impostor.identity.session_id, original.identity.session_id)
+        self.assertNotEqual(impostor.identity, original.identity)
+        copied = json.loads(identity_b.read_text(encoding="utf-8"))
+        self.assertEqual(copied["identity"]["session_id"], original.identity.session_id)
+        token = self._lease(impostor.identity)
+        result = self.lifecycle.adopt_run(impostor.identity, token, RUN_ID)
+        self.assertIsNone(result.get("ok"))
+        self.assertEqual(result.get("error"), "run_protected", result)
+        self.assertIsNone(self.store.get(RUN_ID).owner_session_id)
         self.assertEqual(self.store.get(RUN_ID).state, "RUNNING_IDLE")
 
     def test_daemon_restart_forgets_the_launcher(self) -> None:
@@ -848,9 +1089,7 @@ class McpProtectionMessageTest(unittest.IsolatedAsyncioTestCase):
                     log_sink=lambda _message: None,
                 )
             )
-            from tests.test_client_mode import ClientModeTest
-
-            ClientModeTest._attach_fixture_transport(runtime, srv)
+            _attach_fixture_transport(runtime, srv)
             payload = await runtime.session_acquire_wait("watch the box", 5.0)
             stored = life.manifest.get("test-run")
         finally:

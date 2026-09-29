@@ -35,8 +35,12 @@ READ_ONLY_COMMANDS = frozenset(
         # because a phase write shares the same command name).
         "surface_query",
         "object_inspect",
+        "object_doors",
         "entities_query",
         "ui_tree",
+        # Server read of the weapon in hands, including the EEFired tally.
+        "weapon_state",
+        "input_describe",
     }
 )
 MAX_OPERATION_PIN_S = 300.0
@@ -246,6 +250,10 @@ class SessionCoordinator:
             raise ValueError("invalid_cleanup_timeout")
         self._cleanup_timeout_s = float(cleanup_timeout_s)
         self._condition = threading.Condition()
+        # The request thread that just renewed a lease. Handlers read it back
+        # onto the wire; it is cleared at the start of every authorize and of
+        # every command handler so a reused HTTP worker cannot leak it.
+        self._renewed_lease = threading.local()
         self._active: _Lease | None = None
         self._releasing: _Lease | None = None
         self._grant_inflight: _GrantInFlight | None = None
@@ -1218,6 +1226,22 @@ class SessionCoordinator:
                 "cleanup_degraded": self._unique(degraded),
             }
 
+    def clear_renewed_lease(self) -> None:
+        """Forget any lease this thread just renewed. Command handlers call this
+        before they do work, so a reused worker thread cannot report a previous
+        request's lease."""
+        self._renewed_lease.lease_id = None
+
+    def renewed_lease_id(self) -> str | None:
+        """The lease authorize renewed on this thread, or None if it did not."""
+        value = getattr(self._renewed_lease, "lease_id", None)
+        if isinstance(value, str) and value:
+            return value
+        return None
+
+    def _note_renewed_lease(self, lease_id: str) -> None:
+        self._renewed_lease.lease_id = lease_id
+
     def authorize(
         self,
         client: ClientIdentity,
@@ -1225,6 +1249,7 @@ class SessionCoordinator:
         command: str,
         operation_timeout_s: float = 0.0,
     ) -> AuthorizationDecision:
+        self.clear_renewed_lease()
         with self._condition:
             degraded = tuple(self._expire_due())
             requires_lease = command_requires_lease(command)
@@ -1247,6 +1272,7 @@ class SessionCoordinator:
                         if lease.expires_at != expires_at:
                             lease.expires_at = expires_at
                             self._bump_revision_locked()
+                        self._note_renewed_lease(lease.lease_id)
                         return AuthorizationDecision(
                             True,
                             200,
@@ -1317,6 +1343,7 @@ class SessionCoordinator:
                 )
             )
             self._bump_revision_locked()
+            self._note_renewed_lease(lease.lease_id)
             return AuthorizationDecision(
                 True,
                 200,

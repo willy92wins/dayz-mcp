@@ -17,13 +17,15 @@ class MCPBridge : Managed
 	protected const float TELEMETRY_OBJECT_AT_MAX_RADIUS = 50.0;
 	// F3.4 / F3.6: fixed lookup radius when type+pos resolve an in-world object.
 	protected const float OBJECT_LOOKUP_RADIUS = 25.0;
+	// object_doors refuses a larger GetDoorCount instead of emitting an unbounded list.
+	protected const int DOOR_READ_MAX = 64;
 	// Capability census announced on every poll (caps=). Sorted ascending,
 	// comma separated; one entry per branch of Dispatch() before unknown_command.
 	// The daemon crosses this list against its registered tools; keep it in
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_inspect,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_enter,vehicle_prepare_fixture,world_spawn," + "world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
@@ -559,6 +561,18 @@ class MCPBridge : Managed
 		{
 			postNow = DispatchQueryGetInCondition(command, result);
 		}
+		else if (command.cmd == "hands_take")
+		{
+			postNow = DispatchHandsTake(command, result);
+		}
+		else if (command.cmd == "object_doors")
+		{
+			postNow = DispatchObjectDoors(command, result);
+		}
+		else if (command.cmd == "weapon_state")
+		{
+			postNow = DispatchWeaponState(command, result);
+		}
 		else if (command.cmd == "entities_query")
 		{
 			postNow = DispatchEntitiesQuery(command, result);
@@ -642,6 +656,232 @@ class MCPBridge : Managed
 
 		result.ok = true;
 		return true;
+	}
+
+	// hands_take validates on the server (object_id lives in m_RuntimeObjects)
+	// and asks the owning client to call PredictiveTakeEntityToHands. That call
+	// no-ops on a dedicated server (actiontakeitemtohands.c OnExecute returns
+	// before it). accepted is the synchronous verdict; confirmed stays false.
+	protected bool DispatchHandsTake(MCPCommand command, MCPResult result)
+	{
+		result.accepted = false;
+		result.confirmed = false;
+		if (!command.args || command.args.object_id <= 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		int objectId = command.args.object_id;
+		result.object_id = objectId;
+		if (!m_RuntimeObjects || !m_RuntimeObjects.Contains(objectId))
+		{
+			result.ok = false;
+			result.error = "object_id_unknown";
+			return true;
+		}
+
+		Object registered = m_RuntimeObjects.Get(objectId);
+		if (!registered)
+		{
+			result.ok = false;
+			result.error = "object_id_stale";
+			return true;
+		}
+
+		result.type = registered.GetType();
+		ItemBase item = ItemBase.Cast(registered);
+		if (!item)
+		{
+			result.ok = false;
+			result.error = "not_an_item";
+			return true;
+		}
+
+		string playerError = "";
+		PlayerBase player = ResolvePlayer(command.args, playerError);
+		if (!player)
+		{
+			result.ok = false;
+			result.error = playerError;
+			return true;
+		}
+
+		// Predicates live on PlayerBase so the client RPC recheck is the same
+		// function, not a second copy. validated type is result.type.
+		string refusal = player.MCPHandsTakeRefusal(item);
+		if (refusal != "")
+		{
+			result.ok = false;
+			result.error = refusal;
+			return true;
+		}
+
+		if (!GetGame().IsMultiplayer())
+		{
+			if (!ScriptInputUserData.CanStoreInputUserData())
+			{
+				result.ok = false;
+				result.error = "input_busy";
+				return true;
+			}
+			player.PredictiveTakeEntityToHands(item);
+			result.ok = true;
+			result.accepted = true;
+			result.confirmed = false;
+			return true;
+		}
+
+		int netLow = 0;
+		int netHigh = 0;
+		item.GetNetworkID(netLow, netHigh);
+		bool networked = true;
+		if (netLow == 0)
+		{
+			if (netHigh == 0)
+			{
+				networked = false;
+			}
+		}
+		if (!networked)
+		{
+			result.ok = false;
+			result.error = "not_networked";
+			return true;
+		}
+		if (!player.GetIdentity())
+		{
+			result.ok = false;
+			result.error = "no_identity";
+			return true;
+		}
+
+		if (!player.MCPRequestTakeToHands(item, result.type))
+		{
+			result.ok = false;
+			result.error = "rpc_failed";
+			return true;
+		}
+		result.ok = true;
+		result.accepted = true;
+		result.confirmed = false;
+		return true;
+	}
+
+	// world_spawn id of this object, or 0 when it is not in m_RuntimeObjects.
+	// map.GetElement / GetKey are O(n) (enscript.c:868, :878); foreach is the
+	// linear walk vanilla uses (effectmanager.c:547).
+	protected int RuntimeObjectId(Object subject)
+	{
+		if (!subject)
+		{
+			return 0;
+		}
+		if (!m_RuntimeObjects)
+		{
+			return 0;
+		}
+		foreach (int spawnedId, Object registered : m_RuntimeObjects)
+		{
+			if (registered == subject)
+			{
+				return spawnedId;
+			}
+		}
+		return 0;
+	}
+
+	// Server read. "Local player" on this peer is ResolvePlayer: empty uid is
+	// the first human. GetGame().GetPlayer() is null on a dedicated server.
+	protected bool DispatchWeaponState(MCPCommand command, MCPResult result)
+	{
+		result.accepted = false;
+		result.confirmed = false;
+		string playerError = "";
+		PlayerBase player = ResolvePlayer(command.args, playerError);
+		if (!player)
+		{
+			result.ok = false;
+			result.error = playerError;
+			result.found = false;
+			result.type = "";
+			return true;
+		}
+
+		EntityAI held = player.GetEntityInHands();
+		if (!held)
+		{
+			// Completed read. ok=false would become ToolError and drop type.
+			result.ok = true;
+			result.error = "no_weapon_in_hands";
+			result.found = false;
+			result.type = "";
+			result.object_id = 0;
+			return true;
+		}
+
+		result.object_id = RuntimeObjectId(held);
+		Weapon_Base heldWeapon = Weapon_Base.Cast(held);
+		if (!heldWeapon)
+		{
+			result.ok = true;
+			result.error = "no_weapon_in_hands";
+			result.found = false;
+			result.type = held.GetType();
+			return true;
+		}
+
+		result.weapon_state = BuildWeaponState(heldWeapon);
+		result.type = heldWeapon.GetType();
+		result.found = true;
+		result.ok = true;
+		result.error = "";
+		return true;
+	}
+
+	protected MCPWeaponState BuildWeaponState(Weapon_Base heldWeapon)
+	{
+		MCPWeaponState state = new MCPWeaponState();
+		int muzzleCount = heldWeapon.GetMuzzleCount();
+		int current = heldWeapon.GetCurrentMuzzle();
+		state.muzzle_index = current;
+		state.jammed = heldWeapon.IsJammed();
+		state.shots = heldWeapon.MCPShotCount();
+		if (current < 0 || current >= muzzleCount)
+		{
+			state.mode_index = -1;
+			state.mode_name = "";
+		}
+		else
+		{
+			state.mode_index = heldWeapon.GetCurrentMode(current);
+			state.mode_name = heldWeapon.GetCurrentModeName(current);
+		}
+
+		int i = 0;
+		while (i < muzzleCount)
+		{
+			MCPWeaponMuzzleState muzzle = new MCPWeaponMuzzleState();
+			muzzle.index = i;
+			muzzle.chamber_empty = heldWeapon.IsChamberEmpty(i);
+			muzzle.chamber_fired_out = heldWeapon.IsChamberFiredOut(i);
+			muzzle.internal_cartridges = heldWeapon.GetInternalMagazineCartridgeCount(i);
+			Magazine mag = heldWeapon.GetMagazine(i);
+			if (mag)
+			{
+				muzzle.magazine_present = true;
+				muzzle.magazine_ammo = mag.GetAmmoCount();
+			}
+			else
+			{
+				muzzle.magazine_present = false;
+				muzzle.magazine_ammo = 0;
+			}
+			state.muzzles.Insert(muzzle);
+			i = i + 1;
+		}
+		return state;
 	}
 
 	protected bool DispatchNotifyPlayers(MCPCommand command, MCPResult result)
@@ -1607,6 +1847,73 @@ class MCPBridge : Managed
 		return inventory.GetCargo() != null;
 	}
 
+	// Building door predicates (3_game/entities/building.c). Not GetAnimationPhase:
+	// that read stays in DispatchObjectAnim. OpenDoor, CloseDoor, LockDoor and
+	// UnlockDoor are not called. A non-Building is not_a_building.
+	protected bool DispatchObjectDoors(MCPCommand command, MCPResult result)
+	{
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		string error = "";
+		Object match = ResolveCommandObject(command.args, error);
+		if (!match)
+		{
+			result.ok = false;
+			result.error = error;
+			return true;
+		}
+
+		result.type = match.GetType();
+		if (command.args.object_id > 0)
+		{
+			result.object_id = command.args.object_id;
+		}
+
+		Building building = Building.Cast(match);
+		if (!building)
+		{
+			result.ok = false;
+			result.error = "not_a_building";
+			return true;
+		}
+
+		int doorCount = building.GetDoorCount();
+		MCPBuildingDoors report = new MCPBuildingDoors();
+		report.door_count = doorCount;
+		result.building_doors = report;
+		if (doorCount < 0 || doorCount > DOOR_READ_MAX)
+		{
+			result.ok = false;
+			result.error = "door_count_unsupported";
+			return true;
+		}
+
+		int doorIndex = 0;
+		while (doorIndex < doorCount)
+		{
+			MCPDoorState row = new MCPDoorState();
+			row.index = doorIndex;
+			row.open = building.IsDoorOpen(doorIndex);
+			row.opening = building.IsDoorOpening(doorIndex);
+			row.opening_ajar = building.IsDoorOpeningAjar(doorIndex);
+			row.opened = building.IsDoorOpened(doorIndex);
+			row.ajar = building.IsDoorOpenedAjar(doorIndex);
+			row.closing = building.IsDoorClosing(doorIndex);
+			row.closed = building.IsDoorClosed(doorIndex);
+			row.locked = building.IsDoorLocked(doorIndex);
+			report.doors.Insert(row);
+			doorIndex = doorIndex + 1;
+		}
+
+		result.ok = true;
+		return true;
+	}
+
 	// F3.6: memory points and bounding center. Missing memory points are product FAIL
 	// (exists:false) with ok:true — never a tool error.
 	protected bool DispatchObjectInspect(MCPCommand command, MCPResult result)
@@ -1722,7 +2029,7 @@ class MCPBridge : Managed
 	}
 
 	// Resolve a single world object by classname near pos. Zero matches -> object_not_found;
-	// more than one -> ambiguous_object. Used by object_anim and object_inspect.
+	// more than one -> ambiguous_object. Used by object_anim, object_inspect and object_doors.
 	protected Object FindUniqueObjectNearType(string typeName, vector pos, float radius, out string error)
 	{
 		error = "object_not_found";
