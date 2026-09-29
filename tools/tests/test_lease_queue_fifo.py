@@ -68,9 +68,11 @@ READ_ONLY = {
     "logs_since",
     "surface_query",
     "object_inspect",
+    "object_doors",
     "entities_query",
     "ui_tree",
     "weapon_state",
+    "input_describe",
 }
 
 

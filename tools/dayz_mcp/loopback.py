@@ -8,6 +8,7 @@ import errno
 import hmac
 import json
 import math
+import os
 import re
 import sys
 import threading
@@ -70,6 +71,7 @@ SERVER_COMMANDS = {
     "inventory_attach",
     "inventory_give",
     "object_inspect",
+    "object_doors",
     "infected_drive",
     "entities_query",
     "hands_take",
@@ -80,6 +82,7 @@ CLIENT_COMMANDS = {
     "camera_get",
     "restore_gameplay",
     "key_press",
+    "input_describe",
     "player_respawn",
     "vehicle_get_in_client",
     "engine_set",
@@ -373,6 +376,18 @@ def _is_non_empty_string(value: object) -> bool:
     return isinstance(value, str) and value != ""
 
 
+# input_describe name. Printable ASCII so the Enforce ToAscii check (32..126)
+# accepts every string this predicate accepts. 128 matches MCPClientBridge.c
+# INPUT_NAME_MAX.
+INPUT_NAME_MAX_CHARS = 128
+
+
+def is_printable_input_name(value: object) -> bool:
+    if not isinstance(value, str) or value == "" or len(value) > INPUT_NAME_MAX_CHARS:
+        return False
+    return all(32 <= ord(character) <= 126 for character in value)
+
+
 def _equal_to(expected: object) -> _FieldValidator:
     def validate(value: object) -> bool:
         return value == expected
@@ -583,6 +598,12 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={"dik": _integer_in_range(minimum=0)},
         )
     ),
+    "input_describe": _command_schema(
+        _schema_variant(
+            required=("name",),
+            validators={"name": is_printable_input_name},
+        )
+    ),
     "vehicle_trace": _command_schema(
         _schema_variant(
             required=(
@@ -748,6 +769,21 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "object_id": _integer_in_range(minimum=1),
                 "want": _is_non_empty_string_list,
             },
+        ),
+    ),
+    # Same target shapes as object_inspect, without want. A phase key is refused
+    # so this read cannot be confused with object_anim's write.
+    "object_doors": _command_schema(
+        _schema_variant(
+            required=("type", "pos"),
+            validators={
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+            },
+        ),
+        _schema_variant(
+            required=("object_id",),
+            validators={"object_id": _integer_in_range(minimum=1)},
         ),
     ),
     # Exact keys keep authenticated socket ingress fail-closed.
@@ -4299,10 +4335,19 @@ def _bind_exclusive(port: int, log_sink: LogSink, reclaim_orphans: bool) -> "Exc
             raise
         original_argv = getattr(sys, "orig_argv", None)
         expected_argv = list(original_argv) if isinstance(original_argv, list) else None
+        # full_image_path_of is the base interpreter the snapshot hashes. A venv's
+        # sys.executable is Scripts\python.exe, a different path. Empty, relative,
+        # or a failed lookup skips the reclaim; the original bind error stands.
+        try:
+            expected_executable = orphan_guard.full_image_path_of(os.getpid())
+        except Exception:
+            expected_executable = None
+        if not isinstance(expected_executable, str) or not os.path.isabs(expected_executable):
+            raise
         if not orphan_guard.try_reclaim_port(
             port,
             log=log_sink,
-            expected_executable=sys.executable,
+            expected_executable=expected_executable,
             expected_argv=expected_argv,
         ):
             raise

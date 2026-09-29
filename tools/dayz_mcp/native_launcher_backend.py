@@ -1225,6 +1225,29 @@ def _drain_after_job_close(
         )
 
 
+def _captured_addon_builder_path(image_authority: object) -> str | None:
+    """The one AddonBuilder path sealed on the loaded bundle, or None.
+
+    Read once from ``process_descriptors``. Zero matches, more than one, or a
+    path that is empty or contains NUL refuses AddonBuilder announcements for
+    the run. This does not consult ``DAYZ_TOOLS_PATH`` or the registry.
+    """
+    descriptors = getattr(image_authority, "process_descriptors", None)
+    if type(descriptors) is not tuple:
+        return None
+    paths: list[str] = []
+    for descriptor in descriptors:
+        if getattr(descriptor, "kind", None) is not BrokerKind.ADDON_BUILDER:
+            continue
+        path = getattr(descriptor, "announced_path", None)
+        if type(path) is not str or not path or "\0" in path:
+            return None
+        paths.append(path)
+    if len(paths) != 1:
+        return None
+    return paths[0]
+
+
 def _supervise_created_launcher(
     created: CreatedRegisteredLauncher,
     *,
@@ -1241,7 +1264,9 @@ def _supervise_created_launcher(
     job_completion_key = created.job_handle
     creator_thread_id = threading.get_ident()
     state = NativeDebugState(creator_thread_id=creator_thread_id)
-    announcement_decoder = ChildAnnouncementDecoder()
+    announcement_decoder = ChildAnnouncementDecoder(
+        addon_builder_path=_captured_addon_builder_path(image_authority)
+    )
     announcements: deque[tuple[ChildAnnouncement, float]] = deque()
     root_exit_code: int | None = None
     started = False

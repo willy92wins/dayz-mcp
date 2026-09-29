@@ -17,13 +17,15 @@ class MCPBridge : Managed
 	protected const float TELEMETRY_OBJECT_AT_MAX_RADIUS = 50.0;
 	// F3.4 / F3.6: fixed lookup radius when type+pos resolve an in-world object.
 	protected const float OBJECT_LOOKUP_RADIUS = 25.0;
+	// object_doors refuses a larger GetDoorCount instead of emitting an unbounded list.
+	protected const int DOOR_READ_MAX = 64;
 	// Capability census announced on every poll (caps=). Sorted ascending,
 	// comma separated; one entry per branch of Dispatch() before unknown_command.
 	// The daemon crosses this list against its registered tools; keep it in
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_inspect,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
@@ -563,6 +565,10 @@ class MCPBridge : Managed
 		{
 			postNow = DispatchHandsTake(command, result);
 		}
+		else if (command.cmd == "object_doors")
+		{
+			postNow = DispatchObjectDoors(command, result);
+		}
 		else if (command.cmd == "weapon_state")
 		{
 			postNow = DispatchWeaponState(command, result);
@@ -702,7 +708,9 @@ class MCPBridge : Managed
 			return true;
 		}
 
-		string refusal = HandsTakeRefusal(player, item);
+		// Predicates live on PlayerBase so the client RPC recheck is the same
+		// function, not a second copy. validated type is result.type.
+		string refusal = player.MCPHandsTakeRefusal(item);
 		if (refusal != "")
 		{
 			result.ok = false;
@@ -749,178 +757,39 @@ class MCPBridge : Managed
 			return true;
 		}
 
-		player.MCPRequestTakeToHands(item);
+		if (!player.MCPRequestTakeToHands(item, result.type))
+		{
+			result.ok = false;
+			result.error = "rpc_failed";
+			return true;
+		}
 		result.ok = true;
 		result.accepted = true;
 		result.confirmed = false;
 		return true;
 	}
 
-	protected string HandsTakeRefusal(PlayerBase player, ItemBase item)
+	// world_spawn id of this object, or 0 when it is not in m_RuntimeObjects.
+	// map.GetElement / GetKey are O(n) (enscript.c:868, :878); foreach is the
+	// linear walk vanilla uses (effectmanager.c:547).
+	protected int RuntimeObjectId(Object subject)
 	{
-		if (!item.IsTakeable())
+		if (!subject)
 		{
-			return "not_takeable";
+			return 0;
 		}
-		if (item.IsBeingPlaced())
+		if (!m_RuntimeObjects)
 		{
-			return "not_takeable";
+			return 0;
 		}
-		if (item.IsSetForDeletion())
+		foreach (int spawnedId, Object registered : m_RuntimeObjects)
 		{
-			return "not_takeable";
-		}
-
-		EntityAI held = player.GetEntityInHands();
-		if (held == item)
-		{
-			return "already_in_hands";
-		}
-
-		string reachError = HandsTakeReachError(player, item);
-		if (reachError != "")
-		{
-			return reachError;
-		}
-		if (!item.CanPutIntoHands(player))
-		{
-			return "cannot_take";
-		}
-		if (held)
-		{
-			if (!GameInventory.CanSwapEntitiesEx(held, item))
+			if (registered == subject)
 			{
-				return "hands_blocked";
-			}
-			return "";
-		}
-
-		GameInventory inventory = player.GetInventory();
-		if (!inventory)
-		{
-			return "cannot_take";
-		}
-		if (!inventory.CanAddEntityIntoHands(item))
-		{
-			return "cannot_take";
-		}
-		return "";
-	}
-
-	// Own cargo/attachment, or a ground item within UAMaxDistances.DEFAULT
-	// (actionconstants.c:112, the take-to-hands CCTObject distance). A parent
-	// that is not this player is reachable only when it is BaseBuildingBase,
-	// matching ActionTakeItemToHands.ActionCondition.
-	protected string HandsTakeReachError(PlayerBase player, ItemBase item)
-	{
-		int locType = InventoryLocationType.UNKNOWN;
-		bool located = false;
-		InventoryLocation loc = new InventoryLocation();
-		GameInventory itemInventory = item.GetInventory();
-		if (itemInventory)
-		{
-			located = itemInventory.GetCurrentInventoryLocation(loc);
-		}
-		if (located)
-		{
-			if (loc.IsValid())
-			{
-				locType = loc.GetType();
+				return spawnedId;
 			}
 		}
-
-		if (locType == InventoryLocationType.HANDS)
-		{
-			if (loc.GetParent() == player)
-			{
-				return "already_in_hands";
-			}
-			return "not_reachable";
-		}
-
-		Man owner = item.GetHierarchyRootPlayer();
-		if (owner == player)
-		{
-			if (locType == InventoryLocationType.CARGO)
-			{
-				return "";
-			}
-			if (locType == InventoryLocationType.PROXYCARGO)
-			{
-				return "";
-			}
-			if (locType == InventoryLocationType.ATTACHMENT)
-			{
-				return HandsTakeAttachmentError(item);
-			}
-			return "not_reachable";
-		}
-
-		EntityAI parent = item.GetHierarchyParent();
-		if (parent)
-		{
-			if (!BaseBuildingBase.Cast(parent))
-			{
-				return "not_reachable";
-			}
-			string detachError = HandsTakeAttachmentError(item);
-			if (detachError != "")
-			{
-				return detachError;
-			}
-		}
-
-		if (locType == InventoryLocationType.TEMP)
-		{
-			return "not_reachable";
-		}
-		if (locType == InventoryLocationType.VEHICLE)
-		{
-			return "not_reachable";
-		}
-		if (locType == InventoryLocationType.CARGO)
-		{
-			return "not_reachable";
-		}
-		if (locType == InventoryLocationType.PROXYCARGO)
-		{
-			return "not_reachable";
-		}
-		if (!HandsTakeWithinReach(player, item))
-		{
-			return "not_reachable";
-		}
-		return "";
-	}
-
-	protected string HandsTakeAttachmentError(ItemBase item)
-	{
-		EntityAI parent = item.GetHierarchyParent();
-		if (!parent)
-		{
-			return "not_reachable";
-		}
-		if (!item.CanDetachAttachment(parent))
-		{
-			return "not_reachable";
-		}
-		if (!parent.CanReleaseAttachment(item))
-		{
-			return "not_reachable";
-		}
-		return "";
-	}
-
-	protected bool HandsTakeWithinReach(PlayerBase player, ItemBase item)
-	{
-		float reach = UAMaxDistances.DEFAULT;
-		float reachSq = reach * reach;
-		float distSq = vector.DistanceSq(player.GetPosition(), item.GetPosition());
-		if (distSq > reachSq)
-		{
-			return false;
-		}
-		return true;
+		return 0;
 	}
 
 	// Server read. "Local player" on this peer is ResolvePlayer: empty uid is
@@ -943,17 +812,20 @@ class MCPBridge : Managed
 		EntityAI held = player.GetEntityInHands();
 		if (!held)
 		{
-			result.ok = false;
+			// Completed read. ok=false would become ToolError and drop type.
+			result.ok = true;
 			result.error = "no_weapon_in_hands";
 			result.found = false;
 			result.type = "";
+			result.object_id = 0;
 			return true;
 		}
 
+		result.object_id = RuntimeObjectId(held);
 		Weapon_Base heldWeapon = Weapon_Base.Cast(held);
 		if (!heldWeapon)
 		{
-			result.ok = false;
+			result.ok = true;
 			result.error = "no_weapon_in_hands";
 			result.found = false;
 			result.type = held.GetType();
@@ -1975,6 +1847,73 @@ class MCPBridge : Managed
 		return inventory.GetCargo() != null;
 	}
 
+	// Building door predicates (3_game/entities/building.c). Not GetAnimationPhase:
+	// that read stays in DispatchObjectAnim. OpenDoor, CloseDoor, LockDoor and
+	// UnlockDoor are not called. A non-Building is not_a_building.
+	protected bool DispatchObjectDoors(MCPCommand command, MCPResult result)
+	{
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		string error = "";
+		Object match = ResolveCommandObject(command.args, error);
+		if (!match)
+		{
+			result.ok = false;
+			result.error = error;
+			return true;
+		}
+
+		result.type = match.GetType();
+		if (command.args.object_id > 0)
+		{
+			result.object_id = command.args.object_id;
+		}
+
+		Building building = Building.Cast(match);
+		if (!building)
+		{
+			result.ok = false;
+			result.error = "not_a_building";
+			return true;
+		}
+
+		int doorCount = building.GetDoorCount();
+		MCPBuildingDoors report = new MCPBuildingDoors();
+		report.door_count = doorCount;
+		result.building_doors = report;
+		if (doorCount < 0 || doorCount > DOOR_READ_MAX)
+		{
+			result.ok = false;
+			result.error = "door_count_unsupported";
+			return true;
+		}
+
+		int doorIndex = 0;
+		while (doorIndex < doorCount)
+		{
+			MCPDoorState row = new MCPDoorState();
+			row.index = doorIndex;
+			row.open = building.IsDoorOpen(doorIndex);
+			row.opening = building.IsDoorOpening(doorIndex);
+			row.opening_ajar = building.IsDoorOpeningAjar(doorIndex);
+			row.opened = building.IsDoorOpened(doorIndex);
+			row.ajar = building.IsDoorOpenedAjar(doorIndex);
+			row.closing = building.IsDoorClosing(doorIndex);
+			row.closed = building.IsDoorClosed(doorIndex);
+			row.locked = building.IsDoorLocked(doorIndex);
+			report.doors.Insert(row);
+			doorIndex = doorIndex + 1;
+		}
+
+		result.ok = true;
+		return true;
+	}
+
 	// F3.6: memory points and bounding center. Missing memory points are product FAIL
 	// (exists:false) with ok:true — never a tool error.
 	protected bool DispatchObjectInspect(MCPCommand command, MCPResult result)
@@ -2090,7 +2029,7 @@ class MCPBridge : Managed
 	}
 
 	// Resolve a single world object by classname near pos. Zero matches -> object_not_found;
-	// more than one -> ambiguous_object. Used by object_anim and object_inspect.
+	// more than one -> ambiguous_object. Used by object_anim, object_inspect and object_doors.
 	protected Object FindUniqueObjectNearType(string typeName, vector pos, float radius, out string error)
 	{
 		error = "object_not_found";

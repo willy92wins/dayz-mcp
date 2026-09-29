@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from dayz_mcp.dayz_tools_paths import addon_builder_exe
+from dayz_mcp.native_broker_protocol import BrokerKind
 from tests._tiers import slow_test
 
 _ADDON_BUILDER_ANNOUNCE = addon_builder_exe().encode("utf-8")
@@ -18,6 +19,13 @@ _ADDON_BUILDER_ANNOUNCE = addon_builder_exe().encode("utf-8")
 def _handle_value(value: object) -> int:
     raw = getattr(value, "value", value)
     return int(raw or 0)
+
+
+class _SealedAddonBuilder:
+    kind = BrokerKind.ADDON_BUILDER
+
+    def __init__(self, announced_path: str) -> None:
+        self.announced_path = announced_path
 
 
 class _ImageAuthority:
@@ -33,6 +41,9 @@ class _ImageAuthority:
         self.calls: list[tuple[int, str]] = []
         self.child_calls: list[tuple[int, object]] = []
         self.helper_calls: list[int] = []
+        self.process_descriptors = (
+            _SealedAddonBuilder(_ADDON_BUILDER_ANNOUNCE.decode("utf-8")),
+        )
 
     def approve_debug_image(self, file_handle: int, *, event_kind: str) -> bool:
         self.calls.append((file_handle, event_kind))
