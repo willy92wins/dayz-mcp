@@ -1177,6 +1177,178 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("warnings", result)
 
 
+class Fb62c5LongLogTest(unittest.TestCase):
+    """Markers past the old 8 MiB head and tail still decide the warning.
+
+    Generated files only. Each read stays within `_RPT_READ_CHUNK`. A
+    `[Logout]: Player … finished` line stops the walk: that line alone makes
+    the warning impossible. A connection does not, because a later finished
+    line would clear it.
+    """
+
+    _CONNECTED = (
+        '1:14:03.254 Player "Dev" (steamID=76561197995575711 '
+        "pos=<12830.6, 10099.6, 6.0>) is connected\n"
+    ).encode("ascii")
+    _FINISHED = b"[Logout]: Player abc123 finished\n"
+
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _write_parts(self, path: Path, parts: list[bytes | tuple[bytes, int]]) -> None:
+        megabyte = 1024 * 1024
+        with path.open("wb") as stream:
+            for part in parts:
+                if isinstance(part, bytes):
+                    stream.write(part)
+                    continue
+                payload, count = part
+                written = 0
+                while written < count:
+                    step = min(megabyte, count - written)
+                    stream.write(payload * step)
+                    written += step
+
+    def _warnings(self, rpt: Path) -> tuple[list[str], list[int]]:
+        sizes: list[int] = []
+        real_open = Path.open
+
+        def counting_open(path: Path, *args, **kwargs):
+            handle = real_open(path, *args, **kwargs)
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if "r" in str(mode) and "b" in str(mode):
+                original = handle.read
+
+                def read(size: int = -1):
+                    data = original() if size is None or size < 0 else original(size)
+                    sizes.append(len(data))
+                    return data
+
+                handle.read = read  # type: ignore[method-assign]
+            return handle
+
+        with patch.object(Path, "open", counting_open):
+            warnings = dayz_test_tool._player_state_warnings(rpt)
+        return warnings, sizes
+
+    def _assert_bounded_reads(self, sizes: list[int]) -> None:
+        chunk = dayz_test_tool._RPT_READ_CHUNK
+        self.assertTrue(sizes)
+        self.assertTrue(all(size <= chunk for size in sizes))
+
+    def _assert_outside_old_window(self, size: int, marker_at: int, marker_len: int) -> None:
+        chunk = dayz_test_tool._RPT_READ_CHUNK
+        self.assertGreater(size, 16 * chunk)
+        self.assertGreaterEqual(marker_at, 8 * chunk)
+        self.assertLess(marker_at + marker_len, size - 8 * chunk)
+
+    def test_connection_in_the_middle_of_a_long_rpt_warns(self) -> None:
+        chunk = dayz_test_tool._RPT_READ_CHUNK
+        pad = 9 * chunk
+        rpt = self.root / "DayZDiag_x64_current.RPT"
+        self._write_parts(rpt, [(b"x", pad), self._CONNECTED, (b"x", pad)])
+        size = rpt.stat().st_size
+        self._assert_outside_old_window(size, pad, len(self._CONNECTED))
+        warnings, sizes = self._warnings(rpt)
+        self.assertEqual(warnings, [dayz_test_tool._PLAYER_STATE_NOT_SAVED])
+        self._assert_bounded_reads(sizes)
+        self.assertEqual(sum(sizes), size)
+
+    def test_finished_line_in_the_middle_of_a_long_rpt_suppresses(self) -> None:
+        chunk = dayz_test_tool._RPT_READ_CHUNK
+        pad = 9 * chunk
+        rpt = self.root / "DayZDiag_x64_current.RPT"
+        self._write_parts(
+            rpt, [self._CONNECTED, (b"x", pad), self._FINISHED, (b"x", pad)]
+        )
+        size = rpt.stat().st_size
+        marker_at = len(self._CONNECTED) + pad
+        self._assert_outside_old_window(size, marker_at, len(self._FINISHED))
+        warnings, sizes = self._warnings(rpt)
+        self.assertEqual(warnings, [])
+        self._assert_bounded_reads(sizes)
+        self.assertGreater(sum(sizes), marker_at)
+        self.assertLess(sum(sizes), size)
+
+    def test_finished_line_in_the_middle_of_a_long_script_log_suppresses(self) -> None:
+        chunk = dayz_test_tool._RPT_READ_CHUNK
+        pad = 9 * chunk
+        rpt = self.root / "DayZDiag_x64_current.RPT"
+        script = self.root / "script_2026-09-29_01-12-51.log"
+        rpt.write_bytes(b"boot\n" + self._CONNECTED)
+        self._write_parts(script, [(b"y", pad), self._FINISHED, (b"y", pad)])
+        script_size = script.stat().st_size
+        self._assert_outside_old_window(script_size, pad, len(self._FINISHED))
+        warnings, sizes = self._warnings(rpt)
+        self.assertEqual(warnings, [])
+        self._assert_bounded_reads(sizes)
+        self.assertGreater(sum(sizes), pad)
+        self.assertLess(sum(sizes), rpt.stat().st_size + script_size)
+
+    def test_marker_split_across_a_block_boundary_is_found(self) -> None:
+        chunk = dayz_test_tool._RPT_READ_CHUNK
+        boundary = 8 * chunk
+        overlap = dayz_test_tool._PLAYER_LOG_OVERLAP
+        self.assertLessEqual(len(self._CONNECTED), overlap)
+        self.assertLessEqual(len(self._FINISHED), overlap)
+        self._assert_halves_do_not_match(
+            self._CONNECTED, dayz_test_tool._PLAYER_CONNECTED_RE
+        )
+        self._assert_halves_do_not_match(
+            self._FINISHED, dayz_test_tool._LOGOUT_FINISHED_RE
+        )
+
+        warned = self.root / "split_connected.RPT"
+        self._write_split(warned, self._CONNECTED, boundary)
+        warnings, sizes = self._warnings(warned)
+        self.assertEqual(warnings, [dayz_test_tool._PLAYER_STATE_NOT_SAVED])
+        self._assert_bounded_reads(sizes)
+        self.assertEqual(sum(sizes), warned.stat().st_size)
+
+        quiet = self.root / "split_finished.RPT"
+        self._write_split(quiet, self._FINISHED, boundary, prefix=self._CONNECTED)
+        warnings, sizes = self._warnings(quiet)
+        self.assertEqual(warnings, [])
+        self._assert_bounded_reads(sizes)
+        self.assertGreater(sum(sizes), boundary)
+        self.assertLess(sum(sizes), quiet.stat().st_size)
+
+    def _assert_halves_do_not_match(self, marker: bytes, pattern: object) -> None:
+        half = len(marker) // 2
+        search = pattern.search
+        self.assertGreater(half, 0)
+        self.assertIsNone(search(marker[:half]))
+        self.assertIsNone(search(marker[half:]))
+        self.assertIsNotNone(search(marker))
+
+    def _write_split(
+        self, path: Path, marker: bytes, boundary: int, prefix: bytes = b""
+    ) -> None:
+        half = len(marker) // 2
+        start = boundary - half
+        self.assertGreaterEqual(start, len(prefix))
+        chunk = dayz_test_tool._RPT_READ_CHUNK
+        tail = 9 * chunk
+        self._write_parts(
+            path, [prefix, (b"y", start - len(prefix)), marker, (b"y", tail)]
+        )
+        size = path.stat().st_size
+        # The marker straddles the 8 MiB head cut, which is also a 1 MiB block
+        # boundary. The old head holds only the first half; the tail does not
+        # hold the rest.
+        self.assertGreater(size, 16 * chunk)
+        self.assertLess(start, 8 * chunk)
+        self.assertGreater(start + len(marker), 8 * chunk)
+        self.assertLess(start + len(marker), size - 8 * chunk)
+        with path.open("rb") as handle:
+            handle.seek(start)
+            self.assertEqual(handle.read(len(marker)), marker)
+
+
 CHILD_WINDOW = r'''
 import ctypes
 from ctypes import wintypes
