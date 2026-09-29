@@ -72,6 +72,8 @@ SERVER_COMMANDS = {
     "object_inspect",
     "infected_drive",
     "entities_query",
+    "hands_take",
+    "weapon_state",
 }
 CLIENT_COMMANDS = {
     "camera_set",
@@ -753,6 +755,24 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         _schema_variant(
             required=("object_id",),
             validators={"object_id": _integer_in_range(minimum=1)},
+        )
+    ),
+    # hands_take is predictive: the daemon accepts the request, the client
+    # finishes it. uid empty selects the first human, same as inventory_give.
+    "hands_take": _command_schema(
+        _schema_variant(
+            required=("object_id",),
+            optional=("uid",),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "uid": _is_string,
+            },
+        )
+    ),
+    "weapon_state": _command_schema(
+        _schema_variant(
+            optional=("uid",),
+            validators={"uid": _is_string},
         )
     ),
     "notify_players": _command_schema(

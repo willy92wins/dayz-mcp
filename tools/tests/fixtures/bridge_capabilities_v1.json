@@ -9,6 +9,7 @@
     "server": {
       "entities_query": "entities_query",
       "exec_enforce": null,
+      "hands_take": "hands_take",
       "infected_drive": "infected_drive",
       "inventory_attach": "inventory_attach",
       "inventory_give": "inventory_give",
@@ -25,6 +26,7 @@
       "telemetry_read": "telemetry_read",
       "vehicle_enter": "vehicle_enter",
       "vehicle_prepare_fixture": "vehicle_prepare_fixture",
+      "weapon_state": "weapon_state",
       "world_spawn": "world_spawn",
       "world_time_set": "world_time_set",
       "world_weather_set": "world_weather_set"

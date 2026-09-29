@@ -37,6 +37,8 @@ READ_ONLY_COMMANDS = frozenset(
         "object_inspect",
         "entities_query",
         "ui_tree",
+        # Server read of the weapon in hands, including the EEFired tally.
+        "weapon_state",
     }
 )
 MAX_OPERATION_PIN_S = 300.0

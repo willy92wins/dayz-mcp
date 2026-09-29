@@ -1,7 +1,7 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 63 typed
+game, put the world into a state, act, and read back what the engine did — 65 typed
 tools, server-authoritative, no keyboard, no OCR.**
 
 Two things fall out of that, and both are new for this game:
@@ -29,10 +29,10 @@ frame, raycast a placement, record a 20 Hz drive trace as a regression fixture
 | Step | Tool(s) | What it does |
 |---|---|---|
 | **Build + launch** | `dayz_test_run(project, mode, build=True, …)` | Packs the mod with AddonBuilder, starts a diag server and/or client with it loaded, waits for readiness. Managed run, returns a `run_id`. |
-| **Set up the scene** | `world_spawn`, `player_teleport`, `vehicle_enter`, `inventory_attach`, `inventory_give`, `world_time_set`, `world_weather_set`, `engine_set` | Put the world into the state the test needs — deterministically, from script. |
+| **Set up the scene** | `world_spawn`, `player_teleport`, `vehicle_enter`, `inventory_attach`, `inventory_give`, `hands_take`, `world_time_set`, `world_weather_set`, `engine_set` | Put the world into the state the test needs — deterministically, from script. |
 | **Act** | `vehicle_control`, `object_anim`, `camera_set`, `notify_players` | Drive, animate, frame the shot. |
 | **Iterate the UI** | `ui_reload_layout`, `ui_tree`, `ui_dialog`, `capture_screenshot` | Reload a `.layout` written into the client's profile directory and read back the rectangles the engine computed for it. The file is re-read on every call, so a panel can be edited and re-measured in seconds instead of one repack-and-boot per change. `ui_dialog` is the client modal (acknowledge/confirm/form) for the local player. |
-| **Observe** | `wait_for`, `logs_since`, `query_player_state`, `object_inspect`, `vehicle_telemetry`, `vehicle_trace`, `scene_raycast`, `surface_query`, `capture_screenshot` | Structured state from the server, log tails since a cursor, 20 Hz vehicle traces, raycasts, frames. Data an agent can assert on, not pixels to squint at. |
+| **Observe** | `wait_for`, `logs_since`, `query_player_state`, `weapon_state`, `object_inspect`, `vehicle_telemetry`, `vehicle_trace`, `scene_raycast`, `surface_query`, `capture_screenshot` | Structured state from the server, log tails since a cursor, 20 Hz vehicle traces, raycasts, frames. Data an agent can assert on, not pixels to squint at. |
 | **Reset + repeat** | `restore_gameplay`, `dayz_test_stop`, `session_acquire_wait`, `session_release`, `session_status` | Return the world to normal, stop the managed run, hand the game to the next session. |
 
 An agent that can call these can iterate on a mod the way it iterates on code: change,
@@ -62,10 +62,10 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` is broken in the diag build (T165276), so frames
 come from an external window grab of the rendered client, which only reads pixels.
 
-**63 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**65 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
 `action_use`, `bridge_status`, `camera_get`, `camera_set`, `capture_screenshot`,
-`dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `infected_drive`, `inventory_attach`, `inventory_give`, `key_press`,
+`dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `hands_take`, `infected_drive`, `inventory_attach`, `inventory_give`, `key_press`,
 `lease_acquire`, `list_projects`, `logs_since`, `notify_players`, `object_anim`,
 `object_delete`, `object_inspect`, `pipeline_feedback`, `pipeline_inbox`,
 `pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_respawn`, `player_teleport`, `query_all_players`, `query_get_in_condition`,
@@ -74,7 +74,7 @@ vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
 `session_status`, `session_wait`, `surface_query`, `telemetry_read`, `ui_click`, `ui_dialog`, `ui_focus`, `ui_reload_layout`,
 `ui_set_text`, `ui_tree`, `vehicle_control`, `vehicle_enter`, `vehicle_get_in_client`,
 `vehicle_prepare_fixture`, `vehicle_release`, `vehicle_telemetry`, `vehicle_trace`,
-`wait_for`, `world_spawn`, `world_time_set`, `world_weather_set`.
+`wait_for`, `weapon_state`, `world_spawn`, `world_time_set`, `world_weather_set`.
 Several agent sessions can share one running game through a single daemon that owns
 the port and hands out leases. The full surface, the transport and the security
 model are in [`dayz-mcp-architecture.md`](dayz-mcp-architecture.md);

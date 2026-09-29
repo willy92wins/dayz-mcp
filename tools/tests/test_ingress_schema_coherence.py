@@ -29,6 +29,10 @@ _DATE = {"year": 2026, "month": 9, "day": 28, "hour": 9, "minute": 0}
 # (tool, arguments, verb the tool must send)
 _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("query_player_state", {}, "query_player_state"),
+    ("weapon_state", {}, "weapon_state"),
+    ("weapon_state", {"uid": "76561198000000000"}, "weapon_state"),
+    ("hands_take", {"object_id": 1}, "hands_take"),
+    ("hands_take", {"object_id": 4, "uid": "76561198000000000"}, "hands_take"),
     ("query_all_players", {}, "query_all_players"),
     ("world_spawn", {"type": "CivilianSedan", "pos": _POS}, "world_spawn"),
     (

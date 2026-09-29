@@ -917,6 +917,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
     "server": {
         "entities_query": "entities_query",
         "exec_enforce": None,  # not a public tool by decision
+        "hands_take": "hands_take",
         "infected_drive": "infected_drive",
         "inventory_attach": "inventory_attach",
         "inventory_give": "inventory_give",
@@ -933,6 +934,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "telemetry_read": "telemetry_read",
         "vehicle_enter": "vehicle_enter",
         "vehicle_prepare_fixture": "vehicle_prepare_fixture",
+        "weapon_state": "weapon_state",
         "world_spawn": "world_spawn",
         "world_time_set": "world_time_set",
         "world_weather_set": "world_weather_set",
@@ -6242,6 +6244,58 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["uid"] = uid
         async with runtime.tool_lock:
             return await runtime.call_bridge("inventory_give", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} "
+            "Put a reachable item into a player's hands via "
+            "PredictiveTakeEntityToHands. object_id is the world_spawn id "
+            "(inventory_give does not return one). The take is predictive and "
+            "asynchronous: accepted=true with confirmed=false means the server "
+            "accepted the request, not that the item is in hands yet. Confirm "
+            "with weapon_state. uid empty (default) targets the first human. "
+            "No OS input and no client focus."
+        )
+    )
+    async def hands_take(
+        object_id: StrictInt,
+        uid: str = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(object_id, int) or isinstance(object_id, bool):
+            raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
+        if object_id <= 0:
+            raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
+        if not isinstance(uid, str):
+            raise ToolError(_bad_args("uid", uid, "be a string"))
+        args: dict[str, Any] = {"object_id": object_id}
+        if uid != "":
+            args["uid"] = uid
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("hands_take", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            "Read the weapon in a player's hands on the server: type, current "
+            "muzzle, per-muzzle chamber and magazine, jam, fire mode, and the "
+            "server shot counter. The counter increments in Weapon_Base.EEFired "
+            "on the server only, after super, and is not a replicated variable. "
+            "Empty hands or a non-weapon returns error=no_weapon_in_hands "
+            "(type is set when a non-weapon is held). uid empty (default) "
+            "targets the first human. Confirm a hands_take with this read."
+        )
+    )
+    async def weapon_state(
+        uid: str = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(uid, str):
+            raise ToolError(_bad_args("uid", uid, "be a string"))
+        args: dict[str, Any] = {}
+        if uid != "":
+            args["uid"] = uid
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("weapon_state", args, "server", _timeout(timeout_s))
 
     @app.tool(
         description=(

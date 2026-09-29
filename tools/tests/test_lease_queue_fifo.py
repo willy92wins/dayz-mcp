@@ -70,6 +70,7 @@ READ_ONLY = {
     "object_inspect",
     "entities_query",
     "ui_tree",
+    "weapon_state",
 }
 
 
