@@ -21,6 +21,7 @@ from dayz_mcp import loopback, server
 from dayz_mcp.server import ServerConfig, build_app
 from tests.client_helpers import _fixture_client_runtime
 from tests.mcp_helpers import _content_json
+from tests.wait_for_helpers import _ExactWaitClock
 from tests._tiers import slow_test
 
 def _live_run(profiles: Path) -> dict:
@@ -242,21 +243,26 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(result["elapsed_s"], 0.0)
 
     async def test_client_not_polling_wait_is_bounded_by_timeout_s(self) -> None:
-        import time
-
+        # The not-ready retry must stop on timeout_s. poll_interval_s is longer
+        # than the budget, so an uncapped sleep would land at 0.5.
         not_ready = "game_not_ready:reason=client_not_polling"
         runtime = _FakeRuntime(fallback=not_ready)
-        t0 = time.monotonic()
-        result = await server.execute_wait_for(
-            runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
-        )
-        wall = time.monotonic() - t0
+        clock = _ExactWaitClock()
+        with (
+            patch("dayz_mcp.server.time.monotonic", clock),
+            patch("dayz_mcp.server.asyncio.sleep", clock.sleep),
+        ):
+            result = await server.execute_wait_for(
+                runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
+            )
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
         self.assertEqual(result["last_error"], not_ready)
-        # One probe, or two on a coarse clock (see test_deadline_bounds_the_sleep).
-        self.assertIn(runtime.bridge_calls, (1, 2))
-        self.assertLess(wall, 0.3, f"deadline exceeded: {wall:.3f}s for timeout_s=0.1")
+        self.assertEqual(runtime.bridge_calls, 1)
+        self.assertEqual(result["probes"], 1)
+        self.assertEqual(result["not_ready_probes"], 1)
+        self.assertEqual(result["elapsed_s"], 0.1)
+        self.assertEqual(clock.sleeps, [0.1])
 
     @slow_test
     async def test_bare_client_not_polling_token_is_retried_and_named(self) -> None:
@@ -353,19 +359,23 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         # _enqueue_error that still contains client_not_polling must fail here:
         # wait_for retries only the exact mapped string.
         runtime = _real_client_runtime_http_only(_http_always_client_not_polling)
-        result = await server.execute_wait_for(
-            runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
-        )
+        clock = _ExactWaitClock()
+        with (
+            patch("dayz_mcp.server.time.monotonic", clock),
+            patch("dayz_mcp.server.asyncio.sleep", clock.sleep),
+        ):
+            result = await server.execute_wait_for(
+                runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
+            )
         self.assertTrue(result["ok"])
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
-        # One probe, or two on a coarse clock (see test_deadline_bounds_the_sleep);
-        # every probe met client_not_polling.
-        self.assertIn(result["probes"], (1, 2))
-        self.assertEqual(result["not_ready_probes"], result["probes"])
+        self.assertEqual(result["probes"], 1)
+        self.assertEqual(result["not_ready_probes"], 1)
         self.assertEqual(result["last_error"], _MAPPED_CLIENT_NOT_POLLING)
         self.assertEqual(result["tool"], "wait_for")
-        self.assertGreater(result["elapsed_s"], 0.0)
+        self.assertEqual(result["elapsed_s"], 0.1)
+        self.assertEqual(clock.sleeps, [0.1])
 
     @slow_test
     async def test_real_runtime_client_not_polling_then_players_satisfies(self) -> None:
@@ -407,22 +417,22 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
     async def test_deadline_bounds_the_sleep(self) -> None:
         # A poll interval longer than the remaining budget must not extend the
         # call past timeout_s: the single deadline governs the sleep too (Codex B-02).
-        import time
-
         runtime = _FakeRuntime(fallback="game_not_ready:reason=server_poll_stale")
-        t0 = time.monotonic()
-        result = await server.execute_wait_for(
-            runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
-        )
-        wall = time.monotonic() - t0
+        clock = _ExactWaitClock()
+        with (
+            patch("dayz_mcp.server.time.monotonic", clock),
+            patch("dayz_mcp.server.asyncio.sleep", clock.sleep),
+        ):
+            result = await server.execute_wait_for(
+                runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
+            )
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
-        # One probe, or two when the clock is coarse: asyncio treats a timer
-        # within one clock resolution as due, and on Windows before 3.13
-        # time.monotonic ticks every ~15.6 ms, so the capped sleep can end
-        # just before the deadline and leave room for a last probe.
-        self.assertIn(runtime.bridge_calls, (1, 2))
-        self.assertLess(wall, 0.3, f"deadline exceeded: {wall:.3f}s for timeout_s=0.1")
+        self.assertEqual(result["last_error"], "game_not_ready:reason=server_poll_stale")
+        self.assertEqual(runtime.bridge_calls, 1)
+        self.assertEqual(result["probes"], 1)
+        self.assertEqual(result["elapsed_s"], 0.1)
+        self.assertEqual(clock.sleeps, [0.1])
 
     async def test_sleep_does_not_hold_tool_lock(self) -> None:
         # Fails if wait_for wraps its whole body in `async with runtime.tool_lock`.
@@ -580,8 +590,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         # The while test can pass and the lock still be taken afterwards: a
         # free lock does not yield, so asyncio.timeout cannot win. The
         # reviewer reproduced a second probe at 0.109375s for timeout_s=0.1.
-        # Real-clock tests allow one or two probes (test_deadline_bounds_the_sleep);
-        # this clock jumps only inside the lock acquire that follows a passing
+        # This clock jumps only inside the lock acquire that follows a passing
         # while check, so a probe after the deadline is unambiguous.
         timeout_s = 0.1
         deadline = timeout_s
