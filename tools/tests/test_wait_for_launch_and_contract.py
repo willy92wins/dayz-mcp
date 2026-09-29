@@ -34,6 +34,8 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
+from unittest.mock import patch
+
 from dayz_mcp import log_tail, server
 from tests.test_wait_for import (
     _HttpClientNotPollingThenPlayers,
@@ -41,6 +43,7 @@ from tests.test_wait_for import (
     _http_always_client_not_polling,
     _real_client_runtime_http_only,
 )
+from tests.wait_for_helpers import _ExactWaitClock
 from tests._tiers import slow_test
 
 
@@ -540,21 +543,30 @@ class ClientNotPollingWaitContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.bridge_calls, 2)
 
     async def test_client_not_polling_does_not_extend_past_timeout_s(self) -> None:
+        # The not-ready retry must stop on timeout_s. poll_interval_s is longer
+        # than the budget, so an uncapped sleep would land at 0.5. The fake
+        # clock does not see a blocking sleep, so the wall bound stays real.
         import time
 
         not_ready = "game_not_ready:reason=client_not_polling"
         runtime = _PlayerProbeRuntime([], fallback=not_ready)
-        t0 = time.monotonic()
-        result = await server.execute_wait_for(
-            runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
-        )
-        wall = time.monotonic() - t0
+        clock = _ExactWaitClock()
+        started = time.perf_counter()
+        with (
+            patch("dayz_mcp.server.time.monotonic", clock),
+            patch("dayz_mcp.server.asyncio.sleep", clock.sleep),
+        ):
+            result = await server.execute_wait_for(
+                runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
+            )
+        wall = time.perf_counter() - started
         self.assertTrue(result["timed_out"])
         self.assertEqual(result["last_error"], not_ready)
-        # One probe, or two on a coarse clock: asyncio treats a timer within one
-        # clock resolution as due, and on Windows before 3.13 time.monotonic
-        # ticks every ~15.6 ms (see tests.test_wait_for).
-        self.assertIn(runtime.bridge_calls, (1, 2))
+        self.assertEqual(runtime.bridge_calls, 1)
+        self.assertEqual(result["probes"], 1)
+        self.assertEqual(result["not_ready_probes"], 1)
+        self.assertEqual(result["elapsed_s"], 0.1)
+        self.assertEqual(clock.sleeps, [0.1])
         self.assertLess(wall, 0.3, f"deadline exceeded: {wall:.3f}s for timeout_s=0.1")
 
     async def test_version_blocked_still_aborts_the_first_probe(self) -> None:
@@ -585,17 +597,22 @@ class ClientNotPollingWaitContractTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_runtime_client_not_polling_times_out_as_wait_for_json(self) -> None:
         runtime = _real_client_runtime_http_only(_http_always_client_not_polling)
-        result = await server.execute_wait_for(
-            runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
-        )
+        clock = _ExactWaitClock()
+        with (
+            patch("dayz_mcp.server.time.monotonic", clock),
+            patch("dayz_mcp.server.asyncio.sleep", clock.sleep),
+        ):
+            result = await server.execute_wait_for(
+                runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
+            )
         self.assertTrue(result["ok"])
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
-        # One probe, or two on a coarse clock (see tests.test_wait_for); every
-        # probe met client_not_polling.
-        self.assertIn(result["probes"], (1, 2))
-        self.assertEqual(result["not_ready_probes"], result["probes"])
+        self.assertEqual(result["probes"], 1)
+        self.assertEqual(result["not_ready_probes"], 1)
         self.assertEqual(result["last_error"], _MAPPED_CLIENT_NOT_POLLING)
+        self.assertEqual(result["elapsed_s"], 0.1)
+        self.assertEqual(clock.sleeps, [0.1])
 
     @slow_test
     async def test_real_runtime_client_not_polling_then_players_satisfies(self) -> None:
