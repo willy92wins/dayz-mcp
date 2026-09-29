@@ -9,7 +9,6 @@ import json
 import os
 import re
 import shutil
-import struct
 import subprocess
 import sys
 import unittest
@@ -26,6 +25,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import install_mcp as installer
+from tests.pe_helpers import write_fake_x64_pe
 from install_mcp import (
     InstallerContractError,
     InstallerExecutionError,
@@ -72,17 +72,6 @@ def _short_path_or_skip(test: unittest.TestCase, path: Path) -> str:
             "volume did not return an 8.3 short name distinct from the long path"
         )
     return short
-
-
-def write_fake_x64_pe(path: Path) -> None:
-    payload = bytearray(512)
-    payload[0:2] = b"MZ"
-    struct.pack_into("<I", payload, 0x3C, 0x80)
-    payload[0x80:0x84] = b"PE\0\0"
-    struct.pack_into("<H", payload, 0x84, 0x8664)
-    struct.pack_into("<H", payload, 0x94, 0xF0)
-    struct.pack_into("<H", payload, 0x98, 0x20B)
-    path.write_bytes(payload)
 
 
 def cli_entry_payload(path: Path) -> dict[str, object]:
@@ -299,14 +288,32 @@ class InstallerCliManifestTest(unittest.TestCase):
             load_installer_cli_manifest(self.manifest_path)
         self.assertEqual(caught.exception.code, "installer_cli_path_not_canonical")
 
-    def test_long_path_failure_refuses_a_matching_cli_spelling(self) -> None:
+    def test_matching_long_cli_path_is_accepted_when_expansion_fails(self) -> None:
         pinned = importlib.import_module("dayz_mcp.pinned_keyfile")
         self.write_manifest()
         with patch.object(
             pinned._kernel32, "GetLongPathNameW", return_value=0
-        ), self.assertRaises(InstallerContractError) as caught:
+        ) as expanded:
+            manifest = load_installer_cli_manifest(self.manifest_path)
+        self.assertEqual(expanded.call_count, 0)
+        self.assertEqual(manifest.entries["CLAUDE"].path, self.claude.absolute())
+
+    def test_short_cli_path_is_refused_when_expansion_fails(self) -> None:
+        pinned = importlib.import_module("dayz_mcp.pinned_keyfile")
+        nested = self.root / "ALongDirectoryNameForShortPaths"
+        nested.mkdir()
+        cli = nested / "claude.exe"
+        write_fake_x64_pe(cli)
+        short = _short_path_or_skip(self, cli)
+        payload = self.payload()
+        payload["entries"]["CLAUDE"] = self._entry_spelled(cli, short)
+        self.write_manifest(payload)
+        with patch.object(
+            pinned._kernel32, "GetLongPathNameW", return_value=0
+        ) as expanded, self.assertRaises(InstallerContractError) as caught:
             load_installer_cli_manifest(self.manifest_path)
         self.assertEqual(caught.exception.code, "installer_cli_path_not_canonical")
+        self.assertGreater(expanded.call_count, 0)
 
     def test_entry_reported_as_symlink_is_rejected_even_when_bytes_are_valid(self) -> None:
         self.write_manifest()

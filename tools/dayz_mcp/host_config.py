@@ -106,25 +106,18 @@ def _reject_duplicate_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, o
 
 
 def _same_canonical_long_path(left: str, right: str) -> bool:
-    """True when both paths expand to one long form.
+    """Main's normpath compare, then an 8.3 expansion if that missed.
 
-    On Windows a failure to expand refuses. The raw spellings are not
-    compared, so an 8.3 path is accepted only when its long form matches.
+    A path main accepts does not call GetLongPathNameW, so missing list
+    access on a parent is not a new refusal. Expansion failure refuses.
     """
     if os.name != "nt":
         return os.path.normcase(os.path.normpath(left)) == os.path.normcase(
             os.path.normpath(right)
         )
-    from dayz_mcp.pinned_keyfile import CanonicalPathError, canonical_long_path
+    from dayz_mcp.pinned_keyfile import same_requested_path
 
-    try:
-        left_long = canonical_long_path(left)
-        right_long = canonical_long_path(right)
-    except CanonicalPathError:
-        return False
-    return os.path.normcase(os.path.normpath(left_long)) == os.path.normcase(
-        os.path.normpath(right_long)
-    )
+    return same_requested_path(left, right, collapse=True)
 
 
 def _canonical_existing_file(value: object) -> str:

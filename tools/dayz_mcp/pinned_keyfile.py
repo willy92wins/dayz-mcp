@@ -109,7 +109,8 @@ def canonical_long_path(path: str) -> str:
     """Long form of an existing path.
 
     Expands 8.3 names and leaves reparse points in the spelling. A failure
-    raises: callers must refuse, not compare the raw spelling instead.
+    raises. Callers try this only after the raw spelling compare missed:
+    the call needs list access on every ancestor.
     """
     if not isinstance(path, str) or not path or "\0" in path:
         raise CanonicalPathError()
@@ -121,6 +122,40 @@ def canonical_long_path(path: str) -> str:
     if not value:
         raise CanonicalPathError()
     return value
+
+
+def _spelling(value: str, *, collapse: bool) -> str:
+    if collapse:
+        return os.path.normcase(os.path.normpath(value))
+    return os.path.normcase(value)
+
+
+def _expanded_matches(candidate: str, observed: str, *, collapse: bool) -> bool:
+    try:
+        expanded = canonical_long_path(candidate)
+    except CanonicalPathError:
+        return False
+    return _spelling(expanded, collapse=collapse) == _spelling(
+        observed, collapse=collapse
+    )
+
+
+def same_requested_path(left: str, right: str, *, collapse: bool) -> bool:
+    """True when main's spelling compare matches, or one side is its 8.3 form.
+
+    The raw compare runs first and does not call GetLongPathNameW. A long
+    path main already accepts stays accepted even when listing the parents
+    is denied. Expansion is attempted only after a mismatch, and a failure
+    to expand leaves that mismatch: callers refuse.
+    collapse is False for the installer, which must keep ".." and junctions.
+    """
+    if _spelling(left, collapse=collapse) == _spelling(right, collapse=collapse):
+        return True
+    if os.name != "nt":
+        return False
+    return _expanded_matches(left, right, collapse=collapse) or _expanded_matches(
+        right, left, collapse=collapse
+    )
 
 
 def _final_handle_path(handle: object) -> str:
@@ -190,14 +225,7 @@ def read_pinned_keyfile(path: str) -> str:
         ):
             raise ValueError("invalid_daemon_keyfile")
         final_path = _final_handle_path(handle)
-        try:
-            requested_long = canonical_long_path(canonical)
-            final_long = canonical_long_path(final_path)
-        except CanonicalPathError:
-            raise ValueError("invalid_daemon_keyfile") from None
-        if os.path.normcase(os.path.normpath(requested_long)) != os.path.normcase(
-            os.path.normpath(final_long)
-        ):
+        if not same_requested_path(canonical, final_path, collapse=True):
             raise ValueError("invalid_daemon_keyfile")
         raw = _read_bounded(handle)
     finally:
