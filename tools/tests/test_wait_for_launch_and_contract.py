@@ -544,10 +544,14 @@ class ClientNotPollingWaitContractTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_client_not_polling_does_not_extend_past_timeout_s(self) -> None:
         # The not-ready retry must stop on timeout_s. poll_interval_s is longer
-        # than the budget, so an uncapped sleep would land at 0.5.
+        # than the budget, so an uncapped sleep would land at 0.5. The fake
+        # clock does not see a blocking sleep, so the wall bound stays real.
+        import time
+
         not_ready = "game_not_ready:reason=client_not_polling"
         runtime = _PlayerProbeRuntime([], fallback=not_ready)
         clock = _ExactWaitClock()
+        started = time.perf_counter()
         with (
             patch("dayz_mcp.server.time.monotonic", clock),
             patch("dayz_mcp.server.asyncio.sleep", clock.sleep),
@@ -555,6 +559,7 @@ class ClientNotPollingWaitContractTest(unittest.IsolatedAsyncioTestCase):
             result = await server.execute_wait_for(
                 runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
             )
+        wall = time.perf_counter() - started
         self.assertTrue(result["timed_out"])
         self.assertEqual(result["last_error"], not_ready)
         self.assertEqual(runtime.bridge_calls, 1)
@@ -562,6 +567,7 @@ class ClientNotPollingWaitContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["not_ready_probes"], 1)
         self.assertEqual(result["elapsed_s"], 0.1)
         self.assertEqual(clock.sleeps, [0.1])
+        self.assertLess(wall, 0.3, f"deadline exceeded: {wall:.3f}s for timeout_s=0.1")
 
     async def test_version_blocked_still_aborts_the_first_probe(self) -> None:
         runtime = _PlayerProbeRuntime(["version_blocked", 1], fallback=1)

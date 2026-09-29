@@ -244,10 +244,14 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_client_not_polling_wait_is_bounded_by_timeout_s(self) -> None:
         # The not-ready retry must stop on timeout_s. poll_interval_s is longer
-        # than the budget, so an uncapped sleep would land at 0.5.
+        # than the budget, so an uncapped sleep would land at 0.5. The fake
+        # clock does not see a blocking sleep, so the wall bound stays real.
+        import time
+
         not_ready = "game_not_ready:reason=client_not_polling"
         runtime = _FakeRuntime(fallback=not_ready)
         clock = _ExactWaitClock()
+        started = time.perf_counter()
         with (
             patch("dayz_mcp.server.time.monotonic", clock),
             patch("dayz_mcp.server.asyncio.sleep", clock.sleep),
@@ -255,6 +259,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
             result = await server.execute_wait_for(
                 runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
             )
+        wall = time.perf_counter() - started
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
         self.assertEqual(result["last_error"], not_ready)
@@ -263,6 +268,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["not_ready_probes"], 1)
         self.assertEqual(result["elapsed_s"], 0.1)
         self.assertEqual(clock.sleeps, [0.1])
+        self.assertLess(wall, 0.3, f"deadline exceeded: {wall:.3f}s for timeout_s=0.1")
 
     @slow_test
     async def test_bare_client_not_polling_token_is_retried_and_named(self) -> None:
@@ -417,8 +423,13 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
     async def test_deadline_bounds_the_sleep(self) -> None:
         # A poll interval longer than the remaining budget must not extend the
         # call past timeout_s: the single deadline governs the sleep too (Codex B-02).
+        # perf_counter stays outside the patched monotonic, so a real sleep
+        # past the budget fails even when the fake clock reports 0.1.
+        import time
+
         runtime = _FakeRuntime(fallback="game_not_ready:reason=server_poll_stale")
         clock = _ExactWaitClock()
+        started = time.perf_counter()
         with (
             patch("dayz_mcp.server.time.monotonic", clock),
             patch("dayz_mcp.server.asyncio.sleep", clock.sleep),
@@ -426,6 +437,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
             result = await server.execute_wait_for(
                 runtime, "players_at_least", value=1, timeout_s=0.1, poll_interval_s=0.5
             )
+        wall = time.perf_counter() - started
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["timed_out"])
         self.assertEqual(result["last_error"], "game_not_ready:reason=server_poll_stale")
@@ -433,6 +445,7 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["probes"], 1)
         self.assertEqual(result["elapsed_s"], 0.1)
         self.assertEqual(clock.sleeps, [0.1])
+        self.assertLess(wall, 0.3, f"deadline exceeded: {wall:.3f}s for timeout_s=0.1")
 
     async def test_sleep_does_not_hold_tool_lock(self) -> None:
         # Fails if wait_for wraps its whole body in `async with runtime.tool_lock`.
