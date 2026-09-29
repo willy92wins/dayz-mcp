@@ -94,6 +94,8 @@ from dayz_mcp.loopback import (
 )
 from dayz_mcp.server_cli import CLIENT_PLATFORM_ALIASES, build_server_parser
 from dayz_mcp.process_lifecycle import (
+    ADOPTION_REVERT_PENDING,
+    caller_launched_row,
     caller_may_adopt_ownerless,
     empty_box,
     occupancy_error_fields,
@@ -315,6 +317,7 @@ _REMOTE_ERROR_CODES = frozenset({
     # run-fence refusals emitted by loopback._enqueue_run_rejection and loopback._enqueue_command.
     "run_not_owned",
     "run_state_unavailable",
+    "run_protected",
     "enqueue_cancelled",
     # lease-grant race surfaced by session_coordination._validate_token_locked on /enqueue.
     "session_granting",
@@ -4451,13 +4454,18 @@ def _box_run(box: object, run_id: object) -> dict[str, Any] | None:
 def _row_is_protected(
     row: dict[str, Any] | None, caller_session: str | None
 ) -> bool:
-    """Ownerless RUNNING_IDLE this caller may not adopt. Fail closed.
+    """Ownerless RUNNING_IDLE, or a revert that has not landed. Fail closed.
 
-    A RUNNING row, including one with no use_state, is not this refusal.
-    The daemon still decides with the full session id.
+    A RUNNING row is not this refusal unless its adoption revert is still
+    pending. The launcher is not refused. The daemon decides with the full
+    session id; this layer only has the public prefix.
     """
 
-    if not isinstance(row, dict) or row.get("state") != "RUNNING_IDLE":
+    if not isinstance(row, dict):
+        return False
+    if row.get("use_reason") == ADOPTION_REVERT_PENDING:
+        return not caller_launched_row(row, caller_session)
+    if row.get("state") != "RUNNING_IDLE":
         return False
     owner = row.get("owner_session")
     if isinstance(owner, str) and owner:
@@ -5273,6 +5281,16 @@ def _session_status_blocked_on(
             "host UDP socket table (psutil/netstat, process attribution) -- "
             "wait_for_box_s does not help"
         )
+    if isinstance(box, dict):
+        runs = box.get("runs")
+        if isinstance(runs, list):
+            for item in runs:
+                if (
+                    isinstance(item, dict)
+                    and item.get("use_reason") == ADOPTION_REVERT_PENDING
+                    and _row_is_protected(item, caller_session)
+                ):
+                    return _protection_blocked_on(item)
     if isinstance(box, dict) and box_available_for(box, caller_session)["adopt"] is True:
         return ADOPT_BLOCKED_ON
     if isinstance(box, dict):
