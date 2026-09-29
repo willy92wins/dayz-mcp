@@ -277,6 +277,11 @@ class _BoxSnapshot:
     signal_recovered_at: float | None = None
     use_clock_origin: float | None = None
     bound_runs: frozenset[str] = field(default_factory=frozenset)
+    # 250f PR 3: launcher request (§3.2), the warden's countdown, and a
+    # warning that failed and must not be retried yet.
+    launcher_request: Mapping[str, float] = field(default_factory=dict)
+    closing_runs: frozenset[str] = field(default_factory=frozenset)
+    warning_blocked: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -344,9 +349,9 @@ def _use_projection(
 
     adopt_run reads use_state: a RUNNING_IDLE run that is not abandoned is
     protected from every session except the one that launched it.
-    Precedence: agent, unknown, human, idle, then past RUN_IDLE_CUT_S
-    idle_waiting (with a reason) or abandoned. STARTING, STOPPING and
-    UNRECONCILED runs are not classified.
+    Precedence: closing, agent, unknown, human, idle, then past
+    RUN_IDLE_CUT_S idle_waiting (with a reason) or abandoned. STARTING,
+    STOPPING and UNRECONCILED runs are not classified.
     """
 
     clock = snapshot.clock
@@ -363,6 +368,10 @@ def _use_projection(
         human_at = None
     if human_at is not None:
         fields["human_input_age_s"] = round(clock - human_at, 3)
+    # closing beats agent: the warden owns the run and is counting down.
+    if run.state == "RUNNING" and run.run_id in snapshot.closing_runs:
+        fields["use_state"] = "closing"
+        return fields
     if run.state == "RUNNING" and run.owner_session_id:
         fields["use_state"] = "agent"
         return fields
@@ -377,9 +386,12 @@ def _use_projection(
     # back (review #125 F4).
     recovered_at = snapshot.signal_recovered_at if client != "dead" else None
     since = snapshot.ownerless_since.get(run.run_id, snapshot.use_clock_origin)
+    launcher_at = snapshot.launcher_request.get(run.run_id)
+    if launcher_at is not None and launcher_at > clock:
+        launcher_at = None
     anchors = [
         value
-        for value in (since, human_at, uncertain_at, recovered_at)
+        for value in (since, human_at, uncertain_at, recovered_at, launcher_at)
         if value is not None and value <= clock
     ]
     if not anchors:
@@ -419,6 +431,15 @@ def _use_projection(
         reason = "previous_generation"
     elif run.run_id not in snapshot.bound_runs:
         reason = "bridge_not_ready"
+    blocked_until = snapshot.warning_blocked.get(run.run_id)
+    if (
+        reason is None
+        and client != "dead"
+        and isinstance(blocked_until, (int, float))
+        and not isinstance(blocked_until, bool)
+        and clock < float(blocked_until)
+    ):
+        reason = "warning_failed"
     if reason is not None:
         fields["use_state"] = "idle_waiting"
         fields["use_reason"] = reason
@@ -1505,6 +1526,14 @@ class ProcessLifecycle:
         self._human_input_at: dict[tuple[str, str], float] = {}
         self._uncertain_input_at: dict[tuple[str, str], float] = {}
         self._launched_by: dict[tuple[str, str], ClientIdentity] = {}
+        # 250f PR 3. Launcher requests restart the idle clock (§3.2). Closing
+        # is the warden's countdown. A failed warning stays idle_waiting until
+        # its block lifts. Idle retirement labels the diagnostic when this
+        # daemon, not a player, closes the run.
+        self._launcher_request_at: dict[tuple[str, str], float] = {}
+        self._closing_runs: set[tuple[str, str]] = set()
+        self._warning_blocked_until: dict[tuple[str, str], float] = {}
+        self._idle_retirement: dict[str, str] = {}
         self._input_attributor = InputAttributor(bridge_s=INPUT_SIGNAL_STALE_S)
         self._input_good_at: float | None = None
         self._signal_recovered_at: float | None = None
@@ -3520,6 +3549,8 @@ class ProcessLifecycle:
         return [record.pid for record in retiring], None
 
     def stop_run(self, client: ClientIdentity, token: str | None, run_id: object) -> dict[str, object]:
+        if isinstance(run_id, str) and run_id:
+            self.note_launcher_request(client, run_id)
         legacy_error = self._legacy_identity_error()
         if legacy_error is not None:
             return legacy_error
@@ -3741,11 +3772,20 @@ class ProcessLifecycle:
                 run.owner_session_id = None
                 run.owner_lease_id = None
                 run.processes = []
+                idle_decision = self._peek_idle_retirement(run_id)
+                if idle_decision:
+                    retire_event = "idle_timeout"
+                    retire_reason = "idle_timeout"
+                    retire_decision = idle_decision
+                else:
+                    retire_event = "lifecycle_stop_outcome"
+                    retire_reason = "stopped"
+                    retire_decision = "stopped"
                 if not self._commit_retirement(
                     run,
-                    "lifecycle_stop_outcome",
-                    "stopped",
-                    "stopped",
+                    retire_event,
+                    retire_reason,
+                    retire_decision,
                 ):
                     result = {
                         "error": "partial_cleanup",
@@ -3765,6 +3805,8 @@ class ProcessLifecycle:
                         state="STOPPING",
                         terminated=terminated,
                     )
+                if idle_decision:
+                    self._take_idle_retirement(run_id)
                 # fb-20260908-202102-2edd (2edd-2): stop_run terminates via
                 # guard.kill, not orderly mission teardown. Callers that read
                 # RPT Leaked/Destroying-game lines after a "succeeded" stop
@@ -3781,10 +3823,10 @@ class ProcessLifecycle:
                 }
                 return self._terminal_outcome(
                     result,
-                    "lifecycle_stop_outcome",
+                    retire_event,
                     client,
-                    reason="stopped",
-                    decision="stopped",
+                    reason=retire_reason,
+                    decision=retire_decision,
                     run_id=run_id,
                     state="EXITED",
                     terminated=terminated,
@@ -3795,6 +3837,8 @@ class ProcessLifecycle:
     def close_run(
         self, client: ClientIdentity, token: str | None, run_id: object
     ) -> dict[str, object]:
+        if isinstance(run_id, str) and run_id:
+            self.note_launcher_request(client, run_id)
         legacy_error = self._legacy_identity_error()
         if legacy_error is not None:
             return legacy_error
@@ -3933,6 +3977,212 @@ class ProcessLifecycle:
                     result["cleanup_degraded"] = list(dict.fromkeys(degraded))
             return result
 
+    def note_launcher_request(
+        self, client: ClientIdentity, run_id: str, *, when: float | None = None
+    ) -> bool:
+        """Restart the idle clock when the launcher asks for this run (§3.2).
+
+        A queued ticket is stamped from box_occupancy. A lifecycle call with
+        the launcher's full session id is stamped here. Either one cancels a
+        countdown the warden is already in.
+        """
+
+        if not isinstance(run_id, str) or not run_id:
+            return False
+        if not self._client_is_launcher(client, run_id):
+            return False
+        stamp = time.time() if when is None else float(when)
+        with self._activity_lock:
+            key = self._activity_key(run_id)
+            current = self._launcher_request_at.get(key)
+            if current is None or stamp >= current:
+                self._launcher_request_at[key] = stamp
+                self._bump_box_revision_locked()
+        return True
+
+    def remember_launcher(self, run_id: str, client: ClientIdentity) -> None:
+        """Record the launcher for a run this process did not itself start.
+
+        start_run already does this. Tests and a recovered row use it so the
+        clock can recognise that session.
+        """
+
+        if not isinstance(run_id, str) or not run_id:
+            return
+        with self._activity_lock:
+            self._launched_by.setdefault(self._activity_key(run_id), client)
+
+    def _stamp_queued_launcher_requests(self, clock: float) -> None:
+        reader = getattr(self.coordinator, "queued_session_ids", None)
+        if not callable(reader):
+            return
+        try:
+            sessions = reader()
+        except Exception:
+            return
+        if not sessions:
+            return
+        if not isinstance(sessions, (list, tuple)):
+            return
+        wanted = {session for session in sessions if isinstance(session, str)}
+        if not wanted:
+            return
+        with self._activity_lock:
+            changed = False
+            generation = self._current_generation()
+            for (gen, run_id), identity in self._launched_by.items():
+                if gen != generation or identity.session_id not in wanted:
+                    continue
+                key = (gen, run_id)
+                current = self._launcher_request_at.get(key)
+                if current is None or clock >= current:
+                    self._launcher_request_at[key] = clock
+                    changed = True
+            if changed:
+                self._bump_box_revision_locked()
+
+    def human_input_at(self, run_id: str) -> float | None:
+        with self._activity_lock:
+            return self._human_input_at.get(self._activity_key(run_id))
+
+    def launcher_request_at(self, run_id: str) -> float | None:
+        with self._activity_lock:
+            return self._launcher_request_at.get(self._activity_key(run_id))
+
+    def ownerless_since(self, run_id: str) -> float | None:
+        with self._activity_lock:
+            return self._ownerless_since.get(self._activity_key(run_id))
+
+    def restore_ownerless_since(self, run_id: str, stamp: float) -> None:
+        with self._activity_lock:
+            self._ownerless_since[self._activity_key(run_id)] = float(stamp)
+            self._bump_box_revision_locked()
+
+    def mark_closing(self, run_id: str) -> None:
+        with self._activity_lock:
+            self._closing_runs.add(self._activity_key(run_id))
+            self._bump_box_revision_locked()
+
+    def clear_closing(self, run_id: str) -> None:
+        with self._activity_lock:
+            self._closing_runs.discard(self._activity_key(run_id))
+            self._bump_box_revision_locked()
+
+    def block_warning(self, run_id: str, until: float) -> None:
+        with self._activity_lock:
+            self._warning_blocked_until[self._activity_key(run_id)] = float(until)
+            self._bump_box_revision_locked()
+
+    def arm_idle_retirement(self, run_id: str, decision: str) -> None:
+        if decision not in {"orderly", "fallback_stop"}:
+            raise ValueError("invalid_idle_retirement")
+        with self._activity_lock:
+            self._idle_retirement[run_id] = decision
+
+    def clear_idle_retirement(self, run_id: str) -> None:
+        with self._activity_lock:
+            self._idle_retirement.pop(run_id, None)
+
+    def _peek_idle_retirement(self, run_id: str) -> str | None:
+        with self._activity_lock:
+            return self._idle_retirement.get(run_id)
+
+    def _take_idle_retirement(self, run_id: str) -> str | None:
+        with self._activity_lock:
+            return self._idle_retirement.pop(run_id, None)
+
+    def audit_idle_timeout(
+        self,
+        client: ClientIdentity | None,
+        run_id: str,
+        decision: str,
+        detail: str = "",
+    ) -> bool:
+        extra: dict[str, object] = {"run_id": run_id}
+        if detail:
+            extra["detail"] = detail
+        return self._audit("idle_timeout", client, "idle_timeout", decision, **extra)
+
+    def registered_identities(
+        self, run_id: str
+    ) -> tuple[tuple[object, ...], ...] | None:
+        run = self.manifest.get(run_id)
+        if run is None:
+            return None
+        return tuple(
+            sorted(
+                (
+                    record.pid,
+                    record.creation_time_utc,
+                    record.executable_sha256,
+                    record.command_line_sha256,
+                    record.role,
+                )
+                for record in run.processes
+            )
+        )
+
+    def registered_process_kinds(self, run_id: str) -> dict[str, int] | None:
+        """owned/gone/foreign/unknown counts. None when the run is gone."""
+
+        run = self.manifest.get(run_id)
+        if run is None:
+            return None
+        buckets, _reason = self._partition_registered_processes(run.processes)
+        return {name: len(pids) for name, pids in buckets.items()}
+
+    def retail_quarantined(self) -> bool:
+        return self._quarantined()
+
+    def scans_known(self) -> bool:
+        reason, observed = self._diag_snapshot()
+        if reason is not None or observed is None:
+            return False
+        port_reason, holders = self._port_holders()
+        if port_reason is not None or holders is None:
+            return False
+        return True
+
+    def idle_close_gate(
+        self,
+        run_id: str,
+        *,
+        allow_gone: bool,
+        daemon_generation: str,
+        launch_generation: object,
+    ) -> str | None:
+        """None when a close or a fallback stop is still allowed.
+
+        Gone processes are a mismatch before WM_CLOSE and are ignored before
+        the fallback stop: a process that died during the wait is not foreign.
+        Anything the guard cannot vouch for, a foreign identity, an unknown
+        scan or a generation change refuses the whole close. No partial close.
+        """
+
+        if self.daemon_generation != daemon_generation:
+            return "generation_changed"
+        if self._quarantined():
+            return "retail_quarantine"
+        if not self.scans_known():
+            return "scan_unknown"
+        run = self.manifest.get(run_id)
+        if run is None:
+            return "run_missing"
+        if run.daemon_generation_at_launch != launch_generation:
+            return "generation_changed"
+        if run.state not in {"RUNNING", "STOPPING"}:
+            return "run_not_owned"
+        buckets, unknown_reason = self._partition_registered_processes(run.processes)
+        if buckets["unknown"]:
+            return unknown_reason or "process_identity_mismatch"
+        if buckets["foreign"]:
+            return "process_identity_mismatch"
+        if buckets["gone"] and not allow_gone:
+            return "process_changed"
+        if not buckets["owned"] and not buckets["gone"]:
+            return "process_changed"
+        return None
+
     def _client_is_launcher(self, client: ClientIdentity, run_id: str) -> bool:
         # Full session id, not the public prefix and not the pid. Rights last
         # as long as that MCP client: server_reload keeps the session id, a
@@ -3974,6 +4224,8 @@ class ProcessLifecycle:
         return None
 
     def adopt_run(self, client: ClientIdentity, token: str | None, run_id: object) -> dict[str, object]:
+        if isinstance(run_id, str) and run_id:
+            self.note_launcher_request(client, run_id)
         legacy_error = self._legacy_identity_error()
         if legacy_error is not None:
             return legacy_error
@@ -4528,11 +4780,20 @@ class ProcessLifecycle:
         real reason instead of conflating a disk failure with an audit failure. On a
         persist failure the manifest rolls back in-memory; the next pass converges."""
         buckets, _unknown_reason = self._partition_registered_processes(run.processes)
+        idle_decision = self._peek_idle_retirement(run.run_id)
+        if idle_decision:
+            event = "idle_timeout"
+            reason = "idle_timeout"
+            decision = idle_decision
+        else:
+            event = "run_reaped"
+            reason = "all_processes_gone_or_foreign"
+            decision = "reaped"
         if not self._audit(
-            "run_reaped",
+            event,
             client,
-            "all_processes_gone_or_foreign",
-            "reaped",
+            reason,
+            decision,
             run_id=run.run_id,
             dead_pids=[record.pid for record in run.processes],
             owned_pids=list(buckets["owned"]),
@@ -4545,13 +4806,9 @@ class ProcessLifecycle:
         run.owner_lease_id = None
         run.processes = []
         run.state = "EXITED"
-        if not self._commit_retirement(
-            run,
-            "run_reaped",
-            "all_processes_gone_or_foreign",
-            "reaped",
-        ):
+        if not self._commit_retirement(run, event, reason, decision):
             return "manifest_failed"
+        self._take_idle_retirement(run.run_id)
         self.coordinator.note_run_reaped(owner_session_id)
         return ""
 
@@ -4595,6 +4852,8 @@ class ProcessLifecycle:
         case. Lease-gated like other lifecycle ops. Rejects (run_not_reapable)
         any run with a still-owned process, an unavailable guard or an ambiguous
         diag â€” those keep the TTY-gated admin_reconcile path. Terminates nothing."""
+        if isinstance(run_id, str) and run_id:
+            self.note_launcher_request(client, run_id)
         legacy_error = self._legacy_identity_error()
         if legacy_error is not None:
             return legacy_error
@@ -4791,6 +5050,7 @@ class ProcessLifecycle:
         """
 
         clock = time.time() if now is None else float(now)
+        self._stamp_queued_launcher_requests(clock)
         snapshot = self._take_box_snapshot(clock)
         probes = self._probes_for_snapshot(snapshot, use_cache=now is None)
         return _derive_box(snapshot, probes)
@@ -4844,6 +5104,21 @@ class ProcessLifecycle:
                 for (gen, run_id), identity in self._launched_by.items()
                 if gen == generation
             }
+            launcher_request = {
+                run_id: stamp
+                for (gen, run_id), stamp in self._launcher_request_at.items()
+                if gen == generation
+            }
+            closing = frozenset(
+                run_id
+                for (gen, run_id) in self._closing_runs
+                if gen == generation
+            )
+            warning_blocked = {
+                run_id: stamp
+                for (gen, run_id), stamp in self._warning_blocked_until.items()
+                if gen == generation
+            }
             input_good_at = self._input_good_at
             origin = self._use_clock_origin
         # No lifecycle lock is held here, so the documented order
@@ -4869,6 +5144,9 @@ class ProcessLifecycle:
             signal_recovered_at=recovered_at,
             use_clock_origin=origin,
             bound_runs=bound,
+            launcher_request=MappingProxyType(launcher_request),
+            closing_runs=closing,
+            warning_blocked=MappingProxyType(warning_blocked),
         )
 
     def _collect_probes(self, snapshot: _BoxSnapshot) -> _BoxProbes:

@@ -52,6 +52,10 @@ from dayz_mcp.runtime_state import (
     RuntimePaths,
     recover_coordination_startup,
 )
+from dayz_mcp.idle_warden import (
+    IDLE_WARDEN_SETTINGS_NAME,
+    install_idle_warden,
+)
 from dayz_mcp.process_lifecycle import (
     ProcessLifecycle,
     RunManifestStore,
@@ -1648,9 +1652,24 @@ def run_daemon(config: Any, *, stop: threading.Event | None = None) -> int:
         )
 
     if state.lifecycle is not None:
+        input_fns = input_activity.real_win32()
         install_run_reaper(state.lifecycle, log=log, stop=stop)
         install_input_sampler(
-            state.lifecycle, input_activity.real_win32(), log=log, stop=stop
+            state.lifecycle, input_fns, log=log, stop=stop
+        )
+        install_idle_warden(
+            state.lifecycle,
+            state.lifecycle.coordinator,
+            state,
+            paths.root / IDLE_WARDEN_SETTINGS_NAME,
+            generation=daemon_generation,
+            log=log,
+            stop=stop,
+            sample_input=(
+                None
+                if input_fns is None
+                else lambda: input_activity.take_sample(input_fns, time.time())
+            ),
         )
 
     # Block until idle shutdown or external termination. No parent-death watchdog:

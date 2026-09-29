@@ -2096,6 +2096,21 @@ class SessionCoordinator:
         nested = header.get("fault_id") if isinstance(header, dict) else None
         return nested if isinstance(nested, str) and nested else None
 
+    def queued_session_ids(self) -> tuple[str, ...]:
+        """Full session ids in the FIFO. Does not expire tickets or leases.
+
+        The idle clock reads this from box_occupancy, which can already hold
+        the lifecycle operation lock. Expiring here could start cleanup that
+        takes that same lock.
+        """
+
+        with self._condition:
+            return tuple(
+                ticket.client.session_id
+                for ticket in self._queue
+                if isinstance(ticket.client.session_id, str)
+            )
+
     def expire_due(self) -> tuple[str, ...]:
         """Run expiry side effects before callers enter their own state lock."""
 

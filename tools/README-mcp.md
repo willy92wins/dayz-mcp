@@ -141,6 +141,10 @@ Locate the file with `--policy PATH`, then `DAYZ_MCP_LAUNCHER_POLICY`, then `%LO
 
 Exceptional `python -m dayz_mcp.admin_cli` release/reconcile operations require a real interactive TTY, a non-empty reason, and exact typed confirmation. They are not MCP tools and are not a normal queue-bypass mechanism.
 
+## Idle warden
+
+The daemon reads `%LOCALAPPDATA%\DayZ_MCP\idle-warden.json` on every warden cycle. The file sits next to `runs.json`. It has one field, `enabled`, and only the JSON object `{"enabled": true}` turns the warden on. A missing file, a file that cannot be read, and any other JSON (including `"enabled": "true"`, `1`, `false`, or extra fields) leave it off. While it is off the warden does not take a lease, adopt a run, enqueue a bridge command, or change `use_state`.
+
 ## Cookbook
 
 Short call sequences for a cold consumer. Use `playbook_run(name, params)` for a named checklist; CLI runner usage is in [`playbooks/README.md`](../playbooks/README.md).

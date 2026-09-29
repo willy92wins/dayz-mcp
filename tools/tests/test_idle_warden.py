@@ -1,0 +1,1270 @@
+"""250f PR 3: the idle warden, shipped disabled.
+
+Fake clocks, a fake bridge and a fake process guard. No real process is started.
+"""
+
+from __future__ import annotations
+
+import sys
+import threading
+import time
+import unittest
+import uuid
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+_TOOLS_DIR = Path(__file__).resolve().parents[1]
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+from dayz_mcp import dayz_test_tool
+from dayz_mcp.idle_warden import (
+    WARNING_TEXT,
+    IdleWarden,
+    idle_warden_identity,
+    install_idle_warden,
+    read_idle_warden_enabled,
+)
+from dayz_mcp.input_activity import InputSample
+from dayz_mcp.loopback import ServerState
+from dayz_mcp.process_lifecycle import (
+    RUN_IDLE_CUT_S,
+    ProcessLifecycle,
+    RunManifestStore,
+    RunRecord,
+)
+from dayz_mcp.runtime_state import RuntimePaths
+from dayz_mcp.session_coordination import (
+    MAX_OPERATION_TOMBSTONES,
+    SESSION_TTL_S,
+    ClientIdentity,
+    SessionCoordinator,
+)
+from dayz_mcp.window_close import Win32WindowFns
+from tests.process_lifecycle_helpers import (
+    IDENTITY_A,
+    IDENTITY_B,
+    AuditSink,
+    FakeGuard,
+    FakeLauncher,
+    process,
+    snapshot,
+)
+from tests.steam_helpers import FakeSteamGate
+
+
+GENERATION = "gen-now"
+OTHER_WINDOW_PID = 31337
+LAUNCHER = ClientIdentity(
+    "codex", 7, 1, "2026-07-15T00:00:02Z", "launcher-session", "launch"
+)
+STRANGER = ClientIdentity(
+    "claude", 3, 1, "2026-07-15T00:00:03Z", "stranger", "fill"
+)
+
+
+class FakeBindings:
+    def __init__(self) -> None:
+        self.bound: set[str] = set()
+        self.retired: list[tuple[str, str]] = []
+
+    def run_has_bound_binding(self, run_id: str) -> bool:
+        return run_id in self.bound
+
+    def fence_runs(self, run_ids: list[str]) -> None:
+        return None
+
+    def unfence_runs(self, run_ids: list[str]) -> None:
+        return None
+
+    def retire_run(self, run_id: str, reason: str) -> None:
+        self.retired.append((run_id, reason))
+        self.bound.discard(run_id)
+
+
+class FakeWindows:
+    def __init__(self) -> None:
+        self.posted: list[tuple[int, int]] = []
+        self.hwnd_of = {801: 1801, 802: 1802}
+
+    def bind(self) -> Win32WindowFns:
+        owner = self
+
+        def enum_windows(callback):
+            for hwnd in owner.hwnd_of.values():
+                if callback(hwnd) is False:
+                    return False
+            return True
+
+        def window_pid(hwnd: int) -> int:
+            for pid, handle in owner.hwnd_of.items():
+                if handle == hwnd:
+                    return pid
+            return 0
+
+        def is_visible(_hwnd: int) -> bool:
+            return True
+
+        def post_message(hwnd: int, msg: int, wparam: int, lparam: int) -> bool:
+            owner.posted.append((int(hwnd), int(msg)))
+            return True
+
+        return Win32WindowFns(
+            enum_windows=enum_windows,
+            window_pid=window_pid,
+            is_visible=is_visible,
+            post_message=post_message,
+        )
+
+
+class FakeBridge:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.scripts: dict[str, dict[str, object] | None] = {}
+        self.enqueue_status = 200
+        self.token: str | None = "instance-1|1|9|2026-09-29T00:00:00Z"
+        self.abandoned: list[tuple[int, str]] = []
+        self._seq = 0
+        self._cmd: dict[int, str] = {}
+
+    def bound_instance_token(self, run_id: str, role: str = "server") -> str | None:
+        _ = (run_id, role)
+        return self.token
+
+    def enqueue_command(
+        self,
+        cmd: str,
+        args: dict,
+        peer: str | None = None,
+        *,
+        identity_payload: object = None,
+        lease_token: str | None = None,
+        operation_timeout_s: float = 0.0,
+        internal: bool = False,
+    ) -> tuple[int, dict]:
+        self.calls.append(
+            {
+                "cmd": cmd,
+                "args": dict(args),
+                "peer": peer,
+                "identity": identity_payload,
+                "lease_token": lease_token,
+                "operation_timeout_s": operation_timeout_s,
+                "internal": internal,
+            }
+        )
+        if self.enqueue_status != 200:
+            return self.enqueue_status, {"error": "bridge_down"}
+        self._seq += 1
+        self._cmd[self._seq] = cmd
+        return 200, {"id": self._seq, "peer": peer, "cmd": cmd}
+
+    def take_result(self, command_id: int, remove: bool = False) -> dict | None:
+        _ = remove
+        cmd = self._cmd.get(command_id)
+        if cmd in self.scripts:
+            value = self.scripts[cmd]
+            return None if value is None else dict(value)
+        if cmd == "query_all_players":
+            return {
+                "ok": True,
+                "players": [
+                    {"uid": "76561198000000001"},
+                    {"uid": "76561198000000002"},
+                ],
+            }
+        if cmd == "notify_players":
+            return {"ok": 1}
+        return None
+
+    def abandon_command(self, command_id: int, reason: str) -> None:
+        self.abandoned.append((command_id, reason))
+
+
+class SettingsReaderTest(unittest.TestCase):
+    def test_only_exact_enabled_true_is_on(self) -> None:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            missing = root / "missing.json"
+            self.assertFalse(read_idle_warden_enabled(missing))
+            directory = root / "nested"
+            directory.mkdir()
+            self.assertFalse(read_idle_warden_enabled(directory))
+            broken = root / "broken.json"
+            broken.write_text("{", encoding="utf-8")
+            self.assertFalse(read_idle_warden_enabled(broken))
+            bom = root / "bom.json"
+            bom.write_bytes(b'\xef\xbb\xbf{"enabled": true}\n')
+            self.assertFalse(read_idle_warden_enabled(bom))
+            for text in (
+                '{"enabled": "true"}',
+                '{"enabled": 1}',
+                '{"enabled": false}',
+                "{}",
+                '{"enabled": true, "extra": 1}',
+            ):
+                path = root / "off.json"
+                path.write_text(text, encoding="utf-8")
+                self.assertFalse(read_idle_warden_enabled(path), text)
+            on = root / "on.json"
+            on.write_text('{"enabled": true}\n', encoding="utf-8")
+            self.assertTrue(read_idle_warden_enabled(on))
+
+
+class IdleWardenTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.game = self.root / "DayZ"
+        self.game.mkdir()
+        (self.game / "DayZDiag_x64.exe").write_bytes(b"")
+        self.paths = RuntimePaths(
+            self.root / "runtime",
+            self.root / "runtime" / "audit",
+            self.root / "runtime" / "coordination.json",
+            self.root / "runtime" / "runs.json",
+        )
+        self.settings = self.paths.root / "idle-warden.json"
+        self.windows = FakeWindows()
+        self.holder: dict[str, ProcessLifecycle | None] = {"lifecycle": None}
+        self._ids = 0
+        self.clock = [0.0]
+        self.rebuild()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _token(self) -> str:
+        self._ids += 1
+        return f"token-{self._ids}"
+
+    def _lease(self) -> str:
+        self._ids += 1
+        return f"lease-{self._ids}"
+
+    def _cleanup(self, session_id: str, lease_id: str, reason: str, vehicle: bool):
+        _ = (reason, vehicle)
+        lifecycle = self.holder.get("lifecycle")
+        if lifecycle is None:
+            return {}
+        return lifecycle.begin_release_owner(session_id, lease_id)
+
+    def rebuild(self, **coordinator_kwargs: object) -> None:
+        # A new runs.json each time: the cases that rebuild are independent,
+        # and RunManifestStore reloads whatever is already on that path.
+        self._ids += 1
+        slot = self.root / f"rt-{self._ids}"
+        self.paths = RuntimePaths(
+            slot,
+            slot / "audit",
+            slot / "coordination.json",
+            slot / "runs.json",
+        )
+        self.settings = slot / "idle-warden.json"
+        audit = coordinator_kwargs.pop("audit", None)
+        self.audit = audit if isinstance(audit, AuditSink) else AuditSink()
+        self.coordinator = SessionCoordinator(
+            token_fn=self._token,
+            id_fn=self._lease,
+            audit=self.audit,
+            cleanup=self._cleanup,
+            **coordinator_kwargs,
+        )
+        self.store = RunManifestStore(self.paths)
+        self.guard = FakeGuard()
+        self.launcher = FakeLauncher()
+        self.live: list[int] = []
+        self.retail_processes: list[dict[str, object]] = []
+        self.diag_known = True
+        self.bindings = FakeBindings()
+        self.bridge = FakeBridge()
+        self.phases: list = []
+        self.mono = 0.0
+        self.wall_value = 0.0
+        self.windows.posted.clear()
+        self.lifecycle = self._lifecycle()
+        self.holder["lifecycle"] = self.lifecycle
+        self.lifecycle.window_fns = self.windows.bind()
+
+    def _lifecycle(self) -> ProcessLifecycle:
+        return ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
+            coordinator=self.coordinator,
+            manifest=self.store,
+            audit=self.audit,
+            guard=self.guard,
+            retail_probe=lambda: {
+                "known": True,
+                "processes": list(self.retail_processes),
+            },
+            diag_probe=lambda: (
+                {"known": False}
+                if not self.diag_known
+                else {
+                    "known": True,
+                    "processes": [
+                        {"pid": pid, "name": "DayZDiag_x64.exe"} for pid in self.live
+                    ],
+                }
+            ),
+            game_path=self.game,
+            launcher=self.launcher,
+            id_fn=lambda: "run-1",
+            bindings=self.bindings,
+            daemon_generation=GENERATION,
+        )
+
+    def add_run(
+        self,
+        run_id: str = "run-x",
+        *,
+        owner: str | None = None,
+        processes=None,
+        generation: str | None = GENERATION,
+        live: bool = True,
+    ) -> RunRecord:
+        records = processes if processes is not None else [
+            process(801, role="server"),
+            process(802, role="client"),
+        ]
+        run = RunRecord(
+            run_id,
+            owner,
+            "lease-A" if owner else None,
+            "RUNNING" if owner else "RUNNING_IDLE",
+            "label",
+            "@Mod",
+            "profiles",
+            "mission",
+            list(records),
+            daemon_generation_at_launch=generation,
+        )
+        self.store.add(run)
+        for record in records:
+            self.guard.snapshots[record.pid] = snapshot(record)
+            if live:
+                self.live.append(record.pid)
+        return run
+
+    def good_signal(
+        self, at: float, *, foreground: int = OTHER_WINDOW_PID, tick: int = 100
+    ) -> None:
+        self.lifecycle.record_input_sample(
+            InputSample(
+                at=at,
+                ok=True,
+                last_input_tick=tick,
+                idle_ms=0,
+                foreground_pid=foreground,
+            )
+        )
+
+    def healthy_signal(self, start: float, until: float, step: float = 1.5) -> None:
+        at = start
+        while at < until:
+            self.good_signal(at)
+            at += step
+        self.good_signal(until)
+
+    def human_input(self, at: float, pid: int = 802) -> list[str]:
+        self.good_signal(at - 0.25, foreground=pid, tick=1000)
+        return self.lifecycle.record_input_sample(
+            InputSample(
+                at=at, ok=True, last_input_tick=1100, idle_ms=0, foreground_pid=pid
+            )
+        )
+
+    def row(self, now: float, run_id: str = "run-x") -> dict[str, object]:
+        box = self.lifecycle.box_occupancy(now=now)
+        for item in box["runs"]:
+            if item["run_id"] == run_id:
+                return item
+        self.fail(f"no row for {run_id}: {box['runs']}")
+
+    def abandon(
+        self,
+        *,
+        dead: bool = False,
+        generation: str | None = GENERATION,
+        run_id: str = "run-x",
+        signal: bool = True,
+    ) -> float:
+        self.add_run(run_id, owner="A", generation=generation, live=not dead)
+        self.assertEqual(self.lifecycle.release_owner("A", "lease-A"), [run_id])
+        # adopt_run classifies with its own clock (time.time). Backdate the
+        # ownerless stamp so that clock and the warden's wall agree on the cut.
+        stamp = time.time() - (RUN_IDLE_CUT_S + 1.0)
+        self.lifecycle.restore_ownerless_since(run_id, stamp)
+        self.wall_value = stamp + RUN_IDLE_CUT_S + 1.0
+        if not dead and signal:
+            self.bindings.bound.add(run_id)
+            self.healthy_signal(float(stamp), self.wall_value)
+        return self.wall_value
+
+    def enable(self) -> None:
+        self.settings.parent.mkdir(parents=True, exist_ok=True)
+        self.settings.write_text('{"enabled": true}\n', encoding="utf-8")
+
+    def advance(self, seconds: float) -> None:
+        self.mono += float(seconds)
+
+    def quiet_sample(self) -> InputSample:
+        return InputSample(
+            at=self.wall_value,
+            ok=True,
+            last_input_tick=100,
+            idle_ms=0,
+            foreground_pid=OTHER_WINDOW_PID,
+        )
+
+    def human_sample(self) -> InputSample:
+        return InputSample(
+            at=self.wall_value,
+            ok=True,
+            last_input_tick=1100,
+            idle_ms=0,
+            foreground_pid=802,
+        )
+
+    def _phase(self, name: str, warden: IdleWarden) -> None:
+        for hook in list(self.phases):
+            hook(name, warden)
+
+    def make_warden(self, **kwargs: object) -> IdleWarden:
+        options: dict[str, object] = dict(
+            lifecycle=self.lifecycle,
+            coordinator=self.coordinator,
+            bridge=self.bridge,
+            settings_path=self.settings,
+            generation=GENERATION,
+            wall=lambda: self.wall_value,
+            monotonic=lambda: self.mono,
+            sleep=self.advance,
+            wait_slice_s=0.0,
+            poll_s=60.0,
+            sample_input=self.quiet_sample,
+            phase=self._phase,
+        )
+        options.update(kwargs)
+        return IdleWarden(**options)
+
+    def drive(self, **kwargs: object) -> str:
+        self.enable()
+        return self.make_warden(**kwargs).run_once()
+
+    def kill_all(self) -> None:
+        for pid in list(self.guard.snapshots):
+            self.guard.snapshots[pid] = {
+                "error": "process_not_found",
+                "exit_code": 4,
+            }
+        self.live.clear()
+
+    def make_foreign(self, pid: int) -> None:
+        current = dict(self.guard.snapshots[pid])
+        current["executable_sha256"] = "c" * 64
+        current["identity_complete"] = True
+        self.guard.snapshots[pid] = current
+
+    def on_exit(self, name: str, _warden: IdleWarden) -> None:
+        if name == "waiting_exit":
+            self.kill_all()
+
+    def commands(self) -> list[object]:
+        return [call["cmd"] for call in self.bridge.calls]
+
+    def assert_abandoned(self, run_id: str = "run-x", reason: str | None = None) -> None:
+        row = self.row(self.wall_value, run_id)
+        self.assertEqual(row["use_state"], "abandoned")
+        if reason is not None:
+            self.assertEqual(row["use_reason"], reason)
+
+    def assert_retired(self, decision: str, run_id: str = "run-x") -> None:
+        matched = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "idle_timeout" and event.get("decision") == decision
+        ]
+        self.assertTrue(matched, self.audit.events)
+        self.assertTrue(all(event.get("reason") == "idle_timeout" for event in matched))
+        self.assertTrue(all(event.get("run_id") == run_id for event in matched))
+        raw = self.lifecycle.public_status()["retired_run_diagnostics"]
+        self.assertTrue(
+            any(
+                item.get("run_id") == run_id
+                and item.get("event") == "idle_timeout"
+                and item.get("reason") == "idle_timeout"
+                and item.get("decision") == decision
+                for item in raw
+            ),
+            raw,
+        )
+        published = dayz_test_tool._runs_retired_recently(raw)
+        self.assertIsNotNone(published)
+        self.assertTrue(
+            any(
+                item.get("run_id") == run_id
+                and item.get("reason") == "idle_timeout"
+                and item.get("decision") == decision
+                for item in published
+            ),
+            published,
+        )
+
+    def assert_not_retired(self, run_id: str = "run-x") -> None:
+        raw = self.lifecycle.public_status()["retired_run_diagnostics"]
+        self.assertFalse(any(item.get("run_id") == run_id for item in raw), raw)
+        failed = [
+            event
+            for event in self.audit.events
+            if event.get("event") == "idle_timeout" and event.get("decision") == "failed"
+        ]
+        self.assertTrue(failed, self.audit.events)
+        self.assertTrue(all(event.get("reason") == "idle_timeout" for event in failed))
+
+    def test_identity_is_the_internal_client(self) -> None:
+        client = idle_warden_identity(
+            GENERATION, pid=4, ppid=5, started_at_utc="2026-09-29T00:00:00Z"
+        )
+        self.assertEqual(client.platform, "unknown")
+        self.assertEqual(client.session_id, f"idle-warden-{GENERATION}")
+        self.assertEqual(client.task_label, "idle_timeout")
+        self.assertEqual(client.public_payload()["session"], "idle-warden-")
+
+    def test_disabled_has_no_side_effect(self) -> None:
+        self.clock = [0.0]
+        self.rebuild(time_fn=lambda: self.clock[0])
+        status, _body = self.coordinator.acquire(IDENTITY_A, "hold")
+        self.assertEqual(status, 200)
+        self.abandon()
+        self.assert_abandoned()
+        self.lifecycle.remember_launcher("run-x", LAUNCHER)
+        queued, _ticket = self.coordinator.enqueue(LAUNCHER, "launch", "op-launch")
+        self.assertEqual(queued, 202)
+        # enqueue itself expires due leases. Advance only after the ticket is
+        # in, so a disabled pass is the only thing that could drop either one.
+        self.clock[0] = SESSION_TTL_S + 5
+        warden = self.make_warden()
+        self.assertEqual(warden.run_once(), "disabled")
+        self.assertIsNotNone(self.coordinator._active)
+        self.assertIsNone(self.lifecycle.launcher_request_at("run-x"))
+        self.assertEqual(self.bridge.calls, [])
+        self.assertEqual(self.windows.posted, [])
+        run = self.store.get("run-x")
+        self.assertEqual(run.state, "RUNNING_IDLE")
+        self.assertIsNone(run.owner_session_id)
+        self.assertEqual(
+            self.coordinator.queued_session_ids(), (LAUNCHER.session_id,)
+        )
+        self.assertIsNone(warden.token)
+        self.assertIsNone(warden.ticket_id)
+
+    def test_enabled_cycle_expires_a_due_lease(self) -> None:
+        self.clock = [0.0]
+        self.rebuild(time_fn=lambda: self.clock[0])
+        status, _body = self.coordinator.acquire(IDENTITY_A, "hold")
+        self.assertEqual(status, 200)
+        self.clock[0] = SESSION_TTL_S + 5
+        self.assertEqual(self.drive(), "no_candidate")
+        self.assertIsNone(self.coordinator._active)
+
+    def test_live_orderly_warns_then_closes(self) -> None:
+        self.abandon()
+        self.assert_abandoned()
+        seen: dict[str, object] = {}
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "warning":
+                seen["use"] = self.row(self.wall_value)["use_state"]
+            self.on_exit(name, _warden)
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "orderly")
+        self.assertEqual(seen["use"], "closing")
+        self.assertEqual(
+            self.commands(),
+            ["query_all_players", "notify_players", "notify_players"],
+        )
+        self.assertTrue(all(call["internal"] is False for call in self.bridge.calls))
+        self.assertTrue(all(call["peer"] == "server" for call in self.bridge.calls))
+        for call in self.bridge.calls[1:]:
+            self.assertEqual(call["args"]["title"], WARNING_TEXT)
+            self.assertEqual(call["args"]["show_time"], 60)
+        self.assertEqual(
+            [call["args"]["uid"] for call in self.bridge.calls[1:]],
+            ["76561198000000001", "76561198000000002"],
+        )
+        identity = self.bridge.calls[0]["identity"]
+        self.assertEqual(identity["session_id"], f"idle-warden-{GENERATION}")
+        self.assertIsInstance(self.bridge.calls[0]["lease_token"], str)
+        self.assertTrue(self.windows.posted)
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertEqual(self.store.get("run-x").state, "EXITED")
+        self.assert_retired("orderly")
+        self.assertIsNone(self.coordinator._active)
+
+    def test_dead_client_closes_without_warning_or_closing(self) -> None:
+        self.abandon(dead=True)
+        self.assert_abandoned(reason="client_gone")
+        seen: dict[str, object] = {}
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "revalidate_close":
+                seen["use"] = self.row(self.wall_value)["use_state"]
+            self.on_exit(name, _warden)
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "orderly")
+        self.assertNotEqual(seen.get("use"), "closing")
+        self.assertEqual(self.bridge.calls, [])
+        self.assertTrue(self.windows.posted)
+        self.assert_retired("orderly")
+
+    def test_fallback_stop_when_processes_survive_the_wait(self) -> None:
+        self.abandon()
+        self.assertEqual(self.drive(), "fallback_stop")
+        self.assertTrue(self.windows.posted)
+        self.assertTrue(self.guard.terminate_calls)
+        self.assertEqual(self.store.get("run-x").state, "EXITED")
+        self.assert_retired("fallback_stop")
+        self.assertIsNone(self.coordinator._active)
+
+    def test_mixed_identity_before_close_closes_nothing(self) -> None:
+        self.abandon()
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "revalidate_close":
+                self.make_foreign(802)
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "failed")
+        self.assertEqual(self.windows.posted, [])
+        self.assertEqual(self.guard.terminate_calls, [])
+        run = self.store.get("run-x")
+        self.assertNotEqual(run.state, "EXITED")
+        self.assertEqual(len(run.processes), 2)
+        self.assert_not_retired()
+
+    def test_scan_unknown_before_stop_does_not_stop(self) -> None:
+        self.abandon()
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "waiting_exit":
+                self.diag_known = False
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "failed")
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertNotEqual(self.store.get("run-x").state, "EXITED")
+        self.assert_not_retired()
+
+    def test_identity_change_before_stop_does_not_stop(self) -> None:
+        self.abandon()
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "waiting_exit":
+                self.make_foreign(802)
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "failed")
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertNotEqual(self.store.get("run-x").state, "EXITED")
+        self.assert_not_retired()
+
+    def test_scan_change_during_countdown_zeros_the_clock(self) -> None:
+        self.abandon()
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "countdown":
+                self.diag_known = False
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "countdown_aborted")
+        self.assertEqual(self.windows.posted, [])
+        self.diag_known = True
+        self.assertEqual(self.row(self.wall_value)["use_state"], "idle")
+
+    def test_process_change_during_countdown_zeros_the_clock(self) -> None:
+        self.abandon()
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "countdown":
+                self.make_foreign(802)
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "countdown_aborted")
+        self.assertEqual(self.windows.posted, [])
+        self.guard.snapshots[802] = snapshot(process(802, role="client"))
+        self.assertEqual(self.row(self.wall_value)["use_state"], "idle")
+
+    def test_quarantine_during_countdown_zeros_the_clock(self) -> None:
+        self.abandon()
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "countdown":
+                self.retail_processes.append({"pid": 9, "name": "DayZ_x64.exe"})
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "countdown_aborted")
+        self.assertEqual(self.windows.posted, [])
+        self.retail_processes.clear()
+        self.assertEqual(self.row(self.wall_value)["use_state"], "idle")
+
+    def test_input_during_the_queue_cancels(self) -> None:
+        self.abandon()
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "queued":
+                self.human_input(self.wall_value)
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "cancelled")
+        run = self.store.get("run-x")
+        self.assertEqual(run.state, "RUNNING_IDLE")
+        self.assertIsNone(run.owner_session_id)
+        self.assertEqual(self.row(self.wall_value)["use_state"], "human")
+        self.assertIsNone(self.coordinator._active)
+        self.assertEqual(self.windows.posted, [])
+
+    def test_input_during_the_warning_cancels(self) -> None:
+        self.abandon()
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "warning":
+                self.human_input(self.wall_value)
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "countdown_aborted")
+        self.assertNotIn("notify_players", self.commands())
+        self.assertEqual(self.windows.posted, [])
+        self.assertEqual(self.row(self.wall_value)["use_state"], "human")
+
+    def test_input_during_countdown_cancels(self) -> None:
+        self.abandon()
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "countdown":
+                self.human_input(self.wall_value)
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "countdown_aborted")
+        self.assertEqual(self.windows.posted, [])
+        self.assertEqual(self.row(self.wall_value)["use_state"], "human")
+
+    def test_input_just_after_the_last_sample_cancels_before_close(self) -> None:
+        self.abandon()
+
+        def hook(name: str, warden: IdleWarden) -> None:
+            if name == "revalidate_close":
+                warden.sample_input = self.human_sample
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "countdown_aborted")
+        self.assertEqual(self.windows.posted, [])
+        self.assertEqual(self.row(self.wall_value)["use_state"], "human")
+
+    def test_launcher_ticket_before_the_grant_is_not_a_candidate(self) -> None:
+        self.abandon()
+        self.assert_abandoned()
+        self.lifecycle.remember_launcher("run-x", LAUNCHER)
+        status, _body = self.coordinator.enqueue(LAUNCHER, "launch", "op-launch")
+        self.assertEqual(status, 202)
+        self.assertEqual(self.drive(), "no_candidate")
+        self.assertEqual(
+            self.coordinator.queued_session_ids(), (LAUNCHER.session_id,)
+        )
+        self.assertEqual(self.row(self.wall_value)["use_state"], "idle")
+        self.assertEqual(self.bridge.calls, [])
+
+    def test_launcher_lifecycle_call_restarts_the_clock(self) -> None:
+        self.add_run(owner="A")
+        self.lifecycle.release_owner("A", "lease-A")
+        past = time.time() - (RUN_IDLE_CUT_S + 1)
+        self.lifecycle.restore_ownerless_since("run-x", past)
+        self.bindings.bound.add("run-x")
+        self.healthy_signal(past, time.time())
+        now = time.time()
+        self.healthy_signal(now - 1.0, now)
+        self.lifecycle.remember_launcher("run-x", LAUNCHER)
+        self.assertEqual(self.row(time.time())["use_state"], "abandoned")
+        result = self.lifecycle.adopt_run(LAUNCHER, None, "run-x")
+        self.assertEqual(result.get("error"), "lease_required")
+        self.assertIsNotNone(self.lifecycle.launcher_request_at("run-x"))
+        self.assertNotEqual(self.row(time.time())["use_state"], "abandoned")
+
+    def test_launcher_during_the_warning_cancels(self) -> None:
+        self.abandon()
+        self.lifecycle.remember_launcher("run-x", LAUNCHER)
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "warning":
+                self.assertTrue(
+                    self.lifecycle.note_launcher_request(
+                        LAUNCHER, "run-x", when=self.wall_value
+                    )
+                )
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "countdown_aborted")
+        self.assertNotIn("notify_players", self.commands())
+        self.assertEqual(self.windows.posted, [])
+        self.assertEqual(self.row(self.wall_value)["use_state"], "idle")
+
+    def test_launcher_during_countdown_cancels(self) -> None:
+        self.abandon()
+        self.lifecycle.remember_launcher("run-x", LAUNCHER)
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "countdown":
+                self.lifecycle.note_launcher_request(
+                    LAUNCHER, "run-x", when=self.wall_value
+                )
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "countdown_aborted")
+        self.assertEqual(self.windows.posted, [])
+        self.assertEqual(self.row(self.wall_value)["use_state"], "idle")
+
+    def test_launcher_just_before_wm_close_cancels(self) -> None:
+        self.abandon()
+        self.lifecycle.remember_launcher("run-x", LAUNCHER)
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "revalidate_close":
+                self.lifecycle.note_launcher_request(
+                    LAUNCHER, "run-x", when=self.wall_value
+                )
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "countdown_aborted")
+        self.assertEqual(self.windows.posted, [])
+
+    def test_another_session_ahead_in_the_queue_blocks_the_warden(self) -> None:
+        self.abandon(dead=True)
+        status, _body = self.coordinator.enqueue(IDENTITY_B, "work", "op-b")
+        self.assertEqual(status, 202)
+        self.phases.append(self.on_exit)
+        self.enable()
+        warden = self.make_warden()
+        self.assertEqual(warden.run_once(), "queued")
+        self.assertIsNone(self.store.get("run-x").owner_session_id)
+        self.assertIn(warden.client.session_id, self.coordinator.queued_session_ids())
+        self.assertEqual(self.coordinator.cancel_operation(IDENTITY_B, "op-b")[0], 200)
+        self.assertEqual(warden.run_once(), "orderly")
+        self.assertEqual(self.bridge.calls, [])
+        self.assert_retired("orderly")
+
+    def test_late_cancel_while_queued_does_not_adopt(self) -> None:
+        self.abandon()
+
+        def hook(name: str, warden: IdleWarden) -> None:
+            if name == "queued":
+                status, _body = self.coordinator.cancel_operation(
+                    warden.client, warden.operation_id or ""
+                )
+                self.assertEqual(status, 200)
+
+        self.phases.append(hook)
+        # Cancel removes the ticket. The following wait sees ticket_invalid,
+        # which the warden reports as wait_failed and does not adopt on.
+        self.assertEqual(self.drive(), "wait_failed")
+        self.assertIsNone(self.coordinator._active)
+        self.assertIsNone(self.store.get("run-x").owner_session_id)
+        self.assertEqual(self.windows.posted, [])
+
+    def test_cancel_during_grant_audit_publishes_no_lease(self) -> None:
+        self.abandon(dead=True)
+        sink = self.audit
+        holder: dict[str, object] = {"warden": None}
+
+        def wrapped(event: dict[str, object]) -> bool:
+            ok = sink(event)
+            warden = holder["warden"]
+            if (
+                event.get("event") == "session_grant_prepared"
+                and isinstance(warden, IdleWarden)
+            ):
+                # The grant holds the audit gate across this callback. Cancelling
+                # on this thread deadlocks on that gate; another thread tombstones
+                # the operation, then blocks until the grant releases the gate.
+                op = warden.operation_id or ""
+                key = (warden.client, op)
+                worker = threading.Thread(
+                    target=lambda: self.coordinator.cancel_operation(
+                        warden.client, op
+                    ),
+                    daemon=True,
+                )
+                holder["worker"] = worker
+                worker.start()
+                deadline = time.monotonic() + 2.0
+                while key not in self.coordinator._operation_tombstones:
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.005)
+            return ok
+
+        self.coordinator._audit = wrapped
+        self.enable()
+        warden = self.make_warden()
+        holder["warden"] = warden
+        self.assertEqual(warden.run_once(), "cancelled")
+        worker = holder.get("worker")
+        if isinstance(worker, threading.Thread):
+            worker.join(2.0)
+            self.assertFalse(worker.is_alive())
+        self.assertIsNone(self.coordinator._active)
+        self.assertIsNone(self.store.get("run-x").owner_session_id)
+
+    def test_tombstone_saturation_refuses_the_enqueue(self) -> None:
+        for index in range(MAX_OPERATION_TOMBSTONES):
+            status, body = self.coordinator.cancel_operation(STRANGER, f"never-{index}")
+            self.assertEqual(status, 200, body)
+        self.abandon()
+        self.assertEqual(self.drive(), "enqueue_failed")
+        self.assertIsNone(self.store.get("run-x").owner_session_id)
+        self.assertEqual(self.bridge.calls, [])
+
+    def test_wal_failure_does_not_adopt(self) -> None:
+        def boom(_marker: dict) -> str:
+            raise RuntimeError("wal down")
+
+        self.rebuild(
+            fault_arm=boom,
+            fault_transition=lambda _marker: "a" * 64,
+            fault_clear=lambda _marker: True,
+            persist_snapshot=lambda _snapshot: None,
+        )
+        self.abandon(dead=True)
+        self.assertEqual(self.drive(), "wait_failed")
+        run = self.store.get("run-x")
+        self.assertEqual(run.state, "RUNNING_IDLE")
+        self.assertIsNone(run.owner_session_id)
+        self.assertEqual(self.windows.posted, [])
+
+    def test_grant_audit_failure_does_not_adopt(self) -> None:
+        self.audit.fail_events.add("session_grant_prepared")
+        self.abandon(dead=True)
+        self.assertEqual(self.drive(), "wait_failed")
+        self.assertIsNone(self.store.get("run-x").owner_session_id)
+        self.assertEqual(self.windows.posted, [])
+
+    def test_queue_audit_failure_does_not_adopt(self) -> None:
+        self.audit.fail_events.add("session_queued")
+        self.abandon(dead=True)
+        self.assertEqual(self.drive(), "enqueue_failed")
+        self.assertIsNone(self.store.get("run-x").owner_session_id)
+
+    def test_cleanup_saturation_releases_without_closing(self) -> None:
+        self.abandon()
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "countdown":
+                for _index in range(4):
+                    self.assertTrue(
+                        self.coordinator._cleanup_worker_slots.acquire(blocking=False)
+                    )
+                self.human_input(self.wall_value)
+
+        self.phases.append(hook)
+        try:
+            self.assertEqual(self.drive(), "countdown_aborted")
+        finally:
+            for _index in range(4):
+                self.coordinator._cleanup_worker_slots.release()
+        self.assertEqual(self.windows.posted, [])
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertEqual(self.store.get("run-x").state, "RUNNING_IDLE")
+
+    def test_ticket_ttl_does_not_adopt(self) -> None:
+        self.clock = [0.0]
+        self.rebuild(time_fn=lambda: self.clock[0])
+        self.abandon(dead=True)
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "queued":
+                self.clock[0] += SESSION_TTL_S + 1
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "wait_failed")
+        self.assertIsNone(self.store.get("run-x").owner_session_id)
+        self.assertEqual(self.windows.posted, [])
+
+    def test_grace_and_pref_renewal_then_the_warden_closes(self) -> None:
+        self.clock = [0.0]
+        self.rebuild(
+            time_fn=lambda: self.clock[0],
+            attached_run_probe=lambda _session, _lease: True,
+        )
+        status, _body = self.coordinator.acquire(IDENTITY_A, "owner")
+        self.assertEqual(status, 200)
+        self.abandon(dead=True)
+        self.phases.append(self.on_exit)
+        self.enable()
+        warden = self.make_warden()
+        self.clock[0] = 100
+        self.assertEqual(warden.run_once(), "queued")
+        self.assertIsNone(self.store.get("run-x").owner_session_id)
+        self.clock[0] = 130
+        self.assertEqual(warden.run_once(), "queued")
+        self.assertEqual(self.store.get("run-x").state, "RUNNING_IDLE")
+        renewed, _renewed_body = self.coordinator.acquire(IDENTITY_A, "owner")
+        self.assertEqual(renewed, 200)
+        self.assertEqual(self.coordinator._pref_used.get(IDENTITY_A.session_id), 1)
+        self.clock[0] = 200
+        self.assertEqual(warden.run_once(), "queued")
+        self.clock[0] = 260
+        jumped, jumped_body = self.coordinator.acquire(IDENTITY_A, "again")
+        self.assertEqual(jumped, 202, jumped_body)
+        self.assertEqual(warden.run_once(), "orderly")
+        self.assertEqual(self.bridge.calls, [])
+        self.assert_retired("orderly")
+
+    def _assert_warning_failed(self, **kwargs: object) -> None:
+        self.abandon()
+        self.assert_abandoned()
+        scripts = kwargs.get("scripts")
+        if isinstance(scripts, dict):
+            self.bridge.scripts.update(scripts)
+        status = kwargs.get("enqueue_status")
+        if isinstance(status, int):
+            self.bridge.enqueue_status = status
+        extra: dict[str, object] = {}
+        if kwargs.get("timeout"):
+            extra["bridge_timeout_s"] = 0.0
+        self.assertEqual(self.drive(**extra), "warning_failed")
+        row = self.row(self.wall_value)
+        self.assertEqual(
+            (row["use_state"], row["use_reason"]),
+            ("idle_waiting", "warning_failed"),
+        )
+        self.assertEqual(self.windows.posted, [])
+        self.assertEqual(self.guard.terminate_calls, [])
+
+    def test_warning_query_error_blocks_for_five_minutes(self) -> None:
+        self._assert_warning_failed(scripts={"query_all_players": {"error": "bridge_down"}})
+        end = self.wall_value + 301
+        self.healthy_signal(self.wall_value, end)
+        self.assertEqual(self.row(end)["use_state"], "abandoned")
+
+    def test_warning_query_transport_failure(self) -> None:
+        self._assert_warning_failed(enqueue_status=500)
+
+    def test_warning_no_players(self) -> None:
+        self._assert_warning_failed(
+            scripts={"query_all_players": {"ok": True, "players": []}}
+        )
+
+    def test_warning_notify_not_ok(self) -> None:
+        self._assert_warning_failed(
+            scripts={"notify_players": {"ok": False, "error": "player_not_found"}}
+        )
+        self.assertIn("notify_players", self.commands())
+
+    def test_warning_query_timeout(self) -> None:
+        self._assert_warning_failed(scripts={"query_all_players": None}, timeout=True)
+        self.assertTrue(self.bridge.abandoned)
+
+    def test_binding_change_between_query_and_notify(self) -> None:
+        self.abandon()
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "before_notify":
+                self.bridge.token = "other-binding"
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "warning_failed")
+        self.assertEqual(self.commands(), ["query_all_players"])
+        self.assertEqual(self.windows.posted, [])
+        self.assertEqual(
+            self.row(self.wall_value)["use_reason"], "warning_failed"
+        )
+
+    def test_generation_change_between_query_and_notify(self) -> None:
+        self.abandon()
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "before_notify":
+                run = self.store.get("run-x")
+                run.daemon_generation_at_launch = "gen-other"
+                self.store.replace(run)
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "warning_failed")
+        self.assertEqual(self.commands(), ["query_all_players"])
+        self.assertEqual(self.windows.posted, [])
+
+    def test_several_active_runs_are_not_a_candidate(self) -> None:
+        for run_id in ("run-a", "run-b"):
+            self.add_run(run_id)
+            self.lifecycle.restore_ownerless_since(run_id, 10_000.0)
+            self.bindings.bound.add(run_id)
+        self.healthy_signal(10_000.0, 10_601.0)
+        self.wall_value = 10_601.0
+        box = self.lifecycle.box_occupancy(now=self.wall_value)
+        self.assertEqual(len(box["runs"]), 2)
+        self.assertTrue(
+            all(item["use_reason"] == "multiple_active_runs" for item in box["runs"])
+        )
+        self.assertEqual(self.drive(), "no_candidate")
+        self.assertEqual(self.coordinator.queued_session_ids(), ())
+
+    def test_unknown_scan_is_not_a_candidate(self) -> None:
+        self.abandon()
+        self.diag_known = False
+        self.assertEqual(self.drive(), "no_candidate")
+        self.assertEqual(self.coordinator.queued_session_ids(), ())
+
+    def test_retail_quarantine_is_not_a_candidate_even_if_abandoned(self) -> None:
+        self.abandon()
+        self.retail_processes.append({"pid": 9, "name": "DayZ_x64.exe"})
+        self.assertEqual(self.row(self.wall_value)["use_state"], "abandoned")
+        self.assertEqual(self.drive(), "no_candidate")
+        self.assertEqual(self.coordinator.queued_session_ids(), ())
+        self.assertEqual(self.bridge.calls, [])
+
+    def test_owned_human_idle_unknown_and_unreconciled_are_left_alone(self) -> None:
+        self.add_run(owner="A")
+        self.assertEqual(self.row(time.time())["use_state"], "agent")
+        self.assertEqual(self.drive(), "no_candidate")
+        self.assertEqual(self.coordinator.queued_session_ids(), ())
+
+        self.rebuild()
+        self.add_run()
+        self.lifecycle.release_owner("A", "lease-A") if False else None
+        self.bindings.bound.add("run-x")
+        now = time.time()
+        self.lifecycle.restore_ownerless_since("run-x", now)
+        self.healthy_signal(now, now)
+        self.human_input(now)
+        self.wall_value = now
+        self.assertEqual(self.row(now)["use_state"], "human")
+        self.assertEqual(self.drive(), "no_candidate")
+
+        self.rebuild()
+        self.add_run()
+        now = time.time()
+        self.lifecycle.restore_ownerless_since("run-x", now)
+        self.bindings.bound.add("run-x")
+        self.healthy_signal(now, now)
+        self.wall_value = now
+        self.assertEqual(self.row(now)["use_state"], "idle")
+        self.assertEqual(self.drive(), "no_candidate")
+
+        self.rebuild()
+        self.add_run()
+        self.wall_value = time.time()
+        self.assertEqual(self.row(self.wall_value)["use_state"], "unknown")
+        self.assertEqual(self.drive(), "no_candidate")
+
+        self.rebuild()
+        self.add_run()
+        run = self.store.get("run-x")
+        run.state = "UNRECONCILED"
+        self.store.replace(run)
+        self.assertEqual(self.drive(), "no_candidate")
+        self.assertEqual(self.coordinator.queued_session_ids(), ())
+
+    def test_restart_during_countdown_discards_it(self) -> None:
+        self.add_run(owner="A", live=True)
+        self.lifecycle.mark_closing("run-x")
+        self.assertEqual(self.row(time.time())["use_state"], "closing")
+        self.store.recover_after_restart()
+        self.bindings = FakeBindings()
+        self.lifecycle = self._lifecycle()
+        self.holder["lifecycle"] = self.lifecycle
+        self.lifecycle.window_fns = self.windows.bind()
+        text = self.paths.runs_path.read_text(encoding="utf-8")
+        self.assertNotIn("closing", text)
+        self.assertNotIn("idle-warden", text)
+        row = self.row(time.time())
+        self.assertNotEqual(row["use_state"], "closing")
+        self.assertEqual(row["use_state"], "unknown")
+        self.assertEqual(self.drive(), "no_candidate")
+        self.assertEqual(self.bridge.calls, [])
+
+    def test_restart_mid_stop_is_unreconciled(self) -> None:
+        self.add_run(owner="A")
+        run = self.store.get("run-x")
+        run.state = "STOPPING"
+        self.store.replace(run)
+        recovered = self.store.recover_after_restart()
+        self.assertIn("run-x", recovered["unreconciled"])
+        self.bindings = FakeBindings()
+        self.lifecycle = self._lifecycle()
+        self.holder["lifecycle"] = self.lifecycle
+        self.assertEqual(self.store.get("run-x").state, "UNRECONCILED")
+        self.assertEqual(self.drive(), "no_candidate")
+
+    def test_dead_client_after_restart_waits_until_600(self) -> None:
+        self.add_run(generation="gen-before", live=False)
+        # The restarted clock has no ownerless stamp. Put its 600 s point at
+        # the real now: adopt_run classifies with time.time(), not the warden wall.
+        now = time.time()
+        self.lifecycle._use_clock_origin = now - 600.0
+        origin = self.lifecycle._use_clock_origin
+        self.assertIsNone(self.lifecycle.ownerless_since("run-x"))
+        low = origin + 599
+        high = origin + 600
+        if self.row(high)["use_state"] != "abandoned":
+            high = origin + 600.05
+        self.assertEqual(self.row(low)["use_state"], "idle")
+        self.assertEqual(self.row(high)["use_reason"], "client_gone")
+        self.wall_value = low
+        self.enable()
+        warden = self.make_warden()
+        self.assertEqual(warden.run_once(), "no_candidate")
+        self.assertEqual(self.bridge.calls, [])
+        self.assertEqual(self.coordinator.queued_session_ids(), ())
+        self.wall_value = high
+        self.phases.append(self.on_exit)
+        self.assertEqual(warden.run_once(), "orderly")
+        self.assertEqual(self.bridge.calls, [])
+        self.assert_retired("orderly")
+
+    def test_closing_beats_agent(self) -> None:
+        self.add_run(owner="A")
+        self.lifecycle.mark_closing("run-x")
+        self.assertEqual(self.row(time.time())["use_state"], "closing")
+
+    def test_queued_session_ids_do_not_expire(self) -> None:
+        self.clock = [0.0]
+        self.rebuild(time_fn=lambda: self.clock[0])
+        status, _body = self.coordinator.enqueue(IDENTITY_A, "work", "op-keep")
+        self.assertEqual(status, 202)
+        self.clock[0] = SESSION_TTL_S + 5
+        self.assertEqual(
+            self.coordinator.queued_session_ids(), (IDENTITY_A.session_id,)
+        )
+        self.coordinator.expire_due()
+        self.assertEqual(self.coordinator.queued_session_ids(), ())
+
+    def test_install_thread_stops(self) -> None:
+        stop = threading.Event()
+        stop.set()
+        thread = install_idle_warden(
+            self.lifecycle,
+            self.coordinator,
+            self.bridge,
+            self.settings,
+            generation=GENERATION,
+            stop=stop,
+            interval_s=30,
+        )
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(thread.name, "dayz-mcp-idle-warden")
+        self.assertTrue(thread.daemon)
+
+
+class BoundInstanceTokenTest(unittest.TestCase):
+    def test_bound_server_pin_and_missing_peer(self) -> None:
+        state = ServerState("bound-token-test")
+        instance = str(uuid.uuid4())
+        state.install_bound_peer(
+            instance=instance, role="server", pid=9, run_id="run-x"
+        )
+        token = state.bound_instance_token("run-x", "server")
+        self.assertEqual(token, f"{instance}|1|9|2026-08-18T00:00:00.000000Z")
+        self.assertIsNone(state.bound_instance_token("missing", "server"))
+        self.assertIsNone(state.bound_instance_token("run-x", "client"))

@@ -1367,6 +1367,32 @@ class ServerState:
             if callable(remember):
                 remember(run_id)
 
+    def bound_instance_token(self, run_id: str, role: str = "server") -> str | None:
+        """Pin of the BOUND peer for one run. None when that peer is not BOUND.
+
+        The idle warden compares this across query_all_players and every
+        notify_players. A change, or None, means the warning is not evidence.
+        """
+
+        if not isinstance(run_id, str) or not run_id or not isinstance(role, str):
+            return None
+        with self._lock:
+            instance = self._role_index.get((run_id, role))
+            binding = (
+                self._bindings.get(instance) if isinstance(instance, str) else None
+            )
+            if (
+                binding is None
+                or binding.state != BINDING_BOUND
+                or binding.run_id != run_id
+                or binding.role != role
+            ):
+                return None
+            return (
+                f"{binding.instance}|{binding.epoch}|{binding.pid}|"
+                f"{binding.creation_time_utc}"
+            )
+
     def run_has_bound_binding(self, run_id: str) -> bool:
         """True iff a present binding for this run is BOUND. STARTING does not dispatch."""
 
