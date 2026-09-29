@@ -24,6 +24,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping, TypeVar
 
 from dayz_mcp import dayz_test_storage, window_close
+from dayz_mcp.child_environment import whitelisted_child_environment
 from dayz_mcp.input_activity import InputAttributor, InputSample
 from dayz_mcp.instance_fence import BindingPrepareError
 from dayz_mcp.steam_launch_guard import Preparation
@@ -1794,7 +1795,11 @@ class ProcessLifecycle:
         return runs, diagnostics
 
     def _launch(self, argv: list[str], cwd: str, window_style: str) -> object:
-        kwargs: dict[str, object] = {"cwd": cwd, "close_fds": True}
+        kwargs: dict[str, object] = {
+            "cwd": cwd,
+            "close_fds": True,
+            "env": whitelisted_child_environment(),
+        }
         if os.name == "nt" and window_style == "hidden":
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         elif os.name == "nt" and window_style == "normal":

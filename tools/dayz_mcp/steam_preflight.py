@@ -20,6 +20,7 @@ from typing import Protocol
 from ctypes import wintypes
 
 from dayz_mcp import wmi_host
+from dayz_mcp.child_environment import whitelisted_child_environment
 
 
 STEAM_SESSION_STALE = "steam_session_stale"
@@ -531,6 +532,7 @@ class WindowsSteamRemediationHost:
             [executable, *extra_args],
             close_fds=True,
             creationflags=_STEAM_INVOKE_FLAGS,
+            env=whitelisted_child_environment(),
         )
 
     def monotonic(self) -> float:
