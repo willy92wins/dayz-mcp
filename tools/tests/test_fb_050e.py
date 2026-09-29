@@ -374,6 +374,28 @@ class Fb050eDayzTestRunTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(repeated[server._TOOL_REGISTRY_STALE_HINT_KEY], hint)
 
+    async def test_fb_050e_stale_dayz_test_run_keeps_an_existing_hint(self) -> None:
+        original = dict(_RUN_RESULT)
+        original["hint"] = (
+            "port 2302 is held by a process that is not a managed run"
+        )
+        _seed, result = await self._call_run(
+            snapshot=_stale_snapshot(), execute_payload=original
+        )
+        self.assertIs(result["caller_tool_registry_stale"], True)
+        self.assertEqual(result["hint"], original["hint"])
+        self.assertEqual(
+            result["warnings"],
+            [_STALE_WARNING],
+        )
+        self.assertEqual(_STALE_WARNING, "tool_registry_stale_reopen_client")
+        self.assertEqual(
+            result[server._TOOL_REGISTRY_STALE_HINT_KEY],
+            server._TOOL_REGISTRY_STALE_HINT,
+        )
+        self.assertNotEqual(result["hint"], result[server._TOOL_REGISTRY_STALE_HINT_KEY])
+        self._assert_unchanged(original, result)
+
     def test_fb_050e_dayz_test_run_description_names_client_tool_timeout(self) -> None:
         app, _runtime = build_app(
             ServerConfig(key="k", port=0, log_sink=lambda _message: None)

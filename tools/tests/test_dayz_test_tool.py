@@ -230,6 +230,89 @@ class DayzTestToolRequestTest(unittest.TestCase):
                 folded = [item.casefold() for item in mod_arg.split(";") if item]
                 self.assertEqual(len(folded), len(set(folded)))
 
+    def test_moving_the_bridge_out_of_base_mods_lists_it_once(self) -> None:
+        """The error's recipe, followed exactly, puts the bridge on -mod= once.
+
+        Adding extra_mods=['@DayZ_MCP'] while the folder stays in the
+        effective base_mods lists it twice: the worker concatenates both
+        lists. Policy defaults stay in force when the field is omitted, so
+        that case has to pass an explicit base_mods without the bridge.
+        """
+        caller_policy = _policy()
+        with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+            dayz_test_tool.build_run_request(
+                _sealed(caller_policy),
+                project="ExampleMod",
+                mode="offline",
+                base_mods=["@DayZ_MCP"],
+            )
+        code = caught.exception.code
+        self.assertIn(
+            "Move '@DayZ_MCP' from the effective base_mods to extra_mods",
+            code,
+        )
+        self.assertIn("explicit base_mods without the bridge", code)
+        self.assertNotIn("Add extra_mods=['@DayZ_MCP']", code)
+
+        # Same inputs as the error cases above this test. None means the
+        # effective list is the policy default, so the call must pass it
+        # explicitly with the bridge removed.
+        sources: tuple[
+            tuple[str, dayz_test_request.RequestProjectPolicy, list[str] | None],
+            ...,
+        ] = (
+            ("caller_base", caller_policy, ["@DayZ_MCP"]),
+            ("caller_base_case", caller_policy, ["@dayz_mcp"]),
+            (
+                "caller_base_absolute",
+                caller_policy,
+                [r"P:\Mods\@DayZ_MCP"],
+            ),
+            (
+                "policy_base",
+                _policy(default_base_mods=("@CF", "@DayZ_MCP")),
+                None,
+            ),
+            (
+                "policy_base_case",
+                _policy(default_base_mods=("@CF", "@dayz_mcp")),
+                None,
+            ),
+        )
+        for label, policy, caller_base in sources:
+            with self.subTest(label=label):
+                effective = (
+                    list(policy.default_base_mods)
+                    if caller_base is None
+                    else caller_base
+                )
+                moved = [
+                    item
+                    for item in effective
+                    if not dayz_test_tool._names_bridge(item)
+                ]
+                raw, _selected = dayz_test_tool.build_run_request(
+                    _sealed(policy),
+                    project="ExampleMod",
+                    mode="offline",
+                    base_mods=moved,
+                    extra_mods=["@DayZ_MCP"],
+                )
+                parsed = dayz_test_request.parse_dayz_test_request(
+                    raw, policies=(policy,)
+                )
+                self.assertEqual(parsed.payload["extra_mods"], ["@DayZ_MCP"])
+                self.assertFalse(
+                    any(
+                        dayz_test_tool._names_bridge(item)
+                        for item in parsed.payload["base_mods"]
+                    )
+                )
+                mod_arg = _worker_mod_arg(parsed.payload, policy)
+                self.assertEqual(
+                    _bridge_mod_entries(mod_arg), [r"P:\Mods\@DayZ_MCP"]
+                )
+
     def test_cleared_base_mods_still_defaults_the_bridge_once(self) -> None:
         """An empty caller list, or no_base_mods, is not the policy default.
 

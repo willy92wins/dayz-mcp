@@ -85,9 +85,11 @@ _BRIDGE_MOD_MISSING = (
 _BRIDGE_MOD_MISSING_IN_BASE_MODS = (
     "bridge_mod_missing: the bridge is already in base_mods, which does not "
     "count (base_mods and server_mods do not satisfy the bridge check). "
-    "Add extra_mods=['@DayZ_MCP'] (the folder name '@DayZ_MCP' must be "
-    "explicit in extra_mods or as the project mod); dayz_test_run does not "
-    "copy a base_mods entry into extra_mods"
+    "Move '@DayZ_MCP' from the effective base_mods to extra_mods "
+    "(extra_mods=['@DayZ_MCP']). When that base list is the policy default, "
+    "pass an explicit base_mods without the bridge. dayz_test_run does not "
+    "copy a base_mods entry into extra_mods, because that would list the "
+    "folder twice on -mod="
 )
 _HELD_LEASE_RUN = (
     "session_transition_conflict: release your session lease first - "
