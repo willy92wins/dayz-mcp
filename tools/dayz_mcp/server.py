@@ -189,6 +189,9 @@ _RETAIL_QUARANTINE_REASONS = frozenset({
 })
 LEASE_TOOL_LINE = "Requires a lease (session_acquire_wait)."
 
+# flags=0 stays the surface default. This mask is the example to add when
+# the caller wants the object left out of the world save.
+_WORLD_SPAWN_NOPERSIST_FLAGS = ECE_PLACE_ON_SURFACE | ECE_NOPERSISTENCY_WORLD
 WORLD_SPAWN_FLAGS_LINE = (
     "flags=0 uses ECE_PLACE_ON_SURFACE. Allowed non-zero values are the exact "
     "pair ECE_CREATEPHYSICS|ECE_TRACE, or any value that includes "
@@ -197,7 +200,12 @@ WORLD_SPAWN_FLAGS_LINE = (
     "ECE_KEEPHEIGHT (524288) and ECE_NOLIFETIME (4194304), alone or together "
     "(flags=4718592), return bad_flags because IsAllowedSpawnFlags does not "
     "admit those bits (KEEPHEIGHT skips surface placement; NOLIFETIME is not "
-    "in the extra allowlist). Unknown bits also return bad_flags."
+    "in the extra allowlist). Unknown bits also return bad_flags. "
+    "Without ECE_NOPERSISTENCY_WORLD the server can save the object and "
+    "return it in a later run, where its object_id is no longer valid. "
+    f"Add that flag to keep it out of the world save, for example "
+    f"flags={_WORLD_SPAWN_NOPERSIST_FLAGS} "
+    "(ECE_PLACE_ON_SURFACE|ECE_NOPERSISTENCY_WORLD)."
 )
 DAEMON_AUTOSPAWN_DISABLED = (
     "daemon_autospawn_disabled: start the daemon (--daemon) or omit "
@@ -4869,6 +4877,13 @@ def _failed_active_run_result(
 
 
 _TOOL_REGISTRY_STALE_WARNING = "tool_registry_stale_reopen_client"
+_TOOL_REGISTRY_STALE_HINT_KEY = "tool_registry_stale_hint"
+_TOOL_REGISTRY_STALE_HINT = (
+    "The host must reconnect the dayz-mcp server to list the current tools. "
+    "The agent cannot do that itself (Claude Code: /mcp, then reconnect "
+    "dayz-mcp). Hosts that do not re-list after tools/list_changed should "
+    "be registered with --no-progressive-disclosure."
+)
 
 
 def _annotate_caller_tool_registry(
@@ -4885,6 +4900,7 @@ def _annotate_caller_tool_registry(
     if _TOOL_REGISTRY_STALE_WARNING not in warnings:
         warnings.append(_TOOL_REGISTRY_STALE_WARNING)
     payload["warnings"] = warnings
+    payload[_TOOL_REGISTRY_STALE_HINT_KEY] = _TOOL_REGISTRY_STALE_HINT
     return payload
 
 
@@ -6210,7 +6226,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Requires a lease (session_acquire_wait). Delete an object "
             "previously returned by world_spawn.object_id. object_id is "
             "session-scoped and does not survive the run — keep the spawn id "
-            "in this session; there is no pos+type delete. Deleting a seated "
+            "in this session; there is no pos+type delete. Spawn with "
+            "ECE_NOPERSISTENCY_WORLD so the object is not saved into a later "
+            "run. Deleting a seated "
             "transport after vehicle_get_in_client needs care (sanctioned "
             "teardown; it ejects). Returns ok with "
             "deleted=0 (success, nothing removed) when the id is unknown or "

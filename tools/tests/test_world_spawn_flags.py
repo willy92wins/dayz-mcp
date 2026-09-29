@@ -77,6 +77,19 @@ class WorldSpawnFlagsToolTest(unittest.IsolatedAsyncioTestCase):
         description = self.app._tool_manager.get_tool("world_spawn").description or ""
         _assert_world_spawn_copy(self, description)
         self.assertIn(server.WORLD_SPAWN_FLAGS_LINE, description)
+        nopersist = server.ECE_PLACE_ON_SURFACE + server.ECE_NOPERSISTENCY_WORLD
+        self.assertEqual(
+            nopersist,
+            server.ECE_PLACE_ON_SURFACE | server.ECE_NOPERSISTENCY_WORLD,
+        )
+        self.assertIn(f"flags={nopersist}", description)
+        flags = self.app._tool_manager.get_tool("world_spawn").parameters[
+            "properties"
+        ]["flags"]
+        self.assertEqual(flags.get("default"), 0)
+        delete = self.app._tool_manager.get_tool("object_delete").description or ""
+        self.assertIn("ECE_NOPERSISTENCY_WORLD", delete)
+        self.assertIn("does not survive the run", delete)
 
     async def test_keepheight_nolifetime_and_unknown_bits_are_bad_flags(self) -> None:
         with patch.object(self.runtime, "call_bridge", new=AsyncMock()) as call:

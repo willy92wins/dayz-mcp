@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import patch
 
 from tests._addon_paths import addon_root
+from dayz_mcp.core import ECE_NOPERSISTENCY_WORLD, ECE_PLACE_ON_SURFACE
 from dayz_mcp.server import (
     LEASE_TOOL_LINE,
     _INITIAL_DESCRIPTION_LIMIT,
@@ -73,6 +74,14 @@ def _assert_world_spawn_copy(test: unittest.TestCase, description: str) -> None:
     test.assertIn(_SPAWN_BAD_FLAGS_CLAUSE, description)
     test.assertNotIn("accepts ECE_KEEPHEIGHT", description)
     test.assertNotIn("accepts ECE_NOLIFETIME", description)
+    nopersist = ECE_PLACE_ON_SURFACE + ECE_NOPERSISTENCY_WORLD
+    test.assertEqual(nopersist, ECE_PLACE_ON_SURFACE | ECE_NOPERSISTENCY_WORLD)
+    test.assertIn("Without ECE_NOPERSISTENCY_WORLD", description)
+    test.assertIn("later run", description)
+    test.assertIn("object_id is no longer valid", description)
+    test.assertIn(f"flags={nopersist}", description)
+    test.assertIn("ECE_PLACE_ON_SURFACE|ECE_NOPERSISTENCY_WORLD", description)
+    test.assertNotIn("not verified in game", description)
 
 
 def _assert_dayz_test_run_copy(test: unittest.TestCase, description: str) -> None:
@@ -153,6 +162,9 @@ class PreconditionDocsTest(unittest.IsolatedAsyncioTestCase):
         delete = _tool_description(self.app, "object_delete")
         self.assertIn("does not survive the run", delete)
         self.assertIn("needs care", delete)
+        self.assertIn("no pos+type delete", delete)
+        self.assertIn("ECE_NOPERSISTENCY_WORLD", delete)
+        self.assertNotIn("not verified in game", delete)
 
     def test_world_spawn_does_not_claim_fixture_prep(self) -> None:
         description = _tool_description(self.app, "world_spawn")

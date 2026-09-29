@@ -79,6 +79,18 @@ _BRIDGE_MOD_MISSING = (
     "this call kept bridge_mod_missing because the sealed request "
     "would reject that appended entry"
 )
+# The bridge folder is already on the effective base_mods list, so the
+# default is not appended (a second -mod= entry). The sealed parser
+# rejected nothing on this path.
+_BRIDGE_MOD_MISSING_IN_BASE_MODS = (
+    "bridge_mod_missing: the bridge is already in base_mods, which does not "
+    "count (base_mods and server_mods do not satisfy the bridge check). "
+    "Move '@DayZ_MCP' from the effective base_mods to extra_mods "
+    "(extra_mods=['@DayZ_MCP']). When that base list is the policy default, "
+    "pass an explicit base_mods without the bridge. dayz_test_run does not "
+    "copy a base_mods entry into extra_mods, because that would list the "
+    "folder twice on -mod="
+)
 _HELD_LEASE_RUN = (
     "session_transition_conflict: release your session lease first - "
     "dayz_test_run manages its own lease internally"
@@ -488,6 +500,8 @@ def build_run_request(
         ntpath.basename(mod).casefold() in _BRIDGE_MOD_NAMES
         for mod in effective_mods
     ):
+        if any(_names_bridge(item) for item in effective_base):
+            _fail(_BRIDGE_MOD_MISSING_IN_BASE_MODS)
         _fail(_BRIDGE_MOD_MISSING)
     return parsed.canonical_bytes, selected
 
