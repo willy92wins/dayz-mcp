@@ -38,6 +38,8 @@ READ_ONLY_COMMANDS = frozenset(
         "object_doors",
         "entities_query",
         "ui_tree",
+        # Server read of the weapon in hands, including the EEFired tally.
+        "weapon_state",
         "input_describe",
     }
 )
