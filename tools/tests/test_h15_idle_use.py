@@ -190,13 +190,15 @@ class H15SpecContractTests(unittest.TestCase):
             "El aviso espera a que el vigilante tenga el lease, así que una cola por delante lo retrasa.",
             "conserva la adopción de recuperación: otra sesión puede adoptarlo.",
             "el stop de respaldo solo ocurre tras una segunda revalidación",
-            "Si no pasa, el resultado es `failed` y no hay stop.",
+            "Si no pasa, el audit anota `failed` y no hay stop.",
+            "`run_once()` puede devolver `release_pending` hasta que el lease se suelta (el token sigue retenido), o `release_cleanup_pending` o `release_lost`.",
             "no un plazo garantizado.",
             "solo si la segunda revalidación pasa, el stop del lifecycle guard por identidad (`failed` y sin stop si no pasa).",
         ):
             self.assertIn(phrase, spec, phrase)
         for phrase in (
             "Apagarlo a mitad de ciclo suelta lo que tenga y no cierra.",
+            "Si no pasa, el resultado es `failed` y no hay stop.",
             "Si un rol sigue vivo, el stop es el del lifecycle guard por identidad (`stop_run`).",
             "el aviso se ve a las 10:00 y el cierre llega a las 11:00 con `idle_timeout` `orderly`; mover el ratón",
         ):
@@ -249,7 +251,8 @@ class H15SpecContractTests(unittest.TestCase):
             "Turning it off before `WM_CLOSE` releases what it holds and closes nothing.",
             "turning it off does not undo that close, and it prevents the fallback stop.",
             "the fallback stop happens only after a second revalidation",
-            "When it does not, the result is `failed` and there is no stop.",
+            "When it does not, the audit records `failed` and there is no stop.",
+            "`run_once()` can return `release_pending` until the lease is released (the token stays held), or `release_cleanup_pending` or `release_lost`.",
             "so a queue ahead of it delays the warning.",
             "not a deadline.",
             "The run is a candidate from 600 s; the warning follows the lease; the close is no earlier than 60 s after the last confirmed warning.",
@@ -259,6 +262,7 @@ class H15SpecContractTests(unittest.TestCase):
             self.assertIn(phrase, arch, phrase)
         for phrase in (
             "and turning it off releases what it holds and closes nothing.",
+            "When it does not, the result is `failed` and there is no stop.",
             "If a launched role is still alive, a lifecycle-guard stop by identity follows (`stop_run`).",
             "only the launching session may adopt an ownerless run.",
             "Warn at 10:00 and close at 11:00. With no way to warn",
