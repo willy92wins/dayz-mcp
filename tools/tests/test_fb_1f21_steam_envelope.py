@@ -4,6 +4,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
+import mcp_capture
 from dayz_mcp import dayz_test_request, dayz_test_tool, native_launcher_transaction
 from dayz_mcp import steam_preflight
 from dayz_mcp.steam_launch_guard import Preparation, SteamIdentity
@@ -285,6 +286,20 @@ class SteamPreparationToolEnvelopeTests(unittest.IsolatedAsyncioTestCase):
         )
         vpp_patcher.start()
         self.addCleanup(vpp_patcher.stop)
+        desktop_patcher = patch.object(
+            dayz_test_tool,
+            "evaluate_prerun_desktop",
+            return_value=mcp_capture.PrerunDesktopResult(
+                error_code=None,
+                desktop="unlocked",
+                mean_brightness=80.0,
+                nonblack_ratio=0.9,
+                waited_s=0.01,
+                remediation="",
+            ),
+        )
+        desktop_patcher.start()
+        self.addCleanup(desktop_patcher.stop)
 
     async def _run_with_status(self, status: dict[str, object]) -> dict[str, object]:
         policy = _policy()
