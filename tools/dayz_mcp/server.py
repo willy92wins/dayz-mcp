@@ -3756,11 +3756,14 @@ async def execute_wait_for(
             if not held:
                 last_error = _TOOL_LOCK_BUSY
                 break
-            probes += 1
+            # The while test can pass and this lock still be taken: a free
+            # lock does not yield, so the timeout cannot fire first. A probe
+            # must not start once the deadline has passed.
             remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            probes += 1
             if condition == "entity_state":
-                if remaining <= 0.0:
-                    break
                 probe_timeout = min(DEFAULT_TOOL_TIMEOUT_S, remaining)
                 result = await runtime.call_bridge("telemetry_read", entity_args, "server", probe_timeout)
                 not_ready = _structured_not_ready_message(result)

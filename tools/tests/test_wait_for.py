@@ -576,6 +576,104 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
                     )
                 self.assertIn("lookback_lines", str(ctx.exception))
 
+    async def test_no_probe_starts_after_the_deadline(self) -> None:
+        # The while test can pass and the lock still be taken afterwards: a
+        # free lock does not yield, so asyncio.timeout cannot win. The
+        # reviewer reproduced a second probe at 0.109375s for timeout_s=0.1.
+        # Real-clock tests allow one or two probes (test_deadline_bounds_the_sleep);
+        # this clock jumps only inside the lock acquire that follows a passing
+        # while check, so a probe after the deadline is unambiguous.
+        timeout_s = 0.1
+        deadline = timeout_s
+        past_deadline = 0.109375
+
+        class _Clock:
+            def __init__(self) -> None:
+                self.now = 0.0
+
+            def __call__(self) -> float:
+                return self.now
+
+        class _JumpLock(asyncio.Lock):
+            def __init__(self, clock: _Clock, jump_on: int) -> None:
+                super().__init__()
+                self._clock = clock
+                self._jump_on = jump_on
+                self.acquires = 0
+
+            async def acquire(self) -> bool:
+                self.acquires += 1
+                if self.acquires == self._jump_on:
+                    self._clock.now = past_deadline
+                return await super().acquire()
+
+        class _RecordingRuntime(_FakeRuntime):
+            def __init__(self) -> None:
+                super().__init__(fallback=0)
+                self.probe_starts: list[float] = []
+
+            async def call_bridge(self, cmd, args, peer, timeout_s):
+                self.probe_starts.append(server.time.monotonic())
+                if cmd == "telemetry_read":
+                    return {"ok": 1, "telemetry": {"found": False}}
+                return await super().call_bridge(cmd, args, peer, timeout_s)
+
+        entity = {
+            "type": "CarScript",
+            "pos": [1.0, 2.0, 3.0],
+            "radius": 5.0,
+            "field": "found",
+            "equals": True,
+        }
+        cases = (
+            ("players_at_least", {"value": 1}, 1),
+            ("players_at_most", {"value": 99}, 1),
+            ("entity_state", {"entity": entity}, 1),
+            ("log_matches", {"pattern": "NEEDLE", "lookback_lines": 0}, 2),
+        )
+        for condition, kwargs, jump_on in cases:
+            with self.subTest(condition=condition):
+                clock = _Clock()
+                runtime = _RecordingRuntime()
+                runtime.tool_lock = _JumpLock(clock, jump_on)
+                probe_starts = runtime.probe_starts
+                if condition == "log_matches":
+                    with tempfile.TemporaryDirectory() as directory:
+                        profiles = Path(directory) / "_server" / "profiles"
+                        profiles.mkdir(parents=True)
+
+                        def lifecycle_status() -> dict:
+                            probe_starts.append(server.time.monotonic())
+                            return {"runs": [_live_run(profiles)]}
+
+                        runtime.lifecycle_status = lifecycle_status
+                        with patch("dayz_mcp.server.time.monotonic", clock):
+                            result = await server.execute_wait_for(
+                                runtime,
+                                condition,
+                                timeout_s=timeout_s,
+                                poll_interval_s=0.5,
+                                **kwargs,
+                            )
+                else:
+                    with patch("dayz_mcp.server.time.monotonic", clock):
+                        result = await server.execute_wait_for(
+                            runtime,
+                            condition,
+                            timeout_s=timeout_s,
+                            poll_interval_s=0.5,
+                            **kwargs,
+                        )
+                self.assertTrue(result["ok"])
+                self.assertFalse(result["satisfied"])
+                self.assertTrue(result["timed_out"])
+                self.assertEqual(result["tool"], "wait_for")
+                self.assertEqual(result["probes"], 0)
+                self.assertEqual(
+                    [stamp for stamp in probe_starts if stamp >= deadline],
+                    [],
+                )
+
 
 # --- BUG-086: evidence that stands on its own -------------------------------
 #
