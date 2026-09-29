@@ -8,6 +8,7 @@ import errno
 import hmac
 import json
 import math
+import os
 import re
 import sys
 import threading
@@ -4279,10 +4280,19 @@ def _bind_exclusive(port: int, log_sink: LogSink, reclaim_orphans: bool) -> "Exc
             raise
         original_argv = getattr(sys, "orig_argv", None)
         expected_argv = list(original_argv) if isinstance(original_argv, list) else None
+        # full_image_path_of is the base interpreter the snapshot hashes. A venv's
+        # sys.executable is Scripts\python.exe, a different path. Empty, relative,
+        # or a failed lookup skips the reclaim; the original bind error stands.
+        try:
+            expected_executable = orphan_guard.full_image_path_of(os.getpid())
+        except Exception:
+            expected_executable = None
+        if not isinstance(expected_executable, str) or not os.path.isabs(expected_executable):
+            raise
         if not orphan_guard.try_reclaim_port(
             port,
             log=log_sink,
-            expected_executable=sys.executable,
+            expected_executable=expected_executable,
             expected_argv=expected_argv,
         ):
             raise
