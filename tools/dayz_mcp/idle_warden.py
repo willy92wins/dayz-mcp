@@ -173,6 +173,12 @@ class IdleWarden:
         self._closed = False
 
     def run_once(self) -> str:
+        try:
+            return self._cycle()
+        finally:
+            self._release_unconfirmed_adoption()
+
+    def _cycle(self) -> str:
         if not read_idle_warden_enabled(self.settings_path):
             if self.token or self.ticket_id:
                 self._drop_authority()
@@ -254,6 +260,11 @@ class IdleWarden:
     def _own(self, run_id: str) -> str:
         adopted = self.lifecycle.adopt_run(self.client, self.token, run_id)
         if not isinstance(adopted, dict) or adopted.get("ok") is not True:
+            # A late human or uncertain sample reverts the owner after the
+            # durable write and answers run_protected. That is not a failed
+            # warning: the run stays ownerless and this lease is dropped.
+            if isinstance(adopted, dict) and adopted.get("error") == "run_protected":
+                return self._not_adopted()
             return self._warning_failed(run_id, "adopt_failed")
         if not self._dead and adopted.get("dispatchable") is not True:
             return self._warning_failed(run_id, "not_dispatchable")
@@ -581,6 +592,84 @@ class IdleWarden:
         if isinstance(refreshed, str) and refreshed:
             self.token = refreshed
         return True
+
+    def _not_adopted(self) -> str:
+        if not self._release():
+            return "release_pending"
+        return "not_adopted"
+
+    def _release_unconfirmed_adoption(self) -> None:
+        """Drop adoption-unconfirmed.json when it names this warden and we do not own the run.
+
+        The lifecycle writes that marker just before a stranger's owner replace
+        and removes it when the adopt settles. A cycle that exits without the
+        owner must not leave the marker for startup to treat as a crash.
+        """
+
+        lifecycle = self.lifecycle
+        try:
+            marker = lifecycle._adoption_marker_path()
+        except Exception:
+            return
+        if not isinstance(marker, Path) or not marker.is_file():
+            return
+        try:
+            document = lifecycle._read_adoption_marker()
+        except Exception:
+            return
+        if (
+            not isinstance(document, dict)
+            or document.get("owner_session_id") != self.client.session_id
+        ):
+            return
+        run_id = document.get("run_id")
+        try:
+            run = lifecycle.manifest.get(run_id) if isinstance(run_id, str) else None
+        except Exception:
+            return
+        lease_id = document.get("owner_lease_id")
+        owns = (
+            run is not None
+            and run.state == "RUNNING"
+            and run.owner_session_id == self.client.session_id
+            and run.owner_lease_id == lease_id
+        )
+        if owns and lifecycle._open_adoption is not None:
+            try:
+                with lifecycle._operation_lock:
+                    lifecycle._close_adoption_after_replace(self.client, run)
+            except Exception:
+                return
+            try:
+                run = (
+                    lifecycle.manifest.get(run_id) if isinstance(run_id, str) else None
+                )
+            except Exception:
+                return
+            owns = (
+                run is not None
+                and run.state == "RUNNING"
+                and run.owner_session_id == self.client.session_id
+                and run.owner_lease_id == lease_id
+            )
+        if owns:
+            return
+        try:
+            open_adoption = lifecycle._open_adoption
+            if open_adoption is None or (
+                isinstance(open_adoption, tuple)
+                and bool(open_adoption)
+                and open_adoption[0] == run_id
+            ):
+                lifecycle._drop_open_adoption()
+        except Exception:
+            pass
+        if not marker.is_file():
+            return
+        try:
+            marker.unlink()
+        except OSError:
+            return
 
     def _warning_failed(self, run_id: str, detail: str) -> str:
         previous = self.lifecycle.ownerless_since(run_id)

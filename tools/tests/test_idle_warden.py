@@ -5,6 +5,7 @@ Fake clocks, a fake bridge and a fake process guard. No real process is started.
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 import time
@@ -1238,6 +1239,81 @@ class IdleWardenTest(unittest.TestCase):
         )
         self.coordinator.expire_due()
         self.assertEqual(self.coordinator.queued_session_ids(), ())
+
+    def test_input_inside_the_adoption_write_is_not_adopted(self) -> None:
+        # Human input during the owner replace invalidates the stranger adopt.
+        # The run goes back to ownerless RUNNING_IDLE. The warden must not warn
+        # or close, and the unconfirmed marker must not stay behind.
+        self.abandon()
+        self.assert_abandoned()
+        original = self.store.replace
+        injected = False
+
+        def replace_with_input(run):
+            nonlocal injected
+            if not injected:
+                injected = True
+                self.human_input(time.time())
+            return original(run)
+
+        self.store.replace = replace_with_input
+        self.enable()
+        warden = self.make_warden()
+        try:
+            result = warden.run_once()
+        finally:
+            self.store.replace = original
+        self.assertEqual(result, "not_adopted")
+        self.assertTrue(injected)
+        stored = self.store.get("run-x")
+        self.assertIsNotNone(stored)
+        self.assertIsNone(stored.owner_session_id)
+        self.assertIsNone(stored.owner_lease_id)
+        self.assertEqual(stored.state, "RUNNING_IDLE")
+        self.assertEqual(self.bridge.calls, [])
+        self.assertEqual(self.windows.posted, [])
+        self.assertIsNone(self.coordinator._active)
+        self.assertIsNone(warden.token)
+        self.assertEqual(self.lifecycle._warning_blocked_until, {})
+        marker = self.lifecycle._adoption_marker_path()
+        self.assertIsNotNone(marker)
+        self.assertFalse(marker.exists())
+        settled = json.loads(
+            self.lifecycle._adoption_settled_path().read_text(encoding="utf-8")
+        )
+        self.assertTrue(settled["settled"])
+        self.assertTrue(settled["reverted"])
+        self.assertEqual(settled["invalidated_by"], "human")
+        self.assertEqual(settled["owner_session_id"], warden.client.session_id)
+        self.assertEqual(self.row(time.time())["use_state"], "human")
+
+    def test_exit_does_not_leave_the_adoption_marker(self) -> None:
+        self.abandon()
+        warden = self.make_warden()
+        marker = self.lifecycle._adoption_marker_path()
+        self.assertIsNotNone(marker)
+        marker.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "run_id": "run-x",
+                    "owner_session_id": warden.client.session_id,
+                    "owner_lease_id": "lease-leak",
+                    "token": 1,
+                    "invalidated": False,
+                    "invalidated_by": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(warden.run_once(), "disabled")
+        self.assertFalse(marker.exists())
+        stored = self.store.get("run-x")
+        self.assertEqual(stored.state, "RUNNING_IDLE")
+        self.assertIsNone(stored.owner_session_id)
+        self.assertIsNone(self.coordinator._active)
+        self.assertEqual(self.bridge.calls, [])
+        self.assertEqual(self.windows.posted, [])
 
     def test_install_thread_stops(self) -> None:
         stop = threading.Event()
