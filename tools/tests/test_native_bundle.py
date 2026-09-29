@@ -533,5 +533,192 @@ class Fb19b5ToolsLayoutTest(unittest.TestCase):
                             )
 
 
+class AddonTreeSteamDllTest(unittest.TestCase):
+    _STEAM = r"C:\Program Files (x86)\Steam"
+    _NAMES = frozenset({"steamclient.dll", "tier0_s.dll"})
+
+    def _authority(self, **overrides: object) -> native_bundle.DebugImageAuthority:
+        fields: dict[str, object] = {
+            "process_identities": frozenset(),
+            "module_identities": frozenset(),
+            "system_directory": r"C:\Windows\System32",
+            "steam_install_directory": self._STEAM,
+            "steam_client_dll_names": self._NAMES,
+        }
+        fields.update(overrides)
+        return native_bundle.DebugImageAuthority(**fields)
+
+    def _approve(self, authority: native_bundle.DebugImageAuthority, path: str) -> bool:
+        with patch.object(
+            native_bundle, "_file_identity", return_value=PathIdentity(1, "AB" * 16)
+        ), patch.object(native_bundle, "_final_handle_path", return_value=path):
+            return authority.approve_addon_tree_module(11)
+
+    def test_measured_basenames_are_the_closed_set(self) -> None:
+        self.assertEqual(
+            native_bundle._ADDON_TREE_STEAM_CLIENT_DLLS,
+            frozenset(
+                {
+                    "cserhelper.dll",
+                    "gameoverlayrenderer.dll",
+                    "gameoverlayrenderer64.dll",
+                    "steamclient.dll",
+                    "tier0_s.dll",
+                    "vstdlib_s.dll",
+                }
+            ),
+        )
+
+    def test_listed_dll_in_the_steam_directory_is_approved(self) -> None:
+        authority = self._authority()
+        listed = self._STEAM + r"\steamclient.dll"
+        with patch.object(
+            native_bundle, "_file_identity", return_value=PathIdentity(1, "AB" * 16)
+        ), patch.object(native_bundle, "_final_handle_path", return_value=listed):
+            self.assertTrue(authority.approve_addon_tree_module(11))
+            self.assertFalse(authority.approve_debug_image(11, event_kind="LOAD_DLL"))
+        self.assertTrue(self._approve(authority, listed.upper()))
+        self.assertFalse(authority.approve_addon_tree_module(0))
+        self.assertFalse(authority.approve_addon_tree_module(True))  # type: ignore[arg-type]
+
+    def test_unlisted_dll_in_the_steam_directory_is_rejected(self) -> None:
+        authority = self._authority()
+        self.assertFalse(
+            self._approve(authority, self._STEAM + r"\steamclient64.dll")
+        )
+        self.assertFalse(self._approve(authority, self._STEAM + r"\steamclient.exe"))
+
+    def test_listed_name_outside_the_steam_directory_is_rejected(self) -> None:
+        authority = self._authority()
+        outside = (
+            r"C:\Users\guill\AppData\Local\Temp\steamclient.dll",
+            r"C:\Program Files (x86)\SteamSibling\steamclient.dll",
+            r"C:\Program Files (x86)\Steam\..\Temp\steamclient.dll",
+            r"C:\Program Files (x86)\Steam\..\Steam\steamclient.dll",
+            self._STEAM + r"\steamapps\steamclient.dll",
+            self._STEAM + r"\bin\steamclient.dll",
+        )
+        for path in outside:
+            with self.subTest(path=path):
+                self.assertFalse(self._approve(authority, path))
+
+    def test_named_subdirectory_is_exact_and_not_a_prefix(self) -> None:
+        named = self._STEAM + r"\bin"
+        authority = self._authority(steam_client_dll_directories=frozenset({named}))
+        self.assertTrue(self._approve(authority, named + r"\steamclient.dll"))
+        self.assertTrue(self._approve(authority, self._STEAM + r"\tier0_s.dll"))
+        self.assertFalse(self._approve(authority, named + r"\nested\steamclient.dll"))
+        self.assertFalse(
+            self._approve(
+                self._authority(
+                    steam_client_dll_directories=frozenset({self._STEAM + r"\.."})
+                ),
+                self._STEAM + r"\steamclient.dll",
+            )
+        )
+
+    def test_unresolved_steam_directory_disables_the_rule(self) -> None:
+        authority = self._authority(steam_install_directory=None)
+        self.assertFalse(
+            self._approve(authority, self._STEAM + r"\steamclient.dll")
+        )
+        with patch.object(
+            native_bundle, "_resolve_addon_tree_steam_directory", return_value=None
+        ):
+            directory, names = native_bundle._addon_tree_steam_rule()
+        self.assertIsNone(directory)
+        self.assertEqual(names, frozenset())
+        disabled = self._authority(
+            steam_install_directory=directory,
+            steam_client_dll_names=names,
+        )
+        self.assertFalse(
+            self._approve(disabled, self._STEAM + r"\steamclient.dll")
+        )
+
+    def test_bundle_load_stores_the_resolved_steam_rule(self) -> None:
+        source = Path(native_bundle.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("from dayz_mcp.steam_preflight", source)
+        self.assertNotIn("import steam_preflight", source)
+        body = source[source.index("def load_verified_bundle") :]
+        self.assertIn(
+            "steam_install_directory, steam_client_dll_names = _addon_tree_steam_rule()",
+            body,
+        )
+        self.assertIn("steam_install_directory=steam_install_directory", body)
+        self.assertIn("steam_client_dll_names=steam_client_dll_names", body)
+        with patch.object(
+            native_bundle,
+            "_resolve_addon_tree_steam_directory",
+            return_value=self._STEAM,
+        ):
+            directory, names = native_bundle._addon_tree_steam_rule()
+        self.assertEqual(directory, self._STEAM)
+        self.assertEqual(names, native_bundle._ADDON_TREE_STEAM_CLIENT_DLLS)
+
+    def test_steam_resolution_fails_closed(self) -> None:
+        steam_exe = self._STEAM + r"\steam.exe"
+        other_exe = r"D:\OtherSteam\steam.exe"
+
+        def install(path: str) -> str | None:
+            folded = ntpath.normcase(ntpath.normpath(path))
+            if folded == ntpath.normcase(steam_exe):
+                return self._STEAM
+            if folded == ntpath.normcase(other_exe):
+                return r"D:\OtherSteam"
+            return None
+
+        class Provider:
+            def __init__(self, pids: tuple[object, ...], images: dict[int, object]) -> None:
+                self._pids = pids
+                self._images = images
+
+            def steam_process_pids(self) -> tuple[object, ...]:
+                if self._pids == ("raise",):
+                    raise OSError("unreadable")
+                return self._pids
+
+            def process_image_path(self, pid: int) -> object:
+                image = self._images[pid]
+                if image == "raise":
+                    raise OSError("unreadable")
+                return image
+
+        class Host:
+            def __init__(self, executable: object) -> None:
+                self._executable = executable
+
+            def steam_executable(self) -> object:
+                if self._executable == "raise":
+                    raise OSError("unreadable")
+                return self._executable
+
+        def resolve(pids: tuple[object, ...], images: dict[int, object], registry: object) -> str | None:
+            return native_bundle._resolve_addon_tree_steam_directory(
+                provider=Provider(pids, images),
+                host=Host(registry),
+            )
+
+        with patch.object(
+            native_bundle, "_install_directory_of_steam_executable", side_effect=install
+        ):
+            self.assertEqual(resolve((), {}, steam_exe), self._STEAM)
+            self.assertEqual(
+                resolve((4,), {4: steam_exe}, r"c:/program files (x86)/steam/steam.exe"),
+                self._STEAM,
+            )
+            self.assertEqual(resolve((4,), {4: steam_exe}, None), self._STEAM)
+            self.assertIsNone(resolve((), {}, None))
+            self.assertIsNone(resolve((), {}, r"C:\missing\steam.exe"))
+            self.assertIsNone(resolve(("raise",), {}, steam_exe))
+            self.assertIsNone(resolve((4,), {4: "raise"}, steam_exe))
+            self.assertIsNone(resolve((4,), {4: r"C:\Windows\notepad.exe"}, None))
+            self.assertIsNone(resolve((4, 5), {4: steam_exe, 5: other_exe}, None))
+            self.assertIsNone(resolve((4,), {4: steam_exe}, other_exe))
+            self.assertIsNone(resolve((0,), {}, None))
+            self.assertIsNone(resolve(tuple(range(1, 10)), {}, None))
+            self.assertIsNone(resolve((), {}, "raise"))
+
+
 if __name__ == "__main__":
     unittest.main()
