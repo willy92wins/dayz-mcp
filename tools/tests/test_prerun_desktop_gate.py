@@ -744,6 +744,70 @@ class FastTierRealDesktopGateGuardTest(unittest.TestCase):
                 probe_brightness=saved_brightness,
             )
 
+    def test_a_fake_patched_onto_the_module_is_not_refused_later(self) -> None:
+        # A check while the module name is patched must not stamp that fake.
+        # A later call that passes the same fake explicitly is still a fake.
+        def patched_fake() -> str:
+            return "unlocked"
+
+        def independent_fake() -> str:
+            return "unlocked"
+
+        def brightness_fake(**_kwargs: object) -> dict[str, object]:
+            return {"ok": True, "mean_brightness": 80.0, "nonblack_ratio": 0.9}
+
+        with mock.patch.object(mcp_capture, "probe_input_desktop", patched_fake):
+            reject_real_desktop_gate_in_fast_tier(
+                fast_tier=True,
+                probe_desktop=independent_fake,
+                probe_brightness=brightness_fake,
+                test_id=self.id(),
+            )
+        reject_real_desktop_gate_in_fast_tier(
+            fast_tier=True,
+            probe_desktop=patched_fake,
+            probe_brightness=brightness_fake,
+            test_id=self.id(),
+        )
+        if not FAST_TIER_ONLY:
+            return
+        with mock.patch.object(mcp_capture, "probe_input_desktop", patched_fake):
+            mcp_capture.run_prerun_desktop_gate(
+                timeout_s=0,
+                probe_desktop=independent_fake,
+                probe_brightness=brightness_fake,
+            )
+        mcp_capture.run_prerun_desktop_gate(
+            timeout_s=0,
+            probe_desktop=patched_fake,
+            probe_brightness=brightness_fake,
+        )
+
+    def test_an_unhashable_callable_fake_is_accepted(self) -> None:
+        class UnhashableFake:
+            __hash__ = None
+
+            def __call__(self) -> str:
+                return "unlocked"
+
+        def brightness_fake(**_kwargs: object) -> dict[str, object]:
+            return {"ok": True, "mean_brightness": 80.0, "nonblack_ratio": 0.9}
+
+        fake = UnhashableFake()
+        reject_real_desktop_gate_in_fast_tier(
+            fast_tier=True,
+            probe_desktop=fake,
+            probe_brightness=brightness_fake,
+            test_id=self.id(),
+        )
+        if not FAST_TIER_ONLY:
+            return
+        mcp_capture.run_prerun_desktop_gate(
+            timeout_s=0,
+            probe_desktop=fake,
+            probe_brightness=brightness_fake,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
