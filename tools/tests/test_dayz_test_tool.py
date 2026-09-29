@@ -70,48 +70,82 @@ class DayzTestToolRequestTest(unittest.TestCase):
         self.assertEqual(parsed.payload["base_mods"], list(policy.default_base_mods))
         self.assertEqual(parsed.payload["mode"], "offline")
 
-    def test_build_run_request_requires_bridge_in_effective_mods(self) -> None:
+    def test_build_run_request_defaults_bridge_into_extra_mods(self) -> None:
+        """fb-20260925-233943-9ccc: a non-bridge project gets @DayZ_MCP appended."""
         policy = _policy()
         sealed = _sealed(policy)
-
-        with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
-            dayz_test_tool.build_run_request(
-                sealed,
-                project="ExampleMod",
-                mode="offline",
-            )
-        self.assertEqual(
-            caught.exception.code,
-            dayz_test_tool._BRIDGE_MOD_MISSING,
-        )
-        self.assertTrue(caught.exception.code.startswith("bridge_mod_missing:"))
-        self.assertIn("folder name", caught.exception.code)
-        self.assertIn("@DayZ_MCP", caught.exception.code)
-
-        for excluded_field in ("base_mods", "server_mods"):
-            with self.subTest(excluded_field=excluded_field):
-                with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
-                    dayz_test_tool.build_run_request(
-                        sealed,
-                        project="ExampleMod",
-                        mode="offline",
-                        **{excluded_field: ["@DayZ_MCP"]},
-                    )
-                self.assertEqual(
-                    caught.exception.code,
-                    dayz_test_tool._BRIDGE_MOD_MISSING,
-                )
 
         raw, selected = dayz_test_tool.build_run_request(
             sealed,
             project="ExampleMod",
             mode="offline",
-            extra_mods=["@DayZ_MCP"],
         )
         parsed = dayz_test_request.parse_dayz_test_request(raw, policies=(policy,))
         self.assertIs(selected, policy)
         self.assertEqual(parsed.payload["extra_mods"], ["@DayZ_MCP"])
+        self.assertEqual(parsed.payload["base_mods"], list(policy.default_base_mods))
+        self.assertEqual(parsed.payload["server_mods"], [])
+        self.assertEqual(
+            dayz_test_tool._bridge_default_report(None, raw), ["@DayZ_MCP"]
+        )
 
+        raw, _selected = dayz_test_tool.build_run_request(
+            sealed,
+            project="ExampleMod",
+            mode="offline",
+            extra_mods=["@Other"],
+        )
+        parsed = dayz_test_request.parse_dayz_test_request(raw, policies=(policy,))
+        self.assertEqual(parsed.payload["extra_mods"], ["@Other", "@DayZ_MCP"])
+        self.assertEqual(
+            dayz_test_tool._bridge_default_report(["@Other"], raw), ["@DayZ_MCP"]
+        )
+
+        # base_mods and server_mods still do not count: the default is written
+        # onto extra_mods, and those lists are left as the caller passed them.
+        for excluded_field in ("base_mods", "server_mods"):
+            with self.subTest(excluded_field=excluded_field):
+                raw, _selected = dayz_test_tool.build_run_request(
+                    sealed,
+                    project="ExampleMod",
+                    mode="offline",
+                    **{excluded_field: ["@DayZ_MCP"]},
+                )
+                parsed = dayz_test_request.parse_dayz_test_request(
+                    raw, policies=(policy,)
+                )
+                self.assertEqual(parsed.payload["extra_mods"], ["@DayZ_MCP"])
+                self.assertEqual(parsed.payload[excluded_field], ["@DayZ_MCP"])
+
+    def test_explicit_bridge_extra_mod_is_not_duplicated(self) -> None:
+        policy = _policy()
+        sealed = _sealed(policy)
+        absolute = r"P:\Mods\@DayZ_MCP"
+        cases = (
+            ["@DayZ_MCP"],
+            ["@dayz_mcp"],
+            ["@DAYZ_MCP"],
+            ["DayZ_MCP"],
+            ["@Other", "@DayZ_MCP"],
+            [absolute],
+        )
+        for explicit in cases:
+            with self.subTest(explicit=explicit):
+                raw, _selected = dayz_test_tool.build_run_request(
+                    sealed,
+                    project="ExampleMod",
+                    mode="offline",
+                    extra_mods=explicit,
+                )
+                parsed = dayz_test_request.parse_dayz_test_request(
+                    raw, policies=(policy,)
+                )
+                self.assertEqual(parsed.payload["extra_mods"], explicit)
+                self.assertEqual(
+                    dayz_test_tool._bridge_default_report(explicit, raw), []
+                )
+
+    def test_dayz_mcp_project_does_not_gain_an_extra_mod(self) -> None:
         bridge_policy = _policy(
             mod="DayZ_MCP",
             dev_root=r"P:\DayZ_MCP_dev",
@@ -128,6 +162,49 @@ class DayzTestToolRequestTest(unittest.TestCase):
         self.assertIs(selected, bridge_policy)
         self.assertEqual(parsed.payload["mod"], "DayZ_MCP")
         self.assertEqual(parsed.payload["extra_mods"], [])
+        self.assertEqual(dayz_test_tool._bridge_default_report(None, raw), [])
+
+    def test_kill_request_does_not_gain_the_bridge_default(self) -> None:
+        policy = _policy()
+        raw, _selected = dayz_test_tool.build_run_request(
+            _sealed(policy),
+            project="ExampleMod",
+            mode="offline",
+            run_id=RUN_ID,
+            kill=True,
+        )
+        parsed = dayz_test_request.parse_dayz_test_request(raw, policies=(policy,))
+        self.assertEqual(parsed.payload["extra_mods"], [])
+        self.assertIs(parsed.payload["kill"], True)
+
+    def test_sealed_list_limit_keeps_bridge_mod_missing(self) -> None:
+        """65 entries is mod_list_invalid; the default must not produce that."""
+        policy = _policy()
+        full = [f"@Mod{index:02d}" for index in range(64)]
+        with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+            dayz_test_tool.build_run_request(
+                _sealed(policy),
+                project="ExampleMod",
+                mode="offline",
+                extra_mods=full,
+            )
+        self.assertEqual(caught.exception.code, dayz_test_tool._BRIDGE_MOD_MISSING)
+        self.assertTrue(caught.exception.code.startswith("bridge_mod_missing:"))
+        self.assertIn("folder name", caught.exception.code)
+        self.assertIn("extra_mods=['@DayZ_MCP']", caught.exception.code)
+        self.assertIn("base_mods and server_mods do not count", caught.exception.code)
+        self.assertIn("sealed request", caught.exception.code)
+
+    def test_bad_extra_mod_still_fails_before_the_bridge_default(self) -> None:
+        with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+            dayz_test_tool.build_run_request(
+                _sealed(_policy()),
+                project="ExampleMod",
+                mode="offline",
+                extra_mods=[r"mods\@DayZ_MCP"],
+            )
+        self.assertEqual(caught.exception.code, dayz_test_tool._BAD_MOD)
+        self.assertTrue(caught.exception.code.startswith("bad_mod:"))
 
     def test_build_run_request_rejects_unknown_project_and_public_paths(self) -> None:
         sealed = _sealed(_policy())
@@ -714,9 +791,26 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         vpp_patcher.start()
         self.addCleanup(vpp_patcher.stop)
 
-    async def test_run_rejects_missing_bridge_before_secure_launch(self) -> None:
-        policy = _policy()
-        runtime = _Runtime()
+    async def _launch_and_capture(self, **kwargs: object):
+        policy = kwargs.pop("policy", _policy())
+        seen: list[bytes] = []
+
+        async def launch(raw_request: bytes, **launch_kwargs: object) -> int:
+            seen.append(raw_request)
+            await launch_kwargs["execution_started_cb"]()
+            launch_kwargs["output_sink"](
+                "stdout",
+                _terminal(
+                    {
+                        "cleanup_degraded": False,
+                        "error_code": None,
+                        "exit_code": 0,
+                        "ok": True,
+                        "run_id": RUN_ID,
+                    }
+                ),
+            )
+            return 0
 
         with patch.object(
             dayz_test_tool, "open_approved_launcher", return_value=_Opened()
@@ -727,20 +821,71 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             dayz_test_tool.secure_launcher,
             "execute_secure_launcher_request",
+            side_effect=launch,
+        ):
+            result = await dayz_test_tool.execute_dayz_test_run(
+                _Runtime(),
+                project=policy.mod,
+                mode="all",
+                **kwargs,
+            )
+        self.assertEqual(len(seen), 1)
+        parsed = dayz_test_request.parse_dayz_test_request(
+            seen[0], policies=(policy,)
+        )
+        return result, parsed
+
+    async def test_run_defaults_bridge_mod_and_reports_it(self) -> None:
+        """A non-bridge project launches with @DayZ_MCP appended and named."""
+        policy = _policy()
+        result, parsed = await self._launch_and_capture(policy=policy)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["project"], "ExampleMod")
+        self.assertEqual(parsed.payload["extra_mods"], ["@DayZ_MCP"])
+        self.assertEqual(parsed.payload["base_mods"], list(policy.default_base_mods))
+        self.assertEqual(parsed.payload["server_mods"], [])
+        self.assertEqual(result["extra_mods_defaulted"], ["@DayZ_MCP"])
+
+    async def test_run_does_not_duplicate_an_explicit_bridge_mod(self) -> None:
+        result, parsed = await self._launch_and_capture(
+            extra_mods=["@Other", "@DayZ_MCP"]
+        )
+        self.assertEqual(parsed.payload["extra_mods"], ["@Other", "@DayZ_MCP"])
+        self.assertNotIn("extra_mods_defaulted", result)
+
+    async def test_run_dayz_mcp_project_is_unchanged(self) -> None:
+        policy = _policy(
+            mod="DayZ_MCP",
+            dev_root=r"P:\DayZ_MCP_dev",
+            default_source=r"P:\DayZ_MCP",
+        )
+        result, parsed = await self._launch_and_capture(policy=policy)
+        self.assertEqual(parsed.payload["mod"], "DayZ_MCP")
+        self.assertEqual(parsed.payload["extra_mods"], [])
+        self.assertNotIn("extra_mods_defaulted", result)
+
+    async def test_run_bad_extra_mod_still_fails_with_bad_mod(self) -> None:
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(_policy())),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
             new=AsyncMock(),
         ) as launch:
             with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
                 await dayz_test_tool.execute_dayz_test_run(
-                    runtime,
+                    _Runtime(),
                     project="ExampleMod",
                     mode="all",
+                    extra_mods=[r"mods\@Broken"],
                 )
-
         launch.assert_not_awaited()
-        self.assertEqual(
-            caught.exception.code,
-            dayz_test_tool._BRIDGE_MOD_MISSING,
-        )
+        self.assertEqual(caught.exception.code, dayz_test_tool._BAD_MOD)
+        self.assertTrue(caught.exception.code.startswith("bad_mod:"))
 
     async def test_run_reports_progress_and_returns_compact_terminal_result(self) -> None:
         policy = _policy()

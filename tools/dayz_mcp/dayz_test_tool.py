@@ -59,10 +59,25 @@ _BAD_MOD = (
     "folder name such as '@DayZ_MCP', or an absolute path inside the "
     "project's mod_roots; relative paths with '\\' or '/' are rejected"
 )
+# fb-20260925-233943-9ccc. The folder name the default writes. Presence uses
+# the same basename comparison as the bridge check below (_BRIDGE_MOD_NAMES).
+_DEFAULT_BRIDGE_EXTRA = "@DayZ_MCP"
+# A candidate the sealed parser would refuse is not committed. The call keeps
+# bridge_mod_missing instead of turning into bad_dayz_test_request.
+_SEALED_REQUEST_REJECTS_BRIDGE_DEFAULT = frozenset(
+    {
+        "bad_dayz_test_request:mod_list_invalid",
+        "bad_dayz_test_request:payload_too_large",
+        "bad_dayz_test_request:raw_envelope_invalid",
+    }
+)
 _BRIDGE_MOD_MISSING = (
     "bridge_mod_missing: add extra_mods=['@DayZ_MCP'] "
     "(the folder name '@DayZ_MCP' must be explicit in extra_mods or as "
-    "the project mod; base_mods and server_mods do not count)"
+    "the project mod; base_mods and server_mods do not count). "
+    "dayz_test_run appends '@DayZ_MCP' to extra_mods by default; "
+    "this call kept bridge_mod_missing because the sealed request "
+    "would reject that appended entry"
 )
 _HELD_LEASE_RUN = (
     "session_transition_conflict: release your session lease first - "
@@ -256,6 +271,63 @@ def _public_mod_list(
     return list(value)
 
 
+def _names_bridge(value: object) -> bool:
+    """Same comparison as the bridge check: basename, casefolded."""
+    return (
+        isinstance(value, str)
+        and ntpath.basename(value).casefold() in _BRIDGE_MOD_NAMES
+    )
+
+
+def _extra_mods_with_bridge_default(
+    extra_mods: list[str] | None,
+    *,
+    project_mod: str,
+    kill: bool,
+) -> tuple[list[str] | None, tuple[str, ...]]:
+    """Append @DayZ_MCP on extra_mods when this launch would miss the bridge.
+
+    kill requests are not launches. The DayZ_MCP project already is the
+    bridge. An entry whose basename casefolds into _BRIDGE_MOD_NAMES is
+    already present, including '@dayz_mcp' and an absolute path, so it is
+    not duplicated. A list the sealed parser would reject after the append
+    (longer than 64, or a casefold duplicate) is left unchanged.
+    """
+    if kill or _names_bridge(project_mod):
+        return extra_mods, ()
+    if extra_mods is not None and any(_names_bridge(item) for item in extra_mods):
+        return extra_mods, ()
+    candidate = [*(extra_mods or ()), _DEFAULT_BRIDGE_EXTRA]
+    if not dayz_test_request._valid_string_list(candidate):
+        return extra_mods, ()
+    return candidate, (_DEFAULT_BRIDGE_EXTRA,)
+
+
+def _bridge_default_report(
+    requested: list[str] | None, canonical: bytes
+) -> list[str]:
+    """The default this canonical request actually carried, if it did."""
+    try:
+        payload = json.loads(canonical)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    got = payload.get("extra_mods")
+    if type(got) is not list:
+        return []
+    prefix = list(requested) if type(requested) is list else []
+    if got == [*prefix, _DEFAULT_BRIDGE_EXTRA]:
+        return [_DEFAULT_BRIDGE_EXTRA]
+    return []
+
+
+def _annotate_bridge_default(
+    result: dict[str, object], defaulted: list[str]
+) -> dict[str, object]:
+    if defaulted:
+        result["extra_mods_defaulted"] = list(defaulted)
+    return result
+
+
 def build_run_request(
     sealed_policies: tuple[object, ...],
     *,
@@ -287,70 +359,97 @@ def build_run_request(
     public_extra = _public_mod_list(extra_mods, selected.mod_roots)
     public_base = _public_mod_list(base_mods, selected.mod_roots)
     public_server = _public_mod_list(server_mods, selected.mod_roots)
-    document: dict[str, object] = {
-        "auto_remediate_steam": auto_remediate_steam,
-        "build": build,
-        "clean": clean,
-        "dev_root": selected.dev_root,
-        "height": height,
-        "kill": kill,
-        "mission": mission,
-        "mod": selected.mod,
-        "mode": mode,
-        "no_base_mods": no_base_mods,
-        "no_file_patching": no_file_patching,
-        "pack_only": pack_only,
-        "player_name": player_name,
-        "port": port,
-        "preflight": preflight,
-        "run_id": run_id,
-        "server_wait_s": server_wait_s,
-        "version": 1,
-        "width": width,
-    }
-    if public_extra is not None:
-        document["extra_mods"] = public_extra
-    if public_base is not None:
-        document["base_mods"] = public_base
-    if public_server is not None:
-        document["server_mods"] = public_server
-    if replace_if_not_polling_since is not None:
-        # 79e2. Present only on the call that supersedes a live client, and only
-        # once the gate has actually read the bridge: the value is the instant
-        # of that reading, which start_run revalidates before killing anything.
-        document["replace_if_not_polling_since"] = replace_if_not_polling_since
-    raw = json.dumps(
-        document,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    # Caller's entries are already validated. The default is one more folder
+    # name on extra_mods, then the same parser. A size or list rejection that
+    # appears only with that name is dropped and the bridge check below
+    # reports bridge_mod_missing; any other rejection is the caller's.
+    requested_extra = public_extra
+    public_extra, defaulted_bridge = _extra_mods_with_bridge_default(
+        public_extra, project_mod=selected.mod, kill=kill
+    )
+
+    def _compose(
+        mods: list[str] | None,
+    ) -> dayz_test_request.ParsedDayzTestRequest:
+        document: dict[str, object] = {
+            "auto_remediate_steam": auto_remediate_steam,
+            "build": build,
+            "clean": clean,
+            "dev_root": selected.dev_root,
+            "height": height,
+            "kill": kill,
+            "mission": mission,
+            "mod": selected.mod,
+            "mode": mode,
+            "no_base_mods": no_base_mods,
+            "no_file_patching": no_file_patching,
+            "pack_only": pack_only,
+            "player_name": player_name,
+            "port": port,
+            "preflight": preflight,
+            "run_id": run_id,
+            "server_wait_s": server_wait_s,
+            "version": 1,
+            "width": width,
+        }
+        if mods is not None:
+            document["extra_mods"] = mods
+        if public_base is not None:
+            document["base_mods"] = public_base
+        if public_server is not None:
+            document["server_mods"] = public_server
+        if replace_if_not_polling_since is not None:
+            # 79e2. Present only on the call that supersedes a live client, and only
+            # once the gate has actually read the bridge: the value is the instant
+            # of that reading, which start_run revalidates before killing anything.
+            document["replace_if_not_polling_since"] = replace_if_not_polling_since
+        raw = json.dumps(
+            document,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        try:
+            return dayz_test_request.parse_dayz_test_request(
+                raw, policies=_semantic_policies(sealed_policies)
+            )
+        except (TypeError, ValueError) as exc:
+            token = str(exc)
+            if token == dayz_test_request._INVALID_RUN_ID:
+                _fail("bad_run_id")
+            if token in {
+                dayz_test_request._CLIENT_REQUIRES_RUN_ID,
+                dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
+            }:
+                _fail(f"bad_dayz_test_request:{token}")
+            # 8f8c point 3. The 25 conditions of the parser used to arrive here as
+            # one token. A declared reason is republished with the same shape the
+            # three named causes above already use, so every consumer that matches
+            # on the bad_dayz_test_request prefix keeps working; anything else --
+            # an undeclared suffix, a TypeError, a ValueError from elsewhere --
+            # keeps EXACTLY the bare legacy code.
+            prefix = "invalid_dayz_test_request:"
+            if token.startswith(prefix):
+                reason = token[len(prefix) :]
+                if reason in dayz_test_request.REQUEST_REJECTION_REASONS:
+                    _fail(f"bad_dayz_test_request:{reason}")
+            _fail("bad_dayz_test_request")
+
     try:
-        parsed = dayz_test_request.parse_dayz_test_request(
-            raw, policies=_semantic_policies(sealed_policies)
-        )
-    except (TypeError, ValueError) as exc:
-        token = str(exc)
-        if token == dayz_test_request._INVALID_RUN_ID:
-            _fail("bad_run_id")
-        if token in {
-            dayz_test_request._CLIENT_REQUIRES_RUN_ID,
-            dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
-        }:
-            _fail(f"bad_dayz_test_request:{token}")
-        # 8f8c point 3. The 25 conditions of the parser used to arrive here as
-        # one token. A declared reason is republished with the same shape the
-        # three named causes above already use, so every consumer that matches
-        # on the bad_dayz_test_request prefix keeps working; anything else --
-        # an undeclared suffix, a TypeError, a ValueError from elsewhere --
-        # keeps EXACTLY the bare legacy code.
-        prefix = "invalid_dayz_test_request:"
-        if token.startswith(prefix):
-            reason = token[len(prefix) :]
-            if reason in dayz_test_request.REQUEST_REJECTION_REASONS:
-                _fail(f"bad_dayz_test_request:{reason}")
-        _fail("bad_dayz_test_request")
+        parsed = _compose(public_extra)
+    except DayzTestToolError as exc:
+        if (
+            defaulted_bridge
+            and exc.code in _SEALED_REQUEST_REJECTS_BRIDGE_DEFAULT
+        ):
+            try:
+                parsed = _compose(requested_extra)
+            except DayzTestToolError:
+                raise exc
+            public_extra = requested_extra
+        else:
+            raise
     effective_mods = [selected.mod, *(public_extra or [])]
     if not kill and not any(
         ntpath.basename(mod).casefold() in _BRIDGE_MOD_NAMES
@@ -1543,6 +1642,7 @@ async def execute_dayz_test_run(
             raw_request, policy = build_run_request(
                 bundle.sealed_policies, **request_arguments
             )
+            bridge_default = _bridge_default_report(extra_mods, raw_request)
             # The admin-tools gate runs before the host gate below: it is a
             # property of the request just composed, and a refusal here has
             # consulted neither Steam nor the lifecycle. A request that asks
@@ -1574,7 +1674,7 @@ async def execute_dayz_test_run(
                 )
                 if preflight:
                     refused["preflight_skipped_checks"] = preflight_skipped_checks
-                return refused
+                return _annotate_bridge_default(refused, bridge_default)
             if _mode_starts_client(mode):
                 # Gate body uses time.sleep / ImageGrab join. Run it off the
                 # broker event loop so other MCP sessions keep heartbeating.
@@ -1599,7 +1699,7 @@ async def execute_dayz_test_run(
                     )
                     if preflight:
                         refused["preflight_skipped_checks"] = preflight_skipped_checks
-                    return refused
+                    return _annotate_bridge_default(refused, bridge_default)
             if not preflight and _mode_starts_client(mode):
                 try:
                     steam = evaluate_steam_session()
@@ -1631,7 +1731,7 @@ async def execute_dayz_test_run(
                         vpp_missing=list(vpp.missing),
                         vpp_warnings=list(vpp.warnings),
                     )
-                    return failed
+                    return _annotate_bridge_default(failed, bridge_default)
             replacement: ClientReplacementDecision | None = None
             client_pids_before: tuple[int, ...] | None = None
             bridge_cause: str | None = None
@@ -1661,7 +1761,7 @@ async def execute_dayz_test_run(
                         vpp_warnings=list(vpp.warnings),
                     )
                     refused["run_not_extensible_cause"] = exc.cause
-                    return refused
+                    return _annotate_bridge_default(refused, bridge_default)
                 if _mode_starts_client(mode):
                     # Relaunching this role supersedes the client already on the
                     # run (the role replacement inside start_run). The caller
@@ -1740,7 +1840,7 @@ async def execute_dayz_test_run(
                             and replacement.reason == _BRIDGE_STATUS_UNKNOWN
                         ):
                             refused["bridge_status_cause"] = bridge_cause
-                        return refused
+                        return _annotate_bridge_default(refused, bridge_default)
             if replacement is not None and replacement.replace:
                 # H-A2-2 / 79e2: the verdict reached here is two broker hops and
                 # one process start away from the kill, so it does not travel as
@@ -1752,6 +1852,7 @@ async def execute_dayz_test_run(
                     **request_arguments,
                     replace_if_not_polling_since=decided_at_ms,
                 )
+                bridge_default = _bridge_default_report(extra_mods, raw_request)
             # 296b: the CLIENT profile roots whose dumps can name this
             # launch's death; the snapshot is taken when the launch executes.
             client_dump_roots = (
@@ -1778,7 +1879,7 @@ async def execute_dayz_test_run(
             )
             if preflight:
                 result["preflight_skipped_checks"] = preflight_skipped_checks
-            return result
+            return _annotate_bridge_default(result, bridge_default)
 
 
 def _run_row(status: object, run_id: str) -> dict[str, object] | None:
