@@ -113,6 +113,73 @@ class HandoffRoundTripTest(unittest.TestCase):
         self.assertFalse(self.path.exists())
         clear_handoff(self.path)
 
+    def test_supervisor_identity_survives_clearing_the_carrier(self) -> None:
+        identity_path = session_handoff.supervisor_identity_path(self.path)
+        self.assertTrue(
+            session_handoff.store_supervisor_identity_if_absent(
+                identity_path, self.identity
+            )
+        )
+        self.assertFalse(
+            session_handoff.store_supervisor_identity_if_absent(
+                identity_path, self.identity
+            )
+        )
+        loaded = session_handoff.load_supervisor_identity(identity_path)
+        self.assertIsNotNone(loaded)
+        self.assertIsNot(loaded, self.identity)
+        self.assertEqual(loaded, self.identity)
+        self._write()
+        clear_handoff(self.path)
+        self.assertFalse(self.path.exists())
+        self.assertEqual(
+            session_handoff.load_supervisor_identity(identity_path), self.identity
+        )
+        session_handoff.clear_supervisor_identity(identity_path)
+        self.assertIsNone(session_handoff.load_supervisor_identity(identity_path))
+        session_handoff.clear_supervisor_identity(identity_path)
+
+    def test_supervisor_identity_refuses_a_carrier_document(self) -> None:
+        identity_path = session_handoff.supervisor_identity_path(self.path)
+        self._write()
+        identity_path.write_bytes(self.path.read_bytes())
+        self.assertIsNone(session_handoff.load_supervisor_identity(identity_path))
+        self.assertTrue(identity_path.is_file())
+
+    def test_supervisor_identity_refuses_a_reused_pid(self) -> None:
+        identity_path = session_handoff.supervisor_identity_path(self.path)
+        self.assertTrue(
+            session_handoff.store_supervisor_identity_if_absent(
+                identity_path, self.identity
+            )
+        )
+        stamp = session_handoff.supervisor_process_stamp()
+        self.assertIsNotNone(stamp)
+        document = json.loads(identity_path.read_text(encoding="utf-8"))
+        assert stamp is not None
+        self.assertEqual(document["supervisor_pid"], stamp[0])
+        self.assertEqual(document["supervisor_creation_time_utc"], stamp[1])
+        document["supervisor_creation_time_utc"] = "2000-01-01T00:00:00.000000Z"
+        identity_path.write_text(json.dumps(document), encoding="utf-8")
+        self.assertIsNone(session_handoff.load_supervisor_identity(identity_path))
+        self.assertTrue(identity_path.is_file())
+        self.assertEqual(
+            json.loads(identity_path.read_text(encoding="utf-8"))["supervisor_pid"],
+            stamp[0],
+        )
+
+    def test_supervisor_identity_refuses_a_copy_into_another_directory(self) -> None:
+        identity_path = session_handoff.supervisor_identity_path(self.path)
+        self.assertTrue(
+            session_handoff.store_supervisor_identity_if_absent(
+                identity_path, self.identity
+            )
+        )
+        other = self.dir / "other-supervisor" / "supervisor-identity.json"
+        other.parent.mkdir()
+        other.write_bytes(identity_path.read_bytes())
+        self.assertIsNone(session_handoff.load_supervisor_identity(other))
+        self.assertEqual(other.read_bytes(), identity_path.read_bytes())
     def test_a_failed_unlink_is_retried_and_then_the_file_is_gone(self) -> None:
         self._write()
         real_unlink = os.unlink

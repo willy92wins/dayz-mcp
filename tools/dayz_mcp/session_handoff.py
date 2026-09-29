@@ -415,6 +415,167 @@ def _seal_tombstone(path: Path) -> None:
         raise
 
 
+# The lease carrier above is consume-once and dies on session_release. D-82's
+# launcher right has to survive that release for as long as the same supervisor
+# (the same MCP client) keeps replacing workers. This file is the whole
+# ClientIdentity and nothing else: no lease token, so it is not the
+# session_id-only split the rehearsal forbids, and from_payload still rejects
+# a pid that arrived as text. It also names the supervisor process (pid and
+# creation time) and the directory the file was written in. A copy into
+# another supervisor's directory fails the directory check. A recycled pid
+# fails the creation time. A file that does not match is refused and left
+# in place; the worker mints a new identity and does not keep the launcher.
+SUPERVISOR_IDENTITY_VERSION = 1
+
+
+def supervisor_identity_path(carrier: str | os.PathLike[str]) -> Path:
+    """The stable identity next to a carrier. clear_handoff does not remove it."""
+    return Path(carrier).with_name("supervisor-identity.json")
+
+
+def supervisor_process_stamp() -> tuple[int, str] | None:
+    """Pid and creation time of the supervisor that owns this worker.
+
+    The immediate parent on Windows may be the venv launcher, a new process
+    on every spawn. ``walk_past_redirectors`` stops at the first ancestor
+    that is not that launcher: the supervisor. ``NativeProcessGuard.snapshot``
+    supplies the creation time, the same stamp as a process identity.
+    None when that process cannot be read. Callers then refuse the file.
+    """
+
+    import sys
+
+    from dayz_mcp.instance_fence import normalize_creation_time_utc
+    from dayz_mcp.native_process_guard import NativeProcessGuard
+    from dayz_mcp.orphan_guard import walk_past_redirectors
+
+    ppid = os.getppid()
+    if isinstance(ppid, bool) or not isinstance(ppid, int) or ppid <= 0:
+        return None
+    try:
+        supervisor_pid = walk_past_redirectors(ppid, sys.executable)
+    except Exception:
+        return None
+    if (
+        isinstance(supervisor_pid, bool)
+        or not isinstance(supervisor_pid, int)
+        or supervisor_pid <= 0
+    ):
+        return None
+    snapshot = NativeProcessGuard().snapshot(supervisor_pid)
+    if not isinstance(snapshot, dict) or snapshot.get("identity_complete") is not True:
+        return None
+    if snapshot.get("pid") != supervisor_pid:
+        return None
+    created = normalize_creation_time_utc(snapshot.get("creation_time_utc"))
+    if created is None:
+        return None
+    return supervisor_pid, created
+
+
+def _supervisor_binding_accepts(path: Path, document: dict[str, object]) -> bool:
+    """True when this file still belongs to this worker's supervisor process."""
+
+    from dayz_mcp.instance_fence import normalize_creation_time_utc
+
+    pid = document.get("supervisor_pid")
+    directory = document.get("supervisor_dir")
+    created = normalize_creation_time_utc(document.get("supervisor_creation_time_utc"))
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or created is None:
+        return False
+    if not isinstance(directory, str) or not directory:
+        return False
+    try:
+        loaded_dir = os.path.normcase(str(path.resolve().parent))
+        expected_dir = os.path.normcase(str(Path(directory).resolve()))
+    except OSError:
+        return False
+    if loaded_dir != expected_dir:
+        return False
+    return supervisor_process_stamp() == (pid, created)
+
+
+def load_supervisor_identity(path: str | os.PathLike[str]) -> ClientIdentity | None:
+    """Read the supervisor identity. None on any doubt. Does not delete the file."""
+
+    try:
+        target = Path(path)
+        raw = target.read_text(encoding="utf-8")
+        document = json.loads(raw)
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    if document.get("version") != SUPERVISOR_IDENTITY_VERSION:
+        return None
+    # A carrier copied onto this path still holds a lease token. Refuse it:
+    # this file must not become a second way to replay a lease.
+    if "lease_token" in document or "lease_id" in document:
+        return None
+    if not _supervisor_binding_accepts(target, document):
+        return None
+    try:
+        return ClientIdentity.from_payload(document.get("identity"))
+    except ValueError:
+        return None
+
+
+def store_supervisor_identity_if_absent(
+    path: str | os.PathLike[str], identity: ClientIdentity
+) -> bool:
+    """Create the supervisor identity. False when a file is already there.
+
+    Does not replace. The first worker of a supervisor writes it; a later
+    worker with a live carrier must not overwrite the supervisor's identity
+    with a different one, and a corrupt or rejected file stays in place
+    (fail closed). No parent stamp means no file: an unbound identity
+    would be reusable by whoever copied it.
+    """
+
+    if not isinstance(identity, ClientIdentity):
+        raise TypeError("supervisor_identity_required")
+    target = Path(path)
+    if target.exists():
+        return False
+    stamp = supervisor_process_stamp()
+    if stamp is None:
+        return False
+    supervisor_pid, supervisor_created = stamp
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        supervisor_dir = str(target.parent.resolve())
+    except OSError:
+        return False
+    document = {
+        "version": SUPERVISOR_IDENTITY_VERSION,
+        "identity": identity.to_payload(),
+        "supervisor_pid": supervisor_pid,
+        "supervisor_creation_time_utc": supervisor_created,
+        "supervisor_dir": supervisor_dir,
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = f"{target}.tmp"
+    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(document, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        _unlink_quietly(temporary)
+        raise
+    if target.exists():
+        _unlink_quietly(temporary)
+        return False
+    os.replace(temporary, target)
+    return True
+
+
+def clear_supervisor_identity(path: str | os.PathLike[str]) -> None:
+    """Drop the supervisor identity when that supervisor process exits."""
+    _unlink_quietly(path)
+
+
 def _unlink_quietly(path: str | os.PathLike[str]) -> None:
     try:
         os.unlink(path)

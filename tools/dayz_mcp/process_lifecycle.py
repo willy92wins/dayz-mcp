@@ -27,7 +27,7 @@ from dayz_mcp.input_activity import InputAttributor, InputSample
 from dayz_mcp.instance_fence import BindingPrepareError
 from dayz_mcp.steam_launch_guard import Preparation
 from dayz_mcp.steam_prepare_supervisor import SteamPreparationGate
-from dayz_mcp.runtime_state import RuntimePaths, atomic_write_bytes
+from dayz_mcp.runtime_state import RuntimePaths, atomic_write_bytes, atomic_write_json
 from dayz_mcp.session_coordination import (
     AuthorizationDecision,
     CleanupDisposition,
@@ -342,7 +342,8 @@ def _use_projection(
 ) -> dict[str, object]:
     """250f (plan v2.1 §3.3): use_state and what it was measured from.
 
-    Observation only: nothing reads these fields to decide an action yet.
+    adopt_run reads use_state: a RUNNING_IDLE run that is not abandoned is
+    protected from every session except the one that launched it.
     Precedence: agent, unknown, human, idle, then past RUN_IDLE_CUT_S
     idle_waiting (with a reason) or abandoned. STARTING, STOPPING and
     UNRECONCILED runs are not classified.
@@ -717,6 +718,118 @@ def _wait_hint(box: object) -> str:
     return _ACTIVE_RUN_WAIT_HINT
 
 
+def _finite_use_age(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    age = float(value)
+    if not math.isfinite(age):
+        return None
+    return age
+
+
+def caller_launched_row(row: dict[str, object], caller_session: str | None) -> bool:
+    """Message-layer match: the public 12-character session prefix.
+
+    The daemon decides with the full session id. A prefix collision can
+    describe the caller as the launcher here and still be refused there.
+    """
+
+    if not isinstance(caller_session, str) or not caller_session:
+        return False
+    launched = row.get("launched_by")
+    if not isinstance(launched, dict):
+        return False
+    session = launched.get("session")
+    if not isinstance(session, str) or not session:
+        return False
+    return caller_session[:12] == session[:12]
+
+
+def caller_may_adopt_ownerless(
+    row: dict[str, object], caller_session: str | None
+) -> bool:
+    """Launcher in any ownerless state, or anyone once the run is abandoned.
+
+    A missing use_state is not abandoned: the caller may not adopt.
+    """
+
+    if caller_launched_row(row, caller_session):
+        return True
+    return row.get("use_state") == "abandoned"
+
+
+def protection_retry_after_s(row: dict[str, object]) -> float | None:
+    """Seconds until the 10-minute cut, for idle and human only."""
+
+    use_state = row.get("use_state")
+    if use_state == "idle":
+        age = _finite_use_age(row.get("idle_s"))
+    elif use_state == "human":
+        age = _finite_use_age(row.get("human_input_age_s"))
+    else:
+        return None
+    if age is None:
+        return None
+    remaining = RUN_IDLE_CUT_S - age
+    if remaining <= 0:
+        return None
+    return round(remaining, 3)
+
+
+ADOPTION_REVERT_PENDING = "adoption_revert_pending"
+
+
+def adoption_revert_pending_fields() -> dict[str, object]:
+    """Refusal while the stranger is still the durable owner.
+
+    The revert write has not landed. The launcher is not refused for this
+    reason; everyone else is, until that write succeeds or startup recovery
+    reads the marker.
+    """
+
+    return {
+        "use_state": "agent",
+        "use_reason": ADOPTION_REVERT_PENDING,
+        "hint": (
+            "run_protected: adoption revert has not reached the manifest; "
+            "this session does not have the launcher's right"
+        ),
+    }
+
+
+def protection_fields(row: dict[str, object] | None) -> dict[str, object]:
+    """Refusal body for a run that is not abandoned and not ours to adopt.
+
+    Unclassifiable rows stay protected and say so. retry_after_s is present
+    only for idle (from idle_s) and human (from human_input_age_s).
+    """
+
+    use_state = row.get("use_state") if isinstance(row, dict) else None
+    use_reason = row.get("use_reason") if isinstance(row, dict) else None
+    if not isinstance(use_state, str) or not use_state:
+        use_state = None
+    if not isinstance(use_reason, str) or not use_reason:
+        use_reason = None if use_state is not None else "unclassified"
+    state_text = use_state or "unclassified"
+    hint = (
+        f"run_protected: this ownerless run is in use ({state_text}); only the "
+        "session that launched it may adopt it until it is abandoned"
+    )
+    if isinstance(use_reason, str) and use_reason:
+        hint = f"{hint} ({use_reason})"
+    fields: dict[str, object] = {
+        "use_state": use_state,
+        "use_reason": use_reason,
+        "hint": hint,
+    }
+    if isinstance(row, dict):
+        retry = protection_retry_after_s(row)
+        if retry is not None:
+            fields["retry_after_s"] = retry
+            fields["hint"] = f"{hint}; retry in {retry}s"
+    return fields
+
+
 def _caller_owns_run(item: dict[str, object], caller_session: str | None) -> bool:
     owner = item.get("owner_session")
     if not isinstance(owner, str) or not owner:
@@ -776,7 +889,17 @@ def occupancy_error_fields(
                 "RUNNING_IDLE",
             }:
                 payload["hint"] = _ACTIVE_RUN_STOP_HINT.format(run_id=run_id)
-            elif state in {"RUNNING", "RUNNING_IDLE"}:
+            elif state == "RUNNING_IDLE" and not _caller_owns_run(item, caller_session):
+                if caller_may_adopt_ownerless(item, caller_session):
+                    payload["hint"] = _ACTIVE_RUN_TAKEOVER_HINT.format(run_id=run_id)
+                else:
+                    notice = protection_fields(item)
+                    payload["hint"] = notice["hint"]
+                    payload["use_state"] = notice["use_state"]
+                    payload["use_reason"] = notice["use_reason"]
+                    if "retry_after_s" in notice:
+                        payload["retry_after_s"] = notice["retry_after_s"]
+            elif state == "RUNNING":
                 payload["hint"] = _ACTIVE_RUN_TAKEOVER_HINT.format(run_id=run_id)
             else:
                 payload["hint"] = _wait_hint(box)
@@ -1416,6 +1539,22 @@ class ProcessLifecycle:
         # manifest: only exclusions of records no active run holds are pruned.
         self._excluded_use_records: dict[tuple[str, str, int, str], None] = {}
         self._use_clock_origin = time.time()
+        # Open stranger adopt: token under _activity_lock, marker beside runs.json.
+        # The marker is fsynced before the owner replace. A crash in between
+        # reverts that owner on the next startup instead of keeping it.
+        self._pending_adoption: dict[tuple[str, str], int] = {}
+        self._invalidated_adoption: dict[tuple[str, str], tuple[int, str]] = {}
+        self._adoption_serial = 0
+        self._open_adoption: tuple[str, int] | None = None
+        # Revert whose manifest write failed. The durable row still names the
+        # stranger. Daemon memory only: startup recovery reads the marker.
+        # The view is replaced wholesale so enqueue can read it without this
+        # lock (the loopback lock is already held there).
+        self._adoption_revert_pending: dict[tuple[str, str], tuple[int, str]] = {}
+        self._revert_pending_view: tuple[frozenset[str], Mapping[str, str]] = (
+            frozenset(),
+            MappingProxyType({}),
+        )
         # Retired-run diagnostics live in daemon memory and start empty after a
         # restart; the audit file is never read to reconstruct them.
         self._retired_diagnostics: deque[RetiredRunDiagnostic] = deque(maxlen=32)
@@ -1431,6 +1570,7 @@ class ProcessLifecycle:
             seal = installed_source_pin_status()
             if seal["status"] != "fresh":
                 logging.getLogger(__name__).warning("native_launcher_source_seal: %s", seal)
+        self._recover_unconfirmed_adoption()
 
     def _prepare_instance(
         self,
@@ -1758,6 +1898,9 @@ class ProcessLifecycle:
                 if current is None or epoch > current:
                     table[key] = epoch
                 credited.append(run_id)
+                self._invalidate_pending_adoption_locked(
+                    run_id, "human" if verified else "uncertain"
+                )
         return credited
 
     def record_command_activity(self, run_id: str, *, now: float | None = None) -> bool:
@@ -3153,6 +3296,15 @@ class ProcessLifecycle:
                     authority, command, "launch_identity_conflict"
                 )
             run = self.manifest.get(run_id)
+            if isinstance(run_id, str) and run is not None:
+                refusal = self._refuse_unconfirmed_owner(client, run_id)
+                if refusal is not None:
+                    result = self._reject_reserved(
+                        authority, command, "run_protected"
+                    )
+                    result.update(refusal)
+                    return result
+                run = self.manifest.get(run_id)
             if (
                 run is None
                 or run.state != "RUNNING"
@@ -3438,6 +3590,14 @@ class ProcessLifecycle:
             run = self.manifest.get(run_id)
             if run is None:
                 return self._reject_reserved(authority, command, "run_not_found", 404)
+            refusal = self._refuse_unconfirmed_owner(client, run_id)
+            if refusal is not None:
+                result = self._reject_reserved(authority, command, "run_protected")
+                result.update(refusal)
+                return result
+            run = self.manifest.get(run_id)
+            if run is None:
+                return self._reject_reserved(authority, command, "run_not_found", 404)
             never_started = (
                 run.state == "EXITED"
                 and run.launch_acknowledged is False
@@ -3715,6 +3875,16 @@ class ProcessLifecycle:
                 run = self.manifest.get(run_id)
                 if run is None:
                     return self._reject_reserved(authority, command, "run_not_found", 404)
+                refusal = self._refuse_unconfirmed_owner(client, run_id)
+                if refusal is not None:
+                    result = self._reject_reserved(
+                        authority, command, "run_protected"
+                    )
+                    result.update(refusal)
+                    return result
+                run = self.manifest.get(run_id)
+                if run is None:
+                    return self._reject_reserved(authority, command, "run_not_found", 404)
                 if (
                     run.owner_session_id != client.session_id
                     or run.owner_lease_id != authority[1]
@@ -3831,6 +4001,566 @@ class ProcessLifecycle:
                     result["cleanup_degraded"] = list(dict.fromkeys(degraded))
             return result
 
+    def _client_is_launcher(self, client: ClientIdentity, run_id: str) -> bool:
+        # Full session id, not the public prefix and not the pid. Rights last
+        # as long as that MCP client: server_reload keeps the session id, a
+        # client reopen and a daemon restart do not.
+        with self._activity_lock:
+            identity = self._launched_by.get(self._activity_key(run_id))
+        return (
+            identity is not None
+            and isinstance(client.session_id, str)
+            and identity.session_id == client.session_id
+        )
+
+    def _adoption_protection(
+        self, client: ClientIdentity, run: RunRecord
+    ) -> dict[str, object] | None:
+        """None allows the adopt. Only RUNNING_IDLE is passed in.
+
+        The launcher skips the box read, so a classification failure cannot
+        lock them out. Everyone else may adopt only use_state abandoned.
+        Caller holds _operation_lock. box_occupancy takes _activity_lock and
+        drops it before ServerState._lock; that order is the allowed one.
+        The sampler can still write a sample after this read.
+        _revalidate_abandoned repeats the classification before the owner
+        is assigned.
+        """
+
+        if self._client_is_launcher(client, run.run_id):
+            return None
+        try:
+            box = self.box_occupancy()
+        except Exception:
+            return protection_fields(None)
+        runs = box.get("runs") if isinstance(box, dict) else None
+        row: dict[str, object] | None = None
+        if isinstance(runs, list):
+            for item in runs:
+                if isinstance(item, dict) and item.get("run_id") == run.run_id:
+                    row = item
+                    break
+        if row is None or row.get("use_state") != "abandoned":
+            return protection_fields(row)
+        return None
+
+    def _use_clocks_locked(
+        self,
+    ) -> tuple[
+        str,
+        Mapping[str, float],
+        frozenset[str],
+        frozenset[str],
+        Mapping[str, float],
+        Mapping[str, float],
+        Mapping[str, float],
+        float | None,
+        Mapping[str, Mapping[str, object]],
+        float | None,
+        float | None,
+    ]:
+        """Copy the use clocks. Caller holds _activity_lock."""
+
+        generation = (
+            self.daemon_generation
+            if isinstance(self.daemon_generation, str)
+            else ""
+        )
+        activity = {
+            run_id: stamp
+            for (gen, run_id), stamp in self._last_activity.items()
+            if gen == generation
+            and stamp
+            > self._activity_tombstone.get((gen, run_id), stamp - 1.0)
+        }
+        unknown = frozenset(
+            run_id
+            for (gen, run_id) in self._activity_unknown
+            if gen == generation
+        )
+        compensating = frozenset(
+            run_id
+            for (gen, run_id) in self._compensating_runs
+            if gen == generation
+        )
+        ownerless = {
+            run_id: stamp
+            for (gen, run_id), stamp in self._ownerless_since.items()
+            if gen == generation
+        }
+        human = {
+            run_id: stamp
+            for (gen, run_id), stamp in self._human_input_at.items()
+            if gen == generation
+        }
+        uncertain = {
+            run_id: stamp
+            for (gen, run_id), stamp in self._uncertain_input_at.items()
+            if gen == generation
+        }
+        launched = {
+            run_id: MappingProxyType(identity.public_payload())
+            for (gen, run_id), identity in self._launched_by.items()
+            if gen == generation
+        }
+        return (
+            generation,
+            MappingProxyType(activity),
+            unknown,
+            compensating,
+            MappingProxyType(ownerless),
+            MappingProxyType(human),
+            MappingProxyType(uncertain),
+            self._signal_recovered_at,
+            MappingProxyType(launched),
+            self._input_good_at,
+            self._use_clock_origin,
+        )
+
+    def _snapshot_from_clocks(
+        self,
+        clock: float,
+        runs: tuple[RunRecord, ...],
+        revision: int,
+        bound: frozenset[str],
+        clocks: tuple[
+            str,
+            Mapping[str, float],
+            frozenset[str],
+            frozenset[str],
+            Mapping[str, float],
+            Mapping[str, float],
+            Mapping[str, float],
+            float | None,
+            Mapping[str, Mapping[str, object]],
+            float | None,
+            float | None,
+        ],
+    ) -> _BoxSnapshot:
+        (
+            generation,
+            activity,
+            unknown,
+            compensating,
+            ownerless,
+            human,
+            uncertain,
+            recovered_at,
+            launched,
+            input_good_at,
+            origin,
+        ) = clocks
+        return _BoxSnapshot(
+            clock=clock,
+            runs=runs,
+            activity=activity,
+            unknown=unknown,
+            revision=revision,
+            daemon_generation=generation,
+            compensating=compensating,
+            ownerless_since=ownerless,
+            human_input=human,
+            uncertain_input=uncertain,
+            launched_by=launched,
+            input_good_at=input_good_at,
+            signal_recovered_at=recovered_at,
+            use_clock_origin=origin,
+            bound_runs=bound,
+        )
+
+    def _adoption_marker_path(self) -> Path | None:
+        paths = getattr(self.manifest, "paths", None)
+        runs_path = getattr(paths, "runs_path", None)
+        if isinstance(runs_path, (str, Path)):
+            return Path(runs_path).with_name("adoption-unconfirmed.json")
+        return None
+
+    def _adoption_settled_path(self) -> Path | None:
+        marker = self._adoption_marker_path()
+        if marker is None:
+            return None
+        return marker.with_name("adoption-unconfirmed-settled.json")
+
+    def _read_adoption_marker(self) -> dict[str, object] | None:
+        path = self._adoption_marker_path()
+        if path is None:
+            return None
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return None
+        if not isinstance(document, dict) or document.get("version") != 1:
+            return None
+        run_id = document.get("run_id")
+        owner = document.get("owner_session_id")
+        lease = document.get("owner_lease_id")
+        token = document.get("token")
+        invalidated = document.get("invalidated")
+        kind = document.get("invalidated_by")
+        if (
+            not isinstance(run_id, str)
+            or not run_id
+            or not isinstance(owner, str)
+            or not owner
+            or not isinstance(lease, str)
+            or not lease
+            or isinstance(token, bool)
+            or not isinstance(token, int)
+            or not isinstance(invalidated, bool)
+            or (kind is not None and kind not in {"human", "uncertain"})
+        ):
+            return None
+        return document
+
+    def _write_adoption_marker(self, document: dict[str, object]) -> None:
+        path = self._adoption_marker_path()
+        if path is None:
+            raise RuntimeError("adoption_marker_unavailable")
+        atomic_write_json(path, document)
+
+    def _delete_adoption_marker(self) -> None:
+        path = self._adoption_marker_path()
+        if path is None:
+            return
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+
+    def _note_pending_adoption_locked(
+        self, run_id: str, owner: str, lease_id: str
+    ) -> int:
+        """Caller holds _activity_lock. Fsync the marker, then remember the token.
+
+        The marker names the owner this adopt is about to write. Startup
+        reverts a run that still carries that owner. The fsync is the extra
+        hold: no manifest lock and no ServerState._lock.
+        """
+
+        self._adoption_serial += 1
+        token = self._adoption_serial
+        self._write_adoption_marker(
+            {
+                "version": 1,
+                "run_id": run_id,
+                "owner_session_id": owner,
+                "owner_lease_id": lease_id,
+                "token": token,
+                "invalidated": False,
+                "invalidated_by": None,
+            }
+        )
+        key = self._activity_key(run_id)
+        self._pending_adoption[key] = token
+        self._invalidated_adoption.pop(key, None)
+        return token
+
+    def _invalidate_pending_adoption_locked(self, run_id: str, kind: str) -> None:
+        """Caller holds _activity_lock. Human or uncertain input closes the adopt."""
+
+        if kind not in {"human", "uncertain"}:
+            return
+        key = self._activity_key(run_id)
+        token = self._pending_adoption.get(key)
+        if token is None:
+            return
+        current = self._invalidated_adoption.get(key)
+        if current is not None and current[0] == token:
+            return
+        self._invalidated_adoption[key] = (token, kind)
+        try:
+            document = self._read_adoption_marker()
+            if (
+                document is None
+                or document.get("run_id") != run_id
+                or document.get("token") != token
+                or document.get("invalidated") is True
+            ):
+                return
+            document["invalidated"] = True
+            document["invalidated_by"] = kind
+            self._write_adoption_marker(document)
+        except Exception:
+            return
+
+    def _pending_adoption_invalidated_locked(
+        self, run_id: str, token: int
+    ) -> str | None:
+        """Caller holds _activity_lock. The input kind, or None if this token is clean."""
+
+        found = self._invalidated_adoption.get(self._activity_key(run_id))
+        if found is None or found[0] != token:
+            return None
+        return found[1]
+
+    def _consume_pending_adoption_locked(self, run_id: str, token: int) -> None:
+        key = self._activity_key(run_id)
+        if self._pending_adoption.get(key) == token:
+            self._pending_adoption.pop(key, None)
+        found = self._invalidated_adoption.get(key)
+        if found is not None and found[0] == token:
+            self._invalidated_adoption.pop(key, None)
+
+    def _drop_open_adoption(self) -> None:
+        open_adoption = self._open_adoption
+        self._open_adoption = None
+        if open_adoption is None:
+            return
+        run_id, token = open_adoption
+        with self._activity_lock:
+            self._consume_pending_adoption_locked(run_id, token)
+        try:
+            self._delete_adoption_marker()
+        except OSError:
+            return
+
+    def _settle_adoption_marker(self, *, reverted: bool, kind: str | None) -> None:
+        document = self._read_adoption_marker()
+        if document is None:
+            return
+        if kind in {"human", "uncertain"}:
+            document["invalidated"] = True
+            document["invalidated_by"] = kind
+        settled_path = self._adoption_settled_path()
+        if settled_path is None:
+            return
+        atomic_write_json(
+            settled_path,
+            {
+                "version": 1,
+                "settled": True,
+                "run_id": document["run_id"],
+                "owner_session_id": document["owner_session_id"],
+                "owner_lease_id": document["owner_lease_id"],
+                "token": document["token"],
+                "invalidated": document["invalidated"] is True,
+                "invalidated_by": document.get("invalidated_by"),
+                "reverted": reverted,
+            },
+        )
+        self._delete_adoption_marker()
+
+    def _recover_unconfirmed_adoption(self) -> None:
+        """A crash after the owner replace and before revert must not keep that owner.
+
+        The marker is the trace: it names the owner and whether human or
+        uncertain input invalidated the adopt. The run goes back to ownerless
+        RUNNING_IDLE. The settled file keeps that fact after the marker is removed.
+        An unreadable marker is left in place.
+        """
+
+        path = self._adoption_marker_path()
+        if path is None or not path.exists():
+            return
+        document = self._read_adoption_marker()
+        if document is None:
+            return
+        run = self.manifest.get(str(document["run_id"]))
+        reverted = False
+        if (
+            run is not None
+            and run.state == "RUNNING"
+            and run.owner_session_id == document["owner_session_id"]
+            and run.owner_lease_id == document["owner_lease_id"]
+        ):
+            run.owner_session_id = None
+            run.owner_lease_id = None
+            run.state = "RUNNING_IDLE"
+            self.manifest.replace(run)
+            reverted = True
+        kind = document.get("invalidated_by")
+        self._settle_adoption_marker(
+            reverted=reverted,
+            kind=kind if isinstance(kind, str) else None,
+        )
+
+    def _publish_revert_view_locked(self) -> None:
+        """Caller holds _activity_lock. Publish a lock-free snapshot for enqueue."""
+
+        generation = (
+            self.daemon_generation if isinstance(self.daemon_generation, str) else ""
+        )
+        run_ids: set[str] = set()
+        launchers: dict[str, str] = {}
+        for (gen, run_id), _pending in self._adoption_revert_pending.items():
+            if gen != generation:
+                continue
+            run_ids.add(run_id)
+            identity = self._launched_by.get((gen, run_id))
+            if identity is not None and isinstance(identity.session_id, str) and identity.session_id:
+                launchers[run_id] = identity.session_id
+        self._revert_pending_view = (frozenset(run_ids), MappingProxyType(launchers))
+
+    def _adoption_revert_is_pending(self, run_id: str) -> bool:
+        with self._activity_lock:
+            return self._activity_key(run_id) in self._adoption_revert_pending
+
+    def _clear_revert_pending(self, key: tuple[str, str], token: int) -> None:
+        with self._activity_lock:
+            current = self._adoption_revert_pending.get(key)
+            if current is None or current[0] != token:
+                return
+            self._adoption_revert_pending.pop(key, None)
+            self._publish_revert_view_locked()
+
+    def _retry_adoption_reverts(self) -> None:
+        """Caller holds _operation_lock. Leave a run pending when the write fails."""
+
+        with self._activity_lock:
+            pending = list(self._adoption_revert_pending.items())
+        for key, (token, kind) in pending:
+            try:
+                run = self.manifest.get(key[1])
+            except Exception:
+                continue
+            if run is None or run.state != "RUNNING" or not run.owner_session_id:
+                if run is not None and run.owner_session_id is None:
+                    try:
+                        self._settle_adoption_marker(reverted=True, kind=kind)
+                    except Exception:
+                        pass
+                self._clear_revert_pending(key, token)
+                continue
+            run.owner_session_id = None
+            run.owner_lease_id = None
+            run.state = "RUNNING_IDLE"
+            try:
+                RunManifestStore.replace(self.manifest, run)
+            except Exception:
+                continue
+            try:
+                self._settle_adoption_marker(reverted=True, kind=kind)
+            except Exception:
+                pass
+            self._clear_revert_pending(key, token)
+            self._invalidate_box_cache()
+
+    def _refuse_unconfirmed_owner(
+        self, client: ClientIdentity, run_id: str
+    ) -> dict[str, object] | None:
+        """None lets the caller continue. Caller holds _operation_lock.
+
+        Retries the durable revert first. The launcher is not refused while
+        the write is still pending; every other session is.
+        """
+
+        if not self._adoption_revert_is_pending(run_id):
+            return None
+        self._retry_adoption_reverts()
+        if not self._adoption_revert_is_pending(run_id):
+            return None
+        if self._client_is_launcher(client, run_id):
+            return None
+        return adoption_revert_pending_fields()
+
+    def _close_adoption_after_replace(
+        self, client: ClientIdentity, run: RunRecord
+    ) -> dict[str, object] | None:
+        """None keeps the owner. A dict refuses with run_protected fields.
+
+        Caller holds _operation_lock. The owner replace has already returned.
+        """
+
+        open_adoption = self._open_adoption
+        if open_adoption is None:
+            return None
+        run_id, token = open_adoption
+        with self._activity_lock:
+            kind = self._pending_adoption_invalidated_locked(run_id, token)
+            self._consume_pending_adoption_locked(run_id, token)
+            if kind is None:
+                try:
+                    self._delete_adoption_marker()
+                except OSError:
+                    kind = "uncertain"
+        self._open_adoption = None
+        if kind is None:
+            return None
+        run.owner_session_id = None
+        run.owner_lease_id = None
+        run.state = "RUNNING_IDLE"
+        # The owner commit is the instance replace. A probe wrapped around
+        # that call runs before it returns; the revert must not re-enter it.
+        try:
+            RunManifestStore.replace(self.manifest, run)
+        except Exception:
+            # The store rolled back to the stranger. Remember the token and
+            # refuse that ownership until a later write lands.
+            with self._activity_lock:
+                self._adoption_revert_pending[self._activity_key(run_id)] = (
+                    token,
+                    kind,
+                )
+                self._publish_revert_view_locked()
+            return adoption_revert_pending_fields()
+        try:
+            self._settle_adoption_marker(reverted=True, kind=kind)
+        except Exception:
+            pass
+        try:
+            refusal = self._adoption_protection(client, run)
+        except Exception:
+            refusal = None
+        if refusal is None:
+            return protection_fields(None)
+        return refusal
+
+    def _revalidate_abandoned(
+        self, client: ClientIdentity, run: RunRecord, lease_id: str
+    ) -> dict[str, object] | None:
+        """None allows the adopt. A dict is the run_protected body.
+
+        Caller holds _operation_lock. The launcher returns immediately.
+        Everyone else is classified again after probes return. Under
+        _activity_lock the clocks are copied and, when the run is still
+        abandoned, a pending adoption is registered and its marker is
+        fsynced before the owner fields are set on this clone. The lock
+        drops before manifest.replace. record_input_sample invalidates
+        that token if it records human or uncertain input for the run.
+        adopt_run then reverts the durable owner. Probes and
+        _adopt_dispatchable stay outside the lock. Anything that cannot
+        be classified is run_protected.
+        """
+
+        self._open_adoption = None
+        if self._client_is_launcher(client, run.run_id):
+            return None
+        try:
+            probe_snapshot = self._take_box_snapshot(time.time())
+            probes = self._probes_for_snapshot(probe_snapshot, use_cache=False)
+            runs = tuple(self.manifest.list_runs())
+            bound = frozenset(
+                item.run_id
+                for item in runs
+                if item.state in _ACTIVE_STATES
+                and self._adopt_dispatchable(item.run_id)
+            )
+            with self._activity_lock:
+                snapshot = self._snapshot_from_clocks(
+                    time.time(),
+                    runs,
+                    self._box_revision,
+                    bound,
+                    self._use_clocks_locked(),
+                )
+                active_count = sum(
+                    1 for item in runs if item.state in _ACTIVE_STATES
+                )
+                projected = _use_projection(run, snapshot, probes, active_count)
+                if projected.get("use_state") != "abandoned":
+                    return protection_fields(projected)
+                token = self._note_pending_adoption_locked(
+                    run.run_id, client.session_id, lease_id
+                )
+                self._open_adoption = (run.run_id, token)
+                run.owner_session_id = client.session_id
+                run.owner_lease_id = lease_id
+                run.state = "RUNNING"
+                return None
+        except Exception:
+            self._drop_open_adoption()
+            return protection_fields(None)
+
     def adopt_run(self, client: ClientIdentity, token: str | None, run_id: object) -> dict[str, object]:
         legacy_error = self._legacy_identity_error()
         if legacy_error is not None:
@@ -3851,6 +4581,16 @@ class ProcessLifecycle:
                     return self._reject_reserved(authority, command, "retail_quarantine")
                 if not isinstance(run_id, str) or not run_id:
                     return self._reject_reserved(authority, command, "run_not_found", 404)
+                run = self.manifest.get(run_id)
+                if run is None:
+                    return self._reject_reserved(authority, command, "run_not_found", 404)
+                refusal = self._refuse_unconfirmed_owner(client, run_id)
+                if refusal is not None:
+                    result = self._reject_reserved(
+                        authority, command, "run_protected"
+                    )
+                    result.update(refusal)
+                    return result
                 run = self.manifest.get(run_id)
                 if run is None:
                     return self._reject_reserved(authority, command, "run_not_found", 404)
@@ -3893,6 +4633,14 @@ class ProcessLifecycle:
                     for other in self.manifest.list_runs()
                 ):
                     return self._reject_reserved(authority, command, "active_run_exists")
+                if run.state == "RUNNING_IDLE":
+                    refusal = self._adoption_protection(client, run)
+                    if refusal is not None:
+                        result = self._reject_reserved(
+                            authority, command, "run_protected"
+                        )
+                        result.update(refusal)
+                        return result
                 buckets, unknown_reason = self._partition_registered_processes(run.processes)
                 if buckets["unknown"]:
                     reason = unknown_reason or "process_identity_mismatch"
@@ -3922,8 +4670,19 @@ class ProcessLifecycle:
                     return self._error("audit_failed", 503)
                 if self._quarantined():
                     return self._reject_reserved(authority, command, "retail_quarantine")
+                if run.state == "RUNNING_IDLE":
+                    refusal = self._revalidate_abandoned(
+                        client, run, authority[1]
+                    )
+                    if refusal is not None:
+                        result = self._reject_reserved(
+                            authority, command, "run_protected"
+                        )
+                        result.update(refusal)
+                        return result
                 command_id = self._commit_reserved(authority, command)
                 if command_id is None:
+                    self._drop_open_adoption()
                     return self._error("lease_invalid", 409)
                 committed = True
                 run.owner_session_id = client.session_id
@@ -3932,8 +4691,17 @@ class ProcessLifecycle:
                 try:
                     self.manifest.replace(run)
                 except Exception:
+                    self._drop_open_adoption()
                     self._finish_committed(authority, command_id)
                     return self._error("manifest_failed", 503)
+                if self._open_adoption is not None:
+                    refusal = self._close_adoption_after_replace(client, run)
+                    if refusal is not None:
+                        self._invalidate_box_cache()
+                        self._finish_committed(authority, command_id)
+                        result = self._error("run_protected", 409)
+                        result.update(refusal)
+                        return result
                 self._invalidate_box_cache()
                 self._unfence_runs([run_id])
                 self._finish_committed(authority, command_id)
@@ -4428,6 +5196,7 @@ class ProcessLifecycle:
         audited so a later ghost can be told apart from a skipped reaper."""
         with self._operation_lock:
             self._require_legacy_identity_safe()
+            self._retry_adoption_reverts()
             if self._quarantined():
                 if not self._audit(
                     "reap_under_quarantine",
@@ -4643,7 +5412,20 @@ class ProcessLifecycle:
         clock = time.time() if now is None else float(now)
         snapshot = self._take_box_snapshot(clock)
         probes = self._probes_for_snapshot(snapshot, use_cache=now is None)
-        return _derive_box(snapshot, probes)
+        derived = _derive_box(snapshot, probes)
+        with self._activity_lock:
+            pending = {
+                run_id
+                for (gen, run_id) in self._adoption_revert_pending
+                if gen == snapshot.daemon_generation
+            }
+        if pending:
+            runs = derived.get("runs")
+            if isinstance(runs, list):
+                for row in runs:
+                    if isinstance(row, dict) and row.get("run_id") in pending:
+                        row["use_reason"] = ADOPTION_REVERT_PENDING
+        return derived
 
     def _take_box_snapshot(self, clock: float) -> _BoxSnapshot:
         # The seal must be a lower bound of the data it certifies.
@@ -4651,51 +5433,7 @@ class ProcessLifecycle:
             revision = self._box_revision
         runs = tuple(self.manifest.list_runs())
         with self._activity_lock:
-            generation = (
-                self.daemon_generation
-                if isinstance(self.daemon_generation, str)
-                else ""
-            )
-            activity = {
-                run_id: stamp
-                for (gen, run_id), stamp in self._last_activity.items()
-                if gen == generation
-                and stamp
-                > self._activity_tombstone.get((gen, run_id), stamp - 1.0)
-            }
-            unknown = frozenset(
-                run_id
-                for (gen, run_id) in self._activity_unknown
-                if gen == generation
-            )
-            compensating = frozenset(
-                run_id
-                for (gen, run_id) in self._compensating_runs
-                if gen == generation
-            )
-            ownerless = {
-                run_id: stamp
-                for (gen, run_id), stamp in self._ownerless_since.items()
-                if gen == generation
-            }
-            human = {
-                run_id: stamp
-                for (gen, run_id), stamp in self._human_input_at.items()
-                if gen == generation
-            }
-            uncertain = {
-                run_id: stamp
-                for (gen, run_id), stamp in self._uncertain_input_at.items()
-                if gen == generation
-            }
-            recovered_at = self._signal_recovered_at
-            launched = {
-                run_id: MappingProxyType(identity.public_payload())
-                for (gen, run_id), identity in self._launched_by.items()
-                if gen == generation
-            }
-            input_good_at = self._input_good_at
-            origin = self._use_clock_origin
+            clocks = self._use_clocks_locked()
         # No lifecycle lock is held here, so the documented order
         # (_operation_lock before ServerState._lock) is kept.
         bound = frozenset(
@@ -4703,23 +5441,7 @@ class ProcessLifecycle:
             for run in runs
             if run.state in _ACTIVE_STATES and self._adopt_dispatchable(run.run_id)
         )
-        return _BoxSnapshot(
-            clock=clock,
-            runs=runs,
-            activity=MappingProxyType(activity),
-            unknown=unknown,
-            revision=revision,
-            daemon_generation=generation,
-            compensating=compensating,
-            ownerless_since=MappingProxyType(ownerless),
-            human_input=MappingProxyType(human),
-            uncertain_input=MappingProxyType(uncertain),
-            launched_by=MappingProxyType(launched),
-            input_good_at=input_good_at,
-            signal_recovered_at=recovered_at,
-            use_clock_origin=origin,
-            bound_runs=bound,
-        )
+        return self._snapshot_from_clocks(clock, runs, revision, bound, clocks)
 
     def _collect_probes(self, snapshot: _BoxSnapshot) -> _BoxProbes:
         active = [run for run in snapshot.runs if run.state in _ACTIVE_STATES]

@@ -278,7 +278,8 @@ class CloseRun8604Test(unittest.TestCase):
             )
         except Exception as exc:
             self.fail(str(exc))
-        self.assertTrue(adopted.get("ok"))
+        self.assertEqual(adopted.get("error"), "run_protected")
+        self.assertIsNot(adopted.get("ok"), True)
 
     def test_8604_r3_exception_after_authorize_leaves_no_reservation(self) -> None:
         record = process(81)

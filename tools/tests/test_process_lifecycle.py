@@ -31,7 +31,7 @@ from dayz_mcp.process_lifecycle import (
 from dayz_mcp.runtime_state import JsonlAuditWriter, RuntimePaths
 from dayz_mcp.session_coordination import SessionCoordinator
 from tests.fence_helpers import INST_CLIENT, INST_SERVER, accredited_poll, bind_both_peers
-from tests.lifecycle_helpers import HASH_A, HASH_B
+from tests.lifecycle_helpers import HASH_A, HASH_B, stamp_launcher
 from tests.process_lifecycle_helpers import (
     AuditSink,
     FakeGuard,
@@ -492,6 +492,7 @@ class ProcessLifecycleTest(unittest.TestCase):
             [record],
         )
         self.store.add(run)
+        stamp_launcher(self.lifecycle, run.run_id, IDENTITY_A)
         return run
 
     def _bind_run(self, run_id: str = "run-existing") -> loopback.ServerState:
@@ -3899,13 +3900,13 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertEqual(self.store.get("run-existing").state, "RUNNING_IDLE")
         life2, manifest2, _state2 = self._fresh_lifecycle_after_restart()
         adopted = life2.adopt_run(IDENTITY_A, self.token_a, "run-existing")
+        # A restart forgets launchers. Protection runs before the gone-process
+        # check, so the former launcher is refused until the run is abandoned.
         self.assertNotEqual(adopted.get("ok"), True, adopted)
-        self.assertEqual(adopted.get("error"), "run_processes_gone")
+        self.assertEqual(adopted.get("error"), "run_protected")
         self.assertEqual(adopted.get("_http_status"), 409)
-        hint = adopted.get("hint")
-        self.assertIsInstance(hint, str)
-        self.assertIn("reap", str(hint).lower())
         self.assertEqual(manifest2.get("run-existing").state, "RUNNING_IDLE")
+        self.assertIsNone(manifest2.get("run-existing").owner_session_id)
 
     def test_adopt_after_restart_live_process_declares_not_dispatchable(self) -> None:
         record = process(9425)
@@ -3914,14 +3915,12 @@ class ProcessLifecycleTest(unittest.TestCase):
         self._bind_run()
         released = self.lifecycle.release_owner("A", "lease-A")
         self.assertEqual(released, ["run-existing"])
-        life2, _manifest2, state2 = self._fresh_lifecycle_after_restart()
+        life2, manifest2, state2 = self._fresh_lifecycle_after_restart()
         adopted = life2.adopt_run(IDENTITY_A, self.token_a, "run-existing")
-        self.assertTrue(adopted.get("ok"), adopted)
-        self.assertIs(adopted.get("dispatchable"), False, adopted)
-        hint = adopted.get("hint")
-        self.assertIsInstance(hint, str)
-        self.assertIn("restart", str(hint).lower())
-        self.assertIn("stop_run", str(hint))
+        self.assertEqual(adopted.get("error"), "run_protected", adopted)
+        self.assertNotEqual(adopted.get("ok"), True, adopted)
+        self.assertEqual(manifest2.get("run-existing").state, "RUNNING_IDLE")
+        self.assertIsNone(manifest2.get("run-existing").owner_session_id)
         st, payload = state2.enqueue_command(
             "world_spawn", {"type": "SurvivorM_Mirek", "pos": [1, 2, 3], "flags": 0, "rotation": 0}, peer="server"
         )

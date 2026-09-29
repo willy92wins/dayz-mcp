@@ -45,7 +45,8 @@ class TakeoverBTests(unittest.TestCase):
         }
         fields = occupancy_error_fields(box, caller_session="me")
         hint = str(fields.get("hint") or "")
-        self.assertIn("takeover=true", hint)
+        self.assertIn("run_protected", hint)
+        self.assertNotIn("takeover=true", hint)
         self.assertNotIn("stop it with dayz_test_stop", hint)
         self.assertEqual(takeover_target_run_id(box, caller_session="me"), "abc")
 
@@ -152,9 +153,10 @@ class DayzTestRunTakeoverTests(unittest.IsolatedAsyncioTestCase):
             execute=execute,
         )
         execute.assert_not_awaited()
-        self.assertEqual(payload.get("error_code"), TAKEOVER_REQUIRED)
+        self.assertEqual(payload.get("error_code"), "run_protected")
         hint = str(payload.get("hint") or "")
-        self.assertIn("takeover=true", hint)
+        self.assertIn("run_protected", hint)
+        self.assertNotIn("takeover=true", hint)
         self.assertNotIn("stop it with dayz_test_stop", hint)
 
     async def test_p6_takeover_stops_then_launches(self) -> None:

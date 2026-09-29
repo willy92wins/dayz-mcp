@@ -21,8 +21,10 @@ from dayz_mcp import control_client, daemon, loopback, server
 from dayz_mcp.server import ServerConfig, ToolError
 from _broker import e2e_daemon as broker_e2e
 from _session_coordination import e2e_agent_sessions as binary_e2e
-from tests.test_daemon import _free_port, _http
+from tests.daemon_helpers import _http
+from tests.test_daemon import _free_port
 from tests.client_helpers import _VALID_PEER_VERSION, _fixture_client_runtime
+from tests.lifecycle_helpers import stamp_launcher
 from tests.fence_helpers import (
     INST_CLIENT,
     INST_SERVER,
@@ -234,6 +236,7 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         lease_token: str,
         run_id: str = "test-run",
     ) -> dict:
+        stamp_launcher(self.daemon.state.lifecycle, run_id, runtime.identity)
         result = await runtime._control_with_lazy_spawn(
             runtime._control._session_call,
             "/lifecycle/adopt",
@@ -291,8 +294,22 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
 
         acquired_b = await runtime_b.session_wait(queued_b["ticket"], 1.0)
         self.assertEqual(acquired_b["status"], "active")
-        await self.adopt_run(runtime_b, acquired_b["lease_token"])
-        await runtime_b.call_bridge("world_weather_set", {"rain": 0.0, "time": 0.0, "min_duration": 0.0}, "server", 2.0)
+        # A launched the run. B holds the lease and still may not adopt it.
+        # The control client turns a 409 into ToolError; the daemon body is
+        # what the sealed worker would read, so this posts HTTP directly.
+        status, refused = _http(
+            self.daemon.base,
+            "POST",
+            "/lifecycle/adopt",
+            self.key,
+            {
+                "identity": runtime_b.identity.to_payload(),
+                "lease_token": acquired_b["lease_token"],
+                "run_id": "test-run",
+            },
+        )
+        self.assertEqual(status, 409, refused)
+        self.assertEqual(refused.get("error"), "run_protected", refused)
         await runtime_b.session_release(acquired_b["lease_token"])
 
         mutations = [
@@ -300,15 +317,20 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
             for name in server_peer.command_names()
             if name != "query_player_state"
         ]
-        self.assertEqual(
-            mutations, ["world_spawn", "world_time_set", "world_weather_set"]
-        )
+        self.assertEqual(mutations, ["world_spawn", "world_time_set"])
 
     @slow_test
     async def test_abandoned_head_is_never_blind_granted_and_next_live_wait_claims(self) -> None:
         runtime_a = self.client("codex")
         runtime_b = self.client("claude")
         runtime_c = self.client("codex")
+        # This test is the session FIFO. The fixture run is an ownerless
+        # RUNNING_IDLE that this session did not launch, so a grant would
+        # come back run_protected and session_acquire_wait would release it.
+        # STOPPING is not adoptable: the grant leaves adopted_run null.
+        parked = self.daemon.state.lifecycle.manifest.get("test-run")
+        parked.state = "STOPPING"
+        self.daemon.state.lifecycle.manifest.replace(parked)
 
         acquired_a = await runtime_a.session_acquire("owner-a")
         queued_b = await runtime_b.session_acquire("abandoned-b")
@@ -431,6 +453,7 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         # camera_get is a world read: it fails fast unless BOTH peers poll.
         self.peer("server")
         client_peer = self.peer("client")
+        stamp_launcher(self.daemon.state.lifecycle, "test-run", runtime_a.identity)
 
         acquired_a = await runtime_a.session_acquire("drive")
         adopted = acquired_a.get("adopted_run") or {}
@@ -457,8 +480,10 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         granted = await runtime_b.session_wait(queued_b["ticket"], 10.0)
         self.assertEqual(granted["status"], "active")
         wait_adopted = granted.get("adopted_run") or {}
-        self.assertEqual(wait_adopted.get("ok"), True, granted)
+        self.assertEqual(wait_adopted.get("ok"), False, granted)
+        self.assertEqual(wait_adopted.get("error"), "run_protected")
         self.assertEqual(wait_adopted.get("run_id"), "test-run")
+        self.assertIn("lease_token", granted)
         await runtime_b.session_release(granted["lease_token"])
 
     @slow_test

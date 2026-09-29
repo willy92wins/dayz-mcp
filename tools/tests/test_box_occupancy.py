@@ -34,7 +34,7 @@ from dayz_mcp.session_coordination import (
     SessionCoordinator,
 )
 from tests.mcp_helpers import _content_json
-from tests.lifecycle_helpers import HASH_A, HASH_B
+from tests.lifecycle_helpers import HASH_A, HASH_B, stamp_launcher
 from tests.process_lifecycle_helpers import (
     AuditSink,
     FakeGuard,
@@ -425,10 +425,10 @@ class OccupancyErrorFieldsTest(unittest.TestCase):
             },
             caller_session="me",
         )
-        self.assertEqual(idle["hint"], (
-            "pass takeover=true to evict occupied_by_run_id=abc; "
-            "do not dayz_test_stop a run you do not own"
-        ))
+        idle_hint = str(idle["hint"])
+        self.assertIn("run_protected", idle_hint)
+        self.assertNotIn("takeover=true", idle_hint)
+        self.assertNotIn("stop it with dayz_test_stop", idle_hint)
         owner = occupancy_error_fields(
             {
                 "runs": [
@@ -1132,6 +1132,8 @@ class RunCommandActivityTest(unittest.TestCase):
         by_id = {item["run_id"]: item for item in box["runs"]}
         self.assertEqual(by_id[self.run_id]["activity_state"], "unknown")
         self.assertIsNone(by_id[self.run_id]["last_activity_age_s"])
+        # The launch stamp is keyed by the generation that created the run.
+        stamp_launcher(self.lifecycle, self.run_id, IDENTITY_A)
         adopted = self.lifecycle.adopt_run(IDENTITY_A, self.token_a, self.run_id)
         self.assertTrue(adopted.get("ok"), adopted)
         self._add_unowned_run()

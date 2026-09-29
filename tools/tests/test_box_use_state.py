@@ -1,8 +1,8 @@
 """250f, plan v2.1 §3.2-§3.3: use_state in the box rows, through the lifecycle.
 
-Observation only: these fields decide nothing yet. Clocks are real time plus
-offsets passed to box_occupancy(now=...), because the ownerless stamp is taken
-with time.time() at the transition.
+adopt_run reads use_state (250f PR 2). These tests still only check the
+projection. Clocks are real time plus offsets passed to box_occupancy(now=...),
+because the ownerless stamp is taken with time.time() at the transition.
 """
 
 from __future__ import annotations

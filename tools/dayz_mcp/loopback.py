@@ -1611,12 +1611,46 @@ class ServerState:
             return False
         return self._durable_run_state(run_id) in {"RUNNING", "STARTING"}
 
+    def _revert_pending_blocks(self, run_id: str, owner_session: str | None) -> bool:
+        """True when this session must not use a run whose revert has not landed.
+
+        Reads the lifecycle's published view. The loopback lock is already
+        held, so this does not take the lifecycle locks.
+        """
+
+        lifecycle = self.lifecycle
+        if lifecycle is None:
+            return False
+        try:
+            view = lifecycle._revert_pending_view
+        except AttributeError:
+            return False
+        if not isinstance(view, tuple) or len(view) != 2:
+            return True
+        run_ids, launchers = view
+        if not isinstance(run_ids, frozenset) or run_id not in run_ids:
+            return False
+        try:
+            launcher = launchers[run_id]
+        except (KeyError, TypeError, IndexError):
+            launcher = None
+        if isinstance(launcher, str) and launcher and owner_session == launcher:
+            return False
+        return True
+
     def _enqueue_run_rejection(
-        self, run_id: str | None, *, mutation: bool, internal: bool
+        self,
+        run_id: str | None,
+        *,
+        mutation: bool,
+        internal: bool,
+        owner_session: str | None = None,
     ) -> str | None:
         _ = mutation
         if not isinstance(run_id, str) or not run_id:
             return None
+        if not internal and self._revert_pending_blocks(run_id, owner_session):
+            return "run_protected"
         if internal:
             # P-J1: a fenced RUNNING/STARTING run still accepts the daemon's own
             # cleanup. RUNNING_IDLE stays run_not_owned at enqueue: production
@@ -1662,7 +1696,12 @@ class ServerState:
         return status, payload
 
     def _enqueue_fence_target(
-        self, peer: str, cmd: str, *, internal: bool = False
+        self,
+        peer: str,
+        cmd: str,
+        *,
+        internal: bool = False,
+        owner_session: str | None = None,
     ) -> tuple[str | None, list[dict] | None, str | None]:
         mutation = command_requires_lease(cmd)
         candidates = self._active_bindings_for_peer(peer)
@@ -1681,7 +1720,10 @@ class ServerState:
         if mutation:
             if len(bound) == 1:
                 rejection = self._enqueue_run_rejection(
-                    _binding_run_id(bound[0]), mutation=True, internal=internal
+                    _binding_run_id(bound[0]),
+                    mutation=True,
+                    internal=internal,
+                    owner_session=owner_session,
                 )
                 if rejection is not None:
                     return rejection, None, None
@@ -1702,7 +1744,10 @@ class ServerState:
             return "legacy_unbound", None, None
         if len(bound) == 1:
             rejection = self._enqueue_run_rejection(
-                _binding_run_id(bound[0]), mutation=False, internal=internal
+                _binding_run_id(bound[0]),
+                mutation=False,
+                internal=internal,
+                owner_session=owner_session,
             )
             if rejection is not None:
                 return rejection, None, None
@@ -2131,11 +2176,12 @@ class ServerState:
 
         commanded_run_id: str | None = None
         activity_epoch: float | None = None
+        owner_session = owner_client.session_id if owner_client is not None else None
         with self._lock:
             if self._stopping:
                 return 409, {"error": "enqueue_cancelled"}
             fence_error_code, queue, fence_instance = self._enqueue_fence_target(
-                peer, cmd, internal=internal
+                peer, cmd, internal=internal, owner_session=owner_session
             )
             if fence_error_code is not None or queue is None:
                 code = fence_error_code or "legacy_unbound"
@@ -2210,11 +2256,12 @@ class ServerState:
         # Reserve both capacity and id before the durable "allowed" audit. Every
         # enqueue path counts this reservation, so no concurrent command can consume
         # the promised slot while audit I/O runs outside the state lock.
+        owner_session = owner_client.session_id if owner_client is not None else None
         with self._lock:
             if self._stopping:
                 return 409, {"error": "enqueue_cancelled"}
             fence_error_code, _queue, _fence_instance = self._enqueue_fence_target(
-                peer, "exec_enforce", internal=internal
+                peer, "exec_enforce", internal=internal, owner_session=owner_session
             )
             if fence_error_code is not None:
                 self._fence_reject_counts[fence_error_code] = (
@@ -2247,7 +2294,7 @@ class ServerState:
         activity_epoch: float | None = None
         with self._lock:
             fence_error_code, queue, fence_instance = self._enqueue_fence_target(
-                peer, "exec_enforce", internal=internal
+                peer, "exec_enforce", internal=internal, owner_session=owner_session
             )
             self._exec_capacity_reserved[peer] -= 1
             if fence_error_code is not None or queue is None:
@@ -3646,8 +3693,9 @@ class Handler(BaseHTTPRequestHandler):
                 "run_id": result.get("run_id") if result.get("run_id") is not None else run_id,
                 "error": error if isinstance(error, str) and error else "adopt_failed",
             }
-            if "hint" in result:
-                adopted["hint"] = result["hint"]
+            for key in ("hint", "use_state", "use_reason", "retry_after_s"):
+                if key in result:
+                    adopted[key] = result[key]
             payload["adopted_run"] = _copy_cleanup(adopted, result)
             return payload
         except Exception:
