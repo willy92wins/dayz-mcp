@@ -98,6 +98,10 @@ CLIENT_COMMANDS = {
     "ui_dialog",
     "action_use",
     "action_use_target",
+    "weapon_aim",
+    "weapon_fire",
+    "weapon_raise",
+    "weapon_sights",
 }
 
 CREDENTIAL_RECOVERY_TTL_S = 300.0
@@ -508,6 +512,12 @@ _SAFE_SIGNED_UNIT_REAL = _reject_numeric_errors(
 # Mirrors server.VEHICLE_CONTROL_MAX_TTL_S and MCPClientBridge.c:114. A test
 # keeps the two Python copies equal.
 _VEHICLE_CONTROL_MAX_TTL_S = 30.0
+# Mirrors MCPWeaponControl in addon/scripts/4_World/MCP_Weapon.c:45-50.
+# hold_ttl_s is rejected outside (0, 30], not clamped. The aim cap is pi
+# rounded up so math.pi still passes; the override protos name no unit.
+WEAPON_RAISE_DEFAULT_TTL_S = 3.0
+WEAPON_RAISE_MAX_TTL_S = 30.0
+WEAPON_AIM_ABS_MAX = 3.141593
 
 
 def _is_real_list(length: int) -> _FieldValidator:
@@ -1061,6 +1071,48 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                     _real_in_range(minimum=0.0, maximum=_VEHICLE_CONTROL_MAX_TTL_S)
                 ),
             },
+        )
+    ),
+    # raised=false still needs a positive TTL on the wire; the bridge reports 0.
+    "weapon_raise": _command_schema(
+        _schema_variant(
+            required=("raised", "hold_ttl_s"),
+            validators={
+                "raised": _is_strict_bool,
+                "hold_ttl_s": _reject_numeric_errors(
+                    _real_in_range(
+                        minimum=0.0,
+                        maximum=WEAPON_RAISE_MAX_TTL_S,
+                        minimum_inclusive=False,
+                    )
+                ),
+            },
+        )
+    ),
+    "weapon_aim": _command_schema(
+        _schema_variant(
+            required=("dx", "dy"),
+            validators={
+                "dx": _reject_numeric_errors(
+                    _real_in_range(
+                        minimum=-WEAPON_AIM_ABS_MAX,
+                        maximum=WEAPON_AIM_ABS_MAX,
+                    )
+                ),
+                "dy": _reject_numeric_errors(
+                    _real_in_range(
+                        minimum=-WEAPON_AIM_ABS_MAX,
+                        maximum=WEAPON_AIM_ABS_MAX,
+                    )
+                ),
+            },
+        )
+    ),
+    "weapon_fire": _command_schema(_schema_variant()),
+    "weapon_sights": _command_schema(
+        _schema_variant(
+            required=("mode",),
+            validators={"mode": _one_of("ironsights", "optics", "none")},
         )
     ),
 }

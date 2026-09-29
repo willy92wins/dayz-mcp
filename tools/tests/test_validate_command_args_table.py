@@ -1285,6 +1285,47 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             (False, "bad_args"),
         ),
     ),
+    "weapon_raise": (
+        ("valid_raise", {"raised": True, "hold_ttl_s": 3.0}, (True, None)),
+        ("valid_release_still_needs_ttl", {"raised": False, "hold_ttl_s": 0.1}, (True, None)),
+        ("valid_max", {"raised": True, "hold_ttl_s": 30.0}, (True, None)),
+        ("ttl_zero", {"raised": True, "hold_ttl_s": 0.0}, (False, "bad_args")),
+        ("ttl_negative", {"raised": True, "hold_ttl_s": -1.0}, (False, "bad_args")),
+        ("ttl_over_max", {"raised": True, "hold_ttl_s": 30.5}, (False, "bad_args")),
+        ("ttl_nan", {"raised": True, "hold_ttl_s": float("nan")}, (False, "bad_args")),
+        ("ttl_inf", {"raised": True, "hold_ttl_s": float("inf")}, (False, "bad_args")),
+        ("raised_int", {"raised": 1, "hold_ttl_s": 3.0}, (False, "bad_args")),
+        ("missing_raised", {"hold_ttl_s": 3.0}, (False, "bad_args")),
+        ("missing_ttl", {"raised": True}, (False, "bad_args")),
+        (
+            "extra_key",
+            {"raised": True, "hold_ttl_s": 3.0, "extra": None},
+            (False, "bad_args"),
+        ),
+    ),
+    "weapon_aim": (
+        ("valid_zero", {"dx": 0.0, "dy": 0.0}, (True, None)),
+        ("valid_cap", {"dx": 3.141593, "dy": -3.141593}, (True, None)),
+        ("dx_over_cap", {"dx": 3.141594, "dy": 0.0}, (False, "bad_args")),
+        ("dy_under_cap", {"dx": 0.0, "dy": -3.141594}, (False, "bad_args")),
+        ("dx_bool", {"dx": True, "dy": 0.0}, (False, "bad_args")),
+        ("dx_nan", {"dx": float("nan"), "dy": 0.0}, (False, "bad_args")),
+        ("missing_dy", {"dx": 0.0}, (False, "bad_args")),
+        ("extra_key", {"dx": 0.0, "dy": 0.0, "extra": None}, (False, "bad_args")),
+    ),
+    "weapon_fire": (
+        ("valid_empty", {}, (True, None)),
+        ("extra_key", {"extra": None}, (False, "bad_args")),
+    ),
+    "weapon_sights": (
+        ("valid_ironsights", {"mode": "ironsights"}, (True, None)),
+        ("valid_optics", {"mode": "optics"}, (True, None)),
+        ("valid_none", {"mode": "none"}, (True, None)),
+        ("bad_mode", {"mode": "red_dot"}, (False, "bad_args")),
+        ("unhashable_mode", {"mode": ["ironsights"]}, (False, "bad_args")),
+        ("missing_mode", {}, (False, "bad_args")),
+        ("extra_key", {"mode": "none", "extra": None}, (False, "bad_args")),
+    ),
 }
 
 

@@ -123,6 +123,7 @@ UiClickMode = Literal["direct", "complete"]
 InventoryAttachDest = Literal["attachment", "cargo"]
 UiReloadLayoutMode = Literal["reload", "close"]
 TelemetryReadMode = Literal["object_at", "fixture_jsonl"]
+WeaponSightsMode = Literal["ironsights", "optics", "none"]
 
 _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "pipeline_resolve",
@@ -977,6 +978,10 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "vehicle_release": "vehicle_release",
         "vehicle_telemetry": "vehicle_telemetry",
         "vehicle_trace": "vehicle_trace",
+        "weapon_aim": "weapon_aim",
+        "weapon_fire": "weapon_fire",
+        "weapon_raise": "weapon_raise",
+        "weapon_sights": "weapon_sights",
     },
 }
 
@@ -2969,6 +2974,11 @@ def _timeout(timeout_s: float) -> float:
 # The bridge only honours hold_ttl_s <= this value; above it the control silently
 # falls back to VEHICLE_CONTROL_DEFAULT_TTL_S (3.0 s). Keep in sync with the bridge.
 VEHICLE_CONTROL_MAX_TTL_S = 30.0
+# Mirrors MCPWeaponControl.RAISE_* and AIM_CHANGE_ABS_MAX
+# (addon/scripts/4_World/MCP_Weapon.c:45-50). Out of range is rejected.
+WEAPON_RAISE_DEFAULT_TTL_S = 3.0
+WEAPON_RAISE_MAX_TTL_S = 30.0
+WEAPON_AIM_ABS_MAX = 3.141593
 
 
 def _finite_float(value: float, error: str = "bad_args") -> float:
@@ -6789,6 +6799,113 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["uid"] = uid
         async with runtime.tool_lock:
             return await runtime.call_bridge("weapon_state", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Raise or lower the local player's weapon with "
+            "HumanInputController.OverrideRaise. No OS input and no focus. "
+            "raised=true holds OverrideRaise(ENABLED, true) until hold_ttl_s "
+            "elapses; the bridge then applies DISABLED itself. raised=false "
+            "releases at once. The result is the read-back after one simulation "
+            "tick: raised is PlayerBase.IsRaised(), input_raised is "
+            "HumanInputController.IsWeaponRaised(), plus expires_at and "
+            "hold_ttl_s. Nothing stays ENABLED without an expiry."
+        )
+    )
+    async def weapon_raise(
+        raised: StrictBool,
+        hold_ttl_s: StrictFloat = WEAPON_RAISE_DEFAULT_TTL_S,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(raised, bool):
+            raise ToolError(_bad_args("raised", raised, "be a bool"))
+        requirement = (
+            f"be a finite number in (0, {WEAPON_RAISE_MAX_TTL_S}]"
+        )
+        ttl = _finite_float(hold_ttl_s, _bad_args("hold_ttl_s", hold_ttl_s, requirement))
+        if ttl <= 0.0 or ttl > WEAPON_RAISE_MAX_TTL_S:
+            raise ToolError(_bad_args("hold_ttl_s", hold_ttl_s, requirement))
+        args = {"raised": raised, "hold_ttl_s": ttl}
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "weapon_raise", args, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Apply one ONE_FRAME aim change on the local "
+            "player through OverrideAimChangeX and OverrideAimChangeY. No OS "
+            "input and no focus. The override protos name no unit. The result "
+            "is the read-back after one simulation tick: aim_lr_before, "
+            "aim_lr_after, aim_ud_before and aim_ud_after are "
+            "GetBaseAimingAngleLR and GetBaseAimingAngleUD (those protos name "
+            "no unit), and aim_change_0, aim_change_1 and aim_change_2 are the "
+            "three components of GetAimChange (the proto calls that vector "
+            "radians and does not name the components). The bridge forces "
+            "DISABLED on both axes after that tick."
+        )
+    )
+    async def weapon_aim(
+        dx: StrictFloat,
+        dy: StrictFloat,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        bound = f"be a finite number in [-{WEAPON_AIM_ABS_MAX}, {WEAPON_AIM_ABS_MAX}]"
+        dx_value = _finite_float(dx, _bad_args("dx", dx, bound))
+        dy_value = _finite_float(dy, _bad_args("dy", dy, bound))
+        if dx_value < -WEAPON_AIM_ABS_MAX or dx_value > WEAPON_AIM_ABS_MAX:
+            raise ToolError(_bad_args("dx", dx, bound))
+        if dy_value < -WEAPON_AIM_ABS_MAX or dy_value > WEAPON_AIM_ABS_MAX:
+            raise ToolError(_bad_args("dy", dy, bound))
+        args = {"dx": dx_value, "dy": dy_value}
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "weapon_aim", args, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Fire the weapon in the local player's hands "
+            "once, through WeaponManager.Fire, after vanilla's own checks. "
+            "No OS input and no focus. accepted=true means Fire was called, "
+            "not that the server counted a shot; confirm the shot with "
+            "weapon_state. A completed refusal is ok=true, accepted=false, "
+            "and error names the reason. A missing weapon, or a dead, "
+            "unconscious, restrained or seated player, is ok=false."
+        )
+    )
+    async def weapon_fire(
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "weapon_fire", {}, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Enter or leave the local player's weapon sights. "
+            "mode ironsights calls SetIronsights(true), optics calls "
+            "SetOptics(true), none calls ExitSights(). No OS input and no "
+            "focus. Optics is refused when the weapon has no attached optic; "
+            "ironsights is refused when the weapon cannot enter them. The "
+            "result reads back ironsights (IsInIronsights) and optics "
+            "(IsInOptics) after one simulation tick. The engine can leave the "
+            "sights on the next frame. This is not an input override."
+        )
+    )
+    async def weapon_sights(
+        mode: WeaponSightsMode,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if mode not in ("ironsights", "optics", "none"):
+            raise ToolError(
+                _bad_args("mode", mode, "be one of 'ironsights', 'optics' or 'none'")
+            )
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "weapon_sights", {"mode": mode}, "client", _timeout(timeout_s)
+            )
 
     @app.tool(
         description=(

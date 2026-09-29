@@ -169,6 +169,14 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("object_doors", {"object_id": 1}, "object_doors"),
     ("input_describe", {"name": "UAMoveForward"}, "input_describe"),
     ("input_describe", {"name": "a" * 128}, "input_describe"),
+    ("weapon_raise", {"raised": True}, "weapon_raise"),
+    ("weapon_raise", {"raised": False, "hold_ttl_s": 30.0}, "weapon_raise"),
+    ("weapon_aim", {"dx": 0.0, "dy": 0.0}, "weapon_aim"),
+    ("weapon_aim", {"dx": 3.141593, "dy": -3.141593}, "weapon_aim"),
+    ("weapon_fire", {}, "weapon_fire"),
+    ("weapon_sights", {"mode": "ironsights"}, "weapon_sights"),
+    ("weapon_sights", {"mode": "optics"}, "weapon_sights"),
+    ("weapon_sights", {"mode": "none"}, "weapon_sights"),
 )
 
 # A bridge answer per verb, enough for each tool to reach its bridge call and
@@ -244,6 +252,14 @@ class IngressSchemaCoherenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             loopback._VEHICLE_CONTROL_MAX_TTL_S, server.VEHICLE_CONTROL_MAX_TTL_S
         )
+
+    def test_weapon_action_bounds_match_the_tool(self) -> None:
+        self.assertEqual(loopback.WEAPON_RAISE_DEFAULT_TTL_S, server.WEAPON_RAISE_DEFAULT_TTL_S)
+        self.assertEqual(loopback.WEAPON_RAISE_MAX_TTL_S, server.WEAPON_RAISE_MAX_TTL_S)
+        self.assertEqual(loopback.WEAPON_AIM_ABS_MAX, server.WEAPON_AIM_ABS_MAX)
+        self.assertEqual(loopback.WEAPON_RAISE_DEFAULT_TTL_S, 3.0)
+        self.assertEqual(loopback.WEAPON_RAISE_MAX_TTL_S, 30.0)
+        self.assertEqual(loopback.WEAPON_AIM_ABS_MAX, 3.141593)
 
     def test_the_session_e2e_binary_sends_valid_payloads(self) -> None:
         # _session_coordination/e2e_agent_sessions.py calls call_bridge directly,

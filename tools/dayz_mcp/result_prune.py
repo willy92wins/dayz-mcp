@@ -49,6 +49,7 @@ PRUNABLE_FIELDS = (
     "weapon_state",
     "input_describe",
     "building_doors",
+    "weapon_action",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
