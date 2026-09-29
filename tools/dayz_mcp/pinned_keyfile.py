@@ -39,6 +39,18 @@ class _FILE_ATTRIBUTE_TAG_INFO(ctypes.Structure):
 _kernel32 = bind_common_kernel32()
 _kernel32.GetFileAttributesW.argtypes = (wintypes.LPCWSTR,)
 _kernel32.GetFileAttributesW.restype = wintypes.DWORD
+_kernel32.GetLongPathNameW.argtypes = (
+    wintypes.LPCWSTR,
+    wintypes.LPWSTR,
+    wintypes.DWORD,
+)
+_kernel32.GetLongPathNameW.restype = wintypes.DWORD
+_kernel32.GetShortPathNameW.argtypes = (
+    wintypes.LPCWSTR,
+    wintypes.LPWSTR,
+    wintypes.DWORD,
+)
+_kernel32.GetShortPathNameW.restype = wintypes.DWORD
 _kernel32.ReadFile.argtypes = (
     wintypes.HANDLE,
     wintypes.LPVOID,
@@ -87,6 +99,111 @@ def _assert_no_reparse_parents(path: str) -> None:
             raise ValueError("invalid_daemon_keyfile")
 
 
+class CanonicalPathError(Exception):
+    """GetLongPathNameW could not return a long form. Callers refuse."""
+
+
+def _dos_path(value: str) -> str:
+    if value.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + value[8:]
+    if value.startswith("\\\\?\\"):
+        return value[4:]
+    return value
+
+
+def canonical_long_path(path: str) -> str:
+    """Long form of an existing path.
+
+    Expands 8.3 names and leaves reparse points in the spelling. A failure
+    raises. Callers try this only after the raw spelling compare missed:
+    the call needs list access on every ancestor.
+    """
+    if not isinstance(path, str) or not path or "\0" in path:
+        raise CanonicalPathError()
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = int(_kernel32.GetLongPathNameW(path, buffer, len(buffer)))
+    if length <= 0 or length >= len(buffer):
+        raise CanonicalPathError()
+    value = _dos_path(buffer.value)
+    if not value:
+        raise CanonicalPathError()
+    return value
+
+
+def _spelling(value: str, *, collapse: bool) -> str:
+    if collapse:
+        return os.path.normcase(os.path.normpath(value))
+    return os.path.normcase(value)
+
+
+def _short_path_name(path: str) -> str:
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = int(_kernel32.GetShortPathNameW(path, buffer, len(buffer)))
+    if length <= 0 or length >= len(buffer):
+        raise CanonicalPathError()
+    value = _dos_path(buffer.value)
+    if not value:
+        raise CanonicalPathError()
+    return value
+
+
+def _differs_only_by_short_names(requested: str, expanded: str) -> bool:
+    """True when each changed component is the 8.3 name of that long prefix.
+
+    A trailing dot or space is not an alias. GetShortPathNameW failing
+    refuses, so the caller keeps the mismatch main already refused.
+    """
+    requested_parts = requested.split("\\")
+    expanded_parts = expanded.split("\\")
+    if len(requested_parts) != len(expanded_parts) or not requested_parts:
+        return False
+    for index, (left, right) in enumerate(zip(requested_parts, expanded_parts)):
+        if os.path.normcase(left) == os.path.normcase(right):
+            continue
+        if not left or left.endswith(".") or left.endswith(" "):
+            return False
+        try:
+            short_prefix = _short_path_name("\\".join(expanded_parts[: index + 1]))
+        except CanonicalPathError:
+            return False
+        short_leaf = short_prefix.split("\\")[-1]
+        if not short_leaf or os.path.normcase(left) != os.path.normcase(short_leaf):
+            return False
+    return True
+
+
+def _expanded_matches(candidate: str, observed: str, *, collapse: bool) -> bool:
+    try:
+        expanded = canonical_long_path(candidate)
+    except CanonicalPathError:
+        return False
+    if _spelling(expanded, collapse=collapse) != _spelling(
+        observed, collapse=collapse
+    ):
+        return False
+    return _differs_only_by_short_names(candidate, expanded)
+
+
+def same_requested_path(left: str, right: str, *, collapse: bool) -> bool:
+    """True when main's spelling compare matches, or one side is its 8.3 form.
+
+    The raw compare runs first and does not call GetLongPathNameW. A long
+    path main already accepts stays accepted even when listing the parents
+    is denied. Expansion is attempted only after a mismatch. It counts only
+    when every changed component is that prefix's 8.3 name, with no trailing
+    dot or space. A failure to expand or to read the short name leaves the
+    mismatch: callers refuse.
+    collapse is False for the installer, which must keep ".." and junctions.
+    """
+    if _spelling(left, collapse=collapse) == _spelling(right, collapse=collapse):
+        return True
+    if os.name != "nt":
+        return False
+    return _expanded_matches(left, right, collapse=collapse) or _expanded_matches(
+        right, left, collapse=collapse
+    )
+
+
 def _final_handle_path(handle: object) -> str:
     buffer = ctypes.create_unicode_buffer(32768)
     length = int(
@@ -94,12 +211,7 @@ def _final_handle_path(handle: object) -> str:
     )
     if length <= 0 or length >= len(buffer):
         raise ValueError("invalid_daemon_keyfile")
-    value = buffer.value
-    if value.startswith("\\\\?\\UNC\\"):
-        return "\\\\" + value[8:]
-    if value.startswith("\\\\?\\"):
-        return value[4:]
-    return value
+    return _dos_path(buffer.value)
 
 
 def _read_bounded(handle: object) -> bytes:
@@ -159,9 +271,7 @@ def read_pinned_keyfile(path: str) -> str:
         ):
             raise ValueError("invalid_daemon_keyfile")
         final_path = _final_handle_path(handle)
-        if os.path.normcase(os.path.normpath(final_path)) != os.path.normcase(
-            os.path.normpath(canonical)
-        ):
+        if not same_requested_path(canonical, final_path, collapse=True):
             raise ValueError("invalid_daemon_keyfile")
         raw = _read_bounded(handle)
     finally:

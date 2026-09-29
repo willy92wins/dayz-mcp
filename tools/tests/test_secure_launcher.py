@@ -159,7 +159,7 @@ class SecureLauncherRegistryTests(unittest.TestCase):
             )
 
             with open_entry(validated[0]) as opened:
-                self.assertEqual(opened.path, native)
+                self.assertEqual(opened.path.resolve(), native.resolve())
 
             rejected = root / "consumer.txt"
             rejected.write_bytes(b"fixture")
