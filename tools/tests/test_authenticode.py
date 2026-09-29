@@ -61,6 +61,27 @@ class AuthenticodeSubjectTest(unittest.TestCase):
         with patch.object(authenticode, "signer_subject", return_value=None):
             self.assertFalse(authenticode.is_valve_signed(r"C:\signed.dll"))
 
+    def test_unsigned_handle_loses_to_a_signed_path(self) -> None:
+        signed = Path(r"C:\Program Files (x86)\Steam\steamclient.dll")
+        self.assertTrue(signed.is_file())
+        self.assertTrue(authenticode.is_valve_signed(str(signed)))
+        with tempfile.TemporaryDirectory() as temporary:
+            unsigned = Path(temporary) / "steamclient.dll"
+            unsigned.write_bytes(b"not a signed image")
+            handle = authenticode._open_read_handle(str(unsigned))
+            self.assertIsNotNone(handle)
+            assert handle is not None
+            try:
+                self.assertFalse(
+                    authenticode.is_valve_signed_handle(handle, path=str(signed))
+                )
+                self.assertNotIn(
+                    authenticode.signer_subject_handle(handle, path=str(signed)),
+                    authenticode.VALVE_SIGNER_SUBJECTS,
+                )
+            finally:
+                authenticode._close_handle(handle)
+
 
 if __name__ == "__main__":
     unittest.main()

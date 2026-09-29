@@ -5,6 +5,7 @@ import json
 import ntpath
 import os
 import re
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -13,7 +14,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import build_native_launcher
-from dayz_mcp import dayz_tools_paths, launcher_registry, native_bundle, native_child_announcement
+from dayz_mcp import (
+    authenticode,
+    dayz_tools_paths,
+    launcher_registry,
+    native_bundle,
+    native_child_announcement,
+)
 from dayz_mcp.dayz_tools_paths import addon_helper_exes
 from dayz_mcp.native_broker_protocol import BrokerKind
 from dayz_mcp.native_child_announcement import ChildAnnouncement, ChildAnnouncementDecoder
@@ -729,7 +736,7 @@ class AddonTreeSteamDllTest(unittest.TestCase):
         ), patch.object(
             native_bundle, "_path_identity", return_value=file_identity
         ), patch.object(
-            native_bundle, "is_valve_signed", return_value=signed
+            native_bundle, "_valve_signature_of_handle", return_value=signed
         ):
             return authority.approve_addon_tree_module(11)
 
@@ -937,12 +944,14 @@ class AddonTreeSteamDllTest(unittest.TestCase):
                 host=Host(registry),
             )
 
-        def signed(path: str) -> bool:
+        def signed(file_handle: int, path: str) -> bool:
             return ntpath.normcase(ntpath.normpath(path)) == ntpath.normcase(steam_exe)
 
         with patch.object(
             native_bundle, "_install_directory_of_steam_executable", side_effect=install
-        ), patch.object(native_bundle, "is_valve_signed", side_effect=signed):
+        ), patch.object(
+            native_bundle, "_valve_signature_of_handle", side_effect=signed
+        ):
             agreed = resolve(
                 (4,), {4: steam_exe}, r"c:/program files (x86)/steam/steam.exe"
             )
@@ -967,14 +976,145 @@ class AddonTreeSteamDllTest(unittest.TestCase):
             self.assertIsNone(resolve((), {}, "raise"))
         with patch.object(
             native_bundle, "_install_directory_of_steam_executable", side_effect=install
-        ), patch.object(native_bundle, "is_valve_signed", return_value=False):
+        ), patch.object(
+            native_bundle, "_valve_signature_of_handle", return_value=False
+        ):
             self.assertIsNone(resolve((4,), {4: steam_exe}, steam_exe))
         with patch.object(
             native_bundle, "_install_directory_of_steam_executable", side_effect=install
         ), patch.object(
-            native_bundle, "is_valve_signed", return_value=True
+            native_bundle, "_valve_signature_of_handle", return_value=True
         ), patch.object(native_bundle, "_directory_identity", return_value=None):
             self.assertIsNone(resolve((4,), {4: steam_exe}, steam_exe))
+
+    def test_unsigned_handle_is_rejected_when_the_path_is_swapped(self) -> None:
+        real = Path(r"C:\Program Files (x86)\Steam\steamclient.dll")
+        self.assertTrue(real.is_file())
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            module = directory / "steamclient.dll"
+            held = directory / "held-unsigned.dll"
+            signed = directory / "signed-copy.dll"
+            module.write_bytes(b"unsigned payload in debug event")
+            shutil.copyfile(real, signed)
+            handle = native_bundle._open_share_read(str(module))
+            self.assertIsNotNone(handle)
+            assert handle is not None
+            final = native_bundle._final_handle_path(handle)
+            parent = ntpath.dirname(final)
+            pinned = native_bundle._directory_identity(parent)
+            self.assertIsInstance(pinned, PathIdentity)
+            authority = self._authority(
+                steam_install_directory=parent,
+                steam_install_identity=pinned,
+                steam_client_dll_names=frozenset({"steamclient.dll"}),
+            )
+            before = native_bundle._file_identity(handle)
+            seen = {"calls": 0, "path_valve": False}
+
+            def swap(file_handle: int, *, path: str) -> bool:
+                seen["calls"] += 1
+                os.replace(module, held)
+                os.replace(signed, module)
+                try:
+                    seen["path_valve"] = authenticode.is_valve_signed(path)
+                    return authenticode.is_valve_signed_handle(file_handle, path=path)
+                finally:
+                    os.replace(module, signed)
+                    os.replace(held, module)
+
+            try:
+                with patch.object(
+                    native_bundle, "is_valve_signed_handle", side_effect=swap
+                ):
+                    approved = authority.approve_addon_tree_module(handle)
+                self.assertEqual(native_bundle._file_identity(handle), before)
+            finally:
+                native_bundle._close_kernel_handle(handle)
+            self.assertFalse(approved)
+            self.assertEqual(seen["calls"], 1)
+            self.assertTrue(seen["path_valve"])
+            self.assertFalse(authenticode.is_valve_signed(str(module)))
+
+    def test_steam_image_rejects_unsigned_handle_when_its_path_is_swapped(self) -> None:
+        real = Path(r"C:\Program Files (x86)\Steam\steam.exe")
+        self.assertTrue(real.is_file())
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            image = directory / "steam.exe"
+            held = directory / "held-unsigned.exe"
+            signed = directory / "signed-copy.exe"
+            image.write_bytes(b"unsigned steam image")
+            shutil.copyfile(real, signed)
+            seen = {"calls": 0, "path_valve": False}
+
+            def swap(file_handle: int, *, path: str) -> bool:
+                seen["calls"] += 1
+                os.replace(image, held)
+                os.replace(signed, image)
+                try:
+                    seen["path_valve"] = authenticode.is_valve_signed(path)
+                    return authenticode.is_valve_signed_handle(file_handle, path=path)
+                finally:
+                    os.replace(image, signed)
+                    os.replace(held, image)
+
+            class Provider:
+                def steam_process_pids(self) -> tuple[int, ...]:
+                    return (4,)
+
+                def process_image_path(self, pid: int) -> str:
+                    return str(image)
+
+            class Host:
+                def steam_executable(self) -> str:
+                    return str(image)
+
+            with patch.object(
+                native_bundle, "is_valve_signed_handle", side_effect=swap
+            ):
+                pinned = native_bundle._resolve_addon_tree_steam_directory(
+                    provider=Provider(), host=Host()
+                )
+            self.assertIsNone(pinned)
+            self.assertEqual(seen["calls"], 1)
+            self.assertTrue(seen["path_valve"])
+            self.assertFalse(authenticode.is_valve_signed(str(image)))
+
+    def test_attributes_only_handle_is_approved_by_the_same_file_id(self) -> None:
+        dll = self._STEAM + r"\steamclient.dll"
+        pinned = native_bundle._directory_identity(self._STEAM)
+        self.assertIsInstance(pinned, PathIdentity)
+        authority = self._authority(
+            steam_client_dll_names=native_bundle._ADDON_TREE_STEAM_CLIENT_DLLS,
+            steam_install_identity=pinned,
+        )
+        readable = native_bundle._open_share_read(dll)
+        self.assertIsNotNone(readable)
+        assert readable is not None
+        try:
+            self.assertTrue(authority.approve_addon_tree_module(readable))
+        finally:
+            native_bundle._close_kernel_handle(readable)
+        attributes = native_bundle._path_kernel32.CreateFileW(
+            dll,
+            native_bundle._FILE_READ_ATTRIBUTES,
+            native_bundle._FILE_SHARE_READ
+            | native_bundle._FILE_SHARE_WRITE
+            | native_bundle._FILE_SHARE_DELETE,
+            None,
+            native_bundle._OPEN_EXISTING,
+            native_bundle._FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        numeric = native_bundle._usable_handle(attributes)
+        self.assertIsNotNone(numeric)
+        assert numeric is not None
+        try:
+            self.assertIsNone(native_bundle._duplicate_read(numeric))
+            self.assertTrue(authority.approve_addon_tree_module(numeric))
+        finally:
+            native_bundle._close_kernel_handle(numeric)
 
 
 if __name__ == "__main__":

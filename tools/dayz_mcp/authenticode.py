@@ -113,9 +113,66 @@ VALVE_SIGNER_SUBJECTS = frozenset(
 )
 
 
-def signer_subject(path: str) -> str | None:
-    """Return the verified signer subject, or None if the signature is not valid."""
-    if type(path) is not str or not path or "\0" in path:
+_GENERIC_READ = 0x80000000
+_FILE_SHARE_READ = 0x00000001
+_FILE_SHARE_WRITE = 0x00000002
+_FILE_SHARE_DELETE = 0x00000004
+_OPEN_EXISTING = 3
+_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_INVALID_HANDLE = frozenset({-1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF})
+
+
+def _kernel32() -> ctypes.WinDLL:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
+
+
+def _close_handle(value: int) -> None:
+    _kernel32().CloseHandle(wintypes.HANDLE(value))
+
+
+def _open_read_handle(path: str) -> int | None:
+    handle = _kernel32().CreateFileW(
+        path,
+        _GENERIC_READ,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+        None,
+        _OPEN_EXISTING,
+        _FILE_ATTRIBUTE_NORMAL,
+        None,
+    )
+    if not handle or int(handle) in _INVALID_HANDLE:
+        return None
+    return int(handle)
+
+
+def signer_subject_handle(file_handle: int, *, path: str) -> str | None:
+    """Signer subject of an open file, read through WINTRUST_FILE_INFO.hFile.
+
+    pcwszFilePath cannot be NULL (WINTRUST_FILE_INFO). On this host the bytes
+    WinVerifyTrust verifies are the handle's: a signed handle with an unsigned
+    path succeeds, and an unsigned handle with a signed path fails. The handle
+    needs read access; FILE_READ_ATTRIBUTES alone fails closed.
+    """
+    if (
+        type(file_handle) is not int
+        or file_handle <= 0
+        or type(path) is not str
+        or not path
+        or "\0" in path
+    ):
         return None
     try:
         wintrust = ctypes.WinDLL("wintrust", use_last_error=True)
@@ -150,7 +207,7 @@ def signer_subject(path: str) -> str | None:
     file_info = _WintrustFileInfo(
         ctypes.sizeof(_WintrustFileInfo),
         path,
-        None,
+        wintypes.HANDLE(file_handle),
         None,
     )
     trust_data = _WintrustData(
@@ -211,6 +268,27 @@ def signer_subject(path: str) -> str | None:
         except (OSError, ValueError):
             subject_text = None
     return subject_text
+
+
+def signer_subject(path: str) -> str | None:
+    """Open `path` for read and verify that handle. None if it cannot be verified."""
+    if type(path) is not str or not path or "\0" in path:
+        return None
+    handle = _open_read_handle(path)
+    if handle is None:
+        return None
+    try:
+        return signer_subject_handle(handle, path=path)
+    finally:
+        _close_handle(handle)
+
+
+def is_valve_signed_handle(file_handle: int, *, path: str) -> bool:
+    """True only when this open handle's signer subject is one of Valve's."""
+    try:
+        return signer_subject_handle(file_handle, path=path) in VALVE_SIGNER_SUBJECTS
+    except Exception:
+        return False
 
 
 def is_valve_signed(path: str) -> bool:

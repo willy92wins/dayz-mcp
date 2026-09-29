@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import BinaryIO
 
-from dayz_mcp.authenticode import is_valve_signed
+from dayz_mcp.authenticode import is_valve_signed, is_valve_signed_handle
 from dayz_mcp.dayz_test_request import RequestProjectPolicy
 from dayz_mcp.native_broker_protocol import BrokerKind
 from dayz_mcp.dayz_tools_paths import (
@@ -197,6 +197,10 @@ _FILE_ATTRIBUTE_NORMAL = 0x00000080
 _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _FILE_TYPE_DISK = 0x0001
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_GENERIC_READ = 0x80000000
+_FILE_READ_DATA = 0x00000001
+_EXTENDED_FILE_ID_TYPE = 2
+_INVALID_HANDLE_VALUES = frozenset({0, -1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF})
 
 
 def _is_trusted_gac_microsoft_visual_basic(path: str, windows_directory: str) -> bool:
@@ -351,7 +355,9 @@ class DebugImageAuthority:
         try:
             if _directory_identity(parent) != pinned:
                 return False
-            if is_valve_signed(path) is not True:
+            # WinVerifyTrust reads WINTRUST_FILE_INFO.hFile. The path is only
+            # the required pcwszFilePath; a swap of that name does not approve.
+            if _valve_signature_of_handle(file_handle, path) is not True:
                 return False
             after = _file_identity(file_handle)
             reopened = _path_identity(path)
@@ -513,6 +519,233 @@ def _path_identity(path: str) -> PathIdentity | None:
     return _open_path_identity(path, directory=False)
 
 
+class _FileId128(ctypes.Structure):
+    _fields_ = [("Identifier", ctypes.c_ubyte * 16)]
+
+
+class _FileIdDescriptor(ctypes.Structure):
+    class _Union(ctypes.Union):
+        _fields_ = [
+            ("FileId", ctypes.c_longlong),
+            ("ObjectId", ctypes.c_ubyte * 16),
+            ("ExtendedFileId", _FileId128),
+        ]
+
+    _anonymous_ = ("union",)
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("Type", wintypes.DWORD),
+        ("union", _Union),
+    ]
+
+
+def _usable_handle(handle: object) -> int | None:
+    if not handle:
+        return None
+    value = int(handle)
+    if value in _INVALID_HANDLE_VALUES or value == _INVALID_HANDLE_VALUE:
+        return None
+    return value
+
+
+def _close_kernel_handle(value: int | None) -> None:
+    if type(value) is int and value > 0:
+        _path_kernel32.CloseHandle(value)
+
+
+def _bind_handle_reopen() -> None:
+    # Same WinDLL as native_launcher_backend. Leave a signature that is already
+    # bound; setting it again would fight DuplicateHandle's prototype there.
+    kernel32 = _path_kernel32
+    if kernel32.GetCurrentProcess.argtypes is None:
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    if kernel32.DuplicateHandle.argtypes is None:
+        kernel32.DuplicateHandle.argtypes = (
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.HANDLE),
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        )
+        kernel32.DuplicateHandle.restype = wintypes.BOOL
+    if kernel32.OpenFileById.argtypes is None:
+        kernel32.OpenFileById.argtypes = (
+            wintypes.HANDLE,
+            ctypes.POINTER(_FileIdDescriptor),
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        )
+        kernel32.OpenFileById.restype = wintypes.HANDLE
+
+
+def _duplicate_read(file_handle: int) -> int | None:
+    _bind_handle_reopen()
+    duplicated = wintypes.HANDLE()
+    current = _path_kernel32.GetCurrentProcess()
+    if not _path_kernel32.DuplicateHandle(
+        current,
+        wintypes.HANDLE(file_handle),
+        current,
+        ctypes.byref(duplicated),
+        _FILE_READ_DATA,
+        False,
+        0,
+    ):
+        return None
+    return _usable_handle(duplicated.value)
+
+
+def _reopen_by_file_id(path: str, identity: PathIdentity) -> int | None:
+    """Open the same file id. The path only selects the volume."""
+    if type(identity) is not PathIdentity or type(identity.file_id) is not str:
+        return None
+    file_id = identity.file_id
+    if len(file_id) != 32 or any(character not in "0123456789ABCDEF" for character in file_id):
+        return None
+    drive, _tail = ntpath.splitdrive(ntpath.normpath(path))
+    if (
+        len(drive) != 2
+        or drive[1] != ":"
+        or not drive[0].isascii()
+        or not drive[0].isalpha()
+    ):
+        return None
+    _bind_handle_reopen()
+    volume = _path_kernel32.CreateFileW(
+        "\\\\.\\" + drive,
+        0,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )
+    volume_handle = _usable_handle(volume)
+    if volume_handle is None:
+        return None
+    try:
+        extended = _FileId128()
+        extended.Identifier[:] = bytes.fromhex(file_id)
+        descriptor = _FileIdDescriptor()
+        descriptor.dwSize = ctypes.sizeof(descriptor)
+        descriptor.Type = _EXTENDED_FILE_ID_TYPE
+        descriptor.ExtendedFileId = extended
+        opened = _path_kernel32.OpenFileById(
+            wintypes.HANDLE(volume_handle),
+            ctypes.byref(descriptor),
+            _GENERIC_READ,
+            _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+            None,
+            0,
+        )
+        numeric = _usable_handle(opened)
+        if numeric is None:
+            return None
+        try:
+            if int(_path_kernel32.GetFileType(numeric)) != _FILE_TYPE_DISK:
+                raise OSError("reopened file is not a disk file")
+            if _file_identity(numeric) != identity:
+                raise OSError("reopened file id differs")
+        except (OSError, ValueError):
+            _close_kernel_handle(numeric)
+            return None
+        return numeric
+    finally:
+        _close_kernel_handle(volume_handle)
+
+
+def _valve_signature_of_handle(file_handle: int, path: str) -> bool:
+    """Valve subject of this open file, read through its handle.
+
+    FILE_READ_ATTRIBUTES is not enough for WinVerifyTrust. Duplicate the handle
+    for FILE_READ_DATA when it already allows that. Otherwise reopen by file id
+    and require that reopen to be the same PathIdentity. No path fallback.
+    """
+    if type(file_handle) is not int or file_handle <= 0 or type(path) is not str or not path:
+        return False
+    try:
+        before = _file_identity(file_handle)
+    except (OSError, ValueError):
+        return False
+    if type(before) is not PathIdentity:
+        return False
+    opened = _duplicate_read(file_handle)
+    if opened is None:
+        opened = _reopen_by_file_id(path, before)
+    if opened is None:
+        return False
+    try:
+        if _file_identity(opened) != before or _file_identity(file_handle) != before:
+            return False
+        if is_valve_signed_handle(opened, path=path) is not True:
+            return False
+        return (
+            _file_identity(opened) == before and _file_identity(file_handle) == before
+        )
+    except (OSError, ValueError):
+        return False
+    finally:
+        _close_kernel_handle(opened)
+
+
+def _open_share_read(path: str) -> int | None:
+    if (
+        type(path) is not str
+        or not path
+        or "\0" in path
+        or '"' in path
+        or not ntpath.isabs(path)
+        or _path_has_dot_segment(path)
+    ):
+        return None
+    handle = _path_kernel32.CreateFileW(
+        ntpath.normpath(path),
+        _GENERIC_READ,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+        None,
+        _OPEN_EXISTING,
+        _FILE_ATTRIBUTE_NORMAL,
+        None,
+    )
+    numeric = _usable_handle(handle)
+    if numeric is None:
+        return None
+    try:
+        if int(_path_kernel32.GetFileType(numeric)) != _FILE_TYPE_DISK:
+            raise OSError("opened file is not a disk file")
+    except (OSError, ValueError):
+        _close_kernel_handle(numeric)
+        return None
+    return numeric
+
+
+def _steam_image_pin(
+    file_handle: int, directory: str
+) -> tuple[PathIdentity, str] | None:
+    try:
+        identity = _file_identity(file_handle)
+        final = _final_handle_path(file_handle)
+    except (OSError, ValueError):
+        return None
+    if type(identity) is not PathIdentity:
+        return None
+    if PureWindowsPath(final).name.casefold() != "steam.exe":
+        return None
+    parent = ntpath.dirname(final)
+    if (
+        not parent
+        or ntpath.normpath(parent) != parent
+        or ntpath.normcase(parent) != ntpath.normcase(directory)
+    ):
+        return None
+    return identity, final
+
+
 def _install_directory_of_steam_executable(path: str) -> str | None:
     if (
         type(path) is not str
@@ -563,6 +796,8 @@ def _resolve_addon_tree_steam_directory(
     # reads HKCU Software\Valve\Steam SteamExe (steam_preflight.py:517).
     # Here a missing side, a second steam.exe, a signer that is not Valve,
     # or a directory whose file id cannot be pinned leaves the rule off.
+    # The signature is WinVerifyTrust on a GENERIC_READ handle of the live
+    # image path; that handle's file id has to equal the registry steam.exe.
     # The readers are copied: importing steam_preflight would put
     # invoke_steam's subprocess.Popen (steam_preflight.py:530) in the
     # audited process-creation closure.
@@ -599,16 +834,36 @@ def _resolve_addon_tree_steam_directory(
             or ntpath.normcase(registry_directory) != ntpath.normcase(live)
         ):
             return None
+        image_handle = _open_share_read(image)
+        if image_handle is None:
+            return None
+        registry_handle = None
         try:
-            signed = is_valve_signed(ntpath.join(live, "steam.exe"))
-        except Exception:
-            return None
-        if signed is not True:
-            return None
-        identity = _directory_identity(live)
-        if type(identity) is not PathIdentity:
-            return None
-        return _PinnedSteamInstall(live, identity)
+            pinned_image = _steam_image_pin(image_handle, live)
+            if pinned_image is None:
+                return None
+            image_identity, image_final = pinned_image
+            registry_handle = _open_share_read(registry_value)
+            if registry_handle is None:
+                return None
+            pinned_registry = _steam_image_pin(registry_handle, live)
+            if pinned_registry is None or pinned_registry[0] != image_identity:
+                return None
+            if _valve_signature_of_handle(image_handle, image_final) is not True:
+                return None
+            if _file_identity(image_handle) != image_identity:
+                return None
+            parent = ntpath.dirname(image_final)
+            identity = _directory_identity(parent)
+            if (
+                type(identity) is not PathIdentity
+                or _directory_identity(live) != identity
+            ):
+                return None
+            return _PinnedSteamInstall(live, identity)
+        finally:
+            _close_kernel_handle(image_handle)
+            _close_kernel_handle(registry_handle)
     except Exception:
         return None
 
