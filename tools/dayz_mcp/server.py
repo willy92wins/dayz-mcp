@@ -1978,9 +1978,13 @@ class ClientRuntime:
             except (OSError, ValueError, TypeError) as exc:
                 # Losing the carrier costs a lease across the next recycle; it
                 # must never cost the call that happened to change the lease.
+                # A rewrite the tombstone still rejects is not a persisted lease:
+                # the same degraded flag a failed clear already publishes.
                 self._log(f"SESSION: carrier write failed: {exc}")
                 if lease_token and lease_id:
                     self._release_carrier_reservation(generation)
+                    if isinstance(exc, session_handoff.TombstoneStillRejects):
+                        self._carrier_degraded = True
                 elif generation == self._carrier_gen:
                     self._carrier_degraded = True
 

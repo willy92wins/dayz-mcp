@@ -25,6 +25,7 @@ daemon's coordinator, which re-validates on every authorize.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -56,6 +57,17 @@ MAX_CLOCK_SKEW_S = 5.0
 MAX_SECRET_LEN = 512
 
 _LOG = logging.getLogger(__name__)
+
+# Tombstone schema. ``token_sha256`` is the digest of the revoked lease token.
+# The token itself never goes in the side file.
+_TOMBSTONE_VERSION = 1
+
+
+class TombstoneStillRejects(OSError):
+    """The replacement is on disk, but a tombstone still rejects that token.
+
+    ``consume_handoff`` would return None, so the rewrite is not a persisted lease.
+    """
 
 
 @dataclass(frozen=True)
@@ -128,8 +140,10 @@ def write_handoff(
         raise
     os.replace(f"{target}.tmp", target)
     # A clear that could not replace this path may have left a tombstone.
-    # This document is the live lease, so the tombstone must not hide it.
-    _unlink_quietly(_tombstone_path(target))
+    # One that names a different token can stay: the reader compares digests.
+    # One that still names this token, or that cannot be classified, means
+    # this rewrite is not actually inheritable.
+    _retire_tombstone(target)
 
 
 def _tombstone_path(path: Path) -> Path:
@@ -145,9 +159,10 @@ def consume_handoff(
 ) -> SessionHandoff | None:
     """Read the carrier once and remove it, whatever it turned out to contain.
 
-    A tombstone beside the carrier is checked first. It means a clear could not
-    delete or replace the file, so the bytes still on disk must not be inherited.
-    The tombstone stays while the carrier file does, and is removed with it.
+    A tombstone names the token a clear could not delete, by digest. The carrier
+    is refused only when its token matches, or when the marker cannot be told
+    apart from this file (unreadable, malformed, or with no digest). A later
+    token is read normally. A matching marker stays while the carrier file does.
 
     Consume-once: a carrier that survived its read could be replayed by a later worker
     against a lease that has since changed hands. Removing it before returning also
@@ -157,18 +172,22 @@ def consume_handoff(
     worker starts without a lease, which is what a worker did before any of this.
     """
     target = Path(path)
-    tombstone = _tombstone_path(target)
-    if tombstone.exists():
+    marker = _tombstone_path(target)
+    try:
+        raw: bytes | None = target.read_bytes()
+    except OSError:
+        raw = None
+    if _tombstone_blocks(marker, raw):
         _unlink_quietly(target)
         if not target.exists():
-            _unlink_quietly(tombstone)
+            _unlink_quietly(marker)
         return None
-    try:
-        raw = target.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        _unlink_quietly(target)
+    if raw is None:
         return None
     _unlink_quietly(target)
+    # This token is not the one the marker names. Dropping the marker is
+    # best-effort: a failure here must not hide the lease we just accepted.
+    _unlink_quietly(marker)
 
     try:
         document = json.loads(raw)
@@ -220,8 +239,9 @@ def clear_handoff(path: str | os.PathLike[str]) -> None:
     A delete that fails is logged and retried once. If it still fails, the file
     is replaced with ``{}``, which consume_handoff rejects, so the released
     token cannot be inherited (fb-20260928-021501-83be). If that replace also
-    fails, a side tombstone is sealed and consume_handoff refuses the file
-    that is still there. The tombstone's own failure propagates.
+    fails, a side tombstone is sealed with the digest of the token still in
+    the file, and consume_handoff refuses that token. A later different token
+    is not the one named. The tombstone's own failure propagates.
     """
     target = Path(path)
     ok, error = _unlink_once(target)
@@ -272,14 +292,116 @@ def _overwrite_rejected(path: Path) -> None:
     os.replace(temporary, path)
 
 
+def _token_sha256(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _carrier_token_sha256(raw: bytes) -> str | None:
+    """Digest of the lease token in ``raw``, or None when the file has none."""
+    try:
+        document = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(document, dict):
+        return None
+    token = document.get("lease_token")
+    if not isinstance(token, str) or not token or len(token) > MAX_SECRET_LEN:
+        return None
+    return _token_sha256(token)
+
+
+def _tombstone_blocks(marker: Path, raw: bytes | None) -> bool:
+    """Whether ``marker`` forbids inheriting the carrier bytes ``raw``.
+
+    A classified digest blocks only that token. No marker blocks nothing.
+    An unreadable marker, a malformed one, or one with no digest blocks the
+    file beside it: those do not say which carrier was revoked, so they cannot
+    be told apart from a later legitimate one.
+    """
+    try:
+        text = marker.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeError):
+        return True
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return True
+    if not isinstance(payload, dict):
+        return True
+    version = payload.get("v")
+    digest = payload.get("token_sha256")
+    classified = (
+        not isinstance(version, bool)
+        and version == _TOMBSTONE_VERSION
+        and isinstance(digest, str)
+        and len(digest) == 64
+        and all(char in "0123456789abcdef" for char in digest)
+    )
+    if not classified or raw is None:
+        return True
+    current = _carrier_token_sha256(raw)
+    if current is None:
+        return True
+    return current == digest
+
+
+def _retire_tombstone(target: Path) -> None:
+    """Remove the side marker after a carrier replace.
+
+    A marker that still rejects ``target`` (it names this token, or it cannot
+    be classified) is not success: the reader would discard the rewrite.
+    A marker for some other token may stay. The reader will not apply it here.
+    """
+    marker = _tombstone_path(target)
+    try:
+        os.unlink(marker)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        try:
+            raw: bytes | None = target.read_bytes()
+        except OSError:
+            raw = None
+        if not _tombstone_blocks(marker, raw):
+            _LOG.warning(
+                "stale carrier tombstone could not be removed (%s): %s",
+                exc,
+                marker,
+            )
+            return
+        _LOG.warning(
+            "carrier rewrite left a tombstone that still rejects %s (%s)",
+            target,
+            exc,
+        )
+        raise TombstoneStillRejects(
+            f"tombstone still rejects the carrier: {target}"
+        ) from exc
+
+
 def _seal_tombstone(path: Path) -> None:
-    """Mark ``path`` rejected without replacing it. Raises if the mark cannot be sealed."""
+    """Mark the token in ``path`` rejected, without replacing the file.
+
+    The marker stores the SHA-256 of that token, never the token. When the
+    file has no readable token, the marker carries no digest and the reader
+    rejects whatever still sits beside it. Raises if the mark cannot be sealed.
+    """
+    try:
+        digest = _carrier_token_sha256(path.read_bytes())
+    except OSError:
+        digest = None
+    body: dict[str, object] = {"v": _TOMBSTONE_VERSION}
+    if digest is not None:
+        body["token_sha256"] = digest
+    payload = json.dumps(body, separators=(",", ":")).encode("ascii")
     marker = _tombstone_path(path)
     marker.parent.mkdir(parents=True, exist_ok=True)
     temporary = f"{marker}.tmp"
     handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(handle, b"invalid")
+        os.write(handle, payload)
         os.fsync(handle)
     except BaseException:
         os.close(handle)

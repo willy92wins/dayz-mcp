@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import os
 import sys
@@ -169,6 +170,88 @@ class HandoffRoundTripTest(unittest.TestCase):
         self.assertIn(b"token-abc", self.path.read_bytes())
         self.assertTrue(session_handoff._tombstone_path(self.path).exists())
         self.assertIsNone(consume_handoff(self.path, now=lambda: 1000.0))
+
+    def test_a_later_lease_survives_an_undeletable_tombstone_of_the_revoked_token(self) -> None:
+        # Review R2-1: the marker names the revoked token only. A new lease is
+        # inherited even when `.invalid` cannot be deleted. That same marker
+        # still refuses the revoked token, and rewriting it is not success.
+        self._write(lease_token="revoked-token", lease_id="lease-old")
+        real_unlink, real_replace = os.unlink, os.replace
+
+        def stuck(path: object) -> None:
+            if Path(path) == self.path:
+                raise PermissionError("busy")
+            real_unlink(path)
+
+        def stuck_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+            if Path(dst) == self.path:
+                raise PermissionError("busy")
+            real_replace(src, dst, *args, **kwargs)
+
+        with (
+            patch.object(session_handoff.os, "unlink", side_effect=stuck),
+            patch.object(session_handoff.os, "replace", side_effect=stuck_replace),
+        ):
+            clear_handoff(self.path)
+        marker = session_handoff._tombstone_path(self.path)
+        self.assertTrue(marker.exists())
+        sealed = marker.read_bytes()
+        self.assertNotIn(b"revoked-token", sealed)
+        self.assertIn(hashlib.sha256(b"revoked-token").hexdigest().encode("ascii"), sealed)
+        revoked = self.path.read_bytes()
+
+        def block_marker(path: object) -> None:
+            if Path(path) == marker:
+                raise PermissionError("marker locked")
+            real_unlink(path)
+
+        with patch.object(session_handoff.os, "unlink", side_effect=block_marker):
+            write_handoff(
+                self.path,
+                identity=self.identity,
+                lease_token="new-token",
+                lease_id="lease-new",
+                generation=4,
+                now=lambda: 1000.0,
+            )
+            self.assertIn(b"new-token", self.path.read_bytes())
+            self.assertTrue(marker.exists())
+            inherited = consume_handoff(self.path, now=lambda: 1000.0)
+            self.assertIsNotNone(inherited)
+            assert inherited is not None
+            self.assertEqual(inherited.lease_token, "new-token")
+            self.assertFalse(self.path.exists())
+            self.assertTrue(marker.exists())
+            self.path.write_bytes(revoked)
+            self.assertIsNone(consume_handoff(self.path, now=lambda: 1000.0))
+            with self.assertRaises(session_handoff.TombstoneStillRejects):
+                write_handoff(
+                    self.path,
+                    identity=self.identity,
+                    lease_token="revoked-token",
+                    lease_id="lease-old",
+                    generation=5,
+                    now=lambda: 1000.0,
+                )
+            self.assertIsNone(consume_handoff(self.path, now=lambda: 1000.0))
+
+    def test_an_unclassified_tombstone_still_rejects_the_carrier_beside_it(self) -> None:
+        # No digest: the marker cannot be told apart from a later lease, so
+        # the neighbour stays refused and a rewrite that cannot delete it raises.
+        self._write(lease_token="live-token", lease_id="lease-live")
+        marker = session_handoff._tombstone_path(self.path)
+        marker.write_bytes(b"invalid")
+        real_unlink = os.unlink
+
+        def block_marker(path: object) -> None:
+            if Path(path) == marker:
+                raise PermissionError("marker locked")
+            real_unlink(path)
+
+        with patch.object(session_handoff.os, "unlink", side_effect=block_marker):
+            with self.assertRaises(session_handoff.TombstoneStillRejects):
+                self._write(lease_token="other-token", lease_id="lease-other")
+            self.assertIsNone(consume_handoff(self.path, now=lambda: 1000.0))
 
 
 class HandoffRefusalTest(unittest.TestCase):
@@ -1186,6 +1269,70 @@ class CarrierFollowsLeaseRenewalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime._carrier_written_at, 50.0)
         self.assertEqual(runtime._carrier_reserve_gen, 5)
         self.assertEqual(runtime._carrier_reserved_at, 40.0)
+
+    async def test_an_undeletable_tombstone_hides_only_the_revoked_lease(self):
+        runtime = await self.worker()
+        real_unlink, real_replace = os.unlink, os.replace
+
+        def stuck_carrier(path: object) -> None:
+            if Path(path) == self.carrier:
+                raise PermissionError("busy")
+            real_unlink(path)
+
+        def stuck_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+            if Path(dst) == self.carrier:
+                raise PermissionError("busy")
+            real_replace(src, dst, *args, **kwargs)
+
+        with (
+            patch.object(session_handoff.os, "unlink", side_effect=stuck_carrier),
+            patch.object(session_handoff.os, "replace", side_effect=stuck_replace),
+        ):
+            session_handoff.clear_handoff(self.carrier)
+        marker = session_handoff._tombstone_path(self.carrier)
+        self.assertTrue(marker.exists())
+        revoked = self.token
+        code, _released = self.coordinator.release(self.identity, revoked)
+        self.assertEqual(code, 200)
+        self.clock = 50.0
+        code, new_lease = self.coordinator.acquire(self.identity, "after sealed clear")
+        self.assertEqual(code, 200)
+        new_token = new_lease["lease_token"]
+        self.assertNotEqual(new_token, revoked)
+
+        def block_marker(path: object) -> None:
+            if Path(path) == marker:
+                raise PermissionError("marker locked")
+            real_unlink(path)
+
+        runtime._carrier_written_at = 10.0
+        runtime._carrier_degraded = False
+        with patch.object(session_handoff.os, "unlink", side_effect=block_marker):
+            runtime._apply_carrier_io(
+                runtime._carrier_gen,
+                revoked,
+                runtime._control.active_lease_id,
+                refresh=False,
+            )
+            self.assertEqual(runtime._carrier_written_at, 10.0)
+            self.assertTrue(runtime._carrier_degraded)
+            session_handoff.write_handoff(
+                self.carrier,
+                identity=self.identity,
+                lease_token=new_token,
+                lease_id=new_lease["lease_id"],
+                generation=1,
+            )
+            self.assertTrue(self.recycle_keeps_the_lease())
+            with self.assertRaises(session_handoff.TombstoneStillRejects):
+                session_handoff.write_handoff(
+                    self.carrier,
+                    identity=self.identity,
+                    lease_token=revoked,
+                    lease_id=self.lease["lease_id"],
+                    generation=1,
+                )
+            self.assertIsNone(session_handoff.consume_handoff(self.carrier))
 
 
 if __name__ == "__main__":
