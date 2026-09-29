@@ -139,6 +139,78 @@ class ControlClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"runs": []})
         session_call.assert_awaited_once_with("/lifecycle/status")
 
+    async def test_lifecycle_close_and_reap_errors_keep_a_verified_body(self) -> None:
+        control = importlib.import_module("dayz_mcp.control_client")
+        identity = control.ControlIdentity(
+            platform="unknown",
+            pid=123,
+            ppid=45,
+            started_at_utc="2026-07-22T00:00:00Z",
+            session_id="12345678-1234-4234-8234-1234567890ab",
+            task_label="",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            keyfile = Path(temporary) / "daemon.key"
+            keyfile.write_text("test-key\n", encoding="utf-8")
+            client = control.ControlClient(policy=_policy(keyfile), identity=identity)
+
+            def respond(status: int, document: dict[str, object]):
+                def transport(**_kwargs):
+                    return status, json.dumps(document).encode("utf-8")
+
+                return transport
+
+            with patch.object(
+                client._credential_provider,
+                "request_with_refresh",
+                side_effect=respond(
+                    404, {"error": "run_not_found", "lease_id": "lease-1"}
+                ),
+            ):
+                with self.assertRaises(control.ControlClientError) as raised:
+                    client._request_once("/lifecycle/reap", {"run_id": "missing"}, 5.0)
+            error = raised.exception
+            self.assertEqual(error.code, "run_not_found")
+            self.assertIsInstance(error.body, control.VerifiedErrorBody)
+            self.assertEqual(error.body.code, "run_not_found")
+            self.assertEqual(error.body.lease_id, "lease-1")
+
+            with patch.object(
+                client._credential_provider,
+                "request_with_refresh",
+                side_effect=respond(409, {"error": "lease_invalid"}),
+            ):
+                with self.assertRaises(control.ControlClientError) as raised:
+                    client._request_once("/lifecycle/close", {"run_id": "missing"}, 5.0)
+            self.assertEqual(raised.exception.code, "lease_invalid")
+            self.assertIsInstance(raised.exception.body, control.VerifiedErrorBody)
+            self.assertIsNone(raised.exception.body.lease_id)
+
+            for bad in ("", 7, True, None):
+                with patch.object(
+                    client._credential_provider,
+                    "request_with_refresh",
+                    side_effect=respond(
+                        404, {"error": "run_not_found", "lease_id": bad}
+                    ),
+                ):
+                    with self.assertRaises(control.ControlClientError) as raised:
+                        client._request_once(
+                            "/lifecycle/reap", {"run_id": "missing"}, 5.0
+                        )
+                self.assertIsNone(raised.exception.body.lease_id)
+
+            with patch.object(
+                client._credential_provider,
+                "request_with_refresh",
+                side_effect=respond(
+                    404, {"error": "nope", "lease_id": "lease-1"}
+                ),
+            ):
+                with self.assertRaises(control.ControlClientError) as raised:
+                    client._request_once("/session/status", {}, 5.0)
+            self.assertIsNone(raised.exception.body)
+
     async def test_status_uses_exact_constructor_identity_and_accredited_transport(
         self,
     ) -> None:

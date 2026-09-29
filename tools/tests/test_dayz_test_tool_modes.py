@@ -440,6 +440,20 @@ class ModeContractM19Test(unittest.IsolatedAsyncioTestCase):
         )
         vpp_patcher.start()
         self.addCleanup(vpp_patcher.stop)
+        desktop_patcher = patch.object(
+            dayz_test_tool,
+            "evaluate_prerun_desktop",
+            return_value=mcp_capture.PrerunDesktopResult(
+                error_code=None,
+                desktop="unlocked",
+                mean_brightness=80.0,
+                nonblack_ratio=0.9,
+                waited_s=0.01,
+                remediation="",
+            ),
+        )
+        desktop_patcher.start()
+        self.addCleanup(desktop_patcher.stop)
 
     @staticmethod
     def _runtime_with_dead_client(*, extensible: bool = False) -> _Runtime:
