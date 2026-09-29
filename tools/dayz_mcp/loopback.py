@@ -70,6 +70,7 @@ SERVER_COMMANDS = {
     "inventory_attach",
     "inventory_give",
     "object_inspect",
+    "object_doors",
     "infected_drive",
     "entities_query",
 }
@@ -78,6 +79,7 @@ CLIENT_COMMANDS = {
     "camera_get",
     "restore_gameplay",
     "key_press",
+    "input_describe",
     "player_respawn",
     "vehicle_get_in_client",
     "engine_set",
@@ -371,6 +373,18 @@ def _is_non_empty_string(value: object) -> bool:
     return isinstance(value, str) and value != ""
 
 
+# input_describe name. Printable ASCII so the Enforce ToAscii check (32..126)
+# accepts every string this predicate accepts. 128 matches MCPClientBridge.c
+# INPUT_NAME_MAX.
+INPUT_NAME_MAX_CHARS = 128
+
+
+def is_printable_input_name(value: object) -> bool:
+    if not isinstance(value, str) or value == "" or len(value) > INPUT_NAME_MAX_CHARS:
+        return False
+    return all(32 <= ord(character) <= 126 for character in value)
+
+
 def _equal_to(expected: object) -> _FieldValidator:
     def validate(value: object) -> bool:
         return value == expected
@@ -581,6 +595,12 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={"dik": _integer_in_range(minimum=0)},
         )
     ),
+    "input_describe": _command_schema(
+        _schema_variant(
+            required=("name",),
+            validators={"name": is_printable_input_name},
+        )
+    ),
     "vehicle_trace": _command_schema(
         _schema_variant(
             required=(
@@ -746,6 +766,21 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "object_id": _integer_in_range(minimum=1),
                 "want": _is_non_empty_string_list,
             },
+        ),
+    ),
+    # Same target shapes as object_inspect, without want. A phase key is refused
+    # so this read cannot be confused with object_anim's write.
+    "object_doors": _command_schema(
+        _schema_variant(
+            required=("type", "pos"),
+            validators={
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+            },
+        ),
+        _schema_variant(
+            required=("object_id",),
+            validators={"object_id": _integer_in_range(minimum=1)},
         ),
     ),
     # Exact keys keep authenticated socket ingress fail-closed.
