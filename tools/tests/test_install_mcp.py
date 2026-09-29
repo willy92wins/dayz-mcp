@@ -1996,8 +1996,20 @@ class RegistryFlagGrammarTest(unittest.TestCase):
                     )
 
 
+def _decode_powershell(blob: bytes) -> str:
+    if blob.startswith(b"\xff\xfe") or blob.startswith(b"\xfe\xff") or b"\x00" in blob[:80]:
+        try:
+            return blob.decode("utf-16")
+        except UnicodeError:
+            pass
+    try:
+        return blob.decode("utf-8")
+    except UnicodeError:
+        return blob.decode("cp1252", errors="replace")
+
+
 def _run_powershell(script: Path, arguments: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    completed = subprocess.run(
         [
             "powershell.exe",
             "-NoProfile",
@@ -2009,8 +2021,13 @@ def _run_powershell(script: Path, arguments: list[str]) -> subprocess.CompletedP
             *arguments,
         ],
         capture_output=True,
-        text=True,
         check=False,
+    )
+    return subprocess.CompletedProcess(
+        completed.args,
+        completed.returncode,
+        _decode_powershell(completed.stdout),
+        _decode_powershell(completed.stderr),
     )
 
 
@@ -2025,8 +2042,8 @@ $functionAst = $ast.Find({ param($node) $node -is [System.Management.Automation.
 if ($null -eq $functionAst) { throw 'Missing function Get-RegistrationReplaceDecision' }
 . ([scriptblock]::Create($functionAst.Extent.Text))
 
-function New-Probe($CommandMissing, $ExitCode, [string]$Output) {
-  return @{ CommandMissing = [bool]$CommandMissing; ExitCode = $ExitCode; Output = $Output }
+function New-Probe($CommandMissing, $ExitCode, [string]$Stdout, [string]$Stderr) {
+  return @{ CommandMissing = [bool]$CommandMissing; ExitCode = $ExitCode; Stdout = $Stdout; Stderr = $Stderr }
 }
 function Assert-Decision($Name, $Claude, $Codex, [bool]$Replace, [string]$ExpectAction, [string[]]$Fragments) {
   $decision = Get-RegistrationReplaceDecision -Claude $Claude -Codex $Codex -ReplaceExistingRegistration:$Replace
@@ -2044,11 +2061,11 @@ function Assert-Decision($Name, $Claude, $Codex, [bool]$Replace, [string]$Expect
   }
 }
 
-$absentClaude = New-Probe $false 1 "No MCP server named `"dayz-mcp`". Configured servers: other"
-$absentCodex = New-Probe $false 1 "No MCP server named 'dayz-mcp' found.`n"
-$presentClaude = New-Probe $false 0 "dayz-mcp:`r`n  Type: stdio`r`n  Command: C:\Python\python.exe`r`n  Args: -m dayz_mcp --client --exec-audit-path C:\audit`r`n"
-$presentCodex = New-Probe $false 0 '{"transport":{"type":"stdio","command":"C:\\Python\\python.exe","args":["-m","dayz_mcp","--client"]}}'
-$missing = @{ CommandMissing = $true; ExitCode = $null; Output = '' }
+$absentClaude = New-Probe $false 1 '' "No MCP server named `"dayz-mcp`". Configured servers: other, dayz-mcp`n"
+$absentCodex = New-Probe $false 1 '' "Error: No MCP server named 'dayz-mcp' found.`n"
+$presentClaude = New-Probe $false 0 "dayz-mcp:`r`n  Type: stdio`r`n  Command: C:\Python\python.exe`r`n  Args: -m dayz_mcp --client --exec-audit-path C:\audit`r`n" ''
+$presentCodex = New-Probe $false 0 '{"transport":{"type":"stdio","command":"C:\\Python\\python.exe","args":["-m","dayz_mcp","--client"]}}' ''
+$missing = @{ CommandMissing = $true; ExitCode = $null; Stdout = ''; Stderr = '' }
 
 Assert-Decision 'both absent' $absentClaude $absentCodex $false 'proceed' @()
 Assert-Decision 'both absent replace' $absentClaude $absentCodex $true 'proceed' @()
@@ -2060,20 +2077,22 @@ Assert-Decision 'both present replace' $presentClaude $presentCodex $true 'proce
 Assert-Decision 'claude missing' $missing $absentCodex $false 'refuse' @('command missing', 'Stopped before removing')
 Assert-Decision 'claude missing replace' $missing $absentCodex $true 'refuse' @('command missing', 'Stopped before removing')
 Assert-Decision 'codex missing' $absentClaude $missing $false 'refuse' @('Codex: command missing')
-Assert-Decision 'claude exit 2' (New-Probe $false 2 'boom') $absentCodex $false 'refuse' @('Claude: exit code 2')
-Assert-Decision 'claude garbage' (New-Probe $false 0 'hello') $absentCodex $false 'refuse' @('Claude: unparseable output')
-Assert-Decision 'claude bad not-found' (New-Probe $false 1 'not today') $absentCodex $false 'refuse' @('without the not-found message')
-Assert-Decision 'claude contradictory' (New-Probe $false 0 ($presentClaude.Output + "No MCP server named `"dayz-mcp`".")) $absentCodex $false 'refuse' @('unparseable output')
-$shapedAbsent = "No MCP server named `"dayz-mcp`".`r`n  Type: stdio`r`n  Command: C:\Python\python.exe`r`n  Args: -m dayz_mcp`r`n"
-Assert-Decision 'claude shaped absent' (New-Probe $false 1 $shapedAbsent) $absentCodex $false 'refuse' @('unparseable output')
-Assert-Decision 'codex garbage' $absentClaude (New-Probe $false 0 'hello') $false 'refuse' @('Codex: unparseable output')
-Assert-Decision 'codex empty object' $absentClaude (New-Probe $false 0 '{}') $false 'refuse' @('Codex: unparseable output')
-Assert-Decision 'codex no args' $absentClaude (New-Probe $false 0 '{"transport":{"type":"stdio","command":"C:\\Python\\python.exe"}}') $false 'refuse' @('Codex: unparseable output')
-Assert-Decision 'swapped claude phrase' (New-Probe $false 1 "No MCP server named 'dayz-mcp' found") $absentCodex $false 'refuse' @('without the not-found message')
-Assert-Decision 'swapped codex phrase' $absentClaude (New-Probe $false 1 'No MCP server named "dayz-mcp".') $false 'refuse' @('without the not-found message')
-Assert-Decision 'null exit' (@{ CommandMissing = $false; ExitCode = $null; Output = 'x' }) $absentCodex $false 'refuse' @('exit code is missing')
+Assert-Decision 'claude exit 2' (New-Probe $false 2 'boom' '') $absentCodex $false 'refuse' @('Claude: exit code 2')
+Assert-Decision 'claude garbage' (New-Probe $false 0 'hello' '') $absentCodex $false 'refuse' @('Claude: unparseable output')
+Assert-Decision 'claude bad not-found' (New-Probe $false 1 '' 'not today') $absentCodex $false 'refuse' @('without the not-found message')
+Assert-Decision 'stdout phrase is not absent' (New-Probe $false 1 $absentClaude.Stderr '') $absentCodex $false 'refuse' @('without the not-found message')
+Assert-Decision 'claude contradictory' (New-Probe $false 0 $presentClaude.Stdout "No MCP server named `"dayz-mcp`".") $absentCodex $false 'refuse' @('unparseable output')
+Assert-Decision 'stderr warning on success' (New-Probe $false 0 $presentClaude.Stdout 'warning') $absentCodex $false 'refuse' @('unparseable output')
+$shapedAbsent = "dayz-mcp:`r`n  Type: stdio`r`n  Command: C:\Python\python.exe`r`n  Args: -m dayz_mcp`r`n"
+Assert-Decision 'claude shaped absent' (New-Probe $false 1 $shapedAbsent $absentClaude.Stderr) $absentCodex $false 'refuse' @('unparseable output')
+Assert-Decision 'codex garbage' $absentClaude (New-Probe $false 0 'hello' '') $false 'refuse' @('Codex: unparseable output')
+Assert-Decision 'codex empty object' $absentClaude (New-Probe $false 0 '{}' '') $false 'refuse' @('Codex: unparseable output')
+Assert-Decision 'codex no args' $absentClaude (New-Probe $false 0 '{"transport":{"type":"stdio","command":"C:\\Python\\python.exe"}}' '') $false 'refuse' @('Codex: unparseable output')
+Assert-Decision 'swapped claude phrase' (New-Probe $false 1 '' "No MCP server named 'dayz-mcp' found") $absentCodex $false 'refuse' @('without the not-found message')
+Assert-Decision 'swapped codex phrase' $absentClaude (New-Probe $false 1 '' 'No MCP server named "dayz-mcp".') $false 'refuse' @('without the not-found message')
+Assert-Decision 'null exit' (@{ CommandMissing = $false; ExitCode = $null; Stdout = 'x'; Stderr = '' }) $absentCodex $false 'refuse' @('exit code is missing')
 Assert-Decision 'null probe' $null $absentCodex $true 'refuse' @('probe is missing', 'Stopped before removing')
-Assert-Decision 'present plus unreadable' $presentClaude (New-Probe $false 2 'boom') $true 'refuse' @('registration check failed', 'Codex: exit code 2')
+Assert-Decision 'present plus unreadable' $presentClaude (New-Probe $false 2 'boom' '') $true 'refuse' @('registration check failed', 'Codex: exit code 2')
 'PASS'
 '''
 
@@ -2085,14 +2104,16 @@ param(
   [string]$CodexOnlyDir,
   [string]$LogPath,
   [string]$ClaudeStdout,
-  [string]$CodexStdout
+  [string]$ClaudeStderr,
+  [string]$CodexStdout,
+  [string]$CodexStderr
 )
 $ErrorActionPreference = 'Stop'
 $tokens = $null
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($SourcePath, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw ('PowerShell source did not parse: ' + $parseErrors[0].ToString()) }
-foreach ($name in @('Get-ClientRegistrationProbe', 'Get-RegistrationReplaceDecision')) {
+foreach ($name in @('Invoke-NativeRegistrationCommand', 'Get-ClientRegistrationProbe', 'Get-RegistrationReplaceDecision')) {
   $functionAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
   if ($null -eq $functionAst) { throw "Missing function $name" }
   . ([scriptblock]::Create($functionAst.Extent.Text))
@@ -2110,19 +2131,21 @@ $decisionBlock = [scriptblock]::Create($blockText)
 
 $presentClaude = "dayz-mcp:`r`n  Type: stdio`r`n  Command: C:\Python\python.exe`r`n  Args: -m dayz_mcp --client --exec-audit-path C:\audit`r`n"
 $presentCodex = '{"transport":{"type":"stdio","command":"C:\\Python\\python.exe","args":["-m","dayz_mcp","--client"]}}'
-$absentClaude = "No MCP server named `"dayz-mcp`". Configured servers: other"
-$absentCodex = "No MCP server named 'dayz-mcp' found."
+$absentClaude = "No MCP server named `"dayz-mcp`". Configured servers: other, dayz-mcp"
+$absentCodex = "Error: No MCP server named 'dayz-mcp' found."
 $cases = @(
-  @{ Name = 'present'; Dir = $BothDir; Replace = $false; Expect = 'refuse'; Fragment = 'already registered'; ClaudeExit = 0; CodexExit = 0; ClaudeOut = $presentClaude; CodexOut = $presentCodex; WantClaude = $true; WantCodex = $true },
-  @{ Name = 'absent'; Dir = $BothDir; Replace = $false; Expect = 'proceed'; Fragment = ''; ClaudeExit = 1; CodexExit = 1; ClaudeOut = $absentClaude; CodexOut = $absentCodex; WantClaude = $true; WantCodex = $true },
-  @{ Name = 'replace'; Dir = $BothDir; Replace = $true; Expect = 'proceed'; Fragment = ''; ClaudeExit = 0; CodexExit = 0; ClaudeOut = $presentClaude; CodexOut = $presentCodex; WantClaude = $true; WantCodex = $true },
-  @{ Name = 'garbage'; Dir = $BothDir; Replace = $false; Expect = 'refuse'; Fragment = 'unparseable output'; ClaudeExit = 0; CodexExit = 1; ClaudeOut = 'hello'; CodexOut = $absentCodex; WantClaude = $true; WantCodex = $true },
-  @{ Name = 'exit-2'; Dir = $BothDir; Replace = $true; Expect = 'refuse'; Fragment = 'exit code 2'; ClaudeExit = 2; CodexExit = 1; ClaudeOut = 'boom'; CodexOut = $absentCodex; WantClaude = $true; WantCodex = $true },
-  @{ Name = 'claude-missing'; Dir = $CodexOnlyDir; Replace = $false; Expect = 'refuse'; Fragment = 'command missing'; ClaudeExit = 1; CodexExit = 1; ClaudeOut = $absentClaude; CodexOut = $absentCodex; WantClaude = $false; WantCodex = $true }
+  @{ Name = 'present'; Dir = $BothDir; Replace = $false; Expect = 'refuse'; Fragment = 'already registered'; ClaudeExit = 0; CodexExit = 0; ClaudeOut = $presentClaude; ClaudeErr = ''; CodexOut = $presentCodex; CodexErr = ''; WantClaude = $true; WantCodex = $true },
+  @{ Name = 'absent'; Dir = $BothDir; Replace = $false; Expect = 'proceed'; Fragment = ''; ClaudeExit = 1; CodexExit = 1; ClaudeOut = ''; ClaudeErr = $absentClaude; CodexOut = ''; CodexErr = $absentCodex; WantClaude = $true; WantCodex = $true },
+  @{ Name = 'replace'; Dir = $BothDir; Replace = $true; Expect = 'proceed'; Fragment = ''; ClaudeExit = 0; CodexExit = 0; ClaudeOut = $presentClaude; ClaudeErr = ''; CodexOut = $presentCodex; CodexErr = ''; WantClaude = $true; WantCodex = $true },
+  @{ Name = 'garbage'; Dir = $BothDir; Replace = $false; Expect = 'refuse'; Fragment = 'unparseable output'; ClaudeExit = 0; CodexExit = 1; ClaudeOut = 'hello'; ClaudeErr = ''; CodexOut = ''; CodexErr = $absentCodex; WantClaude = $true; WantCodex = $true },
+  @{ Name = 'exit-2'; Dir = $BothDir; Replace = $true; Expect = 'refuse'; Fragment = 'exit code 2'; ClaudeExit = 2; CodexExit = 1; ClaudeOut = 'boom'; ClaudeErr = ''; CodexOut = ''; CodexErr = $absentCodex; WantClaude = $true; WantCodex = $true },
+  @{ Name = 'claude-missing'; Dir = $CodexOnlyDir; Replace = $false; Expect = 'refuse'; Fragment = 'command missing'; ClaudeExit = 1; CodexExit = 1; ClaudeOut = ''; ClaudeErr = $absentClaude; CodexOut = ''; CodexErr = $absentCodex; WantClaude = $false; WantCodex = $true }
 )
 $env:DAYZ_MCP_FAKE_LOG = $LogPath
 $env:DAYZ_MCP_CLAUDE_STDOUT = $ClaudeStdout
+$env:DAYZ_MCP_CLAUDE_STDERR = $ClaudeStderr
 $env:DAYZ_MCP_CODEX_STDOUT = $CodexStdout
+$env:DAYZ_MCP_CODEX_STDERR = $CodexStderr
 $env:PATHEXT = '.CMD;.EXE;.BAT'
 foreach ($case in $cases) {
   $env:PATH = $case.Dir
@@ -2137,7 +2160,9 @@ foreach ($case in $cases) {
     }
   }
   Set-Content -LiteralPath $ClaudeStdout -Encoding Ascii -Value $case.ClaudeOut
+  Set-Content -LiteralPath $ClaudeStderr -Encoding Ascii -Value $case.ClaudeErr
   Set-Content -LiteralPath $CodexStdout -Encoding Ascii -Value $case.CodexOut
+  Set-Content -LiteralPath $CodexStderr -Encoding Ascii -Value $case.CodexErr
   Set-Content -LiteralPath $LogPath -Encoding Ascii -Value ''
   $env:DAYZ_MCP_CLAUDE_EXIT = [string]$case.ClaudeExit
   $env:DAYZ_MCP_CODEX_EXIT = [string]$case.CodexExit
@@ -2159,10 +2184,10 @@ foreach ($case in $cases) {
   if ($logged -match 'remove' -or $logged -match 'NOT-GET') {
     throw "$($case.Name) invoked something other than mcp get: $logged"
   }
-  if ($case.WantClaude -and $logged -notmatch 'CLAUDE mcp get') {
+  if ($case.WantClaude -and $logged -notmatch 'CLAUDE "mcp" "get"') {
     throw "$($case.Name) did not probe claude: $logged"
   }
-  if ($case.WantCodex -and $logged -notmatch 'CODEX mcp get') {
+  if ($case.WantCodex -and $logged -notmatch 'CODEX "mcp" "get"') {
     throw "$($case.Name) did not probe codex: $logged"
   }
   if (-not $case.WantClaude -and $logged -match 'CLAUDE') {
@@ -2173,14 +2198,19 @@ foreach ($case in $cases) {
 '''
 
 
-def _fake_mcp_cmd(path: Path, role: str, stdout_var: str, exit_var: str) -> None:
+def _fake_mcp_cmd(path: Path, role: str, stdout_var: str, stderr_var: str, exit_var: str) -> None:
+    # Not-found text belongs on stderr, matching installer-not-found-fixtures-v1.json.
+    # `exit /b` inside a parenthesized block does not become PowerShell's
+    # $LASTEXITCODE, so the get path leaves that block before exiting.
     path.write_text(
         "@echo off\n"
         f'>>"%DAYZ_MCP_FAKE_LOG%" echo {role} %*\n'
-        'if /I "%~1"=="mcp" if /I "%~2"=="get" (\n'
-        f'  type "%{stdout_var}%"\n'
-        f"  exit /b %{exit_var}%\n"
-        ")\n"
+        'if /I not "%~1"=="mcp" goto :notget\n'
+        'if /I not "%~2"=="get" goto :notget\n'
+        f'type "%{stdout_var}%"\n'
+        f'type "%{stderr_var}%" 1>&2\n'
+        f"exit /b %{exit_var}%\n"
+        ":notget\n"
         f'>>"%DAYZ_MCP_FAKE_LOG%" echo {role}-NOT-GET %*\n'
         "exit /b 0\n",
         encoding="ascii",
@@ -2201,6 +2231,14 @@ class PowerShellRegisterGuardTest(unittest.TestCase):
         window = source[register_at:remove_at]
         self.assertIn("throw $registrationDecision.Reason", window)
         self.assertNotIn("mcp remove", window)
+        self.assertIn(
+            "if ($ReplaceExistingRegistration) {\n    & claude mcp remove dayz-mcp -s user\n  }",
+            source,
+        )
+        self.assertIn(
+            "if ($ReplaceExistingRegistration) {\n    & $CodexCmd mcp remove dayz-mcp\n  }",
+            source,
+        )
         probe_body = _ps_function_body(source, "Get-ClientRegistrationProbe")
         self.assertNotIn("mcp remove", probe_body)
         self.assertNotIn("mcp add", probe_body)
@@ -2237,9 +2275,9 @@ class PowerShellRegisterGuardTest(unittest.TestCase):
             codex_only = root / "codex-only"
             both.mkdir()
             codex_only.mkdir()
-            _fake_mcp_cmd(both / "claude.cmd", "CLAUDE", "DAYZ_MCP_CLAUDE_STDOUT", "DAYZ_MCP_CLAUDE_EXIT")
-            _fake_mcp_cmd(both / "codex.cmd", "CODEX", "DAYZ_MCP_CODEX_STDOUT", "DAYZ_MCP_CODEX_EXIT")
-            _fake_mcp_cmd(codex_only / "codex.cmd", "CODEX", "DAYZ_MCP_CODEX_STDOUT", "DAYZ_MCP_CODEX_EXIT")
+            _fake_mcp_cmd(both / "claude.cmd", "CLAUDE", "DAYZ_MCP_CLAUDE_STDOUT", "DAYZ_MCP_CLAUDE_STDERR", "DAYZ_MCP_CLAUDE_EXIT")
+            _fake_mcp_cmd(both / "codex.cmd", "CODEX", "DAYZ_MCP_CODEX_STDOUT", "DAYZ_MCP_CODEX_STDERR", "DAYZ_MCP_CODEX_EXIT")
+            _fake_mcp_cmd(codex_only / "codex.cmd", "CODEX", "DAYZ_MCP_CODEX_STDOUT", "DAYZ_MCP_CODEX_STDERR", "DAYZ_MCP_CODEX_EXIT")
             probe = root / "remove_order_probe.ps1"
             probe.write_text(_PS_REMOVE_ORDER_PROBE, encoding="utf-8")
             completed = _run_powershell(
@@ -2255,8 +2293,12 @@ class PowerShellRegisterGuardTest(unittest.TestCase):
                     str(root / "calls.log"),
                     "-ClaudeStdout",
                     str(root / "claude-out.txt"),
+                    "-ClaudeStderr",
+                    str(root / "claude-err.txt"),
                     "-CodexStdout",
                     str(root / "codex-out.txt"),
+                    "-CodexStderr",
+                    str(root / "codex-err.txt"),
                 ],
             )
         self.assertEqual(
@@ -2264,6 +2306,203 @@ class PowerShellRegisterGuardTest(unittest.TestCase):
             (0, "PASS"),
             completed.stderr,
         )
+
+    def _write_channel_fakes(self, directory: Path) -> None:
+        # `exit /b` inside a parenthesized block does not become PowerShell's
+        # $LASTEXITCODE, so every exit is at the top level after a goto.
+        claude = r"""@echo off
+if not "%~2"=="get" goto :notget
+if "%FAKE_PRESENT%"=="1" goto :present
+echo No MCP server named "dayz-mcp". Configured servers: other, dayz-mcp 1>&2
+exit /b 1
+:present
+echo dayz-mcp:
+echo   Type: stdio
+echo   Command: C:\Python\python.exe
+echo   Args: -m dayz_mcp --client
+exit /b 0
+:notget
+if not "%~2"=="remove" goto :notremove
+if not exist "%FAKE_STATE%" goto :removeabsent
+echo CLAUDE_REMOVE_DELETED>>"%FAKE_LOG%"
+del "%FAKE_STATE%"
+exit /b 0
+:removeabsent
+echo CLAUDE_REMOVE_ABSENT>>"%FAKE_LOG%"
+exit /b 0
+:notremove
+if not "%~2"=="add" goto :other
+echo CLAUDE_ADD>>"%FAKE_LOG%"
+if "%FAKE_ADD_FAIL%"=="1" exit /b 1
+exit /b 0
+:other
+echo CLAUDE_OTHER>>"%FAKE_LOG%"
+exit /b 0
+"""
+        codex = r"""@echo off
+if not "%~2"=="get" goto :notget
+if "%FAKE_PRESENT%"=="1" goto :present
+echo old-registration>"%FAKE_STATE%"
+echo Error: No MCP server named 'dayz-mcp' found. 1>&2
+exit /b 1
+:present
+echo {"transport":{"type":"stdio","command":"C:\\Python\\python.exe","args":["-m","dayz_mcp","--client"]}}
+exit /b 0
+:notget
+if not "%~2"=="remove" goto :notremove
+echo CODEX_REMOVE>>"%FAKE_LOG%"
+exit /b 0
+:notremove
+if not "%~2"=="add" goto :other
+echo CODEX_ADD>>"%FAKE_LOG%"
+exit /b 0
+:other
+echo CODEX_OTHER>>"%FAKE_LOG%"
+exit /b 0
+"""
+        (directory / "claude.cmd").write_text(claude, encoding="ascii", newline="\r\n")
+        (directory / "codex.cmd").write_text(codex, encoding="ascii", newline="\r\n")
+
+    def _run_register_mode(self, mode: str) -> subprocess.CompletedProcess[str]:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bindir = root / "bin"
+            bindir.mkdir()
+            self._write_channel_fakes(bindir)
+            probe = root / "register_mutation.ps1"
+            probe.write_text(_PS_REGISTER_MUTATION_PROBE, encoding="utf-8")
+            return _run_powershell(
+                probe,
+                [
+                    "-SourcePath",
+                    str(TOOLS_DIR / "install-mcp.ps1"),
+                    "-BinDir",
+                    str(bindir),
+                    "-StatePath",
+                    str(root / "state.txt"),
+                    "-LogPath",
+                    str(root / "calls.txt"),
+                    "-Mode",
+                    mode,
+                ],
+            )
+
+    @unittest.skipUnless(os.name == "nt", "install-mcp.ps1 runs on Windows PowerShell")
+    @slow_test
+    def test_fixture_stderr_absent_proceeds(self) -> None:
+        completed = self._run_register_mode("stderr")
+        self.assertEqual(
+            (completed.returncode, completed.stdout.strip()),
+            (0, "PASS"),
+            completed.stderr,
+        )
+
+    @unittest.skipUnless(os.name == "nt", "install-mcp.ps1 runs on Windows PowerShell")
+    @slow_test
+    def test_new_install_does_not_remove_a_registration_that_appears(self) -> None:
+        completed = self._run_register_mode("race")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(completed.stdout.strip().endswith("PASS"), completed.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "install-mcp.ps1 runs on Windows PowerShell")
+    @slow_test
+    def test_failed_add_stops_without_remove(self) -> None:
+        completed = self._run_register_mode("addfail")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(completed.stdout.strip().endswith("PASS"), completed.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "install-mcp.ps1 runs on Windows PowerShell")
+    @slow_test
+    def test_replace_switch_still_removes_before_add(self) -> None:
+        completed = self._run_register_mode("replace")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(completed.stdout.strip().endswith("PASS"), completed.stdout)
+
+
+_PS_REGISTER_MUTATION_PROBE = r'''
+param(
+  [string]$SourcePath,
+  [string]$BinDir,
+  [string]$StatePath,
+  [string]$LogPath,
+  [string]$Mode
+)
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($SourcePath, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count) { throw ('PowerShell source did not parse: ' + $parseErrors[0].ToString()) }
+foreach ($name in @('Invoke-NativeRegistrationCommand', 'Get-ClientRegistrationProbe', 'Get-RegistrationReplaceDecision')) {
+  $functionAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
+  if ($null -eq $functionAst) { throw "Missing function $name" }
+  . ([scriptblock]::Create($functionAst.Extent.Text))
+}
+$source = [IO.File]::ReadAllText($SourcePath)
+$start = $source.IndexOf('$registrationDecision = Get-RegistrationReplaceDecision')
+$end = $source.IndexOf("  # Self-verify", $start)
+if ($start -lt 0 -or $end -lt 0) { throw 'register block missing' }
+$blockText = $source.Substring($start, $end - $start)
+$env:PATH = $BinDir
+$env:PATHEXT = '.CMD;.EXE;.BAT'
+$env:FAKE_STATE = $StatePath
+$env:FAKE_LOG = $LogPath
+$env:FAKE_PRESENT = '0'
+$env:FAKE_ADD_FAIL = '0'
+$ReplaceExistingRegistration = $false
+if ($Mode -eq 'replace') {
+  $env:FAKE_PRESENT = '1'
+  $ReplaceExistingRegistration = $true
+  Set-Content -LiteralPath $StatePath -Encoding Ascii -Value 'old-registration'
+} elseif (Test-Path -LiteralPath $StatePath) {
+  Remove-Item -LiteralPath $StatePath -Force
+}
+if ($Mode -eq 'addfail') { $env:FAKE_ADD_FAIL = '1' }
+Set-Content -LiteralPath $LogPath -Encoding Ascii -Value ''
+$resolved = Get-Command claude -ErrorAction SilentlyContinue
+if ($null -eq $resolved -or -not $resolved.Source.StartsWith($BinDir)) {
+  throw "claude resolved outside the fake dir: $($resolved.Source)"
+}
+$VenvPython = 'C:\fake\python.exe'
+$claudeArgs = @('--client')
+$codexArgs = @('--client')
+if ($Mode -eq 'stderr') {
+  $decision = Get-RegistrationReplaceDecision -Claude (Get-ClientRegistrationProbe -Client claude) -Codex (Get-ClientRegistrationProbe -Client codex) -ReplaceExistingRegistration:$false
+  if ($decision.Action -ne 'proceed') { throw $decision.Reason }
+  'PASS'
+  return
+}
+$threw = $false
+$message = ''
+try {
+  . ([scriptblock]::Create($blockText))
+} catch {
+  $threw = $true
+  $message = [string]$_.Exception.Message
+}
+$logged = [IO.File]::ReadAllText($LogPath)
+$state = Test-Path -LiteralPath $StatePath
+if ($Mode -eq 'race') {
+  if ($threw) { throw "race refused: $message" }
+  if ($logged -match 'REMOVE') { throw "race removed: $logged" }
+  if ($logged -notmatch 'CLAUDE_ADD' -or $logged -notmatch 'CODEX_ADD') { throw "race did not add: $logged" }
+  if (-not $state) { throw 'race deleted the registration that appeared after the first get' }
+}
+if ($Mode -eq 'addfail') {
+  if (-not $threw) { throw "add failure proceeded: $logged" }
+  if ($message -notlike '*claude mcp add*') { throw "add failure reason: $message" }
+  if ($logged -match 'REMOVE') { throw "add failure removed: $logged" }
+  if ($logged -match 'CODEX_ADD') { throw "add failure continued to codex: $logged" }
+  if ($logged -notmatch 'CLAUDE_ADD') { throw "add was not attempted: $logged" }
+}
+if ($Mode -eq 'replace') {
+  if ($threw) { throw "replace refused: $message" }
+  if ($logged -notmatch 'CLAUDE_REMOVE_DELETED') { throw "replace did not remove: $logged" }
+  if ($logged -notmatch 'CODEX_REMOVE' -or $logged -notmatch 'CLAUDE_ADD' -or $logged -notmatch 'CODEX_ADD') {
+    throw "replace log: $logged"
+  }
+}
+'PASS'
+'''
 
 
 if __name__ == "__main__":

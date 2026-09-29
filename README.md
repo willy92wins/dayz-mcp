@@ -203,11 +203,12 @@ the host reconnecting, and the lease crosses each replacement. `--no-supervised`
 `-NoSupervised` opts out. `python install_mcp.py --register` refuses to drop an
 option the current registrations carry (`registration_would_drop_options` names each
 one) unless you add `--allow-option-removal`. `.\install-mcp.ps1 -Register` only
-registers when Claude and Codex do not already have `dayz-mcp`. If one of them
-does, or that check cannot be read, the script stops before removing anything.
-Re-register with `python tools/install_mcp.py --register` from the repository
-root, or pass `-ReplaceExistingRegistration` when you really want this script
-to replace the current registration (that drops options it already carries).
+adds `dayz-mcp` when Claude and Codex do not already have it, and that path
+never removes a name. If one of them does, the check cannot be read, or the
+name appears before the add, the script stops. Re-register with
+`python tools/install_mcp.py --register` from the repository root, or pass
+`-ReplaceExistingRegistration` when you really want this script to remove and
+replace the current registration (that drops options it already carries).
 
 Three run modes (`python -m dayz_mcp`; `tools/dayz_mcp/server_cli.py:96-118`):
 
