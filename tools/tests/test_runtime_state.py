@@ -1056,6 +1056,14 @@ class CoordinatorSnapshotTest(unittest.TestCase):
             )
             coordinator.authorize(queued, None, "world_spawn")
             coordinator.release(owner, active["lease_token"])
+            # release() returns after at most RELEASE_AUDIT_TIMEOUT_S while the
+            # handoff fence can still be up. wait(0) polls once.
+            with coordinator._condition:
+                self.assertTrue(
+                    coordinator._condition.wait_for(
+                        lambda: not coordinator._handoff_pending, timeout=1.0
+                    )
+                )
             coordinator.acquire(abandoned, "camera")
             queued_token = coordinator.wait(queued, waiting["ticket"], 0.0)[1][
                 "lease_token"

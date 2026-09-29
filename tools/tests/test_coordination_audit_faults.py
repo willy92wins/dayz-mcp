@@ -1942,6 +1942,14 @@ class CleanupWorkerCapacityTest(unittest.TestCase):
             )
             self.assertIsNone(snapshot["active"])
             self.assertEqual(snapshot["queue"][0]["session"], IDENTITY_B.session_id[:12])
+            # release() returns after at most RELEASE_AUDIT_TIMEOUT_S while the
+            # handoff fence can still be up. wait(0) polls once.
+            with coordinator._condition:
+                self.assertTrue(
+                    coordinator._condition.wait_for(
+                        lambda: not coordinator._handoff_pending, timeout=1.0
+                    )
+                )
             granted = coordinator.wait(
                 IDENTITY_B, snapshot["queue"][0]["ticket"], 0.0
             )

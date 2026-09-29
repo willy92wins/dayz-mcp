@@ -365,6 +365,14 @@ class AuthorityIoBoundaryTest(unittest.TestCase):
         thread.join(1.0)
         self.assertFalse(thread.is_alive())
         self.assertNotEqual(admin_result[0][0], 200)
+        # admin_release holds the audit gate across resume, so release()
+        # returns while handoff_pending is still set. wait(0) polls once.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         claimed = coordinator.wait(IDENTITY_B, ticket["ticket"], 0.0)
         self.assertEqual((claimed[0], claimed[1]["status"]), (200, "active"))
         snapshot = coordinator.snapshot_payload()
@@ -405,6 +413,15 @@ class AuthorityIoBoundaryTest(unittest.TestCase):
         thread.join(1.0)
         self.assertFalse(thread.is_alive())
         self.assertNotEqual(heartbeat_result[0][0], 200)
+        # The heartbeat audit holds the audit gate across resume, so
+        # release() returns while handoff_pending is still set. wait(0)
+        # polls once and does not wait for that fence.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         claimed = coordinator.wait(IDENTITY_B, ticket["ticket"], 0.0)
         self.assertEqual((claimed[0], claimed[1]["status"]), (200, "active"))
         snapshot = coordinator.snapshot_payload()
@@ -454,6 +471,33 @@ class AuthorityIoBoundaryTest(unittest.TestCase):
         self.assertEqual(snapshot["active"]["session"], IDENTITY.session_id[:12])
         self.assertEqual(snapshot["queue"][0]["session"], IDENTITY_B.session_id[:12])
 
+    def test_zero_timeout_wait_claims_idle_head_when_clock_does_not_advance(self) -> None:
+        # wait() bounds the poll with time.monotonic, not the injected
+        # time_fn. A timeout of 0 makes that deadline equal to "now". The
+        # claim still has to be attempted once when the slot is idle.
+        clock = Clock()
+        coordinator = SessionCoordinator(
+            time_fn=clock,
+            token_fn=Sequence("token"),
+            id_fn=Sequence("lease"),
+            audit=lambda _event: True,
+            cleanup=lambda *_args: {},
+        )
+        _, active = coordinator.acquire(IDENTITY, "held")
+        _, ticket = coordinator.acquire(IDENTITY_B, "queued")
+        self.assertEqual(
+            coordinator.release(IDENTITY, active["lease_token"])[0], 200
+        )
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
+        with patch.object(coordination_module.time, "monotonic", lambda: clock.now):
+            claimed = coordinator.wait(IDENTITY_B, ticket["ticket"], 0.0)
+        self.assertEqual((claimed[0], claimed[1]["status"]), (200, "active"))
+
     def test_concurrent_fifo_grant_cannot_pop_or_overwrite_a_granted_ticket(self) -> None:
         entered = threading.Event()
         resume = threading.Event()
@@ -482,6 +526,14 @@ class AuthorityIoBoundaryTest(unittest.TestCase):
         self.assertEqual((queued_status, ticket["status"]), (202, "queued"))
         release_status, _ = coordinator.release(IDENTITY, l1["lease_token"])
         self.assertEqual(release_status, 200)
+        # release() can return before its audit worker clears handoff_pending.
+        # wait(0) would then poll queued and never enter the grant this test blocks on.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         claimed: list[tuple[int, dict[str, object]]] = []
         claim_error: list[Exception] = []
 
