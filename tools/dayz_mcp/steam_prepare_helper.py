@@ -15,6 +15,7 @@ import threading
 import time
 
 from . import steam_preflight as steam
+from .child_environment import whitelisted_child_environment
 from .steam_launch_guard import (
     PREPARE_BUDGET_S, Preparation, PreparationCancelled, live_identity, prepare,
 )
@@ -135,6 +136,7 @@ class GuardedHost(steam.WindowsSteamRemediationHost):
             [executable, *extra_args], close_fds=True,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=steam._STEAM_INVOKE_FLAGS | (0x01000000 if os.name == "nt" else 0),
+            env=whitelisted_child_environment(),
         )
         self.checkpoint()
 

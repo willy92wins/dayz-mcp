@@ -61,12 +61,26 @@ class ExtraModsNameFormErrorTest(unittest.TestCase):
         self.assertIn("@DayZ_MCP", code)
         self.assertIn("absolute path inside the project's mod_roots", code)
 
-    def test_missing_bridge_keeps_prefix_and_requires_explicit_folder(self) -> None:
+    def test_omitted_extra_mods_appends_the_bridge_folder(self) -> None:
+        raw, selected = dayz_test_tool.build_run_request(
+            _sealed(),
+            project="ExampleMod",
+            mode="offline",
+        )
+        parsed = dayz_test_request.parse_dayz_test_request(
+            raw, policies=(_policy(),)
+        )
+        self.assertEqual(selected.mod, "ExampleMod")
+        self.assertEqual(parsed.payload["extra_mods"], ["@DayZ_MCP"])
+
+    def test_sealed_list_limit_keeps_prefix_and_names_the_rejection(self) -> None:
+        full = [f"@Mod{index:02d}" for index in range(64)]
         with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
             dayz_test_tool.build_run_request(
                 _sealed(),
                 project="ExampleMod",
                 mode="offline",
+                extra_mods=full,
             )
         code = caught.exception.code
         self.assertEqual(code, dayz_test_tool._BRIDGE_MOD_MISSING)
@@ -74,6 +88,7 @@ class ExtraModsNameFormErrorTest(unittest.TestCase):
         self.assertIn("extra_mods=['@DayZ_MCP']", code)
         self.assertIn("folder name", code)
         self.assertIn("base_mods and server_mods do not count", code)
+        self.assertIn("sealed request", code)
 
     def test_folder_name_is_still_accepted(self) -> None:
         raw, selected = dayz_test_tool.build_run_request(
@@ -96,6 +111,10 @@ class ExtraModsNameFormDocsTest(unittest.TestCase):
         self.assertIn("single folder name", text)
         self.assertIn("@DayZ_MCP", text)
         self.assertIn("bridge_mod_missing", text)
+        self.assertIn("appended to extra_mods by default", text)
+        self.assertIn("extra_mods_defaulted", text)
+        self.assertNotIn("pass extra_mods=['@DayZ_MCP'] explicitly", text)
+        self.assertNotIn("include '@DayZ_MCP' here explicitly", text)
         self.assertNotIn("extra_mods accepts any folder", text)
 
 

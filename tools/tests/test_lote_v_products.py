@@ -150,11 +150,16 @@ class PublishedExtraModsNameFormTest(unittest.TestCase):
         self.assertIn("@DayZ_MCP", desc)
         self.assertIn("bad_mod", desc)
         self.assertIn("bridge_mod_missing", desc)
+        self.assertIn("appended to extra_mods by default", desc)
+        self.assertIn("extra_mods_defaulted", desc)
+        self.assertNotIn("pass extra_mods=['@DayZ_MCP'] explicitly", desc)
         self.assertNotIn("extra_mods accepts any folder", desc)
         props = app._tool_manager.get_tool("dayz_test_run").parameters["properties"]
         self.assertEqual(props["extra_mods"]["description"], server.EXTRA_MODS_DESCRIPTION)
         self.assertIn("single folder name", props["extra_mods"]["description"])
         self.assertIn("bridge_mod_missing", props["extra_mods"]["description"])
+        self.assertIn("extra_mods_defaulted", props["extra_mods"]["description"])
+        self.assertIn("appended to extra_mods by default", props["extra_mods"]["description"])
 
 
 class ReachableCapabilityTest(unittest.TestCase):

@@ -59,10 +59,25 @@ _BAD_MOD = (
     "folder name such as '@DayZ_MCP', or an absolute path inside the "
     "project's mod_roots; relative paths with '\\' or '/' are rejected"
 )
+# fb-20260925-233943-9ccc. The folder name the default writes. Presence uses
+# the same basename comparison as the bridge check below (_BRIDGE_MOD_NAMES).
+_DEFAULT_BRIDGE_EXTRA = "@DayZ_MCP"
+# A candidate the sealed parser would refuse is not committed. The call keeps
+# bridge_mod_missing instead of turning into bad_dayz_test_request.
+_SEALED_REQUEST_REJECTS_BRIDGE_DEFAULT = frozenset(
+    {
+        "bad_dayz_test_request:mod_list_invalid",
+        "bad_dayz_test_request:payload_too_large",
+        "bad_dayz_test_request:raw_envelope_invalid",
+    }
+)
 _BRIDGE_MOD_MISSING = (
     "bridge_mod_missing: add extra_mods=['@DayZ_MCP'] "
     "(the folder name '@DayZ_MCP' must be explicit in extra_mods or as "
-    "the project mod; base_mods and server_mods do not count)"
+    "the project mod; base_mods and server_mods do not count). "
+    "dayz_test_run appends '@DayZ_MCP' to extra_mods by default; "
+    "this call kept bridge_mod_missing because the sealed request "
+    "would reject that appended entry"
 )
 _HELD_LEASE_RUN = (
     "session_transition_conflict: release your session lease first - "
@@ -256,6 +271,88 @@ def _public_mod_list(
     return list(value)
 
 
+def _names_bridge(value: object) -> bool:
+    """Same comparison as the bridge check: basename, casefolded."""
+    return (
+        isinstance(value, str)
+        and ntpath.basename(value).casefold() in _BRIDGE_MOD_NAMES
+    )
+
+
+def _effective_base_mods(
+    public_base: list[str] | None,
+    *,
+    policy_defaults: tuple[str, ...],
+    no_base_mods: bool,
+) -> list[str]:
+    """The base_mods list the sealed payload, and then -mod=, will carry.
+
+    The caller's list wins. Omitting the field uses the policy defaults.
+    no_base_mods clears both, matching dayz_test_request's canonical payload.
+    """
+    if no_base_mods:
+        return []
+    if public_base is not None:
+        return list(public_base)
+    return list(policy_defaults)
+
+
+def _extra_mods_with_bridge_default(
+    extra_mods: list[str] | None,
+    *,
+    project_mod: str,
+    kill: bool,
+    base_mods: list[str],
+) -> tuple[list[str] | None, tuple[str, ...]]:
+    """Append @DayZ_MCP on extra_mods when this launch would miss the bridge.
+
+    kill requests are not launches. The DayZ_MCP project already is the
+    bridge. An entry whose basename casefolds into _BRIDGE_MOD_NAMES is
+    already present, including '@dayz_mcp' and an absolute path, so it is
+    not duplicated. The same comparison on the effective base_mods keeps
+    the original document: copying the folder into extra_mods would put it
+    twice on -mod=, and the bridge check below still reports
+    bridge_mod_missing because base_mods do not satisfy it. A list the
+    sealed parser would reject after the append (longer than 64, or a
+    casefold duplicate) is left unchanged.
+    """
+    if kill or _names_bridge(project_mod):
+        return extra_mods, ()
+    if extra_mods is not None and any(_names_bridge(item) for item in extra_mods):
+        return extra_mods, ()
+    if any(_names_bridge(item) for item in base_mods):
+        return extra_mods, ()
+    candidate = [*(extra_mods or ()), _DEFAULT_BRIDGE_EXTRA]
+    if not dayz_test_request._valid_string_list(candidate):
+        return extra_mods, ()
+    return candidate, (_DEFAULT_BRIDGE_EXTRA,)
+
+
+def _bridge_default_report(
+    requested: list[str] | None, canonical: bytes
+) -> list[str]:
+    """The default this canonical request actually carried, if it did."""
+    try:
+        payload = json.loads(canonical)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    got = payload.get("extra_mods")
+    if type(got) is not list:
+        return []
+    prefix = list(requested) if type(requested) is list else []
+    if got == [*prefix, _DEFAULT_BRIDGE_EXTRA]:
+        return [_DEFAULT_BRIDGE_EXTRA]
+    return []
+
+
+def _annotate_bridge_default(
+    result: dict[str, object], defaulted: list[str]
+) -> dict[str, object]:
+    if defaulted:
+        result["extra_mods_defaulted"] = list(defaulted)
+    return result
+
+
 def build_run_request(
     sealed_policies: tuple[object, ...],
     *,
@@ -287,70 +384,105 @@ def build_run_request(
     public_extra = _public_mod_list(extra_mods, selected.mod_roots)
     public_base = _public_mod_list(base_mods, selected.mod_roots)
     public_server = _public_mod_list(server_mods, selected.mod_roots)
-    document: dict[str, object] = {
-        "auto_remediate_steam": auto_remediate_steam,
-        "build": build,
-        "clean": clean,
-        "dev_root": selected.dev_root,
-        "height": height,
-        "kill": kill,
-        "mission": mission,
-        "mod": selected.mod,
-        "mode": mode,
-        "no_base_mods": no_base_mods,
-        "no_file_patching": no_file_patching,
-        "pack_only": pack_only,
-        "player_name": player_name,
-        "port": port,
-        "preflight": preflight,
-        "run_id": run_id,
-        "server_wait_s": server_wait_s,
-        "version": 1,
-        "width": width,
-    }
-    if public_extra is not None:
-        document["extra_mods"] = public_extra
-    if public_base is not None:
-        document["base_mods"] = public_base
-    if public_server is not None:
-        document["server_mods"] = public_server
-    if replace_if_not_polling_since is not None:
-        # 79e2. Present only on the call that supersedes a live client, and only
-        # once the gate has actually read the bridge: the value is the instant
-        # of that reading, which start_run revalidates before killing anything.
-        document["replace_if_not_polling_since"] = replace_if_not_polling_since
-    raw = json.dumps(
-        document,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    # Caller's entries are already validated. The default is one more folder
+    # name on extra_mods, then the same parser. A size or list rejection that
+    # appears only with that name is dropped and the bridge check below
+    # reports bridge_mod_missing; any other rejection is the caller's.
+    requested_extra = public_extra
+    effective_base = _effective_base_mods(
+        public_base,
+        policy_defaults=selected.default_base_mods,
+        no_base_mods=no_base_mods,
+    )
+    public_extra, defaulted_bridge = _extra_mods_with_bridge_default(
+        public_extra,
+        project_mod=selected.mod,
+        kill=kill,
+        base_mods=effective_base,
+    )
+
+    def _compose(
+        mods: list[str] | None,
+    ) -> dayz_test_request.ParsedDayzTestRequest:
+        document: dict[str, object] = {
+            "auto_remediate_steam": auto_remediate_steam,
+            "build": build,
+            "clean": clean,
+            "dev_root": selected.dev_root,
+            "height": height,
+            "kill": kill,
+            "mission": mission,
+            "mod": selected.mod,
+            "mode": mode,
+            "no_base_mods": no_base_mods,
+            "no_file_patching": no_file_patching,
+            "pack_only": pack_only,
+            "player_name": player_name,
+            "port": port,
+            "preflight": preflight,
+            "run_id": run_id,
+            "server_wait_s": server_wait_s,
+            "version": 1,
+            "width": width,
+        }
+        if mods is not None:
+            document["extra_mods"] = mods
+        if public_base is not None:
+            document["base_mods"] = public_base
+        if public_server is not None:
+            document["server_mods"] = public_server
+        if replace_if_not_polling_since is not None:
+            # 79e2. Present only on the call that supersedes a live client, and only
+            # once the gate has actually read the bridge: the value is the instant
+            # of that reading, which start_run revalidates before killing anything.
+            document["replace_if_not_polling_since"] = replace_if_not_polling_since
+        raw = json.dumps(
+            document,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        try:
+            return dayz_test_request.parse_dayz_test_request(
+                raw, policies=_semantic_policies(sealed_policies)
+            )
+        except (TypeError, ValueError) as exc:
+            token = str(exc)
+            if token == dayz_test_request._INVALID_RUN_ID:
+                _fail("bad_run_id")
+            if token in {
+                dayz_test_request._CLIENT_REQUIRES_RUN_ID,
+                dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
+            }:
+                _fail(f"bad_dayz_test_request:{token}")
+            # 8f8c point 3. The 25 conditions of the parser used to arrive here as
+            # one token. A declared reason is republished with the same shape the
+            # three named causes above already use, so every consumer that matches
+            # on the bad_dayz_test_request prefix keeps working; anything else --
+            # an undeclared suffix, a TypeError, a ValueError from elsewhere --
+            # keeps EXACTLY the bare legacy code.
+            prefix = "invalid_dayz_test_request:"
+            if token.startswith(prefix):
+                reason = token[len(prefix) :]
+                if reason in dayz_test_request.REQUEST_REJECTION_REASONS:
+                    _fail(f"bad_dayz_test_request:{reason}")
+            _fail("bad_dayz_test_request")
+
     try:
-        parsed = dayz_test_request.parse_dayz_test_request(
-            raw, policies=_semantic_policies(sealed_policies)
-        )
-    except (TypeError, ValueError) as exc:
-        token = str(exc)
-        if token == dayz_test_request._INVALID_RUN_ID:
-            _fail("bad_run_id")
-        if token in {
-            dayz_test_request._CLIENT_REQUIRES_RUN_ID,
-            dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
-        }:
-            _fail(f"bad_dayz_test_request:{token}")
-        # 8f8c point 3. The 25 conditions of the parser used to arrive here as
-        # one token. A declared reason is republished with the same shape the
-        # three named causes above already use, so every consumer that matches
-        # on the bad_dayz_test_request prefix keeps working; anything else --
-        # an undeclared suffix, a TypeError, a ValueError from elsewhere --
-        # keeps EXACTLY the bare legacy code.
-        prefix = "invalid_dayz_test_request:"
-        if token.startswith(prefix):
-            reason = token[len(prefix) :]
-            if reason in dayz_test_request.REQUEST_REJECTION_REASONS:
-                _fail(f"bad_dayz_test_request:{reason}")
-        _fail("bad_dayz_test_request")
+        parsed = _compose(public_extra)
+    except DayzTestToolError as exc:
+        if (
+            defaulted_bridge
+            and exc.code in _SEALED_REQUEST_REJECTS_BRIDGE_DEFAULT
+        ):
+            try:
+                parsed = _compose(requested_extra)
+            except DayzTestToolError:
+                raise exc
+            public_extra = requested_extra
+        else:
+            raise
     effective_mods = [selected.mod, *(public_extra or [])]
     if not kill and not any(
         ntpath.basename(mod).casefold() in _BRIDGE_MOD_NAMES
@@ -1543,6 +1675,7 @@ async def execute_dayz_test_run(
             raw_request, policy = build_run_request(
                 bundle.sealed_policies, **request_arguments
             )
+            bridge_default = _bridge_default_report(extra_mods, raw_request)
             # The admin-tools gate runs before the host gate below: it is a
             # property of the request just composed, and a refusal here has
             # consulted neither Steam nor the lifecycle. A request that asks
@@ -1574,7 +1707,7 @@ async def execute_dayz_test_run(
                 )
                 if preflight:
                     refused["preflight_skipped_checks"] = preflight_skipped_checks
-                return refused
+                return _annotate_bridge_default(refused, bridge_default)
             if _mode_starts_client(mode):
                 # Gate body uses time.sleep / ImageGrab join. Run it off the
                 # broker event loop so other MCP sessions keep heartbeating.
@@ -1599,7 +1732,7 @@ async def execute_dayz_test_run(
                     )
                     if preflight:
                         refused["preflight_skipped_checks"] = preflight_skipped_checks
-                    return refused
+                    return _annotate_bridge_default(refused, bridge_default)
             if not preflight and _mode_starts_client(mode):
                 try:
                     steam = evaluate_steam_session()
@@ -1631,7 +1764,7 @@ async def execute_dayz_test_run(
                         vpp_missing=list(vpp.missing),
                         vpp_warnings=list(vpp.warnings),
                     )
-                    return failed
+                    return _annotate_bridge_default(failed, bridge_default)
             replacement: ClientReplacementDecision | None = None
             client_pids_before: tuple[int, ...] | None = None
             bridge_cause: str | None = None
@@ -1661,7 +1794,7 @@ async def execute_dayz_test_run(
                         vpp_warnings=list(vpp.warnings),
                     )
                     refused["run_not_extensible_cause"] = exc.cause
-                    return refused
+                    return _annotate_bridge_default(refused, bridge_default)
                 if _mode_starts_client(mode):
                     # Relaunching this role supersedes the client already on the
                     # run (the role replacement inside start_run). The caller
@@ -1740,7 +1873,7 @@ async def execute_dayz_test_run(
                             and replacement.reason == _BRIDGE_STATUS_UNKNOWN
                         ):
                             refused["bridge_status_cause"] = bridge_cause
-                        return refused
+                        return _annotate_bridge_default(refused, bridge_default)
             if replacement is not None and replacement.replace:
                 # H-A2-2 / 79e2: the verdict reached here is two broker hops and
                 # one process start away from the kill, so it does not travel as
@@ -1752,6 +1885,7 @@ async def execute_dayz_test_run(
                     **request_arguments,
                     replace_if_not_polling_since=decided_at_ms,
                 )
+                bridge_default = _bridge_default_report(extra_mods, raw_request)
             # 296b: the CLIENT profile roots whose dumps can name this
             # launch's death; the snapshot is taken when the launch executes.
             client_dump_roots = (
@@ -1778,7 +1912,7 @@ async def execute_dayz_test_run(
             )
             if preflight:
                 result["preflight_skipped_checks"] = preflight_skipped_checks
-            return result
+            return _annotate_bridge_default(result, bridge_default)
 
 
 def _run_row(status: object, run_id: str) -> dict[str, object] | None:
@@ -2122,8 +2256,12 @@ _CLOSE_REASON_TOKENS = frozenset(
         "no_window",
         "run_retired_elsewhere",
         "status_unavailable",
+        "close_failed",
     }
 )
+_CLOSE_ERROR_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\Z")
+_SPLIT_CLOSE_TOKENS = frozenset({"posted", "not_posted", "failed", "unknown"})
+_SPLIT_PROCESS_TOKENS = frozenset({"running", "absent", "unknown"})
 _CLOSE_POLL_S = 0.05
 _CLOSE_REAP_INTERVAL_S = 1.0
 _RPT_READ_CHUNK = 1024 * 1024
@@ -2138,6 +2276,19 @@ _PLAYER_CONNECTED_RE = re.compile(
     br'Player "[^"\n]+" \([^)\n]*\) is connected'
 )
 _LOGOUT_FINISHED_RE = re.compile(br"\[Logout\]: Player \S+ finished\b")
+_PLAYER_CONNECTED_NAME_RE = re.compile(
+    br'Player "([^"\n]+)" \([^)\n]*\) is connected'
+)
+_LOGOUT_FINISHED_ID_RE = re.compile(br"\[Logout\]: Player (\S+) finished\b")
+# The connect line names the player. The logout line carries the uid. The
+# server RPT state line is what ties those two cited formats together.
+_PLAYER_UID_RE = re.compile(
+    br"\[StateMachine\]: Player (.+?) \([^)\n]*\buid (\S+?)\)"
+)
+# fb-20260928-032049-62c5. The logout phase is min(this, graceful_timeout_s)
+# and does not consume the termination deadline.
+_LOGOUT_WAIT_S = 30.0
+_PLAYER_TOKEN_MAX = 256
 _PLAYER_STATE_NOT_SAVED = (
     "player_state_not_saved: wait for the periodic players.db save, "
     "or disconnect the client first"
@@ -2506,6 +2657,401 @@ def _player_state_warnings(server_rpt: Path) -> list[str]:
     return []
 
 
+def _player_token(raw: bytes) -> str | None:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError:
+        return None
+    if not text or len(text) > _PLAYER_TOKEN_MAX:
+        return None
+    if any(ord(char) < 32 for char in text):
+        return None
+    return text
+
+
+@dataclass(frozen=True, slots=True)
+class _LogoutBoundary:
+    """Byte sizes taken before the client close. A later line is verifiable
+    only at or past that size on the same file, or in a file the directory
+    listing did not contain yet.
+    """
+
+    files: dict[str, tuple[int, int]]
+    listed: bool
+
+
+def _logout_boundary(server_rpt: Path | None) -> _LogoutBoundary:
+    files: dict[str, tuple[int, int]] = {}
+    if server_rpt is None:
+        return _LogoutBoundary(files, False)
+    listed = False
+    try:
+        entries = list(server_rpt.parent.iterdir())
+        listed = True
+    except OSError:
+        entries = []
+    for item in entries:
+        try:
+            if not item.is_file():
+                continue
+            stat = item.stat()
+        except OSError:
+            continue
+        files[str(item)] = (int(stat.st_ino), int(stat.st_size))
+    key = str(server_rpt)
+    if key not in files:
+        try:
+            stat = server_rpt.stat()
+        except OSError:
+            pass
+        else:
+            files[key] = (int(stat.st_ino), int(stat.st_size))
+    return _LogoutBoundary(files, listed)
+
+
+@dataclass(frozen=True, slots=True)
+class _LogEvent:
+    path: str
+    inode: int
+    offset: int
+    after_boundary: bool
+    seq: int
+
+
+class _LogoutWatch:
+    """Active connections and the logout lines that can save them.
+
+    A player is saved only when the uid linked to that name logs out after
+    that player's last connect line and after the pre-close boundary. A line
+    from before the boundary, or a uid that was never linked, does not count.
+    """
+
+    __slots__ = (
+        "boundary",
+        "order",
+        "connects",
+        "uid_links",
+        "logouts",
+        "files",
+        "seq",
+        "incomplete",
+        "unverified",
+    )
+
+    def __init__(self, boundary: _LogoutBoundary) -> None:
+        self.boundary = boundary
+        self.order: list[str] = []
+        self.connects: list[tuple[_LogEvent, str]] = []
+        self.uid_links: list[tuple[_LogEvent, str, str]] = []
+        self.logouts: list[tuple[_LogEvent, str]] = []
+        self.files: dict[str, tuple[int, int, bytes]] = {}
+        self.seq = 0
+        self.incomplete = False
+        self.unverified = False
+
+    def _after_boundary(self, path: str, inode: int, offset: int) -> bool:
+        snap = self.boundary.files.get(path)
+        if snap is None:
+            return self.boundary.listed
+        snap_inode, snap_size = snap
+        if inode != snap_inode:
+            return False
+        return offset >= snap_size
+
+    def _event(self, path: str, inode: int, offset: int) -> _LogEvent:
+        self.seq += 1
+        return _LogEvent(
+            path,
+            inode,
+            offset,
+            self._after_boundary(path, inode, offset),
+            self.seq,
+        )
+
+    def _fold(
+        self,
+        path: str,
+        inode: int,
+        window: bytes,
+        window_start: int,
+        carry_len: int,
+    ) -> None:
+        for match in _PLAYER_UID_RE.finditer(window):
+            if match.end() <= carry_len:
+                continue
+            name = _player_token(match.group(1))
+            uid = _player_token(match.group(2))
+            if name and uid:
+                event = self._event(path, inode, window_start + match.start())
+                self.uid_links.append((event, name, uid))
+        for match in _PLAYER_CONNECTED_NAME_RE.finditer(window):
+            if match.end() <= carry_len:
+                continue
+            name = _player_token(match.group(1))
+            if not name:
+                continue
+            event = self._event(path, inode, window_start + match.start())
+            self.connects.append((event, name))
+            if name not in self.order:
+                self.order.append(name)
+        for match in _LOGOUT_FINISHED_ID_RE.finditer(window):
+            if match.end() <= carry_len:
+                continue
+            token = _player_token(match.group(1))
+            if not token:
+                continue
+            event = self._event(path, inode, window_start + match.start())
+            self.logouts.append((event, token))
+
+    def _remember(
+        self, key: str, inode: int, offset: int, carry: bytes
+    ) -> None:
+        self.files[key] = (inode, offset, carry)
+
+    def consume_file(self, path: Path, deadline: float) -> bool:
+        """Read one file up to ``deadline``. False means the budget expired."""
+        if time.monotonic() >= deadline:
+            self.incomplete = True
+            return False
+        try:
+            stat = path.stat()
+        except OSError:
+            return True
+        key = str(path)
+        inode = int(stat.st_ino)
+        size = int(stat.st_size)
+        snap = self.boundary.files.get(key)
+        if snap is not None and snap[0] != inode:
+            self.unverified = True
+            return True
+        prev = self.files.get(key)
+        if prev is not None and (prev[0] != inode or size < prev[1]):
+            self.unverified = True
+            return True
+        offset = 0 if prev is None else prev[1]
+        carry = b"" if prev is None else prev[2]
+        if offset >= size:
+            return True
+        try:
+            handle = path.open("rb")
+        except OSError:
+            return True
+        try:
+            while offset < size:
+                if time.monotonic() >= deadline:
+                    self.incomplete = True
+                    self._remember(key, inode, offset, carry)
+                    return False
+                try:
+                    handle.seek(offset)
+                    chunk = handle.read(min(_RPT_READ_CHUNK, size - offset))
+                except OSError:
+                    self._remember(key, inode, offset, carry)
+                    return True
+                if not chunk or not isinstance(chunk, bytes):
+                    self._remember(key, inode, offset, carry)
+                    return True
+                window_start = offset - len(carry)
+                window = carry + chunk
+                self._fold(key, inode, window, window_start, len(carry))
+                if len(window) > _PLAYER_LOG_OVERLAP:
+                    carry = window[-_PLAYER_LOG_OVERLAP:]
+                else:
+                    carry = window
+                offset += len(chunk)
+        finally:
+            try:
+                handle.close()
+            except OSError:
+                pass
+        self._remember(key, inode, offset, carry)
+        return True
+
+    def consume_tree(self, server_rpt: Path, deadline: float) -> bool:
+        if not self.consume_file(server_rpt, deadline):
+            return False
+        script = _script_log_for_server_rpt(server_rpt)
+        if script is None:
+            return not self.incomplete
+        return self.consume_file(script, deadline)
+
+    def _later(self, logout: _LogEvent, connect: _LogEvent) -> bool:
+        if (
+            logout.path == connect.path
+            and logout.inode == connect.inode
+            and logout.offset > connect.offset
+        ):
+            return True
+        return logout.after_boundary and not connect.after_boundary
+
+    def _active_uids(self, name: str, last: _LogEvent) -> set[str]:
+        """The uid of this connection, not an earlier session of the same name."""
+        same = [
+            (event, uid)
+            for event, linked, uid in self.uid_links
+            if linked == name and event.path == last.path and event.inode == last.inode
+        ]
+        before = [
+            (event, uid) for event, uid in same if event.offset <= last.offset
+        ]
+        if before:
+            _event, uid = max(before, key=lambda item: (item[0].offset, item[0].seq))
+            return {uid}
+        after = [(event, uid) for event, uid in same if event.offset > last.offset]
+        if after:
+            _event, uid = min(after, key=lambda item: (item[0].offset, item[0].seq))
+            return {uid}
+        return set()
+
+    def _logout_finished(self, name: str) -> bool:
+        connects = [event for event, linked in self.connects if linked == name]
+        if not connects:
+            return False
+        last = max(
+            connects,
+            key=lambda event: (event.after_boundary, event.offset, event.seq),
+        )
+        uids = self._active_uids(name, last)
+        if not uids:
+            return False
+        for event, token in self.logouts:
+            if token not in uids or not event.after_boundary:
+                continue
+            if self._later(event, last):
+                return True
+        return False
+
+    def rows(self) -> list[dict[str, object]]:
+        return [
+            {"player": name, "logout_finished": self._logout_finished(name)}
+            for name in self.order
+        ]
+
+
+async def _wait_for_connected_logouts(
+    server_rpt: Path | None,
+    timeout_s: float,
+    boundary: _LogoutBoundary,
+    *,
+    wait: bool,
+) -> tuple[list[dict[str, object]], float, bool]:
+    """Return (players, wait_s, timed_out).
+
+    The deadline is armed before any log byte is read and checked between
+    blocks. No connected player skips the wait. A connected player is saved
+    only by their linked uid's logout after the pre-close boundary. Without
+    that link the wait runs to the cap and the caller warns.
+    """
+    if server_rpt is None:
+        return [], 0.0, False
+    budget = min(_LOGOUT_WAIT_S, timeout_s)
+    started = time.monotonic()
+    deadline = started + budget
+    watch = _LogoutWatch(boundary)
+
+    def _elapsed() -> float:
+        return max(0.0, time.monotonic() - started)
+
+    if not watch.consume_tree(server_rpt, deadline) or watch.unverified:
+        return watch.rows(), _elapsed(), True
+    rows = watch.rows()
+    if not rows or not wait:
+        return rows, 0.0, False
+    while True:
+        rows = watch.rows()
+        if rows and all(item["logout_finished"] is True for item in rows):
+            return rows, _elapsed(), False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return rows, _elapsed(), True
+        await asyncio.sleep(min(_CLOSE_POLL_S, remaining))
+        if not watch.consume_tree(server_rpt, deadline) or watch.unverified:
+            return watch.rows(), _elapsed(), True
+
+
+def _split_client_then_server(roles: list[str]) -> bool:
+    return set(roles) == {"client", "server"}
+
+
+def _close_error_token(value: object) -> str:
+    if isinstance(value, str) and _CLOSE_ERROR_TOKEN.fullmatch(value):
+        return value
+    return "lifecycle_close_unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class _RoleCloseFailure:
+    code: str
+    query_state: bool
+
+
+async def _checked_role_close(fn: object, *args: object) -> dict[str, object]:
+    if not callable(fn):
+        _fail("lifecycle_close_unavailable")
+    close_result = await fn(*args)
+    if not isinstance(close_result, dict):
+        _fail("lifecycle_close_unavailable")
+    if close_result.get("error"):
+        code = close_result.get("error")
+        _fail(
+            str(code) if isinstance(code, str) and code else "lifecycle_close_unavailable"
+        )
+    return close_result
+
+
+async def _attempt_role_close(
+    fn: object, *args: object
+) -> tuple[dict[str, object] | None, _RoleCloseFailure | None]:
+    """Close one role. A failure is data, not an exception for the caller.
+
+    A coded rejection can be followed by a status query. A transport
+    exception cannot: another call may be the outage itself.
+    """
+    if not callable(fn):
+        return None, _RoleCloseFailure("lifecycle_close_unavailable", False)
+    try:
+        close_result = await fn(*args)
+    except DayzTestToolError as exc:
+        return None, _RoleCloseFailure(_close_error_token(exc.code), True)
+    except Exception:
+        return None, _RoleCloseFailure("lifecycle_close_unavailable", False)
+    if not isinstance(close_result, dict):
+        return None, _RoleCloseFailure("lifecycle_close_unavailable", False)
+    if close_result.get("error"):
+        return None, _RoleCloseFailure(
+            _close_error_token(close_result.get("error")), True
+        )
+    return close_result, None
+
+
+def _role_process_state(status: dict[str, object], run_id: str, role: str) -> str:
+    """``running`` or ``absent`` when the snapshot says so, else ``unknown``."""
+    run = _run_row(status, run_id)
+    if run is not None:
+        processes = run.get("processes")
+        if not isinstance(processes, list):
+            return "unknown"
+        for item in processes:
+            if isinstance(item, dict) and item.get("role") == role:
+                return "running"
+        return "absent"
+    if _retired_event(status, run_id) is not None:
+        return "absent"
+    return "unknown"
+
+
+def _merge_role_close(
+    run_id: str, parts: list[dict[str, object]]
+) -> dict[str, object]:
+    merged: dict[str, object] = {"run_id": run_id}
+    for part in parts:
+        for key, value in part.items():
+            if key == "run_id" or not isinstance(value, dict):
+                continue
+            merged[key] = value
+    return merged
+
+
 def _whitelist_close_result(payload: dict[str, object]) -> dict[str, object]:
     roles_raw = payload.get("roles")
     roles: list[dict[str, object]] = []
@@ -2524,7 +3070,139 @@ def _whitelist_close_result(payload: dict[str, object]) -> dict[str, object]:
         and all(isinstance(item, str) and item for item in warnings)
     ):
         result["warnings"] = list(warnings)
+    order = payload.get("close_order")
+    if (
+        isinstance(order, list)
+        and order
+        and all(isinstance(item, str) and item in {"client", "server"} for item in order)
+    ):
+        result["close_order"] = list(order)
+    wait = payload.get("logout_wait_s")
+    if isinstance(wait, float) and math.isfinite(wait) and wait >= 0.0:
+        result["logout_wait_s"] = wait
+    players = payload.get("logout_players")
+    if isinstance(players, list):
+        clean: list[dict[str, object]] = []
+        reportable = True
+        for item in players:
+            if not isinstance(item, dict):
+                reportable = False
+                break
+            name = item.get("player")
+            seen = item.get("logout_finished")
+            if not isinstance(name, str) or not name or not isinstance(seen, bool):
+                reportable = False
+                break
+            clean.append({"player": name, "logout_finished": seen})
+        if reportable:
+            result["logout_players"] = clean
+    error = payload.get("error")
+    if isinstance(error, str) and _CLOSE_ERROR_TOKEN.fullmatch(error):
+        result["error"] = error
+    split_roles = payload.get("close_roles")
+    if isinstance(split_roles, list):
+        clean_roles: list[dict[str, object]] = []
+        reportable = True
+        for item in split_roles:
+            if not isinstance(item, dict):
+                reportable = False
+                break
+            role = item.get("role")
+            close = item.get("close")
+            process = item.get("process")
+            if (
+                role not in {"client", "server"}
+                or close not in _SPLIT_CLOSE_TOKENS
+                or process not in _SPLIT_PROCESS_TOKENS
+            ):
+                reportable = False
+                break
+            clean_roles.append(
+                {"role": role, "close": close, "process": process}
+            )
+        if reportable and clean_roles:
+            result["close_roles"] = clean_roles
     return result
+
+
+def _reported_close_state(close_result: object, role: str) -> str:
+    """``posted`` only when that role's ``windows_posted`` is a positive int.
+
+    A confirmed zero is ``not_posted``. No row, a bool, or any other count
+    is ``unknown``: the answer must not claim a WM_CLOSE was sent.
+    """
+    if not isinstance(close_result, dict):
+        return "unknown"
+    row = _close_role_row(close_result, role)
+    if row is None:
+        return "unknown"
+    value = row.get("windows_posted")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return "unknown"
+    if value > 0:
+        return "posted"
+    if value == 0:
+        return "not_posted"
+    return "unknown"
+
+
+async def _partial_split_close(
+    status_fn: object,
+    run_id: str,
+    published: list[str],
+    players: list[dict[str, object]],
+    logout_wait_s: float,
+    timed_out: bool,
+    failure: _RoleCloseFailure,
+    client_close: object,
+) -> dict[str, object]:
+    """The server close did not land. The client state comes from its reply.
+
+    The answer keeps the original error, says the stop is still required,
+    and reports each role's process as running, absent, or unknown.
+    """
+    client_process = "unknown"
+    server_process = "unknown"
+    run_retired = False
+    if failure.query_state and callable(status_fn):
+        status: object = None
+        try:
+            status = await status_fn()
+        except Exception:
+            status = None
+        if isinstance(status, dict) and not status.get("error"):
+            client_process = _role_process_state(status, run_id, "client")
+            server_process = _role_process_state(status, run_id, "server")
+            run_retired = _retired_event(status, run_id) is not None
+    payload: dict[str, object] = {
+        "run_id": run_id,
+        "graceful": False,
+        "stop_method": "orderly_close",
+        "graceful_wait_s": 0.0,
+        "exit_metrics_valid": False,
+        "run_retired": run_retired,
+        "stop_required": True,
+        "reason": "close_failed",
+        "roles": [
+            {"role": role, "termination_line": False, "rpt_rotated": False}
+            for role in published
+        ],
+        "close_order": ["client", "server"],
+        "logout_wait_s": float(logout_wait_s),
+        "logout_players": players,
+        "error": failure.code,
+        "close_roles": [
+            {
+                "role": "client",
+                "close": _reported_close_state(client_close, "client"),
+                "process": client_process,
+            },
+            {"role": "server", "close": "failed", "process": server_process},
+        ],
+    }
+    if timed_out:
+        payload["warnings"] = [_PLAYER_STATE_NOT_SAVED]
+    return _whitelist_close_result(payload)
 
 
 async def execute_dayz_test_close(
@@ -2584,12 +3262,44 @@ async def execute_dayz_test_close(
     close_fn = getattr(runtime, "lifecycle_close", None)
     if not callable(close_fn):
         _fail("lifecycle_close_unavailable")
-    close_result = await close_fn(run_id)
-    if not isinstance(close_result, dict):
-        _fail("lifecycle_close_unavailable")
-    if close_result.get("error"):
-        code = close_result.get("error")
-        _fail(str(code) if isinstance(code, str) and code else "lifecycle_close_unavailable")
+    logout_report: dict[str, object] | None = None
+    if _split_client_then_server(process_roles):
+        close_roles = getattr(runtime, "lifecycle_close_roles", None)
+        server_watch = watches.get("server")
+        server_rpt = None if server_watch is None else Path(server_watch.path)
+        boundary = _logout_boundary(server_rpt)
+        client_close = await _checked_role_close(close_roles, run_id, ["client"])
+        client_row = _close_role_row(client_close, "client")
+        players, logout_wait_s, timed_out = await _wait_for_connected_logouts(
+            server_rpt,
+            timeout_s,
+            boundary,
+            wait=client_row is None or _windows_posted(client_close, "client") > 0,
+        )
+        server_close, server_failure = await _attempt_role_close(
+            close_roles, run_id, ["server"]
+        )
+        if server_failure is not None or server_close is None:
+            return await _partial_split_close(
+                status_fn,
+                run_id,
+                published,
+                players,
+                logout_wait_s,
+                timed_out,
+                server_failure
+                or _RoleCloseFailure("lifecycle_close_unavailable", False),
+                client_close,
+            )
+        close_result = _merge_role_close(run_id, [client_close, server_close])
+        logout_report = {
+            "close_order": ["client", "server"],
+            "logout_wait_s": logout_wait_s,
+            "logout_players": players,
+            "timed_out": timed_out,
+        }
+    else:
+        close_result = await _checked_role_close(close_fn, run_id)
     wait_started = time.monotonic()
     deadline = wait_started + timeout_s
     reap_fn = getattr(runtime, "lifecycle_reap", None)
@@ -2751,9 +3461,16 @@ async def execute_dayz_test_close(
         "reason": reason,
         "roles": roles_out,
     }
-    # Warning only. The close order, timeouts and reap stay as they are
-    # (fb-20260928-032049-62c5).
-    if graceful:
+    # fb-20260928-032049-62c5 option 1: client, then the logout line, then
+    # the server. The warning is that wait timing out. One-role closes keep
+    # the boolean warning from #136.
+    if logout_report is not None:
+        payload["close_order"] = logout_report["close_order"]
+        payload["logout_wait_s"] = logout_report["logout_wait_s"]
+        payload["logout_players"] = logout_report["logout_players"]
+        if graceful and logout_report["timed_out"] is True:
+            payload["warnings"] = [_PLAYER_STATE_NOT_SAVED]
+    elif graceful:
         server_watch = watches.get("server")
         if server_watch is not None:
             warnings = _player_state_warnings(Path(server_watch.path))

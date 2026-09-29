@@ -2243,6 +2243,7 @@ class ClientRuntime:
         wanted = getattr(method, "__func__", None)
         implemented = {
             getattr(getattr(control, "lifecycle_close", None), "__func__", None),
+            getattr(getattr(control, "lifecycle_close_roles", None), "__func__", None),
             getattr(getattr(control, "lifecycle_reap", None), "__func__", None),
         }
         if wanted is None or wanted not in implemented:
@@ -2407,6 +2408,17 @@ class ClientRuntime:
     async def lifecycle_close(self, run_id: str) -> dict[str, Any]:
         result = await self._control_with_lazy_spawn(
             self._control.lifecycle_close, run_id
+        )
+        await self._accept_command_renewal(result)
+        if isinstance(result, dict):
+            result.pop("lease_id", None)
+        return result
+
+    async def lifecycle_close_roles(
+        self, run_id: str, roles: list[str]
+    ) -> dict[str, Any]:
+        result = await self._control_with_lazy_spawn(
+            self._control.lifecycle_close_roles, run_id, roles
         )
         await self._accept_command_renewal(result)
         if isinstance(result, dict):
@@ -3225,9 +3237,14 @@ EXTRA_MODS_DESCRIPTION = (
     "Additional mods for this run. Each entry must be a single folder name "
     "(for example '@DayZ_MCP') or an absolute path inside the project's "
     "mod_roots; relative paths with '\\' or '/' are rejected as bad_mod. "
-    "When the selected project is not DayZ_MCP, include '@DayZ_MCP' here "
-    "explicitly (bridge_mod_missing otherwise); base_mods and server_mods "
-    "do not satisfy that gate."
+    "When the selected project is not DayZ_MCP, '@DayZ_MCP' is appended to "
+    "extra_mods by default unless that folder name is already present in "
+    "extra_mods, and the result reports extra_mods_defaulted. The same "
+    "folder in the base_mods list this run will load (the caller's list, or "
+    "the policy defaults when the caller omits it) is not copied into "
+    "extra_mods. base_mods and server_mods do not satisfy that gate, so "
+    "that call stays bridge_mod_missing. bridge_mod_missing also remains "
+    "when the sealed request would reject the appended entry."
 )
 CLIENT_START_BUDGET_MAX_S = 3600.0
 CLIENT_START_BUDGET_DESCRIPTION = (
@@ -5642,9 +5659,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "project's mod_roots; relative paths with '\\' or '/' are "
             "rejected as bad_mod. A disposable probe need not be "
             "registered as a project. When the selected project is not "
-            "DayZ_MCP, pass extra_mods=['@DayZ_MCP'] explicitly "
-            "(bridge_mod_missing otherwise); '@DayZ_MCP' in base_mods or "
-            "server_mods does not satisfy that gate. "
+            "DayZ_MCP, '@DayZ_MCP' is appended to extra_mods by default "
+            "unless that folder name is already present in extra_mods, and "
+            "the result reports extra_mods_defaulted. The same folder in "
+            "the base_mods list this run will load (the caller's list, or "
+            "the policy defaults when the caller omits it) is not copied "
+            "into extra_mods. base_mods and server_mods do not satisfy "
+            "that gate, so that call stays bridge_mod_missing. "
+            "bridge_mod_missing also remains when the sealed request would "
+            "reject the appended entry. "
             "wait_for_box_s>0 waits "
             "until session_status.box is free (FIFO, no tool_lock while "
             "sleeping). on_busy=\"queue\" waits in that FIFO (wait_for_box_s "
@@ -5989,12 +6012,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(
         description=(
-            f"{LEASE_TOOL_LINE} For the session that owns the run. Ask the "
-            "run's windows to close as a person would; wait for each launched "
-            "role's orderly termination. Graceful only when every launched "
-            "role wrote a new termination line and the run was retired as "
-            "run_reaped. When stop_required is true, release the lease and "
-            "call dayz_test_stop."
+            f"{LEASE_TOOL_LINE} For the session that owns the run. When the "
+            "run has a live client and a live server, close the client first, "
+            "wait for each connected player's `[Logout]: Player … finished` "
+            "line (at most 30s, also bounded by graceful_timeout_s), then "
+            "close the server. If that server close fails, the result is not "
+            "graceful, stop_required is true, and the original error is kept. "
+            "A server-only run or a client-only reattach "
+            "closes as before. Graceful only when every launched role wrote "
+            "a new termination line and the run was retired as run_reaped. "
+            "When stop_required is true, release the lease and call "
+            "dayz_test_stop."
         )
     )
     async def dayz_test_close(

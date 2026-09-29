@@ -3896,7 +3896,12 @@ class Handler(BaseHTTPRequestHandler):
         elif action == "stop":
             result = lifecycle.stop_run(client, token, body.get("run_id"))
         elif action == "close":
-            result = lifecycle.close_run(client, token, body.get("run_id"))
+            if "roles" in body:
+                result = lifecycle.close_run_roles(
+                    client, token, body.get("run_id"), body.get("roles")
+                )
+            else:
+                result = lifecycle.close_run(client, token, body.get("run_id"))
         elif action == "adopt":
             result = lifecycle.adopt_run(client, token, body.get("run_id"))
         elif action == "reap":

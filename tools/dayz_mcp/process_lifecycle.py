@@ -24,6 +24,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping, TypeVar
 
 from dayz_mcp import dayz_test_storage, window_close
+from dayz_mcp.child_environment import whitelisted_child_environment
 from dayz_mcp.input_activity import InputAttributor, InputSample
 from dayz_mcp.instance_fence import BindingPrepareError
 from dayz_mcp.steam_launch_guard import Preparation
@@ -45,6 +46,9 @@ _IDLE_GUARD: contextvars.ContextVar[Mapping[str, object] | None] = contextvars.C
     "dayz_idle_guard",
     default=None,
 )
+# Roles a caller may name on close_run_roles. close_run(only_roles=None)
+# still closes every owned role.
+_CLOSE_ROLE_NAMES = frozenset({"client", "server"})
 
 
 @contextmanager
@@ -1794,7 +1798,11 @@ class ProcessLifecycle:
         return runs, diagnostics
 
     def _launch(self, argv: list[str], cwd: str, window_style: str) -> object:
-        kwargs: dict[str, object] = {"cwd": cwd, "close_fds": True}
+        kwargs: dict[str, object] = {
+            "cwd": cwd,
+            "close_fds": True,
+            "env": whitelisted_child_environment(),
+        }
         if os.name == "nt" and window_style == "hidden":
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         elif os.name == "nt" and window_style == "normal":
@@ -4021,7 +4029,12 @@ class ProcessLifecycle:
                 self._finish_committed(authority, command_id)
 
     def close_run(
-        self, client: ClientIdentity, token: str | None, run_id: object
+        self,
+        client: ClientIdentity,
+        token: str | None,
+        run_id: object,
+        *,
+        only_roles: frozenset[str] | None = None,
     ) -> dict[str, object]:
         """Close the run's windows. Ordinary callers are unchanged.
 
@@ -4029,7 +4042,20 @@ class ProcessLifecycle:
         no effect after any doubt observed up to the final check of the first effect.
         the only residual window is between that check and the syscall.
         after the first effect, no foreign target is touched, and the outcome says so.
+
+        ``only_roles`` limits the non-warden post to those roles. None closes
+        every owned role, which is the idle warden's call. A warden guard
+        together with ``only_roles`` refuses before any post.
         """
+        if only_roles is not None and (
+            not isinstance(only_roles, frozenset)
+            or not only_roles
+            or any(
+                not isinstance(role, str) or role not in _CLOSE_ROLE_NAMES
+                for role in only_roles
+            )
+        ):
+            return self._error("bad_args", 400)
         if isinstance(run_id, str) and run_id:
             self.note_launcher_request(client, run_id)
         legacy_error = self._legacy_identity_error()
@@ -4071,6 +4097,8 @@ class ProcessLifecycle:
                 ):
                     return self._reject_reserved(authority, command, "run_not_adopted")
                 close_guard = self._warden_idle_guard(client, "close", run_id)
+                if close_guard is not None and only_roles is not None:
+                    return self._reject_reserved(authority, command, "close_failed")
                 if close_guard is not None:
                     refusal = self._idle_destruction_refusal(run, close_guard)
                     if refusal is not None:
@@ -4099,6 +4127,10 @@ class ProcessLifecycle:
                         key=lambda item: (rank.get(item[1].role, 2), item[0]),
                     )
                 ]
+                if close_guard is None and only_roles is not None:
+                    owned = [
+                        record for record in owned if record.role in only_roles
+                    ]
                 if not self._audit(
                     "lifecycle_close",
                     client,
@@ -4186,6 +4218,27 @@ class ProcessLifecycle:
                 if degraded:
                     result["cleanup_degraded"] = list(dict.fromkeys(degraded))
             return result
+
+    def close_run_roles(
+        self,
+        client: ClientIdentity,
+        token: str | None,
+        run_id: object,
+        roles: object,
+    ) -> dict[str, object]:
+        """Post WM_CLOSE to the named roles only. ``close_run`` is unchanged.
+
+        The idle warden calls ``close_run`` and never this method. Unknown,
+        empty, or non-list roles post nothing.
+        """
+        if isinstance(roles, str) or not isinstance(roles, (list, tuple)):
+            return self._error("bad_args", 400)
+        if not roles or not all(isinstance(role, str) for role in roles):
+            return self._error("bad_args", 400)
+        chosen = frozenset(roles)
+        if not chosen or not chosen <= _CLOSE_ROLE_NAMES:
+            return self._error("bad_args", 400)
+        return self.close_run(client, token, run_id, only_roles=chosen)
 
     def note_launcher_request(
         self, client: ClientIdentity, run_id: str, *, when: float | None = None
@@ -4356,6 +4409,69 @@ class ProcessLifecycle:
             return None
         buckets, _reason = self._partition_registered_processes(run.processes)
         return {name: len(pids) for name, pids in buckets.items()}
+
+    def launched_processes_still_alive(self, run_id: str) -> tuple[str, ...] | None:
+        """Names that still block ``reap_dead_run``. None when the run is absent.
+
+        Empty when nothing owned, unknown, or still listed by a known diag
+        scan is left. An unknown diag scan does not add names, so empty is
+        not by itself a known-clean read (``reap_rejection_witness``). A
+        name is ``<pid>:<role>`` for a launched role that is still owned,
+        still unclassified, or still listed by the diag scan, and
+        ``<pid>:diag`` for any other diag process. Does not terminate.
+        """
+
+        run = self.manifest.get(run_id)
+        if run is None:
+            return None
+        buckets, _unknown_reason = self._partition_registered_processes(run.processes)
+        blocking = set(buckets["owned"]) | set(buckets["unknown"])
+        labels: dict[int, str] = {}
+        for record in run.processes:
+            if record.pid in blocking:
+                labels[record.pid] = f"{record.pid}:{record.role}"
+        reason, processes = self._diag_snapshot()
+        if reason is None and processes is not None:
+            roles = {record.pid: record.role for record in run.processes}
+            for process in processes:
+                pid = process.get("pid")
+                if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                    continue
+                if pid in labels:
+                    continue
+                role = roles.get(pid)
+                labels[pid] = f"{pid}:{role}" if role is not None else f"{pid}:diag"
+        return tuple(labels[pid] for pid in sorted(labels))
+
+    def reap_rejection_witness(
+        self, run_id: str
+    ) -> tuple[str, tuple[str, ...]] | None:
+        """Classify a ``run_not_reapable`` read taken after ``reap_dead_run``.
+
+        ``None`` when the run is absent. ``state`` when the state is not
+        reapable. ``unknown`` when the diag scan cannot be vouched for and no
+        owned or unclassified role is left. ``alive`` when a known witness
+        still blocks; the names match ``launched_processes_still_alive``.
+        ``clean`` when that read is known and empty. Ports are not consulted.
+        Does not terminate.
+        """
+
+        run = self.manifest.get(run_id)
+        if run is None:
+            return None
+        if run.state not in _REAPABLE_STATES:
+            return ("state", ())
+        buckets, _unknown_reason = self._partition_registered_processes(run.processes)
+        named = self.launched_processes_still_alive(run_id)
+        labels = named if named is not None else ()
+        reason, processes = self._diag_snapshot()
+        if reason is not None or processes is None:
+            if buckets["owned"] or buckets["unknown"]:
+                return ("alive", labels)
+            return ("unknown", ())
+        if labels or processes:
+            return ("alive", labels)
+        return ("clean", ())
 
     def retail_quarantined(self) -> bool:
         return self._quarantined()

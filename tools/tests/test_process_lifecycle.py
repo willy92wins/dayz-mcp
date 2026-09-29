@@ -28,6 +28,10 @@ from dayz_mcp.process_lifecycle import (
     RunRecord,
     _ADOPT_NOT_DISPATCHABLE_HINT,
 )
+from tests.child_environment_helpers import (
+    assert_whitelisted_child_environment,
+    poisoned_child_environment,
+)
 from dayz_mcp.runtime_state import JsonlAuditWriter, RuntimePaths
 from dayz_mcp.session_coordination import SessionCoordinator
 from tests.fence_helpers import INST_CLIENT, INST_SERVER, accredited_poll, bind_both_peers
@@ -5079,6 +5083,28 @@ class StorageRotationAuditTest(unittest.TestCase):
         dropped = self.lifecycle.public_status().get("audit_rows_dropped")
         self.assertIsInstance(dropped, int)
         self.assertGreaterEqual(dropped, before + 1)
+
+
+class LaunchEnvironmentTests(unittest.TestCase):
+    def test_launch_hands_popen_only_the_whitelisted_environment(self) -> None:
+        seen: list[dict[str, object]] = []
+
+        def fake_popen(_argv: list[str], **kwargs: object) -> object:
+            seen.append(kwargs)
+            return object()
+
+        lifecycle = object.__new__(ProcessLifecycle)
+        poisoned = poisoned_child_environment()
+        with (
+            patch("dayz_mcp.child_environment.os.environ", poisoned),
+            patch("dayz_mcp.process_lifecycle.subprocess.Popen", fake_popen),
+        ):
+            lifecycle._launch(["DayZDiag_x64.exe", "-server"], r"C:\DayZ", "normal")
+
+        self.assertEqual(len(seen), 1)
+        assert_whitelisted_child_environment(self, seen[0]["env"])
+        self.assertNotIn("FAKE_API_KEY", seen[0]["env"])
+        self.assertNotIn("PERSONAL_PASS", seen[0]["env"])
 
 
 if __name__ == "__main__":
