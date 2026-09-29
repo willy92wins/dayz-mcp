@@ -247,6 +247,27 @@ class DayzTestWorkerTests(unittest.TestCase):
         self.assertNotIn(b"lease", serialized.lower())
         self.assertNotIn(b"identity", serialized.lower())
 
+    def test_navmesh_server_adds_only_literal_flag_to_managed_launch(self) -> None:
+        starts = []
+        for options in ({}, {"navmesh_data_server": False}, {"navmesh_data_server": True}):
+            broker = _Broker()
+            result = self._run(_raw(**options), broker)
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual([r.payload.get("command") for r in broker.requests], ["start", "ack"])
+            start = json.loads(broker.requests[0].stdin)
+            self.assertEqual(start["new_run_id"], result.run_id)
+            supplied_hash = start.pop("launch_request_sha256")
+            self.assertEqual(supplied_hash, hashlib.sha256(
+                json.dumps(start, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest())
+            self.assertEqual(start["role"], "server")
+            starts.append(start)
+        self.assertEqual(starts[0], starts[1])
+        self.assertNotIn("-startNavmeshDataServer", starts[0]["argv"])
+        self.assertEqual(starts[2]["argv"].count("-startNavmeshDataServer"), 1)
+        starts[2]["argv"].remove("-startNavmeshDataServer")
+        self.assertEqual(starts[2], starts[0])
+
     def test_new_start_retries_same_recoverable_request_after_lost_response(self) -> None:
         broker = _Broker()
         broker.lose_first_new_start_response = True
