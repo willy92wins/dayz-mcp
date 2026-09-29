@@ -46,6 +46,7 @@ PRUNABLE_FIELDS = (
     "ui",
     "ui_request",
     "dialog",
+    "weapon_state",
     "input_describe",
     "building_doors",
 )

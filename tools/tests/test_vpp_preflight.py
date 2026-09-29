@@ -33,6 +33,7 @@ from dayz_mcp import (
     dayz_test_worker,
     native_launcher_transaction as transaction,
 )
+import mcp_capture
 from tests._tiers import slow_test
 
 
@@ -1297,6 +1298,22 @@ class _Runtime:
 
 
 class DayzTestRunVppGateTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        desktop_patcher = patch.object(
+            dayz_test_tool,
+            "evaluate_prerun_desktop",
+            return_value=mcp_capture.PrerunDesktopResult(
+                error_code=None,
+                desktop="unlocked",
+                mean_brightness=80.0,
+                nonblack_ratio=0.9,
+                waited_s=0.01,
+                remediation="",
+            ),
+        )
+        desktop_patcher.start()
+        self.addCleanup(desktop_patcher.stop)
+
     async def test_a_server_run_with_unusable_admin_tools_never_reaches_the_launcher(
         self,
     ) -> None:

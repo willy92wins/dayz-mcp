@@ -71,6 +71,7 @@ READ_ONLY = {
     "object_doors",
     "entities_query",
     "ui_tree",
+    "weapon_state",
     "input_describe",
 }
 

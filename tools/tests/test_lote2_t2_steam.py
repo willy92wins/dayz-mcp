@@ -2,6 +2,7 @@
 import unittest
 from unittest.mock import patch, AsyncMock
 from types import SimpleNamespace
+import mcp_capture
 from dayz_mcp import steam_preflight as sp
 from tests.test_steam_preflight import _MutableSteamProvider, _FakeRemediationHost
 
@@ -87,6 +88,11 @@ class SteamEnvelopeT2Tests(unittest.IsolatedAsyncioTestCase):
         with patch.object(tool, "open_approved_launcher", return_value=fixtures._Opened()), patch.object(
             tool.secure_launcher, "load_verified_bundle", return_value=fixtures._Bundle(fixtures._sealed(fixtures._policy()))
         ), patch.object(tool, "preflight_vpp_request", return_value=SimpleNamespace(error_code=None, missing=(), warnings=(), hint="")), patch.object(
+            tool, "evaluate_prerun_desktop", return_value=mcp_capture.PrerunDesktopResult(
+                error_code=None, desktop="unlocked", mean_brightness=80.0,
+                nonblack_ratio=0.9, waited_s=0.01, remediation="",
+            )
+        ), patch.object(
             tool, "evaluate_steam_session", return_value=stale
         ), patch.object(sp, "remediate_stale_steam_session", side_effect=AssertionError("must not mutate")) as remediate, patch.object(
             tool.secure_launcher, "execute_secure_launcher_request", new=launch
