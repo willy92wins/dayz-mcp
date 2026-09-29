@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import ntpath
@@ -461,14 +462,65 @@ class CloseRun8604Test(unittest.TestCase):
         self.assertNotIn("server", result)
         self.assertEqual(self.guard.terminate_calls, [])
 
+    def test_62c5_close_run_roles_posts_only_the_named_role(self) -> None:
+        client = process(41, "client")
+        server = process(42, "server")
+        self.add_run(server, client)
+        self.guard.snapshots[client.pid] = snapshot(client)
+        self.guard.snapshots[server.pid] = snapshot(server)
+        self.win32.windows = [
+            (100, server.pid, True),
+            (101, client.pid, True),
+        ]
+        before = self.manifest_bytes()
+        fn = getattr(self.lifecycle, "close_run_roles", None)
+        if fn is None:
+            self.fail("ProcessLifecycle.close_run_roles is missing")
+        first = _g2_call(self, fn, IDENTITY_A, self.token_a, RUN_ID, ["client"])
+        self.assertEqual(first.get("run_id"), RUN_ID)
+        self.assertIn("client", first)
+        self.assertNotIn("server", first)
+        self.assertEqual([item[0] for item in self.win32.posts], [101])
+        second = _g2_call(self, fn, IDENTITY_A, self.token_a, RUN_ID, ["server"])
+        self.assertIn("server", second)
+        self.assertNotIn("client", second)
+        self.assertEqual([item[0] for item in self.win32.posts], [101, 100])
+        self.assertTrue(all(item[1] == WM_CLOSE for item in self.win32.posts))
+        self.assertEqual(self.manifest_bytes(), before)
+        self.assertEqual(self.store.get(RUN_ID).state, "RUNNING")
+        self.assertEqual(self.guard.terminate_calls, [])
+
+    def test_62c5_close_run_roles_rejects_unknown_and_posts_nothing(self) -> None:
+        record = process(41, "client")
+        self.add_run(record)
+        self.guard.snapshots[record.pid] = snapshot(record)
+        self.win32.windows = [(101, record.pid, True)]
+        fn = getattr(self.lifecycle, "close_run_roles", None)
+        if fn is None:
+            self.fail("ProcessLifecycle.close_run_roles is missing")
+        result = _g2_call(
+            self, fn, IDENTITY_A, self.token_a, RUN_ID, ["client", "offline"]
+        )
+        self.assertEqual(result.get("error"), "bad_args")
+        self.assertEqual(self.win32.posts, [])
+        self.assertEqual(self.store.get(RUN_ID).state, "RUNNING")
+
 
 class FakeLifecycleClose:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object, object]] = []
+        self.role_calls: list[tuple[object, object]] = []
 
     def close_run(self, client, token, value):
         self.calls.append((client.session_id, token, value))
         return {"run_id": value, "client": {"pid": 1, "windows_found": 1, "windows_posted": 1}}
+
+    def close_run_roles(self, client, token, value, roles):
+        self.role_calls.append((value, roles))
+        return {
+            "run_id": value,
+            "server": {"pid": 2, "windows_found": 1, "windows_posted": 1},
+        }
 
     def status(self, client):
         return {"runs": []}
@@ -533,6 +585,48 @@ class Route8604Test(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body.get("run_id"), "R")
         self.assertEqual(self.lifecycle.calls[-1][2], "R")
+        self.assertEqual(self.lifecycle.role_calls, [])
+
+    @slow_test
+    def test_62c5_lifecycle_close_roles_route_dispatches_close_run_roles(self) -> None:
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        identity = {
+            "platform": "codex",
+            "pid": 11,
+            "ppid": 1,
+            "started_at_utc": "2026-07-15T00:00:00Z",
+            "session_id": "A",
+            "task_label": "http",
+        }
+        url = self.base + "/lifecycle/close?" + urllib.parse.urlencode({"key": "key"})
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(
+                {
+                    "identity": identity,
+                    "lease_token": "token",
+                    "run_id": "R",
+                    "roles": ["server"],
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=2.0) as response:
+                body = json.loads(response.read())
+                status = response.status
+        except urllib.error.HTTPError as exc:
+            self.fail(str(exc.read()))
+        except AttributeError as exc:
+            self.fail(str(exc))
+        self.assertEqual(status, 200)
+        self.assertEqual(body.get("run_id"), "R")
+        self.assertEqual(self.lifecycle.calls, [])
+        self.assertEqual(self.lifecycle.role_calls, [("R", ["server"])])
 
 
 class Client8604Test(unittest.IsolatedAsyncioTestCase):
@@ -570,6 +664,40 @@ class Client8604Test(unittest.IsolatedAsyncioTestCase):
             {"run_id": "R", "lease_token": "lease-token"},
         )
 
+    async def test_62c5_lifecycle_close_roles_posts_the_role_list(self) -> None:
+        from tests.test_control_client import _policy
+        from dayz_mcp import control_client as control
+
+        if not hasattr(control.ControlClient, "lifecycle_close_roles"):
+            self.fail("ControlClient.lifecycle_close_roles is missing")
+        identity = control.ControlIdentity(
+            platform="unknown",
+            pid=123,
+            ppid=45,
+            started_at_utc="2026-07-22T00:00:00Z",
+            session_id="12345678-1234-4234-8234-1234567890ab",
+            task_label="",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            keyfile = Path(temporary) / "daemon.key"
+            keyfile.write_text("test-key\n", encoding="utf-8")
+            client = control.ControlClient(policy=_policy(keyfile), identity=identity)
+            client.active_lease_token = "lease-token"
+            with patch.object(
+                client,
+                "_session_call",
+                new=AsyncMock(return_value={"run_id": "R"}),
+            ) as session_call:
+                try:
+                    result = await client.lifecycle_close_roles("R", ["client"])
+                except AttributeError as exc:
+                    self.fail(str(exc))
+        self.assertEqual(result, {"run_id": "R"})
+        session_call.assert_awaited_once_with(
+            "/lifecycle/close",
+            {"run_id": "R", "roles": ["client"], "lease_token": "lease-token"},
+        )
+
 
 def _write_rpt(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -593,6 +721,8 @@ class CloseToolRuntime:
         self.roles = roles
         self.status_calls = 0
         self.close_calls = 0
+        self.role_calls: list[tuple[str, ...]] = []
+        self.close_at: list[tuple[tuple[str, ...], float]] = []
         self.reap_calls = 0
         self.close_posted = 1
         self.retire_event: str | None = None
@@ -646,28 +776,46 @@ class CloseToolRuntime:
             raise RuntimeError("status unavailable")
         return self._status_payload()
 
-    async def lifecycle_close(self, run_id: str) -> dict[str, object]:
+    def _role_rpts(self, roles: tuple[str, ...]) -> list[Path]:
+        paths: list[Path] = []
+        if "client" in roles:
+            paths.append(self.client_rpt)
+        if "server" in roles:
+            paths.append(self.server_rpt)
+        return paths
+
+    async def _perform_close(
+        self, run_id: str, roles: tuple[str, ...]
+    ) -> dict[str, object]:
         self.close_calls += 1
-        if self.append_on_close:
-            for path in (self.client_rpt, self.server_rpt):
-                if path.is_file():
-                    path.write_text(
-                        path.read_text(encoding="utf-8") + self.append_on_close,
-                        encoding="utf-8",
-                    )
-        if self.rotate_on_close:
-            for path in (self.client_rpt, self.server_rpt):
-                if path.is_file():
-                    path.unlink()
-                    path.write_text("rotated\n" + TERMINATION, encoding="utf-8")
+        self.close_at.append((roles, time.monotonic()))
+        for path in self._role_rpts(roles):
+            if self.append_on_close and path.is_file():
+                path.write_text(
+                    path.read_text(encoding="utf-8") + self.append_on_close,
+                    encoding="utf-8",
+                )
+            if self.rotate_on_close and path.is_file():
+                path.unlink()
+                path.write_text("rotated\n" + TERMINATION, encoding="utf-8")
         result: dict[str, object] = {"run_id": run_id}
-        for index, role in enumerate(self.roles):
+        for index, role in enumerate(roles):
             result[role] = {
                 "pid": index + 1,
                 "windows_found": self.close_posted,
                 "windows_posted": self.close_posted,
             }
         return result
+
+    async def lifecycle_close(self, run_id: str) -> dict[str, object]:
+        return await self._perform_close(run_id, self.roles)
+
+    async def lifecycle_close_roles(
+        self, run_id: str, roles: list[str]
+    ) -> dict[str, object]:
+        chosen = tuple(roles)
+        self.role_calls.append(chosen)
+        return await self._perform_close(run_id, chosen)
 
     async def lifecycle_reap(self, run_id: str) -> dict[str, object]:
         self.reap_calls += 1
@@ -1099,6 +1247,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         runtime.reap_event = "run_reaped"
         return _close_tool(runtime, graceful_timeout_s=2)
 
+    @slow_test
     async def test_62c5_connected_player_without_logout_finished_warns(self) -> None:
         runtime = self._runtime()
         _write_rpt(
@@ -1162,6 +1311,7 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("warnings", result)
         self.assertFalse(_serialized_has_host_path(result, self.root))
 
+    @slow_test
     async def test_62c5_ungraceful_close_does_not_warn(self) -> None:
         runtime = self._runtime()
         _write_rpt(
@@ -1176,6 +1326,205 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["graceful"])
         self.assertEqual(result["reason"], "run_retired_elsewhere")
         self.assertNotIn("warnings", result)
+
+    def _connect_dev(self, runtime: CloseToolRuntime, *, uid: str | None = None) -> None:
+        lines = ["boot server\n"]
+        if uid is not None:
+            lines.append(
+                "[StateMachine]: Player Dev (dpnid 1 uid " + uid + ") Entering Ready\n"
+            )
+        lines.append(
+            '1:14:03.254 Player "Dev" (steamID=76561197995575711 '
+            "pos=<12830.6, 10099.6, 6.0>) is connected\n"
+        )
+        _write_rpt(runtime.server_rpt, "".join(lines))
+
+    def _logout_line(self, token: str) -> str:
+        return "SCRIPT       : [Logout]: Player " + token + " finished\n"
+
+    def _arm_graceful(self, runtime: CloseToolRuntime) -> None:
+        runtime.append_on_close = TERMINATION
+        runtime.reap_event = "run_reaped"
+
+    @slow_test
+    async def test_62c5_client_closes_before_server_and_server_waits_for_logout(
+        self,
+    ) -> None:
+        runtime = self._runtime()
+        uid = "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg="
+        self._connect_dev(runtime, uid=uid)
+        self._arm_graceful(runtime)
+        script = runtime.server_rpt.parent / "script_test.log"
+        script.write_text("boot\n", encoding="utf-8")
+
+        async def write_logout() -> None:
+            while not any(roles == ("client",) for roles, _at in runtime.close_at):
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.12)
+            runtime.logout_at = time.monotonic()
+            script.write_text(
+                script.read_text(encoding="utf-8") + self._logout_line(uid),
+                encoding="utf-8",
+            )
+
+        runtime.logout_at = None
+        writer = asyncio.create_task(write_logout())
+        result = await _close_tool(runtime, graceful_timeout_s=2)
+        await writer
+        client_at = next(at for roles, at in runtime.close_at if roles == ("client",))
+        server_at = next(at for roles, at in runtime.close_at if roles == ("server",))
+        self.assertLess(client_at, runtime.logout_at)
+        self.assertGreater(server_at, runtime.logout_at)
+        self.assertEqual(runtime.role_calls, [("client",), ("server",)])
+        self.assertEqual(result["close_order"], ["client", "server"])
+        self.assertEqual(
+            result["logout_players"],
+            [{"player": "Dev", "logout_finished": True}],
+        )
+        self.assertLess(result["logout_wait_s"], 1.5)
+        self.assertGreater(result["logout_wait_s"], 0.05)
+        self.assertNotIn("warnings", result)
+        self.assertTrue(result["graceful"])
+        self.assertFalse(_serialized_has_host_path(result, self.root))
+
+    @slow_test
+    async def test_62c5_two_players_keep_the_server_until_both_logout(self) -> None:
+        runtime = self._runtime()
+        _write_rpt(
+            runtime.server_rpt,
+            "boot server\n"
+            "[StateMachine]: Player Dev (dpnid 1 uid uid-dev) Entering Ready\n"
+            'Player "Dev" (steamID=1 pos=<1, 2, 3>) is connected\n'
+            "[StateMachine]: Player Ace (dpnid 2 uid uid-ace) Entering Ready\n"
+            'Player "Ace" (steamID=2 pos=<4, 5, 6>) is connected\n',
+        )
+        self._arm_graceful(runtime)
+        script = runtime.server_rpt.parent / "script_test.log"
+        script.write_text("boot\n", encoding="utf-8")
+
+        async def write_logouts() -> None:
+            while not any(roles == ("client",) for roles, _at in runtime.close_at):
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            runtime.first_logout_at = time.monotonic()
+            script.write_text(
+                script.read_text(encoding="utf-8") + self._logout_line("uid-dev"),
+                encoding="utf-8",
+            )
+            await asyncio.sleep(0.25)
+            runtime.second_logout_at = time.monotonic()
+            script.write_text(
+                script.read_text(encoding="utf-8") + self._logout_line("uid-ace"),
+                encoding="utf-8",
+            )
+
+        runtime.first_logout_at = None
+        runtime.second_logout_at = None
+        writer = asyncio.create_task(write_logouts())
+        result = await _close_tool(runtime, graceful_timeout_s=2)
+        await writer
+        server_at = next(at for roles, at in runtime.close_at if roles == ("server",))
+        self.assertGreater(server_at, runtime.second_logout_at)
+        self.assertGreater(runtime.second_logout_at, runtime.first_logout_at)
+        self.assertEqual(
+            result["logout_players"],
+            [
+                {"player": "Dev", "logout_finished": True},
+                {"player": "Ace", "logout_finished": True},
+            ],
+        )
+        self.assertNotIn("warnings", result)
+        self.assertTrue(result["graceful"])
+
+    @slow_test
+    async def test_62c5_logout_timeout_still_closes_the_server_and_warns(self) -> None:
+        runtime = self._runtime()
+        self._connect_dev(runtime)
+        self._arm_graceful(runtime)
+        budget = 0.45
+        result = await _close_tool(runtime, graceful_timeout_s=budget)
+        self.assertEqual(dayz_test_tool._LOGOUT_WAIT_S, 30.0)
+        self.assertGreaterEqual(result["logout_wait_s"], 0.3)
+        self.assertLess(result["logout_wait_s"], 1.5)
+        self.assertLessEqual(result["logout_wait_s"], dayz_test_tool._LOGOUT_WAIT_S)
+        self.assertEqual(runtime.role_calls, [("client",), ("server",)])
+        client_at = next(at for roles, at in runtime.close_at if roles == ("client",))
+        server_at = next(at for roles, at in runtime.close_at if roles == ("server",))
+        self.assertGreaterEqual(server_at - client_at, 0.3)
+        self.assertEqual(
+            result["logout_players"],
+            [{"player": "Dev", "logout_finished": False}],
+        )
+        self.assertEqual(result.get("warnings"), [dayz_test_tool._PLAYER_STATE_NOT_SAVED])
+        self.assertTrue(result["graceful"])
+        self.assertEqual(result["close_order"], ["client", "server"])
+
+    async def test_62c5_no_connected_player_does_not_wait(self) -> None:
+        runtime = self._runtime()
+        _write_rpt(
+            runtime.server_rpt,
+            "boot server\nPlayer connect enabled\n",
+        )
+        self._arm_graceful(runtime)
+        started = time.monotonic()
+        result = await _close_tool(runtime, graceful_timeout_s=2)
+        self.assertLess(time.monotonic() - started, 0.6)
+        self.assertEqual(result["logout_wait_s"], 0.0)
+        self.assertEqual(result["logout_players"], [])
+        self.assertEqual(result["close_order"], ["client", "server"])
+        self.assertEqual(runtime.role_calls, [("client",), ("server",)])
+        self.assertNotIn("warnings", result)
+        self.assertTrue(result["graceful"])
+
+    async def test_62c5_single_player_finished_line_skips_the_wait(self) -> None:
+        runtime = self._runtime()
+        self._connect_dev(runtime)
+        (runtime.server_rpt.parent / "script_test.log").write_text(
+            self._logout_line("HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg="),
+            encoding="utf-8",
+        )
+        self._arm_graceful(runtime)
+        result = await _close_tool(runtime, graceful_timeout_s=2)
+        self.assertLess(result["logout_wait_s"], 0.25)
+        self.assertEqual(
+            result["logout_players"],
+            [{"player": "Dev", "logout_finished": True}],
+        )
+        self.assertNotIn("warnings", result)
+        self.assertEqual(runtime.role_calls, [("client",), ("server",)])
+        client_at = next(at for roles, at in runtime.close_at if roles == ("client",))
+        server_at = next(at for roles, at in runtime.close_at if roles == ("server",))
+        self.assertLess(server_at - client_at, 0.25)
+
+    async def test_62c5_server_only_close_stays_one_shot(self) -> None:
+        runtime = self._runtime(roles=("server",))
+        self._connect_dev(runtime)
+        self._arm_graceful(runtime)
+        started = time.monotonic()
+        result = await _close_tool(runtime, graceful_timeout_s=1.5)
+        self.assertLess(time.monotonic() - started, 0.7)
+        self.assertEqual(runtime.close_calls, 1)
+        self.assertEqual(runtime.role_calls, [])
+        self.assertNotIn("close_order", result)
+        self.assertNotIn("logout_wait_s", result)
+        self.assertNotIn("logout_players", result)
+        self.assertEqual(result.get("warnings"), [dayz_test_tool._PLAYER_STATE_NOT_SAVED])
+        self.assertTrue(result["graceful"])
+
+    async def test_62c5_client_reattach_close_stays_one_shot(self) -> None:
+        runtime = self._runtime(roles=("client",))
+        self._connect_dev(runtime)
+        self._arm_graceful(runtime)
+        started = time.monotonic()
+        result = await _close_tool(runtime, graceful_timeout_s=1.5)
+        self.assertLess(time.monotonic() - started, 0.7)
+        self.assertEqual(runtime.close_calls, 1)
+        self.assertEqual(runtime.role_calls, [])
+        self.assertNotIn("close_order", result)
+        self.assertNotIn("logout_wait_s", result)
+        self.assertNotIn("logout_players", result)
+        self.assertNotIn("warnings", result)
+        self.assertTrue(result["graceful"])
 
 
 class Fb62c5LongLogTest(unittest.TestCase):

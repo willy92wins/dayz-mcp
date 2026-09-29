@@ -45,6 +45,9 @@ _IDLE_GUARD: contextvars.ContextVar[Mapping[str, object] | None] = contextvars.C
     "dayz_idle_guard",
     default=None,
 )
+# Roles a caller may name on close_run_roles. close_run(only_roles=None)
+# still closes every owned role.
+_CLOSE_ROLE_NAMES = frozenset({"client", "server"})
 
 
 @contextmanager
@@ -4021,7 +4024,12 @@ class ProcessLifecycle:
                 self._finish_committed(authority, command_id)
 
     def close_run(
-        self, client: ClientIdentity, token: str | None, run_id: object
+        self,
+        client: ClientIdentity,
+        token: str | None,
+        run_id: object,
+        *,
+        only_roles: frozenset[str] | None = None,
     ) -> dict[str, object]:
         """Close the run's windows. Ordinary callers are unchanged.
 
@@ -4029,7 +4037,20 @@ class ProcessLifecycle:
         no effect after any doubt observed up to the final check of the first effect.
         the only residual window is between that check and the syscall.
         after the first effect, no foreign target is touched, and the outcome says so.
+
+        ``only_roles`` limits the non-warden post to those roles. None closes
+        every owned role, which is the idle warden's call. A warden guard
+        together with ``only_roles`` refuses before any post.
         """
+        if only_roles is not None and (
+            not isinstance(only_roles, frozenset)
+            or not only_roles
+            or any(
+                not isinstance(role, str) or role not in _CLOSE_ROLE_NAMES
+                for role in only_roles
+            )
+        ):
+            return self._error("bad_args", 400)
         if isinstance(run_id, str) and run_id:
             self.note_launcher_request(client, run_id)
         legacy_error = self._legacy_identity_error()
@@ -4071,6 +4092,8 @@ class ProcessLifecycle:
                 ):
                     return self._reject_reserved(authority, command, "run_not_adopted")
                 close_guard = self._warden_idle_guard(client, "close", run_id)
+                if close_guard is not None and only_roles is not None:
+                    return self._reject_reserved(authority, command, "close_failed")
                 if close_guard is not None:
                     refusal = self._idle_destruction_refusal(run, close_guard)
                     if refusal is not None:
@@ -4099,6 +4122,10 @@ class ProcessLifecycle:
                         key=lambda item: (rank.get(item[1].role, 2), item[0]),
                     )
                 ]
+                if close_guard is None and only_roles is not None:
+                    owned = [
+                        record for record in owned if record.role in only_roles
+                    ]
                 if not self._audit(
                     "lifecycle_close",
                     client,
@@ -4186,6 +4213,27 @@ class ProcessLifecycle:
                 if degraded:
                     result["cleanup_degraded"] = list(dict.fromkeys(degraded))
             return result
+
+    def close_run_roles(
+        self,
+        client: ClientIdentity,
+        token: str | None,
+        run_id: object,
+        roles: object,
+    ) -> dict[str, object]:
+        """Post WM_CLOSE to the named roles only. ``close_run`` is unchanged.
+
+        The idle warden calls ``close_run`` and never this method. Unknown,
+        empty, or non-list roles post nothing.
+        """
+        if isinstance(roles, str) or not isinstance(roles, (list, tuple)):
+            return self._error("bad_args", 400)
+        if not roles or not all(isinstance(role, str) for role in roles):
+            return self._error("bad_args", 400)
+        chosen = frozenset(roles)
+        if not chosen or not chosen <= _CLOSE_ROLE_NAMES:
+            return self._error("bad_args", 400)
+        return self.close_run(client, token, run_id, only_roles=chosen)
 
     def note_launcher_request(
         self, client: ClientIdentity, run_id: str, *, when: float | None = None

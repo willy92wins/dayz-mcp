@@ -2138,6 +2138,19 @@ _PLAYER_CONNECTED_RE = re.compile(
     br'Player "[^"\n]+" \([^)\n]*\) is connected'
 )
 _LOGOUT_FINISHED_RE = re.compile(br"\[Logout\]: Player \S+ finished\b")
+_PLAYER_CONNECTED_NAME_RE = re.compile(
+    br'Player "([^"\n]+)" \([^)\n]*\) is connected'
+)
+_LOGOUT_FINISHED_ID_RE = re.compile(br"\[Logout\]: Player (\S+) finished\b")
+# The connect line names the player. The logout line carries the uid. The
+# server RPT state line is what ties those two cited formats together.
+_PLAYER_UID_RE = re.compile(
+    br"\[StateMachine\]: Player (.+?) \([^)\n]*\buid (\S+?)\)"
+)
+# fb-20260928-032049-62c5. The logout phase is min(this, graceful_timeout_s)
+# and does not consume the termination deadline.
+_LOGOUT_WAIT_S = 30.0
+_PLAYER_TOKEN_MAX = 256
 _PLAYER_STATE_NOT_SAVED = (
     "player_state_not_saved: wait for the periodic players.db save, "
     "or disconnect the client first"
@@ -2506,6 +2519,167 @@ def _player_state_warnings(server_rpt: Path) -> list[str]:
     return []
 
 
+def _player_token(raw: bytes) -> str | None:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError:
+        return None
+    if not text or len(text) > _PLAYER_TOKEN_MAX:
+        return None
+    if any(ord(char) < 32 for char in text):
+        return None
+    return text
+
+
+class _LogoutWatch:
+    """Connected names, uid links, and logout tokens from one server log pair."""
+
+    __slots__ = ("order", "uids", "finished", "files")
+
+    def __init__(self) -> None:
+        self.order: list[str] = []
+        self.uids: dict[str, set[str]] = {}
+        self.finished: set[str] = set()
+        self.files: dict[str, tuple[int, int, bytes]] = {}
+
+    def _fold(self, window: bytes) -> None:
+        for match in _PLAYER_UID_RE.finditer(window):
+            name = _player_token(match.group(1))
+            uid = _player_token(match.group(2))
+            if name and uid:
+                self.uids.setdefault(name, set()).add(uid)
+        for match in _PLAYER_CONNECTED_NAME_RE.finditer(window):
+            name = _player_token(match.group(1))
+            if name and name not in self.order:
+                self.order.append(name)
+        for match in _LOGOUT_FINISHED_ID_RE.finditer(window):
+            token = _player_token(match.group(1))
+            if token:
+                self.finished.add(token)
+
+    def consume_file(self, path: Path) -> None:
+        try:
+            stat = path.stat()
+        except OSError:
+            return
+        key = str(path)
+        inode = int(stat.st_ino)
+        size = int(stat.st_size)
+        prev = self.files.get(key)
+        if prev is not None and (prev[0] != inode or size < prev[1]):
+            return
+        offset = 0 if prev is None else prev[1]
+        carry = b"" if prev is None else prev[2]
+        if offset >= size:
+            return
+        try:
+            handle = path.open("rb")
+        except OSError:
+            return
+        try:
+            while offset < size:
+                try:
+                    handle.seek(offset)
+                    chunk = handle.read(min(_RPT_READ_CHUNK, size - offset))
+                except OSError:
+                    return
+                if not chunk or not isinstance(chunk, bytes):
+                    return
+                window = carry + chunk
+                self._fold(window)
+                if len(window) > _PLAYER_LOG_OVERLAP:
+                    carry = window[-_PLAYER_LOG_OVERLAP:]
+                else:
+                    carry = window
+                offset += len(chunk)
+        finally:
+            try:
+                handle.close()
+            except OSError:
+                pass
+        self.files[key] = (inode, offset, carry)
+
+    def consume_tree(self, server_rpt: Path) -> None:
+        self.consume_file(server_rpt)
+        script = _script_log_for_server_rpt(server_rpt)
+        if script is not None:
+            self.consume_file(script)
+
+    def rows(self) -> list[dict[str, object]]:
+        count = len(self.order)
+        rows: list[dict[str, object]] = []
+        for name in self.order:
+            linked = self.uids.get(name, set())
+            seen = name in self.finished or bool(linked & self.finished)
+            if not seen and count == 1 and self.finished:
+                seen = True
+            rows.append({"player": name, "logout_finished": seen})
+        return rows
+
+
+async def _wait_for_connected_logouts(
+    server_rpt: Path | None,
+    timeout_s: float,
+    *,
+    wait: bool,
+) -> tuple[list[dict[str, object]], float, bool]:
+    """Return (players, wait_s, timed_out).
+
+    No connected player skips the wait. One connected player is finished
+    when any `[Logout]: Player … finished` line is present (the logout token
+    is the uid, not the quoted name). Several players each need their own
+    name or uid on a finished line.
+    """
+    if server_rpt is None:
+        return [], 0.0, False
+    watch = _LogoutWatch()
+    watch.consume_tree(server_rpt)
+    if not watch.order or not wait:
+        return watch.rows(), 0.0, False
+    budget = min(_LOGOUT_WAIT_S, timeout_s)
+    started = time.monotonic()
+    deadline = started + budget
+    while True:
+        rows = watch.rows()
+        if rows and all(item["logout_finished"] is True for item in rows):
+            return rows, max(0.0, time.monotonic() - started), False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return rows, max(0.0, time.monotonic() - started), True
+        await asyncio.sleep(min(_CLOSE_POLL_S, remaining))
+        watch.consume_tree(server_rpt)
+
+
+def _split_client_then_server(roles: list[str]) -> bool:
+    return set(roles) == {"client", "server"}
+
+
+async def _checked_role_close(fn: object, *args: object) -> dict[str, object]:
+    if not callable(fn):
+        _fail("lifecycle_close_unavailable")
+    close_result = await fn(*args)
+    if not isinstance(close_result, dict):
+        _fail("lifecycle_close_unavailable")
+    if close_result.get("error"):
+        code = close_result.get("error")
+        _fail(
+            str(code) if isinstance(code, str) and code else "lifecycle_close_unavailable"
+        )
+    return close_result
+
+
+def _merge_role_close(
+    run_id: str, parts: list[dict[str, object]]
+) -> dict[str, object]:
+    merged: dict[str, object] = {"run_id": run_id}
+    for part in parts:
+        for key, value in part.items():
+            if key == "run_id" or not isinstance(value, dict):
+                continue
+            merged[key] = value
+    return merged
+
+
 def _whitelist_close_result(payload: dict[str, object]) -> dict[str, object]:
     roles_raw = payload.get("roles")
     roles: list[dict[str, object]] = []
@@ -2524,6 +2698,32 @@ def _whitelist_close_result(payload: dict[str, object]) -> dict[str, object]:
         and all(isinstance(item, str) and item for item in warnings)
     ):
         result["warnings"] = list(warnings)
+    order = payload.get("close_order")
+    if (
+        isinstance(order, list)
+        and order
+        and all(isinstance(item, str) and item in {"client", "server"} for item in order)
+    ):
+        result["close_order"] = list(order)
+    wait = payload.get("logout_wait_s")
+    if isinstance(wait, float) and math.isfinite(wait) and wait >= 0.0:
+        result["logout_wait_s"] = wait
+    players = payload.get("logout_players")
+    if isinstance(players, list):
+        clean: list[dict[str, object]] = []
+        reportable = True
+        for item in players:
+            if not isinstance(item, dict):
+                reportable = False
+                break
+            name = item.get("player")
+            seen = item.get("logout_finished")
+            if not isinstance(name, str) or not name or not isinstance(seen, bool):
+                reportable = False
+                break
+            clean.append({"player": name, "logout_finished": seen})
+        if reportable:
+            result["logout_players"] = clean
     return result
 
 
@@ -2584,12 +2784,28 @@ async def execute_dayz_test_close(
     close_fn = getattr(runtime, "lifecycle_close", None)
     if not callable(close_fn):
         _fail("lifecycle_close_unavailable")
-    close_result = await close_fn(run_id)
-    if not isinstance(close_result, dict):
-        _fail("lifecycle_close_unavailable")
-    if close_result.get("error"):
-        code = close_result.get("error")
-        _fail(str(code) if isinstance(code, str) and code else "lifecycle_close_unavailable")
+    logout_report: dict[str, object] | None = None
+    if _split_client_then_server(process_roles):
+        close_roles = getattr(runtime, "lifecycle_close_roles", None)
+        client_close = await _checked_role_close(close_roles, run_id, ["client"])
+        client_row = _close_role_row(client_close, "client")
+        server_watch = watches.get("server")
+        server_rpt = None if server_watch is None else Path(server_watch.path)
+        players, logout_wait_s, timed_out = await _wait_for_connected_logouts(
+            server_rpt,
+            timeout_s,
+            wait=client_row is None or _windows_posted(client_close, "client") > 0,
+        )
+        server_close = await _checked_role_close(close_roles, run_id, ["server"])
+        close_result = _merge_role_close(run_id, [client_close, server_close])
+        logout_report = {
+            "close_order": ["client", "server"],
+            "logout_wait_s": logout_wait_s,
+            "logout_players": players,
+            "timed_out": timed_out,
+        }
+    else:
+        close_result = await _checked_role_close(close_fn, run_id)
     wait_started = time.monotonic()
     deadline = wait_started + timeout_s
     reap_fn = getattr(runtime, "lifecycle_reap", None)
@@ -2751,9 +2967,16 @@ async def execute_dayz_test_close(
         "reason": reason,
         "roles": roles_out,
     }
-    # Warning only. The close order, timeouts and reap stay as they are
-    # (fb-20260928-032049-62c5).
-    if graceful:
+    # fb-20260928-032049-62c5 option 1: client, then the logout line, then
+    # the server. The warning is that wait timing out. One-role closes keep
+    # the boolean warning from #136.
+    if logout_report is not None:
+        payload["close_order"] = logout_report["close_order"]
+        payload["logout_wait_s"] = logout_report["logout_wait_s"]
+        payload["logout_players"] = logout_report["logout_players"]
+        if graceful and logout_report["timed_out"] is True:
+            payload["warnings"] = [_PLAYER_STATE_NOT_SAVED]
+    elif graceful:
         server_watch = watches.get("server")
         if server_watch is not None:
             warnings = _player_state_warnings(Path(server_watch.path))

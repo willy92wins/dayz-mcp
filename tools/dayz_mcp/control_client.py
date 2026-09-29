@@ -403,6 +403,15 @@ class ControlClient:
             payload["lease_token"] = token
         return await self._session_call("/lifecycle/close", payload)
 
+    async def lifecycle_close_roles(
+        self, run_id: str, roles: list[str]
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {"run_id": run_id, "roles": list(roles)}
+        token = self.active_lease_token
+        if isinstance(token, str) and token:
+            payload["lease_token"] = token
+        return await self._session_call("/lifecycle/close", payload)
+
     async def lifecycle_reap(self, run_id: str) -> dict[str, object]:
         payload: dict[str, object] = {"run_id": run_id}
         token = self.active_lease_token

@@ -2243,6 +2243,7 @@ class ClientRuntime:
         wanted = getattr(method, "__func__", None)
         implemented = {
             getattr(getattr(control, "lifecycle_close", None), "__func__", None),
+            getattr(getattr(control, "lifecycle_close_roles", None), "__func__", None),
             getattr(getattr(control, "lifecycle_reap", None), "__func__", None),
         }
         if wanted is None or wanted not in implemented:
@@ -2407,6 +2408,17 @@ class ClientRuntime:
     async def lifecycle_close(self, run_id: str) -> dict[str, Any]:
         result = await self._control_with_lazy_spawn(
             self._control.lifecycle_close, run_id
+        )
+        await self._accept_command_renewal(result)
+        if isinstance(result, dict):
+            result.pop("lease_id", None)
+        return result
+
+    async def lifecycle_close_roles(
+        self, run_id: str, roles: list[str]
+    ) -> dict[str, Any]:
+        result = await self._control_with_lazy_spawn(
+            self._control.lifecycle_close_roles, run_id, roles
         )
         await self._accept_command_renewal(result)
         if isinstance(result, dict):
@@ -5989,12 +6001,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(
         description=(
-            f"{LEASE_TOOL_LINE} For the session that owns the run. Ask the "
-            "run's windows to close as a person would; wait for each launched "
-            "role's orderly termination. Graceful only when every launched "
-            "role wrote a new termination line and the run was retired as "
-            "run_reaped. When stop_required is true, release the lease and "
-            "call dayz_test_stop."
+            f"{LEASE_TOOL_LINE} For the session that owns the run. When the "
+            "run has a live client and a live server, close the client first, "
+            "wait for each connected player's `[Logout]: Player … finished` "
+            "line (at most 30s, also bounded by graceful_timeout_s), then "
+            "close the server. A server-only run or a client-only reattach "
+            "closes as before. Graceful only when every launched role wrote "
+            "a new termination line and the run was retired as run_reaped. "
+            "When stop_required is true, release the lease and call "
+            "dayz_test_stop."
         )
     )
     async def dayz_test_close(
