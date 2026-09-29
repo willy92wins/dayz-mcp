@@ -692,6 +692,14 @@ class GrantAuthorityFenceTests(unittest.TestCase):
             waiter, "camera", operation_id="op-b"
         )[1]
         self.assertEqual(coordinator.release(owner, active["lease_token"])[0], 200)
+        # release() returns after at most RELEASE_AUDIT_TIMEOUT_S while the
+        # handoff fence can still be up. The zero-timeout grant polls once.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
 
         wal.enabled = True
         worker, result = self._start_call(
@@ -1052,6 +1060,14 @@ class CleanupBudgetAndFencingTest(unittest.TestCase):
             self.assertLess(elapsed, 0.5)
             self.assertEqual(status, 200)
             self.assertIn("cleanup_timeout", released["cleanup_degraded"])
+            # Cleanup timeout is not the release-audit fence. release() can
+            # return while handoff_pending is still set. wait(0) polls once.
+            with coordinator._condition:
+                self.assertTrue(
+                    coordinator._condition.wait_for(
+                        lambda: not coordinator._handoff_pending, timeout=1.0
+                    )
+                )
             claimed = coordinator.wait(IDENTITY_B, ticket["ticket"], 0.0)
             self.assertEqual(
                 (claimed[0], claimed[1]["status"]), (200, "active")
@@ -1228,6 +1244,14 @@ class GrantLedgerLinearizationTest(unittest.TestCase):
         _, l1 = coordinator.acquire(IDENTITY, "l1")
         _, ticket = coordinator.acquire(IDENTITY_B, "l2")
         coordinator.release(IDENTITY, l1["lease_token"])
+        # release() returns after at most RELEASE_AUDIT_TIMEOUT_S while the
+        # handoff fence can still be up. wait(0) polls once.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         result: list[tuple[int, dict]] = []
         wait_thread = threading.Thread(
             target=lambda: result.append(
@@ -1280,6 +1304,14 @@ class GrantLedgerLinearizationTest(unittest.TestCase):
         _, l1 = coordinator.acquire(IDENTITY, "l1")
         _, ticket = coordinator.acquire(IDENTITY_B, "l2")
         coordinator.release(IDENTITY, l1["lease_token"])
+        # release() returns after at most RELEASE_AUDIT_TIMEOUT_S while the
+        # handoff fence can still be up. wait(0) polls once.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         owner_result: list[tuple[int, dict]] = []
         owner_wait = threading.Thread(
             target=lambda: owner_result.append(
@@ -1941,6 +1973,14 @@ class GrantLedgerLinearizationTest(unittest.TestCase):
         _, l1 = coordinator.acquire(IDENTITY, "l1")
         _, ticket = coordinator.acquire(IDENTITY_B, "l2")
         coordinator.release(IDENTITY, l1["lease_token"])
+        # release() returns after at most RELEASE_AUDIT_TIMEOUT_S while the
+        # handoff fence can still be up. wait(0) polls once.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         result: list[tuple[int, dict]] = []
         wait_thread = threading.Thread(
             target=lambda: result.append(
@@ -2040,6 +2080,14 @@ class GrantLedgerLinearizationTest(unittest.TestCase):
         _, l1 = coordinator.acquire(IDENTITY, "l1")
         _, ticket = coordinator.acquire(IDENTITY_B, "l2")
         coordinator.release(IDENTITY, l1["lease_token"])
+        # release() returns after at most RELEASE_AUDIT_TIMEOUT_S while the
+        # handoff fence can still be up. wait(0) polls once.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         claim_result: list[tuple[int, dict]] = []
         claim_thread = threading.Thread(
             target=lambda: claim_result.append(
@@ -2130,6 +2178,14 @@ class GrantLedgerLinearizationTest(unittest.TestCase):
         _, l1 = coordinator.acquire(IDENTITY, "l1")
         _, ticket = coordinator.acquire(IDENTITY_B, "l2")
         coordinator.release(IDENTITY, l1["lease_token"])
+        # release() returns after at most RELEASE_AUDIT_TIMEOUT_S while the
+        # handoff fence can still be up. wait(0) polls once.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         first: list[tuple[int, dict]] = []
         first_wait = threading.Thread(
             target=lambda: first.append(
@@ -2165,6 +2221,14 @@ class GrantLedgerLinearizationTest(unittest.TestCase):
         _, l1 = coordinator.acquire(IDENTITY, "l1")
         _, ticket = coordinator.acquire(IDENTITY_B, "l2")
         coordinator.release(IDENTITY, l1["lease_token"])
+        # release() returns after at most RELEASE_AUDIT_TIMEOUT_S while the
+        # handoff fence can still be up. wait(0) polls once.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         self.assertEqual(
             coordinator.wait(IDENTITY_B, ticket["ticket"], 0.0)[0],
             200,

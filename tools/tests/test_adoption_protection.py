@@ -13,6 +13,7 @@ import shutil
 import sys
 import time
 import unittest
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -25,6 +26,7 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import server as server_module
 from dayz_mcp import session_handoff
 from dayz_mcp.input_activity import InputAttributor, InputSample
+from dayz_mcp.loopback import ServerState
 from dayz_mcp.process_lifecycle import (
     INPUT_SIGNAL_STALE_S,
     RUN_IDLE_CUT_S,
@@ -32,12 +34,15 @@ from dayz_mcp.process_lifecycle import (
     RunManifestStore,
     RunRecord,
     caller_may_adopt_ownerless,
+    takeover_target_run_id,
 )
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.server import (
     ADOPT_BLOCKED_ON,
     ServerConfig,
     TAKEOVER_REQUIRED,
+    _box_run,
+    _row_is_protected,
     _runtime_holds_lease,
     _session_status_blocked_on,
     box_available_for,
@@ -51,7 +56,7 @@ from tests.daemon_helpers import (
     _http,
     _wait_until_lease_claimable,
 )
-from tests.lifecycle_helpers import stamp_launcher
+from tests.lifecycle_helpers import Sequence, stamp_launcher
 from tests.mcp_helpers import _content_json
 from tests.process_lifecycle_helpers import (
     AuditSink,
@@ -122,9 +127,12 @@ class AdoptionFixture(unittest.TestCase):
             self.root / "runtime" / "runs.json",
         )
         self.audit = AuditSink()
+        # A released token is remembered and refused before the active-lease
+        # match (session_coordination.py:_validate_token_locked). The same
+        # string on the next grant for that client is that dead token.
         self.coordinator = SessionCoordinator(
-            token_fn=lambda: "token-adopt",
-            id_fn=lambda: "lease-adopt",
+            token_fn=Sequence("token-adopt"),
+            id_fn=Sequence("lease-adopt"),
             audit=self.audit,
         )
         self.store = RunManifestStore(paths)
@@ -658,6 +666,130 @@ class DirectAdoptMatrixTest(AdoptionFixture):
         self.assertEqual(result.get("use_reason"), "unclassified")
         self.assertEqual(self._pending(), [])
         self.assertEqual(self.store.get(RUN_ID).state, "RUNNING_IDLE")
+
+    def test_a_failed_revert_does_not_leave_the_stranger_in_charge(self) -> None:
+        # The owner replace landed and the revert write did not. The durable
+        # row still names the stranger until a later write succeeds.
+        self.shape("idle_waiting")
+        self.bindings.bound.add(RUN_ID)
+        self.lifecycle._invalidate_box_cache()
+        self.assertEqual(self._row()["use_state"], "abandoned")
+        stamp_launcher(self.lifecycle, RUN_ID, LAUNCHER)
+        launch_id = str(uuid.uuid4())
+        prepared = self.store.get(RUN_ID)
+        assert prepared is not None
+        prepared.launch_operation_id = launch_id
+        prepared.launch_request_sha256 = "ab" * 32
+        self.store.replace(prepared)
+        token = self._lease(OTHER)
+        original = RunManifestStore.replace
+        seen = {"owner_committed": False}
+
+        def replace_with_fault(store, row):
+            if row.owner_session_id == OTHER.session_id and not seen["owner_committed"]:
+                self._human(time.time())
+                original(store, row)
+                seen["owner_committed"] = True
+                return
+            if seen["owner_committed"] and row.owner_session_id is None:
+                raise PermissionError("injected second replace failure")
+            return original(store, row)
+
+        with patch.object(RunManifestStore, "replace", replace_with_fault):
+            result = self.lifecycle.adopt_run(OTHER, token, RUN_ID)
+            self.assertEqual(result.get("error"), "run_protected", result)
+            self.assertEqual(result.get("use_reason"), "adoption_revert_pending")
+            live = self.store.get(RUN_ID)
+            assert live is not None
+            self.assertEqual(live.owner_session_id, OTHER.session_id)
+            self.assertEqual(live.state, "RUNNING")
+            self.assertTrue(self.lifecycle._adoption_marker_path().exists())
+
+            stopped = self.lifecycle.stop_run(OTHER, token, RUN_ID)
+            self.assertEqual(stopped.get("error"), "run_protected", stopped)
+            closed = self.lifecycle.close_run(OTHER, token, RUN_ID)
+            self.assertEqual(closed.get("error"), "run_protected", closed)
+            acked = self.lifecycle.ack_run(OTHER, token, RUN_ID, launch_id)
+            self.assertEqual(acked.get("error"), "run_protected", acked)
+            self.assertEqual(self.store.get(RUN_ID).state, "RUNNING")
+            self.assertEqual(self.store.get(RUN_ID).owner_session_id, OTHER.session_id)
+
+            bridge = ServerState("k", coordination=self.coordinator)
+            bridge.lifecycle = self.lifecycle
+            bridge.retail_probe = lambda: {"known": True, "processes": []}
+            bridge.install_bound_peer(
+                instance=str(uuid.uuid4()),
+                role="client",
+                pid=802,
+                run_id=RUN_ID,
+            )
+            status, body = bridge.enqueue_command(
+                "engine_set",
+                {"mode": "stop"},
+                peer="client",
+                identity_payload=OTHER.to_payload(),
+                lease_token=token,
+            )
+            self.assertEqual(status, 409, body)
+            self.assertEqual(body.get("error"), "run_protected")
+
+            box = self.lifecycle.box_occupancy()
+            self.assertEqual(self._row()["use_reason"], "adoption_revert_pending")
+            text = _session_status_blocked_on(
+                {"owner": None, "box": box}, OTHER.session_id
+            )
+            self.assertIn("protected", text)
+            self.assertIn("adoption_revert_pending", text)
+            launcher_text = _session_status_blocked_on(
+                {"owner": None, "box": box}, LAUNCHER.session_id
+            )
+            self.assertNotIn("adoption_revert_pending", launcher_text or "")
+            target = takeover_target_run_id(box, caller_session="third-session")
+            self.assertEqual(target, RUN_ID)
+            self.assertTrue(_row_is_protected(_box_run(box, target), "third-session"))
+            self.assertFalse(
+                _row_is_protected(_box_run(box, target), LAUNCHER.session_id)
+            )
+
+            third = ClientIdentity(
+                "codex", 33, 3, "2026-07-15T00:00:02Z", "third-session", "third"
+            )
+            third_token = self._lease(third)
+            adopted = self.lifecycle.adopt_run(third, third_token, RUN_ID)
+            self.assertEqual(adopted.get("error"), "run_protected", adopted)
+            self.assertEqual(adopted.get("use_reason"), "adoption_revert_pending")
+
+            launcher_token = self._lease(LAUNCHER)
+            launcher_adopt = self.lifecycle.adopt_run(LAUNCHER, launcher_token, RUN_ID)
+            self.assertNotEqual(launcher_adopt.get("use_reason"), "adoption_revert_pending")
+            self.assertEqual(self.store.get(RUN_ID).owner_session_id, OTHER.session_id)
+            allowed, allowed_body = bridge.enqueue_command(
+                "engine_set",
+                {"mode": "stop"},
+                peer="client",
+                identity_payload=LAUNCHER.to_payload(),
+                lease_token=launcher_token,
+            )
+            self.assertEqual(allowed, 200, allowed_body)
+
+        self.assertEqual(self.lifecycle.reap_dead_runs(), [])
+        settled_run = self.store.get(RUN_ID)
+        assert settled_run is not None
+        self.assertIsNone(settled_run.owner_session_id)
+        self.assertEqual(settled_run.state, "RUNNING_IDLE")
+        marker = self.lifecycle._adoption_marker_path()
+        assert marker is not None
+        self.assertFalse(marker.exists())
+        settled_path = self.lifecycle._adoption_settled_path()
+        assert settled_path is not None
+        settled = json.loads(settled_path.read_text(encoding="utf-8"))
+        self.assertTrue(settled["settled"])
+        self.assertTrue(settled["reverted"])
+        self.assertEqual(settled["invalidated_by"], "human")
+        launcher_token = self._lease(LAUNCHER)
+        taken = self.lifecycle.adopt_run(LAUNCHER, launcher_token, RUN_ID)
+        self.assertIs(taken.get("ok"), True, taken)
+        self.assertEqual(self.store.get(RUN_ID).owner_session_id, LAUNCHER.session_id)
 
 
 class HttpAdoptionMatrixTest(unittest.TestCase):

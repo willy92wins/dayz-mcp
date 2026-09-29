@@ -1569,7 +1569,7 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(len(exhausted), 1)
         self.assertEqual(exhausted[0]["severity"], "FAIL")
         self.assertEqual(exhausted[0]["slots"], 10)
-        self.assertEqual(Path(exhausted[0]["path"]), base.resolve())
+        self.assertEqual(Path(exhausted[0]["path"]).resolve(), base.resolve())
 
         (self.runtime / "runs.json.bak-preprune.10").unlink()
         free, free_exit = self.execute()

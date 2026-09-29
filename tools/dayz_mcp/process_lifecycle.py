@@ -817,6 +817,27 @@ def protection_retry_after_s(row: dict[str, object]) -> float | None:
     return round(remaining, 3)
 
 
+ADOPTION_REVERT_PENDING = "adoption_revert_pending"
+
+
+def adoption_revert_pending_fields() -> dict[str, object]:
+    """Refusal while the stranger is still the durable owner.
+
+    The revert write has not landed. The launcher is not refused for this
+    reason; everyone else is, until that write succeeds or startup recovery
+    reads the marker.
+    """
+
+    return {
+        "use_state": "agent",
+        "use_reason": ADOPTION_REVERT_PENDING,
+        "hint": (
+            "run_protected: adoption revert has not reached the manifest; "
+            "this session does not have the launcher's right"
+        ),
+    }
+
+
 def protection_fields(row: dict[str, object] | None) -> dict[str, object]:
     """Refusal body for a run that is not abandoned and not ours to adopt.
 
@@ -1574,6 +1595,15 @@ class ProcessLifecycle:
         self._invalidated_adoption: dict[tuple[str, str], tuple[int, str]] = {}
         self._adoption_serial = 0
         self._open_adoption: tuple[str, int] | None = None
+        # Revert whose manifest write failed. The durable row still names the
+        # stranger. Daemon memory only: startup recovery reads the marker.
+        # The view is replaced wholesale so enqueue can read it without this
+        # lock (the loopback lock is already held there).
+        self._adoption_revert_pending: dict[tuple[str, str], tuple[int, str]] = {}
+        self._revert_pending_view: tuple[frozenset[str], Mapping[str, str]] = (
+            frozenset(),
+            MappingProxyType({}),
+        )
         # Retired-run diagnostics live in daemon memory and start empty after a
         # restart; the audit file is never read to reconstruct them.
         self._retired_diagnostics: deque[RetiredRunDiagnostic] = deque(maxlen=32)
@@ -3315,6 +3345,15 @@ class ProcessLifecycle:
                     authority, command, "launch_identity_conflict"
                 )
             run = self.manifest.get(run_id)
+            if isinstance(run_id, str) and run is not None:
+                refusal = self._refuse_unconfirmed_owner(client, run_id)
+                if refusal is not None:
+                    result = self._reject_reserved(
+                        authority, command, "run_protected"
+                    )
+                    result.update(refusal)
+                    return result
+                run = self.manifest.get(run_id)
             if (
                 run is None
                 or run.state != "RUNNING"
@@ -3606,6 +3645,14 @@ class ProcessLifecycle:
                 return self._reject_reserved(authority, command, "retail_quarantine")
             if not isinstance(run_id, str) or not run_id:
                 return self._reject_reserved(authority, command, "run_not_found", 404)
+            run = self.manifest.get(run_id)
+            if run is None:
+                return self._reject_reserved(authority, command, "run_not_found", 404)
+            refusal = self._refuse_unconfirmed_owner(client, run_id)
+            if refusal is not None:
+                result = self._reject_reserved(authority, command, "run_protected")
+                result.update(refusal)
+                return result
             run = self.manifest.get(run_id)
             if run is None:
                 return self._reject_reserved(authority, command, "run_not_found", 404)
@@ -4004,6 +4051,16 @@ class ProcessLifecycle:
                     return self._reject_reserved(authority, command, "retail_quarantine")
                 if not isinstance(run_id, str) or not run_id:
                     return self._reject_reserved(authority, command, "run_not_found", 404)
+                run = self.manifest.get(run_id)
+                if run is None:
+                    return self._reject_reserved(authority, command, "run_not_found", 404)
+                refusal = self._refuse_unconfirmed_owner(client, run_id)
+                if refusal is not None:
+                    result = self._reject_reserved(
+                        authority, command, "run_protected"
+                    )
+                    result.update(refusal)
+                    return result
                 run = self.manifest.get(run_id)
                 if run is None:
                     return self._reject_reserved(authority, command, "run_not_found", 404)
@@ -5043,6 +5100,85 @@ class ProcessLifecycle:
             kind=kind if isinstance(kind, str) else None,
         )
 
+    def _publish_revert_view_locked(self) -> None:
+        """Caller holds _activity_lock. Publish a lock-free snapshot for enqueue."""
+
+        generation = (
+            self.daemon_generation if isinstance(self.daemon_generation, str) else ""
+        )
+        run_ids: set[str] = set()
+        launchers: dict[str, str] = {}
+        for (gen, run_id), _pending in self._adoption_revert_pending.items():
+            if gen != generation:
+                continue
+            run_ids.add(run_id)
+            identity = self._launched_by.get((gen, run_id))
+            if identity is not None and isinstance(identity.session_id, str) and identity.session_id:
+                launchers[run_id] = identity.session_id
+        self._revert_pending_view = (frozenset(run_ids), MappingProxyType(launchers))
+
+    def _adoption_revert_is_pending(self, run_id: str) -> bool:
+        with self._activity_lock:
+            return self._activity_key(run_id) in self._adoption_revert_pending
+
+    def _clear_revert_pending(self, key: tuple[str, str], token: int) -> None:
+        with self._activity_lock:
+            current = self._adoption_revert_pending.get(key)
+            if current is None or current[0] != token:
+                return
+            self._adoption_revert_pending.pop(key, None)
+            self._publish_revert_view_locked()
+
+    def _retry_adoption_reverts(self) -> None:
+        """Caller holds _operation_lock. Leave a run pending when the write fails."""
+
+        with self._activity_lock:
+            pending = list(self._adoption_revert_pending.items())
+        for key, (token, kind) in pending:
+            try:
+                run = self.manifest.get(key[1])
+            except Exception:
+                continue
+            if run is None or run.state != "RUNNING" or not run.owner_session_id:
+                if run is not None and run.owner_session_id is None:
+                    try:
+                        self._settle_adoption_marker(reverted=True, kind=kind)
+                    except Exception:
+                        pass
+                self._clear_revert_pending(key, token)
+                continue
+            run.owner_session_id = None
+            run.owner_lease_id = None
+            run.state = "RUNNING_IDLE"
+            try:
+                RunManifestStore.replace(self.manifest, run)
+            except Exception:
+                continue
+            try:
+                self._settle_adoption_marker(reverted=True, kind=kind)
+            except Exception:
+                pass
+            self._clear_revert_pending(key, token)
+            self._invalidate_box_cache()
+
+    def _refuse_unconfirmed_owner(
+        self, client: ClientIdentity, run_id: str
+    ) -> dict[str, object] | None:
+        """None lets the caller continue. Caller holds _operation_lock.
+
+        Retries the durable revert first. The launcher is not refused while
+        the write is still pending; every other session is.
+        """
+
+        if not self._adoption_revert_is_pending(run_id):
+            return None
+        self._retry_adoption_reverts()
+        if not self._adoption_revert_is_pending(run_id):
+            return None
+        if self._client_is_launcher(client, run_id):
+            return None
+        return adoption_revert_pending_fields()
+
     def _close_adoption_after_replace(
         self, client: ClientIdentity, run: RunRecord
     ) -> dict[str, object] | None:
@@ -5071,7 +5207,18 @@ class ProcessLifecycle:
         run.state = "RUNNING_IDLE"
         # The owner commit is the instance replace. A probe wrapped around
         # that call runs before it returns; the revert must not re-enter it.
-        RunManifestStore.replace(self.manifest, run)
+        try:
+            RunManifestStore.replace(self.manifest, run)
+        except Exception:
+            # The store rolled back to the stranger. Remember the token and
+            # refuse that ownership until a later write lands.
+            with self._activity_lock:
+                self._adoption_revert_pending[self._activity_key(run_id)] = (
+                    token,
+                    kind,
+                )
+                self._publish_revert_view_locked()
+            return adoption_revert_pending_fields()
         try:
             self._settle_adoption_marker(reverted=True, kind=kind)
         except Exception:
@@ -5162,6 +5309,16 @@ class ProcessLifecycle:
                     return self._reject_reserved(authority, command, "retail_quarantine")
                 if not isinstance(run_id, str) or not run_id:
                     return self._reject_reserved(authority, command, "run_not_found", 404)
+                run = self.manifest.get(run_id)
+                if run is None:
+                    return self._reject_reserved(authority, command, "run_not_found", 404)
+                refusal = self._refuse_unconfirmed_owner(client, run_id)
+                if refusal is not None:
+                    result = self._reject_reserved(
+                        authority, command, "run_protected"
+                    )
+                    result.update(refusal)
+                    return result
                 run = self.manifest.get(run_id)
                 if run is None:
                     return self._reject_reserved(authority, command, "run_not_found", 404)
@@ -5772,6 +5929,7 @@ class ProcessLifecycle:
         audited so a later ghost can be told apart from a skipped reaper."""
         with self._operation_lock:
             self._require_legacy_identity_safe()
+            self._retry_adoption_reverts()
             if self._quarantined():
                 if not self._audit(
                     "reap_under_quarantine",
@@ -5990,7 +6148,20 @@ class ProcessLifecycle:
         self._stamp_queued_launcher_requests(clock)
         snapshot = self._take_box_snapshot(clock)
         probes = self._probes_for_snapshot(snapshot, use_cache=now is None)
-        return _derive_box(snapshot, probes)
+        derived = _derive_box(snapshot, probes)
+        with self._activity_lock:
+            pending = {
+                run_id
+                for (gen, run_id) in self._adoption_revert_pending
+                if gen == snapshot.daemon_generation
+            }
+        if pending:
+            runs = derived.get("runs")
+            if isinstance(runs, list):
+                for row in runs:
+                    if isinstance(row, dict) and row.get("run_id") in pending:
+                        row["use_reason"] = ADOPTION_REVERT_PENDING
+        return derived
 
     def _take_box_snapshot(self, clock: float) -> _BoxSnapshot:
         # The seal must be a lower bound of the data it certifies.

@@ -222,7 +222,15 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(waiter.active_ticket, queued["ticket"])
 
         await owner.session_release(owner_acquired["lease_token"])
-        await asyncio.sleep(0.05)
+        # HTTP 200 can return while handoff_pending is still set. session_wait
+        # with timeout 0 polls once.
+        coordinator = srv.state.coordination
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         granted = await waiter.session_wait(queued["ticket"], 0.0)
 
         self.assertEqual(granted["status"], "active")

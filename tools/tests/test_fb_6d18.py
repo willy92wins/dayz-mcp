@@ -1,12 +1,13 @@
 """Locked Windows sessions fail capture as session_locked, not a generic backend error.
 
 Window-grab backends need the interactive desktop. Tests patch the desktop
-probe, ctypes.WinDLL and subprocess.run so they never call OpenInputDesktop.
+probe, ctypes.WinDLL and subprocess.Popen so they never call OpenInputDesktop.
 """
 
 from __future__ import annotations
 
 import ctypes
+import io
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -23,43 +24,56 @@ class _SinkRuntime:
         self._log = self.lines.append
 
 
-def _patched_run() -> mock.Mock:
-    proc = mock.Mock()
-    proc.stdout = ""
-    proc.stderr = "patched"
-    return proc
+class _ExitedGrab:
+    def __init__(self, stdout: str = "", stderr: str = "", code: int = 1) -> None:
+        self.stdout = io.StringIO(stdout)
+        self.stderr = io.StringIO(stderr)
+        self.returncode = code
+
+    def poll(self) -> int:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
+def _patched_popen() -> _ExitedGrab:
+    return _ExitedGrab(stdout="", stderr="patched", code=1)
 
 
 class Fb6d18CaptureSessionLockedTest(unittest.TestCase):
     def test_fb_6d18_locked_probe_returns_session_locked_without_subprocess(self) -> None:
-        run = mock.Mock(return_value=_patched_run())
+        popen = mock.Mock(return_value=_patched_popen())
         with mock.patch.object(mcp_capture, "probe_input_desktop", return_value="locked"):
             with mock.patch.object(mcp_capture.os.path, "exists", return_value=True):
-                with mock.patch.object(mcp_capture.subprocess, "run", run):
+                with mock.patch.object(mcp_capture.subprocess, "Popen", popen):
                     result = mcp_capture._run_window_capture("frame.png", "DayZDiag_x64", 8.0)
 
         self.assertEqual({"ok": False, "error": "session_locked"}, result)
-        run.assert_not_called()
+        popen.assert_not_called()
 
     def test_fb_6d18_unknown_probe_reaches_existing_path(self) -> None:
-        run = mock.Mock(return_value=_patched_run())
+        popen = mock.Mock(return_value=_patched_popen())
         with mock.patch.object(mcp_capture, "probe_input_desktop", return_value="unknown"):
             with mock.patch.object(mcp_capture.os.path, "exists", return_value=True):
-                with mock.patch.object(mcp_capture.subprocess, "run", run):
+                with mock.patch.object(mcp_capture.subprocess, "Popen", popen):
                     result = mcp_capture._run_window_capture("frame.png", "DayZDiag_x64", 8.0)
 
-        run.assert_called_once()
+        popen.assert_called_once()
         self.assertNotEqual("session_locked", result.get("error"))
         self.assertTrue(str(result.get("error") or "").startswith("capture_backend_failed"))
 
     def test_fb_6d18_unlocked_probe_reaches_existing_path(self) -> None:
-        run = mock.Mock(return_value=_patched_run())
+        popen = mock.Mock(return_value=_patched_popen())
         with mock.patch.object(mcp_capture, "probe_input_desktop", return_value="unlocked"):
             with mock.patch.object(mcp_capture.os.path, "exists", return_value=True):
-                with mock.patch.object(mcp_capture.subprocess, "run", run):
+                with mock.patch.object(mcp_capture.subprocess, "Popen", popen):
                     result = mcp_capture._run_window_capture("frame.png", "DayZDiag_x64", 8.0)
 
-        run.assert_called_once()
+        popen.assert_called_once()
         self.assertNotEqual("session_locked", result.get("error"))
         self.assertTrue(str(result.get("error") or "").startswith("capture_backend_failed"))
 

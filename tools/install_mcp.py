@@ -233,7 +233,18 @@ def _validate_cli_entry(role: str, value: object) -> InstallerCliEntry:
         resolved = path.resolve(strict=True)
     except OSError as error:
         raise InstallerContractError("installer_cli_missing") from error
-    if os.path.normcase(str(path)) != os.path.normcase(str(resolved)):
+    if os.name == "nt":
+        from dayz_mcp.pinned_keyfile import same_requested_path
+
+        # collapse=False: main does not normpath, and GetLongPathNameW keeps
+        # ".." and junctions. Collapsing either would accept what resolve()
+        # rewrites. The raw compare still runs first.
+        paths_match = same_requested_path(
+            str(path), str(resolved), collapse=False
+        )
+    else:
+        paths_match = os.path.normcase(str(path)) == os.path.normcase(str(resolved))
+    if not paths_match:
         raise InstallerContractError("installer_cli_path_not_canonical")
 
     metadata = _native_regular_file(path)
