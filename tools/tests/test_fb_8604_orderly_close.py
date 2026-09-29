@@ -1386,7 +1386,10 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         client_at = next(at for roles, at in runtime.close_at if roles == ("client",))
         server_at = next(at for roles, at in runtime.close_at if roles == ("server",))
         self.assertLess(client_at, runtime.logout_at)
-        self.assertGreater(server_at, runtime.logout_at)
+        # >=, not >: on a 15.6 ms clock (Windows, Python 3.11) the stamp taken before the line is
+        # written and the server-close stamp taken after it is seen can land in the same tick. An
+        # early server close would still be ~0.12 s before logout_at and fail this.
+        self.assertGreaterEqual(server_at, runtime.logout_at)
         self.assertEqual(runtime.role_calls, [("client",), ("server",)])
         self.assertEqual(result["close_order"], ["client", "server"])
         self.assertEqual(
@@ -1436,7 +1439,8 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         result = await _close_tool(runtime, graceful_timeout_s=2)
         await writer
         server_at = next(at for roles, at in runtime.close_at if roles == ("server",))
-        self.assertGreater(server_at, runtime.second_logout_at)
+        # >=, not >: see the coarse-clock note in the client-first test above.
+        self.assertGreaterEqual(server_at, runtime.second_logout_at)
         self.assertGreater(runtime.second_logout_at, runtime.first_logout_at)
         self.assertEqual(
             result["logout_players"],
@@ -1595,7 +1599,8 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         result = await _close_tool(runtime, graceful_timeout_s=2)
         await writer
         server_at = next(at for roles, at in runtime.close_at if roles == ("server",))
-        self.assertGreater(server_at, runtime.logout_at)
+        # >=, not >: see the coarse-clock note in the client-first test above.
+        self.assertGreaterEqual(server_at, runtime.logout_at)
         self.assertEqual(
             result["logout_players"],
             [{"player": "Dev", "logout_finished": True}],
