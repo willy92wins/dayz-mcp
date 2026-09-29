@@ -7,8 +7,12 @@ bridge command, no use_state change, no lease expiry pass, and no touch of
 go off releases what it holds and closes nothing.
 
 When on, an ``abandoned`` run is warned and closed 60 s later unless someone
-reacts. A confirmed-dead client skips the warning. The lease is the normal
-queue plus a live wait (D-19), with the coordinator's WAL and audit (D-20).
+reacts. A confirmed-dead client skips the warning. After a successful close
+the warden waits, within ``EXIT_WAIT_S``, until every launched role has exited
+the process-guard snapshot, then reaps. A ``run_not_reapable`` answer while
+those processes are still alive is a retry, not a failure, until that budget
+is spent. The lease is the normal queue plus a live wait (D-19), with the
+coordinator's WAL and audit (D-20).
 """
 
 from __future__ import annotations
@@ -420,13 +424,21 @@ class IdleWarden:
     def _after_close(self, run_id: str) -> str:
         deadline = self.monotonic() + EXIT_WAIT_S
         while self.monotonic() < deadline:
-            if self._gone(run_id) or self._state(run_id) == "EXITED":
-                break
+            if self._state(run_id) == "EXITED":
+                return self._finish("orderly")
+            if self._gone(run_id):
+                outcome = self._reap_exited(run_id, budget_open=True)
+                if outcome is not None:
+                    return outcome
             if not self._heartbeat():
                 break
             self._hook("waiting_exit")
-            if self._gone(run_id) or self._state(run_id) == "EXITED":
-                break
+            if self._state(run_id) == "EXITED":
+                return self._finish("orderly")
+            if self._gone(run_id):
+                outcome = self._reap_exited(run_id, budget_open=True)
+                if outcome is not None:
+                    return outcome
             remaining = deadline - self.monotonic()
             if remaining <= 0.0:
                 break
@@ -434,11 +446,9 @@ class IdleWarden:
         if self._state(run_id) == "EXITED":
             return self._finish("orderly")
         if self._gone(run_id):
-            reaped = self.lifecycle.reap_dead_run(self.client, self.token, run_id)
-            if (
-                isinstance(reaped, dict) and reaped.get("ok") is True
-            ) or self._state(run_id) == "EXITED":
-                return self._finish("orderly")
+            outcome = self._reap_exited(run_id, budget_open=False)
+            if outcome is not None:
+                return outcome
             return self._fail(run_id, "reap_failed")
         self._hook("revalidate_stop")
         off = self._switch_off(run_id)
@@ -642,6 +652,31 @@ class IdleWarden:
             and kinds["unknown"] == 0
             and kinds["gone"] > 0
         )
+
+    def _reap_exited(self, run_id: str, *, budget_open: bool) -> str | None:
+        """Reap after every launched role has left the guard snapshot.
+
+        ``None`` means ``run_not_reapable`` while a process of the run is still
+        alive and ``EXIT_WAIT_S`` is not spent: the caller waits and retries.
+        Any other reap error fails immediately. The budget ending with those
+        processes still alive is ``reap_failed`` and names them.
+        """
+
+        reaped = self.lifecycle.reap_dead_run(self.client, self.token, run_id)
+        if (
+            isinstance(reaped, dict) and reaped.get("ok") is True
+        ) or self._state(run_id) == "EXITED":
+            return self._finish("orderly")
+        alive: tuple[str, ...] = ()
+        if isinstance(reaped, dict) and reaped.get("error") == "run_not_reapable":
+            named = self.lifecycle.launched_processes_still_alive(run_id)
+            if named:
+                alive = named
+        if alive and budget_open:
+            return None
+        if alive:
+            return self._fail(run_id, "reap_failed; processes=" + ",".join(alive))
+        return self._fail(run_id, "reap_failed")
 
     def _heartbeat(self) -> bool:
         if not self.token:

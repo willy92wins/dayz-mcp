@@ -4357,6 +4357,39 @@ class ProcessLifecycle:
         buckets, _reason = self._partition_registered_processes(run.processes)
         return {name: len(pids) for name, pids in buckets.items()}
 
+    def launched_processes_still_alive(self, run_id: str) -> tuple[str, ...] | None:
+        """Names that still block ``reap_dead_run``. None when the run is absent.
+
+        Empty when every launched role has exited and the diag scan is clear:
+        the same witnesses as ``_run_all_dead`` (guard classification, then
+        ``_diag_snapshot_registered``). A name is ``<pid>:<role>`` for a
+        launched role that is still owned, still unclassified, or still listed
+        by the diag scan, and ``<pid>:diag`` for any other diag process.
+        Does not terminate.
+        """
+
+        run = self.manifest.get(run_id)
+        if run is None:
+            return None
+        buckets, _unknown_reason = self._partition_registered_processes(run.processes)
+        blocking = set(buckets["owned"]) | set(buckets["unknown"])
+        labels: dict[int, str] = {}
+        for record in run.processes:
+            if record.pid in blocking:
+                labels[record.pid] = f"{record.pid}:{record.role}"
+        reason, processes = self._diag_snapshot()
+        if reason is None and processes is not None:
+            roles = {record.pid: record.role for record in run.processes}
+            for process in processes:
+                pid = process.get("pid")
+                if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                    continue
+                if pid in labels:
+                    continue
+                role = roles.get(pid)
+                labels[pid] = f"{pid}:{role}" if role is not None else f"{pid}:diag"
+        return tuple(labels[pid] for pid in sorted(labels))
+
     def retail_quarantined(self) -> bool:
         return self._quarantined()
 
