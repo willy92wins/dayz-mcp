@@ -382,6 +382,7 @@ def build_run_request(
     no_base_mods: bool = False,
     no_file_patching: bool = False,
     auto_remediate_steam: bool = False,
+    navmesh_data_server: bool = False,
     port: int = 2302,
     width: int = 1920,
     height: int = 1080,
@@ -426,6 +427,7 @@ def build_run_request(
             "mission": mission,
             "mod": selected.mod,
             "mode": mode,
+            "navmesh_data_server": navmesh_data_server,
             "no_base_mods": no_base_mods,
             "no_file_patching": no_file_patching,
             "pack_only": pack_only,
@@ -1634,6 +1636,7 @@ async def execute_dayz_test_run(
     server_wait_s: int = 60,
     progress_cb: _ProgressCallback | None = None,
     auto_remediate_steam: bool = False,
+    navmesh_data_server: bool = False,
     client_start_budget_s: float | None = None,
 ) -> dict[str, object]:
     """Run or preflight a request, with explicit omissions in this adapter.
@@ -1679,6 +1682,7 @@ async def execute_dayz_test_run(
                 "server_mods": server_mods,
                 "no_base_mods": no_base_mods,
                 "no_file_patching": no_file_patching,
+                "navmesh_data_server": navmesh_data_server,
                 "auto_remediate_steam": auto_remediate_steam,
                 "port": port,
                 "width": width,

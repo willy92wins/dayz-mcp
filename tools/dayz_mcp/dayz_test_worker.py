@@ -270,6 +270,8 @@ def _start_core(
         ]
         if not payload["no_file_patching"]:
             argv.append("-filePatching")
+        if payload.get("navmesh_data_server", False):
+            argv.append("-startNavmeshDataServer")
         argv.append(f"-port={port}")
         server_mods = list(payload.get("server_mods", []))
         if server_mods:

@@ -3232,6 +3232,12 @@ RUN_ID_MATRIX_RUN_ID_DESCRIPTION = (
     "Live run to reattach to. Required with mode=client; forbidden with "
     "mode=server|all (bad_dayz_test_request otherwise)."
 )
+NAVMESH_DATA_SERVER_DESCRIPTION = (
+    "Opt-in. Default false. With mode=server, adds -startNavmeshDataServer "
+    "for DayZ Tools NavMeshGenerator. Rejected with other modes or pack_only. "
+    "Preflight validates the request without launching. A successful launch "
+    "does not prove the generator connected or produced a usable navmesh."
+)
 AUTO_REMEDIATE_STEAM_DESCRIPTION = (
     "Opt-in. Default false. When the Steam gate refuses (steam_not_running or "
     "steam_session_stale), dayz-mcp prepares Steam once before it launches the "
@@ -3302,6 +3308,7 @@ def _describe_run_parameters(app: FastMCP, tool_name: str) -> None:
         ("run_id", RUN_ID_MATRIX_RUN_ID_DESCRIPTION),
         ("extra_mods", EXTRA_MODS_DESCRIPTION),
         ("auto_remediate_steam", AUTO_REMEDIATE_STEAM_DESCRIPTION),
+        ("navmesh_data_server", NAVMESH_DATA_SERVER_DESCRIPTION),
         ("client_start_budget_s", CLIENT_START_BUDGET_DESCRIPTION),
         ("takeover", TAKEOVER_DESCRIPTION),
     ):
@@ -5748,6 +5755,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         server_wait_s: StrictInt = 60,
         wait_for_box_s: StrictFloat = 0.0,
         auto_remediate_steam: StrictBool = False,
+        navmesh_data_server: StrictBool = False,
         takeover: StrictBool = False,
         client_start_budget_s: StrictFloat | StrictInt | None = None,
         on_busy: StrictStr = "fail",
@@ -5766,6 +5774,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         budget_s = _parse_client_start_budget_s(client_start_budget_s)
         wait_s = _parse_wait_for_box_s(wait_for_box_s)
         on_busy = _parse_on_busy(on_busy)
+        # Refuse before queue admission or takeover. The sealed request parser
+        # also enforces this restriction for non-MCP callers and the worker.
+        if navmesh_data_server and (mode != "server" or pack_only):
+            raise ToolError(
+                "bad_dayz_test_request:navmesh_data_server_requires_server_launch"
+            )
         client = _client_runtime()
         started = time.monotonic()
         box_ticket: str | None = None
@@ -5914,6 +5928,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                             server_mods=server_mods,
                             no_base_mods=no_base_mods,
                             no_file_patching=no_file_patching,
+                            navmesh_data_server=navmesh_data_server,
                             port=port,
                             width=width,
                             height=height,

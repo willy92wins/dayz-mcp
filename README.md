@@ -38,6 +38,13 @@ frame, raycast a placement, record a 20 Hz drive trace as a regression fixture
 An agent that can call these can iterate on a mod the way it iterates on code: change,
 build, run, measure, fix — the way this repo itself was developed and gated.
 
+For a custom terrain, `dayz_test_run(project, mode="server", navmesh_data_server=True, …)`
+starts the managed server with `-startNavmeshDataServer` for DayZ Tools NavMeshGenerator.
+The option defaults to false and rejects other modes and `pack_only`; `preflight`
+only validates. Connect the generator and save its `.nm` separately: launcher readiness
+does not certify a generator connection or a usable navmesh. Stop this run with
+`dayz_test_stop(run_id)` as usual.
+
 ## The server, as tools
 
 | Need | Tool(s) |

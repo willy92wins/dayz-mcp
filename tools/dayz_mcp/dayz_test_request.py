@@ -37,6 +37,7 @@ _REQUEST_KEYS = frozenset(
         "run_id",
         "replace_if_not_polling_since",
         "auto_remediate_steam",
+        "navmesh_data_server",
     }
 )
 _MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal", "lfheli"})
@@ -56,14 +57,17 @@ _SERVER_ALL_FORBID_RUN_ID = "server_all_forbid_run_id"
 # existed carries every other key and not that one. Recognising only the new
 # keyset would make a stored or replayed v1 document stop being canonical and
 # die as source_requires_build, with no version bump and no legacy route -- the
-# exact failure a rollback of this window would hit. Both keysets are canonical.
+# exact failure a rollback of this window would hit. Keep the pre-navmesh
+# canonical forms too; omitted optional fields retain their false defaults.
 _CANONICAL_KEYSETS = frozenset(
-    {
+    keys - omitted
+    for keys in (
         _REQUEST_KEYS,
         _REQUEST_KEYS - {"replace_if_not_polling_since"},
         _REQUEST_KEYS - {"auto_remediate_steam"},
         _REQUEST_KEYS - {"replace_if_not_polling_since", "auto_remediate_steam"},
-    }
+    )
+    for omitted in (frozenset(), frozenset({"navmesh_data_server"}))
 )
 
 
@@ -79,6 +83,7 @@ REQUEST_REJECTION_REASONS = frozenset(
         "mod_list_invalid",
         "mode_authority_unreadable",
         "mode_unknown",
+        "navmesh_data_server_requires_server_launch",
         "no_base_mods_conflict",
         "pack_only_requires_build",
         "payload_not_encodable",
@@ -359,6 +364,7 @@ def parse_dayz_test_request(
     preflight = value.get("preflight", False)
     kill = value.get("kill", False)
     auto_remediate_steam = value.get("auto_remediate_steam", False)
+    navmesh_data_server = value.get("navmesh_data_server", False)
     run_id = value.get("run_id")
     replace_witness = value.get("replace_if_not_polling_since")
 
@@ -389,6 +395,7 @@ def parse_dayz_test_request(
             preflight,
             kill,
             auto_remediate_steam,
+            navmesh_data_server,
         )
     ):
         _invalid("flag_not_boolean")
@@ -410,6 +417,8 @@ def parse_dayz_test_request(
         _invalid("no_base_mods_conflict")
 
     effective_build = build or clean
+    if navmesh_data_server and (mode != "server" or kill or pack_only):
+        _invalid("navmesh_data_server_requires_server_launch")
     if pack_only and not effective_build:
         _invalid("pack_only_requires_build")
     canonical_default_source = (
@@ -452,6 +461,7 @@ def parse_dayz_test_request(
         "mission": mission,
         "mod": policy.mod,
         "mode": mode,
+        "navmesh_data_server": navmesh_data_server,
         "no_base_mods": no_base_mods,
         "no_file_patching": no_file_patching,
         "pack_only": pack_only,
