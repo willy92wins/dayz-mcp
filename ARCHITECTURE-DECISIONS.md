@@ -41,12 +41,15 @@ If you are about to change one of these rules, you are changing the design, not 
    - Reads need no lease.
    - Mutations and lifecycle calls need the `dayz-box` lease. It has a 120 s TTL that every heartbeat and every command authorized under it renew.
    - The queue is FIFO with one exception. A holder whose lease expired while its run was still attached gets a 90 s grace (`LEASE_GRACE_S`) to take it back ahead of the queue. Strangers are held off meanwhile, and with a queue waiting it can do so only once in a row (`MAX_PREF_RENEWALS`).
-   - Cleanup is scoped to the owner and never kills DayZ or the daemon.
-   - *Where:* `tools/dayz_mcp/session_coordination.py`.
+   - Cleanup is scoped to the owner and never kills DayZ or the daemon. This sentence is lease cleanup.
+   - The one exception is the idle warden (`tools/dayz_mcp/idle_warden.py`). It ships off. Only `%LOCALAPPDATA%\DayZ_MCP\idle-warden.json` as the JSON object `{"enabled": true}` turns it on; a missing, unreadable or any other file leaves it off, and turning it off releases what it holds and closes nothing. When on, it takes the `dayz-box` lease through the same queue and may close one abandoned run: ownerless `RUNNING_IDLE`, no human input for `RUN_IDLE_CUT_S` (600 s), `use_state` `abandoned`, and the only active run, with a known scan and no retail quarantine. A live client is closed only after a confirmed `notify_players` warning to its players (`WARNING_SHOW_S` 60) and `COUNTDOWN_S` (60 s) with no reaction. The close is `WM_CLOSE` first (`close_run`). It then waits up to `EXIT_WAIT_S` (45 s) for every launched role to leave the process-guard snapshot and reaps; a `run_not_reapable` whose next read is known and empty is one more reap, still inside that budget. If a launched role is still alive, a lifecycle-guard stop by identity follows (`stop_run`). A confirmed-dead client (`client_gone`) skips the warning. It never closes a run with an agent owner, a human playing, an unknown scan or retail quarantine.
+   - *Where:* `tools/dayz_mcp/session_coordination.py` for the lease; `tools/dayz_mcp/idle_warden.py` for the exception. Use state is `_use_projection` in `tools/dayz_mcp/process_lifecycle.py`; the input signal is `tools/dayz_mcp/input_activity.py`.
    - *Decisions:*
      - D-15;
      - D-19: only a live `session_wait` can claim the head of the queue;
-     - D-20: a token is published only after its write-ahead log entry is durable.
+     - D-20: a token is published only after its write-ahead log entry is durable;
+     - D-81: activity that resets the 10-minute cut is a leased agent, or keyboard or mouse while a window of the run is in front. Warn at 10:00 and close at 11:00. With no way to warn, a live client is not cut. While someone is playing, only the session that launched the run may adopt it or stop it.
+     - D-82: before that cut, only the launching session may adopt an ownerless run. Once `use_state` is `abandoned`, any session may adopt it, or the warden may close it.
 
 6. **Only the sealed native launcher starts DayZ.**
    - `dayz_test_run`, `dayz_test_stop` and `dayz_test_close` (the graceful close) are the agent's lifecycle interface.

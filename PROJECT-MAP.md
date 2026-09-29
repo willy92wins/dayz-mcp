@@ -71,7 +71,7 @@ Los módulos unittest están en `tools/tests/`; el gate de este mapa es `tests.t
 Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar autorreferencia.
 - `HANDOFF.md` - estado vivo; leer hasta `LIVE-STATE:END`.
 - `AGENTS.md` - 381 B, touched 2026-07-15 (UTC)
-- `ARCHITECTURE-DECISIONS.md` - 8 KB, touched 2026-09-28 (UTC)
+- `ARCHITECTURE-DECISIONS.md` - 10 KB, touched 2026-09-28 (UTC)
 - `AUDITORIA_2026-08-23.md` - 26 KB, touched 2026-09-14 (UTC)
 - `AUDITORIA_ANGULOS_ADICIONALES_2026-08-23.md` - 20 KB, touched 2026-09-14 (UTC)
 - `AUDITORIA_MCP_2026-09-07.md` - 51 KB, touched 2026-09-07 (UTC)
@@ -83,7 +83,7 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `dayz-mcp-architecture.md` - 20 KB, touched 2026-09-16 (UTC)
 - `GATES.md` - 4 KB, touched 2026-09-08 (UTC)
 - `HANDOFF-ARCHIVE.md` - 272 KB, touched 2026-08-29 (UTC)
-- `product-spec.md` - 59 KB, touched 2026-09-29 (UTC)
+- `product-spec.md` - 65 KB, touched 2026-09-29 (UTC)
 - `QUICKSTART.md` - 3 KB, touched 2026-09-19 (UTC)
 - `README.md` - 21 KB, touched 2026-09-29 (UTC)
 
