@@ -170,6 +170,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const int UI_TREE_DEFAULT_LIMIT = 256;
 	protected const int UI_TREE_MAX_LIMIT = 512;
 	protected const float ACTION_USE_DEFAULT_RADIUS = 5.0;
+	// input_describe: printable ASCII name, and the selected alternative's keys.
+	protected const int INPUT_NAME_MAX = 128;
+	protected const int INPUT_KEY_MAX = 16;
 	//! Capability census announced on every poll as `caps=`: the exact set of
 	//! command.cmd branches Dispatch() handles before falling to unknown_command,
 	//! sorted bytewise and comma-separated. tools/tests/test_bridge_client_capabilities.py
@@ -177,7 +180,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_use,action_use_target,camera_get,camera_set,engine_set,key_press,player_respawn," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace";
+	protected const string CLIENT_POLL_CAPS = "action_use,action_use_target,camera_get,camera_set,engine_set,input_describe,key_press,player_respawn," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -840,6 +843,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			postNow = DispatchActionUse(command, result);
 		}
+		else if (command.cmd == "input_describe")
+		{
+			postNow = DispatchInputDescribe(command, result);
+		}
 		else if (command.cmd == "ui_dialog")
 		{
 			postNow = DispatchUiDialog(command, result);
@@ -854,6 +861,97 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			PostResult(result);
 		}
+	}
+
+	// Printable ASCII (codes 32..126), 1..INPUT_NAME_MAX. Same bound as the ingress.
+	protected bool IsPrintableInputName(string value)
+	{
+		if (value == "")
+		{
+			return false;
+		}
+
+		int length = value.Length();
+		if (length > INPUT_NAME_MAX)
+		{
+			return false;
+		}
+
+		int i = 0;
+		while (i < length)
+		{
+			string character = value.Substring(i, 1);
+			int code = character.ToAscii();
+			if (code < 32 || code > 126)
+			{
+				return false;
+			}
+
+			i = i + 1;
+		}
+
+		return true;
+	}
+
+	// Read whether GetInputByName knows the name, and what the selected
+	// alternative has bound. SelectAlternative is not called: it would change
+	// which bind is active. LocalPress is not called.
+	protected bool DispatchInputDescribe(MCPCommand command, MCPResult result)
+	{
+		if (!command.args || !IsPrintableInputName(command.args.name))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		UAInputAPI api = GetUApi();
+		if (!api)
+		{
+			result.ok = false;
+			result.error = "input_api_unavailable";
+			return true;
+		}
+
+		UAInput input = api.GetInputByName(command.args.name);
+		MCPInputDescribe described = new MCPInputDescribe();
+		if (!input)
+		{
+			described.exists = false;
+			result.input_describe = described;
+			result.ok = true;
+			return true;
+		}
+
+		int bindingCount = input.BindingCount();
+		int keyCount = input.BindKeyCount();
+		int conflictCount = input.ConflictCount();
+		if (bindingCount < 0 || keyCount < 0 || keyCount > INPUT_KEY_MAX || conflictCount < 0)
+		{
+			result.ok = false;
+			result.error = "input_bind_unreadable";
+			return true;
+		}
+
+		described.exists = true;
+		described.binding_count = bindingCount;
+		described.locked = input.IsLocked();
+		described.conflict_count = conflictCount;
+
+		int keyIndex = 0;
+		while (keyIndex < keyCount)
+		{
+			MCPInputKey bound = new MCPInputKey();
+			bound.index = keyIndex;
+			bound.key_code = input.GetBindKey(keyIndex);
+			bound.device = input.GetBindDevice(keyIndex);
+			described.keys.Insert(bound);
+			keyIndex = keyIndex + 1;
+		}
+
+		result.input_describe = described;
+		result.ok = true;
+		return true;
 	}
 
 	protected bool DispatchKeyPress(MCPCommand command, MCPResult result)
