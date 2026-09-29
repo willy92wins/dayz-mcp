@@ -3457,7 +3457,46 @@ class Handler(BaseHTTPRequestHandler):
         sink = getattr(self.server, "log_sink", _default_log_sink)  # type: ignore[attr-defined]
         sink(message)
 
+    def _clear_request_renewed_lease(self) -> None:
+        """Drop a lease id left on this thread by an earlier request.
+
+        ThreadingHTTPServer may reuse a worker. Reading the slot without
+        clearing it first would stamp that request's lease onto this body.
+        """
+        coordination = getattr(self.state, "coordination", None)
+        if coordination is None:
+            return
+        clear = getattr(type(coordination), "clear_renewed_lease", None)
+        if clear is None:
+            return
+        clear(coordination)
+
+    def _renewed_lease_field(self) -> str | None:
+        """Lease authorize renewed on this thread, or None if it did not.
+
+        Looked up on the class so a Mock coordination cannot invent the method.
+        """
+        coordination = getattr(self.state, "coordination", None)
+        if coordination is None:
+            return None
+        reader = getattr(type(coordination), "renewed_lease_id", None)
+        if reader is None:
+            return None
+        value = reader(coordination)
+        if isinstance(value, str) and value:
+            return value
+        return None
+
+    def _with_renewed_lease(self, body: dict) -> dict:
+        renewed = self._renewed_lease_field()
+        if renewed is None:
+            return body
+        copied = dict(body)
+        copied["lease_id"] = renewed
+        return copied
+
     def _handle_enqueue(self) -> None:
+        self._clear_request_renewed_lease()
         body = self._read_json()
         if body is None:
             return
@@ -3475,14 +3514,14 @@ class Handler(BaseHTTPRequestHandler):
         )
         payload = self._persist_coordination(payload)
         if status != 200:
-            self._json(status, payload)
+            self._json(status, self._with_renewed_lease(payload))
             return
 
         self._log(f"ENQUEUE id={payload['id']} peer={payload['peer']} cmd={payload['cmd']}")
         response = {"id": payload["id"]}
         if "cleanup_degraded" in payload:
             response["cleanup_degraded"] = payload["cleanup_degraded"]
-        self._json(200, response)
+        self._json(200, self._with_renewed_lease(response))
 
     def _adopt_on_grant(self, client: ClientIdentity, payload: dict) -> dict:
         """P-J2: a granted box lease adopts the unique ownerless RUNNING_IDLE run.
@@ -3741,6 +3780,7 @@ class Handler(BaseHTTPRequestHandler):
             return result
 
     def _handle_lifecycle(self, action: str) -> None:
+        self._clear_request_renewed_lease()
         body = self._read_json()
         if body is None:
             return
@@ -3803,7 +3843,7 @@ class Handler(BaseHTTPRequestHandler):
         result = dict(result)
         status = int(result.pop("_http_status", 200))
         result = self._persist_coordination(result)
-        self._json(status, result)
+        self._json(status, self._with_renewed_lease(result))
 
     def _handle_client_dumps(self) -> None:
         body = self._read_json()
