@@ -1051,12 +1051,12 @@ class CarrierFollowsLeaseRenewalTests(unittest.IsolatedAsyncioTestCase):
         # A 409 lease_invalid is what ProcessLifecycle returns when the
         # reservation is already gone: authorize has renewed, so the handler
         # still adds lease_id, and the client must clear rather than keep it.
-        from tests.test_session_http_contract import SessionHttpTest
+        from tests.session_http_helpers import SessionLoopback
 
         runtime = await self.worker()
         self.assertEqual(runtime.identity, self.identity)
         self.advance(100.0)
-        http = SessionHttpTest("test_mutation_requires_lease_but_read_is_admitted")
+        http = SessionLoopback()
         http.setUp()
         coordinator = self.coordinator
         http.state.coordination = coordinator

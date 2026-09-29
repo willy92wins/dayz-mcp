@@ -1725,6 +1725,7 @@ class ClientRuntime:
     # object.__new__ (BUG-037 timeout cap, H14 stale-policy) still has to
     # answer for the closed default.
     _allow_stale_policy: bool = False
+    _carrier_io_hook: Callable[[int, bool], None] | None = None
 
     def __init__(
         self,
@@ -1921,12 +1922,12 @@ class ClientRuntime:
 
         The generation was already bumped. The optional hook runs before the
         lock so a newer clear can be reserved while this write is still waiting.
+        The thread calls named methods. A getattr result called with two
+        arguments is an unaccredited HTTP path to the runtime audit.
         """
 
         def run() -> None:
-            hook = getattr(self, "_carrier_io_hook", None)
-            if hook is not None:
-                hook(generation, refresh)
+            self._notify_carrier_io_hook(generation, refresh)
             self._apply_carrier_io(
                 generation, lease_token, lease_id, refresh=refresh
             )
@@ -1940,6 +1941,13 @@ class ClientRuntime:
         tasks = self._carrier_tasks
         tasks.add(task)
         task.add_done_callback(tasks.discard)
+
+    def _notify_carrier_io_hook(self, generation: int, refresh: bool) -> None:
+        """Pause point for tests. The attribute is read by name, not via getattr."""
+        hook = self._carrier_io_hook
+        if hook is None:
+            return
+        hook(generation, refresh)
 
     def _apply_carrier_io(
         self,
