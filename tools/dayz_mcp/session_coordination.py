@@ -2171,12 +2171,35 @@ class SessionCoordinator:
             self._expiry_grace = None
             self._condition.notify_all()
 
+    def _capped_remaining_locked(
+        self, expiry: float, cap: float, *, now: float | None = None
+    ) -> float:
+        # (t + cap) - t rounds to the next float above cap for some large t.
+        # The cap is a limit, so a reported remainder never exceeds it.
+        if now is None:
+            now = self._time_fn()
+        return min(cap, max(0.0, expiry - now))
+
+    def _lease_expires_in_s_locked(self, lease: _Lease) -> float:
+        # TTL and the operation pin are capped separately. effective_expiry()
+        # is their max, and subtracting now from that max can round above
+        # whichever cap won.
+        now = self._time_fn()
+        return max(
+            self._capped_remaining_locked(lease.expires_at, SESSION_TTL_S, now=now),
+            self._capped_remaining_locked(
+                lease.pinned_until(), MAX_OPERATION_PIN_S, now=now
+            ),
+        )
+
     def _grace_remaining_locked(self) -> float:
         self._purge_expiry_grace_locked()
         grace = self._expiry_grace
         if grace is None:
             return 0.0
-        return max(0.0, grace.until - self._time_fn())
+        # Armed as effective_expiry + LEASE_GRACE_S at the moment now has
+        # reached that expiry, so the window itself is the cap.
+        return self._capped_remaining_locked(grace.until, LEASE_GRACE_S)
 
     def _preferential_reacquire_locked(self, client: ClientIdentity) -> bool:
         self._purge_expiry_grace_locked()
@@ -2256,7 +2279,7 @@ class SessionCoordinator:
         if remaining < 0:
             remaining = 0
         return {
-            "remaining_s": max(0.0, grace.until - self._time_fn()),
+            "remaining_s": self._capped_remaining_locked(grace.until, LEASE_GRACE_S),
             "pref_remaining": remaining,
             "attached_required": True,
         }
@@ -3863,7 +3886,7 @@ class SessionCoordinator:
             "status": "active",
             "lease_token": lease.lease_token,
             "lease_id": lease.lease_id,
-            "expires_in_s": max(0.0, lease.effective_expiry() - self._time_fn()),
+            "expires_in_s": self._lease_expires_in_s_locked(lease),
         }
         if lease.source_ticket_id is not None:
             payload["ticket"] = lease.source_ticket_id
@@ -3878,8 +3901,8 @@ class SessionCoordinator:
             "status": "queued",
             "ticket": ticket.ticket_id,
             "position": position,
-            "expires_in_s": max(
-                0.0, ticket.touched_at + SESSION_TTL_S - self._time_fn()
+            "expires_in_s": self._capped_remaining_locked(
+                ticket.touched_at + SESSION_TTL_S, SESSION_TTL_S
             ),
         }
         if ticket.operation_id is not None:
@@ -3892,7 +3915,7 @@ class SessionCoordinator:
             "lease_id": lease.lease_id,
             "purpose": lease.purpose,
             "client": lease.client.public_payload(),
-            "expires_in_s": max(0.0, lease.effective_expiry() - self._time_fn()),
+            "expires_in_s": self._lease_expires_in_s_locked(lease),
         }
 
     @staticmethod

@@ -44,6 +44,7 @@ from dayz_mcp.native_process_guard import NativeProcessGuard, identity_hashes
 from dayz_mcp.daemon_contract import argv_targets_port, classify_dayz_argv
 from dayz_mcp.accredited_daemon_transport import (
     MAX_AUTHENTICATED_RESPONSE_BYTES,
+    argv_matches_redirected,
     verified_daemon_http_request,
 )
 from dayz_mcp.native_process_snapshot import (
@@ -989,7 +990,8 @@ def try_reclaim_unresponsive_listener(
 
     Health, not ancestry, is the discriminator (a daemon outlives its spawner).
     Reclaims only after two failed probes 500 ms apart, stable listener ownership,
-    exact structured argv policy, and two identical native v2 snapshots.
+    the structured argv policy (exact, or argv[0] rewritten to the verified
+    interpreter image), and two identical native v2 snapshots.
     Returns True only when an orphan was terminated and the port came free.
 
     Three live-holder states are preserved (never killed), fail-closed:
@@ -1027,7 +1029,9 @@ def try_reclaim_unresponsive_listener(
     if expected_executable is None or expected_argv is None:
         return False
     try:
-        expected_hashes = identity_hashes(expected_executable, expected_argv)
+        # Reject an unverifiable expected identity before any probe. The hashes
+        # compared to the snapshots are computed from the accepted argv below.
+        identity_hashes(expected_executable, expected_argv)
     except (TypeError, ValueError):
         return False
     expected_type = classify_dayz_argv(expected_argv)
@@ -1073,8 +1077,20 @@ def try_reclaim_unresponsive_listener(
     if observed_argv is None:
         log(f"RECLAIM(daemon): pid={pid_a} image={image} argv unavailable; preserving the exclusive bind")
         return False
-    if classify_dayz_argv(observed_argv) != expected_type or observed_argv != expected_argv:
+    # `image` is only the ToolHelp basename. The verified executable identity is
+    # expected_executable, the path the snapshot hash checks; argv[0] may name
+    # that image when a 3.11/3.12 venv redirector rewrote it.
+    if (
+        classify_dayz_argv(observed_argv) != expected_type
+        or not argv_matches_redirected(
+            observed_argv, expected_argv, expected_executable
+        )
+    ):
         log(f"RECLAIM(daemon): pid={pid_a} policy mismatch; preserving the exclusive bind")
+        return False
+    try:
+        expected_hashes = identity_hashes(expected_executable, observed_argv)
+    except (TypeError, ValueError):
         return False
 
     try:
