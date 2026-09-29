@@ -1663,6 +1663,51 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.status_calls, 1)
         self.assertFalse(_serialized_has_host_path(result, self.root))
 
+    async def test_62c5_partial_close_zero_windows_is_not_posted(self) -> None:
+        runtime = self._runtime()
+        runtime.close_posted = 0
+        self._arm_graceful(runtime)
+        original = runtime.lifecycle_close_roles
+
+        async def reject_server(run_id, roles):
+            if list(roles) == ["server"]:
+                return {"error": "lease_invalid"}
+            return await original(run_id, roles)
+
+        runtime.lifecycle_close_roles = reject_server
+        result = await _close_tool(runtime, graceful_timeout_s=0.2)
+        self.assertEqual(result["error"], "lease_invalid")
+        self.assertFalse(result["graceful"])
+        self.assertTrue(result["stop_required"])
+        self.assertEqual(
+            result["close_roles"],
+            [
+                {"role": "client", "close": "not_posted", "process": "running"},
+                {"role": "server", "close": "failed", "process": "running"},
+            ],
+        )
+        self.assertEqual([roles for roles, _at in runtime.close_at], [("client",)])
+        self.assertFalse(_serialized_has_host_path(result, self.root))
+
+    async def test_62c5_partial_close_missing_window_count_is_unknown(self) -> None:
+        runtime = self._runtime()
+        self._arm_graceful(runtime)
+
+        async def reject_server(run_id, roles):
+            if list(roles) == ["server"]:
+                return {"error": "lease_invalid"}
+            return {"run_id": run_id, "client": {"pid": 1, "windows_found": 0}}
+
+        runtime.lifecycle_close_roles = reject_server
+        result = await _close_tool(runtime, graceful_timeout_s=0.2)
+        self.assertEqual(
+            result["close_roles"][0],
+            {"role": "client", "close": "unknown", "process": "running"},
+        )
+        self.assertEqual(result["error"], "lease_invalid")
+        self.assertFalse(result["graceful"])
+        self.assertTrue(result["stop_required"])
+
     @slow_test
     async def test_62c5_logout_scan_stops_when_the_budget_expires(self) -> None:
         runtime = self._runtime()

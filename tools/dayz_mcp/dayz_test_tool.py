@@ -2126,7 +2126,7 @@ _CLOSE_REASON_TOKENS = frozenset(
     }
 )
 _CLOSE_ERROR_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\Z")
-_SPLIT_CLOSE_TOKENS = frozenset({"posted", "failed"})
+_SPLIT_CLOSE_TOKENS = frozenset({"posted", "not_posted", "failed", "unknown"})
 _SPLIT_PROCESS_TOKENS = frozenset({"running", "absent", "unknown"})
 _CLOSE_POLL_S = 0.05
 _CLOSE_REAP_INTERVAL_S = 1.0
@@ -2991,6 +2991,27 @@ def _whitelist_close_result(payload: dict[str, object]) -> dict[str, object]:
     return result
 
 
+def _reported_close_state(close_result: object, role: str) -> str:
+    """``posted`` only when that role's ``windows_posted`` is a positive int.
+
+    A confirmed zero is ``not_posted``. No row, a bool, or any other count
+    is ``unknown``: the answer must not claim a WM_CLOSE was sent.
+    """
+    if not isinstance(close_result, dict):
+        return "unknown"
+    row = _close_role_row(close_result, role)
+    if row is None:
+        return "unknown"
+    value = row.get("windows_posted")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return "unknown"
+    if value > 0:
+        return "posted"
+    if value == 0:
+        return "not_posted"
+    return "unknown"
+
+
 async def _partial_split_close(
     status_fn: object,
     run_id: str,
@@ -2999,8 +3020,9 @@ async def _partial_split_close(
     logout_wait_s: float,
     timed_out: bool,
     failure: _RoleCloseFailure,
+    client_close: object,
 ) -> dict[str, object]:
-    """Client is already closed and the server close did not land.
+    """The server close did not land. The client state comes from its reply.
 
     The answer keeps the original error, says the stop is still required,
     and reports each role's process as running, absent, or unknown.
@@ -3036,7 +3058,11 @@ async def _partial_split_close(
         "logout_players": players,
         "error": failure.code,
         "close_roles": [
-            {"role": "client", "close": "posted", "process": client_process},
+            {
+                "role": "client",
+                "close": _reported_close_state(client_close, "client"),
+                "process": client_process,
+            },
             {"role": "server", "close": "failed", "process": server_process},
         ],
     }
@@ -3129,6 +3155,7 @@ async def execute_dayz_test_close(
                 timed_out,
                 server_failure
                 or _RoleCloseFailure("lifecycle_close_unavailable", False),
+                client_close,
             )
         close_result = _merge_role_close(run_id, [client_close, server_close])
         logout_report = {
