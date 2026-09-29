@@ -15,7 +15,11 @@ from PIL import Image
 
 import mcp_capture
 from dayz_mcp import dayz_test_tool
-from tests._tiers import FAST_TIER_ONLY, reject_real_desktop_gate_in_fast_tier
+from tests._tiers import (
+    FAST_TIER_ONLY,
+    install_fast_tier_desktop_gate_guard,
+    reject_real_desktop_gate_in_fast_tier,
+)
 from dayz_mcp import server
 from dayz_mcp import steam_preflight
 from tests.dayz_test_tool_helpers import (
@@ -807,6 +811,94 @@ class FastTierRealDesktopGateGuardTest(unittest.TestCase):
             probe_desktop=fake,
             probe_brightness=brightness_fake,
         )
+
+    def test_install_while_the_name_is_patched_keeps_the_real_probe(self) -> None:
+        # Importing the guard while probe_input_desktop is patched used to
+        # stamp the fake and leave the restored function unmarked.
+        real_desktop = mcp_capture.probe_input_desktop
+        real_desktop.__dict__.pop("_dayz_real_desktop_probe", None)
+
+        def fake_desktop() -> str:
+            return "unlocked"
+
+        def fake_brightness(**_kwargs: object) -> dict[str, object]:
+            return {"ok": True, "mean_brightness": 80.0, "nonblack_ratio": 0.9}
+
+        with mock.patch.object(mcp_capture, "probe_input_desktop", fake_desktop):
+            install_fast_tier_desktop_gate_guard()
+        with self.assertRaises(AssertionError) as caught:
+            reject_real_desktop_gate_in_fast_tier(
+                fast_tier=True,
+                probe_desktop=real_desktop,
+                probe_brightness=fake_brightness,
+                test_id=self.id(),
+            )
+        self.assertIn(self.id(), str(caught.exception))
+        reject_real_desktop_gate_in_fast_tier(
+            fast_tier=True,
+            probe_desktop=fake_desktop,
+            probe_brightness=fake_brightness,
+            test_id=self.id(),
+        )
+
+    def test_a_wraps_fake_over_a_real_probe_is_accepted(self) -> None:
+        import functools
+
+        def fake_brightness(**_kwargs: object) -> dict[str, object]:
+            return {"ok": True, "mean_brightness": 80.0, "nonblack_ratio": 0.9}
+
+        @functools.wraps(mcp_capture.probe_input_desktop)
+        def fake_desktop() -> str:
+            return "unlocked"
+
+        self.assertIsNot(fake_desktop, mcp_capture.probe_input_desktop)
+        reject_real_desktop_gate_in_fast_tier(
+            fast_tier=True,
+            probe_desktop=fake_desktop,
+            probe_brightness=fake_brightness,
+            test_id=self.id(),
+        )
+        if not FAST_TIER_ONLY:
+            return
+        mcp_capture.run_prerun_desktop_gate(
+            timeout_s=0,
+            probe_desktop=fake_desktop,
+            probe_brightness=fake_brightness,
+        )
+
+    def test_a_partial_of_a_real_probe_is_refused(self) -> None:
+        import functools
+
+        def fake_brightness(**_kwargs: object) -> dict[str, object]:
+            return {"ok": True, "mean_brightness": 80.0, "nonblack_ratio": 0.9}
+
+        bound = functools.partial(mcp_capture.probe_input_desktop)
+        with self.assertRaises(AssertionError) as caught:
+            reject_real_desktop_gate_in_fast_tier(
+                fast_tier=True,
+                probe_desktop=bound,
+                probe_brightness=fake_brightness,
+                test_id=self.id(),
+            )
+        self.assertIn(self.id(), str(caught.exception))
+        nested = functools.partial(
+            functools.partial(mcp_capture.probe_desktop_brightness)
+        )
+        with self.assertRaises(AssertionError):
+            reject_real_desktop_gate_in_fast_tier(
+                fast_tier=True,
+                probe_desktop=lambda: "unlocked",
+                probe_brightness=nested,
+                test_id=self.id(),
+            )
+        if not FAST_TIER_ONLY:
+            return
+        with self.assertRaises(AssertionError):
+            mcp_capture.run_prerun_desktop_gate(
+                timeout_s=0,
+                probe_desktop=bound,
+                probe_brightness=fake_brightness,
+            )
 
 
 if __name__ == "__main__":

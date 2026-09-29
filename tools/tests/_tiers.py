@@ -18,12 +18,13 @@ or waits on real time belongs here too.
 The fast tier also refuses the real pre-run desktop gate. Calling
 mcp_capture.run_prerun_desktop_gate with a real desktop probe
 (probe_input_desktop or probe_desktop_brightness) raises at once and names
-the test. Each real probe function is stamped when that generation is
-loaded. A saved reference keeps its stamp after importlib.reload, so it is
-still refused. A fake never has the stamp, even if a test patched it onto
-the module name. Calls that inject both probes — the gate's own tests —
-are unchanged. The whole suite does not install the refusal wrapper, and
-the gate's production behaviour is untouched.
+the test. A callback is real when, after unwrapping functools.partial, its
+code object is one of those two functions in mcp_capture.py. Reload builds
+a new function with the same code identity, so a saved reference is still
+refused. A fake defined elsewhere is not, including one patched onto the
+module name or built with functools.wraps. Calls that inject both probes —
+the gate's own tests — are unchanged. The whole suite does not install
+the refusal wrapper, and the gate's production behaviour is untouched.
 """
 
 from __future__ import annotations
@@ -41,28 +42,41 @@ slow_test = unittest.skipIf(
 )
 
 _GUARD_FLAG = "_fast_tier_desktop_guard"
-_REAL_PROBE_MARK = "_dayz_real_desktop_probe"
+_REAL_PROBE_CODE_NAMES = frozenset(
+    {"probe_input_desktop", "probe_desktop_brightness"}
+)
 
 
-def _mark_loaded_real_probes() -> None:
-    """Stamp the probe functions of the mcp_capture that is loaded now.
+def _unwrap_partials(callback: object) -> object:
+    """Follow functools.partial.func only.
 
-    Called from install and from the reload hook, before a test can patch
-    the module names. Check time must not call this: a patched fake would
-    keep the stamp. A function stamped here keeps it after reload rebinds
-    the names.
+    functools.wraps sets __wrapped__ on a fake. That link is not followed:
+    the fake's own code is what decides.
     """
-    import mcp_capture
-
-    for probe in (
-        mcp_capture.probe_input_desktop,
-        mcp_capture.probe_desktop_brightness,
-    ):
-        probe.__dict__[_REAL_PROBE_MARK] = True
+    seen: set[int] = set()
+    while isinstance(callback, functools.partial) and id(callback) not in seen:
+        seen.add(id(callback))
+        callback = callback.func
+    return callback
 
 
 def _callback_is_real_desktop_probe(callback: object) -> bool:
-    return getattr(callback, _REAL_PROBE_MARK, False) is True
+    callback = _unwrap_partials(callback)
+    code = getattr(callback, "__code__", None)
+    if code is None:
+        return False
+    name = getattr(code, "co_name", None)
+    filename = getattr(code, "co_filename", None)
+    if name not in _REAL_PROBE_CODE_NAMES or not isinstance(filename, str):
+        return False
+    import mcp_capture
+
+    module_file = getattr(mcp_capture, "__file__", None)
+    if not isinstance(module_file, str):
+        return True
+    return os.path.normcase(os.path.realpath(filename)) == os.path.normcase(
+        os.path.realpath(module_file)
+    )
 
 
 def fast_tier_real_desktop_gate_message(test_id: str) -> str:
@@ -77,9 +91,8 @@ def real_desktop_probes_used(
 ) -> bool:
     """True when this call can touch the host desktop or sleep on it.
 
-    Reads a stamp put on the real function objects at load. It does not
-    hash the callback and does not look at the names currently bound on
-    mcp_capture, so a patched or unhashable fake is not a real probe.
+    Decided from the callback's code object. It does not hash the callback
+    and does not read the names currently bound on mcp_capture.
     """
     return _callback_is_real_desktop_probe(
         probe_desktop
@@ -130,10 +143,6 @@ def reject_real_desktop_gate_in_fast_tier(
 def _install_on_loaded_capture_module() -> None:
     import mcp_capture
 
-    # Stamp before any test patches the names. The wrapper is fast-tier only.
-    _mark_loaded_real_probes()
-    if not FAST_TIER_ONLY:
-        return
     original = mcp_capture.run_prerun_desktop_gate
     if getattr(original, _GUARD_FLAG, False):
         return
@@ -157,11 +166,10 @@ def _install_on_loaded_capture_module() -> None:
 
 
 def _reinstall_after_capture_reload() -> None:
-    """importlib.reload(mcp_capture) builds new probe functions.
+    """importlib.reload(mcp_capture) would drop the wrapper.
 
     tests/test_capture_frame_stale.py reloads the module to simulate a new
-    process. Stamp that generation too. In the fast tier, also put the
-    wrapper back; the reload would drop it.
+    process. Put the wrapper back after that reload, and only that reload.
     """
     import importlib
 
@@ -180,6 +188,8 @@ def _reinstall_after_capture_reload() -> None:
 
 
 def install_fast_tier_desktop_gate_guard() -> None:
-    """Stamp the real probes. Wrap the gate only while DAYZ_MCP_FAST_TESTS=1."""
+    """Wrap the real gate while DAYZ_MCP_FAST_TESTS=1. No-op otherwise."""
+    if not FAST_TIER_ONLY:
+        return
     _install_on_loaded_capture_module()
     _reinstall_after_capture_reload()
