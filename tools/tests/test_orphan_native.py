@@ -232,6 +232,102 @@ class NativeDaemonReclaimTest(unittest.TestCase):
                 self.assertFalse(result)
                 self.assertEqual(guard.terminate_calls, [])
 
+    def _snapshot_pair(
+        self, executable: str, argv: list[str]
+    ) -> FakeGuard:
+        snapshot = process_snapshot(self.pid, executable, argv)
+        return FakeGuard([snapshot, dict(snapshot)])
+
+    def test_redirected_311_argv0_matching_verified_image_is_reclaimed(self) -> None:
+        # 3.11/3.12: Scripts\python.exe rewrites argv[0] to the base interpreter.
+        # get_image stays the ToolHelp basename; the predicate image is the
+        # verified executable, and the kill record is hashed from that argv.
+        image = self.executable
+        tail = self.argv[1:]
+        expected_argv = [r"P:\venv\Scripts\python.exe", *tail]
+        observed = [image, *tail]
+        guard = self._snapshot_pair(image, observed)
+
+        result, guard, _sleeps = self.call(
+            guard=guard,
+            get_argv=lambda _pid: list(observed),
+            expected_executable=image,
+            expected_argv=expected_argv,
+        )
+
+        accepted = identity_hashes(image, observed)
+        self.assertNotEqual(
+            accepted["command_line_sha256"],
+            identity_hashes(image, expected_argv)["command_line_sha256"],
+        )
+        self.assertTrue(result)
+        self.assertEqual(len(guard.terminate_calls), 1)
+        record = asdict(guard.terminate_calls[0])
+        self.assertEqual(record["command_line_sha256"], accepted["command_line_sha256"])
+        self.assertEqual(record["executable_sha256"], accepted["executable_sha256"])
+
+    def test_identical_314_venv_argv_is_reclaimed(self) -> None:
+        # 3.14 keeps the venv path in argv[0]. The image is still the base
+        # interpreter, and an identical argv is reclaimed as before.
+        image = self.executable
+        argv = [r"P:\venv\Scripts\python.exe", *self.argv[1:]]
+        guard = self._snapshot_pair(image, argv)
+
+        result, guard, _sleeps = self.call(
+            guard=guard,
+            get_argv=lambda _pid: list(argv),
+            expected_executable=image,
+            expected_argv=list(argv),
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(len(guard.terminate_calls), 1)
+        self.assertEqual(
+            asdict(guard.terminate_calls[0])["command_line_sha256"],
+            identity_hashes(image, argv)["command_line_sha256"],
+        )
+
+    def test_redirected_argv_negatives_are_not_reclaimed(self) -> None:
+        image = self.executable
+        tail = self.argv[1:]
+        expected_argv = [r"P:\venv\Scripts\python.exe", *tail]
+        other_argument = list(tail)
+        other_argument[other_argument.index("8765")] = "8766"
+        cases = {
+            "argv0_names_another_image": [r"D:\Other\python.exe", *tail],
+            "argv0_relative": ["python.exe", *tail],
+            "argv0_drive_less_root": [r"\Python311\python.exe", *tail],
+            "other_argument_differs": [image, *other_argument],
+            "longer_argv": [image, *tail, "--require-version"],
+            "shorter_argv": [image, *tail[:-1]],
+        }
+        for name, observed in cases.items():
+            with self.subTest(name):
+                result, guard, _sleeps = self.call(
+                    guard=self._snapshot_pair(image, observed),
+                    get_argv=lambda _pid, observed=observed: list(observed),
+                    expected_executable=image,
+                    expected_argv=list(expected_argv),
+                )
+                self.assertFalse(result)
+                self.assertEqual(guard.terminate_calls, [])
+
+    def test_redirect_refused_when_listener_image_is_not_verified(self) -> None:
+        image = self.executable
+        tail = self.argv[1:]
+        observed = [image, *tail]
+        guard = self._snapshot_pair(r"D:\Other\python.exe", observed)
+
+        result, guard, _sleeps = self.call(
+            guard=guard,
+            get_argv=lambda _pid: list(observed),
+            expected_executable=image,
+            expected_argv=[r"P:\venv\Scripts\python.exe", *tail],
+        )
+
+        self.assertFalse(result)
+        self.assertEqual(guard.terminate_calls, [])
+
 
 class NativeEmbeddedReclaimTest(unittest.TestCase):
     def setUp(self) -> None:
