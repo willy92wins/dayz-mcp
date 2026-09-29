@@ -146,6 +146,23 @@ class WeaponActionEnforceContractTest(unittest.TestCase):
             self.assertNotIn("HasExclusiveJob()", body)
             self.assertNotIn("SendInput", body)
 
+    def test_local_player_comparisons_cast_getplayer(self) -> None:
+        # DayZDiag 1.29: != between PlayerBase and DayZPlayer (GetPlayer, game.c:946)
+        # is an unsafe down-cast and fails the World module. Both sites store
+        # PlayerBase.Cast before the identity check.
+        weapon = WEAPON.read_text(encoding="utf-8")
+        self.assertNotIn("!= GetGame().GetPlayer()", weapon)
+        self.assertNotIn("== GetGame().GetPlayer()", weapon)
+        cast = "live = PlayerBase.Cast(GetGame().GetPlayer());"
+        handler = _method_body(weapon, "static void OnCommandHandler(")
+        command = _method_body(weapon, "override void CommandHandler(")
+        self.assertIn(cast, handler)
+        self.assertIn("if (player != live)", handler)
+        self.assertLess(handler.index(cast), handler.index("if (player != live)"))
+        self.assertIn(cast, command)
+        self.assertIn("if (this != live)", command)
+        self.assertLess(command.index(cast), command.index("if (this != live)"))
+
     def test_fire_runs_from_command_handler_not_the_mission_bridge(self) -> None:
         client = CLIENT.read_text(encoding="utf-8")
         weapon = WEAPON.read_text(encoding="utf-8")
