@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
+import importlib
 import io
 import json
 import os
 import re
 import shutil
-import struct
 import subprocess
 import sys
 import unittest
+from ctypes import wintypes
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
@@ -23,6 +25,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import install_mcp as installer
+from tests.pe_helpers import write_fake_x64_pe
 from install_mcp import (
     InstallerContractError,
     InstallerExecutionError,
@@ -46,15 +49,29 @@ from install_mcp import (
 from tests._tiers import slow_test
 
 
-def write_fake_x64_pe(path: Path) -> None:
-    payload = bytearray(512)
-    payload[0:2] = b"MZ"
-    struct.pack_into("<I", payload, 0x3C, 0x80)
-    payload[0x80:0x84] = b"PE\0\0"
-    struct.pack_into("<H", payload, 0x84, 0x8664)
-    struct.pack_into("<H", payload, 0x94, 0xF0)
-    struct.pack_into("<H", payload, 0x98, 0x20B)
-    path.write_bytes(payload)
+def _short_path_name(path: Path) -> str | None:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetShortPathNameW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+    )
+    kernel32.GetShortPathNameW.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = int(kernel32.GetShortPathNameW(str(path), buffer, len(buffer)))
+    if length <= 0 or length >= len(buffer):
+        return None
+    return buffer.value
+
+
+def _short_path_or_skip(test: unittest.TestCase, path: Path) -> str:
+    short = _short_path_name(path)
+    long_form = str(path.resolve())
+    if short is None or os.path.normcase(short) == os.path.normcase(long_form):
+        test.skipTest(
+            "volume did not return an 8.3 short name distinct from the long path"
+        )
+    return short
 
 
 def cli_entry_payload(path: Path) -> dict[str, object]:
@@ -137,9 +154,13 @@ class InstallerCliManifestTest(unittest.TestCase):
 
     @staticmethod
     def _entry(path: Path) -> dict[str, object]:
+        return InstallerCliManifestTest._entry_spelled(path, str(path.absolute()))
+
+    @staticmethod
+    def _entry_spelled(path: Path, spelling: str) -> dict[str, object]:
         payload = path.read_bytes()
         return {
-            "path": str(path.absolute()),
+            "path": spelling,
             "bytes": len(payload),
             "sha256": hashlib.sha256(payload).hexdigest().upper(),
         }
@@ -166,8 +187,8 @@ class InstallerCliManifestTest(unittest.TestCase):
         manifest = load_installer_cli_manifest(self.manifest_path)
 
         self.assertEqual(set(manifest.entries), {"CLAUDE", "CODEX"})
-        self.assertEqual(manifest.entries["CLAUDE"].path, self.claude.resolve())
-        self.assertEqual(manifest.entries["CODEX"].path, self.codex.resolve())
+        self.assertEqual(manifest.entries["CLAUDE"].path, self.claude.absolute())
+        self.assertEqual(manifest.entries["CODEX"].path, self.codex.absolute())
 
     def test_manifest_rejects_missing_extra_or_ambiguous_schema_keys(self) -> None:
         variants = []
@@ -215,6 +236,100 @@ class InstallerCliManifestTest(unittest.TestCase):
 
         with self.assertRaises(InstallerContractError):
             load_installer_cli_manifest(self.manifest_path)
+
+    def test_short_path_of_the_cli_is_canonical_and_another_file_is_not(self) -> None:
+        nested = self.root / "ALongDirectoryNameForShortPaths"
+        nested.mkdir()
+        cli = nested / "claude.exe"
+        write_fake_x64_pe(cli)
+        short = _short_path_or_skip(self, cli)
+        payload = self.payload()
+        payload["entries"]["CLAUDE"] = self._entry_spelled(cli, short)
+        self.write_manifest(payload)
+        manifest = load_installer_cli_manifest(self.manifest_path)
+        self.assertEqual(manifest.entries["CLAUDE"].path, Path(short))
+
+        real = self.root / "RealCliDirectoryForJunction"
+        real.mkdir()
+        target = real / "claude.exe"
+        write_fake_x64_pe(target)
+        junction = self.root / "JunctionDirectoryName"
+        created = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction), str(real)],
+            capture_output=True,
+        )
+        if created.returncode != 0:
+            self.skipTest("junction unavailable")
+        self.addCleanup(lambda: os.rmdir(junction) if junction.exists() else None)
+        through = junction / "claude.exe"
+        short_other = _short_path_or_skip(self, through)
+        if Path(short_other).name.casefold() != "claude.exe":
+            short_dir = _short_path_name(junction)
+            if short_dir is None:
+                self.skipTest(
+                    "volume did not return an 8.3 short name distinct from the long path"
+                )
+            short_other = str(Path(short_dir) / "claude.exe")
+        refused = self.payload()
+        refused["entries"]["CLAUDE"] = self._entry_spelled(through, short_other)
+        self.write_manifest(refused)
+        with self.assertRaises(InstallerContractError) as caught:
+            load_installer_cli_manifest(self.manifest_path)
+        self.assertEqual(caught.exception.code, "installer_cli_path_not_canonical")
+
+    def test_trailing_dot_cli_component_stays_noncanonical(self) -> None:
+        nested = self.root / "foo"
+        nested.mkdir()
+        cli = nested / "claude.exe"
+        write_fake_x64_pe(cli)
+        resolved = str(cli.resolve())
+        parent, name = resolved.rsplit("\\", 1)
+        head, leaf = parent.rsplit("\\", 1)
+        spelling = head + "\\" + leaf + ".\\" + name
+        payload = self.payload()
+        payload["entries"]["CLAUDE"] = self._entry_spelled(cli, spelling)
+        self.write_manifest(payload)
+        with self.assertRaises(InstallerContractError) as caught:
+            load_installer_cli_manifest(self.manifest_path)
+        self.assertEqual(caught.exception.code, "installer_cli_path_not_canonical")
+
+    def test_dotdot_cli_path_stays_noncanonical(self) -> None:
+        extra = self.root / "extra"
+        extra.mkdir()
+        dotted = self.root / "extra" / ".." / "claude.exe"
+        payload = self.payload()
+        payload["entries"]["CLAUDE"] = self._entry_spelled(self.claude, str(dotted))
+        self.write_manifest(payload)
+        with self.assertRaises(InstallerContractError) as caught:
+            load_installer_cli_manifest(self.manifest_path)
+        self.assertEqual(caught.exception.code, "installer_cli_path_not_canonical")
+
+    def test_matching_long_cli_path_is_accepted_when_expansion_fails(self) -> None:
+        pinned = importlib.import_module("dayz_mcp.pinned_keyfile")
+        self.write_manifest()
+        with patch.object(
+            pinned._kernel32, "GetLongPathNameW", return_value=0
+        ) as expanded:
+            manifest = load_installer_cli_manifest(self.manifest_path)
+        self.assertEqual(expanded.call_count, 0)
+        self.assertEqual(manifest.entries["CLAUDE"].path, self.claude.absolute())
+
+    def test_short_cli_path_is_refused_when_expansion_fails(self) -> None:
+        pinned = importlib.import_module("dayz_mcp.pinned_keyfile")
+        nested = self.root / "ALongDirectoryNameForShortPaths"
+        nested.mkdir()
+        cli = nested / "claude.exe"
+        write_fake_x64_pe(cli)
+        short = _short_path_or_skip(self, cli)
+        payload = self.payload()
+        payload["entries"]["CLAUDE"] = self._entry_spelled(cli, short)
+        self.write_manifest(payload)
+        with patch.object(
+            pinned._kernel32, "GetLongPathNameW", return_value=0
+        ) as expanded, self.assertRaises(InstallerContractError) as caught:
+            load_installer_cli_manifest(self.manifest_path)
+        self.assertEqual(caught.exception.code, "installer_cli_path_not_canonical")
+        self.assertGreater(expanded.call_count, 0)
 
     def test_entry_reported_as_symlink_is_rejected_even_when_bytes_are_valid(self) -> None:
         self.write_manifest()

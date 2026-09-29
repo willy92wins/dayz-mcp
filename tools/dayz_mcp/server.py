@@ -167,7 +167,8 @@ LEASE_REQUIRED_RECIPE = with_next_step(
     "session_acquire_wait",
 )
 LEASE_EXPIRED_RECIPE = with_next_step(
-    "lease_expired: call session_acquire_wait(purpose=...)",
+    "lease_expired: the lease timed out. A run left RUNNING_IDLE can be "
+    "re-adopted with session_acquire_wait while its grace lasts",
     "session_acquire_wait",
 )
 LEASE_INVALID_RECIPE = with_next_step(

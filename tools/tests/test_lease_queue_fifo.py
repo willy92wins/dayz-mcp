@@ -376,6 +376,14 @@ class SessionCoordinatorTest(unittest.TestCase):
 
         self.assertTrue(coordinator.complete_lifecycle_recovery_fault("fault-release"))
         self.assertFalse(coordinator.complete_lifecycle_recovery_fault("fault-release"))
+        # The repair publishes the same handoff fence and can return while it
+        # is still up. wait(0) polls once.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         granted_status, granted = coordinator.wait(self.b, queued["ticket"], 0.0)
 
         self.assertEqual((granted_status, granted["status"]), (200, "active"))
@@ -477,6 +485,14 @@ class SessionCoordinatorTest(unittest.TestCase):
         c = self.coordinator.acquire(self.c, "weather")
         status, body = self.coordinator.release(self.a, token)
         self.assertEqual((status, body["released"]), (200, True))
+        # release() returns after at most RELEASE_AUDIT_TIMEOUT_S while the
+        # handoff fence can still be up. wait(0) polls once.
+        with self.coordinator._condition:
+            self.assertTrue(
+                self.coordinator._condition.wait_for(
+                    lambda: not self.coordinator._handoff_pending, timeout=1.0
+                )
+            )
         b_wait = self.coordinator.wait(self.b, b[1]["ticket"], 0.0)
         self.assertEqual((b_wait[0], b_wait[1]["status"]), (200, "active"))
         self.assertEqual(self.coordinator.status(self.c)["self"]["position"], 1)
@@ -560,6 +576,27 @@ class SessionCoordinatorTest(unittest.TestCase):
         status, body = self.coordinator.heartbeat(self.a, token)
         self.assertEqual((status, body["error"]), (409, "lease_expired"))
         self.assertEqual(body.get("cleanup_degraded"), ["audit_failed"])
+
+    def test_expired_token_stays_lease_expired_while_a_wal_fence_is_up(self) -> None:
+        # A fenced cleanup leaves the release WAL armed after the token was
+        # remembered as lease_expired. The fence must not answer "never valid",
+        # and it must not accept the token again (fb-20260928-012541-9f8b).
+        token = self.coordinator.acquire(self.a, "drive")[1]["lease_token"]
+        self.clock.advance(120.0)
+        expired = self.coordinator.heartbeat(self.a, token)
+        self.assertEqual((expired[0], expired[1]["error"]), (409, "lease_expired"))
+        with self.coordinator._condition:
+            self.coordinator._wal_marker = {
+                "state": "armed",
+                "operation": "release",
+            }
+        again = self.coordinator.heartbeat(self.a, token)
+        self.assertEqual((again[0], again[1]["error"]), (409, "lease_expired"))
+        decision = self.coordinator.authorize(self.a, token, "world_spawn")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.error, "lease_expired")
+        unknown = self.coordinator.heartbeat(self.a, "never-issued")
+        self.assertEqual((unknown[0], unknown[1]["error"]), (403, "lease_invalid"))
 
     def test_release_after_expiry_transports_audit_degradation(self) -> None:
         token = self.coordinator.acquire(self.a, "drive")[1]["lease_token"]
@@ -1400,6 +1437,14 @@ class Bug046QueueLivenessRedTests(unittest.TestCase):
         coordinator.acquire(c, "weather")
 
         coordinator.release(a, active["lease_token"])
+        # release() returns after at most RELEASE_AUDIT_TIMEOUT_S while the
+        # handoff fence can still be up. wait(0) polls once.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         claimed = coordinator.wait(b, b_ticket["ticket"], 0.0)
         repeated = coordinator.wait(b, b_ticket["ticket"], 0.0)
 
@@ -1442,6 +1487,14 @@ class Bug046QueueLivenessRedTests(unittest.TestCase):
         b_ticket = coordinator.acquire(b, "camera")[1]
         c_ticket = coordinator.acquire(c, "weather")[1]
         coordinator.release(a, active["lease_token"])
+        # release() returns after at most RELEASE_AUDIT_TIMEOUT_S while the
+        # handoff fence can still be up. wait(0) polls once.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
 
         clock.advance(120.0)
         claimed = coordinator.wait(c, c_ticket["ticket"], 0.0)
@@ -1489,6 +1542,14 @@ class Bug046QueueLivenessRedTests(unittest.TestCase):
         active = coordinator.acquire(a, "drive")[1]
         ticket = coordinator.acquire(b, "camera")[1]
         coordinator.release(a, active["lease_token"])
+        # release() returns after at most RELEASE_AUDIT_TIMEOUT_S while the
+        # handoff fence can still be up. wait(0) polls once.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         results: list[tuple[int, dict]] = []
         first = threading.Thread(
             target=lambda: results.append(coordinator.wait(b, ticket["ticket"], 0.0))
@@ -1573,6 +1634,14 @@ class Bug046QueueLivenessRedTests(unittest.TestCase):
         active = coordinator.acquire(a, "drive")[1]
         ticket = coordinator.acquire(b, "camera")[1]
         coordinator.release(a, active["lease_token"])
+        # The release worker holds _audit_gate until it publishes and drops
+        # the fence. Take the gate only after that, then keep the busy poll.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
 
         self.assertTrue(coordinator._audit_gate.acquire(blocking=False))
         busy_results: list[tuple[int, dict]] = []
@@ -2207,6 +2276,14 @@ class GraceS1Tests(unittest.TestCase):
         clock.advance(MID - 119.0)
         enq = coordinator.enqueue(self.a, "back", "operation-a")
         self.assertEqual(enq[0], 202)
+        # enqueue expires the lease through the same release fence. wait(0)
+        # polls once and does not wait for that fence.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         claimed = coordinator.wait(self.a, enq[1]["ticket"], 0.0)
         self.assertEqual((claimed[0], claimed[1]["status"]), (200, "active"))
 
@@ -2241,6 +2318,14 @@ class GraceS1Tests(unittest.TestCase):
         clock.advance(1.0)
         second = coordinator.acquire(self.a, "again")
         self.assertNotEqual(second[0], 200)
+        # That acquire expires the preferential lease through the release
+        # fence. wait(0) polls once and does not wait for it.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         claimed = coordinator.wait(self.b, ticket, 0.0)
         self.assertEqual((claimed[0], claimed[1]["status"]), (200, "active"))
 
@@ -2508,6 +2593,14 @@ class RaceR9Tests(unittest.TestCase):
         self.assertEqual(coordinator.wait(self.b, ticket_b, 0.0)[0], 202)
         clock.advance(MID - 119.0)
         enq = coordinator.enqueue(self.a, "back", "operation-a")
+        # enqueue expires the lease through the same release fence. A
+        # zero-timeout wait polls once and would miss the claim if it is up.
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=1.0
+                )
+            )
         barrier = threading.Barrier(2)
         results: dict[str, tuple[int, dict]] = {}
 

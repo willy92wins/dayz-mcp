@@ -16,6 +16,50 @@ import mcp_capture
 from tests._tiers import slow_test
 
 
+class _ExitedGrab:
+    """A grab child that has already printed its stdout and exited."""
+
+    def __init__(self, stdout: str, stderr: str, code: int) -> None:
+        self.stdout = io.StringIO(stdout)
+        self.stderr = io.StringIO(stderr)
+        self.returncode = code
+        self.killed = False
+
+    def poll(self) -> int:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+
+class _HangingGrab:
+    """A grab child that never exits. stdout is already buffered."""
+
+    def __init__(self, stdout: str) -> None:
+        self.stdout = io.StringIO(stdout)
+        self.stderr = io.StringIO("")
+        self.returncode: int | None = None
+        self.killed = False
+
+    def poll(self) -> int | None:
+        if self.killed:
+            return -9
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.killed:
+            self.returncode = -9
+            return -9
+        raise subprocess.TimeoutExpired(cmd="powershell", timeout=timeout)
+
+    def kill(self) -> None:
+        self.killed = True
+
+
 class MCPCaptureTest(unittest.TestCase):
     @slow_test
     def test_grab_self_test_covers_client_area_liveness_contract(self) -> None:
@@ -214,46 +258,76 @@ class MCPCaptureTest(unittest.TestCase):
 
     @slow_test
     def test_capture_window_not_found_returns_is_error(self) -> None:
-        # This pins the error for a missing window, not the 8 s grab budget of
-        # grab_stable_frame: a cold PowerShell on a loaded CI runner can take
-        # longer than that to answer (mailbox fb-20260927-141044-76e2). The
-        # real backend still runs; it just gets time to report.
-        real_capture = mcp_capture._run_window_capture
-
-        def patient_capture(*args, **kwargs):
-            kwargs["timeout_s"] = max(float(kwargs.get("timeout_s") or 0.0), 60.0)
-            return real_capture(*args, **kwargs)
-
-        with mock.patch.object(mcp_capture, "_run_window_capture", side_effect=patient_capture):
-            result = mcp_capture.capture_screenshot(
-                scale="tiny",
-                max_tokens=mcp_capture.DEFAULT_MAX_TOKENS,
-                frames=1,
-                process_name="__DayZ_MCP_missing_window__",
-            )
+        # Real backend, missing window. Cold powershell.exe + Add-Type is a
+        # start timeout (capture_start_timeout), not this result: a window
+        # that is not there stays window_not_found (fb-20260927-141044-76e2).
+        result = mcp_capture.capture_screenshot(
+            scale="tiny",
+            max_tokens=mcp_capture.DEFAULT_MAX_TOKENS,
+            frames=1,
+            process_name="__DayZ_MCP_missing_window__",
+        )
 
         self.assertTrue(result.get("isError"))
         self.assertEqual(result.get("error"), "window_not_found")
 
-    def test_grab_budget_is_8s_and_an_overrun_maps_to_capture_timeout(self) -> None:
-        # Pins what the not-found test above relaxes (review of #111): each
-        # grab_stable_frame capture gets 8 s, and a backend that overruns it
-        # comes back as capture_timeout.
+    def test_grab_budget_is_8s(self) -> None:
+        # grab_stable_frame still gives each grab 8 s after the script starts.
         not_found = {"ok": False, "error": "window_not_found"}
         with mock.patch.object(mcp_capture, "_run_window_capture", return_value=not_found) as run:
             mcp_capture.grab_stable_frame(frames=1, process_name="__DayZ_MCP_missing_window__")
         self.assertEqual(run.call_args.kwargs["timeout_s"], 8.0)
 
-        overrun = subprocess.TimeoutExpired(cmd="powershell", timeout=8.0)
+    def test_capture_start_timeout_is_not_a_capture_timeout(self) -> None:
+        # No start line and the process is still running: powershell never
+        # reported that Add-Type finished. That is not a hung grab.
+        hanging = _HangingGrab("")
         with mock.patch.object(mcp_capture, "probe_input_desktop", return_value="unlocked"), mock.patch.object(
-            mcp_capture.subprocess, "run", side_effect=overrun
-        ):
+            mcp_capture, "CAPTURE_START_BUDGET_S", 0.05
+        ), mock.patch.object(mcp_capture.subprocess, "Popen", return_value=hanging):
             result = mcp_capture._run_window_capture(
                 os.path.join(tempfile.gettempdir(), "dayz_mcp_never_written.png"),
                 process_name="__DayZ_MCP_missing_window__",
                 timeout_s=8.0,
             )
+        self.assertEqual(result, {"ok": False, "error": "capture_start_timeout"})
+        self.assertTrue(hanging.killed)
+
+    def test_started_capture_that_overruns_is_capture_timeout(self) -> None:
+        # The start line arrived; the grab itself did not finish.
+        hanging = _HangingGrab('{"phase":"started"}\n')
+        with mock.patch.object(mcp_capture, "probe_input_desktop", return_value="unlocked"), mock.patch.object(
+            mcp_capture.subprocess, "Popen", return_value=hanging
+        ):
+            result = mcp_capture._run_window_capture(
+                os.path.join(tempfile.gettempdir(), "dayz_mcp_never_written.png"),
+                process_name="__DayZ_MCP_missing_window__",
+                timeout_s=0.05,
+            )
         self.assertEqual(result, {"ok": False, "error": "capture_timeout"})
+        self.assertTrue(hanging.killed)
+
+    def test_exited_missing_window_stays_window_not_found(self) -> None:
+        # The phase line is not a result. A process that already exited with
+        # window_not_found is that result even when the start line was buffered
+        # until exit, or never emitted.
+        cases = (
+            '{"phase":"started"}\n{"ok": false, "error": "window_not_found"}\n',
+            '{"ok": false, "error": "window_not_found"}\n',
+        )
+        for stdout in cases:
+            with self.subTest(stdout=stdout):
+                proc = _ExitedGrab(stdout, "", 0)
+                with mock.patch.object(
+                    mcp_capture, "probe_input_desktop", return_value="unlocked"
+                ), mock.patch.object(mcp_capture.subprocess, "Popen", return_value=proc):
+                    result = mcp_capture._run_window_capture(
+                        os.path.join(tempfile.gettempdir(), "dayz_mcp_never_written.png"),
+                        process_name="__DayZ_MCP_missing_window__",
+                        timeout_s=8.0,
+                    )
+                self.assertEqual(result, {"ok": False, "error": "window_not_found"})
+                self.assertFalse(proc.killed)
 
 
 # --- crop_space fixture ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
 import unittest
@@ -93,11 +94,23 @@ class FbF298LaunchStartupinfoTest(unittest.TestCase):
 class FbF298CaptureCreateNoWindowTest(unittest.TestCase):
     def test_fb_f298_window_capture_passes_create_no_window_and_grab_env(self) -> None:
         grab_env = {"KEEP": "1"}
-        run = mock.Mock(
-            return_value=mock.Mock(
-                stdout='{"ok":false,"error":"no_window"}\n', stderr=""
-            )
-        )
+
+        class _ExitedGrab:
+            def __init__(self) -> None:
+                self.stdout = io.StringIO('{"ok":false,"error":"no_window"}\n')
+                self.stderr = io.StringIO("")
+                self.returncode = 0
+
+            def poll(self) -> int:
+                return self.returncode
+
+            def wait(self, timeout: float | None = None) -> int:
+                return self.returncode
+
+            def kill(self) -> None:
+                self.returncode = -9
+
+        popen = mock.Mock(return_value=_ExitedGrab())
         with mock.patch.object(
             mcp_capture, "probe_input_desktop", return_value="unlocked"
         ):
@@ -105,12 +118,12 @@ class FbF298CaptureCreateNoWindowTest(unittest.TestCase):
                 with mock.patch.object(
                     mcp_capture, "_grab_subprocess_env", return_value=grab_env
                 ):
-                    with mock.patch.object(mcp_capture.subprocess, "run", run):
+                    with mock.patch.object(mcp_capture.subprocess, "Popen", popen):
                         mcp_capture._run_window_capture(
                             "frame.png", "DayZDiag_x64", 8.0
                         )
-        run.assert_called_once()
-        kwargs = run.call_args.kwargs
+        popen.assert_called_once()
+        kwargs = popen.call_args.kwargs
         create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         self.assertTrue(int(kwargs.get("creationflags", 0)) & create_no_window)
         self.assertIs(kwargs["env"], grab_env)
