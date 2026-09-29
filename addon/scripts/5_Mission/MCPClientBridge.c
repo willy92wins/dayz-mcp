@@ -893,9 +893,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return true;
 	}
 
-	// Read whether GetInputByName knows the name, and what the selected
-	// alternative has bound. SelectAlternative is not called: it would change
-	// which bind is active. LocalPress is not called.
+	// Read GetInputByName and the selected alternative's bind. In 1.29 a
+	// non-null return is not proof the name is registered (ficha 4f50);
+	// probe publishes the raw values. SelectAlternative is not called: it
+	// would change which bind is active. LocalPress is not called.
 	protected bool DispatchInputDescribe(MCPCommand command, MCPResult result)
 	{
 		if (!command.args || !IsPrintableInputName(command.args.name))
@@ -917,6 +918,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPInputDescribe described = new MCPInputDescribe();
 		if (!input)
 		{
+			// Probe stays unassigned. exists false is only this null return.
 			described.exists = false;
 			result.input_describe = described;
 			result.ok = true;
@@ -948,6 +950,36 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			described.keys.Insert(bound);
 			keyIndex = keyIndex + 1;
 		}
+
+		// One active-input array per call. ID and NameHash are read into locals
+		// so GetInputByID and the active-list scan use the same values.
+		MCPInputProbe probe = new MCPInputProbe();
+		int inputId = input.ID();
+		int nameHash = input.NameHash();
+		probe.input_id = inputId;
+		probe.name_hash = nameHash;
+		probe.name_string_hash = command.args.name.Hash();
+		probe.by_id_found = false;
+		probe.by_id_same_hash = false;
+		UAInput byId = api.GetInputByID(inputId);
+		if (byId)
+		{
+			probe.by_id_found = true;
+			int byIdHash = byId.NameHash();
+			if (byIdHash == nameHash)
+			{
+				probe.by_id_same_hash = true;
+			}
+		}
+		probe.in_active_inputs = false;
+		TIntArray activeIds = new TIntArray();
+		api.GetActiveInputs(activeIds);
+		int activeIndex = activeIds.Find(inputId);
+		if (activeIndex >= 0)
+		{
+			probe.in_active_inputs = true;
+		}
+		described.probe = probe;
 
 		result.input_describe = described;
 		result.ok = true;
