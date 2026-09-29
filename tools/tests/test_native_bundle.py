@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import ntpath
 import os
 import re
+import tempfile
 import unittest
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -533,9 +536,159 @@ class Fb19b5ToolsLayoutTest(unittest.TestCase):
                             )
 
 
+def _canonical_json(value: dict[str, object]) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
+    ).encode("utf-8")
+
+
+def _sha256(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest().upper()
+
+
+def _sealed_root(path: str) -> dict[str, object]:
+    identity = {"file_id": "AB" * 16, "volume_serial_number": 1}
+    return {
+        "allow_root_junction": False,
+        "handle_path": path,
+        "identity": identity,
+        "path": path,
+        "resolved_identity": identity,
+        "resolved_path": path,
+        "root_reparse_tag": 0,
+    }
+
+
+def _write_loadable_bundle(root: Path) -> None:
+    """A bundle load_verified_bundle accepts, sealed against this tree's sources."""
+    package = Path(native_bundle.__file__).resolve().parent
+    members = {
+        "__main__.py": b"\n",
+        "dayz_mcp/__init__.py": (package / "__init__.py").read_bytes(),
+    }
+    for name in native_bundle._APP_PACKAGED_MODULES:
+        members[f"dayz_mcp/{name}"] = (package / name).read_bytes()
+    if set(members) != set(native_bundle._APP_MEMBERS):
+        raise AssertionError("app.pyz members drifted from _APP_MEMBERS")
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "src").mkdir()
+    app_main = b"app-main\n"
+    launcher_source = b"launcher\n"
+    (root / "src" / "app_main.py").write_bytes(app_main)
+    (root / "src" / "launcher.cpp").write_bytes(launcher_source)
+    policy = _canonical_json(
+        {
+            "format_version": 1,
+            "projects": [
+                {
+                    "default_base_mods": [],
+                    "default_source": _sealed_root(r"C:\Windows"),
+                    "dev_root": _sealed_root(r"C:\Windows"),
+                    "mission_roots": [_sealed_root(r"C:\Windows")],
+                    "mod": "Example",
+                    "mod_roots": [_sealed_root(r"C:\Windows")],
+                }
+            ],
+        }
+    )
+    worker_runtime = _canonical_json({"format_version": 1})
+    (root / "request-policy.json").write_bytes(policy)
+    (root / "worker-runtime.json").write_bytes(worker_runtime)
+    archive_path = root / "app.pyz"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for name in sorted(members):
+            info = zipfile.ZipInfo(filename=name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            archive.writestr(info, members[name])
+    build_contract = _canonical_json(
+        {
+            "builder_sha256": "11" * 32,
+            "dependency_lock_sha256": "22" * 32,
+            "format_version": 1,
+            "sources": {
+                "app_main.py": _sha256(app_main),
+                "launcher.cpp": _sha256(launcher_source),
+            },
+        }
+    )
+    (root / "build-contract.json").write_bytes(build_contract)
+    bundle_files = {
+        "app.pyz": archive_path.read_bytes(),
+        "build-contract.json": build_contract,
+        "request-policy.json": policy,
+        "src/app_main.py": app_main,
+        "src/launcher.cpp": launcher_source,
+        "worker-runtime.json": worker_runtime,
+    }
+    from dayz_mcp.dayz_tools_paths import external_file_paths, resolved_layout
+
+    entries: list[dict[str, object]] = []
+    for relative, raw in bundle_files.items():
+        entries.append(
+            {
+                "kind": "bundle",
+                "path": relative,
+                "sha256": _sha256(raw),
+                "size": len(raw),
+            }
+        )
+    for external in external_file_paths(resolved_layout()):
+        info = external.stat()
+        entries.append(
+            {
+                "identity": {
+                    "file_id": native_bundle._manifest_file_id(info),
+                    "volume_serial_number": int(info.st_dev),
+                },
+                "kind": "external",
+                "path": ntpath.normpath(str(external)),
+                "sha256": _sha256(external.read_bytes()),
+                "size": int(info.st_size),
+            }
+        )
+    entries.sort(key=lambda item: (str(item["kind"]), str(item["path"]).casefold()))
+    source_hashes = {
+        key: _sha256((package / module).read_bytes())
+        for key, module in native_bundle._HASHED_MODULES.items()
+    }
+    manifest = _canonical_json(
+        {
+            "bundle_id": "dayz-test-v1",
+            "entries": entries,
+            "format_version": 1,
+            "request_policy_sha256": _sha256(policy),
+            "worker_runtime_sha256": _sha256(worker_runtime),
+            **source_hashes,
+        }
+    )
+    (root / "closure-manifest.json").write_bytes(manifest)
+    marker = b"DAYZ_MCP_MANIFEST_SHA256=" + _sha256(manifest).encode("ascii")
+    executable = b"MZ" + marker
+    (root / "dayz-test-launcher.exe").write_bytes(executable)
+    fingerprint = {
+        "app_pyz_sha256": _sha256(bundle_files["app.pyz"]),
+        "manifest_sha256": _sha256(manifest),
+        "pe_sha256": _sha256(executable),
+        "request_policy_sha256": _sha256(policy),
+    }
+    receipt = _canonical_json(
+        {
+            "build_contract_sha256": _sha256(build_contract),
+            "builds": [
+                {"mode": mode, **fingerprint} for mode in native_bundle._REPRODUCIBILITY_MODES
+            ],
+            "format_version": 2,
+            "reproducible": True,
+        }
+    )
+    (root / "reproducibility.json").write_bytes(receipt)
+
+
 class AddonTreeSteamDllTest(unittest.TestCase):
     _STEAM = r"C:\Program Files (x86)\Steam"
     _NAMES = frozenset({"steamclient.dll", "tier0_s.dll"})
+    _INSTALL_IDENTITY = PathIdentity(4, "CD" * 16)
+    _FILE_IDENTITY = PathIdentity(1, "AB" * 16)
 
     def _authority(self, **overrides: object) -> native_bundle.DebugImageAuthority:
         fields: dict[str, object] = {
@@ -544,14 +697,40 @@ class AddonTreeSteamDllTest(unittest.TestCase):
             "system_directory": r"C:\Windows\System32",
             "steam_install_directory": self._STEAM,
             "steam_client_dll_names": self._NAMES,
+            "steam_install_identity": self._INSTALL_IDENTITY,
         }
         fields.update(overrides)
         return native_bundle.DebugImageAuthority(**fields)
 
-    def _approve(self, authority: native_bundle.DebugImageAuthority, path: str) -> bool:
+    def _approve(
+        self,
+        authority: native_bundle.DebugImageAuthority,
+        path: str,
+        *,
+        signed: bool = True,
+        after_identity: PathIdentity | None = None,
+        directory_identity: PathIdentity | None = None,
+    ) -> bool:
+        file_identity = self._FILE_IDENTITY
         with patch.object(
-            native_bundle, "_file_identity", return_value=PathIdentity(1, "AB" * 16)
-        ), patch.object(native_bundle, "_final_handle_path", return_value=path):
+            native_bundle,
+            "_file_identity",
+            side_effect=[file_identity, after_identity or file_identity],
+        ), patch.object(
+            native_bundle, "_final_handle_path", return_value=path
+        ), patch.object(
+            native_bundle,
+            "_directory_identity",
+            return_value=(
+                authority.steam_install_identity
+                if directory_identity is None
+                else directory_identity
+            ),
+        ), patch.object(
+            native_bundle, "_path_identity", return_value=file_identity
+        ), patch.object(
+            native_bundle, "is_valve_signed", return_value=signed
+        ):
             return authority.approve_addon_tree_module(11)
 
     def test_measured_basenames_are_the_closed_set(self) -> None:
@@ -572,14 +751,39 @@ class AddonTreeSteamDllTest(unittest.TestCase):
     def test_listed_dll_in_the_steam_directory_is_approved(self) -> None:
         authority = self._authority()
         listed = self._STEAM + r"\steamclient.dll"
-        with patch.object(
-            native_bundle, "_file_identity", return_value=PathIdentity(1, "AB" * 16)
-        ), patch.object(native_bundle, "_final_handle_path", return_value=listed):
-            self.assertTrue(authority.approve_addon_tree_module(11))
-            self.assertFalse(authority.approve_debug_image(11, event_kind="LOAD_DLL"))
+        self.assertTrue(self._approve(authority, listed))
         self.assertTrue(self._approve(authority, listed.upper()))
+        with patch.object(
+            native_bundle, "_file_identity", return_value=self._FILE_IDENTITY
+        ), patch.object(native_bundle, "_final_handle_path", return_value=listed):
+            self.assertFalse(authority.approve_debug_image(11, event_kind="LOAD_DLL"))
         self.assertFalse(authority.approve_addon_tree_module(0))
         self.assertFalse(authority.approve_addon_tree_module(True))  # type: ignore[arg-type]
+
+    def test_valve_signature_and_directory_identity_are_required(self) -> None:
+        authority = self._authority()
+        listed = self._STEAM + r"\steamclient.dll"
+        self.assertFalse(self._approve(authority, listed, signed=False))
+        self.assertFalse(
+            self._approve(
+                authority,
+                listed,
+                directory_identity=PathIdentity(9, "11" * 16),
+            )
+        )
+        self.assertFalse(
+            self._approve(
+                authority,
+                listed,
+                after_identity=PathIdentity(2, "22" * 16),
+            )
+        )
+        self.assertFalse(
+            self._approve(
+                self._authority(steam_install_identity=None),
+                listed,
+            )
+        )
 
     def test_unlisted_dll_in_the_steam_directory_is_rejected(self) -> None:
         authority = self._authority()
@@ -602,20 +806,21 @@ class AddonTreeSteamDllTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertFalse(self._approve(authority, path))
 
-    def test_named_subdirectory_is_exact_and_not_a_prefix(self) -> None:
-        named = self._STEAM + r"\bin"
-        authority = self._authority(steam_client_dll_directories=frozenset({named}))
-        self.assertTrue(self._approve(authority, named + r"\steamclient.dll"))
-        self.assertTrue(self._approve(authority, self._STEAM + r"\tier0_s.dll"))
-        self.assertFalse(self._approve(authority, named + r"\nested\steamclient.dll"))
-        self.assertFalse(
-            self._approve(
-                self._authority(
-                    steam_client_dll_directories=frozenset({self._STEAM + r"\.."})
-                ),
-                self._STEAM + r"\steamclient.dll",
-            )
+    def test_every_subdirectory_including_bin_is_rejected(self) -> None:
+        authority = self._authority()
+        self.assertNotIn(
+            "steam_client_dll_directories",
+            native_bundle.DebugImageAuthority.__dataclass_fields__,
         )
+        for path in (
+            self._STEAM + r"\bin\steamclient.dll",
+            self._STEAM + r"\bin\nested\steamclient.dll",
+            self._STEAM + r"\steamapps\steamclient.dll",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(self._approve(authority, path))
+        with self.assertRaises(TypeError):
+            self._authority(steam_client_dll_directories=frozenset({self._STEAM + r"\bin"}))
 
     def test_unresolved_steam_directory_disables_the_rule(self) -> None:
         authority = self._authority(steam_install_directory=None)
@@ -625,12 +830,14 @@ class AddonTreeSteamDllTest(unittest.TestCase):
         with patch.object(
             native_bundle, "_resolve_addon_tree_steam_directory", return_value=None
         ):
-            directory, names = native_bundle._addon_tree_steam_rule()
+            directory, names, identity = native_bundle._addon_tree_steam_rule()
         self.assertIsNone(directory)
         self.assertEqual(names, frozenset())
+        self.assertIsNone(identity)
         disabled = self._authority(
             steam_install_directory=directory,
             steam_client_dll_names=names,
+            steam_install_identity=identity,
         )
         self.assertFalse(
             self._approve(disabled, self._STEAM + r"\steamclient.dll")
@@ -640,21 +847,50 @@ class AddonTreeSteamDllTest(unittest.TestCase):
         source = Path(native_bundle.__file__).read_text(encoding="utf-8")
         self.assertNotIn("from dayz_mcp.steam_preflight", source)
         self.assertNotIn("import steam_preflight", source)
-        body = source[source.index("def load_verified_bundle") :]
-        self.assertIn(
-            "steam_install_directory, steam_client_dll_names = _addon_tree_steam_rule()",
-            body,
+        pinned = native_bundle._PinnedSteamInstall(
+            self._STEAM, self._INSTALL_IDENTITY
         )
-        self.assertIn("steam_install_directory=steam_install_directory", body)
-        self.assertIn("steam_client_dll_names=steam_client_dll_names", body)
-        with patch.object(
-            native_bundle,
-            "_resolve_addon_tree_steam_directory",
-            return_value=self._STEAM,
-        ):
-            directory, names = native_bundle._addon_tree_steam_rule()
-        self.assertEqual(directory, self._STEAM)
-        self.assertEqual(names, native_bundle._ADDON_TREE_STEAM_CLIENT_DLLS)
+        listed = self._STEAM + r"\steamclient.dll"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_loadable_bundle(root)
+            entry = launcher_registry._create_registry_entry_for_test(
+                "dayz-test-v1", root, "dayz-test-launcher.exe"
+            )
+            with launcher_registry._open_registry_entry_for_test(entry) as opened:
+                with patch.object(
+                    native_bundle,
+                    "_resolve_addon_tree_steam_directory",
+                    return_value=pinned,
+                ):
+                    with native_bundle.load_verified_bundle(opened) as verified:
+                        authority = verified.debug_image_authority
+                        self.assertEqual(authority.steam_install_directory, self._STEAM)
+                        self.assertEqual(
+                            authority.steam_client_dll_names,
+                            native_bundle._ADDON_TREE_STEAM_CLIENT_DLLS,
+                        )
+                        self.assertEqual(
+                            authority.steam_install_identity, self._INSTALL_IDENTITY
+                        )
+                        self.assertTrue(self._approve(authority, listed))
+                        self.assertFalse(
+                            self._approve(
+                                authority, self._STEAM + r"\bin\steamclient.dll"
+                            )
+                        )
+                        with patch.object(
+                            native_bundle,
+                            "_file_identity",
+                            return_value=self._FILE_IDENTITY,
+                        ), patch.object(
+                            native_bundle, "_final_handle_path", return_value=listed
+                        ):
+                            self.assertFalse(
+                                authority.approve_debug_image(
+                                    11, event_kind="LOAD_DLL"
+                                )
+                            )
 
     def test_steam_resolution_fails_closed(self) -> None:
         steam_exe = self._STEAM + r"\steam.exe"
@@ -693,31 +929,52 @@ class AddonTreeSteamDllTest(unittest.TestCase):
                     raise OSError("unreadable")
                 return self._executable
 
-        def resolve(pids: tuple[object, ...], images: dict[int, object], registry: object) -> str | None:
+        def resolve(
+            pids: tuple[object, ...], images: dict[int, object], registry: object
+        ) -> native_bundle._PinnedSteamInstall | None:
             return native_bundle._resolve_addon_tree_steam_directory(
                 provider=Provider(pids, images),
                 host=Host(registry),
             )
 
+        def signed(path: str) -> bool:
+            return ntpath.normcase(ntpath.normpath(path)) == ntpath.normcase(steam_exe)
+
         with patch.object(
             native_bundle, "_install_directory_of_steam_executable", side_effect=install
-        ):
-            self.assertEqual(resolve((), {}, steam_exe), self._STEAM)
-            self.assertEqual(
-                resolve((4,), {4: steam_exe}, r"c:/program files (x86)/steam/steam.exe"),
-                self._STEAM,
+        ), patch.object(native_bundle, "is_valve_signed", side_effect=signed):
+            agreed = resolve(
+                (4,), {4: steam_exe}, r"c:/program files (x86)/steam/steam.exe"
             )
-            self.assertEqual(resolve((4,), {4: steam_exe}, None), self._STEAM)
+            self.assertIsInstance(agreed, native_bundle._PinnedSteamInstall)
+            assert agreed is not None
+            self.assertEqual(agreed.directory, self._STEAM)
+            self.assertEqual(
+                agreed.identity, native_bundle._directory_identity(self._STEAM)
+            )
+            self.assertIsNone(resolve((), {}, steam_exe))
+            self.assertIsNone(resolve((4,), {4: steam_exe}, None))
             self.assertIsNone(resolve((), {}, None))
             self.assertIsNone(resolve((), {}, r"C:\missing\steam.exe"))
             self.assertIsNone(resolve(("raise",), {}, steam_exe))
             self.assertIsNone(resolve((4,), {4: "raise"}, steam_exe))
             self.assertIsNone(resolve((4,), {4: r"C:\Windows\notepad.exe"}, None))
+            self.assertIsNone(resolve((4, 5), {4: steam_exe, 5: steam_exe}, steam_exe))
             self.assertIsNone(resolve((4, 5), {4: steam_exe, 5: other_exe}, None))
             self.assertIsNone(resolve((4,), {4: steam_exe}, other_exe))
             self.assertIsNone(resolve((0,), {}, None))
             self.assertIsNone(resolve(tuple(range(1, 10)), {}, None))
             self.assertIsNone(resolve((), {}, "raise"))
+        with patch.object(
+            native_bundle, "_install_directory_of_steam_executable", side_effect=install
+        ), patch.object(native_bundle, "is_valve_signed", return_value=False):
+            self.assertIsNone(resolve((4,), {4: steam_exe}, steam_exe))
+        with patch.object(
+            native_bundle, "_install_directory_of_steam_executable", side_effect=install
+        ), patch.object(
+            native_bundle, "is_valve_signed", return_value=True
+        ), patch.object(native_bundle, "_directory_identity", return_value=None):
+            self.assertIsNone(resolve((4,), {4: steam_exe}, steam_exe))
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import BinaryIO
 
+from dayz_mcp.authenticode import is_valve_signed
 from dayz_mcp.dayz_test_request import RequestProjectPolicy
 from dayz_mcp.native_broker_protocol import BrokerKind
 from dayz_mcp.dayz_tools_paths import (
@@ -193,9 +194,9 @@ _FILE_SHARE_WRITE = 0x00000002
 _FILE_SHARE_DELETE = 0x00000004
 _OPEN_EXISTING = 3
 _FILE_ATTRIBUTE_NORMAL = 0x00000080
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _FILE_TYPE_DISK = 0x0001
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-_MAX_LIVE_STEAM_PROCESSES = 8
 
 
 def _is_trusted_gac_microsoft_visual_basic(path: str, windows_directory: str) -> bool:
@@ -237,7 +238,7 @@ class DebugImageAuthority:
     addon_helper_descriptors: tuple[DebugAddonHelperDescriptor, ...] = ()
     steam_install_directory: str | None = None
     steam_client_dll_names: frozenset[str] = frozenset()
-    steam_client_dll_directories: frozenset[str] = frozenset()
+    steam_install_identity: PathIdentity | None = None
 
     def approve_debug_image(self, file_handle: int, *, event_kind: str) -> bool:
         if type(file_handle) is not int or file_handle <= 0:
@@ -316,34 +317,23 @@ class DebugImageAuthority:
             for descriptor in self.addon_helper_descriptors
         )
 
-    def _addon_tree_steam_parents(self) -> frozenset[str] | None:
-        directory = self.steam_install_directory
-        if type(directory) is not str or not directory or not ntpath.isabs(directory):
-            return None
-        if ntpath.normpath(directory) != directory:
-            return None
-        root = ntpath.normcase(directory)
-        parents = {root}
-        for extra in self.steam_client_dll_directories:
-            if type(extra) is not str or not ntpath.isabs(extra):
-                return None
-            if ntpath.normpath(extra) != extra:
-                return None
-            folded = ntpath.normcase(extra)
-            if folded == root or not _inside_directory(folded, root):
-                return None
-            parents.add(folded)
-        return frozenset(parents)
-
     def approve_addon_tree_module(self, file_handle: int) -> bool:
         if type(file_handle) is not int or file_handle <= 0:
             return False
-        parents = self._addon_tree_steam_parents()
+        directory = self.steam_install_directory
+        pinned = self.steam_install_identity
         names = self.steam_client_dll_names
-        if parents is None or type(names) is not frozenset or not names:
+        if (
+            type(directory) is not str
+            or not ntpath.isabs(directory)
+            or ntpath.normpath(directory) != directory
+            or type(pinned) is not PathIdentity
+            or type(names) is not frozenset
+            or not names
+        ):
             return False
         try:
-            _file_identity(file_handle)
+            before = _file_identity(file_handle)
             path = _final_handle_path(file_handle)
         except (OSError, ValueError):
             return False
@@ -355,7 +345,19 @@ class DebugImageAuthority:
         allowed = {name.casefold() for name in names if type(name) is str}
         if len(allowed) != len(names) or pure.name.casefold() not in allowed:
             return False
-        return ntpath.normcase(ntpath.dirname(path)) in parents
+        parent = ntpath.dirname(path)
+        if ntpath.normcase(parent) != ntpath.normcase(directory):
+            return False
+        try:
+            if _directory_identity(parent) != pinned:
+                return False
+            if is_valve_signed(path) is not True:
+                return False
+            after = _file_identity(file_handle)
+            reopened = _path_identity(path)
+        except (OSError, ValueError):
+            return False
+        return before == after == reopened and type(reopened) is PathIdentity
 
 
 def _path_has_dot_segment(path: str) -> bool:
@@ -471,6 +473,46 @@ class _RegistrySteamExecutable:
         return None
 
 
+@dataclass(frozen=True)
+class _PinnedSteamInstall:
+    directory: str
+    identity: PathIdentity
+
+
+def _open_path_identity(path: str, *, directory: bool) -> PathIdentity | None:
+    if type(path) is not str or not path or "\0" in path:
+        return None
+    flags = _FILE_FLAG_BACKUP_SEMANTICS if directory else _FILE_ATTRIBUTE_NORMAL
+    handle = _path_kernel32.CreateFileW(
+        path,
+        _FILE_READ_ATTRIBUTES,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+        None,
+        _OPEN_EXISTING,
+        flags,
+        None,
+    )
+    if handle == _INVALID_HANDLE_VALUE:
+        return None
+    numeric = int(handle)
+    try:
+        if int(_path_kernel32.GetFileType(numeric)) != _FILE_TYPE_DISK:
+            return None
+        return _file_identity(numeric)
+    except (OSError, ValueError):
+        return None
+    finally:
+        _path_kernel32.CloseHandle(numeric)
+
+
+def _directory_identity(path: str) -> PathIdentity | None:
+    return _open_path_identity(path, directory=True)
+
+
+def _path_identity(path: str) -> PathIdentity | None:
+    return _open_path_identity(path, directory=False)
+
+
 def _install_directory_of_steam_executable(path: str) -> str | None:
     if (
         type(path) is not str
@@ -515,12 +557,15 @@ def _install_directory_of_steam_executable(path: str) -> str | None:
 def _resolve_addon_tree_steam_directory(
     provider: object | None = None,
     host: object | None = None,
-) -> str | None:
-    # Same facts as steam_preflight._steam_executable (steam_preflight.py:543):
-    # a live steam.exe image, else HKCU Software\Valve\Steam SteamExe
-    # (steam_preflight.py:517). Those readers are copied here. Importing
-    # steam_preflight would put invoke_steam's subprocess.Popen
-    # (steam_preflight.py:530) in the audited process-creation closure.
+) -> _PinnedSteamInstall | None:
+    # Both facts have to agree. steam_preflight._steam_executable
+    # (steam_preflight.py:543) prefers a live steam.exe image and otherwise
+    # reads HKCU Software\Valve\Steam SteamExe (steam_preflight.py:517).
+    # Here a missing side, a second steam.exe, a signer that is not Valve,
+    # or a directory whose file id cannot be pinned leaves the rule off.
+    # The readers are copied: importing steam_preflight would put
+    # invoke_steam's subprocess.Popen (steam_preflight.py:530) in the
+    # audited process-creation closure.
     try:
         selected_provider = _LiveSteamProcessReader() if provider is None else provider
         selected_host = _RegistrySteamExecutable() if host is None else host
@@ -528,59 +573,51 @@ def _resolve_addon_tree_steam_directory(
             raw_pids = selected_provider.steam_process_pids()
         except Exception:
             return None
-        if type(raw_pids) is not tuple or len(raw_pids) > _MAX_LIVE_STEAM_PROCESSES:
+        if type(raw_pids) is not tuple or len(raw_pids) != 1:
             return None
-        installs: list[str] = []
-        seen_directories: set[str] = set()
-        seen_pids: set[int] = set()
-        for pid in raw_pids:
-            if type(pid) is not int or not 0 < pid <= 0xFFFFFFFF or pid in seen_pids:
-                return None
-            seen_pids.add(pid)
-            try:
-                image = selected_provider.process_image_path(pid)
-            except Exception:
-                return None
-            if type(image) is not str or ntpath.basename(image).casefold() != "steam.exe":
-                return None
-            directory = _install_directory_of_steam_executable(image)
-            if directory is None:
-                return None
-            folded = ntpath.normcase(directory)
-            if folded not in seen_directories:
-                seen_directories.add(folded)
-                installs.append(directory)
-        if len(installs) > 1:
+        pid = raw_pids[0]
+        if type(pid) is not int or not 0 < pid <= 0xFFFFFFFF:
+            return None
+        try:
+            image = selected_provider.process_image_path(pid)
+        except Exception:
+            return None
+        if type(image) is not str or ntpath.basename(image).casefold() != "steam.exe":
+            return None
+        live = _install_directory_of_steam_executable(image)
+        if live is None:
             return None
         try:
             registry_value = selected_host.steam_executable()
         except Exception:
             return None
-        registry_directory: str | None = None
-        if registry_value is not None:
-            if type(registry_value) is not str:
-                return None
-            registry_directory = _install_directory_of_steam_executable(registry_value)
-            if registry_directory is None:
-                return None
-        if installs:
-            live = installs[0]
-            if (
-                registry_directory is not None
-                and ntpath.normcase(registry_directory) != ntpath.normcase(live)
-            ):
-                return None
-            return live
-        return registry_directory
+        if type(registry_value) is not str:
+            return None
+        registry_directory = _install_directory_of_steam_executable(registry_value)
+        if (
+            registry_directory is None
+            or ntpath.normcase(registry_directory) != ntpath.normcase(live)
+        ):
+            return None
+        try:
+            signed = is_valve_signed(ntpath.join(live, "steam.exe"))
+        except Exception:
+            return None
+        if signed is not True:
+            return None
+        identity = _directory_identity(live)
+        if type(identity) is not PathIdentity:
+            return None
+        return _PinnedSteamInstall(live, identity)
     except Exception:
         return None
 
 
-def _addon_tree_steam_rule() -> tuple[str | None, frozenset[str]]:
-    directory = _resolve_addon_tree_steam_directory()
-    if directory is None:
-        return None, frozenset()
-    return directory, _ADDON_TREE_STEAM_CLIENT_DLLS
+def _addon_tree_steam_rule() -> tuple[str | None, frozenset[str], PathIdentity | None]:
+    pinned = _resolve_addon_tree_steam_directory()
+    if pinned is None:
+        return None, frozenset(), None
+    return pinned.directory, _ADDON_TREE_STEAM_CLIENT_DLLS, pinned.identity
 
 
 @dataclass
@@ -1194,7 +1231,11 @@ def load_verified_bundle(opened_launcher: object) -> VerifiedNativeBundle:
             raise ValueError("invalid_native_launcher_bundle") from error
 
         opened_launcher.revalidate()
-        steam_install_directory, steam_client_dll_names = _addon_tree_steam_rule()
+        (
+            steam_install_directory,
+            steam_client_dll_names,
+            steam_install_identity,
+        ) = _addon_tree_steam_rule()
         authority = DebugImageAuthority(
             process_identities=frozenset(process_identities),
             module_identities=frozenset(module_identities),
@@ -1203,6 +1244,7 @@ def load_verified_bundle(opened_launcher: object) -> VerifiedNativeBundle:
             addon_helper_descriptors=tuple(addon_helper_descriptors),
             steam_install_directory=steam_install_directory,
             steam_client_dll_names=steam_client_dll_names,
+            steam_install_identity=steam_install_identity,
         )
         return VerifiedNativeBundle(
             sealed_policies,
