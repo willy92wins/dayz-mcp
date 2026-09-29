@@ -6871,7 +6871,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "not that the server counted a shot; confirm the shot with "
             "weapon_state. A completed refusal is ok=true, accepted=false, "
             "and error names the reason. A missing weapon, or a dead, "
-            "unconscious, restrained or seated player, is ok=false."
+            "unconscious, restrained or seated player at dispatch, is "
+            "ok=false. Those four are checked again immediately before "
+            "Fire; a failure there is a completed refusal."
         )
     )
     async def weapon_fire(
@@ -6885,8 +6887,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             f"{LEASE_TOOL_LINE} Enter or leave the local player's weapon sights. "
-            "mode ironsights calls SetIronsights(true), optics calls "
-            "SetOptics(true), none calls ExitSights(). No OS input and no "
+            "mode ironsights leaves the optic with SwitchOptics(optic, false) "
+            "then calls SetIronsights(true). mode optics calls "
+            "SetIronsights(false) then SwitchOptics(optic, true). mode none "
+            "calls ExitSights(). No OS input and no "
             "focus. Optics is refused when the weapon has no attached optic; "
             "ironsights is refused when the weapon cannot enter them. The "
             "result reads back ironsights (IsInIronsights) and optics "

@@ -574,6 +574,29 @@ class MCPWeaponControl
 			s_FireReason = "cannot_fire";
 			return;
 		}
+		// CanFire (weaponmanager.c:79-87) skips these. Same predicates as
+		// dispatch: IsAlive (object.c:523), IsUnconscious (playerbase.c:3655),
+		// IsRestrained (playerbase.c:2040), IsInVehicle (dayzplayerimplement.c:465).
+		if (!player.IsAlive())
+		{
+			s_FireReason = "player_dead";
+			return;
+		}
+		if (player.IsUnconscious())
+		{
+			s_FireReason = "player_unconscious";
+			return;
+		}
+		if (player.IsRestrained())
+		{
+			s_FireReason = "player_restrained";
+			return;
+		}
+		if (player.IsInVehicle())
+		{
+			s_FireReason = "player_in_vehicle";
+			return;
+		}
 		manager.Fire(held);
 		s_FireAccepted = true;
 	}

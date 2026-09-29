@@ -1523,6 +1523,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 		mode = command.args.mode;
 		held = Weapon_Base.Cast(player.GetEntityInHands());
+		// HandleADS (dayzplayerimplement.c:1970-1976). SetOptics only sets
+		// m_CameraOptics (dayzplayerimplement.c:380-393); SwitchOptics enters
+		// the optic (dayzplayerimplement.c:425-449). none is ExitSights
+		// (dayzplayerimplement.c:396-422), which leaves both.
 		if (mode == "ironsights")
 		{
 			if (!held.CanEnterIronsights())
@@ -1531,6 +1535,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				result.error = "no_ironsights";
 				return true;
 			}
+			optic = held.GetAttachedOptics();
+			player.SwitchOptics(optic, false);
 			player.SetIronsights(true);
 		}
 		else if (mode == "optics")
@@ -1542,7 +1548,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				result.error = "no_optics";
 				return true;
 			}
-			player.SetOptics(true);
+			player.SetIronsights(false);
+			player.SwitchOptics(optic, true);
 		}
 		else if (mode == "none")
 		{

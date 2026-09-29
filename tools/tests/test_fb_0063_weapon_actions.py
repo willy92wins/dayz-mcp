@@ -184,6 +184,25 @@ class WeaponActionEnforceContractTest(unittest.TestCase):
         self.assertLess(consume.index("s_FirePending = false"), consume.index("manager.Fire("))
         self.assertLess(consume.index("held.CanFire()"), consume.index("manager.Fire("))
         self.assertLess(consume.index("manager.CanFire(held)"), consume.index("manager.Fire("))
+        self.assertLess(consume.index("manager.CanFire(held)"), consume.index("player.IsAlive()"))
+
+    def test_consume_fire_rechecks_the_actor_immediately_before_fire(self) -> None:
+        consume = _method_body(WEAPON.read_text(encoding="utf-8"), "static void ConsumeFire(")
+        fire_at = consume.index("manager.Fire(")
+        previous = consume.index("manager.CanFire(held)")
+        for predicate, reason in (
+            ("player.IsAlive()", "player_dead"),
+            ("player.IsUnconscious()", "player_unconscious"),
+            ("player.IsRestrained()", "player_restrained"),
+            ("player.IsInVehicle()", "player_in_vehicle"),
+        ):
+            found = consume.index(predicate)
+            named = consume.index(f'"{reason}"')
+            self.assertGreater(found, previous, predicate)
+            self.assertLess(found, fire_at, predicate)
+            self.assertGreater(named, previous, reason)
+            self.assertLess(named, fire_at, reason)
+            previous = found
 
     def test_overrides_are_bounded_and_restore_clears_them(self) -> None:
         weapon = WEAPON.read_text(encoding="utf-8")
@@ -235,7 +254,8 @@ class WeaponActionEnforceContractTest(unittest.TestCase):
             "weapon_read_timeout",
             "player_changed",
             "SetIronsights(true)",
-            "SetOptics(true)",
+            "SwitchOptics(optic, true)",
+            "SwitchOptics(optic, false)",
             "ExitSights()",
             "GetAttachedOptics()",
             "CanEnterIronsights()",
@@ -249,8 +269,28 @@ class WeaponActionEnforceContractTest(unittest.TestCase):
         timeout = _method_body(client, "override void MCP_PostJobTimeout(")
         self.assertIn('PostWeaponActionJob(job, "weapon_read_timeout")', timeout)
         sights = _method_body(client, "protected bool DispatchWeaponSights(")
-        self.assertLess(sights.index("GetAttachedOptics()"), sights.index("SetOptics(true)"))
-        self.assertLess(sights.index("CanEnterIronsights()"), sights.index("SetIronsights(true)"))
+        self.assertNotIn("SetOptics(", sights)
+
+    def test_sights_follow_vanilla_transitions(self) -> None:
+        sights = _method_body(CLIENT.read_text(encoding="utf-8"), "protected bool DispatchWeaponSights(")
+        irons = sights[sights.index('mode == "ironsights"') : sights.index('mode == "optics"')]
+        optics = sights[sights.index('mode == "optics"') : sights.index('mode == "none"')]
+        leave = sights[sights.index('mode == "none"') :]
+        # Optics to ironsights: leave the optic, then enter ironsights.
+        self.assertLess(irons.index("CanEnterIronsights()"), irons.index("SwitchOptics(optic, false)"))
+        self.assertLess(irons.index("GetAttachedOptics()"), irons.index("SwitchOptics(optic, false)"))
+        self.assertLess(irons.index("SwitchOptics(optic, false)"), irons.index("SetIronsights(true)"))
+        self.assertNotIn("SetOptics(", irons)
+        # Ironsights to optics: leave ironsights, then enter the optic.
+        self.assertLess(optics.index("GetAttachedOptics()"), optics.index('"no_optics"'))
+        self.assertLess(optics.index('"no_optics"'), optics.index("SetIronsights(false)"))
+        self.assertLess(optics.index("SetIronsights(false)"), optics.index("SwitchOptics(optic, true)"))
+        self.assertNotIn("SetOptics(", optics)
+        # none leaves both, which is what ExitSights does.
+        self.assertIn("ExitSights()", leave)
+        self.assertNotIn("SetIronsights(", leave)
+        self.assertNotIn("SwitchOptics(", leave)
+        self.assertNotIn("SetOptics(", leave)
 
 
 class WeaponActionAppToolTest(unittest.IsolatedAsyncioTestCase):
