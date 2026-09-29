@@ -60,6 +60,96 @@ class PinnedKeyfileTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid_daemon_keyfile"):
                 module.read_pinned_keyfile(str(link))
 
+    def test_trailing_dot_component_is_refused(self) -> None:
+        # GetLongPathNameW strips one trailing dot from a short component
+        # (foo. -> foo). A long component keeps the dot and never matches.
+        module = importlib.import_module("dayz_mcp.pinned_keyfile")
+        host_config = importlib.import_module("dayz_mcp.host_config")
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "foo"
+            folder.mkdir()
+            keyfile = folder / "daemon.key"
+            keyfile.write_bytes(b"test-key\n")
+            final = str(keyfile.resolve())
+            parent, name = final.rsplit("\\", 1)
+            head, leaf = parent.rsplit("\\", 1)
+            spelling = head + "\\" + leaf + ".\\" + name
+            self.assertNotEqual(os.path.normcase(spelling), os.path.normcase(final))
+            self.assertFalse(
+                module.same_requested_path(spelling, final, collapse=True)
+            )
+            self.assertFalse(
+                module.same_requested_path(spelling, final, collapse=False)
+            )
+            with self.assertRaisesRegex(ValueError, "invalid_daemon_keyfile"):
+                module.read_pinned_keyfile(spelling)
+            with self.assertRaisesRegex(
+                host_config.HostConfigError, "^daemon_provenance_conflict$"
+            ):
+                host_config.require_matching_keyfile(spelling, final)
+
+    def test_trailing_space_component_is_refused_when_expansion_strips_it(self) -> None:
+        module = importlib.import_module("dayz_mcp.pinned_keyfile")
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "foo"
+            folder.mkdir()
+            keyfile = folder / "daemon.key"
+            keyfile.write_bytes(b"test-key\n")
+            final = str(keyfile.resolve())
+            parent, name = final.rsplit("\\", 1)
+            head, leaf = parent.rsplit("\\", 1)
+            spelling = head + "\\" + leaf + " \\" + name
+
+            def strip_to_final(path: str, buffer: ctypes.Array, size: int) -> int:
+                del path, size
+                buffer.value = final
+                return len(final)
+
+            with patch.object(
+                module._kernel32, "GetLongPathNameW", side_effect=strip_to_final
+            ):
+                self.assertFalse(
+                    module.same_requested_path(spelling, final, collapse=True)
+                )
+                self.assertFalse(
+                    module.same_requested_path(spelling, final, collapse=False)
+                )
+
+    def test_mixed_short_directory_and_long_filename_is_read(self) -> None:
+        module = importlib.import_module("dayz_mcp.pinned_keyfile")
+        host_config = importlib.import_module("dayz_mcp.host_config")
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "ALongDirectoryNameForShortPaths"
+            folder.mkdir()
+            keyfile = folder / "daemon-keyfile-name.key"
+            keyfile.write_bytes(b"test-key\n")
+            short_dir = _short_path_or_skip(self, folder)
+            short_leaf = Path(short_dir).name
+            final = str(keyfile.resolve())
+            mixed = final.replace("\\" + folder.name + "\\", "\\" + short_leaf + "\\")
+            if os.path.normcase(mixed) == os.path.normcase(final):
+                self.skipTest(
+                    "volume did not return an 8.3 short name distinct from the long path"
+                )
+            self.assertEqual(Path(mixed).name, keyfile.name)
+            self.assertEqual(module.read_pinned_keyfile(mixed), "test-key")
+            self.assertEqual(
+                host_config.require_matching_keyfile(mixed, final), final
+            )
+
+    def test_short_path_is_refused_when_its_short_name_cannot_be_read(self) -> None:
+        module = importlib.import_module("dayz_mcp.pinned_keyfile")
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "ALongDirectoryNameForShortPaths"
+            folder.mkdir()
+            keyfile = folder / "daemon-keyfile-name.key"
+            keyfile.write_bytes(b"test-key\n")
+            short = _short_path_or_skip(self, keyfile)
+            with patch.object(
+                module._kernel32, "GetShortPathNameW", return_value=0
+            ), self.assertRaisesRegex(ValueError, "invalid_daemon_keyfile"):
+                module.read_pinned_keyfile(short)
+
     def test_short_path_of_the_same_file_is_read(self) -> None:
         module = importlib.import_module("dayz_mcp.pinned_keyfile")
         with tempfile.TemporaryDirectory() as directory:

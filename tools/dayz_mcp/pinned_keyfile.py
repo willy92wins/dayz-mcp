@@ -45,6 +45,12 @@ _kernel32.GetLongPathNameW.argtypes = (
     wintypes.DWORD,
 )
 _kernel32.GetLongPathNameW.restype = wintypes.DWORD
+_kernel32.GetShortPathNameW.argtypes = (
+    wintypes.LPCWSTR,
+    wintypes.LPWSTR,
+    wintypes.DWORD,
+)
+_kernel32.GetShortPathNameW.restype = wintypes.DWORD
 _kernel32.ReadFile.argtypes = (
     wintypes.HANDLE,
     wintypes.LPVOID,
@@ -130,14 +136,52 @@ def _spelling(value: str, *, collapse: bool) -> str:
     return os.path.normcase(value)
 
 
+def _short_path_name(path: str) -> str:
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = int(_kernel32.GetShortPathNameW(path, buffer, len(buffer)))
+    if length <= 0 or length >= len(buffer):
+        raise CanonicalPathError()
+    value = _dos_path(buffer.value)
+    if not value:
+        raise CanonicalPathError()
+    return value
+
+
+def _differs_only_by_short_names(requested: str, expanded: str) -> bool:
+    """True when each changed component is the 8.3 name of that long prefix.
+
+    A trailing dot or space is not an alias. GetShortPathNameW failing
+    refuses, so the caller keeps the mismatch main already refused.
+    """
+    requested_parts = requested.split("\\")
+    expanded_parts = expanded.split("\\")
+    if len(requested_parts) != len(expanded_parts) or not requested_parts:
+        return False
+    for index, (left, right) in enumerate(zip(requested_parts, expanded_parts)):
+        if os.path.normcase(left) == os.path.normcase(right):
+            continue
+        if not left or left.endswith(".") or left.endswith(" "):
+            return False
+        try:
+            short_prefix = _short_path_name("\\".join(expanded_parts[: index + 1]))
+        except CanonicalPathError:
+            return False
+        short_leaf = short_prefix.split("\\")[-1]
+        if not short_leaf or os.path.normcase(left) != os.path.normcase(short_leaf):
+            return False
+    return True
+
+
 def _expanded_matches(candidate: str, observed: str, *, collapse: bool) -> bool:
     try:
         expanded = canonical_long_path(candidate)
     except CanonicalPathError:
         return False
-    return _spelling(expanded, collapse=collapse) == _spelling(
+    if _spelling(expanded, collapse=collapse) != _spelling(
         observed, collapse=collapse
-    )
+    ):
+        return False
+    return _differs_only_by_short_names(candidate, expanded)
 
 
 def same_requested_path(left: str, right: str, *, collapse: bool) -> bool:
@@ -145,8 +189,10 @@ def same_requested_path(left: str, right: str, *, collapse: bool) -> bool:
 
     The raw compare runs first and does not call GetLongPathNameW. A long
     path main already accepts stays accepted even when listing the parents
-    is denied. Expansion is attempted only after a mismatch, and a failure
-    to expand leaves that mismatch: callers refuse.
+    is denied. Expansion is attempted only after a mismatch. It counts only
+    when every changed component is that prefix's 8.3 name, with no trailing
+    dot or space. A failure to expand or to read the short name leaves the
+    mismatch: callers refuse.
     collapse is False for the installer, which must keep ".." and junctions.
     """
     if _spelling(left, collapse=collapse) == _spelling(right, collapse=collapse):

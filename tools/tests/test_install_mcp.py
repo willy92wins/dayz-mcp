@@ -277,6 +277,22 @@ class InstallerCliManifestTest(unittest.TestCase):
             load_installer_cli_manifest(self.manifest_path)
         self.assertEqual(caught.exception.code, "installer_cli_path_not_canonical")
 
+    def test_trailing_dot_cli_component_stays_noncanonical(self) -> None:
+        nested = self.root / "foo"
+        nested.mkdir()
+        cli = nested / "claude.exe"
+        write_fake_x64_pe(cli)
+        resolved = str(cli.resolve())
+        parent, name = resolved.rsplit("\\", 1)
+        head, leaf = parent.rsplit("\\", 1)
+        spelling = head + "\\" + leaf + ".\\" + name
+        payload = self.payload()
+        payload["entries"]["CLAUDE"] = self._entry_spelled(cli, spelling)
+        self.write_manifest(payload)
+        with self.assertRaises(InstallerContractError) as caught:
+            load_installer_cli_manifest(self.manifest_path)
+        self.assertEqual(caught.exception.code, "installer_cli_path_not_canonical")
+
     def test_dotdot_cli_path_stays_noncanonical(self) -> None:
         extra = self.root / "extra"
         extra.mkdir()
