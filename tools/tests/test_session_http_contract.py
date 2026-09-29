@@ -25,9 +25,15 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import loopback
 from dayz_mcp.process_lifecycle import RunRecord
 from dayz_mcp.runtime_state import CoordinationSnapshotStore, RuntimePaths
-from dayz_mcp.session_coordination import SessionCoordinator
+from dayz_mcp.session_coordination import (
+    LEASE_GRACE_S,
+    MAX_OPERATION_PIN_S,
+    SESSION_TTL_S,
+    ClientIdentity,
+    SessionCoordinator,
+)
 from tests.fence_helpers import bind_both_peers, INST_CLIENT, INST_SERVER
-from tests.lease_helpers import SnapshotStore
+from tests.lease_helpers import FakeClock, SequentialIds, SnapshotStore
 from tests.lifecycle_helpers import (
     IDENTITY,
     identity,
@@ -988,6 +994,84 @@ class SessionHttpTest(unittest.TestCase):
         )
         self.assertEqual(status, 202)
         self.assertGreater(len(self.store.payloads), after_grant)
+
+
+class ExpiresInCapTest(unittest.TestCase):
+    """Reported remainders stay inside their cap when the clock does not move.
+
+    ``(t + cap) - t`` is not always <= cap. 1e9 + 0.1 happens to subtract
+    exactly on this interpreter; the literals below are ones that round up.
+    """
+
+    # Overshoots both SESSION_TTL_S and MAX_OPERATION_PIN_S at a still clock.
+    _PIN_T = 1000.0000000000003
+    # Grant at this instant, then read grace at expires_at: (expiry + 90) - expiry
+    # rounds above LEASE_GRACE_S.
+    _GRACE_T = 333.9485657913903
+
+    def _coordinator(self, t: float, **kwargs: object) -> tuple[SessionCoordinator, FakeClock]:
+        clock = FakeClock()
+        clock.value = t
+        coordinator = SessionCoordinator(
+            time_fn=clock,
+            token_fn=lambda: "token-a",
+            id_fn=SequentialIds("id"),
+            audit=lambda _event: True,
+            **kwargs,
+        )
+        return coordinator, clock
+
+    def test_large_t_does_not_report_remaining_above_the_cap(self) -> None:
+        t = self._PIN_T
+        self.assertGreater((t + SESSION_TTL_S) - t, SESSION_TTL_S)
+        self.assertGreater((t + MAX_OPERATION_PIN_S) - t, MAX_OPERATION_PIN_S)
+        coordinator, _clock = self._coordinator(t)
+        owner = ClientIdentity.from_payload(IDENTITY_A)
+        status, active = coordinator.acquire(owner, "pin")
+        self.assertEqual(status, 200)
+        self.assertGreater(active["expires_in_s"], SESSION_TTL_S - 1.0)
+        self.assertLessEqual(active["expires_in_s"], SESSION_TTL_S)
+
+        decision = coordinator.authorize(
+            owner,
+            active["lease_token"],
+            "world_spawn",
+            operation_timeout_s=9999,
+        )
+        self.assertTrue(decision.allowed)
+        pinned = coordinator.status(owner)["owner"]["expires_in_s"]
+        self.assertGreater(pinned, MAX_OPERATION_PIN_S - 1.0)
+        self.assertLessEqual(pinned, MAX_OPERATION_PIN_S)
+
+        heartbeat_status, heartbeat = coordinator.heartbeat(
+            owner, active["lease_token"]
+        )
+        self.assertEqual(heartbeat_status, 200)
+        self.assertGreater(heartbeat["expires_in_s"], MAX_OPERATION_PIN_S - 1.0)
+        self.assertLessEqual(heartbeat["expires_in_s"], MAX_OPERATION_PIN_S)
+
+        queued_status, queued = coordinator.acquire(
+            ClientIdentity.from_payload(IDENTITY_B), "queued"
+        )
+        self.assertEqual(queued_status, 202)
+        self.assertGreater(queued["expires_in_s"], SESSION_TTL_S - 1.0)
+        self.assertLessEqual(queued["expires_in_s"], SESSION_TTL_S)
+
+    def test_grace_remaining_does_not_exceed_lease_grace(self) -> None:
+        t = self._GRACE_T
+        coordinator, clock = self._coordinator(
+            t, attached_run_probe=lambda _session_id, _lease_id: True
+        )
+        owner = ClientIdentity.from_payload(IDENTITY_A)
+        status, _active = coordinator.acquire(owner, "grace")
+        self.assertEqual(status, 200)
+        expiry = coordinator._active.expires_at
+        self.assertGreater((expiry + LEASE_GRACE_S) - expiry, LEASE_GRACE_S)
+        clock.value = expiry
+        grace = coordinator.status(owner)["grace"]
+        self.assertIsInstance(grace, dict)
+        self.assertGreater(grace["remaining_s"], LEASE_GRACE_S - 1.0)
+        self.assertLessEqual(grace["remaining_s"], LEASE_GRACE_S)
 
 
 class ProductionCoordinationStorePersistSkipTest(unittest.TestCase):
