@@ -19,6 +19,11 @@ from dayz_mcp.steam_preflight import (
     remediate_stale_steam_session,
     _STEAM_INVOKE_FLAGS,
 )
+from dayz_mcp.steam_prepare_helper import GuardedHost
+from tests.child_environment_helpers import (
+    assert_whitelisted_child_environment,
+    poisoned_child_environment,
+)
 
 
 class FakeSteamProvider:
@@ -459,6 +464,54 @@ class SteamInvokeFlagsTests(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0]["creationflags"], _STEAM_INVOKE_FLAGS)
         self.assertIs(seen[0]["close_fds"], True)
+
+
+class SteamChildEnvironmentTests(unittest.TestCase):
+    def _assert_popen_env(self, seen: list[dict[str, object]]) -> None:
+        self.assertEqual(len(seen), 1)
+        assert_whitelisted_child_environment(self, seen[0]["env"])
+        self.assertNotIn("FAKE_API_KEY", seen[0]["env"])
+        self.assertNotIn("PERSONAL_PASS", seen[0]["env"])
+
+    def test_invoke_steam_hands_popen_only_the_whitelisted_environment(self) -> None:
+        seen: list[dict[str, object]] = []
+
+        def fake_popen(_argv: list[str], **kwargs: object) -> object:
+            seen.append(kwargs)
+            return object()
+
+        poisoned = poisoned_child_environment()
+        with (
+            patch("dayz_mcp.child_environment.os.environ", poisoned),
+            patch.object(steam_preflight.subprocess, "Popen", fake_popen),
+        ):
+            WindowsSteamRemediationHost().invoke_steam(_STEAM_EXE, ("-silent",))
+
+        self._assert_popen_env(seen)
+        self.assertEqual(seen[0]["creationflags"], _STEAM_INVOKE_FLAGS)
+        self.assertIs(seen[0]["close_fds"], True)
+
+    def test_helper_invoke_steam_hands_popen_only_the_whitelisted_environment(self) -> None:
+        seen: list[dict[str, object]] = []
+
+        def fake_popen(_argv: list[str], **kwargs: object) -> object:
+            seen.append(kwargs)
+            return object()
+
+        host = GuardedHost(object(), 60.0, True)
+        poisoned = poisoned_child_environment()
+        with (
+            patch("dayz_mcp.child_environment.os.environ", poisoned),
+            patch.object(host, "permit"),
+            patch.object(host, "checkpoint"),
+            patch.object(
+                steam_preflight, "_safe_live_pids", return_value=()
+            ),
+            patch("dayz_mcp.steam_prepare_helper.subprocess.Popen", fake_popen),
+        ):
+            host.invoke_steam(_STEAM_EXE, ("-silent",))
+
+        self._assert_popen_env(seen)
 
 
 if __name__ == "__main__":
