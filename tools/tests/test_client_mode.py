@@ -18,7 +18,14 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp import control_client, core, host_config, server
 from dayz_mcp.server import ServerConfig
-from tests.test_daemon import DaemonHttpServer, _config, _free_port, _http
+from tests.daemon_helpers import (
+    DaemonHttpServer,
+    _attach_control_transport as _shared_attach_control_transport,
+    _attach_fixture_transport as _shared_attach_fixture_transport,
+    _config,
+    _http,
+)
+from tests.test_daemon import _free_port
 from tests.client_helpers import _VALID_PEER_VERSION, _fixture_client_runtime
 from tests.lifecycle_helpers import stamp_launcher
 from tests.mcp_helpers import _content_json
@@ -152,38 +159,16 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
     def _attach_fixture_transport(
         runtime: server.ClientRuntime, srv: DaemonHttpServer
     ) -> None:
-        request = lambda method, path, payload=None, query=None, timeout=5.0: _http(
-            srv.base,
-            method,
-            path,
-            srv.key,
-            payload=payload,
-            query=query,
-            timeout=timeout,
-        )
-        runtime._request_once = request
-        ClientModeTest._attach_control_transport(runtime, request)
+        _shared_attach_fixture_transport(runtime, srv)
 
     @staticmethod
     def _attach_control_transport(runtime: server.ClientRuntime, request) -> None:
-        def control_request(path, payload, timeout_s):
-            status, response = request(
-                "POST", path, payload, None, timeout_s
-            )
-            if status not in (200, 202):
-                raise control_client.ControlClientError(
-                    server._remote_error_code(response),
-                    request_stage="post_request",
-                    http_bytes_sent=1,
-                )
-            return response
-
-        runtime._control._request_once = control_request
+        _shared_attach_control_transport(runtime, request)
 
     @staticmethod
     def _attach_scripted_transports(runtime: server.ClientRuntime, request) -> None:
         runtime._request_once = request
-        ClientModeTest._attach_control_transport(runtime, request)
+        _shared_attach_control_transport(runtime, request)
 
     def _standalone_client(self) -> server.ClientRuntime:
         return _fixture_client_runtime(

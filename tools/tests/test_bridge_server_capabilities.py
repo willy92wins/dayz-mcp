@@ -62,6 +62,7 @@ MAX_LITERAL_CHUNK = 200
 EXPECTED_SERVER_CAPABILITIES = (
     "entities_query",
     "exec_enforce",
+    "hands_take",
     "infected_drive",
     "inventory_attach",
     "inventory_give",
@@ -79,6 +80,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "telemetry_read",
     "vehicle_enter",
     "vehicle_prepare_fixture",
+    "weapon_state",
     "world_spawn",
     "world_time_set",
     "world_weather_set",

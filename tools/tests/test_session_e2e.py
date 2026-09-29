@@ -21,7 +21,8 @@ from dayz_mcp import control_client, daemon, loopback, server
 from dayz_mcp.server import ServerConfig, ToolError
 from _broker import e2e_daemon as broker_e2e
 from _session_coordination import e2e_agent_sessions as binary_e2e
-from tests.test_daemon import _free_port, _http
+from tests.daemon_helpers import _http
+from tests.test_daemon import _free_port
 from tests.client_helpers import _VALID_PEER_VERSION, _fixture_client_runtime
 from tests.lifecycle_helpers import stamp_launcher
 from tests.fence_helpers import (

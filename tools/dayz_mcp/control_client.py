@@ -31,6 +31,9 @@ _REGISTERED_AT_UTC = re.compile(
 # session_acquire_wait is never on these lists; owned dayz_test_stop may
 # lease internally through the kill-path set only.
 _H14_STALE_POLICY_PATHS = frozenset({"/lifecycle/status"})
+# Close and reap authorize before they can fail. Their error document is the
+# only one whose lease_id is proof of a renewal (fb-20260928-021456-3272).
+_LIFECYCLE_RESULT_PATHS = frozenset({"/lifecycle/close", "/lifecycle/reap"})
 _H14_OWNED_STOP_LEASE_PATHS = frozenset(
     {
         "/lifecycle/status",
@@ -44,6 +47,18 @@ _H14_OWNED_STOP_LEASE_PATHS = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class VerifiedErrorBody:
+    """Fields kept from a decoded lifecycle close/reap error.
+
+    ``code`` is the string ``_remote_error_code`` already accepted. ``lease_id``
+    is set only when that field was a non-empty str. No other keys are kept.
+    """
+
+    code: str
+    lease_id: str | None = None
+
+
 class ControlClientError(RuntimeError):
     def __init__(
         self,
@@ -53,6 +68,7 @@ class ControlClientError(RuntimeError):
         http_bytes_sent: int,
         hint: str | None = None,
         policy_cause: str | None = None,
+        body: VerifiedErrorBody | None = None,
     ) -> None:
         self.code = code
         self.request_stage = request_stage
@@ -60,6 +76,7 @@ class ControlClientError(RuntimeError):
         self.hint = hint if isinstance(hint, str) and hint else None
         # Separate metadata: callers must not parse or compose the stable code.
         self.policy_cause = policy_cause
+        self.body = body if isinstance(body, VerifiedErrorBody) else None
         super().__init__(
             code if self.hint is None else f"{code}: {self.hint}"
         )
@@ -144,6 +161,13 @@ def _remote_error_code(payload: dict[str, object]) -> str:
     if isinstance(error, str) and error and len(error) <= 120:
         return error
     return "daemon_request_failed"
+
+
+def _verified_error_body(payload: dict[str, object]) -> VerifiedErrorBody:
+    lease_id = payload.get("lease_id")
+    if not isinstance(lease_id, str) or not lease_id:
+        lease_id = None
+    return VerifiedErrorBody(code=_remote_error_code(payload), lease_id=lease_id)
 
 
 class ControlClient:
@@ -323,11 +347,17 @@ class ControlClient:
         response = _decode_body(response_body)
         if status not in (200, 202):
             hint = response.get("hint")
+            verified = (
+                _verified_error_body(response)
+                if path in _LIFECYCLE_RESULT_PATHS
+                else None
+            )
             raise ControlClientError(
-                _remote_error_code(response),
+                verified.code if verified is not None else _remote_error_code(response),
                 request_stage="post_request",
                 http_bytes_sent=1,
                 hint=hint if isinstance(hint, str) else None,
+                body=verified,
             )
         return response
 
@@ -687,12 +717,21 @@ class ControlClient:
                 # forgot it as lease_invalid. That is expiry, not a stolen
                 # token (fb-20260917-100554-d0e0).
                 if error.code == "lease_invalid" and held:
+                    previous = error.body
                     raise ControlClientError(
                         "lease_expired",
                         request_stage=error.request_stage,
                         http_bytes_sent=error.http_bytes_sent,
                         hint=error.hint,
                         policy_cause=error.policy_cause,
+                        body=(
+                            VerifiedErrorBody(
+                                code="lease_expired",
+                                lease_id=previous.lease_id,
+                            )
+                            if previous is not None
+                            else None
+                        ),
                     ) from error
                 raise
             with self._state_lock:

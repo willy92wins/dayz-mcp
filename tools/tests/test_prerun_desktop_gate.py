@@ -15,6 +15,11 @@ from PIL import Image
 
 import mcp_capture
 from dayz_mcp import dayz_test_tool
+from tests._tiers import (
+    FAST_TIER_ONLY,
+    install_fast_tier_desktop_gate_guard,
+    reject_real_desktop_gate_in_fast_tier,
+)
 from dayz_mcp import server
 from dayz_mcp import steam_preflight
 from tests.dayz_test_tool_helpers import (
@@ -616,6 +621,284 @@ class PrerunDesktopDescriptionTest(unittest.TestCase):
         self.assertIn("desktop_probe_timeout", description)
         self.assertIn("desktop_probe_failed", description)
         self.assertIn("frame_client_all_black", description)
+
+
+class FastTierRealDesktopGateGuardTest(unittest.TestCase):
+    """The fast tier must fail at once if a test reaches the real probes."""
+
+    def test_real_probes_name_the_test(self) -> None:
+        with self.assertRaises(AssertionError) as caught:
+            reject_real_desktop_gate_in_fast_tier(
+                fast_tier=True,
+                probe_desktop=mcp_capture.probe_input_desktop,
+                probe_brightness=mcp_capture.probe_desktop_brightness,
+                test_id="tests.example.Class.test_method",
+            )
+        message = str(caught.exception)
+        self.assertIn(
+            "fast tier called the real pre-run desktop gate without faking it: ",
+            message,
+        )
+        self.assertIn("tests.example.Class.test_method", message)
+
+    def test_one_real_probe_is_enough_to_refuse(self) -> None:
+        with self.assertRaises(AssertionError) as caught:
+            reject_real_desktop_gate_in_fast_tier(
+                fast_tier=True,
+                probe_desktop=lambda: "unlocked",
+                probe_brightness=mcp_capture.probe_desktop_brightness,
+                test_id="tests.example.Class.test_brightness",
+            )
+        self.assertIn("tests.example.Class.test_brightness", str(caught.exception))
+        with self.assertRaises(AssertionError):
+            reject_real_desktop_gate_in_fast_tier(
+                fast_tier=True,
+                probe_desktop=mcp_capture.probe_input_desktop,
+                probe_brightness=lambda **_kwargs: {"ok": True},
+                test_id="tests.example.Class.test_desktop",
+            )
+
+    def test_injected_probes_are_not_refused(self) -> None:
+        reject_real_desktop_gate_in_fast_tier(
+            fast_tier=True,
+            probe_desktop=lambda: "unlocked",
+            probe_brightness=lambda **_kwargs: {
+                "ok": True,
+                "mean_brightness": 80.0,
+                "nonblack_ratio": 0.9,
+            },
+            test_id="tests.example.Class.test_faked",
+        )
+
+    def test_the_whole_suite_does_not_refuse_real_probes(self) -> None:
+        reject_real_desktop_gate_in_fast_tier(
+            fast_tier=False,
+            probe_desktop=mcp_capture.probe_input_desktop,
+            probe_brightness=mcp_capture.probe_desktop_brightness,
+            test_id="tests.example.Class.test_method",
+        )
+
+    def test_calling_the_real_gate_fails_fast_and_names_this_test(self) -> None:
+        if not FAST_TIER_ONLY:
+            self.skipTest(
+                "the guard wraps the gate only when DAYZ_MCP_FAST_TESTS=1"
+            )
+        with self.assertRaises(AssertionError) as caught:
+            mcp_capture.run_prerun_desktop_gate()
+        self.assertIn(self.id(), str(caught.exception))
+        self.assertIn(
+            "fast tier called the real pre-run desktop gate without faking it: ",
+            str(caught.exception),
+        )
+
+    def test_the_guard_is_still_there_after_the_module_is_reloaded(self) -> None:
+        # test_capture_frame_stale reloads mcp_capture to simulate a new
+        # process. That wipes a wrapper installed only at import time.
+        if not FAST_TIER_ONLY:
+            self.skipTest(
+                "the guard wraps the gate only when DAYZ_MCP_FAST_TESTS=1"
+            )
+        import importlib
+
+        importlib.reload(mcp_capture)
+        self.addCleanup(importlib.reload, mcp_capture)
+        with self.assertRaises(AssertionError) as caught:
+            mcp_capture.run_prerun_desktop_gate()
+        self.assertIn(self.id(), str(caught.exception))
+
+    def test_saved_real_probes_are_refused_after_reload(self) -> None:
+        # reload rebinds probe_input_desktop and probe_desktop_brightness.
+        # A reference saved from the previous function is still a real probe
+        # when a test passes it explicitly.
+        if not FAST_TIER_ONLY:
+            self.skipTest(
+                "the guard wraps the gate only when DAYZ_MCP_FAST_TESTS=1"
+            )
+        import importlib
+
+        original = mcp_capture.run_prerun_desktop_gate.__wrapped__
+        saved_desktop = original.__kwdefaults__["probe_desktop"]
+        saved_brightness = original.__kwdefaults__["probe_brightness"]
+        importlib.reload(mcp_capture)
+        self.addCleanup(importlib.reload, mcp_capture)
+        self.assertIsNot(saved_desktop, mcp_capture.probe_input_desktop)
+        self.assertIsNot(saved_brightness, mcp_capture.probe_desktop_brightness)
+        with self.assertRaises(AssertionError) as caught:
+            mcp_capture.run_prerun_desktop_gate(
+                timeout_s=0,
+                probe_desktop=saved_desktop,
+                probe_brightness=saved_brightness,
+            )
+        message = str(caught.exception)
+        self.assertIn(self.id(), message)
+        self.assertIn(
+            "fast tier called the real pre-run desktop gate without faking it: ",
+            message,
+        )
+        with self.assertRaises(AssertionError):
+            mcp_capture.run_prerun_desktop_gate(
+                timeout_s=0,
+                probe_desktop=saved_desktop,
+                probe_brightness=lambda **_kwargs: {"ok": True},
+            )
+        with self.assertRaises(AssertionError):
+            mcp_capture.run_prerun_desktop_gate(
+                timeout_s=0,
+                probe_desktop=lambda: "unlocked",
+                probe_brightness=saved_brightness,
+            )
+
+    def test_a_fake_patched_onto_the_module_is_not_refused_later(self) -> None:
+        # A check while the module name is patched must not stamp that fake.
+        # A later call that passes the same fake explicitly is still a fake.
+        def patched_fake() -> str:
+            return "unlocked"
+
+        def independent_fake() -> str:
+            return "unlocked"
+
+        def brightness_fake(**_kwargs: object) -> dict[str, object]:
+            return {"ok": True, "mean_brightness": 80.0, "nonblack_ratio": 0.9}
+
+        with mock.patch.object(mcp_capture, "probe_input_desktop", patched_fake):
+            reject_real_desktop_gate_in_fast_tier(
+                fast_tier=True,
+                probe_desktop=independent_fake,
+                probe_brightness=brightness_fake,
+                test_id=self.id(),
+            )
+        reject_real_desktop_gate_in_fast_tier(
+            fast_tier=True,
+            probe_desktop=patched_fake,
+            probe_brightness=brightness_fake,
+            test_id=self.id(),
+        )
+        if not FAST_TIER_ONLY:
+            return
+        with mock.patch.object(mcp_capture, "probe_input_desktop", patched_fake):
+            mcp_capture.run_prerun_desktop_gate(
+                timeout_s=0,
+                probe_desktop=independent_fake,
+                probe_brightness=brightness_fake,
+            )
+        mcp_capture.run_prerun_desktop_gate(
+            timeout_s=0,
+            probe_desktop=patched_fake,
+            probe_brightness=brightness_fake,
+        )
+
+    def test_an_unhashable_callable_fake_is_accepted(self) -> None:
+        class UnhashableFake:
+            __hash__ = None
+
+            def __call__(self) -> str:
+                return "unlocked"
+
+        def brightness_fake(**_kwargs: object) -> dict[str, object]:
+            return {"ok": True, "mean_brightness": 80.0, "nonblack_ratio": 0.9}
+
+        fake = UnhashableFake()
+        reject_real_desktop_gate_in_fast_tier(
+            fast_tier=True,
+            probe_desktop=fake,
+            probe_brightness=brightness_fake,
+            test_id=self.id(),
+        )
+        if not FAST_TIER_ONLY:
+            return
+        mcp_capture.run_prerun_desktop_gate(
+            timeout_s=0,
+            probe_desktop=fake,
+            probe_brightness=brightness_fake,
+        )
+
+    def test_install_while_the_name_is_patched_keeps_the_real_probe(self) -> None:
+        # Importing the guard while probe_input_desktop is patched used to
+        # stamp the fake and leave the restored function unmarked.
+        real_desktop = mcp_capture.probe_input_desktop
+        real_desktop.__dict__.pop("_dayz_real_desktop_probe", None)
+
+        def fake_desktop() -> str:
+            return "unlocked"
+
+        def fake_brightness(**_kwargs: object) -> dict[str, object]:
+            return {"ok": True, "mean_brightness": 80.0, "nonblack_ratio": 0.9}
+
+        with mock.patch.object(mcp_capture, "probe_input_desktop", fake_desktop):
+            install_fast_tier_desktop_gate_guard()
+        with self.assertRaises(AssertionError) as caught:
+            reject_real_desktop_gate_in_fast_tier(
+                fast_tier=True,
+                probe_desktop=real_desktop,
+                probe_brightness=fake_brightness,
+                test_id=self.id(),
+            )
+        self.assertIn(self.id(), str(caught.exception))
+        reject_real_desktop_gate_in_fast_tier(
+            fast_tier=True,
+            probe_desktop=fake_desktop,
+            probe_brightness=fake_brightness,
+            test_id=self.id(),
+        )
+
+    def test_a_wraps_fake_over_a_real_probe_is_accepted(self) -> None:
+        import functools
+
+        def fake_brightness(**_kwargs: object) -> dict[str, object]:
+            return {"ok": True, "mean_brightness": 80.0, "nonblack_ratio": 0.9}
+
+        @functools.wraps(mcp_capture.probe_input_desktop)
+        def fake_desktop() -> str:
+            return "unlocked"
+
+        self.assertIsNot(fake_desktop, mcp_capture.probe_input_desktop)
+        reject_real_desktop_gate_in_fast_tier(
+            fast_tier=True,
+            probe_desktop=fake_desktop,
+            probe_brightness=fake_brightness,
+            test_id=self.id(),
+        )
+        if not FAST_TIER_ONLY:
+            return
+        mcp_capture.run_prerun_desktop_gate(
+            timeout_s=0,
+            probe_desktop=fake_desktop,
+            probe_brightness=fake_brightness,
+        )
+
+    def test_a_partial_of_a_real_probe_is_refused(self) -> None:
+        import functools
+
+        def fake_brightness(**_kwargs: object) -> dict[str, object]:
+            return {"ok": True, "mean_brightness": 80.0, "nonblack_ratio": 0.9}
+
+        bound = functools.partial(mcp_capture.probe_input_desktop)
+        with self.assertRaises(AssertionError) as caught:
+            reject_real_desktop_gate_in_fast_tier(
+                fast_tier=True,
+                probe_desktop=bound,
+                probe_brightness=fake_brightness,
+                test_id=self.id(),
+            )
+        self.assertIn(self.id(), str(caught.exception))
+        nested = functools.partial(
+            functools.partial(mcp_capture.probe_desktop_brightness)
+        )
+        with self.assertRaises(AssertionError):
+            reject_real_desktop_gate_in_fast_tier(
+                fast_tier=True,
+                probe_desktop=lambda: "unlocked",
+                probe_brightness=nested,
+                test_id=self.id(),
+            )
+        if not FAST_TIER_ONLY:
+            return
+        with self.assertRaises(AssertionError):
+            mcp_capture.run_prerun_desktop_gate(
+                timeout_s=0,
+                probe_desktop=bound,
+                probe_brightness=fake_brightness,
+            )
 
 
 if __name__ == "__main__":

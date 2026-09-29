@@ -44,6 +44,13 @@ from dayz_mcp.server import (
 )
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 from tests.client_helpers import _fixture_client_runtime
+from tests.daemon_helpers import (
+    DaemonHttpServer,
+    _attach_fixture_transport,
+    _config,
+    _http,
+    _wait_until_lease_claimable,
+)
 from tests.lifecycle_helpers import stamp_launcher
 from tests.mcp_helpers import _content_json
 from tests.process_lifecycle_helpers import (
@@ -54,12 +61,6 @@ from tests.process_lifecycle_helpers import (
     snapshot,
 )
 from tests.steam_helpers import FakeSteamGate
-from tests.test_daemon import (
-    DaemonHttpServer,
-    _config,
-    _http,
-    _wait_until_lease_claimable,
-)
 
 
 GENERATION = "gen-now"
@@ -1086,9 +1087,7 @@ class McpProtectionMessageTest(unittest.IsolatedAsyncioTestCase):
                     log_sink=lambda _message: None,
                 )
             )
-            from tests.test_client_mode import ClientModeTest
-
-            ClientModeTest._attach_fixture_transport(runtime, srv)
+            _attach_fixture_transport(runtime, srv)
             payload = await runtime.session_acquire_wait("watch the box", 5.0)
             stored = life.manifest.get("test-run")
         finally:

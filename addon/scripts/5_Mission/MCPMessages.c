@@ -373,6 +373,36 @@ class MCPEntityHit
 	}
 };
 
+// weapon_state muzzle row. magazine_ammo is 0 when no magazine is attached.
+class MCPWeaponMuzzleState
+{
+	int index;
+	bool chamber_empty;
+	bool chamber_fired_out;
+	bool magazine_present;
+	int magazine_ammo;
+	int internal_cartridges;
+};
+
+// weapon_state payload. shots is the server EEFired tally (MCP_Weapon.c).
+class MCPWeaponState
+{
+	int muzzle_index;
+	int mode_index;
+	string mode_name;
+	bool jammed;
+	int shots;
+	ref array<ref MCPWeaponMuzzleState> muzzles;
+
+	void MCPWeaponState()
+	{
+		muzzle_index = -1;
+		mode_index = -1;
+		mode_name = "";
+		muzzles = new array<ref MCPWeaponMuzzleState>();
+	}
+};
+
 // F3.6 object_inspect payload. bounding_center is model-local (GetBoundingCenter).
 class MCPObjectInspect
 {
@@ -553,6 +583,11 @@ class MCPResult
 	bool started;
 	// ui_dialog nested payload. Unassigned on other commands.
 	ref MCPDialogResult dialog;
+	// hands_take: accepted means the request passed server checks. confirmed
+	// stays false; the predictive take finishes later. weapon_state is the read.
+	bool accepted;
+	bool confirmed;
+	ref MCPWeaponState weapon_state;
 	// input_describe. Unassigned on other commands.
 	ref MCPInputDescribe input_describe;
 	// object_doors. Unassigned on other commands.
