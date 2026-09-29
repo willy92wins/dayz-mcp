@@ -1901,8 +1901,11 @@ class ClientRuntime:
         """Carrier identity, else the supervisor file, else a new mint.
 
         A live carrier wins so the lease still matches all six fields. The
-        file is written only when absent, and never when it is unreadable:
-        a doubtful file must not be replaced with a new session.
+        file is accepted only when it still sits in the directory it names
+        and this worker's supervisor is that process (pid and creation
+        time; a venv launcher between them is not the supervisor). It is
+        written only when absent, and never when it is unreadable or
+        rejected: a doubtful file must not be replaced with a new session.
         """
 
         if carried is not None:
