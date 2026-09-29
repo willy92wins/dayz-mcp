@@ -80,7 +80,13 @@ from dayz_mcp.server_freshness import (
     source_stale,
 )
 from dayz_mcp import log_tail, result_prune
-from dayz_mcp.loopback import MAX_CLIENT_DUMP_RUN_IDS, LoopbackServer, read_key
+from dayz_mcp.loopback import (
+    INPUT_NAME_MAX_CHARS,
+    MAX_CLIENT_DUMP_RUN_IDS,
+    LoopbackServer,
+    is_printable_input_name,
+    read_key,
+)
 from dayz_mcp.server_cli import CLIENT_PLATFORM_ALIASES, build_server_parser
 from dayz_mcp.process_lifecycle import (
     caller_may_adopt_ownerless,
@@ -924,6 +930,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "notify_players": "notify_players",
         "object_anim": "object_anim",
         "object_delete": "object_delete",
+        "object_doors": "object_doors",
         "object_inspect": "object_inspect",
         "player_teleport": "player_teleport",
         "query_all_players": "query_all_players",
@@ -944,6 +951,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "camera_get": "camera_get",
         "camera_set": "camera_set",
         "engine_set": "engine_set",
+        "input_describe": "input_describe",
         "key_press": "key_press",
         "player_respawn": "player_respawn",
         "restore_gameplay": "restore_gameplay",
@@ -6537,6 +6545,35 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("object_inspect", args, "server", _timeout(timeout_s))
 
+    # Building door predicates. object_anim's phase read is a different API.
+    @app.tool(
+        description=(
+            "Read Building door state. Target by object_id (from world_spawn) "
+            "or by classname near pos, the same lookup object_inspect uses. "
+            "Returns door_count and, per door index, open, opening, "
+            "opening_ajar, opened, ajar, closing, closed and locked. These are "
+            "the engine door predicates. object_anim is unchanged and can still "
+            "read 0 for an open building door. A target that is not a Building "
+            "returns not_a_building. A door count outside 0..64 returns "
+            "door_count_unsupported with that count and an empty doors list. "
+            "Whether a raycast passes through an open door leaf is out of scope."
+        )
+    )
+    async def object_doors(
+        type: StrictStr = "",
+        pos: list[StrictFloat] | None = None,
+        object_id: StrictInt = 0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if type == "" and object_id == 0:
+            raise ToolError(
+                "bad_args: missing target parameters type and object_id; "
+                "use object_id or type+pos"
+            )
+        args = _object_target_args(type, pos, object_id)
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("object_doors", args, "server", _timeout(timeout_s))
+
     @app.tool(
         description=(
             "Query world entities around pos within radius (0 < r <= 200). "
@@ -6895,6 +6932,35 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             confirmed["camera_released"] = True
             confirmed["not_verified"] = list(RESTORE_NOT_VERIFIED)
             return confirmed
+
+    @app.tool(description=(
+        "Read whether the client registered a UAInput by name, and what the "
+        "selected alternative has bound: binding_count, keys (index, key code, "
+        "device), locked and conflict_count. An unknown name returns ok with "
+        "exists false; the other fields are meaningful only when exists is "
+        "true. The call does not change the selected alternative. Pressing the "
+        "input is out of scope; use key_press for an OnKeyPress handler. The "
+        "client must already be in game (client_not_in_game). "
+        "input_api_unavailable means GetUApi returned null. "
+        "input_bind_unreadable means a negative count or more than 16 keys on "
+        "the selected alternative."
+    ))
+    async def input_describe(
+        name: StrictStr,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not is_printable_input_name(name):
+            raise ToolError(
+                _bad_args(
+                    "name",
+                    name,
+                    f"be 1..{INPUT_NAME_MAX_CHARS} printable ASCII characters (codes 32..126)",
+                )
+            )
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "input_describe", {"name": name}, "client", _timeout(timeout_s)
+            )
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Deliver one non-negative DIK code to "

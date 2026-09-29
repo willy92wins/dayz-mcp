@@ -1004,10 +1004,37 @@ bool AppendQuoted(wchar_t* command, DWORD capacity, const wchar_t* value) {
            AppendText(command, capacity, L"\"");
 }
 
-bool BuildAddonCommand(const AddonRequest& request, wchar_t* application, DWORD app_capacity,
+bool EndsWithBundlePath(const wchar_t* path, const wchar_t* suffix) {
+    DWORD path_length = 0;
+    DWORD suffix_length = 0;
+    while (path[path_length] != L'\0') ++path_length;
+    while (suffix[suffix_length] != L'\0') ++suffix_length;
+    if (suffix_length == 0 || path_length < suffix_length) return false;
+    return SameBundlePathText(path + (path_length - suffix_length), suffix);
+}
+
+// The sealed closure is the only AddonBuilder the broker may start. Zero matches
+// and more than one match both refuse; there is no C: fallback.
+const ClosureEntry* SealedAddonBuilderEntry() {
+    const ClosureEntry* found = nullptr;
+    for (DWORD index = 0; index < kClosureEntryCount; ++index) {
+        const ClosureEntry& entry = kClosureEntries[index];
+        if (entry.kind != ClosureKind::EXTERNAL || entry.path == nullptr ||
+            !EndsWithBundlePath(entry.path, L"\\Bin\\AddonBuilder\\AddonBuilder.exe")) {
+            continue;
+        }
+        if (found != nullptr) return nullptr;
+        found = &kClosureEntries[index];
+    }
+    return found;
+}
+
+bool BuildAddonCommand(const AddonRequest& request, const wchar_t* addon,
+                       wchar_t* application, DWORD app_capacity,
                        wchar_t* command, DWORD command_capacity) {
-    static const wchar_t* addon =
-        L"C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ Tools\\Bin\\AddonBuilder\\AddonBuilder.exe";
+    if (addon == nullptr || addon[0] == L'\0') return false;
+    for (DWORD index = 0; addon[index] != L'\0'; ++index)
+        if (addon[index] == L'"' || addon[index] < L' ') return false;
     return CopyText(application, app_capacity, addon) &&
            CopyText(command, command_capacity, L"\"") &&
            AppendText(command, command_capacity, addon) &&
@@ -1197,10 +1224,12 @@ BOOL LaunchApprovedChild(LaunchKind kind, const BYTE* broker_frame,
     wchar_t pbo_path[1024]{};
     PboSnapshot pbo_before{};
     if (kind == LaunchKind::ADDON_BUILDER) {
-        manifest_path = L"C:\\Program Files (x86)\\Steam\\steamapps\\common\\DayZ Tools\\Bin\\AddonBuilder\\AddonBuilder.exe";
+        const ClosureEntry* addon_entry = SealedAddonBuilderEntry();
+        if (addon_entry == nullptr) return FALSE;
+        manifest_path = addon_entry->path;
         if (frame_header.stdin_bytes != 0 ||
             !ParseAddonRequest(broker_frame + sizeof(BrokerHeader), frame_header.payload_bytes, &addon) ||
-            !BuildAddonCommand(addon, application, ARRAYSIZE(application), command, ARRAYSIZE(command)) ||
+            !BuildAddonCommand(addon, manifest_path, application, ARRAYSIZE(application), command, ARRAYSIZE(command)) ||
             !BuildPboPath(addon, pbo_path, ARRAYSIZE(pbo_path)) ||
             !CapturePboSnapshot(pbo_path, true, &pbo_before))
             return FALSE;
