@@ -577,6 +577,27 @@ class SessionCoordinatorTest(unittest.TestCase):
         self.assertEqual((status, body["error"]), (409, "lease_expired"))
         self.assertEqual(body.get("cleanup_degraded"), ["audit_failed"])
 
+    def test_expired_token_stays_lease_expired_while_a_wal_fence_is_up(self) -> None:
+        # A fenced cleanup leaves the release WAL armed after the token was
+        # remembered as lease_expired. The fence must not answer "never valid",
+        # and it must not accept the token again (fb-20260928-012541-9f8b).
+        token = self.coordinator.acquire(self.a, "drive")[1]["lease_token"]
+        self.clock.advance(120.0)
+        expired = self.coordinator.heartbeat(self.a, token)
+        self.assertEqual((expired[0], expired[1]["error"]), (409, "lease_expired"))
+        with self.coordinator._condition:
+            self.coordinator._wal_marker = {
+                "state": "armed",
+                "operation": "release",
+            }
+        again = self.coordinator.heartbeat(self.a, token)
+        self.assertEqual((again[0], again[1]["error"]), (409, "lease_expired"))
+        decision = self.coordinator.authorize(self.a, token, "world_spawn")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.error, "lease_expired")
+        unknown = self.coordinator.heartbeat(self.a, "never-issued")
+        self.assertEqual((unknown[0], unknown[1]["error"]), (403, "lease_invalid"))
+
     def test_release_after_expiry_transports_audit_degradation(self) -> None:
         token = self.coordinator.acquire(self.a, "drive")[1]["lease_token"]
         self.audit.fail_events.add("session_expired")

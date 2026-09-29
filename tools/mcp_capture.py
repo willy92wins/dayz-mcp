@@ -63,6 +63,12 @@ def resolve_request_budget(requested: object = None) -> int:
 DEFAULT_MAX_TOKENS = default_max_tokens()
 DEFAULT_FRAME_COUNT = 4
 DEFAULT_FRAME_INTERVAL_S = 0.12
+# Cold powershell.exe plus Add-Type on a loaded runner can take longer than
+# the 8 s grab budget before the script has looked for a window. That wait is
+# a start, not a hung capture (fb-20260927-141044-76e2). After the script
+# reports {"phase":"started"}, timeout_s is still the capture budget.
+CAPTURE_START_BUDGET_S = 60.0
+_CAPTURE_STARTED_LINE = '{"phase":"started"}'
 
 # Delivery encoding for the inline ImageContent. The ~25k-token MCP-output ceiling (CONFLICT-1,
 # Claude Code issue #9152) is a constraint on the base64 PAYLOAD, not on pixels. A photographic
@@ -1168,6 +1174,66 @@ def _grab_subprocess_env(base: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def _capture_reported_started(line: str) -> bool:
+    return line.strip() == _CAPTURE_STARTED_LINE
+
+
+def _capture_payload_from_output(stdout: str, stderr: str, output_path: str) -> dict[str, Any]:
+    stdout_lines = [
+        line.strip()
+        for line in stdout.splitlines()
+        if line.strip() and not _capture_reported_started(line)
+    ]
+    payload: dict[str, Any] = {}
+    if stdout_lines:
+        try:
+            parsed = json.loads(stdout_lines[-1])
+            if isinstance(parsed, dict):
+                payload = parsed
+        except json.JSONDecodeError:
+            payload = {}
+    if not payload:
+        detail = stderr.strip()
+        return {"ok": False, "error": f"capture_backend_failed: {detail or 'no_json'}"}
+    if payload.get("ok") is True and not os.path.exists(output_path):
+        return {"ok": False, "error": "capture_backend_failed: missing_png"}
+    return payload
+
+
+def _kill_capture_process(proc: subprocess.Popen[str]) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        proc.kill()
+    except OSError:
+        return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        return
+
+
+def _read_capture_stdout(
+    stream: Any, lines: list[str], started: threading.Event
+) -> None:
+    try:
+        for line in stream:
+            lines.append(line)
+            if _capture_reported_started(line):
+                started.set()
+    except Exception:
+        return
+
+
+def _read_capture_stderr(stream: Any, chunks: list[str]) -> None:
+    try:
+        text = stream.read()
+        if text:
+            chunks.append(text)
+    except Exception:
+        return
+
+
 def _run_window_capture(output_path: str, process_name: str, timeout_s: float, method: str = DEFAULT_GRAB_METHOD, client_pid: int = 0, cmdline_match: str = "") -> dict[str, Any]:
     if probe_input_desktop() == "locked":
         return {"ok": False, "error": "session_locked"}
@@ -1193,41 +1259,73 @@ def _run_window_capture(output_path: str, process_name: str, timeout_s: float, m
         cmd += ["-CmdLineMatch", str(cmdline_match)]
     elif client_pid and int(client_pid) > 0:
         cmd += ["-ClientPid", str(int(client_pid))]
+    popen_kwargs: dict[str, object] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "stdin": subprocess.DEVNULL,
+        "text": True,
+        "env": _grab_subprocess_env(),
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(
+            subprocess, "CREATE_NO_WINDOW", 0x08000000
+        )
     try:
-        run_kwargs: dict[str, object] = {
-            "stdout": subprocess.PIPE,
-            "stderr": subprocess.PIPE,
-            "text": True,
-            "timeout": timeout_s,
-            "check": False,
-            "env": _grab_subprocess_env(),
-        }
-        if os.name == "nt":
-            run_kwargs["creationflags"] = getattr(
-                subprocess, "CREATE_NO_WINDOW", 0x08000000
-            )
-        proc = subprocess.run(cmd, **run_kwargs)
-        stdout_lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-        payload: dict[str, Any] = {}
-        if stdout_lines:
-            try:
-                parsed = json.loads(stdout_lines[-1])
-                if isinstance(parsed, dict):
-                    payload = parsed
-            except json.JSONDecodeError:
-                payload = {}
-        if not payload:
-            stderr = proc.stderr.strip()
-            return {"ok": False, "error": f"capture_backend_failed: {stderr or 'no_json'}"}
-        if payload.get("ok") is True and not os.path.exists(output_path):
-            return {"ok": False, "error": "capture_backend_failed: missing_png"}
-        return payload
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "capture_timeout"}
+        proc = subprocess.Popen(cmd, **popen_kwargs)
     except FileNotFoundError:
         return {"ok": False, "error": "capture_backend_failed:command_not_found"}
     except OSError as exc:
         return {"ok": False, "error": f"capture_backend_failed: {exc}"}
+
+    stdout_lines: list[str] = []
+    stderr_chunks: list[str] = []
+    started = threading.Event()
+    readers = [
+        threading.Thread(
+            target=_read_capture_stdout,
+            args=(proc.stdout, stdout_lines, started),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_read_capture_stderr,
+            args=(proc.stderr, stderr_chunks),
+            daemon=True,
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+
+    try:
+        start_deadline = time.monotonic() + CAPTURE_START_BUDGET_S
+        while not started.is_set() and proc.poll() is None:
+            remaining = start_deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            started.wait(min(0.05, remaining))
+        if proc.poll() is None and not started.is_set():
+            _kill_capture_process(proc)
+            return {"ok": False, "error": "capture_start_timeout"}
+        if proc.poll() is None:
+            try:
+                proc.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                _kill_capture_process(proc)
+                return {"ok": False, "error": "capture_timeout"}
+        for reader in readers:
+            reader.join(timeout=2.0)
+        return _capture_payload_from_output(
+            "".join(stdout_lines), "".join(stderr_chunks), output_path
+        )
+    finally:
+        for reader in readers:
+            reader.join(timeout=2.0)
+        for stream in (proc.stdout, proc.stderr):
+            if stream is None:
+                continue
+            try:
+                stream.close()
+            except Exception:
+                pass
 
 
 def grab_window_to_file(output_path: str, process_name: str = "DayZDiag_x64", method: str = DEFAULT_GRAB_METHOD, timeout_s: float = 8.0, client_pid: int = 0, cmdline_match: str = "") -> dict[str, Any]:

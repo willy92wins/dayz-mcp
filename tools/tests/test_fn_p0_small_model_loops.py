@@ -312,7 +312,11 @@ class RegistrySafeNextStepTest(unittest.TestCase):
     def test_lease_recipes_name_public_tools(self) -> None:
         self.assertIn("next_step=session_acquire_wait", server.LEASE_REQUIRED_RECIPE)
         self.assertIn("next_step=session_acquire_wait", server.LEASE_EXPIRED_RECIPE)
+        self.assertIn("RUNNING_IDLE", server.LEASE_EXPIRED_RECIPE)
+        self.assertIn("while its grace lasts", server.LEASE_EXPIRED_RECIPE)
+        self.assertIn("session_acquire_wait", server.LEASE_EXPIRED_RECIPE)
         self.assertIn("next_step=session_status", server.LEASE_INVALID_RECIPE)
+        self.assertIn("never valid", server.LEASE_INVALID_RECIPE)
         self.assertNotIn("lifecycle_status", server.LEASE_EXPIRED_RECIPE)
         self.assertNotIn("lifecycle_status", server.LEASE_INVALID_RECIPE)
         self.assertEqual(

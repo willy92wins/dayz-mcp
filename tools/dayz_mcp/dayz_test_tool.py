@@ -2128,6 +2128,20 @@ _CLOSE_POLL_S = 0.05
 _CLOSE_REAP_INTERVAL_S = 1.0
 _RPT_READ_CHUNK = 1024 * 1024
 _RPT_READ_POLL_CAP = 8 * 1024 * 1024
+# The logout warning walks each chosen log in full, one 1 MiB block at a time.
+# The carry is longer than a connect or logout line (the cited server lines are
+# under 200 bytes) so a marker split across a block is still matched. A marker
+# that itself is longer than this carry and is also split across a block is
+# outside that promise; one that sits inside a single block is still seen.
+_PLAYER_LOG_OVERLAP = 8192
+_PLAYER_CONNECTED_RE = re.compile(
+    br'Player "[^"\n]+" \([^)\n]*\) is connected'
+)
+_LOGOUT_FINISHED_RE = re.compile(br"\[Logout\]: Player \S+ finished\b")
+_PLAYER_STATE_NOT_SAVED = (
+    "player_state_not_saved: wait for the periodic players.db save, "
+    "or disconnect the client first"
+)
 _TERMINATION_LINE_BYTES = _TERMINATION_LINE.encode("ascii")
 _RPT_OVERLAP = max(0, len(_TERMINATION_LINE_BYTES) - 1)
 _ROLE_CLOSE_ORDER = {"client": 0, "server": 1}
@@ -2375,6 +2389,123 @@ def _retired_event(status: object, run_id: str) -> str | None:
     return None
 
 
+class _PlayerScan:
+    __slots__ = ("connected", "finished")
+
+    def __init__(self) -> None:
+        self.connected = False
+        self.finished = False
+
+
+def _scan_player_markers(path: Path, found: _PlayerScan) -> bool:
+    """Stream one log. True if it was read, or a finished line already decided it.
+
+    Memory stays one block plus `_PLAYER_LOG_OVERLAP` bytes. A finished line
+    ends the walk: the warning is then impossible, whether or not a player
+    was connected. A connection by itself does not stop the walk, because a
+    later finished line would clear it.
+    """
+    if found.finished:
+        return True
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return False
+    try:
+        carry = b""
+        while not found.finished:
+            try:
+                chunk = handle.read(_RPT_READ_CHUNK)
+            except OSError:
+                return False
+            if not chunk:
+                break
+            if not isinstance(chunk, bytes):
+                return False
+            window = carry + chunk
+            if (
+                not found.connected
+                and _PLAYER_CONNECTED_RE.search(window) is not None
+            ):
+                found.connected = True
+            if _LOGOUT_FINISHED_RE.search(window) is not None:
+                found.finished = True
+                return True
+            if len(window) > _PLAYER_LOG_OVERLAP:
+                carry = window[-_PLAYER_LOG_OVERLAP:]
+            else:
+                carry = window
+        return True
+    finally:
+        try:
+            handle.close()
+        except OSError:
+            pass
+
+
+def _script_log_for_server_rpt(rpt: Path) -> Path | None:
+    """Newest current-launch script log beside this server RPT.
+
+    Same floor as `_current_launch_logs`: a log touched before the RPT was
+    created belongs to an older run. crash_*.log is not a script log.
+    Prefer script_*.log; otherwise the newest other non-crash .log.
+    """
+    try:
+        floor = rpt.stat().st_ctime - 2.0
+    except OSError:
+        return None
+    try:
+        files = [item for item in rpt.parent.iterdir() if item.is_file()]
+    except OSError:
+        return None
+    current: list[tuple[float, Path]] = []
+    for item in files:
+        if item.suffix.casefold() != ".log":
+            continue
+        if item.name.casefold().startswith("crash"):
+            continue
+        try:
+            mtime = item.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < floor:
+            continue
+        current.append((mtime, item))
+    if not current:
+        return None
+    scripts = [
+        pair for pair in current if pair[1].name.casefold().startswith("script")
+    ]
+    pool = scripts or current
+    return max(pool, key=lambda pair: pair[0])[1]
+
+
+def _player_state_warnings(server_rpt: Path) -> list[str]:
+    """Warn when a connected player never reached `[Logout]: Player … finished`.
+
+    The connected line is the server RPT (`Player "…" (…) is connected`).
+    The finished line is the server script log. Both files are streamed in
+    full. Boolean: one finished line clears the warning and stops the walk.
+    An unreadable script log fails toward the warning once the RPT shows a
+    connected player. An unreadable RPT that never showed one does not warn.
+    `Player connect enabled` is a server flag, not a player.
+    """
+    found = _PlayerScan()
+    rpt_ok = _scan_player_markers(server_rpt, found)
+    if found.finished:
+        return []
+    if not rpt_ok and not found.connected:
+        return []
+    script = _script_log_for_server_rpt(server_rpt)
+    if script is not None:
+        _scan_player_markers(script, found)
+        if found.finished:
+            return []
+    if found.connected:
+        return [_PLAYER_STATE_NOT_SAVED]
+    return []
+
+
 def _whitelist_close_result(payload: dict[str, object]) -> dict[str, object]:
     roles_raw = payload.get("roles")
     roles: list[dict[str, object]] = []
@@ -2386,6 +2517,13 @@ def _whitelist_close_result(payload: dict[str, object]) -> dict[str, object]:
     result = {key: payload.get(key) for key in _CLOSE_TOOL_KEYS}
     result["roles"] = roles
     result["stop_method"] = "orderly_close"
+    warnings = payload.get("warnings")
+    if (
+        isinstance(warnings, list)
+        and warnings
+        and all(isinstance(item, str) and item for item in warnings)
+    ):
+        result["warnings"] = list(warnings)
     return result
 
 
@@ -2613,5 +2751,13 @@ async def execute_dayz_test_close(
         "reason": reason,
         "roles": roles_out,
     }
+    # Warning only. The close order, timeouts and reap stay as they are
+    # (fb-20260928-032049-62c5).
+    if graceful:
+        server_watch = watches.get("server")
+        if server_watch is not None:
+            warnings = _player_state_warnings(Path(server_watch.path))
+            if warnings:
+                payload["warnings"] = warnings
     return _whitelist_close_result(payload)
 
