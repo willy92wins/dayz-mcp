@@ -5,6 +5,7 @@ import asyncio
 import inspect
 import os
 import re
+import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -24,6 +25,46 @@ from tests.dayz_test_tool_helpers import (
     _sealed,
     _terminal,
 )
+
+
+def _worker_mod_arg(
+    payload: dict[str, object],
+    policy: dayz_test_request.RequestProjectPolicy,
+) -> str:
+    """The -mod= string the sealed worker builds. No DayZ process."""
+    runtime = types.SimpleNamespace(mod=policy.mod, mods_root=r"P:\Mods")
+    return dayz_test_worker._mods(payload, runtime)
+
+
+def _bridge_mod_entries(mod_arg: str) -> list[str]:
+    return [
+        item
+        for item in mod_arg.split(";")
+        if item.casefold() == r"p:\mods\@dayz_mcp"
+    ]
+
+
+def _preserved_payload(
+    policy: dayz_test_request.RequestProjectPolicy,
+    *,
+    base_mods: list[str] | None = None,
+) -> dict[str, object]:
+    """Canonical payload with no extra_mods default applied."""
+    document: dict[str, object] = {
+        "dev_root": policy.dev_root,
+        "mission": "chernarus",
+        "mod": policy.mod,
+        "mode": "offline",
+        "version": 1,
+    }
+    if base_mods is not None:
+        document["base_mods"] = base_mods
+    raw = json.dumps(
+        document, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return dayz_test_request.parse_dayz_test_request(
+        raw, policies=(policy,)
+    ).payload
 
 
 def _list_projects_path(payload: bytes | BaseException) -> type:
@@ -101,23 +142,112 @@ class DayzTestToolRequestTest(unittest.TestCase):
             dayz_test_tool._bridge_default_report(["@Other"], raw), ["@DayZ_MCP"]
         )
 
-        # base_mods and server_mods still do not count: the default is written
-        # onto extra_mods, and those lists are left as the caller passed them.
-        for excluded_field in ("base_mods", "server_mods"):
-            with self.subTest(excluded_field=excluded_field):
+        # server_mods is not on -mod=. It still does not satisfy the gate, so
+        # the default is written onto extra_mods and that list stays as passed.
+        raw, _selected = dayz_test_tool.build_run_request(
+            sealed,
+            project="ExampleMod",
+            mode="offline",
+            server_mods=["@DayZ_MCP"],
+        )
+        parsed = dayz_test_request.parse_dayz_test_request(raw, policies=(policy,))
+        self.assertEqual(parsed.payload["extra_mods"], ["@DayZ_MCP"])
+        self.assertEqual(parsed.payload["server_mods"], ["@DayZ_MCP"])
+        mod_arg = _worker_mod_arg(parsed.payload, policy)
+        self.assertEqual(_bridge_mod_entries(mod_arg), [r"P:\Mods\@DayZ_MCP"])
+
+    def test_defaulted_bridge_appears_once_on_the_worker_mod_arg(self) -> None:
+        """origin/main raises bridge_mod_missing and never builds this -mod=."""
+        policy = _policy()
+        raw, _selected = dayz_test_tool.build_run_request(
+            _sealed(policy),
+            project="ExampleMod",
+            mode="offline",
+        )
+        parsed = dayz_test_request.parse_dayz_test_request(raw, policies=(policy,))
+        mod_arg = _worker_mod_arg(parsed.payload, policy)
+        self.assertEqual(parsed.payload["extra_mods"], ["@DayZ_MCP"])
+        self.assertEqual(_bridge_mod_entries(mod_arg), [r"P:\Mods\@DayZ_MCP"])
+        folded = [item.casefold() for item in mod_arg.split(";") if item]
+        self.assertEqual(len(folded), len(set(folded)))
+
+    def test_bridge_in_effective_base_mods_is_not_duplicated_on_mod_arg(self) -> None:
+        """Caller list and policy defaults. Round 1 appended and doubled -mod=.
+
+        The preserved document (no copy into extra_mods) lists the folder
+        once. build_run_request keeps that document and the bridge check,
+        so the call is bridge_mod_missing instead of a doubled -mod=.
+        """
+        caller_policy = _policy()
+        cases: tuple[tuple[str, dayz_test_request.RequestProjectPolicy, dict[str, object]], ...] = (
+            ("caller_base", caller_policy, {"base_mods": ["@DayZ_MCP"]}),
+            ("caller_base_case", caller_policy, {"base_mods": ["@dayz_mcp"]}),
+            (
+                "caller_base_absolute",
+                caller_policy,
+                {"base_mods": [r"P:\Mods\@DayZ_MCP"]},
+            ),
+            (
+                "policy_base",
+                _policy(default_base_mods=("@CF", "@DayZ_MCP")),
+                {},
+            ),
+            (
+                "policy_base_case",
+                _policy(default_base_mods=("@CF", "@dayz_mcp")),
+                {},
+            ),
+        )
+        for label, policy, kwargs in cases:
+            with self.subTest(label=label):
+                with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                    dayz_test_tool.build_run_request(
+                        _sealed(policy),
+                        project="ExampleMod",
+                        mode="offline",
+                        **kwargs,
+                    )
+                self.assertEqual(
+                    caught.exception.code, dayz_test_tool._BRIDGE_MOD_MISSING
+                )
+                preserved = _preserved_payload(
+                    policy,
+                    base_mods=kwargs.get("base_mods"),  # type: ignore[arg-type]
+                )
+                mod_arg = _worker_mod_arg(preserved, policy)
+                self.assertEqual(len(_bridge_mod_entries(mod_arg)), 1)
+                folded = [item.casefold() for item in mod_arg.split(";") if item]
+                self.assertEqual(len(folded), len(set(folded)))
+
+    def test_cleared_base_mods_still_defaults_the_bridge_once(self) -> None:
+        """An empty caller list, or no_base_mods, is not the policy default.
+
+        origin/main raises bridge_mod_missing. The -mod= lists the folder once.
+        """
+        policy = _policy(default_base_mods=("@CF", "@DayZ_MCP"))
+        for label, kwargs in (
+            ("caller_empty", {"base_mods": []}),
+            ("no_base_mods", {"no_base_mods": True}),
+        ):
+            with self.subTest(label=label):
                 raw, _selected = dayz_test_tool.build_run_request(
-                    sealed,
+                    _sealed(policy),
                     project="ExampleMod",
                     mode="offline",
-                    **{excluded_field: ["@DayZ_MCP"]},
+                    **kwargs,
                 )
                 parsed = dayz_test_request.parse_dayz_test_request(
                     raw, policies=(policy,)
                 )
+                self.assertEqual(parsed.payload["base_mods"], [])
                 self.assertEqual(parsed.payload["extra_mods"], ["@DayZ_MCP"])
-                self.assertEqual(parsed.payload[excluded_field], ["@DayZ_MCP"])
+                mod_arg = _worker_mod_arg(parsed.payload, policy)
+                self.assertEqual(
+                    _bridge_mod_entries(mod_arg), [r"P:\Mods\@DayZ_MCP"]
+                )
 
     def test_explicit_bridge_extra_mod_is_not_duplicated(self) -> None:
+        """Regression control: origin/main already kept an explicit bridge entry."""
         policy = _policy()
         sealed = _sealed(policy)
         absolute = r"P:\Mods\@DayZ_MCP"
@@ -146,6 +276,7 @@ class DayzTestToolRequestTest(unittest.TestCase):
                 )
 
     def test_dayz_mcp_project_does_not_gain_an_extra_mod(self) -> None:
+        """Regression control: origin/main already left this project's extra_mods empty."""
         bridge_policy = _policy(
             mod="DayZ_MCP",
             dev_root=r"P:\DayZ_MCP_dev",
@@ -196,6 +327,7 @@ class DayzTestToolRequestTest(unittest.TestCase):
         self.assertIn("sealed request", caught.exception.code)
 
     def test_bad_extra_mod_still_fails_before_the_bridge_default(self) -> None:
+        """Regression control: origin/main already rejected this form as bad_mod."""
         with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
             dayz_test_tool.build_run_request(
                 _sealed(_policy()),

@@ -279,23 +279,48 @@ def _names_bridge(value: object) -> bool:
     )
 
 
+def _effective_base_mods(
+    public_base: list[str] | None,
+    *,
+    policy_defaults: tuple[str, ...],
+    no_base_mods: bool,
+) -> list[str]:
+    """The base_mods list the sealed payload, and then -mod=, will carry.
+
+    The caller's list wins. Omitting the field uses the policy defaults.
+    no_base_mods clears both, matching dayz_test_request's canonical payload.
+    """
+    if no_base_mods:
+        return []
+    if public_base is not None:
+        return list(public_base)
+    return list(policy_defaults)
+
+
 def _extra_mods_with_bridge_default(
     extra_mods: list[str] | None,
     *,
     project_mod: str,
     kill: bool,
+    base_mods: list[str],
 ) -> tuple[list[str] | None, tuple[str, ...]]:
     """Append @DayZ_MCP on extra_mods when this launch would miss the bridge.
 
     kill requests are not launches. The DayZ_MCP project already is the
     bridge. An entry whose basename casefolds into _BRIDGE_MOD_NAMES is
     already present, including '@dayz_mcp' and an absolute path, so it is
-    not duplicated. A list the sealed parser would reject after the append
-    (longer than 64, or a casefold duplicate) is left unchanged.
+    not duplicated. The same comparison on the effective base_mods keeps
+    the original document: copying the folder into extra_mods would put it
+    twice on -mod=, and the bridge check below still reports
+    bridge_mod_missing because base_mods do not satisfy it. A list the
+    sealed parser would reject after the append (longer than 64, or a
+    casefold duplicate) is left unchanged.
     """
     if kill or _names_bridge(project_mod):
         return extra_mods, ()
     if extra_mods is not None and any(_names_bridge(item) for item in extra_mods):
+        return extra_mods, ()
+    if any(_names_bridge(item) for item in base_mods):
         return extra_mods, ()
     candidate = [*(extra_mods or ()), _DEFAULT_BRIDGE_EXTRA]
     if not dayz_test_request._valid_string_list(candidate):
@@ -364,8 +389,16 @@ def build_run_request(
     # appears only with that name is dropped and the bridge check below
     # reports bridge_mod_missing; any other rejection is the caller's.
     requested_extra = public_extra
+    effective_base = _effective_base_mods(
+        public_base,
+        policy_defaults=selected.default_base_mods,
+        no_base_mods=no_base_mods,
+    )
     public_extra, defaulted_bridge = _extra_mods_with_bridge_default(
-        public_extra, project_mod=selected.mod, kill=kill
+        public_extra,
+        project_mod=selected.mod,
+        kill=kill,
+        base_mods=effective_base,
     )
 
     def _compose(
