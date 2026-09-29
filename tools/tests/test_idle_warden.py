@@ -39,6 +39,7 @@ from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import (
     MAX_OPERATION_TOMBSTONES,
     SESSION_TTL_S,
+    CleanupDisposition,
     ClientIdentity,
     SessionCoordinator,
 )
@@ -1770,6 +1771,250 @@ class IdleWardenTest(unittest.TestCase):
             self.assertIsNone(
                 self.lifecycle._warden_idle_guard(client, "close", "run-x")
             )
+
+    def _defer_cleanup(self) -> threading.Event:
+        gate = threading.Event()
+        self.coordinator._cleanup_timeout_s = 0.01
+
+        def cleanup(*_args: object) -> CleanupDisposition:
+            return CleanupDisposition(
+                True,
+                gate,
+                {"terminal_safe": True, "runs_released": ["run-x"]},
+            )
+
+        self.coordinator._cleanup = cleanup
+        return gate
+
+    def _arm_release_fails_once(self):
+        original = self.coordinator._arm_wal_locked
+
+        def arm(*args, **kwargs):
+            if kwargs.get("operation") == "release":
+                return False
+            return original(*args, **kwargs)
+
+        self.coordinator._arm_wal_locked = arm
+        return original
+
+    def test_release_202_drops_the_token_without_a_second_release(self) -> None:
+        self.abandon()
+        self.phases.append(self.on_exit)
+        gate = self._defer_cleanup()
+        calls = {"release": 0}
+        real_release = self.coordinator.release
+
+        def counting_release(client, token, reason="owner_release"):
+            calls["release"] += 1
+            return real_release(client, token, reason)
+
+        self.coordinator.release = counting_release
+        self.enable()
+        warden = self.make_warden()
+        try:
+            self.assertEqual(warden.run_once(), "release_cleanup_pending")
+            self.assertEqual(warden.run_once(), "release_cleanup_pending")
+            self.assertIsNone(warden.token)
+            self.assertIsNone(warden.lease_id)
+            self.assertTrue(warden.cleanup_pending_lease_id)
+            self.assertIsNone(self.coordinator._active)
+            self.assertIsNotNone(self.coordinator._releasing)
+            self.assertEqual(calls["release"], 1)
+        finally:
+            gate.set()
+
+    def test_cleanup_pending_blocks_adoption_until_it_finishes(self) -> None:
+        self.abandon()
+        self.phases.append(self.on_exit)
+        gate = self._defer_cleanup()
+        self.enable()
+        warden = self.make_warden()
+        try:
+            self.assertEqual(warden.run_once(), "release_cleanup_pending")
+            self.windows.hwnd_of[803] = 1803
+            self.windows.hwnd_of[804] = 1804
+            self.add_run(
+                "run-y",
+                owner="B",
+                processes=[
+                    process(803, role="server"),
+                    process(804, role="client"),
+                ],
+            )
+            self.assertEqual(self.lifecycle.release_owner("B", "lease-A"), ["run-y"])
+            stamp = time.time() - (RUN_IDLE_CUT_S + 1.0)
+            self.lifecycle.restore_ownerless_since("run-y", stamp)
+            self.wall_value = stamp + RUN_IDLE_CUT_S + 1.0
+            self.bindings.bound.add("run-y")
+            self.healthy_signal(float(stamp), self.wall_value)
+            self.assertEqual(warden.run_once(), "release_cleanup_pending")
+            stored = self.store.get("run-y")
+            self.assertIsNone(stored.owner_session_id)
+            self.assertIsNone(warden.ticket_id)
+            gate.set()
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                snapshot_payload = self.coordinator.snapshot_payload()
+                if (
+                    snapshot_payload.get("releasing") is None
+                    and snapshot_payload.get("handoff_pending") is False
+                    and snapshot_payload.get("claimable") is True
+                ):
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail(
+                    f"cleanup did not finish: {self.coordinator.snapshot_payload()}"
+                )
+            seen = {"owned": False}
+
+            def watch(name: str, owner: IdleWarden) -> None:
+                self.on_exit(name, owner)
+                run = self.store.get("run-y")
+                if (
+                    run is not None
+                    and run.owner_session_id == owner.client.session_id
+                ):
+                    seen["owned"] = True
+
+            self.phases.append(watch)
+            result = warden.run_once()
+            self.assertIsNone(warden.cleanup_pending_lease_id)
+            self.assertNotEqual(result, "release_cleanup_pending")
+            self.assertNotEqual(result, "release_pending")
+            self.assertTrue(seen["owned"], result)
+        finally:
+            gate.set()
+
+    def test_stop_exits_while_cleanup_is_pending(self) -> None:
+        self.abandon()
+        gate = self._defer_cleanup()
+        self.enable()
+        stop = threading.Event()
+        created: dict[str, IdleWarden] = {}
+        original_init = IdleWarden.__init__
+
+        def remember(warden: IdleWarden, *args, **kwargs) -> None:
+            original_init(warden, *args, **kwargs)
+            created["warden"] = warden
+
+        IdleWarden.__init__ = remember
+        try:
+            def cleanup(*_args: object) -> CleanupDisposition:
+                stop.set()
+                return CleanupDisposition(
+                    True,
+                    gate,
+                    {"terminal_safe": True, "runs_released": ["run-x"]},
+                )
+
+            self.coordinator._cleanup = cleanup
+            thread = install_idle_warden(
+                self.lifecycle,
+                self.coordinator,
+                self.bridge,
+                self.settings,
+                generation=GENERATION,
+                stop=stop,
+                interval_s=0.05,
+                sample_input=self.quiet_sample,
+                wall=lambda: self.wall_value,
+                monotonic=lambda: self.mono,
+                sleep=self.advance,
+            )
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+            warden = created["warden"]
+            self.assertIsNone(warden.token)
+            self.assertIsNone(warden.ticket_id)
+            self.assertTrue(warden.cleanup_pending_lease_id)
+            self.assertIsNotNone(self.coordinator._releasing)
+            self.assertFalse(gate.is_set())
+        finally:
+            IdleWarden.__init__ = original_init
+            gate.set()
+
+    def test_lease_invalid_on_release_drops_the_token(self) -> None:
+        self.abandon()
+        self.phases.append(self.on_exit)
+        original = self._arm_release_fails_once()
+        self.enable()
+        warden = self.make_warden()
+        self.assertEqual(warden.run_once(), "release_pending")
+        self.assertIsNotNone(warden.token)
+        self.coordinator._arm_wal_locked = original
+        status, body = self.coordinator.release(
+            warden.client, warden.token, "owner_release"
+        )
+        self.assertEqual(status, 200, body)
+        calls = {"release": 0}
+        real_release = self.coordinator.release
+
+        def counting_release(client, token, reason="owner_release"):
+            calls["release"] += 1
+            return real_release(client, token, reason)
+
+        self.coordinator.release = counting_release
+        self.assertEqual(warden.run_once(), "release_lost")
+        self.assertIsNone(warden.token)
+        self.assertIsNone(warden.lease_id)
+        self.assertEqual(calls["release"], 1)
+        self.assertEqual(body.get("released"), True)
+        self.assertEqual(warden.run_once(), "no_candidate")
+        self.assertEqual(calls["release"], 1)
+        self.assertIsNone(self.coordinator._active)
+
+    def test_lease_expired_on_release_drops_the_token(self) -> None:
+        self.abandon()
+        self.phases.append(self.on_exit)
+        original = self._arm_release_fails_once()
+        self.enable()
+        warden = self.make_warden()
+        self.assertEqual(warden.run_once(), "release_pending")
+        self.coordinator._arm_wal_locked = original
+        started = self.coordinator._time_fn()
+        self.coordinator._time_fn = lambda: started + SESSION_TTL_S + 5.0
+        calls = {"release": 0}
+        real_release = self.coordinator.release
+
+        def counting_release(client, token, reason="owner_release"):
+            calls["release"] += 1
+            status, body = real_release(client, token, reason)
+            self.assertEqual(status, 409, body)
+            self.assertEqual(body.get("error"), "lease_expired")
+            return status, body
+
+        self.coordinator.release = counting_release
+        self.assertEqual(warden.run_once(), "release_lost")
+        self.assertIsNone(warden.token)
+        self.assertIsNone(warden.lease_id)
+        self.assertEqual(calls["release"], 1)
+        self.assertIsNone(self.coordinator._active)
+        self.assertEqual(warden.run_once(), "no_candidate")
+        self.assertEqual(calls["release"], 1)
+
+    def test_release_exception_retries_while_the_token_is_held(self) -> None:
+        self.abandon()
+        self.phases.append(self.on_exit)
+        real_release = self.coordinator.release
+        calls = {"release": 0}
+
+        def flaky(client, token, reason="owner_release"):
+            calls["release"] += 1
+            if calls["release"] == 1:
+                raise OSError("injected release transport failure")
+            return real_release(client, token, reason)
+
+        self.coordinator.release = flaky
+        self.enable()
+        warden = self.make_warden()
+        self.assertEqual(warden.run_once(), "release_pending")
+        self.assertIsNotNone(warden.token)
+        self.assertIsNotNone(self.coordinator._active)
+        self.assertEqual(warden.run_once(), "released")
+        self.assertIsNone(warden.token)
+        self.assertIsNone(self.coordinator._active)
+        self.assertEqual(calls["release"], 2)
 
 
 class BoundInstanceTokenTest(unittest.TestCase):

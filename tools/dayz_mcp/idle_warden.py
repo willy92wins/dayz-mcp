@@ -175,6 +175,9 @@ class IdleWarden:
         self._launcher_mark: float | None = None
         self._closed = False
         self._adoption_started = False
+        # Lease id whose cleanup the coordinator still owns. Not a token:
+        # the thread does not retry release, and stop does not wait for it.
+        self.cleanup_pending_lease_id: str | None = None
 
     def run_once(self) -> str:
         self._adoption_started = False
@@ -187,9 +190,10 @@ class IdleWarden:
     def _cycle(self) -> str:
         if not read_idle_warden_enabled(self.settings_path):
             if self.token or self.ticket_id:
-                self._drop_authority()
+                result = self._drop_authority()
                 if self.token or self.ticket_id:
                     return "release_pending"
+                return self._outcome_for_release(result, "disabled")
             return "disabled"
         try:
             self.coordinator.expire_due()
@@ -198,7 +202,9 @@ class IdleWarden:
             return "expire_failed"
         if self.token:
             self._clear_closing()
-            return "released" if self._release() else "release_pending"
+            return self._apply_release("released")
+        if self._adoption_blocked_by_cleanup():
+            return "release_cleanup_pending"
         try:
             if self.ticket_id:
                 return self._continue()
@@ -268,9 +274,7 @@ class IdleWarden:
         if off is not None:
             return off
         if not self._still(run_id):
-            if not self._release():
-                return "release_pending"
-            return "cancelled"
+            return self._apply_release("cancelled")
         return self._own(run_id)
 
     def _own(self, run_id: str) -> str:
@@ -657,9 +661,7 @@ class IdleWarden:
         return True
 
     def _not_adopted(self) -> str:
-        if not self._release():
-            return "release_pending"
-        return "not_adopted"
+        return self._apply_release("not_adopted")
 
     def _release_unconfirmed_adoption(self) -> None:
         """Drop this cycle's adoption-unconfirmed.json when the adopt did not stick.
@@ -752,8 +754,9 @@ class IdleWarden:
     def _warning_failed(self, run_id: str, detail: str) -> str:
         previous = self.lifecycle.ownerless_since(run_id)
         self._clear_closing()
-        if not self._release():
-            return "release_pending"
+        released = self._apply_release("warning_failed")
+        if released != "warning_failed":
+            return released
         if previous is None:
             previous = self.wall() - RUN_IDLE_CUT_S
         self.lifecycle.restore_ownerless_since(run_id, previous)
@@ -766,8 +769,9 @@ class IdleWarden:
     def _abort(self, run_id: str) -> str:
         self._clear_closing()
         self.lifecycle.clear_idle_retirement(run_id)
-        if not self._release():
-            return "release_pending"
+        released = self._apply_release("countdown_aborted")
+        if released != "countdown_aborted":
+            return released
         self.lifecycle.restore_ownerless_since(run_id, self.wall())
         return "countdown_aborted"
 
@@ -794,8 +798,9 @@ class IdleWarden:
             self.lifecycle.clear_closing(target)
             self.lifecycle.clear_idle_retirement(target)
         ticket_pending = bool(self.ticket_id) and not self._cancel_ticket()
-        if not self._release():
-            return "release_pending"
+        outcome = self._apply_release("disabled")
+        if outcome != "disabled":
+            return outcome
         if ticket_pending or self.ticket_id:
             return "release_pending"
         return "disabled"
@@ -803,41 +808,61 @@ class IdleWarden:
     def _finish(self, outcome: str) -> str:
         """A normal outcome waits until the coordinator has confirmed the release."""
 
-        if not self._release():
-            return "release_pending"
-        return outcome
+        return self._apply_release(outcome)
 
-    def _release(self) -> bool:
-        """True only after the coordinator confirms the lease is gone.
+    def _outcome_for_release(self, result: str, confirmed: str) -> str:
+        if result == "confirmed":
+            return confirmed
+        if result == "cleanup_pending":
+            return "release_cleanup_pending"
+        if result == "lost":
+            return "release_lost"
+        return "release_pending"
 
-        An exception, or any answer that does not confirm the release, keeps
-        the token and the lease. The caller reports release_pending and retries.
+    def _apply_release(self, confirmed: str) -> str:
+        return self._outcome_for_release(self._release(), confirmed)
+
+    def _release(self) -> str:
+        """How the coordinator left the lease.
+
+        ``confirmed`` is a 200 with ``released`` true, or no token held.
+        ``cleanup_pending`` is ``202 lifecycle_cleanup_pending``: the lease
+        is already retired and the coordinator owns the rest, so the token
+        is dropped and not retried. ``lost`` is ``403 lease_invalid`` or
+        ``lease_expired`` (the coordinator sends that expiry as 409): the
+        token is already dead. ``pending`` keeps the token for a later pass.
         A confirmed release whose cleanup worker is saturated has already
         dropped the lease and will not quiesce the run, so this hands the
-        owner to ``begin_release_owner``. That handoff is not used for an
-        unconfirmed answer.
+        owner to ``begin_release_owner``. A 202 does not: the coordinator's
+        fenced cleanup watcher owns that handoff.
         """
 
         token = self.token
         if not token:
             self.token = None
             self.lease_id = None
-            return True
+            return "confirmed"
         try:
             status, body = self.coordinator.release(
                 self.client, token, "owner_release"
             )
         except Exception:
             self.log("WARDEN: release failed")
-            return False
-        if (
-            isinstance(body, dict)
-            and status == 200
-            and body.get("released") is True
+            return "pending"
+        if not isinstance(body, dict):
+            return "pending"
+        error = body.get("error")
+        if status == 202 and error == "lifecycle_cleanup_pending":
+            self._retire_token(cleanup_pending=True)
+            return "cleanup_pending"
+        if (status == 403 and error == "lease_invalid") or (
+            error == "lease_expired" and status in (403, 409)
         ):
+            self._retire_token(cleanup_pending=False)
+            return "lost"
+        if status == 200 and body.get("released") is True:
             lease_id = self.lease_id
-            self.token = None
-            self.lease_id = None
+            self._retire_token(cleanup_pending=False)
             degraded = body.get("cleanup_degraded")
             saturated = (
                 isinstance(degraded, list)
@@ -850,7 +875,51 @@ class IdleWarden:
                     )
                 except Exception:
                     self.log("WARDEN: direct release failed")
+            return "confirmed"
+        return "pending"
+
+    def _retire_token(self, *, cleanup_pending: bool) -> None:
+        lease_id = self.lease_id
+        self.token = None
+        self.lease_id = None
+        if not cleanup_pending:
+            return
+        if isinstance(lease_id, str) and lease_id:
+            self.cleanup_pending_lease_id = lease_id
+        elif self.cleanup_pending_lease_id is None:
+            self.cleanup_pending_lease_id = ""
+
+    def _adoption_blocked_by_cleanup(self) -> bool:
+        """True until the published coordination snapshot says this cleanup ended.
+
+        Reads the same snapshot ``/status`` publishes as ``coordination``:
+        the release fence (``releasing``), ``handoff_pending``, and
+        ``claimable``. Any gap, or an unreadable snapshot, keeps the warden
+        from taking a new lease. This does not call ``release``.
+        """
+
+        pending = self.cleanup_pending_lease_id
+        if pending is None:
+            return False
+        try:
+            snapshot = self.coordinator.snapshot_payload()
+        except Exception:
+            self.log("WARDEN: cleanup status unreadable")
             return True
+        if not isinstance(snapshot, dict):
+            return True
+        if (
+            "releasing" not in snapshot
+            or "handoff_pending" not in snapshot
+            or "claimable" not in snapshot
+        ):
+            return True
+        releasing = snapshot.get("releasing")
+        if releasing is not None or snapshot.get("handoff_pending") is not False:
+            return True
+        if snapshot.get("claimable") is not True:
+            return True
+        self.cleanup_pending_lease_id = None
         return False
 
     def _cancel_ticket(self) -> bool:
@@ -921,15 +990,21 @@ class IdleWarden:
         self.lifecycle.audit_idle_timeout(self.client, run_id, outcome, detail)
         return self._finish(outcome)
 
-    def _drop_authority(self) -> None:
+    def _drop_authority(self) -> str:
+        """Drop a held token and ticket. Returns the release result code."""
+
         run_id = self.run_id
         if isinstance(run_id, str):
             self.lifecycle.clear_closing(run_id)
             self.lifecycle.clear_idle_retirement(run_id)
+        result = "confirmed"
         if self.token:
-            self._release()
-        if self.ticket_id:
-            self._cancel_ticket()
+            result = self._release()
+        if self.ticket_id and not self._cancel_ticket():
+            if result == "confirmed":
+                return "pending"
+            return result
+        return result
 
     def _clear_ticket(self) -> None:
         self.ticket_id = None
@@ -1001,6 +1076,7 @@ def install_idle_warden(
                 warden.run_once()
             except Exception as exc:
                 log(f"WARDEN: pass failed: {exc}")
+            # A cleanup the coordinator still owns is not a held token.
             held = bool(warden.token or warden.ticket_id)
             if stop is not None and stop.is_set():
                 if held:
