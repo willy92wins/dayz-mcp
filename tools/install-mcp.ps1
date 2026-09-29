@@ -1,3 +1,24 @@
+<#
+.SYNOPSIS
+  Install DayZ MCP and, with -Register, register dayz-mcp on a client that does not already have it.
+
+.DESCRIPTION
+  Without -Register the script installs the venv and prints the registration
+  commands. -Register registers dayz-mcp with Claude Code and Codex only when
+  neither client already has that server. If a registration exists, or that
+  check is missing or unreadable, the script stops before claude/codex
+  `mcp remove`. Re-register with `python tools/install_mcp.py --register` from
+  the repository root; that path refuses to drop options unless
+  --allow-option-removal is passed. -ReplaceExistingRegistration lets this
+  script replace an existing registration anyway.
+
+.PARAMETER Register
+  Register dayz-mcp when Claude and Codex do not already have it.
+
+.PARAMETER ReplaceExistingRegistration
+  With -Register, replace an existing dayz-mcp registration. This drops
+  options the current registration carries.
+#>
 param(
   [int]$Port = 8765,
   [string]$KeyFile = "",
@@ -8,6 +29,7 @@ param(
   [double]$IdleTimeoutSeconds = 1800,
   [switch]$AllowLegacy,
   [switch]$Register,
+  [switch]$ReplaceExistingRegistration,
   [switch]$SkipKnowledgePack,
   [switch]$ClaudeNoProgressiveDisclosure,
   [switch]$NoSupervised
@@ -198,7 +220,7 @@ function Test-CanonicalTextArguments {
   param([string]$ArgsText, [object[]]$ExpectedArguments)
   $valueFlags = @(
     '-m', '--port', '--keyfile', '--expected-game-version', '--idle-timeout',
-    '--exec-allowlist', '--client-platform', '--task-label', '--tool-pack'
+    '--exec-allowlist', '--exec-audit-path', '--client-platform', '--task-label', '--tool-pack'
   )
   $booleanFlags = @(
     '--require-version', '--enable-exec-enforce', '--no-daemon-autospawn',
@@ -331,7 +353,7 @@ function Test-CanonicalArrayArguments {
   if ($Arguments.Count -ne $ExpectedArguments.Count) { return $false }
   $valueFlags = @(
     '-m', '--port', '--keyfile', '--expected-game-version', '--idle-timeout',
-    '--exec-allowlist', '--client-platform', '--task-label', '--tool-pack'
+    '--exec-allowlist', '--exec-audit-path', '--client-platform', '--task-label', '--tool-pack'
   )
   $booleanFlags = @(
     '--require-version', '--enable-exec-enforce', '--no-daemon-autospawn',
@@ -414,6 +436,145 @@ function Test-CodexRegistration {
     (Test-ExactArrayValue $arguments '--keyfile' $ExpectedKeyFile) -and
     (Test-ExactArrayValue $arguments '--client-platform' 'codex')
   )
+}
+
+function Get-ClientRegistrationProbe {
+  param([ValidateSet('claude', 'codex')][string]$Client)
+  $commandName = if ($Client -eq 'claude') { 'claude' } else { 'codex.cmd' }
+  $command = Get-Command $commandName -ErrorAction SilentlyContinue
+  if (-not $command) {
+    return @{
+      Client = $Client
+      CommandMissing = $true
+      ExitCode = $null
+      Output = ''
+    }
+  }
+  $arguments = @('mcp', 'get', 'dayz-mcp')
+  if ($Client -eq 'codex') {
+    $arguments += '--json'
+  }
+  try {
+    $output = & $command.Source @arguments 2>&1 | Out-String
+    $exitCode = $LASTEXITCODE
+  } catch {
+    return @{
+      Client = $Client
+      CommandMissing = $false
+      ExitCode = $null
+      Output = ''
+    }
+  }
+  if ($null -eq $exitCode -or $exitCode -isnot [int]) {
+    return @{
+      Client = $Client
+      CommandMissing = $false
+      ExitCode = $null
+      Output = [string]$output
+    }
+  }
+  return @{
+    Client = $Client
+    CommandMissing = $false
+    ExitCode = $exitCode
+    Output = [string]$output
+  }
+}
+
+# Absent matches the not-found text these CLIs print
+# (reports/security/installer-not-found-fixtures-v1.json): Claude exit 1
+# `No MCP server named "dayz-mcp".`, Codex exit 1
+# `No MCP server named 'dayz-mcp' found`. Exit 0 plus a registration shape is
+# present. Anything else is unreadable. -ReplaceExistingRegistration overrides
+# a parsed registration only; an unreadable probe still refuses.
+function Get-RegistrationReplaceDecision {
+  param(
+    $Claude,
+    $Codex,
+    [bool]$ReplaceExistingRegistration
+  )
+  $classify = {
+    param($Name, $Grammar, $Probe)
+    if ($Probe -isnot [System.Collections.IDictionary]) {
+      return @{ Name = $Name; Kind = 'unreadable'; Detail = "${Name}: probe is missing" }
+    }
+    if ([bool]$Probe['CommandMissing']) {
+      return @{ Name = $Name; Kind = 'unreadable'; Detail = "${Name}: command missing" }
+    }
+    $output = $Probe['Output']
+    $exitCode = $Probe['ExitCode']
+    if ($output -isnot [string]) {
+      return @{ Name = $Name; Kind = 'unreadable'; Detail = "${Name}: output is missing" }
+    }
+    if (($exitCode -isnot [int]) -or ($exitCode -is [bool])) {
+      return @{ Name = $Name; Kind = 'unreadable'; Detail = "${Name}: exit code is missing" }
+    }
+    $absentPattern = if ($Grammar -eq 'claude') {
+      'No MCP server named "dayz-mcp"\.'
+    } else {
+      "No MCP server named 'dayz-mcp' found"
+    }
+    $absentPhrase = [regex]::IsMatch($output, $absentPattern)
+    $shape = $false
+    if ($Grammar -eq 'claude') {
+      $shape = (
+        [regex]::IsMatch($output, '(?m)^\s*Type:\s*\S') -and
+        [regex]::IsMatch($output, '(?m)^\s*Command:\s*\S') -and
+        [regex]::IsMatch($output, '(?m)^\s*Args:\s*\S') -and
+        [regex]::IsMatch($output, 'dayz-mcp')
+      )
+    } elseif ($output.Trim()) {
+      try {
+        $parsed = $output | ConvertFrom-Json
+        $transport = $parsed.transport
+        $shape = (
+          $null -ne $transport -and
+          $transport -isnot [System.Array] -and
+          ($transport.type -is [string]) -and [bool]$transport.type -and
+          ($transport.command -is [string]) -and [bool]$transport.command -and
+          $null -ne $transport.args
+        )
+      } catch {
+        $shape = $false
+      }
+    }
+    if (($exitCode -eq 0) -and $shape -and -not $absentPhrase) {
+      return @{ Name = $Name; Kind = 'present'; Detail = '' }
+    }
+    if (($exitCode -eq 1) -and $absentPhrase -and -not $shape) {
+      return @{ Name = $Name; Kind = 'absent'; Detail = '' }
+    }
+    if (($exitCode -eq 0) -or $absentPhrase) {
+      return @{ Name = $Name; Kind = 'unreadable'; Detail = "${Name}: unparseable output" }
+    }
+    if ($exitCode -eq 1) {
+      return @{ Name = $Name; Kind = 'unreadable'; Detail = "${Name}: exit code 1 without the not-found message" }
+    }
+    return @{ Name = $Name; Kind = 'unreadable'; Detail = "${Name}: exit code $exitCode" }
+  }
+  $claudeResult = & $classify 'Claude' 'claude' $Claude
+  $codexResult = & $classify 'Codex' 'codex' $Codex
+  $unreadable = @()
+  if ($claudeResult.Kind -eq 'unreadable') { $unreadable += $claudeResult }
+  if ($codexResult.Kind -eq 'unreadable') { $unreadable += $codexResult }
+  if ($unreadable.Count) {
+    $detail = ($unreadable | ForEach-Object { $_.Detail }) -join '; '
+    return @{
+      Action = 'refuse'
+      Reason = "registration check failed for ${detail}. Stopped before removing anything."
+    }
+  }
+  $present = @()
+  if ($claudeResult.Kind -eq 'present') { $present += $claudeResult }
+  if ($codexResult.Kind -eq 'present') { $present += $codexResult }
+  if ($present.Count -and -not $ReplaceExistingRegistration) {
+    $names = ($present | ForEach-Object { $_.Name }) -join ' and '
+    return @{
+      Action = 'refuse'
+      Reason = "dayz-mcp is already registered for $names. install-mcp.ps1 -Register does not replace an existing registration. Re-register with python tools/install_mcp.py --register (it keeps options the registration already carries unless --allow-option-removal is passed), or pass -ReplaceExistingRegistration to replace it with this script."
+    }
+  }
+  return @{ Action = 'proceed'; Reason = '' }
 }
 
 if (-not (Test-Path -LiteralPath $VenvDir)) {
@@ -545,13 +706,16 @@ $mcpJson = @{
 Write-Host $mcpJson
 
 if ($Register) {
+  $registrationDecision = Get-RegistrationReplaceDecision -Claude (Get-ClientRegistrationProbe -Client claude) -Codex (Get-ClientRegistrationProbe -Client codex) -ReplaceExistingRegistration:([bool]$ReplaceExistingRegistration)
+  if ($registrationDecision.Action -ne 'proceed') {
+    throw $registrationDecision.Reason
+  }
   Write-Host ""
-  Write-Host "registering dayz-mcp with Claude Code and Codex (idempotent)"
-  # `claude mcp add` does NOT overwrite an existing name (it errors/no-ops) and its
-  # default scope is LOCAL, not USER. Adding without removing the existing USER-scope
-  # entry first silently leaves the old EMBEDDED registration in place -> sessions keep
-  # binding :Port and fight each other (the failure this guard exists to prevent).
-  # Remove-then-add at explicit user scope makes registration idempotent.
+  Write-Host "registering dayz-mcp with Claude Code and Codex"
+  # Reached only when both probes were absent, or -ReplaceExistingRegistration
+  # was set on a parsed registration. `claude mcp add` does not overwrite an
+  # existing name and its default scope is local, so a replace still removes
+  # the user-scope entry before adding. An absent name makes remove a no-op.
   & claude mcp remove dayz-mcp -s user
   & claude mcp add dayz-mcp -s user -- $VenvPython @claudeArgs
   $CodexCmd=(Get-Command codex.cmd).Source
@@ -577,5 +741,5 @@ if ($Register) {
   Write-Host "VERIFY OK: Claude=client/claude, Codex=client/codex, shared port/keyfile."
 } else {
   Write-Host ""
-  Write-Host "default is registration print-only; rerun with -Register to mutate Claude/Codex config."
+  Write-Host "default is registration print-only; rerun with -Register to register dayz-mcp when Claude and Codex do not already have it. An existing registration is left unchanged: re-register with python tools/install_mcp.py --register, or pass -ReplaceExistingRegistration."
 }
