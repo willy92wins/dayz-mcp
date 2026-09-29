@@ -235,8 +235,8 @@ Smoke visual de un vehículo CarScript conducido por MCP, verificado end-to-end 
    `{"url":"http://127.0.0.1:8765/","key":"<key>","pollHz":5}` (ASCII) en `<Mod>_dev\_server\profiles\`
    y `..\_client\profiles\`. El bridge lo lee de `$profile:` (server `MCPBridge.c:125`, client
    `MCPClientBridge.c:211`); key = `DayZ_MCP_dev\tools\.dayz_mcp.key`. Sembrar ANTES del launch (el
-   bridge lee el config en su init, una sola vez). No uses `install-mcp.ps1 -Register` (re-registra el
-   modo broker `--client`).
+   bridge lee el config en su init, una sola vez). No uses `install-mcp.ps1 -Register`
+   (si ya hay registro se niega; `-ReplaceExistingRegistration` sí lo sustituye y tira flags).
 3. **Launch**: `dayz-test.ps1 -Mod <Mod> -Mode all -Build -PackOnly -ExtraMods "@DayZ_MCP" -Mission
    "<...>\dayzOffline.chernarusplus" -ServerWait 240`. `-PackOnly` obligatorio en mods con `.c`
    (binarize los dropea → NO_IGNITER). Llamar el `.ps1` por ruta absoluta (P:\ es subst).

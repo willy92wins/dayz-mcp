@@ -68,6 +68,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "notify_players",
     "object_anim",
     "object_delete",
+    "object_doors",
     "object_inspect",
     "player_teleport",
     "query_all_players",

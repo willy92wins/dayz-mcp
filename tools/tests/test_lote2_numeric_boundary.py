@@ -78,7 +78,7 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
     def test_census_includes_alias_optional_vectors_and_conditional_tool(self):
         rows = set(self.rows)
-        self.assertEqual(len(rows), 123)
+        self.assertEqual(len(rows), 127)
         self.assertIn(("lease_acquire", "max_wait_s", "float"), rows)
         self.assertIn(("exec_enforce", "timeout_s", "float"), rows)
         self.assertIn(("object_anim", "phase", "float"), rows)
@@ -88,6 +88,10 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("inventory_attach", "pos", "vector"), rows)
         self.assertIn(("inventory_attach", "object_id", "int"), rows)
         self.assertIn(("inventory_attach", "timeout_s", "float"), rows)
+        self.assertIn(("object_doors", "pos", "vector"), rows)
+        self.assertIn(("object_doors", "object_id", "int"), rows)
+        self.assertIn(("object_doors", "timeout_s", "float"), rows)
+        self.assertIn(("input_describe", "timeout_s", "float"), rows)
 
     async def test_every_numeric_parameter_rejects_both_booleans_before_handler(self):
         for name, param, shape in self.rows:

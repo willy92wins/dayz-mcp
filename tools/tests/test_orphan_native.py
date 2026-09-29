@@ -396,10 +396,180 @@ class NativeEmbeddedReclaimTest(unittest.TestCase):
                 self.assertEqual(guard.terminate_calls, [])
 
     def test_loopback_supplies_current_structured_policy_to_reclaim(self) -> None:
+        # 3.14 venv: sys.executable is the redirector; the snapshot hashes the
+        # base interpreter. The reclaim must be handed that image, and orig_argv
+        # stays like-for-like (argv[0] is still the redirector).
+        captured: dict[str, object] = {}
+        looked_up: list[int] = []
+        sentinel = object()
+        in_use = OSError("in use")
+        in_use.errno = 10048
+        redirector = r"P:\venv\Scripts\python.exe"
+        image = r"C:\Python314\python.exe"
+        argv = [redirector, "-m", "dayz_mcp", "--embedded", "--port", "8765"]
+
+        def process_image(pid: int) -> str:
+            looked_up.append(pid)
+            return image
+
+        def reclaim(_port: int, **kwargs: object) -> bool:
+            captured.update(kwargs)
+            return True
+
+        def log_sink(_message: object) -> None:
+            return None
+
+        with (
+            patch.object(loopback, "ExclusiveThreadingHTTPServer", side_effect=[in_use, sentinel]),
+            patch.object(loopback.orphan_guard, "full_image_path_of", side_effect=process_image),
+            patch.object(loopback.orphan_guard, "try_reclaim_port", side_effect=reclaim),
+            patch.object(loopback.sys, "orig_argv", list(argv), create=True),
+            patch.object(loopback.sys, "executable", redirector),
+        ):
+            server = loopback._bind_exclusive(8765, log_sink, True)
+
+        self.assertIs(server, sentinel)
+        self.assertEqual(looked_up, [loopback.os.getpid()])
+        self.assertEqual(captured["expected_executable"], image)
+        self.assertEqual(captured["expected_argv"], argv)
+        self.assertIs(captured["log"], log_sink)
+
+    def test_loopback_skips_reclaim_when_process_image_is_unusable(self) -> None:
+        redirector = r"P:\venv\Scripts\python.exe"
+        argv = [redirector, "-m", "dayz_mcp", "--embedded", "--port", "8765"]
+        cases: dict[str, object] = {
+            "missing": None,
+            "empty": "",
+            "relative": r"Scripts\python.exe",
+            "oserror": OSError("image lookup failed"),
+            "runtime": RuntimeError("image lookup failed"),
+        }
+        for name, image in cases.items():
+            with self.subTest(name):
+                in_use = OSError("in use")
+                in_use.errno = 10048
+                attempts: list[object] = []
+                lookups: list[int] = []
+
+                def process_image(pid: int, image: object = image) -> object:
+                    lookups.append(pid)
+                    if isinstance(image, BaseException):
+                        raise image
+                    return image
+
+                def reclaim(_port: int, **_kwargs: object) -> bool:
+                    attempts.append(True)
+                    return True
+
+                with (
+                    patch.object(
+                        loopback,
+                        "ExclusiveThreadingHTTPServer",
+                        side_effect=[in_use, object()],
+                    ) as server_cls,
+                    patch.object(
+                        loopback.orphan_guard,
+                        "full_image_path_of",
+                        side_effect=process_image,
+                    ),
+                    patch.object(loopback.orphan_guard, "try_reclaim_port", side_effect=reclaim),
+                    patch.object(loopback.sys, "orig_argv", list(argv), create=True),
+                    patch.object(loopback.sys, "executable", redirector),
+                ):
+                    with self.assertRaises(OSError) as caught:
+                        loopback._bind_exclusive(8765, lambda _message: None, True)
+
+                self.assertIs(caught.exception, in_use)
+                self.assertEqual(lookups, [loopback.os.getpid()])
+                self.assertEqual(attempts, [])
+                self.assertEqual(server_cls.call_count, 1)
+
+    def test_loopback_reclaim_gates_stay_closed_without_an_image_lookup(self) -> None:
+        # Not a reclaim candidate: the original bind error propagates and the
+        # process image is never consulted.
+        redirector = r"P:\venv\Scripts\python.exe"
+        gates = (
+            {"reclaim_orphans": False, "errno": 10048},
+            {"reclaim_orphans": True, "errno": 13},
+        )
+        for gate in gates:
+            with self.subTest(gate):
+                in_use = OSError("bind failed")
+                in_use.errno = int(gate["errno"])
+                lookups: list[int] = []
+                attempts: list[object] = []
+
+                def process_image(pid: int) -> str:
+                    lookups.append(pid)
+                    return r"C:\Python314\python.exe"
+
+                def reclaim(_port: int, **_kwargs: object) -> bool:
+                    attempts.append(True)
+                    return True
+
+                with (
+                    patch.object(
+                        loopback,
+                        "ExclusiveThreadingHTTPServer",
+                        side_effect=[in_use, object()],
+                    ) as server_cls,
+                    patch.object(
+                        loopback.orphan_guard,
+                        "full_image_path_of",
+                        side_effect=process_image,
+                    ),
+                    patch.object(loopback.orphan_guard, "try_reclaim_port", side_effect=reclaim),
+                    patch.object(loopback.sys, "executable", redirector),
+                ):
+                    with self.assertRaises(OSError) as caught:
+                        loopback._bind_exclusive(
+                            8765,
+                            lambda _message: None,
+                            bool(gate["reclaim_orphans"]),
+                        )
+
+                self.assertIs(caught.exception, in_use)
+                self.assertEqual(lookups, [])
+                self.assertEqual(attempts, [])
+                self.assertEqual(server_cls.call_count, 1)
+
+    def test_loopback_reclaim_refusal_still_reraises_the_bind_error(self) -> None:
+        captured: dict[str, object] = {}
+        in_use = OSError("in use")
+        in_use.errno = 10048
+        redirector = r"P:\venv\Scripts\python.exe"
+        image = r"C:\Python314\python.exe"
+        argv = [redirector, "-m", "dayz_mcp", "--embedded", "--port", "8765"]
+
+        def reclaim(_port: int, **kwargs: object) -> bool:
+            captured.update(kwargs)
+            return False
+
+        with (
+            patch.object(
+                loopback,
+                "ExclusiveThreadingHTTPServer",
+                side_effect=[in_use, object()],
+            ) as server_cls,
+            patch.object(loopback.orphan_guard, "full_image_path_of", return_value=image),
+            patch.object(loopback.orphan_guard, "try_reclaim_port", side_effect=reclaim),
+            patch.object(loopback.sys, "orig_argv", list(argv), create=True),
+            patch.object(loopback.sys, "executable", redirector),
+        ):
+            with self.assertRaises(OSError) as caught:
+                loopback._bind_exclusive(8765, lambda _message: None, True)
+
+        self.assertIs(caught.exception, in_use)
+        self.assertEqual(captured["expected_executable"], image)
+        self.assertEqual(captured["expected_argv"], argv)
+        self.assertEqual(server_cls.call_count, 1)
+
+    def test_loopback_reclaim_keeps_non_list_orig_argv_as_none(self) -> None:
         captured: dict[str, object] = {}
         sentinel = object()
         in_use = OSError("in use")
         in_use.errno = 10048
+        image = r"C:\Python314\python.exe"
 
         def reclaim(_port: int, **kwargs: object) -> bool:
             captured.update(kwargs)
@@ -407,15 +577,15 @@ class NativeEmbeddedReclaimTest(unittest.TestCase):
 
         with (
             patch.object(loopback, "ExclusiveThreadingHTTPServer", side_effect=[in_use, sentinel]),
+            patch.object(loopback.orphan_guard, "full_image_path_of", return_value=image),
             patch.object(loopback.orphan_guard, "try_reclaim_port", side_effect=reclaim),
-            patch.object(loopback.sys, "orig_argv", list(self.argv), create=True),
-            patch.object(loopback.sys, "executable", self.executable),
+            patch.object(loopback.sys, "orig_argv", None, create=True),
         ):
             server = loopback._bind_exclusive(8765, lambda _message: None, True)
 
         self.assertIs(server, sentinel)
-        self.assertEqual(captured["expected_executable"], self.executable)
-        self.assertEqual(captured["expected_argv"], self.argv)
+        self.assertEqual(captured["expected_executable"], image)
+        self.assertIsNone(captured["expected_argv"])
 
     def test_pid_or_snapshot_drift_preserves_embedded_process(self) -> None:
         listener_pids = iter((self.pid, self.pid + 1))

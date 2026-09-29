@@ -27,6 +27,13 @@ cd tools
 .\install-mcp.ps1 -ServerProfiles "C:\path\to\your\server\profiles" -Register
 ```
 
+`-Register` adds `dayz-mcp` only when Claude and Codex do not already have it,
+and that path does not remove an existing name. If they do, or the name appears
+before the add, the script stops. Re-register from this directory with `python
+install_mcp.py --register` (it refuses to drop options the registration already
+carries unless `--allow-option-removal` is passed), or pass
+`-ReplaceExistingRegistration` to remove and replace it with the script.
+
 **3 — Pack the addon** into `<DayZ>\!Workshop\@DayZ_MCP\Addons\DayZ_MCP.pbo`. Set
 `DAYZ_TOOLS_PATH` if DayZ Tools are not under `C:\Program Files (x86)`; the script names
 every path it tried before failing. The script packs the git-tracked `addon/` of the

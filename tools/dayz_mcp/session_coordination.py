@@ -35,8 +35,10 @@ READ_ONLY_COMMANDS = frozenset(
         # because a phase write shares the same command name).
         "surface_query",
         "object_inspect",
+        "object_doors",
         "entities_query",
         "ui_tree",
+        "input_describe",
     }
 )
 MAX_OPERATION_PIN_S = 300.0
