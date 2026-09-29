@@ -1,21 +1,37 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import ntpath
 import os
 import re
+import shutil
+import subprocess
+import tempfile
+import time
 import unittest
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 import build_native_launcher
-from dayz_mcp import dayz_tools_paths, launcher_registry, native_bundle, native_child_announcement
+from dayz_mcp import (
+    authenticode,
+    dayz_tools_paths,
+    launcher_registry,
+    native_bundle,
+    native_child_announcement,
+)
 from dayz_mcp.dayz_tools_paths import addon_helper_exes
 from dayz_mcp.native_broker_protocol import BrokerKind
 from dayz_mcp.native_child_announcement import ChildAnnouncement, ChildAnnouncementDecoder
 from dayz_mcp.request_path_authority import PathIdentity
-from tests._bundle_paths import requires_built_bundle, requires_closure_manifest
+from tests._bundle_paths import (
+    requires_built_bundle,
+    requires_closure_manifest,
+    requires_installed_steam,
+)
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -531,6 +547,712 @@ class Fb19b5ToolsLayoutTest(unittest.TestCase):
                             self.assertTrue(
                                 authority.approve_announced_process(handle, announcement)
                             )
+
+
+def _canonical_json(value: dict[str, object]) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
+    ).encode("utf-8")
+
+
+def _sha256(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest().upper()
+
+
+def _sealed_root(path: str) -> dict[str, object]:
+    identity = {"file_id": "AB" * 16, "volume_serial_number": 1}
+    return {
+        "allow_root_junction": False,
+        "handle_path": path,
+        "identity": identity,
+        "path": path,
+        "resolved_identity": identity,
+        "resolved_path": path,
+        "root_reparse_tag": 0,
+    }
+
+
+def _write_loadable_bundle(root: Path, external_dir: Path) -> tuple[Path, ...]:
+    """A bundle load_verified_bundle accepts, sealed against this tree's sources.
+
+    External closure entries are fixture files under external_dir, not the
+    machine's DayZ Tools. The caller patches native_bundle._external_paths to
+    those paths for the duration of the load.
+    """
+    package = Path(native_bundle.__file__).resolve().parent
+    members = {
+        "__main__.py": b"\n",
+        "dayz_mcp/__init__.py": (package / "__init__.py").read_bytes(),
+    }
+    for name in native_bundle._APP_PACKAGED_MODULES:
+        members[f"dayz_mcp/{name}"] = (package / name).read_bytes()
+    if set(members) != set(native_bundle._APP_MEMBERS):
+        raise AssertionError("app.pyz members drifted from _APP_MEMBERS")
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "src").mkdir()
+    app_main = b"app-main\n"
+    launcher_source = b"launcher\n"
+    (root / "src" / "app_main.py").write_bytes(app_main)
+    (root / "src" / "launcher.cpp").write_bytes(launcher_source)
+    policy = _canonical_json(
+        {
+            "format_version": 1,
+            "projects": [
+                {
+                    "default_base_mods": [],
+                    "default_source": _sealed_root(r"C:\Windows"),
+                    "dev_root": _sealed_root(r"C:\Windows"),
+                    "mission_roots": [_sealed_root(r"C:\Windows")],
+                    "mod": "Example",
+                    "mod_roots": [_sealed_root(r"C:\Windows")],
+                }
+            ],
+        }
+    )
+    worker_runtime = _canonical_json({"format_version": 1})
+    (root / "request-policy.json").write_bytes(policy)
+    (root / "worker-runtime.json").write_bytes(worker_runtime)
+    archive_path = root / "app.pyz"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for name in sorted(members):
+            info = zipfile.ZipInfo(filename=name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            archive.writestr(info, members[name])
+    build_contract = _canonical_json(
+        {
+            "builder_sha256": "11" * 32,
+            "dependency_lock_sha256": "22" * 32,
+            "format_version": 1,
+            "sources": {
+                "app_main.py": _sha256(app_main),
+                "launcher.cpp": _sha256(launcher_source),
+            },
+        }
+    )
+    (root / "build-contract.json").write_bytes(build_contract)
+    bundle_files = {
+        "app.pyz": archive_path.read_bytes(),
+        "build-contract.json": build_contract,
+        "request-policy.json": policy,
+        "src/app_main.py": app_main,
+        "src/launcher.cpp": launcher_source,
+        "worker-runtime.json": worker_runtime,
+    }
+    entries: list[dict[str, object]] = []
+    for relative, raw in bundle_files.items():
+        entries.append(
+            {
+                "kind": "bundle",
+                "path": relative,
+                "sha256": _sha256(raw),
+                "size": len(raw),
+            }
+        )
+    external_dir.mkdir(parents=True, exist_ok=True)
+    externals: list[Path] = []
+    for name in ("fixture.exe", "fixture.dll", "fixture.txt"):
+        written = external_dir / name
+        written.write_bytes(b"sealed-external:" + name.encode("ascii"))
+        externals.append(Path(ntpath.normpath(str(written.resolve(strict=True)))))
+    for external in externals:
+        info = external.stat()
+        entries.append(
+            {
+                "identity": {
+                    "file_id": native_bundle._manifest_file_id(info),
+                    "volume_serial_number": int(info.st_dev),
+                },
+                "kind": "external",
+                "path": ntpath.normpath(str(external)),
+                "sha256": _sha256(external.read_bytes()),
+                "size": int(info.st_size),
+            }
+        )
+    entries.sort(key=lambda item: (str(item["kind"]), str(item["path"]).casefold()))
+    source_hashes = {
+        key: _sha256((package / module).read_bytes())
+        for key, module in native_bundle._HASHED_MODULES.items()
+    }
+    manifest = _canonical_json(
+        {
+            "bundle_id": "dayz-test-v1",
+            "entries": entries,
+            "format_version": 1,
+            "request_policy_sha256": _sha256(policy),
+            "worker_runtime_sha256": _sha256(worker_runtime),
+            **source_hashes,
+        }
+    )
+    (root / "closure-manifest.json").write_bytes(manifest)
+    marker = b"DAYZ_MCP_MANIFEST_SHA256=" + _sha256(manifest).encode("ascii")
+    executable = b"MZ" + marker
+    (root / "dayz-test-launcher.exe").write_bytes(executable)
+    fingerprint = {
+        "app_pyz_sha256": _sha256(bundle_files["app.pyz"]),
+        "manifest_sha256": _sha256(manifest),
+        "pe_sha256": _sha256(executable),
+        "request_policy_sha256": _sha256(policy),
+    }
+    receipt = _canonical_json(
+        {
+            "build_contract_sha256": _sha256(build_contract),
+            "builds": [
+                {"mode": mode, **fingerprint} for mode in native_bundle._REPRODUCIBILITY_MODES
+            ],
+            "format_version": 2,
+            "reproducible": True,
+        }
+    )
+    (root / "reproducibility.json").write_bytes(receipt)
+    return tuple(externals)
+
+
+class AddonTreeSteamDllTest(unittest.TestCase):
+    _STEAM = r"C:\Program Files (x86)\Steam"
+    _NAMES = frozenset({"steamclient.dll", "tier0_s.dll"})
+    _INSTALL_IDENTITY = PathIdentity(4, "CD" * 16)
+    _FILE_IDENTITY = PathIdentity(1, "AB" * 16)
+
+    def _authority(self, **overrides: object) -> native_bundle.DebugImageAuthority:
+        fields: dict[str, object] = {
+            "process_identities": frozenset(),
+            "module_identities": frozenset(),
+            "system_directory": r"C:\Windows\System32",
+            "steam_install_directory": self._STEAM,
+            "steam_client_dll_names": self._NAMES,
+            "steam_install_identity": self._INSTALL_IDENTITY,
+        }
+        fields.update(overrides)
+        return native_bundle.DebugImageAuthority(**fields)
+
+    def _approve(
+        self,
+        authority: native_bundle.DebugImageAuthority,
+        path: str,
+        *,
+        signed: bool = True,
+        after_identity: PathIdentity | None = None,
+        directory_identity: PathIdentity | None = None,
+    ) -> bool:
+        file_identity = self._FILE_IDENTITY
+        with patch.object(
+            native_bundle,
+            "_file_identity",
+            side_effect=[file_identity, after_identity or file_identity],
+        ), patch.object(
+            native_bundle, "_final_handle_path", return_value=path
+        ), patch.object(
+            native_bundle,
+            "_directory_identity",
+            return_value=(
+                authority.steam_install_identity
+                if directory_identity is None
+                else directory_identity
+            ),
+        ), patch.object(
+            native_bundle, "_path_identity", return_value=file_identity
+        ), patch.object(
+            native_bundle, "_valve_signature_of_handle", return_value=signed
+        ):
+            return authority.approve_addon_tree_module(11)
+
+    def test_measured_basenames_are_the_closed_set(self) -> None:
+        self.assertEqual(
+            native_bundle._ADDON_TREE_STEAM_CLIENT_DLLS,
+            frozenset(
+                {
+                    "cserhelper.dll",
+                    "gameoverlayrenderer.dll",
+                    "gameoverlayrenderer64.dll",
+                    "steamclient.dll",
+                    "tier0_s.dll",
+                    "vstdlib_s.dll",
+                }
+            ),
+        )
+
+    def test_listed_dll_in_the_steam_directory_is_approved(self) -> None:
+        authority = self._authority()
+        listed = self._STEAM + r"\steamclient.dll"
+        self.assertTrue(self._approve(authority, listed))
+        self.assertTrue(self._approve(authority, listed.upper()))
+        with patch.object(
+            native_bundle, "_file_identity", return_value=self._FILE_IDENTITY
+        ), patch.object(native_bundle, "_final_handle_path", return_value=listed):
+            self.assertFalse(authority.approve_debug_image(11, event_kind="LOAD_DLL"))
+        self.assertFalse(authority.approve_addon_tree_module(0))
+        self.assertFalse(authority.approve_addon_tree_module(True))  # type: ignore[arg-type]
+
+    def test_valve_signature_and_directory_identity_are_required(self) -> None:
+        authority = self._authority()
+        listed = self._STEAM + r"\steamclient.dll"
+        self.assertFalse(self._approve(authority, listed, signed=False))
+        self.assertFalse(
+            self._approve(
+                authority,
+                listed,
+                directory_identity=PathIdentity(9, "11" * 16),
+            )
+        )
+        self.assertFalse(
+            self._approve(
+                authority,
+                listed,
+                after_identity=PathIdentity(2, "22" * 16),
+            )
+        )
+        self.assertFalse(
+            self._approve(
+                self._authority(steam_install_identity=None),
+                listed,
+            )
+        )
+
+    def test_unlisted_dll_in_the_steam_directory_is_rejected(self) -> None:
+        authority = self._authority()
+        self.assertFalse(
+            self._approve(authority, self._STEAM + r"\steamclient64.dll")
+        )
+        self.assertFalse(self._approve(authority, self._STEAM + r"\steamclient.exe"))
+
+    def test_listed_name_outside_the_steam_directory_is_rejected(self) -> None:
+        authority = self._authority()
+        outside = (
+            r"C:\Users\guill\AppData\Local\Temp\steamclient.dll",
+            r"C:\Program Files (x86)\SteamSibling\steamclient.dll",
+            r"C:\Program Files (x86)\Steam\..\Temp\steamclient.dll",
+            r"C:\Program Files (x86)\Steam\..\Steam\steamclient.dll",
+            self._STEAM + r"\steamapps\steamclient.dll",
+            self._STEAM + r"\bin\steamclient.dll",
+        )
+        for path in outside:
+            with self.subTest(path=path):
+                self.assertFalse(self._approve(authority, path))
+
+    def test_every_subdirectory_including_bin_is_rejected(self) -> None:
+        authority = self._authority()
+        self.assertNotIn(
+            "steam_client_dll_directories",
+            native_bundle.DebugImageAuthority.__dataclass_fields__,
+        )
+        for path in (
+            self._STEAM + r"\bin\steamclient.dll",
+            self._STEAM + r"\bin\nested\steamclient.dll",
+            self._STEAM + r"\steamapps\steamclient.dll",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(self._approve(authority, path))
+        with self.assertRaises(TypeError):
+            self._authority(steam_client_dll_directories=frozenset({self._STEAM + r"\bin"}))
+
+    def test_unresolved_steam_directory_disables_the_rule(self) -> None:
+        authority = self._authority(steam_install_directory=None)
+        self.assertFalse(
+            self._approve(authority, self._STEAM + r"\steamclient.dll")
+        )
+        with patch.object(
+            native_bundle, "_resolve_addon_tree_steam_directory", return_value=None
+        ):
+            directory, names, identity = native_bundle._addon_tree_steam_rule()
+        self.assertIsNone(directory)
+        self.assertEqual(names, frozenset())
+        self.assertIsNone(identity)
+        disabled = self._authority(
+            steam_install_directory=directory,
+            steam_client_dll_names=names,
+            steam_install_identity=identity,
+        )
+        self.assertFalse(
+            self._approve(disabled, self._STEAM + r"\steamclient.dll")
+        )
+
+    def test_bundle_load_stores_the_resolved_steam_rule(self) -> None:
+        source = Path(native_bundle.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("from dayz_mcp.steam_preflight", source)
+        self.assertNotIn("import steam_preflight", source)
+        pinned = native_bundle._PinnedSteamInstall(
+            self._STEAM, self._INSTALL_IDENTITY
+        )
+        listed = self._STEAM + r"\steamclient.dll"
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = base / "bundle"
+            externals = _write_loadable_bundle(root, base / "externals")
+            entry = launcher_registry._create_registry_entry_for_test(
+                "dayz-test-v1", root, "dayz-test-launcher.exe"
+            )
+            with launcher_registry._open_registry_entry_for_test(entry) as opened:
+                with patch.object(
+                    native_bundle,
+                    "_external_paths",
+                    return_value=frozenset(
+                        ntpath.normcase(str(path)) for path in externals
+                    ),
+                ), patch.object(
+                    native_bundle,
+                    "_resolve_addon_tree_steam_directory",
+                    return_value=pinned,
+                ):
+                    with native_bundle.load_verified_bundle(opened) as verified:
+                        authority = verified.debug_image_authority
+                        self.assertEqual(authority.steam_install_directory, self._STEAM)
+                        self.assertEqual(
+                            authority.steam_client_dll_names,
+                            native_bundle._ADDON_TREE_STEAM_CLIENT_DLLS,
+                        )
+                        self.assertEqual(
+                            authority.steam_install_identity, self._INSTALL_IDENTITY
+                        )
+                        self.assertTrue(self._approve(authority, listed))
+                        self.assertFalse(
+                            self._approve(
+                                authority, self._STEAM + r"\bin\steamclient.dll"
+                            )
+                        )
+                        with patch.object(
+                            native_bundle,
+                            "_file_identity",
+                            return_value=self._FILE_IDENTITY,
+                        ), patch.object(
+                            native_bundle, "_final_handle_path", return_value=listed
+                        ):
+                            self.assertFalse(
+                                authority.approve_debug_image(
+                                    11, event_kind="LOAD_DLL"
+                                )
+                            )
+
+    def test_steam_resolution_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            steam_exe = directory / "steam.exe"
+            steam_exe.write_bytes(b"steam-image")
+            other_dir = directory / "other"
+            other_dir.mkdir()
+            other_exe = other_dir / "steam.exe"
+            other_exe.write_bytes(b"other-steam-image")
+            image = str(steam_exe)
+            other = str(other_exe)
+            registry = image.replace("\\", "/")
+
+            class Provider:
+                def __init__(
+                    self, pids: tuple[object, ...], images: dict[int, object]
+                ) -> None:
+                    self._pids = pids
+                    self._images = images
+                    self._calls = 0
+
+                def steam_process_pids(self) -> tuple[object, ...]:
+                    if self._pids == ("raise",):
+                        raise OSError("unreadable")
+                    return self._pids
+
+                def process_image_path(self, pid: int) -> object:
+                    self._calls += 1
+                    image_path = self._images[pid]
+                    if image_path == "raise":
+                        raise OSError("unreadable")
+                    if type(image_path) is tuple:
+                        return image_path[min(self._calls - 1, len(image_path) - 1)]
+                    return image_path
+
+            class Host:
+                def __init__(self, executable: object) -> None:
+                    self._executable = executable
+
+                def steam_executable(self) -> object:
+                    if self._executable == "raise":
+                        raise OSError("unreadable")
+                    return self._executable
+
+            def resolve(
+                pids: tuple[object, ...],
+                images: dict[int, object],
+                registry_value: object,
+            ) -> native_bundle._PinnedSteamInstall | None:
+                return native_bundle._resolve_addon_tree_steam_directory(
+                    provider=Provider(pids, images),
+                    host=Host(registry_value),
+                )
+
+            with patch.object(
+                native_bundle, "_valve_signature_of_handle", return_value=True
+            ):
+                agreed = resolve((4,), {4: image}, registry)
+                self.assertIsInstance(agreed, native_bundle._PinnedSteamInstall)
+                assert agreed is not None
+                self.assertEqual(
+                    ntpath.normcase(agreed.directory),
+                    ntpath.normcase(str(directory)),
+                )
+                self.assertEqual(
+                    agreed.identity,
+                    native_bundle._directory_identity(agreed.directory),
+                )
+                self.assertIsNone(resolve((), {}, image))
+                self.assertIsNone(resolve((4,), {4: image}, None))
+                self.assertIsNone(resolve((), {}, None))
+                self.assertIsNone(resolve((), {}, r"C:\missing\steam.exe"))
+                self.assertIsNone(resolve(("raise",), {}, image))
+                self.assertIsNone(resolve((4,), {4: "raise"}, image))
+                self.assertIsNone(
+                    resolve((4,), {4: r"C:\Windows\notepad.exe"}, None)
+                )
+                self.assertIsNone(
+                    resolve((4, 5), {4: image, 5: image}, image)
+                )
+                self.assertIsNone(resolve((4, 5), {4: image, 5: other}, None))
+                self.assertIsNone(resolve((4,), {4: image}, other))
+                self.assertIsNone(
+                    resolve((4,), {4: (image, other)}, image)
+                )
+                self.assertIsNone(resolve((0,), {}, None))
+                self.assertIsNone(resolve(tuple(range(1, 10)), {}, None))
+                self.assertIsNone(resolve((), {}, "raise"))
+                self.assertIsNone(resolve((4,), {4: image}, "raise"))
+            with patch.object(
+                native_bundle, "_valve_signature_of_handle", return_value=False
+            ):
+                self.assertIsNone(resolve((4,), {4: image}, image))
+            with patch.object(
+                native_bundle, "_valve_signature_of_handle", return_value=True
+            ), patch.object(native_bundle, "_directory_identity", return_value=None):
+                self.assertIsNone(resolve((4,), {4: image}, image))
+
+    def test_held_steam_image_cannot_be_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            image = directory / "steam.exe"
+            held = directory / "held.exe"
+            image.write_bytes(b"steam-image")
+            seen: dict[str, OSError | None] = {"error": None}
+
+            def signed(file_handle: int, path: str) -> bool:
+                try:
+                    os.replace(image, held)
+                except OSError as error:
+                    seen["error"] = error
+                return True
+
+            class Provider:
+                def steam_process_pids(self) -> tuple[int, ...]:
+                    return (4,)
+
+                def process_image_path(self, pid: int) -> str:
+                    return str(image)
+
+            class Host:
+                def steam_executable(self) -> str:
+                    return str(image)
+
+            with patch.object(
+                native_bundle, "_valve_signature_of_handle", side_effect=signed
+            ):
+                pinned = native_bundle._resolve_addon_tree_steam_directory(
+                    provider=Provider(), host=Host()
+                )
+            self.assertIsInstance(seen["error"], OSError)
+            assert seen["error"] is not None
+            self.assertEqual(seen["error"].winerror, 32)
+            self.assertTrue(image.is_file())
+            self.assertFalse(held.exists())
+            self.assertIsNotNone(pinned)
+
+    def test_live_image_swap_during_the_query_does_not_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            running = directory / "steam.exe"
+            held = directory / "held-cmd.exe"
+            replacement = directory / "signed-steam.exe"
+            shutil.copyfile(r"C:\Windows\System32\cmd.exe", running)
+            replacement.write_bytes(b"replacement-not-the-running-image")
+            process = subprocess.Popen(
+                [str(running), "/Q", "/K"],
+                cwd=directory,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            try:
+                reader = native_bundle._LiveSteamProcessReader()
+                ready = False
+                for _ in range(50):
+                    if process.poll() is not None:
+                        self.fail("test process exited early")
+                    try:
+                        reader.process_image_path(process.pid)
+                    except OSError:
+                        time.sleep(0.05)
+                    else:
+                        ready = True
+                        break
+                self.assertTrue(ready)
+
+                class Race:
+                    def __init__(self) -> None:
+                        self.swapped = False
+
+                    def steam_process_pids(self) -> tuple[int, ...]:
+                        return (process.pid,)
+
+                    def process_image_path(self, pid: int) -> str:
+                        path = reader.process_image_path(pid)
+                        if not self.swapped:
+                            os.replace(running, held)
+                            os.replace(replacement, running)
+                            self.swapped = True
+                        return path
+
+                class Host:
+                    def steam_executable(self) -> str:
+                        return str(running)
+
+                race = Race()
+                with patch.object(
+                    native_bundle, "_valve_signature_of_handle", return_value=True
+                ):
+                    pinned = native_bundle._resolve_addon_tree_steam_directory(
+                        provider=race, host=Host()
+                    )
+                self.assertTrue(race.swapped)
+                self.assertIsNone(process.poll())
+                self.assertFalse(authenticode.is_valve_signed(str(held)))
+                self.assertIsNone(pinned)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                process.wait(timeout=10)
+                if process.stdin is not None:
+                    process.stdin.close()
+
+    @requires_installed_steam
+    def test_unsigned_handle_is_rejected_when_the_path_is_swapped(self) -> None:
+        real = Path(r"C:\Program Files (x86)\Steam\steamclient.dll")
+        self.assertTrue(real.is_file())
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            module = directory / "steamclient.dll"
+            held = directory / "held-unsigned.dll"
+            signed = directory / "signed-copy.dll"
+            module.write_bytes(b"unsigned payload in debug event")
+            shutil.copyfile(real, signed)
+            handle = native_bundle._open_share_read(str(module))
+            self.assertIsNotNone(handle)
+            assert handle is not None
+            final = native_bundle._final_handle_path(handle)
+            parent = ntpath.dirname(final)
+            pinned = native_bundle._directory_identity(parent)
+            self.assertIsInstance(pinned, PathIdentity)
+            authority = self._authority(
+                steam_install_directory=parent,
+                steam_install_identity=pinned,
+                steam_client_dll_names=frozenset({"steamclient.dll"}),
+            )
+            before = native_bundle._file_identity(handle)
+            seen = {"calls": 0, "path_valve": False}
+
+            def swap(file_handle: int, *, path: str) -> bool:
+                seen["calls"] += 1
+                os.replace(module, held)
+                os.replace(signed, module)
+                try:
+                    seen["path_valve"] = authenticode.is_valve_signed(path)
+                    return authenticode.is_valve_signed_handle(file_handle, path=path)
+                finally:
+                    os.replace(module, signed)
+                    os.replace(held, module)
+
+            try:
+                with patch.object(
+                    native_bundle, "is_valve_signed_handle", side_effect=swap
+                ):
+                    approved = authority.approve_addon_tree_module(handle)
+                self.assertEqual(native_bundle._file_identity(handle), before)
+            finally:
+                native_bundle._close_kernel_handle(handle)
+            self.assertFalse(approved)
+            self.assertEqual(seen["calls"], 1)
+            self.assertTrue(seen["path_valve"])
+            self.assertFalse(authenticode.is_valve_signed(str(module)))
+
+    def test_steam_image_rejects_unsigned_handle_when_its_path_is_swapped(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            image = directory / "steam.exe"
+            held = directory / "held-unsigned.exe"
+            image.write_bytes(b"unsigned steam image")
+            seen: dict[str, object] = {"calls": 0, "error": None}
+
+            def swap(file_handle: int, *, path: str) -> bool:
+                seen["calls"] = int(seen["calls"]) + 1
+                try:
+                    os.replace(image, held)
+                except OSError as error:
+                    seen["error"] = error
+                return authenticode.is_valve_signed_handle(file_handle, path=path)
+
+            class Provider:
+                def steam_process_pids(self) -> tuple[int, ...]:
+                    return (4,)
+
+                def process_image_path(self, pid: int) -> str:
+                    return str(image)
+
+            class Host:
+                def steam_executable(self) -> str:
+                    return str(image)
+
+            with patch.object(
+                native_bundle, "is_valve_signed_handle", side_effect=swap
+            ):
+                pinned = native_bundle._resolve_addon_tree_steam_directory(
+                    provider=Provider(), host=Host()
+                )
+            self.assertIsNone(pinned)
+            self.assertEqual(seen["calls"], 1)
+            self.assertIsInstance(seen["error"], OSError)
+            assert isinstance(seen["error"], OSError)
+            self.assertEqual(seen["error"].winerror, 32)
+            self.assertTrue(image.is_file())
+            self.assertFalse(held.exists())
+
+    @requires_installed_steam
+    def test_attributes_only_handle_is_approved_by_the_same_file_id(self) -> None:
+        dll = self._STEAM + r"\steamclient.dll"
+        pinned = native_bundle._directory_identity(self._STEAM)
+        self.assertIsInstance(pinned, PathIdentity)
+        authority = self._authority(
+            steam_client_dll_names=native_bundle._ADDON_TREE_STEAM_CLIENT_DLLS,
+            steam_install_identity=pinned,
+        )
+        readable = native_bundle._open_share_read(dll)
+        self.assertIsNotNone(readable)
+        assert readable is not None
+        try:
+            self.assertTrue(authority.approve_addon_tree_module(readable))
+        finally:
+            native_bundle._close_kernel_handle(readable)
+        attributes = native_bundle._path_kernel32.CreateFileW(
+            dll,
+            native_bundle._FILE_READ_ATTRIBUTES,
+            native_bundle._FILE_SHARE_READ
+            | native_bundle._FILE_SHARE_WRITE
+            | native_bundle._FILE_SHARE_DELETE,
+            None,
+            native_bundle._OPEN_EXISTING,
+            native_bundle._FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        numeric = native_bundle._usable_handle(attributes)
+        self.assertIsNotNone(numeric)
+        assert numeric is not None
+        try:
+            self.assertIsNone(native_bundle._duplicate_read(numeric))
+            self.assertTrue(authority.approve_addon_tree_module(numeric))
+        finally:
+            native_bundle._close_kernel_handle(numeric)
 
 
 if __name__ == "__main__":

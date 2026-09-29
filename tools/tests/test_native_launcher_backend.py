@@ -34,13 +34,16 @@ class _ImageAuthority:
         approved: bool = True,
         child_approved: bool = True,
         helper_approved: bool = True,
+        addon_tree_approved: bool = False,
     ) -> None:
         self.approved = approved
         self.child_approved = child_approved
         self.helper_approved = helper_approved
+        self.addon_tree_approved = addon_tree_approved
         self.calls: list[tuple[int, str]] = []
         self.child_calls: list[tuple[int, object]] = []
         self.helper_calls: list[int] = []
+        self.addon_tree_calls: list[int] = []
         self.process_descriptors = (
             _SealedAddonBuilder(_ADDON_BUILDER_ANNOUNCE.decode("utf-8")),
         )
@@ -56,6 +59,10 @@ class _ImageAuthority:
     def approve_addon_helper_process(self, file_handle: int) -> bool:
         self.helper_calls.append(file_handle)
         return self.helper_approved
+
+    def approve_addon_tree_module(self, file_handle: int) -> bool:
+        self.addon_tree_calls.append(file_handle)
+        return self.addon_tree_approved
 
     @property
     def debug_image_authority(self) -> "_ImageAuthority":
@@ -2025,6 +2032,101 @@ class NativeDebugOwnershipTests(unittest.TestCase):
                         if item == "continue:703:704"
                     ]
                     self.assertLess(fake.events.index("close:501"), continue_indices[1])
+
+    def test_steam_dll_rule_runs_only_for_an_addon_tree_load(self) -> None:
+        backend = self._backend()
+        addon_path = _ADDON_BUILDER_ANNOUNCE
+        scenarios = (
+            ("addon_builder", 900, True, 0, [804]),
+            ("addon_helper", 910, True, 0, [824]),
+            ("broker_root", 703, True, None, []),
+            ("unlisted_addon_builder", 900, False, None, [804]),
+            ("already_approved", 900, True, 0, []),
+        )
+        for name, load_pid, tree_approved, expected, tree_calls in scenarios:
+            with self.subTest(name=name):
+                fake = _FakeKernel32()
+                fake.pipe_bytes[23] = bytearray(
+                    _announcement_frame(kind=3, path=addon_path)
+                )
+                events = [
+                    backend.NativeDebugEvent(
+                        "CREATE_PROCESS", pid=703, tid=704,
+                        process_handle=801, thread_handle=802, file_handle=803,
+                    ),
+                    backend.NativeDebugEvent(
+                        "CREATE_PROCESS", pid=900, tid=901,
+                        process_handle=811, thread_handle=812, file_handle=813,
+                    ),
+                ]
+                completions = [
+                    (True, 6, 501, 703),
+                    (True, 6, 501, 900),
+                ]
+                if name == "addon_helper":
+                    events.append(
+                        backend.NativeDebugEvent(
+                            "CREATE_PROCESS", pid=910, tid=911,
+                            process_handle=821, thread_handle=822, file_handle=823,
+                        )
+                    )
+                    completions.append((True, 6, 501, 910))
+                normal_approved = name == "already_approved"
+                load_handle = 824 if name == "addon_helper" else 804
+                events.append(
+                    backend.NativeDebugEvent(
+                        "LOAD_DLL", pid=load_pid, tid=load_pid + 1, file_handle=load_handle,
+                    )
+                )
+                events.extend(
+                    (
+                        backend.NativeDebugEvent("EXIT_PROCESS", pid=900, tid=901, exit_code=0),
+                        backend.NativeDebugEvent("EXIT_PROCESS", pid=703, tid=704, exit_code=0),
+                    )
+                )
+                if name == "addon_helper":
+                    events.insert(
+                        -2,
+                        backend.NativeDebugEvent("EXIT_PROCESS", pid=910, tid=911, exit_code=0),
+                    )
+                completions.append((True, 4, 501, 0))
+                fake.completion_events = completions
+                fake.debug_events = events
+                authority = _ImageAuthority(
+                    approved=normal_approved,
+                    addon_tree_approved=tree_approved,
+                )
+                original = backend._kernel32
+                backend._kernel32 = fake
+                try:
+                    created = self._create(backend, fake)
+                    pipes = backend.NativeRuntimePipes(
+                        11, 21, 22, 12, 23, 13, 14, 24, 15, 25
+                    )
+                    if expected is None:
+                        with self.assertRaisesRegex(
+                            backend.NativeLauncherBackendError,
+                            "native_debug_gate_rejected",
+                        ):
+                            backend._supervise_created_launcher(
+                                created,
+                                canonical_request=b"{}",
+                                runtime_pipes=pipes,
+                                image_authority=authority,
+                                cancel_signal=threading.Event(),
+                            )
+                    else:
+                        result = backend._supervise_created_launcher(
+                            created,
+                            canonical_request=b"{}",
+                            runtime_pipes=pipes,
+                            image_authority=authority,
+                            cancel_signal=threading.Event(),
+                        )
+                        self.assertEqual(result, expected)
+                finally:
+                    backend._kernel32 = original
+                self.assertEqual(authority.addon_tree_calls, tree_calls)
 
     @slow_test
     def test_gate_rejection_preserves_fine_code_kind_and_pid(self) -> None:

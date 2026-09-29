@@ -164,6 +164,8 @@ class _DebugImageAuthority(Protocol):
 
     def approve_addon_helper_process(self, file_handle: int) -> bool: ...
 
+    def approve_addon_tree_module(self, file_handle: int) -> bool: ...
+
 
 class NativeLauncherBackendError(RuntimeError):
     """Stable-code launcher failure; optional local-only diagnostic detail.
@@ -1433,6 +1435,13 @@ def _supervise_created_launcher(
                         event.file_handle,
                         event_kind=event.kind,
                     )
+                    if (
+                        approved is not True
+                        and event.pid in addon_builder_pids | addon_helper_pids
+                    ):
+                        approved = image_authority.approve_addon_tree_module(
+                            event.file_handle
+                        )
                 except BaseException:
                     approved = False
                 event = replace(event, image_approved=approved is True)
