@@ -2,7 +2,9 @@
 
 One daemon thread. Each cycle re-reads ``idle-warden.json``. Absent, unreadable
 or anything other than ``{"enabled": true}`` is off: no lease, no adopt, no
-bridge command, no use_state change, and no lease expiry pass.
+bridge command, no use_state change, no lease expiry pass, and no touch of
+``adoption-unconfirmed.json``. A cycle that was already on and sees the file
+go off releases what it holds and closes nothing.
 
 When on, an ``abandoned`` run is warned and closed 60 s later unless someone
 reacts. A confirmed-dead client skips the warning. The lease is the normal
@@ -24,6 +26,7 @@ from dayz_mcp.process_lifecycle import (
     RUN_IDLE_CUT_S,
     _ACTIVE_STATES,
     ProcessLifecycle,
+    idle_destruction_guard,
 )
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 
@@ -171,17 +174,22 @@ class IdleWarden:
         self._human_mark: float | None = None
         self._launcher_mark: float | None = None
         self._closed = False
+        self._adoption_started = False
 
     def run_once(self) -> str:
+        self._adoption_started = False
         try:
             return self._cycle()
         finally:
-            self._release_unconfirmed_adoption()
+            if self._adoption_started:
+                self._release_unconfirmed_adoption()
 
     def _cycle(self) -> str:
         if not read_idle_warden_enabled(self.settings_path):
             if self.token or self.ticket_id:
                 self._drop_authority()
+                if self.token:
+                    return "release_pending"
             return "disabled"
         try:
             self.coordinator.expire_due()
@@ -200,8 +208,7 @@ class IdleWarden:
             return self._begin(candidate)
         except _Stopped:
             self._clear_closing()
-            self._release()
-            return "stopped"
+            return self._finish("stopped")
 
     def _begin(self, candidate: tuple[str, bool, str]) -> str:
         run_id, dead, launch = candidate
@@ -231,6 +238,9 @@ class IdleWarden:
 
     def _after_enqueue(self, run_id: str) -> str:
         self._hook("queued")
+        off = self._switch_off(run_id)
+        if off is not None:
+            return off
         if not self._still(run_id):
             self._cancel_ticket()
             return "cancelled"
@@ -252,12 +262,19 @@ class IdleWarden:
         self.lease_id = lease_id if isinstance(lease_id, str) else None
         self._clear_ticket()
         self._hook("granted")
+        off = self._switch_off(run_id)
+        if off is not None:
+            return off
         if not self._still(run_id):
             self._release()
             return "cancelled"
         return self._own(run_id)
 
     def _own(self, run_id: str) -> str:
+        off = self._switch_off(run_id)
+        if off is not None:
+            return off
+        self._adoption_started = True
         adopted = self.lifecycle.adopt_run(self.client, self.token, run_id)
         if not isinstance(adopted, dict) or adopted.get("ok") is not True:
             # A late human or uncertain sample reverts the owner after the
@@ -287,6 +304,9 @@ class IdleWarden:
 
     def _warn(self, run_id: str) -> str:
         self._hook("warning")
+        off = self._switch_off(run_id)
+        if off is not None:
+            return off
         if self._reacted(run_id) or self._drift(run_id):
             return self._abort(run_id)
         pin = self._pin(run_id)
@@ -301,6 +321,9 @@ class IdleWarden:
             return self._warning_failed(run_id, detail)
         for uid in uids:
             self._hook("before_notify")
+            off = self._switch_off(run_id)
+            if off is not None:
+                return off
             if self._reacted(run_id) or self._drift(run_id):
                 return self._abort(run_id)
             if self._pin(run_id) != pin:
@@ -317,6 +340,9 @@ class IdleWarden:
         deadline = self.monotonic() + COUNTDOWN_S
         self._hook("countdown")
         while self.monotonic() < deadline:
+            off = self._switch_off(run_id)
+            if off is not None:
+                return off
             if not self._heartbeat():
                 return self._fail(run_id, "lease_lost")
             if self._reacted(run_id) or self._drift(run_id):
@@ -331,12 +357,18 @@ class IdleWarden:
             if remaining <= 0.0:
                 break
             self._sleep(min(self.poll_s, remaining))
+        off = self._switch_off(run_id)
+        if off is not None:
+            return off
         if self._reacted(run_id) or self._drift(run_id):
             return self._abort(run_id)
         return self._close(run_id)
 
     def _close(self, run_id: str) -> str:
         self._hook("revalidate_close")
+        off = self._switch_off(run_id)
+        if off is not None:
+            return off
         if not self._dead:
             sample = self._checkpoint(run_id)
             if sample == "human_input":
@@ -354,7 +386,24 @@ class IdleWarden:
         if current != self._baseline:
             return self._fail(run_id, "process_changed")
         self.lifecycle.arm_idle_retirement(run_id, "orderly")
-        closed = self.lifecycle.close_run(self.client, self.token, run_id)
+        off = self._switch_off(run_id)
+        if off is not None:
+            return off
+        if self._reacted(run_id):
+            return self._abort(run_id)
+        guard = {
+            "expected": self._baseline,
+            "allow_gone": False,
+            "human_at": self.lifecycle.human_input_at(run_id),
+            "launcher_at": self.lifecycle.launcher_request_at(run_id),
+            "wall": self.wall(),
+            "operation": "close",
+            "session_id": self.client.session_id,
+        }
+        with idle_destruction_guard(guard):
+            closed = self.lifecycle.close_run(self.client, self.token, run_id)
+        if isinstance(closed, dict) and closed.get("error") == "anchor_changed":
+            return self._abort(run_id)
         if not isinstance(closed, dict) or "error" in closed:
             self.lifecycle.clear_idle_retirement(run_id)
             detail = "close_failed"
@@ -380,17 +429,18 @@ class IdleWarden:
                 break
             self.sleep(min(self.poll_s, remaining))
         if self._state(run_id) == "EXITED":
-            self._release()
-            return "orderly"
+            return self._finish("orderly")
         if self._gone(run_id):
             reaped = self.lifecycle.reap_dead_run(self.client, self.token, run_id)
             if (
                 isinstance(reaped, dict) and reaped.get("ok") is True
             ) or self._state(run_id) == "EXITED":
-                self._release()
-                return "orderly"
+                return self._finish("orderly")
             return self._fail(run_id, "reap_failed")
         self._hook("revalidate_stop")
+        off = self._switch_off(run_id)
+        if off is not None:
+            return off
         if not self._heartbeat():
             return self._fail(run_id, "lease_lost")
         reason = self._gate(run_id, allow_gone=True)
@@ -400,14 +450,23 @@ class IdleWarden:
         if current is None or not set(current) <= set(self._baseline):
             return self._fail(run_id, "process_changed")
         self.lifecycle.arm_idle_retirement(run_id, "fallback_stop")
-        stopped = self.lifecycle.stop_run(self.client, self.token, run_id)
+        off = self._switch_off(run_id)
+        if off is not None:
+            return off
+        guard = {
+            "expected": self._baseline,
+            "allow_gone": True,
+            "operation": "stop",
+            "session_id": self.client.session_id,
+        }
+        with idle_destruction_guard(guard):
+            stopped = self.lifecycle.stop_run(self.client, self.token, run_id)
         if (
             isinstance(stopped, dict)
             and stopped.get("ok") is True
             and stopped.get("state") == "EXITED"
         ):
-            self._release()
-            return "fallback_stop"
+            return self._finish("fallback_stop")
         detail = "stop_failed"
         if isinstance(stopped, dict) and isinstance(stopped.get("error"), str):
             detail = str(stopped["error"])
@@ -532,6 +591,10 @@ class IdleWarden:
         return None
 
     def _reacted(self, run_id: str) -> bool:
+        try:
+            self.lifecycle.note_queued_launcher_requests(when=self.wall())
+        except Exception:
+            return True
         human = self.lifecycle.human_input_at(run_id)
         if human is not None and human != self._human_mark:
             return True
@@ -599,19 +662,34 @@ class IdleWarden:
         return "not_adopted"
 
     def _release_unconfirmed_adoption(self) -> None:
-        """Drop adoption-unconfirmed.json when it names this warden and we do not own the run.
+        """Drop this cycle's adoption-unconfirmed.json when the adopt did not stick.
 
-        The lifecycle writes that marker just before a stranger's owner replace
-        and removes it when the adopt settles. A cycle that exits without the
-        owner must not leave the marker for startup to treat as a crash.
+        Only a cycle that reached ``adopt_run`` may touch the marker. A fresh
+        disabled pass leaves a pre-existing marker for startup recovery. The
+        settled trace is not deleted.
         """
 
+        if not self._adoption_started:
+            return
         lifecycle = self.lifecycle
         try:
             marker = lifecycle._adoption_marker_path()
         except Exception:
             return
-        if not isinstance(marker, Path) or not marker.is_file():
+        if not isinstance(marker, Path):
+            return
+        try:
+            with lifecycle._operation_lock:
+                self._release_unconfirmed_adoption_locked(lifecycle, marker)
+        except Exception:
+            return
+
+    def _release_unconfirmed_adoption_locked(
+        self, lifecycle: ProcessLifecycle, marker: Path
+    ) -> None:
+        """Caller holds ``_operation_lock``. Deletes only this cycle's marker."""
+
+        if not marker.is_file():
             return
         try:
             document = lifecycle._read_adoption_marker()
@@ -619,6 +697,7 @@ class IdleWarden:
             return
         if (
             not isinstance(document, dict)
+            or document.get("run_id") != self.run_id
             or document.get("owner_session_id") != self.client.session_id
         ):
             return
@@ -636,8 +715,7 @@ class IdleWarden:
         )
         if owns and lifecycle._open_adoption is not None:
             try:
-                with lifecycle._operation_lock:
-                    lifecycle._close_adoption_after_replace(self.client, run)
+                lifecycle._close_adoption_after_replace(self.client, run)
             except Exception:
                 return
             try:
@@ -697,8 +775,34 @@ class IdleWarden:
         self._clear_closing()
         self.lifecycle.clear_idle_retirement(run_id)
         self.lifecycle.audit_idle_timeout(self.client, run_id, "failed", detail)
-        self._release()
-        return "failed"
+        return self._finish("failed")
+
+    def _switch_off(self, run_id: str | None = None) -> str | None:
+        """None while the file still says enabled. Off or unreadable aborts the cycle.
+
+        Does not rewrite the idle clock and does not arm the warning block.
+        """
+
+        try:
+            enabled = read_idle_warden_enabled(self.settings_path)
+        except Exception:
+            enabled = False
+        if enabled:
+            return None
+        target = run_id if isinstance(run_id, str) else self.run_id
+        if isinstance(target, str):
+            self.lifecycle.clear_closing(target)
+            self.lifecycle.clear_idle_retirement(target)
+        if self.ticket_id:
+            self._cancel_ticket()
+        return self._finish("disabled")
+
+    def _finish(self, outcome: str) -> str:
+        """A normal outcome waits until the coordinator has confirmed the release."""
+
+        if not self._release():
+            return "release_pending"
+        return outcome
 
     def _release(self) -> bool:
         """True when the lease is no longer ours. A failed audit keeps it."""
@@ -809,13 +913,28 @@ def install_idle_warden(
     )
 
     def _loop() -> None:
-        while stop is None or not stop.is_set():
+        while True:
+            if (
+                stop is not None
+                and stop.is_set()
+                and not warden.token
+                and not warden.ticket_id
+            ):
+                return
             try:
                 warden.run_once()
             except Exception as exc:
                 log(f"WARDEN: pass failed: {exc}")
+            held = bool(warden.token or warden.ticket_id)
+            if stop is not None and stop.is_set():
+                if held:
+                    time.sleep(interval_s)
+                    continue
+                return
             if stop is not None:
                 if stop.wait(interval_s):
+                    if warden.token or warden.ticket_id:
+                        continue
                     return
             else:
                 time.sleep(interval_s)

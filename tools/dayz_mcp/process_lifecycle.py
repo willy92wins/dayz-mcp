@@ -3,6 +3,7 @@ from __future__ import annotations
 # Every transition into RUNNING_IDLE goes through the fence; the poll
 # re-validates after re-acquiring the lock.
 
+import contextvars
 import dataclasses
 import hashlib
 import json
@@ -34,6 +35,25 @@ from dayz_mcp.session_coordination import (
     ClientIdentity,
     SessionCoordinator,
 )
+
+
+# Set by the idle warden around close_run / stop_run. A wrapper that forwards
+# only the public arguments still runs the guarded body, because the
+# authorization travels with the calling thread. Applied only when the client
+# session matches, and only for the named operation.
+_IDLE_GUARD: contextvars.ContextVar[Mapping[str, object] | None] = contextvars.ContextVar(
+    "dayz_idle_guard",
+    default=None,
+)
+
+
+@contextmanager
+def idle_destruction_guard(guard: Mapping[str, object]):
+    token = _IDLE_GUARD.set(guard)
+    try:
+        yield
+    finally:
+        _IDLE_GUARD.reset(token)
 
 
 RUN_STATES = frozenset(
@@ -3595,6 +3615,13 @@ class ProcessLifecycle:
                 or run.state != "RUNNING"
             ):
                 return self._reject_reserved(authority, command, "run_not_adopted")
+            # The warden authorizes the whole set. A foreign, gone, or unknown
+            # process refuses the stop before any skip-and-continue.
+            stop_guard = self._warden_idle_guard(client, "stop")
+            if stop_guard is not None:
+                refusal = self._idle_destruction_refusal(run, stop_guard)
+                if refusal is not None:
+                    return self._reject_reserved(authority, command, refusal)
             owned: list[ProcessRecord] = []
             gone_pids: list[int] = []
             foreign_pids: list[int] = []
@@ -3680,6 +3707,10 @@ class ProcessLifecycle:
             if command_id is None:
                 return self._error("lease_invalid", 409)
             try:
+                if stop_guard is not None:
+                    refusal = self._idle_destruction_refusal(run, stop_guard)
+                    if refusal is not None:
+                        return {"error": refusal, "run_id": run_id}
                 self._retire_run_bindings(run_id, "stopped")
                 run.state = "STOPPING"
                 try:
@@ -3698,6 +3729,20 @@ class ProcessLifecycle:
                         terminated=0,
                     )
                 self._invalidate_box_cache()
+                if stop_guard is not None:
+                    current_run = self.manifest.get(run_id)
+                    watched = current_run if current_run is not None else run
+                    refusal = self._idle_destruction_refusal(watched, stop_guard)
+                    if refusal is not None:
+                        if watched.state == "STOPPING":
+                            watched.state = "RUNNING"
+                            try:
+                                self.manifest.replace(watched)
+                            except Exception:
+                                pass
+                            else:
+                                self._invalidate_box_cache()
+                        return {"error": refusal, "run_id": run_id}
                 terminated = 0
                 survivors = list(owned)
                 for record in list(owned):
@@ -3878,6 +3923,11 @@ class ProcessLifecycle:
                     or run.state != "RUNNING"
                 ):
                     return self._reject_reserved(authority, command, "run_not_adopted")
+                close_guard = self._warden_idle_guard(client, "close")
+                if close_guard is not None:
+                    refusal = self._idle_destruction_refusal(run, close_guard)
+                    if refusal is not None:
+                        return self._reject_reserved(authority, command, refusal)
                 owned: list[ProcessRecord] = []
                 for record in run.processes:
                     kind, reason = self._classify_registered_process(record)
@@ -3919,6 +3969,8 @@ class ProcessLifecycle:
                     return self._error("lease_invalid", 409)
                 committed = True
                 try:
+                    if close_guard is not None:
+                        return self._close_with_idle_guard(run, run_id, close_guard)
                     fns = getattr(self, "window_fns", None)
                     role_rows: dict[str, dict[str, object]] = {}
                     for record in owned:
@@ -4023,13 +4075,19 @@ class ProcessLifecycle:
         with self._activity_lock:
             self._launched_by.setdefault(self._activity_key(run_id), client)
 
-    def _stamp_queued_launcher_requests(self, clock: float) -> None:
+    def _stamp_queued_launcher_requests(
+        self, clock: float, *, strict: bool = False
+    ) -> None:
         reader = getattr(self.coordinator, "queued_session_ids", None)
         if not callable(reader):
+            if strict:
+                raise RuntimeError("launcher_queue_unreadable")
             return
         try:
             sessions = reader()
         except Exception:
+            if strict:
+                raise
             return
         if not sessions:
             return
@@ -4051,6 +4109,16 @@ class ProcessLifecycle:
                     changed = True
             if changed:
                 self._bump_box_revision_locked()
+
+    def note_queued_launcher_requests(self, *, when: float | None = None) -> None:
+        """Stamp runs whose launcher, by full session id, is waiting in the FIFO.
+
+        Does not scan the box and does not expire the queue. The warden calls
+        this from every reaction check, including the one inside close_run.
+        """
+
+        clock = time.time() if when is None else float(when)
+        self._stamp_queued_launcher_requests(clock, strict=True)
 
     def human_input_at(self, run_id: str) -> float | None:
         with self._activity_lock:
@@ -4193,6 +4261,146 @@ class ProcessLifecycle:
         if not buckets["owned"] and not buckets["gone"]:
             return "process_changed"
         return None
+
+    def _warden_idle_guard(
+        self, client: ClientIdentity, operation: str
+    ) -> Mapping[str, object] | None:
+        guard = _IDLE_GUARD.get()
+        if not isinstance(guard, dict):
+            return None
+        if guard.get("operation") != operation:
+            return None
+        if guard.get("session_id") != client.session_id:
+            return None
+        return guard
+
+    def _idle_destruction_refusal(
+        self, run: RunRecord, guard: Mapping[str, object]
+    ) -> str | None:
+        """None when the whole registered set still matches the warden's authorization.
+
+        Any foreign, unknown, or (when closing) gone process refuses the
+        operation. Callers must not then act on the processes that still match.
+        """
+
+        allow_gone = guard.get("allow_gone") is True
+        expected = guard.get("expected")
+        if not isinstance(expected, tuple):
+            return "process_changed"
+        buckets, reason = self._partition_registered_processes(run.processes)
+        if buckets["unknown"]:
+            return reason or "process_identity_mismatch"
+        if buckets["foreign"]:
+            return "process_identity_mismatch"
+        if buckets["gone"] and not allow_gone:
+            return "process_changed"
+        identity = lambda record: (
+            record.pid,
+            record.creation_time_utc,
+            record.executable_sha256,
+            record.command_line_sha256,
+            record.role,
+        )
+        if not allow_gone:
+            if not buckets["owned"]:
+                return "process_changed"
+            current = tuple(sorted(identity(record) for record in run.processes))
+            if current != expected:
+                return "process_changed"
+            return None
+        owned = tuple(
+            sorted(
+                identity(record)
+                for record in run.processes
+                if self._classify_registered_process(record)[0] == "owned"
+            )
+        )
+        if not set(owned) <= set(expected):
+            return "process_changed"
+        return None
+
+    def _idle_anchors_changed(self, run_id: str, guard: Mapping[str, object]) -> bool:
+        """True when human input or a launcher ticket moved since the warden decided.
+
+        The queue is stamped here, in memory, so a ticket does not depend on
+        some other caller reading the box. Doubt is a change: do not close.
+        """
+
+        wall = guard.get("wall")
+        when = (
+            float(wall)
+            if isinstance(wall, (int, float)) and not isinstance(wall, bool)
+            else None
+        )
+        try:
+            self.note_queued_launcher_requests(when=when)
+        except Exception:
+            return True
+        if "human_at" in guard and self.human_input_at(run_id) != guard.get("human_at"):
+            return True
+        if (
+            "launcher_at" in guard
+            and self.launcher_request_at(run_id) != guard.get("launcher_at")
+        ):
+            return True
+        return False
+
+    def _close_with_idle_guard(
+        self, run: RunRecord, run_id: str, guard: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Post WM_CLOSE only when the whole set and the anchors still match.
+
+        Windows are listed first. The identity check and the anchor check are
+        the last reads; the posts that follow do not touch the guard or the disk.
+        """
+
+        fns = getattr(self, "window_fns", None)
+        listed: list[tuple[ProcessRecord, list[tuple[int, int]]]] = []
+        for record in run.processes:
+            listed.append(
+                (
+                    record,
+                    window_close.list_visible_top_level_windows(
+                        (record.pid,), fns=fns
+                    ),
+                )
+            )
+        refusal = self._idle_destruction_refusal(run, guard)
+        if refusal is not None:
+            return {"error": refusal, "run_id": run_id}
+        if self._idle_anchors_changed(run_id, guard):
+            return {"error": "anchor_changed", "run_id": run_id}
+        rank = {"client": 0, "server": 1}
+        ordered = [
+            item
+            for _index, item in sorted(
+                enumerate(listed),
+                key=lambda item: (rank.get(item[1][0].role, 2), item[0]),
+            )
+        ]
+        role_rows: dict[str, dict[str, object]] = {}
+        for record, windows in ordered:
+            windows_found = len(windows)
+            windows_posted = 0
+            for hwnd, window_pid in windows:
+                if window_close.post_wm_close(hwnd, fns=fns, expected_pid=record.pid):
+                    windows_posted += 1
+                _ = window_pid
+            existing = role_rows.get(record.role)
+            if existing is None:
+                role_rows[record.role] = {
+                    "pid": record.pid,
+                    "windows_found": windows_found,
+                    "windows_posted": windows_posted,
+                }
+            else:
+                existing["windows_found"] = int(existing["windows_found"]) + windows_found
+                existing["windows_posted"] = (
+                    int(existing["windows_posted"]) + windows_posted
+                )
+        result: dict[str, object] = {"run_id": run_id}
+        result.update(role_rows)
+        return result
 
     def _client_is_launcher(self, client: ClientIdentity, run_id: str) -> bool:
         # Full session id, not the public prefix and not the pid. Rights last

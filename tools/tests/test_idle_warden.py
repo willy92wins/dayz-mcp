@@ -1287,33 +1287,222 @@ class IdleWardenTest(unittest.TestCase):
         self.assertEqual(settled["owner_session_id"], warden.client.session_id)
         self.assertEqual(self.row(time.time())["use_state"], "human")
 
+    def test_switch_off_during_countdown_and_before_stop_does_not_close(self) -> None:
+        for phase_name in ("countdown", "revalidate_stop"):
+            with self.subTest(phase=phase_name):
+                self.rebuild()
+                self.abandon()
+
+                def hook(name: str, _warden: IdleWarden, expected: str = phase_name) -> None:
+                    if name == expected:
+                        self.settings.write_text(
+                            '{"enabled": false}\n', encoding="utf-8"
+                        )
+
+                self.phases.append(hook)
+                result = self.drive()
+                self.assertEqual(result, "disabled")
+                self.assertEqual(self.guard.terminate_calls, [])
+                self.assertNotEqual(self.store.get("run-x").state, "EXITED")
+                self.assertIsNone(self.coordinator._active)
+                if phase_name == "countdown":
+                    self.assertEqual(self.windows.posted, [])
+
+    def test_launcher_enqueue_during_warning_countdown_and_close_cancels(self) -> None:
+        for phase_name in ("warning", "countdown", "revalidate_close", "close_audit"):
+            with self.subTest(phase=phase_name):
+                self.rebuild()
+                self.abandon()
+                self.lifecycle.remember_launcher("run-x", LAUNCHER)
+                seen: dict[str, object] = {}
+
+                def enqueue_launcher(tag: str = phase_name) -> None:
+                    status, body = self.coordinator.enqueue(
+                        LAUNCHER, "launch", f"real-launcher-{tag}"
+                    )
+                    seen["status"] = status
+                    seen["ticket"] = body.get("ticket") if isinstance(body, dict) else None
+
+                if phase_name == "close_audit":
+                    original_audit = self.lifecycle._audit
+
+                    def audit(event, client, reason, decision, **extra):
+                        if event == "lifecycle_close" and "status" not in seen:
+                            enqueue_launcher()
+                        return original_audit(event, client, reason, decision, **extra)
+
+                    self.lifecycle._audit = audit
+                else:
+
+                    def hook(name: str, _warden: IdleWarden, expected: str = phase_name) -> None:
+                        if name == expected:
+                            enqueue_launcher(expected)
+
+                    self.phases.append(hook)
+                result = self.drive()
+                self.assertEqual(seen.get("status"), 202)
+                self.assertIsInstance(seen.get("ticket"), str)
+                self.assertEqual(result, "countdown_aborted")
+                self.assertIsNotNone(self.lifecycle.launcher_request_at("run-x"))
+                self.assertEqual(self.windows.posted, [])
+                self.assertEqual(self.guard.terminate_calls, [])
+                self.assertIsNone(self.coordinator._active)
+                self.assertEqual(self.row(self.wall_value)["use_state"], "idle")
+                self.assertEqual(
+                    self.coordinator.queued_session_ids(), (LAUNCHER.session_id,)
+                )
+
+    def test_input_during_close_audit_does_not_post(self) -> None:
+        self.abandon()
+        original = self.lifecycle._audit
+        credited: list[str] = []
+
+        def audit(event, client, reason, decision, **extra):
+            if event == "lifecycle_close" and not credited:
+                credited.extend(self.human_input(time.time()))
+            return original(event, client, reason, decision, **extra)
+
+        self.lifecycle._audit = audit
+        self.phases.append(self.on_exit)
+        result = self.drive()
+        self.assertEqual(credited, ["run-x"])
+        self.assertEqual(result, "countdown_aborted")
+        self.assertEqual(self.windows.posted, [])
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertIsNone(self.coordinator._active)
+        stored = self.store.get("run-x")
+        self.assertEqual(stored.state, "RUNNING_IDLE")
+        self.assertIsNone(stored.owner_session_id)
+        self.assertEqual(self.row(time.time())["use_state"], "human")
+
+    def test_identity_change_inside_close_run_posts_nothing(self) -> None:
+        for where in ("before_call", "during_audit"):
+            with self.subTest(where=where):
+                self.rebuild()
+                self.abandon()
+                if where == "before_call":
+                    original_close = self.lifecycle.close_run
+
+                    def close_after_pid_reuse(client, token, run_id):
+                        self.make_foreign(801)
+                        return original_close(client, token, run_id)
+
+                    self.lifecycle.close_run = close_after_pid_reuse
+                else:
+                    original_audit = self.lifecycle._audit
+
+                    def audit(event, client, reason, decision, **extra):
+                        if event == "lifecycle_close":
+                            self.make_foreign(801)
+                        return original_audit(event, client, reason, decision, **extra)
+
+                    self.lifecycle._audit = audit
+                result = self.drive()
+                self.assertEqual(result, "failed")
+                self.assertEqual(self.windows.posted, [])
+                self.assertEqual(self.guard.terminate_calls, [])
+                stored = self.store.get("run-x")
+                self.assertEqual(stored.state, "RUNNING_IDLE")
+                self.assertEqual(len(stored.processes), 2)
+                self.assertIsNone(stored.owner_session_id)
+                self.assertIsNone(self.coordinator._active)
+
+    def test_identity_change_inside_stop_run_kills_nothing(self) -> None:
+        for where in ("before_call", "after_stopping"):
+            with self.subTest(where=where):
+                self.rebuild()
+                self.abandon()
+                if where == "before_call":
+                    original_stop = self.lifecycle.stop_run
+
+                    def stop_after_pid_reuse(client, token, run_id):
+                        self.make_foreign(801)
+                        return original_stop(client, token, run_id)
+
+                    self.lifecycle.stop_run = stop_after_pid_reuse
+                else:
+                    original_replace = self.store.replace
+                    flipped = {"done": False}
+
+                    def replace(run):
+                        result = original_replace(run)
+                        if not flipped["done"] and getattr(run, "state", None) == "STOPPING":
+                            flipped["done"] = True
+                            self.make_foreign(801)
+                        return result
+
+                    self.store.replace = replace
+                result = self.drive()
+                if where == "after_stopping":
+                    self.assertTrue(flipped["done"])
+                self.assertEqual(result, "failed")
+                self.assertEqual(self.guard.terminate_calls, [])
+                stored = self.store.get("run-x")
+                self.assertEqual(stored.state, "RUNNING_IDLE")
+                self.assertIsNone(stored.owner_session_id)
+                self.assertEqual(len(stored.processes), 2)
+                self.assertIsNone(self.coordinator._active)
+
     def test_exit_does_not_leave_the_adoption_marker(self) -> None:
+        # This cycle did not adopt. A pre-existing marker stays for startup recovery.
         self.abandon()
         warden = self.make_warden()
         marker = self.lifecycle._adoption_marker_path()
         self.assertIsNotNone(marker)
-        marker.write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "run_id": "run-x",
-                    "owner_session_id": warden.client.session_id,
-                    "owner_lease_id": "lease-leak",
-                    "token": 1,
-                    "invalidated": False,
-                    "invalidated_by": None,
-                }
-            ),
-            encoding="utf-8",
+        planted = json.dumps(
+            {
+                "version": 1,
+                "run_id": "run-x",
+                "owner_session_id": warden.client.session_id,
+                "owner_lease_id": "lease-leak",
+                "token": 1,
+                "invalidated": False,
+                "invalidated_by": None,
+            }
         )
+        marker.write_text(planted, encoding="utf-8")
         self.assertEqual(warden.run_once(), "disabled")
-        self.assertFalse(marker.exists())
+        self.assertTrue(marker.is_file())
+        self.assertEqual(marker.read_text(encoding="utf-8"), planted)
+        settled = self.lifecycle._adoption_settled_path()
+        self.assertIsNotNone(settled)
+        self.assertFalse(settled.exists())
+        self.assertFalse(self.settings.exists())
         stored = self.store.get("run-x")
         self.assertEqual(stored.state, "RUNNING_IDLE")
         self.assertIsNone(stored.owner_session_id)
         self.assertIsNone(self.coordinator._active)
         self.assertEqual(self.bridge.calls, [])
         self.assertEqual(self.windows.posted, [])
+
+    def test_release_failure_after_orderly_close_stays_pending(self) -> None:
+        self.abandon()
+        original = self.coordinator._arm_wal_locked
+
+        def arm(*args, **kwargs):
+            if kwargs.get("operation") == "release":
+                return False
+            return original(*args, **kwargs)
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "revalidate_close":
+                self.coordinator._arm_wal_locked = arm
+            self.on_exit(name, _warden)
+
+        self.phases.append(hook)
+        self.enable()
+        warden = self.make_warden()
+        try:
+            result = warden.run_once()
+        finally:
+            self.coordinator._arm_wal_locked = original
+        self.assertEqual(result, "release_pending")
+        self.assertEqual(self.store.get("run-x").state, "EXITED")
+        self.assertIsNotNone(self.coordinator._active)
+        self.assertIsNotNone(warden.token)
+        self.assertEqual(warden.run_once(), "released")
+        self.assertIsNone(self.coordinator._active)
+        self.assertIsNone(warden.token)
 
     def test_install_thread_stops(self) -> None:
         stop = threading.Event()
@@ -1331,6 +1520,40 @@ class IdleWardenTest(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(thread.name, "dayz-mcp-idle-warden")
         self.assertTrue(thread.daemon)
+
+    def test_install_retries_release_while_stop_is_set(self) -> None:
+        self.abandon()
+        self.enable()
+        stop = threading.Event()
+        original = self.coordinator._arm_wal_locked
+        calls = {"release": 0}
+
+        def arm(*args, **kwargs):
+            if kwargs.get("operation") == "release":
+                calls["release"] += 1
+                if calls["release"] == 1:
+                    stop.set()
+                    return False
+            return original(*args, **kwargs)
+
+        self.coordinator._arm_wal_locked = arm
+        thread = install_idle_warden(
+            self.lifecycle,
+            self.coordinator,
+            self.bridge,
+            self.settings,
+            generation=GENERATION,
+            stop=stop,
+            interval_s=0.05,
+            sample_input=self.quiet_sample,
+            wall=lambda: self.wall_value,
+            monotonic=lambda: self.mono,
+            sleep=self.advance,
+        )
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertGreaterEqual(calls["release"], 2)
+        self.assertIsNone(self.coordinator._active)
 
 
 class BoundInstanceTokenTest(unittest.TestCase):
