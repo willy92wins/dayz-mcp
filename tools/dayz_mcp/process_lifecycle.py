@@ -4410,6 +4410,69 @@ class ProcessLifecycle:
         buckets, _reason = self._partition_registered_processes(run.processes)
         return {name: len(pids) for name, pids in buckets.items()}
 
+    def launched_processes_still_alive(self, run_id: str) -> tuple[str, ...] | None:
+        """Names that still block ``reap_dead_run``. None when the run is absent.
+
+        Empty when nothing owned, unknown, or still listed by a known diag
+        scan is left. An unknown diag scan does not add names, so empty is
+        not by itself a known-clean read (``reap_rejection_witness``). A
+        name is ``<pid>:<role>`` for a launched role that is still owned,
+        still unclassified, or still listed by the diag scan, and
+        ``<pid>:diag`` for any other diag process. Does not terminate.
+        """
+
+        run = self.manifest.get(run_id)
+        if run is None:
+            return None
+        buckets, _unknown_reason = self._partition_registered_processes(run.processes)
+        blocking = set(buckets["owned"]) | set(buckets["unknown"])
+        labels: dict[int, str] = {}
+        for record in run.processes:
+            if record.pid in blocking:
+                labels[record.pid] = f"{record.pid}:{record.role}"
+        reason, processes = self._diag_snapshot()
+        if reason is None and processes is not None:
+            roles = {record.pid: record.role for record in run.processes}
+            for process in processes:
+                pid = process.get("pid")
+                if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                    continue
+                if pid in labels:
+                    continue
+                role = roles.get(pid)
+                labels[pid] = f"{pid}:{role}" if role is not None else f"{pid}:diag"
+        return tuple(labels[pid] for pid in sorted(labels))
+
+    def reap_rejection_witness(
+        self, run_id: str
+    ) -> tuple[str, tuple[str, ...]] | None:
+        """Classify a ``run_not_reapable`` read taken after ``reap_dead_run``.
+
+        ``None`` when the run is absent. ``state`` when the state is not
+        reapable. ``unknown`` when the diag scan cannot be vouched for and no
+        owned or unclassified role is left. ``alive`` when a known witness
+        still blocks; the names match ``launched_processes_still_alive``.
+        ``clean`` when that read is known and empty. Ports are not consulted.
+        Does not terminate.
+        """
+
+        run = self.manifest.get(run_id)
+        if run is None:
+            return None
+        if run.state not in _REAPABLE_STATES:
+            return ("state", ())
+        buckets, _unknown_reason = self._partition_registered_processes(run.processes)
+        named = self.launched_processes_still_alive(run_id)
+        labels = named if named is not None else ()
+        reason, processes = self._diag_snapshot()
+        if reason is not None or processes is None:
+            if buckets["owned"] or buckets["unknown"]:
+                return ("alive", labels)
+            return ("unknown", ())
+        if labels or processes:
+            return ("alive", labels)
+        return ("clean", ())
+
     def retail_quarantined(self) -> bool:
         return self._quarantined()
 

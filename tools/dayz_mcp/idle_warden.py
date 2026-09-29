@@ -7,8 +7,14 @@ bridge command, no use_state change, no lease expiry pass, and no touch of
 go off releases what it holds and closes nothing.
 
 When on, an ``abandoned`` run is warned and closed 60 s later unless someone
-reacts. A confirmed-dead client skips the warning. The lease is the normal
-queue plus a live wait (D-19), with the coordinator's WAL and audit (D-20).
+reacts. A confirmed-dead client skips the warning. After a successful close
+the warden waits, within ``EXIT_WAIT_S``, until every launched role has exited
+the process-guard snapshot, then reaps. ``run_not_reapable`` while a process
+of the run is still alive waits and retries until that budget is spent. A
+rejection whose next read is known and empty is one more reap, still before
+the deadline. No reap starts once the budget is spent. The lease is the
+normal queue plus a live wait (D-19), with the coordinator's WAL and audit
+(D-20).
 """
 
 from __future__ import annotations
@@ -175,6 +181,7 @@ class IdleWarden:
         self._launcher_mark: float | None = None
         self._closed = False
         self._adoption_started = False
+        self._reap_blockers: tuple[str, ...] = ()
         # Lease id whose cleanup the coordinator still owns. Not a token:
         # the thread does not retry release, and stop does not wait for it.
         self.cleanup_pending_lease_id: str | None = None
@@ -419,14 +426,29 @@ class IdleWarden:
 
     def _after_close(self, run_id: str) -> str:
         deadline = self.monotonic() + EXIT_WAIT_S
+        self._reap_blockers = ()
         while self.monotonic() < deadline:
-            if self._gone(run_id) or self._state(run_id) == "EXITED":
-                break
+            if self._state(run_id) == "EXITED":
+                return self._finish("orderly")
+            if self._gone(run_id):
+                outcome = self._reap_exited(run_id, deadline)
+                if outcome is not None:
+                    return outcome
+                if self.monotonic() >= deadline:
+                    break
             if not self._heartbeat():
                 break
             self._hook("waiting_exit")
-            if self._gone(run_id) or self._state(run_id) == "EXITED":
+            if self.monotonic() >= deadline:
                 break
+            if self._state(run_id) == "EXITED":
+                return self._finish("orderly")
+            if self._gone(run_id):
+                outcome = self._reap_exited(run_id, deadline)
+                if outcome is not None:
+                    return outcome
+                if self.monotonic() >= deadline:
+                    break
             remaining = deadline - self.monotonic()
             if remaining <= 0.0:
                 break
@@ -434,12 +456,13 @@ class IdleWarden:
         if self._state(run_id) == "EXITED":
             return self._finish("orderly")
         if self._gone(run_id):
-            reaped = self.lifecycle.reap_dead_run(self.client, self.token, run_id)
-            if (
-                isinstance(reaped, dict) and reaped.get("ok") is True
-            ) or self._state(run_id) == "EXITED":
-                return self._finish("orderly")
-            return self._fail(run_id, "reap_failed")
+            # Heartbeat loss can leave the loop with time still left. The
+            # deadline itself does not: the last in-budget blockers stand.
+            if self.monotonic() < deadline:
+                outcome = self._reap_exited(run_id, deadline)
+                if outcome is not None:
+                    return outcome
+            return self._fail_reap_blocked(run_id)
         self._hook("revalidate_stop")
         off = self._switch_off(run_id)
         if off is not None:
@@ -642,6 +665,66 @@ class IdleWarden:
             and kinds["unknown"] == 0
             and kinds["gone"] > 0
         )
+
+    def _reap_exited(self, run_id: str, deadline: float) -> str | None:
+        """Reap after every launched role has left the guard snapshot.
+
+        ``None`` means a process of the run is still blocking and ``deadline``
+        has not been reached: the caller waits. A non-reapable state or an
+        unknown diag scan fails immediately. A known, empty read after the
+        rejection is one more reap, and only while ``monotonic`` is still
+        before ``deadline``. No reap starts at or after the deadline.
+        """
+
+        if self.monotonic() >= deadline:
+            return None
+        reaped = self.lifecycle.reap_dead_run(self.client, self.token, run_id)
+        if self._reap_succeeded(reaped, run_id):
+            return self._finish("orderly")
+        if not self._reap_rejected(reaped):
+            return self._fail(run_id, "reap_failed")
+        return self._rejection_outcome(run_id, deadline, allow_repeat=True)
+
+    def _reap_succeeded(self, reaped: object, run_id: str) -> bool:
+        return (
+            isinstance(reaped, dict) and reaped.get("ok") is True
+        ) or self._state(run_id) == "EXITED"
+
+    def _reap_rejected(self, reaped: object) -> bool:
+        return isinstance(reaped, dict) and reaped.get("error") == "run_not_reapable"
+
+    def _rejection_outcome(
+        self, run_id: str, deadline: float, *, allow_repeat: bool
+    ) -> str | None:
+        witness = self.lifecycle.reap_rejection_witness(run_id)
+        kind = "unknown" if witness is None else witness[0]
+        named = () if witness is None else witness[1]
+        if kind == "alive":
+            if named:
+                self._reap_blockers = named
+            if self.monotonic() < deadline:
+                return None
+            return self._fail_reap_blocked(run_id)
+        if kind == "clean" and allow_repeat and self.monotonic() < deadline:
+            return self._repeat_reap(run_id, deadline)
+        return self._fail(run_id, "reap_failed")
+
+    def _repeat_reap(self, run_id: str, deadline: float) -> str | None:
+        if self.monotonic() >= deadline:
+            return self._fail(run_id, "reap_failed")
+        reaped = self.lifecycle.reap_dead_run(self.client, self.token, run_id)
+        if self._reap_succeeded(reaped, run_id):
+            return self._finish("orderly")
+        if not self._reap_rejected(reaped):
+            return self._fail(run_id, "reap_failed")
+        return self._rejection_outcome(run_id, deadline, allow_repeat=False)
+
+    def _fail_reap_blocked(self, run_id: str) -> str:
+        if self._reap_blockers:
+            return self._fail(
+                run_id, "reap_failed; processes=" + ",".join(self._reap_blockers)
+            )
+        return self._fail(run_id, "reap_failed")
 
     def _heartbeat(self) -> bool:
         if not self.token:
