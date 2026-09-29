@@ -674,6 +674,70 @@ class WaitForTest(unittest.IsolatedAsyncioTestCase):
                     [],
                 )
 
+    async def test_log_matches_launch_does_not_read_after_the_deadline(self) -> None:
+        # The initial launch scan takes a free lock before the polling loop.
+        # Acquire does not yield, so the lock is held even when the deadline
+        # has already passed, and a line written at that moment must not be read.
+        timeout_s = 0.1
+        past_deadline = 0.109375
+
+        class _Clock:
+            def __init__(self) -> None:
+                self.now = 0.0
+
+            def __call__(self) -> float:
+                return self.now
+
+        class _JumpLock(asyncio.Lock):
+            def __init__(self, clock: _Clock, log: Path) -> None:
+                super().__init__()
+                self._clock = clock
+                self._log = log
+
+            async def acquire(self) -> bool:
+                self._clock.now = past_deadline
+                self._log.write_text(
+                    "NEEDLE written after deadline\n", encoding="utf-8"
+                )
+                return await super().acquire()
+
+        clock = _Clock()
+        scans: list[float] = []
+        with tempfile.TemporaryDirectory() as directory:
+            profiles = Path(directory) / "_server" / "profiles"
+            profiles.mkdir(parents=True)
+            log = profiles / "script.log"
+            log.write_text("before\n", encoding="utf-8")
+            runtime = _FakeRuntime()
+            runtime.tool_lock = _JumpLock(clock, log)
+
+            def lifecycle_status() -> dict:
+                scans.append(server.time.monotonic())
+                return {"runs": [_live_run(profiles)]}
+
+            runtime.lifecycle_status = lifecycle_status
+            with patch("dayz_mcp.server.time.monotonic", clock):
+                result = await server.execute_wait_for(
+                    runtime,
+                    "log_matches",
+                    pattern="NEEDLE",
+                    timeout_s=timeout_s,
+                    lookback_from="launch",
+                )
+
+        self.assertEqual(scans, [])
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["satisfied"])
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["probes"], 0)
+        self.assertIsNone(result["observed"])
+        scanned = result["scanned"]
+        self.assertEqual(scanned["lookback_from"], "launch")
+        self.assertEqual(scanned["files"], [])
+        self.assertEqual(scanned["lines_total"], 0)
+        self.assertFalse(scanned["scan_truncated"])
+        self.assertNotIn("last_error", result)
+
 
 # --- BUG-086: evidence that stands on its own -------------------------------
 #

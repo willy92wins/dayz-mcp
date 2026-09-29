@@ -3715,6 +3715,20 @@ async def execute_wait_for(
                     scanned=scan_summary(),
                     last_error=_TOOL_LOCK_BUSY,
                 )
+            # A free lock is taken even with no time left. This block is
+            # before the polling loop, so the loop's deadline check does not
+            # cover it. Do not resolve paths or read a log once the deadline
+            # has passed; the launch scan would otherwise accept a later line.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return _wait_for_response(
+                    condition=condition,
+                    started=started,
+                    probes=0,
+                    observed=observed,
+                    satisfied=False,
+                    scanned=scan_summary(),
+                )
             probe_paths = await _wait_for_script_log_paths(runtime)
             # Markers FIRST, then the launch scan. A line written between the
             # two is read twice, which costs nothing; the other order drops it.
