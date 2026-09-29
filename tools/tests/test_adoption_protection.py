@@ -56,7 +56,7 @@ from tests.daemon_helpers import (
     _http,
     _wait_until_lease_claimable,
 )
-from tests.lifecycle_helpers import stamp_launcher
+from tests.lifecycle_helpers import Sequence, stamp_launcher
 from tests.mcp_helpers import _content_json
 from tests.process_lifecycle_helpers import (
     AuditSink,
@@ -127,9 +127,12 @@ class AdoptionFixture(unittest.TestCase):
             self.root / "runtime" / "runs.json",
         )
         self.audit = AuditSink()
+        # A released token is remembered and refused before the active-lease
+        # match (session_coordination.py:_validate_token_locked). The same
+        # string on the next grant for that client is that dead token.
         self.coordinator = SessionCoordinator(
-            token_fn=lambda: "token-adopt",
-            id_fn=lambda: "lease-adopt",
+            token_fn=Sequence("token-adopt"),
+            id_fn=Sequence("lease-adopt"),
             audit=self.audit,
         )
         self.store = RunManifestStore(paths)
