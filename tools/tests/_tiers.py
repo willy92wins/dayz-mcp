@@ -18,9 +18,11 @@ or waits on real time belongs here too.
 The fast tier also refuses the real pre-run desktop gate. Calling
 mcp_capture.run_prerun_desktop_gate with a real desktop probe
 (probe_input_desktop or probe_desktop_brightness) raises at once and names
-the test. Calls that inject both probes — the gate's own tests — are unchanged.
-The whole suite does not install that refusal, and the gate's production
-behaviour is untouched.
+the test. A function that was a real probe before importlib.reload is still
+real: reload rebinds the names, and a saved reference passed explicitly is
+refused too. Calls that inject both probes — the gate's own tests — are
+unchanged. The whole suite does not install that refusal, and the gate's
+production behaviour is untouched.
 """
 
 from __future__ import annotations
@@ -39,6 +41,18 @@ slow_test = unittest.skipIf(
 
 _GUARD_FLAG = "_fast_tier_desktop_guard"
 
+# Every function object that has been probe_input_desktop or
+# probe_desktop_brightness. importlib.reload rebinds those names; a test
+# can still pass the previous function explicitly.
+_REAL_DESKTOP_PROBES: set[object] = set()
+
+
+def _remember_loaded_real_probes() -> None:
+    import mcp_capture
+
+    _REAL_DESKTOP_PROBES.add(mcp_capture.probe_input_desktop)
+    _REAL_DESKTOP_PROBES.add(mcp_capture.probe_desktop_brightness)
+
 
 def fast_tier_real_desktop_gate_message(test_id: str) -> str:
     return (
@@ -50,12 +64,15 @@ def fast_tier_real_desktop_gate_message(test_id: str) -> str:
 def real_desktop_probes_used(
     *, probe_desktop: object, probe_brightness: object
 ) -> bool:
-    """True when this call can touch the host desktop or sleep on it."""
-    import mcp_capture
+    """True when this call can touch the host desktop or sleep on it.
 
+    Compared against every real probe seen so far, including the functions
+    bound before the latest importlib.reload(mcp_capture).
+    """
+    _remember_loaded_real_probes()
     return (
-        probe_desktop is mcp_capture.probe_input_desktop
-        or probe_brightness is mcp_capture.probe_desktop_brightness
+        probe_desktop in _REAL_DESKTOP_PROBES
+        or probe_brightness in _REAL_DESKTOP_PROBES
     )
 
 
@@ -103,6 +120,9 @@ def reject_real_desktop_gate_in_fast_tier(
 def _install_on_loaded_capture_module() -> None:
     import mcp_capture
 
+    # Record this generation before wrapping, including when the wrapper is
+    # already in place. A later reload adds the new functions and keeps these.
+    _remember_loaded_real_probes()
     original = mcp_capture.run_prerun_desktop_gate
     if getattr(original, _GUARD_FLAG, False):
         return

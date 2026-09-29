@@ -702,6 +702,48 @@ class FastTierRealDesktopGateGuardTest(unittest.TestCase):
             mcp_capture.run_prerun_desktop_gate()
         self.assertIn(self.id(), str(caught.exception))
 
+    def test_saved_real_probes_are_refused_after_reload(self) -> None:
+        # reload rebinds probe_input_desktop and probe_desktop_brightness.
+        # A reference saved from the previous function is still a real probe
+        # when a test passes it explicitly.
+        if not FAST_TIER_ONLY:
+            self.skipTest(
+                "the guard wraps the gate only when DAYZ_MCP_FAST_TESTS=1"
+            )
+        import importlib
+
+        original = mcp_capture.run_prerun_desktop_gate.__wrapped__
+        saved_desktop = original.__kwdefaults__["probe_desktop"]
+        saved_brightness = original.__kwdefaults__["probe_brightness"]
+        importlib.reload(mcp_capture)
+        self.addCleanup(importlib.reload, mcp_capture)
+        self.assertIsNot(saved_desktop, mcp_capture.probe_input_desktop)
+        self.assertIsNot(saved_brightness, mcp_capture.probe_desktop_brightness)
+        with self.assertRaises(AssertionError) as caught:
+            mcp_capture.run_prerun_desktop_gate(
+                timeout_s=0,
+                probe_desktop=saved_desktop,
+                probe_brightness=saved_brightness,
+            )
+        message = str(caught.exception)
+        self.assertIn(self.id(), message)
+        self.assertIn(
+            "fast tier called the real pre-run desktop gate without faking it: ",
+            message,
+        )
+        with self.assertRaises(AssertionError):
+            mcp_capture.run_prerun_desktop_gate(
+                timeout_s=0,
+                probe_desktop=saved_desktop,
+                probe_brightness=lambda **_kwargs: {"ok": True},
+            )
+        with self.assertRaises(AssertionError):
+            mcp_capture.run_prerun_desktop_gate(
+                timeout_s=0,
+                probe_desktop=lambda: "unlocked",
+                probe_brightness=saved_brightness,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
