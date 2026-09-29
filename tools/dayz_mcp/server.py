@@ -83,15 +83,16 @@ from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import MAX_CLIENT_DUMP_RUN_IDS, LoopbackServer, read_key
 from dayz_mcp.server_cli import CLIENT_PLATFORM_ALIASES, build_server_parser
 from dayz_mcp.process_lifecycle import (
+    caller_may_adopt_ownerless,
     empty_box,
     occupancy_error_fields,
+    protection_fields,
     takeover_target_run_id,
 )
 from dayz_mcp import session_handoff
 from dayz_mcp.mcp_supervisor import Supervisor
 from dayz_mcp.session_coordination import (
     READ_ONLY_COMMANDS,
-    SESSION_TTL_S,
     ClientIdentity,
     command_requires_lease,
 )
@@ -2028,12 +2029,50 @@ class ClientRuntime:
         progress_cb: Callable[[float, float | None, str | None], Awaitable[None]]
         | None = None,
     ) -> dict[str, Any]:
-        return await self._control_with_lazy_spawn(
+        payload = await self._control_with_lazy_spawn(
             self._control.session_acquire_wait,
             purpose,
             max_wait_s=max_wait_s,
             progress_cb=progress_cb,
         )
+        return await self._release_protected_grant(payload)
+
+    async def _release_protected_grant(self, payload: object) -> object:
+        """Drop a grant whose adopt came back run_protected.
+
+        The daemon leaves the lease active. This client releases it and
+        answers box_protected. A release that throws keeps the token so the
+        caller can retry; it is not reported as an active grant.
+        """
+
+        if not isinstance(payload, dict):
+            return payload
+        adopted = payload.get("adopted_run")
+        if not isinstance(adopted, dict) or adopted.get("error") != "run_protected":
+            return payload
+        token = payload.get("lease_token")
+        release_error: str | None = None
+        if isinstance(token, str) and token:
+            try:
+                await self.session_release(token)
+            except Exception as exc:
+                release_error = type(exc).__name__
+        answer: dict[str, Any] = {
+            "ok": False,
+            "error": "box_protected",
+            "status": "released" if release_error is None else "release_failed",
+            "adopted_run": adopted,
+            "use_state": adopted.get("use_state"),
+            "hint": adopted.get("hint"),
+        }
+        if "use_reason" in adopted:
+            answer["use_reason"] = adopted["use_reason"]
+        if "retry_after_s" in adopted:
+            answer["retry_after_s"] = adopted["retry_after_s"]
+        if release_error is not None:
+            answer["release_error"] = release_error
+            answer["lease_token"] = token
+        return answer
 
     async def session_heartbeat(self, lease_token: str) -> dict[str, Any]:
         result = await self._control_with_lazy_spawn(
@@ -2888,11 +2927,13 @@ AUTO_REMEDIATE_STEAM_DESCRIPTION = (
     "the result reports steam_pid_repair, steam_restarted and steam_startup."
 )
 TAKEOVER_DESCRIPTION = (
-    "Opt-in. Default false. When another session's RUNNING run or an "
-    "ownerless RUNNING_IDLE occupies the box, refuse with takeover_required "
-    "unless this is true. True stops that registered run through lifecycle "
-    "and then launches; the result names evicted_run_id. Does not kill "
-    "PIDs that are not on the run manifest."
+    "Opt-in. Default false. When another session's RUNNING run occupies "
+    "the box, refuse with takeover_required unless this is true. An "
+    "ownerless RUNNING_IDLE that this session did not launch is "
+    "run_protected until use_state is abandoned; takeover=true does not "
+    "evict it. True stops a run this session may take and then launches; "
+    "the result names evicted_run_id. Does not kill PIDs that are not on "
+    "the run manifest."
 )
 EXTRA_MODS_DESCRIPTION = (
     "Additional mods for this run. Each entry must be a single folder name "
@@ -4096,20 +4137,33 @@ def _first_box_dict(items: object) -> dict[str, Any] | None:
     return None
 
 
-def _finite_box_age_s(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+def _box_run(box: object, run_id: object) -> dict[str, Any] | None:
+    if not isinstance(box, dict) or not isinstance(run_id, str) or not run_id:
         return None
-    age = float(value)
-    if not math.isfinite(age):
+    runs = box.get("runs")
+    if not isinstance(runs, list):
         return None
-    return age
+    for item in runs:
+        if isinstance(item, dict) and item.get("run_id") == run_id:
+            return item
+    return None
 
 
-def _ownerless_idle_age_s(run: dict[str, Any]) -> float | None:
-    age = _finite_box_age_s(run.get("last_activity_age_s"))
-    if age is not None:
-        return age
-    return _finite_box_age_s(run.get("age_s"))
+def _row_is_protected(
+    row: dict[str, Any] | None, caller_session: str | None
+) -> bool:
+    """Ownerless RUNNING_IDLE this caller may not adopt. Fail closed.
+
+    A RUNNING row, including one with no use_state, is not this refusal.
+    The daemon still decides with the full session id.
+    """
+
+    if not isinstance(row, dict) or row.get("state") != "RUNNING_IDLE":
+        return False
+    owner = row.get("owner_session")
+    if isinstance(owner, str) and owner:
+        return False
+    return not caller_may_adopt_ownerless(row, caller_session)
 
 
 def _box_wait_cannot_help(
@@ -4133,14 +4187,8 @@ def _box_wait_cannot_help(
                 and _box_session_is(occupier.get("owner_session"), session_id)
             ):
                 return "own_run"
-    if box_available_for(box)["adopt"] is True:
-        # Keep waiting on a young ownerless idle run (the FIFO head's
-        # fresh launch). Adopt only after it has been idle a full session TTL.
-        idle = _ownerless_idle_runs(box)
-        if len(idle) == 1:
-            age = _ownerless_idle_age_s(idle[0])
-            if age is not None and age >= SESSION_TTL_S:
-                return "adopt"
+    if box_available_for(box, caller_session=session_id or None)["adopt"] is True:
+        return "adopt"
     if isinstance(runs, list):
         for item in runs:
             if isinstance(item, dict) and item.get("state") == "UNRECONCILED":
@@ -4243,7 +4291,11 @@ def _attach_queue_offer(
     caller_session: str | None = None,
     port: int | None = None,
 ) -> dict[str, Any]:
-    if payload.get("error_code") in {"active_run_exists", TAKEOVER_REQUIRED}:
+    if payload.get("error_code") in {
+        "active_run_exists",
+        TAKEOVER_REQUIRED,
+        "run_protected",
+    }:
         payload["queue_offer"] = _box_queue_offer(
             box, caller_session=caller_session, port=port
         )
@@ -4414,6 +4466,16 @@ def _apply_takeover_required(
         return payload
     target = takeover_target_run_id(box, caller_session=caller_session)
     if target is None:
+        return payload
+    row = _box_run(box, target)
+    if _row_is_protected(row, caller_session):
+        payload["error_code"] = "run_protected"
+        notice = protection_fields(row)
+        payload["hint"] = notice["hint"]
+        payload["use_state"] = notice["use_state"]
+        payload["use_reason"] = notice["use_reason"]
+        if "retry_after_s" in notice:
+            payload["retry_after_s"] = notice["retry_after_s"]
         return payload
     payload["error_code"] = TAKEOVER_REQUIRED
     extra = occupancy_error_fields(box, caller_session=caller_session)
@@ -4712,8 +4774,13 @@ def _ownerless_idle_runs(box: dict[str, Any]) -> list[dict[str, Any]]:
     return idle
 
 
-def box_available_for(box: object) -> dict[str, bool]:
-    """MCP-only: whether the box is free for a new launch or an idle adopt."""
+def box_available_for(
+    box: object, caller_session: str | None = None
+) -> dict[str, bool]:
+    """MCP-only: new launch, or adopt for the launcher or an abandoned run.
+
+    caller_session None cannot prove the launcher, so adopt is only abandoned.
+    """
 
     unavailable = {"new_launch": False, "adopt": False}
     if not isinstance(box, dict):
@@ -4726,7 +4793,7 @@ def box_available_for(box: object) -> dict[str, bool]:
     if not isinstance(foreign, list) or foreign:
         return unavailable
     idle = _ownerless_idle_runs(box)
-    if len(idle) == 1:
+    if len(idle) == 1 and caller_may_adopt_ownerless(idle[0], caller_session):
         return {"new_launch": False, "adopt": True}
     return unavailable
 
@@ -4867,7 +4934,28 @@ async def _attach_revalidated_runs_retired_recently(
     status["runs_retired_recently"] = dayz_test_tool._runs_retired_recently(raw, None)
 
 
-def _session_status_blocked_on(status: dict[str, Any]) -> str | None:
+def _protection_blocked_on(row: dict[str, Any]) -> str:
+    """What protects the run, and until when, for a caller who cannot adopt."""
+
+    notice = protection_fields(row)
+    state = notice.get("use_state") or "unclassified"
+    reason = notice.get("use_reason")
+    text = f"DayZ test box is protected ({state}"
+    if isinstance(reason, str) and reason:
+        text += f", {reason}"
+    text += ")"
+    retry = notice.get("retry_after_s")
+    if isinstance(retry, (int, float)) and not isinstance(retry, bool):
+        text += f"; it can be abandoned in {retry}s"
+    else:
+        text += "; no time is given for when it can be abandoned"
+    text += ". Waiting in the box FIFO does not adopt it."
+    return text
+
+
+def _session_status_blocked_on(
+    status: dict[str, Any], caller_session: str | None = None
+) -> str | None:
     """Return the next queue a caller should join, if a resource is busy."""
 
     if isinstance(status.get("owner"), dict):
@@ -4886,8 +4974,12 @@ def _session_status_blocked_on(status: dict[str, Any]) -> str | None:
             "host UDP socket table (psutil/netstat, process attribution) -- "
             "wait_for_box_s does not help"
         )
-    if isinstance(box, dict) and box_available_for(box)["adopt"] is True:
+    if isinstance(box, dict) and box_available_for(box, caller_session)["adopt"] is True:
         return ADOPT_BLOCKED_ON
+    if isinstance(box, dict):
+        idle = _ownerless_idle_runs(box)
+        if len(idle) == 1 and _row_is_protected(idle[0], caller_session):
+            return _protection_blocked_on(idle[0])
     if isinstance(box, dict) and box.get("occupied") is True:
         return (
             'DayZ test box; next: call dayz_test_run(..., on_busy="queue") '
@@ -5152,9 +5244,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "foreign_ports_meta summarizes count/count_all/dayz_relevant and "
             "neither list overrides occupied/available_for; "
             "and the box wait FIFO). box.available_for distinguishes new_launch "
-            "from adopt of an ownerless RUNNING_IDLE run; blocked_on then names "
-            "session_acquire_wait, not the launch FIFO. blocked_on names the "
-            "resource and next queue, or is null when neither lease nor box is busy. "
+            "from adopt of an ownerless RUNNING_IDLE this session launched or "
+            "whose use_state is abandoned. A protected run names use_state and, "
+            "when known, how long until it can be abandoned; blocked_on names "
+            "session_acquire_wait, not the launch FIFO, only when this caller "
+            "can adopt. blocked_on names the resource and next queue, or is "
+            "null when neither lease nor box is busy. "
             f"{_lease_renewal_contract(config.session_ttl_s)}"
         )
     )
@@ -5163,12 +5258,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with client.tool_lock:
             status = await client.session_status()
             box = status.get("box")
+            caller_session = str(
+                getattr(getattr(client, "identity", None), "session_id", "") or ""
+            )
             if isinstance(box, dict):
                 box = dict(box)
                 _annotate_box_foreign_ports(box)
-                box["available_for"] = box_available_for(box)
-                caller_session = str(
-                    getattr(getattr(client, "identity", None), "session_id", "") or ""
+                box["available_for"] = box_available_for(
+                    box, caller_session or None
                 )
                 position = _box_queue_position(box, caller_session)
                 box["queue_position"] = position
@@ -5179,7 +5276,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 else:
                     box["queue_offer"] = None
                 status["box"] = box
-            status["blocked_on"] = _session_status_blocked_on(status)
+            status["blocked_on"] = _session_status_blocked_on(
+                status, caller_session or None
+            )
             await _attach_revalidated_runs_retired_recently(client, status)
             return _with_ok_next_step(status, "session_status")
 
@@ -5237,9 +5336,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "(active_run_exists; reason port_in_use_foreign names the port) "
             "by a socket-table read repeated right before the launch; the "
             "only window left is between that read and DayZ's own bind. "
-            "A RUNNING run owned by another session, or an ownerless "
-            "RUNNING_IDLE, is takeover_required unless takeover=true "
-            "(evicts that registered run, then launches; names evicted_run_id). "
+            "A RUNNING run owned by another session is takeover_required "
+            "unless takeover=true (evicts that registered run, then launches; "
+            "names evicted_run_id). An ownerless RUNNING_IDLE that this "
+            "session did not launch is run_protected until use_state is "
+            "abandoned; takeover=true does not evict it. Abandoned, or the "
+            "session that launched it, stays takeover_required unless "
+            "takeover=true. "
             "port_scan_unknown means the daemon could not read the socket "
             "table: fix the host, waiting does not help. "
             f"0 is the immediate reject. wait_for_box_s must be <= "
@@ -5384,6 +5487,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 target = takeover_target_run_id(
                     box, caller_session=caller_session
                 )
+                if target is not None and _row_is_protected(
+                    _box_run(box, target), caller_session
+                ):
+                    # takeover=true does not evict a protected ownerless run.
+                    # The daemon would refuse the worker's adopt opaquely.
+                    return annotated(
+                        _failed_active_run_result(
+                            project=project,
+                            mode=mode,
+                            box=box,
+                            started=started,
+                            caller_session=caller_session,
+                            port=port,
+                        )
+                    )
                 if target is not None and not takeover:
                     return annotated(
                         _failed_active_run_result(
@@ -5507,7 +5625,30 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async def report(stage: str, message: str | None) -> None:
             await report_dayz_progress(ctx, stage, message)
 
+        caller_session = str(
+            getattr(getattr(client, "identity", None), "session_id", "") or ""
+        ) or None
         async with client.tool_lock:
+            try:
+                snapshot = await client.session_status()
+            except Exception:
+                # The daemon still refuses the adopt inside the worker.
+                snapshot = None
+            if isinstance(snapshot, dict):
+                row = _box_run(_box_from_status(snapshot), run_id)
+                if _row_is_protected(row, caller_session):
+                    notice = protection_fields(row)
+                    failed: dict[str, Any] = {
+                        "status": "failed",
+                        "run_id": run_id,
+                        "error_code": "run_protected",
+                        "hint": notice["hint"],
+                        "use_state": notice["use_state"],
+                        "use_reason": notice["use_reason"],
+                    }
+                    if "retry_after_s" in notice:
+                        failed["retry_after_s"] = notice["retry_after_s"]
+                    return failed
             try:
                 with _typed_dayz_test_value_errors():
                     return await dayz_test_tool.execute_dayz_test_stop(

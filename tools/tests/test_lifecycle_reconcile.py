@@ -51,7 +51,7 @@ from tests.process_lifecycle_helpers import (
     process,
     snapshot,
 )
-from tests.lifecycle_helpers import HASH_A, HASH_B
+from tests.lifecycle_helpers import HASH_A, HASH_B, stamp_launcher
 from tests._tiers import slow_test
 
 RUN_ID = "run-existing"
@@ -201,6 +201,8 @@ class LifecycleReconcileTest(unittest.TestCase):
             list(records),
         )
         self.store.add(run)
+        if state == "RUNNING_IDLE":
+            stamp_launcher(self.lifecycle, RUN_ID, IDENTITY_A)
         return run
 
     def owned(self, pid: int, role: str) -> ProcessRecord:

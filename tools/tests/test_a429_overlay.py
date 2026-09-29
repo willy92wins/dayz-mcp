@@ -96,6 +96,8 @@ def _idle_run(run_id: str = "run-idle") -> dict[str, object]:
         "mod": "@Fixture",
         "label": "idle",
         "age_s": 12.0,
+        # A stranger may adopt only an abandoned ownerless run.
+        "use_state": "abandoned",
     }
 
 

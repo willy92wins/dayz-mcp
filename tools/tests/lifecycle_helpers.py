@@ -30,6 +30,20 @@ IDENTITY_PAYLOAD = IDENTITY.to_payload()
 IDENTITY_B = ClientIdentity(
     "claude", 22, 1, "2026-07-15T00:00:01Z", "other-session", "fifo"
 )
+
+
+def stamp_launcher(lifecycle: object, run_id: str, client: ClientIdentity) -> None:
+    """Record client as the launcher of run_id. Tests only.
+
+    Product start_run writes the same table. setdefault keeps the first
+    session: a later caller does not become the launcher by adopting.
+    """
+
+    activity_lock = getattr(lifecycle, "_activity_lock")
+    launched_by = getattr(lifecycle, "_launched_by")
+    activity_key = getattr(lifecycle, "_activity_key")
+    with activity_lock:
+        launched_by.setdefault(activity_key(run_id), client)
 HASH_A = "a" * 64
 HASH_B = "b" * 64
 
@@ -252,6 +266,7 @@ class LifecycleFixture:
             [process],
         )
         self.store.add(run)
+        stamp_launcher(self.lifecycle, run_id, IDENTITY)
         return run
 
     def release_and_reacquire(self) -> tuple[str, str]:

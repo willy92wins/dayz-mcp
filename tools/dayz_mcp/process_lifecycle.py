@@ -342,7 +342,8 @@ def _use_projection(
 ) -> dict[str, object]:
     """250f (plan v2.1 §3.3): use_state and what it was measured from.
 
-    Observation only: nothing reads these fields to decide an action yet.
+    adopt_run reads use_state: a RUNNING_IDLE run that is not abandoned is
+    protected from every session except the one that launched it.
     Precedence: agent, unknown, human, idle, then past RUN_IDLE_CUT_S
     idle_waiting (with a reason) or abandoned. STARTING, STOPPING and
     UNRECONCILED runs are not classified.
@@ -717,6 +718,97 @@ def _wait_hint(box: object) -> str:
     return _ACTIVE_RUN_WAIT_HINT
 
 
+def _finite_use_age(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    age = float(value)
+    if not math.isfinite(age):
+        return None
+    return age
+
+
+def caller_launched_row(row: dict[str, object], caller_session: str | None) -> bool:
+    """Message-layer match: the public 12-character session prefix.
+
+    The daemon decides with the full session id. A prefix collision can
+    describe the caller as the launcher here and still be refused there.
+    """
+
+    if not isinstance(caller_session, str) or not caller_session:
+        return False
+    launched = row.get("launched_by")
+    if not isinstance(launched, dict):
+        return False
+    session = launched.get("session")
+    if not isinstance(session, str) or not session:
+        return False
+    return caller_session[:12] == session[:12]
+
+
+def caller_may_adopt_ownerless(
+    row: dict[str, object], caller_session: str | None
+) -> bool:
+    """Launcher in any ownerless state, or anyone once the run is abandoned.
+
+    A missing use_state is not abandoned: the caller may not adopt.
+    """
+
+    if caller_launched_row(row, caller_session):
+        return True
+    return row.get("use_state") == "abandoned"
+
+
+def protection_retry_after_s(row: dict[str, object]) -> float | None:
+    """Seconds until the 10-minute cut, for idle and human only."""
+
+    use_state = row.get("use_state")
+    if use_state == "idle":
+        age = _finite_use_age(row.get("idle_s"))
+    elif use_state == "human":
+        age = _finite_use_age(row.get("human_input_age_s"))
+    else:
+        return None
+    if age is None:
+        return None
+    remaining = RUN_IDLE_CUT_S - age
+    if remaining <= 0:
+        return None
+    return round(remaining, 3)
+
+
+def protection_fields(row: dict[str, object] | None) -> dict[str, object]:
+    """Refusal body for a run that is not abandoned and not ours to adopt.
+
+    Unclassifiable rows stay protected and say so. retry_after_s is present
+    only for idle (from idle_s) and human (from human_input_age_s).
+    """
+
+    use_state = row.get("use_state") if isinstance(row, dict) else None
+    use_reason = row.get("use_reason") if isinstance(row, dict) else None
+    if not isinstance(use_state, str) or not use_state:
+        use_state = None
+    if not isinstance(use_reason, str) or not use_reason:
+        use_reason = None if use_state is not None else "unclassified"
+    state_text = use_state or "unclassified"
+    hint = (
+        f"run_protected: this ownerless run is in use ({state_text}); only the "
+        "session that launched it may adopt it until it is abandoned"
+    )
+    if isinstance(use_reason, str) and use_reason:
+        hint = f"{hint} ({use_reason})"
+    fields: dict[str, object] = {
+        "use_state": use_state,
+        "use_reason": use_reason,
+        "hint": hint,
+    }
+    if isinstance(row, dict):
+        retry = protection_retry_after_s(row)
+        if retry is not None:
+            fields["retry_after_s"] = retry
+            fields["hint"] = f"{hint}; retry in {retry}s"
+    return fields
+
+
 def _caller_owns_run(item: dict[str, object], caller_session: str | None) -> bool:
     owner = item.get("owner_session")
     if not isinstance(owner, str) or not owner:
@@ -776,7 +868,17 @@ def occupancy_error_fields(
                 "RUNNING_IDLE",
             }:
                 payload["hint"] = _ACTIVE_RUN_STOP_HINT.format(run_id=run_id)
-            elif state in {"RUNNING", "RUNNING_IDLE"}:
+            elif state == "RUNNING_IDLE" and not _caller_owns_run(item, caller_session):
+                if caller_may_adopt_ownerless(item, caller_session):
+                    payload["hint"] = _ACTIVE_RUN_TAKEOVER_HINT.format(run_id=run_id)
+                else:
+                    notice = protection_fields(item)
+                    payload["hint"] = notice["hint"]
+                    payload["use_state"] = notice["use_state"]
+                    payload["use_reason"] = notice["use_reason"]
+                    if "retry_after_s" in notice:
+                        payload["retry_after_s"] = notice["retry_after_s"]
+            elif state == "RUNNING":
                 payload["hint"] = _ACTIVE_RUN_TAKEOVER_HINT.format(run_id=run_id)
             else:
                 payload["hint"] = _wait_hint(box)
@@ -3831,6 +3933,46 @@ class ProcessLifecycle:
                     result["cleanup_degraded"] = list(dict.fromkeys(degraded))
             return result
 
+    def _client_is_launcher(self, client: ClientIdentity, run_id: str) -> bool:
+        # Full session id, not the public prefix and not the pid. Rights last
+        # as long as that MCP client: server_reload keeps the session id, a
+        # client reopen and a daemon restart do not.
+        with self._activity_lock:
+            identity = self._launched_by.get(self._activity_key(run_id))
+        return (
+            identity is not None
+            and isinstance(client.session_id, str)
+            and identity.session_id == client.session_id
+        )
+
+    def _adoption_protection(
+        self, client: ClientIdentity, run: RunRecord
+    ) -> dict[str, object] | None:
+        """None allows the adopt. Only RUNNING_IDLE is passed in.
+
+        The launcher skips the box read, so a classification failure cannot
+        lock them out. Everyone else may adopt only use_state abandoned.
+        Caller holds _operation_lock. box_occupancy takes _activity_lock and
+        drops it before ServerState._lock; that order is the allowed one.
+        """
+
+        if self._client_is_launcher(client, run.run_id):
+            return None
+        try:
+            box = self.box_occupancy()
+        except Exception:
+            return protection_fields(None)
+        runs = box.get("runs") if isinstance(box, dict) else None
+        row: dict[str, object] | None = None
+        if isinstance(runs, list):
+            for item in runs:
+                if isinstance(item, dict) and item.get("run_id") == run.run_id:
+                    row = item
+                    break
+        if row is None or row.get("use_state") != "abandoned":
+            return protection_fields(row)
+        return None
+
     def adopt_run(self, client: ClientIdentity, token: str | None, run_id: object) -> dict[str, object]:
         legacy_error = self._legacy_identity_error()
         if legacy_error is not None:
@@ -3893,6 +4035,14 @@ class ProcessLifecycle:
                     for other in self.manifest.list_runs()
                 ):
                     return self._reject_reserved(authority, command, "active_run_exists")
+                if run.state == "RUNNING_IDLE":
+                    refusal = self._adoption_protection(client, run)
+                    if refusal is not None:
+                        result = self._reject_reserved(
+                            authority, command, "run_protected"
+                        )
+                        result.update(refusal)
+                        return result
                 buckets, unknown_reason = self._partition_registered_processes(run.processes)
                 if buckets["unknown"]:
                     reason = unknown_reason or "process_identity_mismatch"

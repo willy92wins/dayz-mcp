@@ -544,8 +544,9 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
                 _run_row(
                     state="RUNNING_IDLE",
                     owner_session=None,
-                    last_activity_age_s=SESSION_TTL_S,
-                    age_s=SESSION_TTL_S,
+                    last_activity_age_s=1.0,
+                    age_s=1.0,
+                    use_state="abandoned",
                 )
             ],
         )
@@ -572,6 +573,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
             )
         execute.assert_not_awaited()
         box_status.assert_not_awaited()
+        self.assertEqual(payload.get("reason"), "adopt")
         self.assertEqual(payload.get("error_code"), TAKEOVER_REQUIRED)
         self.assertIsNone(payload.get("queue_offer"))
 
@@ -591,8 +593,9 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
                 _run_row(
                     state="RUNNING_IDLE",
                     owner_session=None,
-                    last_activity_age_s=SESSION_TTL_S,
-                    age_s=SESSION_TTL_S,
+                    last_activity_age_s=1.0,
+                    age_s=1.0,
+                    use_state="abandoned",
                 )
             ]
 
@@ -616,6 +619,7 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
             )
         result = _content_json(payload)
         execute.assert_not_awaited()
+        self.assertEqual(result.get("reason"), "adopt")
         self.assertEqual(result.get("error_code"), TAKEOVER_REQUIRED)
         self.assertIsNone(result.get("queue_offer"))
         self.assertTrue(harness.done)
@@ -1071,27 +1075,28 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["box"]["queue_position"], 3)
 
     async def test_fb_2223_stale_ownerless_idle_ends_queue_with_adopt(self) -> None:
+        # Age alone no longer adopts. use_state idle at the old 120 s mark
+        # stays protected; a short wait times out with an offer.
         runtime, app = _build()
-        box = _busy_box(
+        harness = _BoxHarness(
             runs=[
                 _run_row(
                     state="RUNNING_IDLE",
                     owner_session=None,
                     last_activity_age_s=SESSION_TTL_S,
                     age_s=SESSION_TTL_S,
+                    use_state="idle",
+                    idle_s=120.0,
                 )
-            ],
+            ]
         )
-        box_status = AsyncMock(return_value={})
+        harness.bind(runtime)
         execute = AsyncMock(side_effect=AssertionError("must not launch"))
         with (
             patch.object(
                 server.dayz_test_tool, "execute_dayz_test_run", execute
             ),
-            patch.object(
-                runtime, "session_status", new=AsyncMock(return_value={"box": box})
-            ),
-            patch.object(runtime, "session_box_status", new=box_status),
+            _fast_box_wait(),
         ):
             payload = _content_json(
                 await app.call_tool(
@@ -1100,14 +1105,15 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
                         "project": "ExampleMod",
                         "mode": "server",
                         "on_busy": "queue",
+                        "wait_for_box_s": 0.2,
                     },
                 )
             )
         execute.assert_not_awaited()
-        box_status.assert_not_awaited()
-        self.assertEqual(payload.get("reason"), "adopt")
-        self.assertEqual(payload.get("error_code"), TAKEOVER_REQUIRED)
-        self.assertIsNone(payload.get("queue_offer"))
+        self.assertNotEqual(payload.get("reason"), "adopt")
+        self.assertEqual(payload.get("error_code"), "run_protected")
+        self.assertIsNotNone(payload.get("queue_offer"))
+        self.assertNotIn("takeover=true", str(payload.get("hint") or ""))
 
     @slow_test
     async def test_2223_r3_cancel_before_the_ticket_id_leaves_no_ticket(self) -> None:

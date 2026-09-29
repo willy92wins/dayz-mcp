@@ -29,6 +29,7 @@ from dayz_mcp.process_lifecycle import ProcessRecord, RunRecord
 from dayz_mcp.server import ServerConfig
 from dayz_mcp.session_coordination import ClientIdentity
 from tests.fence_helpers import bind_both_peers
+from tests.lifecycle_helpers import stamp_launcher
 from tests._tiers import slow_test
 
 
@@ -190,6 +191,7 @@ class DaemonHttpServer:
             )
         self.fixture_lease_token = acquired["lease_token"]
         self.fixture_lease_id = acquired["lease_id"]
+        stamp_launcher(lifecycle, "test-run", self.fixture_identity)
         adopted = lifecycle.adopt_run(
             self.fixture_identity, self.fixture_lease_token, "test-run"
         )
@@ -528,13 +530,13 @@ class DaemonEndpointTest(unittest.TestCase):
         self.assertEqual(acquired.get("status"), "active")
         adopted = acquired.get("adopted_run")
         self.assertIsInstance(adopted, dict, acquired)
-        self.assertEqual(
-            {k: adopted.get(k) for k in ("ok", "run_id", "state", "dispatchable")},
-            {"ok": True, "run_id": "test-run", "state": "RUNNING", "dispatchable": True},
-        )
+        self.assertEqual(adopted.get("ok"), False, acquired)
+        self.assertEqual(adopted.get("error"), "run_protected")
+        self.assertEqual(adopted.get("run_id"), "test-run")
+        self.assertIn("lease_token", acquired)
         run = srv.state.lifecycle.manifest.get("test-run")
-        self.assertEqual(run.state, "RUNNING")
-        self.assertEqual(run.owner_session_id, IDENTITY["session_id"])
+        self.assertEqual(run.state, "RUNNING_IDLE")
+        self.assertIsNone(run.owner_session_id)
 
     @slow_test
     def test_acquire_adopts_the_ownerless_unreconciled_run(self) -> None:
@@ -570,7 +572,8 @@ class DaemonEndpointTest(unittest.TestCase):
         acquired = self._acquire_with_rows([row])
         adopted = acquired.get("adopted_run")
         self.assertIsInstance(adopted, dict, acquired)
-        self.assertEqual(adopted.get("ok"), True, acquired)
+        self.assertEqual(adopted.get("ok"), False, acquired)
+        self.assertEqual(adopted.get("error"), "run_protected")
         self.assertEqual(adopted.get("run_id"), "test-run")
 
     def test_acquire_without_adoptable_run_declares_null(self) -> None:
@@ -607,6 +610,9 @@ class DaemonEndpointTest(unittest.TestCase):
             )
         ]
         srv.state.lifecycle.manifest.replace(run)
+        stamp_launcher(
+            srv.state.lifecycle, "test-run", ClientIdentity.from_payload(IDENTITY)
+        )
         status, acquired = _http(
             srv.base,
             "POST",
@@ -619,7 +625,7 @@ class DaemonEndpointTest(unittest.TestCase):
         adopted = acquired.get("adopted_run")
         self.assertIsInstance(adopted, dict)
         self.assertIs(adopted.get("ok"), False)
-        self.assertTrue(adopted.get("error"))
+        self.assertEqual(adopted.get("error"), "run_processes_gone")
         self.assertEqual(adopted.get("run_id"), "test-run")
         stored = srv.state.lifecycle.manifest.get("test-run")
         self.assertEqual(stored.state, "RUNNING_IDLE")
@@ -698,11 +704,13 @@ class DaemonEndpointTest(unittest.TestCase):
         self.assertEqual(status_wait, 200, granted)
         self.assertEqual(granted.get("status"), "active")
         adopted = granted.get("adopted_run") or {}
-        self.assertEqual(adopted.get("ok"), True, granted)
+        self.assertEqual(adopted.get("ok"), False, granted)
+        self.assertEqual(adopted.get("error"), "run_protected")
         self.assertEqual(adopted.get("run_id"), "test-run")
+        self.assertIn("lease_token", granted)
         stored = srv.state.lifecycle.manifest.get("test-run")
-        self.assertEqual(stored.owner_session_id, IDENTITY_B["session_id"])
-        self.assertEqual(stored.state, "RUNNING")
+        self.assertIsNone(stored.owner_session_id)
+        self.assertEqual(stored.state, "RUNNING_IDLE")
 
     def test_acquire_list_runs_failure_declares_run_state_unavailable(self) -> None:
         srv = self._daemon(adopt_fixture=False)

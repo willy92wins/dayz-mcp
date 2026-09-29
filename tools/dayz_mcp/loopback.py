@@ -3551,8 +3551,9 @@ class Handler(BaseHTTPRequestHandler):
                 "run_id": result.get("run_id") if result.get("run_id") is not None else run_id,
                 "error": error if isinstance(error, str) and error else "adopt_failed",
             }
-            if "hint" in result:
-                adopted["hint"] = result["hint"]
+            for key in ("hint", "use_state", "use_reason", "retry_after_s"):
+                if key in result:
+                    adopted[key] = result[key]
             payload["adopted_run"] = _copy_cleanup(adopted, result)
             return payload
         except Exception:

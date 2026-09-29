@@ -20,6 +20,7 @@ from dayz_mcp import control_client, core, host_config, server
 from dayz_mcp.server import ServerConfig
 from tests.test_daemon import DaemonHttpServer, _config, _free_port, _http
 from tests.client_helpers import _VALID_PEER_VERSION, _fixture_client_runtime
+from tests.lifecycle_helpers import stamp_launcher
 from tests.mcp_helpers import _content_json
 from tests.fence_helpers import INST_CLIENT, INST_SERVER, poll_census_query
 from tests._tiers import slow_test
@@ -100,6 +101,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         lease_token: str,
         run_id: str = "test-run",
     ) -> dict:
+        stamp_launcher(srv.state.lifecycle, run_id, runtime.identity)
         result = srv.state.lifecycle.adopt_run(
             runtime.identity, lease_token, run_id
         )

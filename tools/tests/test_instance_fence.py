@@ -37,6 +37,7 @@ from dayz_mcp.process_lifecycle import (
 )
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
+from tests.lifecycle_helpers import stamp_launcher
 from tests._tiers import slow_test
 
 
@@ -493,6 +494,7 @@ class LifecycleFenceTest(unittest.TestCase):
             )
         )
         self.snapshots[record.pid] = _snapshot(record)
+        stamp_launcher(self.lifecycle, "run-existing", IDENTITY_A)
         result = self.lifecycle.adopt_run(IDENTITY_A, self.token, "run-existing")
         self.assertEqual(result.get("ok"), True, result)
         bound = [
