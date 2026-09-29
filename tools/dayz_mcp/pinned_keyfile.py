@@ -39,6 +39,12 @@ class _FILE_ATTRIBUTE_TAG_INFO(ctypes.Structure):
 _kernel32 = bind_common_kernel32()
 _kernel32.GetFileAttributesW.argtypes = (wintypes.LPCWSTR,)
 _kernel32.GetFileAttributesW.restype = wintypes.DWORD
+_kernel32.GetLongPathNameW.argtypes = (
+    wintypes.LPCWSTR,
+    wintypes.LPWSTR,
+    wintypes.DWORD,
+)
+_kernel32.GetLongPathNameW.restype = wintypes.DWORD
 _kernel32.ReadFile.argtypes = (
     wintypes.HANDLE,
     wintypes.LPVOID,
@@ -87,6 +93,36 @@ def _assert_no_reparse_parents(path: str) -> None:
             raise ValueError("invalid_daemon_keyfile")
 
 
+class CanonicalPathError(Exception):
+    """GetLongPathNameW could not return a long form. Callers refuse."""
+
+
+def _dos_path(value: str) -> str:
+    if value.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + value[8:]
+    if value.startswith("\\\\?\\"):
+        return value[4:]
+    return value
+
+
+def canonical_long_path(path: str) -> str:
+    """Long form of an existing path.
+
+    Expands 8.3 names and leaves reparse points in the spelling. A failure
+    raises: callers must refuse, not compare the raw spelling instead.
+    """
+    if not isinstance(path, str) or not path or "\0" in path:
+        raise CanonicalPathError()
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = int(_kernel32.GetLongPathNameW(path, buffer, len(buffer)))
+    if length <= 0 or length >= len(buffer):
+        raise CanonicalPathError()
+    value = _dos_path(buffer.value)
+    if not value:
+        raise CanonicalPathError()
+    return value
+
+
 def _final_handle_path(handle: object) -> str:
     buffer = ctypes.create_unicode_buffer(32768)
     length = int(
@@ -94,12 +130,7 @@ def _final_handle_path(handle: object) -> str:
     )
     if length <= 0 or length >= len(buffer):
         raise ValueError("invalid_daemon_keyfile")
-    value = buffer.value
-    if value.startswith("\\\\?\\UNC\\"):
-        return "\\\\" + value[8:]
-    if value.startswith("\\\\?\\"):
-        return value[4:]
-    return value
+    return _dos_path(buffer.value)
 
 
 def _read_bounded(handle: object) -> bytes:
@@ -159,8 +190,13 @@ def read_pinned_keyfile(path: str) -> str:
         ):
             raise ValueError("invalid_daemon_keyfile")
         final_path = _final_handle_path(handle)
-        if os.path.normcase(os.path.normpath(final_path)) != os.path.normcase(
-            os.path.normpath(canonical)
+        try:
+            requested_long = canonical_long_path(canonical)
+            final_long = canonical_long_path(final_path)
+        except CanonicalPathError:
+            raise ValueError("invalid_daemon_keyfile") from None
+        if os.path.normcase(os.path.normpath(requested_long)) != os.path.normcase(
+            os.path.normpath(final_long)
         ):
             raise ValueError("invalid_daemon_keyfile")
         raw = _read_bounded(handle)

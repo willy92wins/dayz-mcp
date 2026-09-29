@@ -105,6 +105,28 @@ def _reject_duplicate_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, o
     return result
 
 
+def _same_canonical_long_path(left: str, right: str) -> bool:
+    """True when both paths expand to one long form.
+
+    On Windows a failure to expand refuses. The raw spellings are not
+    compared, so an 8.3 path is accepted only when its long form matches.
+    """
+    if os.name != "nt":
+        return os.path.normcase(os.path.normpath(left)) == os.path.normcase(
+            os.path.normpath(right)
+        )
+    from dayz_mcp.pinned_keyfile import CanonicalPathError, canonical_long_path
+
+    try:
+        left_long = canonical_long_path(left)
+        right_long = canonical_long_path(right)
+    except CanonicalPathError:
+        return False
+    return os.path.normcase(os.path.normpath(left_long)) == os.path.normcase(
+        os.path.normpath(right_long)
+    )
+
+
 def _canonical_existing_file(value: object) -> str:
     if not isinstance(value, str) or not value or not os.path.isabs(value):
         raise HostConfigError("daemon_provenance_conflict")
@@ -113,8 +135,8 @@ def _canonical_existing_file(value: object) -> str:
         resolved = candidate.resolve(strict=True)
     except OSError:
         raise HostConfigError("daemon_provenance_conflict") from None
-    if os.path.normcase(os.path.normpath(str(candidate))) != os.path.normcase(
-        os.path.normpath(str(resolved))
+    if not _same_canonical_long_path(
+        os.path.normpath(str(candidate)), os.path.normpath(str(resolved))
     ):
         raise HostConfigError("daemon_provenance_conflict")
     if not resolved.is_file():
@@ -124,8 +146,8 @@ def _canonical_existing_file(value: object) -> str:
 
 def require_matching_keyfile(value: object, expected: str) -> str:
     actual = _canonical_existing_file(value)
-    if os.path.normcase(os.path.normpath(actual)) != os.path.normcase(
-        os.path.normpath(expected)
+    if not _same_canonical_long_path(
+        os.path.normpath(actual), os.path.normpath(expected)
     ):
         raise HostConfigError("daemon_provenance_conflict")
     return actual
@@ -743,9 +765,7 @@ class _PinnedConfigFile:
                 if attributes.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
                     raise HostConfigError("daemon_provenance_conflict")
                 final_path = _final_handle_path(self.handle)
-                if os.path.normcase(os.path.normpath(final_path)) != os.path.normcase(
-                    os.path.normpath(str(self.path))
-                ):
+                if not _same_canonical_long_path(str(self.path), final_path):
                     raise HostConfigError("daemon_provenance_conflict")
             except BaseException:
                 self.close()
