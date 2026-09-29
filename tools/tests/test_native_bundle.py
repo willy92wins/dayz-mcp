@@ -317,8 +317,8 @@ class Fb19b5ToolsLayoutTest(unittest.TestCase):
         )
 
     def test_announced_addon_builder_path_ignores_the_manifest_spelling(self) -> None:
-        # The builder recorded the registry's lower-case SteamPath; the broker announces
-        # its fixed C: path (launcher.cpp, BuildAddonCommand).
+        # The manifest keeps the registry's spelling, which can differ in case from
+        # the announcement. Approval compares the two with ntpath.normcase.
         manifest_path = (
             r"c:\program files (x86)\steam\steamapps\common\DayZ Tools\Bin\AddonBuilder\AddonBuilder.exe"
         )
@@ -370,30 +370,124 @@ class Fb19b5ToolsLayoutTest(unittest.TestCase):
             bytes.fromhex(identity.file_id),
         ) + raw
 
-    def test_the_broker_view_ignores_dayz_tools_path(self) -> None:
-        broker = dayz_tools_paths.addon_builder_exe(environ={})
-        helpers = frozenset(
-            ntpath.normcase(path) for path in dayz_tools_paths.addon_helper_exes(environ={})
-        )
-        for value in (r"E:\missing\DayZ Tools", str(dayz_tools_paths.DEFAULT_TOOLS_ROOT).lower()):
-            with self.subTest(dayz_tools_path=value), patch.dict(
-                os.environ, {"DAYZ_TOOLS_PATH": value}
-            ):
-                self.assertEqual(native_bundle._addon_builder_path(), broker)
-                self.assertEqual(native_bundle._addon_helper_paths(), helpers)
-                announcement = ChildAnnouncementDecoder().feed(
-                    self._broker_frame(broker, "CD" * 32, PathIdentity(5, "0B" * 16))
-                )[0]
-                self.assertEqual(announcement.announced_path, broker)
-
-    def test_the_cpp_addon_builder_literal_is_the_python_broker_view(self) -> None:
-        source = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
-        literals = re.findall(r'L"([^"]*AddonBuilder\.exe)"', source)
-        self.assertGreaterEqual(len(literals), 2)
-        for literal in literals:
-            self.assertEqual(
-                literal.replace("\\\\", "\\"), dayz_tools_paths.addon_builder_exe(environ={})
+    def _sealed_tools(self, tools: Path | None, *, environ_tools: str | None = None):
+        present: set[str] = set()
+        if tools is not None:
+            present.add(
+                ntpath.normcase(str(tools.joinpath(*dayz_tools_paths.ADDON_BUILDER_RELATIVE)))
             )
+            present.add(ntpath.normcase(str(tools.parents[2] / "steamclient.dll")))
+            present.add(
+                ntpath.normcase(str(tools.parent / "DayZ" / dayz_tools_paths.DIAG_NAME))
+            )
+
+        def registry(hive: str, subkey: str, value: str) -> str | None:
+            if tools is not None and (hive, subkey, value) == (
+                "HKEY_CURRENT_USER",
+                r"Software\Bohemia Interactive\DayZ Tools",
+                "path",
+            ):
+                return str(tools)
+            return None
+
+        environ = {key: value for key, value in os.environ.items() if key != "DAYZ_TOOLS_PATH"}
+        if environ_tools is not None:
+            environ["DAYZ_TOOLS_PATH"] = environ_tools
+        return (
+            patch.dict(os.environ, environ, clear=True),
+            patch.object(dayz_tools_paths, "read_registry_string", side_effect=registry),
+            patch.object(
+                Path,
+                "is_file",
+                autospec=True,
+                side_effect=lambda path: ntpath.normcase(str(path)) in present,
+            ),
+        )
+
+    def test_broker_paths_follow_the_resolved_layout(self) -> None:
+        tools = self.F_TOOLS
+        resolved = str(tools.joinpath(*dayz_tools_paths.ADDON_BUILDER_RELATIVE))
+        helpers = frozenset(
+            ntpath.normcase(str(tools.joinpath(*parts)))
+            for parts in dayz_tools_paths.ADDON_HELPER_RELATIVE
+        )
+        default = dayz_tools_paths.addon_builder_exe(environ={})
+        for label, environ_tools in (
+            ("registry", None),
+            ("stale_env_falls_through", r"E:\missing\DayZ Tools"),
+        ):
+            with self.subTest(layout=label):
+                env_patch, registry_patch, file_patch = self._sealed_tools(
+                    tools, environ_tools=environ_tools
+                )
+                with env_patch, registry_patch, file_patch:
+                    self.assertEqual(ntpath.normcase(native_bundle._addon_builder_path()), ntpath.normcase(resolved))
+                    self.assertNotEqual(ntpath.normcase(native_bundle._addon_builder_path()), ntpath.normcase(default))
+                    self.assertEqual(native_bundle._addon_helper_paths(), helpers)
+                    announcement = ChildAnnouncementDecoder().feed(
+                        self._broker_frame(resolved, "CD" * 32, PathIdentity(5, "0B" * 16))
+                    )[0]
+                    self.assertEqual(announcement.announced_path, resolved)
+                    folded = "".join(
+                        character.lower() if character.isupper() else character.upper()
+                        for character in resolved
+                    )
+                    folded_announcement = ChildAnnouncementDecoder().feed(
+                        self._broker_frame(folded, "CD" * 32, PathIdentity(5, "0B" * 16))
+                    )[0]
+                    self.assertEqual(folded_announcement.announced_path, folded)
+                    with self.assertRaisesRegex(ValueError, "invalid_native_child_announcement"):
+                        ChildAnnouncementDecoder().feed(
+                            self._broker_frame(default, "CD" * 32, PathIdentity(5, "0B" * 16))
+                        )
+
+    def test_default_c_layout_paths_when_nothing_resolves(self) -> None:
+        default = dayz_tools_paths.addon_builder_exe(environ={})
+        helpers = frozenset(
+            ntpath.normcase(str(dayz_tools_paths.DEFAULT_TOOLS_ROOT.joinpath(*parts)))
+            for parts in dayz_tools_paths.ADDON_HELPER_RELATIVE
+        )
+        env_patch, registry_patch, file_patch = self._sealed_tools(None)
+        with env_patch, registry_patch, file_patch:
+            self.assertEqual(native_bundle._addon_builder_path(), default)
+            self.assertEqual(native_bundle._addon_helper_paths(), helpers)
+            announcement = ChildAnnouncementDecoder().feed(
+                self._broker_frame(default.lower(), "CD" * 32, PathIdentity(5, "0B" * 16))
+            )[0]
+            self.assertEqual(ntpath.normcase(announcement.announced_path), ntpath.normcase(default))
+
+    def test_the_cpp_addon_builder_path_comes_from_the_sealed_closure(self) -> None:
+        source = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
+        self.assertNotIn("Program Files (x86)", source)
+        literals = re.findall(r'L"([^"]*AddonBuilder\.exe)"', source)
+        self.assertEqual(literals, [r"\\Bin\\AddonBuilder\\AddonBuilder.exe"])
+        lookup = source[
+            source.index("const ClosureEntry* SealedAddonBuilderEntry") : source.index("bool BuildAddonCommand")
+        ]
+        self.assertIn("kClosureEntries[index]", lookup)
+        self.assertIn("ClosureKind::EXTERNAL", lookup)
+        self.assertIn(r'L"\\Bin\\AddonBuilder\\AddonBuilder.exe"', lookup)
+        self.assertIn("if (found != nullptr) return nullptr;", lookup)
+        self.assertIn("return found;", lookup)
+        command = source[source.index("bool BuildAddonCommand") : source.index("bool BuildPboPath")]
+        self.assertNotIn('L"C:', command)
+        self.assertIn("const wchar_t* addon", command)
+        launch = source[
+            source.index("BOOL LaunchApprovedChild") : source.index(
+                'extern "C" void __cdecl wWinMainCRTStartup'
+            )
+        ]
+        self.assertIn("const ClosureEntry* addon_entry = SealedAddonBuilderEntry();", launch)
+        self.assertIn("if (addon_entry == nullptr) return FALSE;", launch)
+        self.assertLess(launch.index("addon_entry == nullptr"), launch.index("manifest_path = addon_entry->path"))
+        self.assertLess(
+            launch.index("manifest_path = addon_entry->path"),
+            launch.index("BuildAddonCommand(addon, manifest_path,"),
+        )
+        self.assertLess(
+            launch.index("BuildAddonCommand(addon, manifest_path,"),
+            launch.index("PublishAnnouncement(kind, manifest_path)"),
+        )
 
     @requires_built_bundle
     def test_built_bundle_consumer_chain_accepts_the_broker_under_each_variable(self) -> None:

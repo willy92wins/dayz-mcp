@@ -17,8 +17,8 @@ from typing import BinaryIO
 from dayz_mcp.dayz_test_request import RequestProjectPolicy
 from dayz_mcp.native_broker_protocol import BrokerKind
 from dayz_mcp.dayz_tools_paths import (
-    addon_builder_exe,
-    addon_helper_exes,
+    ADDON_BUILDER_RELATIVE,
+    ADDON_HELPER_RELATIVE,
     external_file_paths,
     resolved_layout,
 )
@@ -105,16 +105,20 @@ _FINGERPRINT_KEYS = frozenset(
     }
 )
 _REPRODUCIBILITY_MODES = ("clean-1", "clean-2", "offline")
-# AddonBuilder and its helpers are the broker's view: launcher.cpp starts the fixed
-# default C: path (BuildAddonCommand) whatever DAYZ_TOOLS_PATH or the registry say,
-# so these ignore the variable (environ={}); a build still needs DayZ Tools there
-# until the broker takes the sealed path (fb-20260928-124739-a2d5).
+# The broker launches and announces the AddonBuilder sealed in the bundle
+# (closure-manifest.json, kind "external"). resolved_layout() is how the builder
+# chose that layout — env, registry, then the C: default — and the registry
+# spelling can differ in case, so comparisons use ntpath.normcase
+# (fb-20260928-124739-a2d5).
 def _addon_builder_path() -> str:
-    return addon_builder_exe(environ={})
+    return str(resolved_layout().tools.joinpath(*ADDON_BUILDER_RELATIVE))
 
 
 def _addon_helper_paths() -> frozenset[str]:
-    return frozenset(ntpath.normcase(path) for path in addon_helper_exes(environ={}))
+    tools = resolved_layout().tools
+    return frozenset(
+        ntpath.normcase(str(tools.joinpath(*parts))) for parts in ADDON_HELPER_RELATIVE
+    )
 
 
 def _external_paths() -> frozenset[str]:

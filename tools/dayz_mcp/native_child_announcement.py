@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import ntpath
 import struct
 from dataclasses import dataclass
 
-from dayz_mcp.dayz_tools_paths import addon_builder_exe
+from dayz_mcp.dayz_tools_paths import ADDON_BUILDER_RELATIVE, resolved_layout
 from dayz_mcp.native_broker_protocol import BrokerKind
 from dayz_mcp.request_path_authority import PathIdentity
 
@@ -33,6 +34,10 @@ class ChildAnnouncement:
 
 def _invalid() -> None:
     raise ChildAnnouncementError("invalid_native_child_announcement")
+
+
+def _sealed_addon_builder_path() -> str:
+    return str(resolved_layout().tools.joinpath(*ADDON_BUILDER_RELATIVE))
 
 
 class ChildAnnouncementDecoder:
@@ -83,14 +88,17 @@ class ChildAnnouncementDecoder:
                     path = path_raw.decode("utf-8")
                 except UnicodeError:
                     _invalid()
-                # The broker announces its fixed default C: path, whatever
-                # DAYZ_TOOLS_PATH says (launcher.cpp, BuildAddonCommand).
-                expected_path = (
-                    addon_builder_exe(environ={})
-                    if kind is BrokerKind.ADDON_BUILDER
-                    else _PYTHON_PATH
-                )
-                if path != expected_path or "\0" in path:
+                # The broker announces the AddonBuilder path sealed in the
+                # bundle (kClosureEntries). resolved_layout() is that same
+                # resolution; the registry spelling can differ in case, so
+                # the comparison is ntpath.normcase (fb-20260928-124739-a2d5).
+                if kind is BrokerKind.ADDON_BUILDER:
+                    if (
+                        ntpath.normcase(path) != ntpath.normcase(_sealed_addon_builder_path())
+                        or "\0" in path
+                    ):
+                        _invalid()
+                elif path != _PYTHON_PATH or "\0" in path:
                     _invalid()
                 decoded.append(
                     ChildAnnouncement(
