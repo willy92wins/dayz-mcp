@@ -1815,12 +1815,14 @@ class ClientRuntime:
         self._time_fn = time_fn or time.monotonic
         self._sleep_fn = sleep_fn or time.sleep
         self._startup_budget_s = daemon.validated_startup_budget_s(startup_budget_s)
-        # A replacement worker mints a new identity -- new pid, ppid, timestamp and
-        # uuid -- and the coordinator compares all six fields by value, so a fresh one
-        # cannot reach the live lease. When a supervisor hands this generation a
-        # carrier, the identity crosses WHOLE or not at all: carrying part of it is
-        # worse than carrying none (session_coordination.py:2766 then refuses a fresh
-        # acquire too). Measured in REHEARSAL-LEASE.md, 34/34.
+        # The coordinator compares all six ClientIdentity fields by value, so a
+        # fresh identity cannot reach a live lease. A carrier crosses the whole
+        # identity or nothing: carrying only the session id is worse than none
+        # (identity_mismatch). Measured in REHEARSAL-LEASE.md, 34/34.
+        # With no lease (the dayz_test_run path; session_release clears the
+        # carrier) the same supervisor still reuses one full identity from a
+        # file next to that carrier. Embedded and unsupervised workers have no
+        # HANDOFF_ENV and mint a new id, as does a new supervisor directory.
         self._handoff_path = os.environ.get(session_handoff.HANDOFF_ENV) or None
         self._carrier_written_at = float("-inf")
         # Carrier writes and clears take this lock, so a refresh cannot land after
@@ -1831,14 +1833,7 @@ class ClientRuntime:
             if self._handoff_path
             else None
         )
-        self.identity = carried.identity if carried is not None else ClientIdentity(
-            platform=config.client_platform,
-            pid=os.getpid(),
-            ppid=os.getppid(),
-            started_at_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            session_id=str(uuid.uuid4()),
-            task_label=(config.task_label or os.environ.get("DAYZ_MCP_TASK_LABEL", ""))[:120],
-        )
+        self.identity = self._identity_for_worker(config, carried)
         if config.client_platform_raw:
             self._log(
                 "CLIENT: platform alias normalized "
@@ -1863,6 +1858,61 @@ class ClientRuntime:
                 f"SESSION: adopted lease {carried.lease_id} from worker generation "
                 f"{carried.generation}; ownership re-checked by the daemon"
             )
+
+    def _mint_identity(self, config: ServerConfig) -> ClientIdentity:
+        return ClientIdentity(
+            platform=config.client_platform,
+            pid=os.getpid(),
+            ppid=os.getppid(),
+            started_at_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            session_id=str(uuid.uuid4()),
+            task_label=(config.task_label or os.environ.get("DAYZ_MCP_TASK_LABEL", ""))[:120],
+        )
+
+    def _supervisor_identity_file(self) -> Path | None:
+        if not self._handoff_path:
+            return None
+        return session_handoff.supervisor_identity_path(self._handoff_path)
+
+    def _remember_supervisor_identity(self, identity: ClientIdentity) -> None:
+        path = self._supervisor_identity_file()
+        if path is None:
+            return
+        try:
+            session_handoff.store_supervisor_identity_if_absent(path, identity)
+        except (OSError, TypeError, ValueError) as exc:
+            # Losing the file costs the launcher right on a later reload with
+            # no lease. It must not fail the worker that is already starting.
+            self._log(f"SESSION: supervisor identity write failed: {exc}")
+
+    def _identity_for_worker(
+        self,
+        config: ServerConfig,
+        carried: session_handoff.SessionHandoff | None,
+    ) -> ClientIdentity:
+        """Carrier identity, else the supervisor file, else a new mint.
+
+        A live carrier wins so the lease still matches all six fields. The
+        file is written only when absent, and never when it is unreadable:
+        a doubtful file must not be replaced with a new session.
+        """
+
+        if carried is not None:
+            self._remember_supervisor_identity(carried.identity)
+            return carried.identity
+        path = self._supervisor_identity_file()
+        if path is None:
+            return self._mint_identity(config)
+        try:
+            loaded = session_handoff.load_supervisor_identity(path)
+        except Exception:
+            loaded = None
+        if loaded is not None:
+            return loaded
+        minted = self._mint_identity(config)
+        if not path.exists():
+            self._remember_supervisor_identity(minted)
+        return minted
 
     def _mirror_lease_to_carrier(
         self, lease_token: str | None, lease_id: str | None
@@ -5321,9 +5371,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "session_acquire_wait. Queue and run an approved DayZ test "
             "project; lease ownership and heartbeat remain internal to the "
             "tool. Release any held session lease before calling. The run it "
-            "leaves has no owner (RUNNING_IDLE): session_acquire_wait adopts "
-            "it and is required before any bridge verb or wait_for "
-            "players_*/entity_state, as for later mutating tools. With several "
+            "leaves has no owner (RUNNING_IDLE). session_acquire_wait adopts "
+            "it when this session launched it or use_state is abandoned, and "
+            "is required before any bridge verb or wait_for "
+            "players_*/entity_state, as for later mutating tools. Any other "
+            "session gets box_protected and the grant is released. With several "
             "ownerless runs the grant adopts none (adopted_run error "
             "multiple_idle_runs). "
             "Reattach sequence: server -> run_id -> client(run_id). "
@@ -7802,6 +7854,9 @@ def run_supervisor(argv: list[str]) -> int:
         supervisor.run(sys.stdin.buffer)
     finally:
         session_handoff.clear_handoff(carrier)
+        session_handoff.clear_supervisor_identity(
+            session_handoff.supervisor_identity_path(carrier)
+        )
         try:
             os.rmdir(carrier.parent)
         except OSError:

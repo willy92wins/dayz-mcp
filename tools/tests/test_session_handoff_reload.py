@@ -109,6 +109,39 @@ class HandoffRoundTripTest(unittest.TestCase):
         self.assertFalse(self.path.exists())
         clear_handoff(self.path)
 
+    def test_supervisor_identity_survives_clearing_the_carrier(self) -> None:
+        identity_path = session_handoff.supervisor_identity_path(self.path)
+        self.assertTrue(
+            session_handoff.store_supervisor_identity_if_absent(
+                identity_path, self.identity
+            )
+        )
+        self.assertFalse(
+            session_handoff.store_supervisor_identity_if_absent(
+                identity_path, self.identity
+            )
+        )
+        loaded = session_handoff.load_supervisor_identity(identity_path)
+        self.assertIsNotNone(loaded)
+        self.assertIsNot(loaded, self.identity)
+        self.assertEqual(loaded, self.identity)
+        self._write()
+        clear_handoff(self.path)
+        self.assertFalse(self.path.exists())
+        self.assertEqual(
+            session_handoff.load_supervisor_identity(identity_path), self.identity
+        )
+        session_handoff.clear_supervisor_identity(identity_path)
+        self.assertIsNone(session_handoff.load_supervisor_identity(identity_path))
+        session_handoff.clear_supervisor_identity(identity_path)
+
+    def test_supervisor_identity_refuses_a_carrier_document(self) -> None:
+        identity_path = session_handoff.supervisor_identity_path(self.path)
+        self._write()
+        identity_path.write_bytes(self.path.read_bytes())
+        self.assertIsNone(session_handoff.load_supervisor_identity(identity_path))
+        self.assertTrue(identity_path.is_file())
+
 
 class HandoffRefusalTest(unittest.TestCase):
     """Every refusal returns None -- start leaseless -- and never raises."""

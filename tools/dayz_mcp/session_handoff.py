@@ -198,6 +198,84 @@ def clear_handoff(path: str | os.PathLike[str]) -> None:
     _unlink_quietly(path)
 
 
+# The lease carrier above is consume-once and dies on session_release. D-82's
+# launcher right has to survive that release for as long as the same supervisor
+# (the same MCP client) keeps replacing workers. This file is the whole
+# ClientIdentity and nothing else: no lease token, so it is not the
+# session_id-only split the rehearsal forbids, and from_payload still rejects
+# a pid that arrived as text. A different supervisor has a different directory.
+SUPERVISOR_IDENTITY_VERSION = 1
+
+
+def supervisor_identity_path(carrier: str | os.PathLike[str]) -> Path:
+    """The stable identity next to a carrier. clear_handoff does not remove it."""
+    return Path(carrier).with_name("supervisor-identity.json")
+
+
+def load_supervisor_identity(path: str | os.PathLike[str]) -> ClientIdentity | None:
+    """Read the supervisor identity. None on any doubt. Does not delete the file."""
+
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+        document = json.loads(raw)
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    if document.get("version") != SUPERVISOR_IDENTITY_VERSION:
+        return None
+    # A carrier copied onto this path still holds a lease token. Refuse it:
+    # this file must not become a second way to replay a lease.
+    if "lease_token" in document or "lease_id" in document:
+        return None
+    try:
+        return ClientIdentity.from_payload(document.get("identity"))
+    except ValueError:
+        return None
+
+
+def store_supervisor_identity_if_absent(
+    path: str | os.PathLike[str], identity: ClientIdentity
+) -> bool:
+    """Create the supervisor identity. False when a file is already there.
+
+    Does not replace. The first worker of a supervisor writes it; a later
+    worker with a live carrier must not overwrite the supervisor's identity
+    with a different one, and a corrupt file stays in place (fail closed).
+    """
+
+    if not isinstance(identity, ClientIdentity):
+        raise TypeError("supervisor_identity_required")
+    target = Path(path)
+    if target.exists():
+        return False
+    document = {
+        "version": SUPERVISOR_IDENTITY_VERSION,
+        "identity": identity.to_payload(),
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = f"{target}.tmp"
+    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(document, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        _unlink_quietly(temporary)
+        raise
+    if target.exists():
+        _unlink_quietly(temporary)
+        return False
+    os.replace(temporary, target)
+    return True
+
+
+def clear_supervisor_identity(path: str | os.PathLike[str]) -> None:
+    """Drop the supervisor identity when that supervisor process exits."""
+    _unlink_quietly(path)
+
+
 def _unlink_quietly(path: str | os.PathLike[str]) -> None:
     try:
         os.unlink(path)

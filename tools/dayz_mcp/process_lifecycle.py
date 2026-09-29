@@ -3954,6 +3954,9 @@ class ProcessLifecycle:
         lock them out. Everyone else may adopt only use_state abandoned.
         Caller holds _operation_lock. box_occupancy takes _activity_lock and
         drops it before ServerState._lock; that order is the allowed one.
+        The sampler can still write a sample after this read.
+        _revalidate_abandoned repeats the classification before the owner
+        is assigned.
         """
 
         if self._client_is_launcher(client, run.run_id):
@@ -3972,6 +3975,180 @@ class ProcessLifecycle:
         if row is None or row.get("use_state") != "abandoned":
             return protection_fields(row)
         return None
+
+    def _use_clocks_locked(
+        self,
+    ) -> tuple[
+        str,
+        Mapping[str, float],
+        frozenset[str],
+        frozenset[str],
+        Mapping[str, float],
+        Mapping[str, float],
+        Mapping[str, float],
+        float | None,
+        Mapping[str, Mapping[str, object]],
+        float | None,
+        float | None,
+    ]:
+        """Copy the use clocks. Caller holds _activity_lock."""
+
+        generation = (
+            self.daemon_generation
+            if isinstance(self.daemon_generation, str)
+            else ""
+        )
+        activity = {
+            run_id: stamp
+            for (gen, run_id), stamp in self._last_activity.items()
+            if gen == generation
+            and stamp
+            > self._activity_tombstone.get((gen, run_id), stamp - 1.0)
+        }
+        unknown = frozenset(
+            run_id
+            for (gen, run_id) in self._activity_unknown
+            if gen == generation
+        )
+        compensating = frozenset(
+            run_id
+            for (gen, run_id) in self._compensating_runs
+            if gen == generation
+        )
+        ownerless = {
+            run_id: stamp
+            for (gen, run_id), stamp in self._ownerless_since.items()
+            if gen == generation
+        }
+        human = {
+            run_id: stamp
+            for (gen, run_id), stamp in self._human_input_at.items()
+            if gen == generation
+        }
+        uncertain = {
+            run_id: stamp
+            for (gen, run_id), stamp in self._uncertain_input_at.items()
+            if gen == generation
+        }
+        launched = {
+            run_id: MappingProxyType(identity.public_payload())
+            for (gen, run_id), identity in self._launched_by.items()
+            if gen == generation
+        }
+        return (
+            generation,
+            MappingProxyType(activity),
+            unknown,
+            compensating,
+            MappingProxyType(ownerless),
+            MappingProxyType(human),
+            MappingProxyType(uncertain),
+            self._signal_recovered_at,
+            MappingProxyType(launched),
+            self._input_good_at,
+            self._use_clock_origin,
+        )
+
+    def _snapshot_from_clocks(
+        self,
+        clock: float,
+        runs: tuple[RunRecord, ...],
+        revision: int,
+        bound: frozenset[str],
+        clocks: tuple[
+            str,
+            Mapping[str, float],
+            frozenset[str],
+            frozenset[str],
+            Mapping[str, float],
+            Mapping[str, float],
+            Mapping[str, float],
+            float | None,
+            Mapping[str, Mapping[str, object]],
+            float | None,
+            float | None,
+        ],
+    ) -> _BoxSnapshot:
+        (
+            generation,
+            activity,
+            unknown,
+            compensating,
+            ownerless,
+            human,
+            uncertain,
+            recovered_at,
+            launched,
+            input_good_at,
+            origin,
+        ) = clocks
+        return _BoxSnapshot(
+            clock=clock,
+            runs=runs,
+            activity=activity,
+            unknown=unknown,
+            revision=revision,
+            daemon_generation=generation,
+            compensating=compensating,
+            ownerless_since=ownerless,
+            human_input=human,
+            uncertain_input=uncertain,
+            launched_by=launched,
+            input_good_at=input_good_at,
+            signal_recovered_at=recovered_at,
+            use_clock_origin=origin,
+            bound_runs=bound,
+        )
+
+    def _revalidate_abandoned(
+        self, client: ClientIdentity, run: RunRecord, lease_id: str
+    ) -> dict[str, object] | None:
+        """None allows the adopt. A dict is the run_protected body.
+
+        Caller holds _operation_lock. The launcher returns immediately.
+        Everyone else is classified again after probes return: the clocks
+        are copied under _activity_lock and, when the run is still
+        abandoned, the owner fields are set on this clone before the lock
+        drops. The sampler writes those clocks under the same lock and
+        does not take _operation_lock, so it cannot land a sample between
+        the read and the owner write. The hold is that copy, one
+        _use_projection and three assignments. Probes, _adopt_dispatchable
+        and manifest.replace stay outside it. Anything that cannot be
+        classified is run_protected.
+        """
+
+        if self._client_is_launcher(client, run.run_id):
+            return None
+        try:
+            probe_snapshot = self._take_box_snapshot(time.time())
+            probes = self._probes_for_snapshot(probe_snapshot, use_cache=False)
+            runs = tuple(self.manifest.list_runs())
+            bound = frozenset(
+                item.run_id
+                for item in runs
+                if item.state in _ACTIVE_STATES
+                and self._adopt_dispatchable(item.run_id)
+            )
+            with self._activity_lock:
+                snapshot = self._snapshot_from_clocks(
+                    time.time(),
+                    runs,
+                    self._box_revision,
+                    bound,
+                    self._use_clocks_locked(),
+                )
+                active_count = sum(
+                    1 for item in runs if item.state in _ACTIVE_STATES
+                )
+                projected = _use_projection(run, snapshot, probes, active_count)
+                if projected.get("use_state") != "abandoned":
+                    return protection_fields(projected)
+                run.owner_session_id = client.session_id
+                run.owner_lease_id = lease_id
+                run.state = "RUNNING"
+                return None
+        except Exception:
+            return protection_fields(None)
 
     def adopt_run(self, client: ClientIdentity, token: str | None, run_id: object) -> dict[str, object]:
         legacy_error = self._legacy_identity_error()
@@ -4072,6 +4249,16 @@ class ProcessLifecycle:
                     return self._error("audit_failed", 503)
                 if self._quarantined():
                     return self._reject_reserved(authority, command, "retail_quarantine")
+                if run.state == "RUNNING_IDLE":
+                    refusal = self._revalidate_abandoned(
+                        client, run, authority[1]
+                    )
+                    if refusal is not None:
+                        result = self._reject_reserved(
+                            authority, command, "run_protected"
+                        )
+                        result.update(refusal)
+                        return result
                 command_id = self._commit_reserved(authority, command)
                 if command_id is None:
                     return self._error("lease_invalid", 409)
@@ -4801,51 +4988,7 @@ class ProcessLifecycle:
             revision = self._box_revision
         runs = tuple(self.manifest.list_runs())
         with self._activity_lock:
-            generation = (
-                self.daemon_generation
-                if isinstance(self.daemon_generation, str)
-                else ""
-            )
-            activity = {
-                run_id: stamp
-                for (gen, run_id), stamp in self._last_activity.items()
-                if gen == generation
-                and stamp
-                > self._activity_tombstone.get((gen, run_id), stamp - 1.0)
-            }
-            unknown = frozenset(
-                run_id
-                for (gen, run_id) in self._activity_unknown
-                if gen == generation
-            )
-            compensating = frozenset(
-                run_id
-                for (gen, run_id) in self._compensating_runs
-                if gen == generation
-            )
-            ownerless = {
-                run_id: stamp
-                for (gen, run_id), stamp in self._ownerless_since.items()
-                if gen == generation
-            }
-            human = {
-                run_id: stamp
-                for (gen, run_id), stamp in self._human_input_at.items()
-                if gen == generation
-            }
-            uncertain = {
-                run_id: stamp
-                for (gen, run_id), stamp in self._uncertain_input_at.items()
-                if gen == generation
-            }
-            recovered_at = self._signal_recovered_at
-            launched = {
-                run_id: MappingProxyType(identity.public_payload())
-                for (gen, run_id), identity in self._launched_by.items()
-                if gen == generation
-            }
-            input_good_at = self._input_good_at
-            origin = self._use_clock_origin
+            clocks = self._use_clocks_locked()
         # No lifecycle lock is held here, so the documented order
         # (_operation_lock before ServerState._lock) is kept.
         bound = frozenset(
@@ -4853,23 +4996,7 @@ class ProcessLifecycle:
             for run in runs
             if run.state in _ACTIVE_STATES and self._adopt_dispatchable(run.run_id)
         )
-        return _BoxSnapshot(
-            clock=clock,
-            runs=runs,
-            activity=MappingProxyType(activity),
-            unknown=unknown,
-            revision=revision,
-            daemon_generation=generation,
-            compensating=compensating,
-            ownerless_since=MappingProxyType(ownerless),
-            human_input=MappingProxyType(human),
-            uncertain_input=MappingProxyType(uncertain),
-            launched_by=MappingProxyType(launched),
-            input_good_at=input_good_at,
-            signal_recovered_at=recovered_at,
-            use_clock_origin=origin,
-            bound_runs=bound,
-        )
+        return self._snapshot_from_clocks(clock, runs, revision, bound, clocks)
 
     def _collect_probes(self, snapshot: _BoxSnapshot) -> _BoxProbes:
         active = [run for run in snapshot.runs if run.state in _ACTIVE_STATES]
