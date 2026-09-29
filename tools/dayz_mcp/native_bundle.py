@@ -259,9 +259,10 @@ class DebugImageAuthority:
         normalized_final = ntpath.normcase(ntpath.normpath(final_path))
         return any(
             descriptor.kind is announcement.kind
-            # The manifest keeps the builder's spelling (the registry's SteamPath is lower
-            # case) and the broker announces its own. Windows paths compare
-            # case-insensitively; identity, hash and final path pin the file.
+            # The broker announces addon_entry->path from the sealed closure
+            # table, the same value stored on this descriptor. A case-only
+            # difference is still tolerated because Windows compares paths
+            # case-insensitively. Identity, hash and final path pin the file.
             and ntpath.normcase(descriptor.announced_path)
             == ntpath.normcase(announcement.announced_path)
             and descriptor.image_sha256 == announcement.image_sha256

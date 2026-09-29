@@ -424,7 +424,7 @@ class Fb19b5ToolsLayoutTest(unittest.TestCase):
                     self.assertEqual(ntpath.normcase(native_bundle._addon_builder_path()), ntpath.normcase(resolved))
                     self.assertNotEqual(ntpath.normcase(native_bundle._addon_builder_path()), ntpath.normcase(default))
                     self.assertEqual(native_bundle._addon_helper_paths(), helpers)
-                    announcement = ChildAnnouncementDecoder().feed(
+                    announcement = ChildAnnouncementDecoder(addon_builder_path=resolved).feed(
                         self._broker_frame(resolved, "CD" * 32, PathIdentity(5, "0B" * 16))
                     )[0]
                     self.assertEqual(announcement.announced_path, resolved)
@@ -432,12 +432,12 @@ class Fb19b5ToolsLayoutTest(unittest.TestCase):
                         character.lower() if character.isupper() else character.upper()
                         for character in resolved
                     )
-                    folded_announcement = ChildAnnouncementDecoder().feed(
+                    folded_announcement = ChildAnnouncementDecoder(addon_builder_path=resolved).feed(
                         self._broker_frame(folded, "CD" * 32, PathIdentity(5, "0B" * 16))
                     )[0]
                     self.assertEqual(folded_announcement.announced_path, folded)
                     with self.assertRaisesRegex(ValueError, "invalid_native_child_announcement"):
-                        ChildAnnouncementDecoder().feed(
+                        ChildAnnouncementDecoder(addon_builder_path=resolved).feed(
                             self._broker_frame(default, "CD" * 32, PathIdentity(5, "0B" * 16))
                         )
 
@@ -451,7 +451,7 @@ class Fb19b5ToolsLayoutTest(unittest.TestCase):
         with env_patch, registry_patch, file_patch:
             self.assertEqual(native_bundle._addon_builder_path(), default)
             self.assertEqual(native_bundle._addon_helper_paths(), helpers)
-            announcement = ChildAnnouncementDecoder().feed(
+            announcement = ChildAnnouncementDecoder(addon_builder_path=default).feed(
                 self._broker_frame(default.lower(), "CD" * 32, PathIdentity(5, "0B" * 16))
             )[0]
             self.assertEqual(ntpath.normcase(announcement.announced_path), ntpath.normcase(default))
@@ -517,7 +517,9 @@ class Fb19b5ToolsLayoutTest(unittest.TestCase):
                         ]
                         self.assertEqual(len(builders), 1)
                         self.assertEqual(len(authority.addon_helper_descriptors), 3)
-                        announcement = ChildAnnouncementDecoder().feed(
+                        announcement = ChildAnnouncementDecoder(
+                            addon_builder_path=builders[0].announced_path
+                        ).feed(
                             self._broker_frame(
                                 broker, builders[0].image_sha256, builders[0].identity
                             )
