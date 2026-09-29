@@ -3,7 +3,7 @@
 fb-20260915-011312-ba70: launching mcp-grab.ps1 with the parent
 PSModulePath makes Windows PowerShell fail to find its cmdlets.
 
-Launch tests stand in for powershell.exe at subprocess.run and point
+Launch tests stand in for powershell.exe at subprocess.Popen and point
 GRAB_SCRIPT at an inert file, so no test starts PowerShell or reaches the
 desktop. A powershell.cmd stub on PATH is not a stand-in: CreateProcess only
 appends .exe to the bare "powershell" name, so the real grab would run.
@@ -11,8 +11,8 @@ appends .exe to the bare "powershell" name, so the real grab would run.
 
 from __future__ import annotations
 
+import io
 import os
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,24 +25,36 @@ import mcp_capture
 _POISON = "/git/bash/poisoned/Modules"
 
 
-def _fake_grab_child(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+class _ExitedGrab:
+    def __init__(self, stdout: str, stderr: str, code: int) -> None:
+        self.stdout = io.StringIO(stdout)
+        self.stderr = io.StringIO(stderr)
+        self.returncode = code
+
+    def poll(self) -> int:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
+def _fake_grab_child(cmd: list[str], **kwargs: Any) -> _ExitedGrab:
     """powershell.exe running mcp-grab.ps1 with no DayZ window.
 
     The child sees ``env`` when one is passed and the parent environment
-    otherwise, as subprocess.run does. A PSModulePath in any casing fails like
-    the poisoned Windows PowerShell, with no JSON on stdout; stderr carries the
+    otherwise, as Popen does. A PSModulePath in any casing fails like the
+    poisoned Windows PowerShell, with no JSON on stdout; stderr carries the
     inherited value so a leak into the capture error stays visible.
     """
     env = kwargs.get("env")
     child_env = os.environ if env is None else env
     leaked = [value for key, value in child_env.items() if key.casefold() == "psmodulepath"]
     if leaked:
-        return subprocess.CompletedProcess(
-            cmd, 1, stdout="", stderr=f"psmodulepath_leaked: {leaked[0]}\n"
-        )
-    return subprocess.CompletedProcess(
-        cmd, 0, stdout='{"ok":false,"error":"no_window"}\n', stderr=""
-    )
+        return _ExitedGrab("", f"psmodulepath_leaked: {leaked[0]}\n", 1)
+    return _ExitedGrab('{"ok":false,"error":"no_window"}\n', "", 0)
 
 
 class GrabPsModulePathTest(unittest.TestCase):
@@ -63,7 +75,7 @@ class GrabPsModulePathTest(unittest.TestCase):
             with mock.patch.object(mcp_capture.os.path, "exists", return_value=True):
                 with mock.patch.object(
                     mcp_capture.subprocess,
-                    "run",
+                    "Popen",
                     side_effect=FileNotFoundError("powershell"),
                 ):
                     result = mcp_capture._run_window_capture(
@@ -86,7 +98,7 @@ class GrabPsModulePathTest(unittest.TestCase):
                         {"PSModulePath": _POISON, "psmodulepath": _POISON},
                         clear=False,
                     ):
-                        with mock.patch.object(mcp_capture.subprocess, "run", run):
+                        with mock.patch.object(mcp_capture.subprocess, "Popen", run):
                             result = mcp_capture._run_window_capture(
                                 os.path.join(tmp, "frame.png"), "DayZDiag_x64", 8.0
                             )

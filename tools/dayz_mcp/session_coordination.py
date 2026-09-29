@@ -3665,6 +3665,13 @@ class SessionCoordinator:
             and inflight.lease.client == client
         ):
             return None, "session_granting"
+        # Remembered tokens are already dead. Report the stored reason even
+        # while a WAL or audit fence is up: the fence still returns no lease,
+        # so an expired token is not renewed, but it is not relabelled as
+        # never-valid (fb-20260928-012541-9f8b).
+        invalid = self._invalid_tokens.get(lease_token)
+        if invalid is not None and invalid[0] == client:
+            return None, invalid[1]
         if (
             self._audit_fault is not None
             or self._repair_fence
@@ -3677,9 +3684,6 @@ class SessionCoordinator:
             and self._active.client == client
         ):
             return self._active, ""
-        invalid = self._invalid_tokens.get(lease_token)
-        if invalid is not None and invalid[0] == client:
-            return None, invalid[1]
         return None, "lease_invalid"
 
     def _exact_lease_locked(

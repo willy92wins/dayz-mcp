@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import ntpath
+import os
 import subprocess
 import sys
 import tempfile
@@ -923,7 +924,10 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["graceful"])
         self.assertTrue(read_sizes)
         self.assertTrue(all(size <= 1024 * 1024 for size in read_sizes))
-        self.assertLessEqual(sum(read_sizes), growth["n"] + 4096)
+        # Polling still reads only the new bytes (growth). The logout warning
+        # reads the current server RPT once more, in the same 1 MiB chunks.
+        server_bytes = runtime.server_rpt.stat().st_size
+        self.assertLessEqual(sum(read_sizes), growth["n"] + server_bytes + 4096)
 
     @slow_test
     async def test_8604_r3_profiles_outside_policy_roots_open_no_file(self) -> None:
@@ -1088,6 +1092,89 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("notepad.exe", blob)
         self.assertEqual(result["reason"], "role_without_rpt")
         self.assertTrue(all(item["role"] != unknown for item in result["roles"]))
+
+    def _graceful_close(self, runtime: CloseToolRuntime):
+        runtime.append_on_close = TERMINATION
+        runtime.reap_event = "run_reaped"
+        return _close_tool(runtime, graceful_timeout_s=2)
+
+    async def test_62c5_connected_player_without_logout_finished_warns(self) -> None:
+        runtime = self._runtime()
+        _write_rpt(
+            runtime.server_rpt,
+            "boot server\n"
+            '1:14:03.254 Player "Dev" (steamID=76561197995575711 '
+            "pos=<12830.6, 10099.6, 6.0>) is connected\n",
+        )
+        profiles = runtime.server_rpt.parent
+        # Both files contain the finished line and must not clear the warning:
+        # the script log is from an older launch, and crash_*.log is not one.
+        finished = (
+            "SCRIPT       : [Logout]: Player "
+            "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg= finished\n"
+        )
+        old_script = profiles / "script_2020-01-01_00-00-00.log"
+        old_script.write_text(finished, encoding="utf-8")
+        os.utime(old_script, (946684800, 946684800))
+        (profiles / "crash_2026-09-29_01-12-51.log").write_text(
+            finished, encoding="utf-8"
+        )
+        result = await self._graceful_close(runtime)
+        self.assertTrue(result["graceful"])
+        self.assertEqual(
+            result.get("warnings"),
+            [
+                "player_state_not_saved: wait for the periodic players.db save, "
+                "or disconnect the client first"
+            ],
+        )
+        self.assertFalse(_serialized_has_host_path(result, self.root))
+
+    async def test_62c5_logout_finished_in_script_log_adds_no_warning(self) -> None:
+        runtime = self._runtime()
+        _write_rpt(
+            runtime.server_rpt,
+            "boot server\n"
+            '1:14:03.254 Player "Dev" (steamID=76561197995575711 '
+            "pos=<12830.6, 10099.6, 6.0>) is connected\n",
+        )
+        (runtime.server_rpt.parent / "script_test.log").write_text(
+            "SCRIPT       : [Logout]: Player "
+            "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg= finished\n",
+            encoding="utf-8",
+        )
+        result = await self._graceful_close(runtime)
+        self.assertTrue(result["graceful"])
+        self.assertNotIn("warnings", result)
+        self.assertFalse(_serialized_has_host_path(result, self.root))
+
+    async def test_62c5_no_connected_player_adds_no_warning(self) -> None:
+        runtime = self._runtime()
+        _write_rpt(
+            runtime.server_rpt,
+            "boot server\n"
+            "Player connect enabled\n"
+            '[VPPAT] Player "Dev" connected\n',
+        )
+        result = await self._graceful_close(runtime)
+        self.assertTrue(result["graceful"])
+        self.assertNotIn("warnings", result)
+        self.assertFalse(_serialized_has_host_path(result, self.root))
+
+    async def test_62c5_ungraceful_close_does_not_warn(self) -> None:
+        runtime = self._runtime()
+        _write_rpt(
+            runtime.server_rpt,
+            "boot server\n"
+            '1:14:03.254 Player "Dev" (steamID=76561197995575711 '
+            "pos=<12830.6, 10099.6, 6.0>) is connected\n",
+        )
+        runtime.append_on_close = TERMINATION
+        runtime.reap_event = "lifecycle_stop_outcome"
+        result = await _close_tool(runtime, graceful_timeout_s=2)
+        self.assertFalse(result["graceful"])
+        self.assertEqual(result["reason"], "run_retired_elsewhere")
+        self.assertNotIn("warnings", result)
 
 
 CHILD_WINDOW = r'''

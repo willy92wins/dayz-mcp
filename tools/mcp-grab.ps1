@@ -14,9 +14,12 @@
 # do), auto falls back to CopyFromScreen without SetForegroundWindow. Method=foreground remains
 # explicit opt-in; AttachThreadInput+SetForegroundWindow has killed the live client (ficha 8f76).
 #
-# Emits exactly one compact JSON line on stdout:
+# After Add-Type, capture mode emits one flushed {"phase":"started"} line, then
+# exactly one compact JSON result line on stdout:
 #   { ok, error, method, window:{pid,class,title,left,top,width,height}, stats:{meanBrightness,nonBlackRatio}, sha256,
 #     client:{left,top,width,height}, clientStats:{meanBrightness,nonBlackRatio} }
+# Callers that read the last JSON line ignore the phase line. SelfTest stays
+# one JSON line and does not emit the phase line.
 [CmdletBinding(DefaultParameterSetName='Capture')]
 param(
   [string]$ProcessName = 'DayZDiag_x64',
@@ -228,6 +231,18 @@ if ($SelfTest) {
 }
 
 [MCPGrab]::DpiAware()
+
+# Flushed on the raw stdout handle so a cold powershell.exe + Add-Type is not
+# the same failure as a grab that started and then ran out of time
+# (fb-20260927-141044-76e2). PowerShell's pipeline buffers Write-Output.
+# A flush failure must not hide the JSON result: the caller still accepts a
+# process that exits with a result before the start line arrives.
+try {
+  $startedBytes = [System.Text.Encoding]::ASCII.GetBytes('{"phase":"started"}' + "`n")
+  $stdout = [Console]::OpenStandardOutput()
+  $stdout.Write($startedBytes, 0, $startedBytes.Length)
+  $stdout.Flush()
+} catch {}
 
 $wins  = [MCPGrab]::List()
 $shown = $wins | Where-Object { $_.Vis -and $_.Wd -gt 0 -and $_.Ht -gt 0 -and $_.Cls -eq 'DayZ' -and $_.Cls -ne 'ConsoleWindowClass' }

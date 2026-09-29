@@ -2128,6 +2128,17 @@ _CLOSE_POLL_S = 0.05
 _CLOSE_REAP_INTERVAL_S = 1.0
 _RPT_READ_CHUNK = 1024 * 1024
 _RPT_READ_POLL_CAP = 8 * 1024 * 1024
+# One extra pass over the current server log when judging the logout warning.
+# Chunked like the termination poll so a single read stays at 1 MiB.
+_PLAYER_LOG_CAP = 16 * _RPT_READ_CHUNK
+_PLAYER_CONNECTED_RE = re.compile(
+    r'Player "[^"\n]+" \([^)\n]*\) is connected'
+)
+_LOGOUT_FINISHED_RE = re.compile(r"\[Logout\]: Player \S+ finished\b")
+_PLAYER_STATE_NOT_SAVED = (
+    "player_state_not_saved: wait for the periodic players.db save, "
+    "or disconnect the client first"
+)
 _TERMINATION_LINE_BYTES = _TERMINATION_LINE.encode("ascii")
 _RPT_OVERLAP = max(0, len(_TERMINATION_LINE_BYTES) - 1)
 _ROLE_CLOSE_ORDER = {"client": 0, "server": 1}
@@ -2375,6 +2386,105 @@ def _retired_event(status: object, run_id: str) -> str | None:
     return None
 
 
+def _read_capped_text(path: Path) -> str | None:
+    """Current-launch log text, at most `_PLAYER_LOG_CAP`, in 1 MiB reads."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+
+    def _take(handle: object, nbytes: int) -> bytes:
+        parts: list[bytes] = []
+        remaining = nbytes
+        read = getattr(handle, "read")
+        while remaining > 0:
+            chunk = read(min(_RPT_READ_CHUNK, remaining))
+            if not chunk:
+                break
+            if not isinstance(chunk, bytes):
+                break
+            parts.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(parts)
+
+    try:
+        with path.open("rb") as handle:
+            if size <= _PLAYER_LOG_CAP:
+                data = _take(handle, size)
+            else:
+                half = _PLAYER_LOG_CAP // 2
+                head = _take(handle, half)
+                handle.seek(max(0, size - half))
+                tail = _take(handle, half)
+                data = head + b"\n" + tail
+    except OSError:
+        return None
+    return data.decode("utf-8", errors="replace")
+
+
+def _script_log_for_server_rpt(rpt: Path) -> Path | None:
+    """Newest current-launch script log beside this server RPT.
+
+    Same floor as `_current_launch_logs`: a log touched before the RPT was
+    created belongs to an older run. crash_*.log is not a script log.
+    Prefer script_*.log; otherwise the newest other non-crash .log.
+    """
+    try:
+        floor = rpt.stat().st_ctime - 2.0
+    except OSError:
+        return None
+    try:
+        files = [item for item in rpt.parent.iterdir() if item.is_file()]
+    except OSError:
+        return None
+    current: list[tuple[float, Path]] = []
+    for item in files:
+        if item.suffix.casefold() != ".log":
+            continue
+        if item.name.casefold().startswith("crash"):
+            continue
+        try:
+            mtime = item.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < floor:
+            continue
+        current.append((mtime, item))
+    if not current:
+        return None
+    scripts = [
+        pair for pair in current if pair[1].name.casefold().startswith("script")
+    ]
+    pool = scripts or current
+    return max(pool, key=lambda pair: pair[0])[1]
+
+
+def _player_state_warnings(server_rpt: Path) -> list[str]:
+    """Warn when a connected player never reached `[Logout]: Player … finished`.
+
+    The connected line is the server RPT (`Player "…" (…) is connected`).
+    The finished line is the server script log. Boolean: one finished line
+    clears the warning. An unreadable script log fails toward the warning
+    once the RPT shows a connected player. `Player connect enabled` is a
+    server flag, not a player.
+    """
+    rpt_text = _read_capped_text(server_rpt)
+    if rpt_text is None:
+        return []
+    script_text = ""
+    script = _script_log_for_server_rpt(server_rpt)
+    if script is not None:
+        read = _read_capped_text(script)
+        if read is not None:
+            script_text = read
+    blob = rpt_text + "\n" + script_text
+    if _PLAYER_CONNECTED_RE.search(blob) is None:
+        return []
+    if _LOGOUT_FINISHED_RE.search(blob) is not None:
+        return []
+    return [_PLAYER_STATE_NOT_SAVED]
+
+
 def _whitelist_close_result(payload: dict[str, object]) -> dict[str, object]:
     roles_raw = payload.get("roles")
     roles: list[dict[str, object]] = []
@@ -2386,6 +2496,13 @@ def _whitelist_close_result(payload: dict[str, object]) -> dict[str, object]:
     result = {key: payload.get(key) for key in _CLOSE_TOOL_KEYS}
     result["roles"] = roles
     result["stop_method"] = "orderly_close"
+    warnings = payload.get("warnings")
+    if (
+        isinstance(warnings, list)
+        and warnings
+        and all(isinstance(item, str) and item for item in warnings)
+    ):
+        result["warnings"] = list(warnings)
     return result
 
 
@@ -2613,5 +2730,13 @@ async def execute_dayz_test_close(
         "reason": reason,
         "roles": roles_out,
     }
+    # Warning only. The close order, timeouts and reap stay as they are
+    # (fb-20260928-032049-62c5).
+    if graceful:
+        server_watch = watches.get("server")
+        if server_watch is not None:
+            warnings = _player_state_warnings(Path(server_watch.path))
+            if warnings:
+                payload["warnings"] = warnings
     return _whitelist_close_result(payload)
 
