@@ -167,6 +167,25 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
         "object_doors",
     ),
     ("object_doors", {"object_id": 1}, "object_doors"),
+    # The verbs whose optional values travel with a presence flag
+    # (fb-20260930-065425-8779): reads and writes, both target shapes.
+    ("object_anim", {"object_id": 1, "source": "DoorsDriver"}, "object_anim"),
+    ("object_anim", {"object_id": 1, "source": "DoorsDriver", "phase": 1.0}, "object_anim"),
+    (
+        "object_anim",
+        {"type": "CivilianSedan", "pos": _POS, "source": "DoorsDriver", "phase": 0.0},
+        "object_anim",
+    ),
+    (
+        "infected_drive",
+        {"type": "ZmbM_CitizenASkinny_Base", "pos": _POS, "heading": -360.0, "speed": 5.0},
+        "infected_drive",
+    ),
+    (
+        "infected_drive",
+        {"type": "ZmbM_CitizenASkinny_Base", "pos": _POS, "mode": "release"},
+        "infected_drive",
+    ),
     ("vehicle_door", {"object_id": 1, "source": "DoorsDriver", "mode": "read"}, "vehicle_door"),
     ("vehicle_door", {"object_id": 7, "source": "DoorsCargo1", "mode": "open"}, "vehicle_door"),
     (

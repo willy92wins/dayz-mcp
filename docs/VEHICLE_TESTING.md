@@ -171,19 +171,21 @@ Instrument findings the shakedown surfaced (both fixed in this tree):
   now carries a 0.5% allowance (19.9).
 
 Known caveat kept honest: an `object_anim` write applies (the door visibly
-moves), but the phase re-read in the same tick can lag the write -- with a
-player near, a value read one command later can reflect the transition
-(measured 0.0 -> 0.599 -> 1.0 trajectory) or read 0 again, and with no
-player near the value never appears. Confirm writes with a follow-up read,
-not with the write reply alone. A phase written by `object_anim` does not
-hold on the vehicle, so a door-open fixture cannot rely on `object_anim`.
-Measured 2026-09-30 on DayZDiag 1.29
-(run eda91d22), a bare vanilla `CivilianSedan` on asphalt,
-`object_anim` source `DoorsDriver`: write `phase=1` replied 0, then read 1
-at +0.6 s and 0 at +1.2 s; a second write replied 0, read 1 at +4.8 s, then
-0 at +18.6 s, +19.2 s, +19.8 s and +20.1 s. With the player 2.1 km away the
-write reply was 0 and the reads at +5.4 s, +6.3 s and +6.6 s were all 0.
-The modded SUB_WRXSTI returned to 0 within 0.3 s (ficha df3a, 2026-09-25).
+moves), but the phase re-read in the same tick can lag the write. Confirm
+writes with a follow-up read, not with the write reply alone. An
+`object_anim` read writes nothing. Until fb-20260930-065425-8779 it did: a
+read without `phase` reached the bridge as a write of phase 0, so each
+follow-up read closed the door it was checking. That is what run eda91d22
+(2026-09-30, DayZDiag 1.29, a bare vanilla `CivilianSedan` on asphalt,
+source `DoorsDriver`) recorded: write `phase=1` replied 0, reads gave 1 at
++0.6 s and 0 at +1.2 s, and with the player 2.1 km away every read was 0.
+The modded SUB_WRXSTI returning to 0 within 0.3 s (ficha df3a, 2026-09-25)
+was read the same way. Neither shows a written phase that does not stay.
+Measured 2026-09-30 on DayZDiag 1.29 with `vehicle_door` reads, which write
+nothing: a door opened with `vehicle_door` read 1.0 throughout, but after one
+`object_anim` read without `phase` (its reply was the old 1.0) it read 0.0
+`closed` from +0.3 s to +3 s; a door written with `object_anim(phase=1)`
+read 1.0 at +0.6 s, +1.2 s and +5 s.
 The site-gate certificate for a release build is produced against that
 build's PBO hash at release time.
 

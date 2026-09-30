@@ -656,7 +656,7 @@ async def _run() -> dict[str, object]:
             transient_secrets.append(str(active_c["lease_token"]))
             await runtime_c.call_bridge(
                 "world_weather_set",
-                {"rain": 0.0, "time": 0.0, "min_duration": 0.0},
+                {"rain": 0.0, "rain_set": True, "time": 0.0, "min_duration": 0.0},
                 "server",
                 3.0,
             )

@@ -55,7 +55,8 @@ def _minimal_args(cmd: str) -> dict:
     if cmd == "world_time_set":
         return {"year": 2026, "month": 1, "day": 1, "hour": 0, "minute": 0}
     if cmd == "world_weather_set":
-        return {"rain": 0.0, "time": 0.0, "min_duration": 0.0}
+        # Each level travels with its presence flag (fb-20260930-065425-8779).
+        return {"rain": 0.0, "rain_set": True, "time": 0.0, "min_duration": 0.0}
     if cmd == "camera_set":
         return {
             "cam_mode": "orient",
@@ -103,7 +104,14 @@ def _minimal_args(cmd: str) -> dict:
     if cmd == "player_teleport":
         return {"pos": [0.0, 0.0, 0.0]}
     if cmd == "infected_drive":
-        return {"type": "Infected", "pos": [0.0, 0.0, 0.0], "heading": 0.0, "speed": 1.0}
+        return {
+            "type": "Infected",
+            "pos": [0.0, 0.0, 0.0],
+            "heading": 0.0,
+            "heading_set": True,
+            "speed": 1.0,
+            "speed_set": True,
+        }
     if cmd == "object_anim":
         return {"type": "CarScript", "pos": [0.0, 0.0, 0.0], "source": "idle"}
     if cmd == "vehicle_door":
@@ -191,7 +199,14 @@ class CommandValidationCoverageTest(unittest.TestCase):
         self.assertIn("infected_drive", loopback.SERVER_COMMANDS)
         ok, err = loopback.validate_command_args(
             "infected_drive",
-            {"type": "Infected", "pos": [0.0, 0.0, 0.0], "heading": 0.0, "speed": 1.0},
+            {
+                "type": "Infected",
+                "pos": [0.0, 0.0, 0.0],
+                "heading": 0.0,
+                "heading_set": True,
+                "speed": 1.0,
+                "speed_set": True,
+            },
         )
         self.assertTrue(ok, f"infected_drive rejected: {err!r}")
         ok_release, err_release = loopback.validate_command_args(

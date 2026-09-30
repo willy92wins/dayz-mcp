@@ -375,6 +375,12 @@ def _is_strict_bool(value: object) -> bool:
     return isinstance(value, bool)
 
 
+def _is_true(value: object) -> bool:
+    # A presence flag (<field>_set) travels only as JSON true, beside its value.
+    # false, 1 and "true" are refused: 1 == True in Python, so no == here.
+    return value is True
+
+
 def _is_string(value: object) -> bool:
     return isinstance(value, str)
 
@@ -564,18 +570,29 @@ def _is_handbrake(value: object) -> bool:
 
 
 _WEATHER_LEVELS = frozenset({"overcast", "rain", "fog"})
+_WEATHER_LEVEL_FLAGS = frozenset(f"{level}_set" for level in _WEATHER_LEVELS)
 _WEATHER_TIMES = frozenset({"time", "min_duration"})
 
 
 def _validate_world_weather_set_args(args: dict) -> tuple[bool, str | None]:
     # time and min_duration always travel, plus at least one level: the rule
     # world_weather_set applies before it calls the bridge (no_weather_fields).
+    # Each level travels with its <level>_set flag, true, and neither without
+    # the other: the bridge reads an absent key as 0 or false, so the flag is
+    # what says a level was given (fb-20260930-065425-8779).
     # "At least one of three" is not a variant, so it is spelled out here.
     keys = set(args)
-    if keys - _WEATHER_LEVELS - _WEATHER_TIMES or not _WEATHER_TIMES <= keys:
+    if (
+        keys - _WEATHER_LEVELS - _WEATHER_LEVEL_FLAGS - _WEATHER_TIMES
+        or not _WEATHER_TIMES <= keys
+    ):
         return False, "bad_args"
     levels = keys & _WEATHER_LEVELS
     if not levels:
+        return False, "bad_args"
+    if keys & _WEATHER_LEVEL_FLAGS != {f"{level}_set" for level in levels}:
+        return False, "bad_args"
+    if not all(_is_true(args[f"{level}_set"]) for level in levels):
         return False, "bad_args"
     if not all(_SAFE_UNIT_REAL(args[level]) for level in levels):
         return False, "bad_args"
@@ -671,18 +688,22 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             },
         )
     ),
+    # heading and speed each travel with their _set flag, true: the bridge reads
+    # an absent key as 0 or false (fb-20260930-065425-8779).
     "infected_drive": _command_schema(
         _schema_variant(
-            required=("type", "pos", "heading", "speed"),
+            required=("type", "pos", "heading", "heading_set", "speed", "speed_set"),
             validators={
                 "type": _is_non_empty_string,
                 "pos": _is_real_vector3,
                 "heading": _reject_numeric_errors(
                     _real_in_range(minimum=-360.0, maximum=360.0)
                 ),
+                "heading_set": _is_true,
                 "speed": _reject_numeric_errors(
                     _real_in_range(minimum=0.0, maximum=5.0)
                 ),
+                "speed_set": _is_true,
             },
         ),
         _schema_variant(
@@ -694,27 +715,44 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             },
         ),
     ),
-    # An absent phase reads the source; a present phase writes it. The second
-    # variant targets by object_id from the world_spawn registry instead of
-    # classname near pos (fb-20260824-133301-ecf5).
+    # Without phase the command reads the source; a write carries phase and
+    # phase_set true, and one without the other is refused: the bridge reads an
+    # absent key as 0 or false, so only the flag can ask for a write
+    # (fb-20260930-065425-8779). The object_id variants target by the
+    # world_spawn registry instead of classname near pos (fb-20260824-133301-ecf5).
     "object_anim": _command_schema(
         _schema_variant(
             required=("type", "pos", "source"),
-            optional=("phase",),
+            validators={
+                "type": _is_non_empty_string,
+                "source": _is_non_empty_string,
+                "pos": _is_real_vector3,
+            },
+        ),
+        _schema_variant(
+            required=("type", "pos", "source", "phase", "phase_set"),
             validators={
                 "type": _is_non_empty_string,
                 "source": _is_non_empty_string,
                 "pos": _is_real_vector3,
                 "phase": _SAFE_FINITE_REAL,
+                "phase_set": _is_true,
             },
         ),
         _schema_variant(
             required=("object_id", "source"),
-            optional=("phase",),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "source": _is_non_empty_string,
+            },
+        ),
+        _schema_variant(
+            required=("object_id", "source", "phase", "phase_set"),
             validators={
                 "object_id": _integer_in_range(minimum=1),
                 "source": _is_non_empty_string,
                 "phase": _SAFE_FINITE_REAL,
+                "phase_set": _is_true,
             },
         ),
     ),
@@ -1097,10 +1135,29 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={"pos": _is_real_vector3, "component": _integer_in_range()},
         )
     ),
+    # time_multiplier travels with time_multiplier_set true, or neither travels:
+    # the bridge reads an absent key as 0 or false (fb-20260930-065425-8779).
     "world_time_set": _command_schema(
         _schema_variant(
             required=("year", "month", "day", "hour", "minute"),
-            optional=("time_multiplier",),
+            validators={
+                "year": _integer_in_range(minimum=1970, maximum=2100),
+                "month": _integer_in_range(minimum=1, maximum=12),
+                "day": _integer_in_range(minimum=1, maximum=31),
+                "hour": _integer_in_range(minimum=0, maximum=23),
+                "minute": _integer_in_range(minimum=0, maximum=59),
+            },
+        ),
+        _schema_variant(
+            required=(
+                "year",
+                "month",
+                "day",
+                "hour",
+                "minute",
+                "time_multiplier",
+                "time_multiplier_set",
+            ),
             validators={
                 "year": _integer_in_range(minimum=1970, maximum=2100),
                 "month": _integer_in_range(minimum=1, maximum=12),
@@ -1108,8 +1165,9 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "hour": _integer_in_range(minimum=0, maximum=23),
                 "minute": _integer_in_range(minimum=0, maximum=59),
                 "time_multiplier": _is_time_multiplier,
+                "time_multiplier_set": _is_true,
             },
-        )
+        ),
     ),
     "world_weather_set": _command_schema(delegated=_validate_world_weather_set_args),
     # The tool rewrites the look_at alias to lookat before it builds args.

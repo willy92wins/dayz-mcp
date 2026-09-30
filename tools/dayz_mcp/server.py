@@ -6712,13 +6712,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "or by classname near pos. phase is a unitless value; the write "
             "uses SetAnimationPhaseNow. The returned phase is the same-tick "
             "re-read and can still read the old value, so confirm a write "
-            "with a later read. A phase written by object_anim does not hold "
-            "on the vehicle (measured on 1.29: the reply read 0, a later read "
-            "1, then 0 again; with no player near, 0 throughout), so there it "
-            "is an instantaneous probe and cannot keep a door open (ficha "
-            "df3a). For a car door, use vehicle_door. For building doors, read "
-            "object_doors: object_anim can read 0 for an open building door. "
-            "Omit phase to read."
+            "with a later read. A read writes nothing. A written phase holds: "
+            "measured on 1.29, a car door written with phase=1 read back 1.0 "
+            "through vehicle_door at +0.6, +1.2 and +5 s. For a car door, use "
+            "vehicle_door. For building doors, read object_doors: object_anim "
+            "can read 0 for an open building door. Omit phase to read."
         )
     )
     async def object_anim(
@@ -6733,10 +6731,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("source", source, "be a non-empty string"))
         args: dict[str, Any] = {"source": source}
         args.update(_object_target_args(type, pos, object_id))
+        # The flag travels with the value: the bridge reads an absent key as 0
+        # or false, so only phase_set says a write was asked for
+        # (fb-20260930-065425-8779). A read sends neither.
         if phase is not None:
             args["phase"] = _finite_float(
                 phase, _bad_args("phase", phase, "be a finite unitless number")
             )
+            args["phase_set"] = True
         async with runtime.tool_lock:
             return await runtime.call_bridge("object_anim", args, "server", _timeout(timeout_s))
 
@@ -6832,12 +6834,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 raise ToolError(
                     _bad_args("speed", speed, "be provided when mode is omitted")
                 )
+            # Each value travels with its presence flag (fb-20260930-065425-8779).
             args["heading"] = _finite_float(
                 heading, _bad_args("heading", heading, "be a finite number of degrees")
             )
+            args["heading_set"] = True
             args["speed"] = _finite_float(
                 speed, _bad_args("speed", speed, "be a finite number")
             )
+            args["speed_set"] = True
         async with runtime.tool_lock:
             return await runtime.call_bridge("infected_drive", args, "server", _timeout(timeout_s))
 
@@ -7283,7 +7288,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             multiplier = _finite_float(time_multiplier, "bad_time_multiplier")
             if multiplier != -1.0 and (multiplier < 0.0 or multiplier > 64.0):
                 raise ToolError("bad_time_multiplier")
+            # The flag travels with the value (fb-20260930-065425-8779).
             args["time_multiplier"] = multiplier
+            args["time_multiplier_set"] = True
         async with runtime.tool_lock:
             result = await runtime.call_bridge(
                 "world_time_set", args, "server", _timeout(timeout_s)
@@ -7371,12 +7378,18 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         fog_value = _optional_finite_float(
             fog, _bad_args("fog", fog, "be a finite number from 0 to 1")
         )
+        # Only the given levels travel, each with its presence flag. The bridge
+        # sets a level only when its flag is true: an absent key arrives there
+        # as 0, which used to zero the levels not given (fb-20260930-065425-8779).
         if overcast_value is not None:
             args["overcast"] = _require_range(overcast_value, 0.0, 1.0, "bad_overcast")
+            args["overcast_set"] = True
         if rain_value is not None:
             args["rain"] = _require_range(rain_value, 0.0, 1.0, "bad_rain")
+            args["rain_set"] = True
         if fog_value is not None:
             args["fog"] = _require_range(fog_value, 0.0, 1.0, "bad_fog")
+            args["fog_set"] = True
         if not args:
             raise ToolError("no_weather_fields")
         args["time"] = _require_range(
