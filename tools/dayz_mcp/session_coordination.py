@@ -101,6 +101,16 @@ def public_audit_stage(value: object) -> str | None:
     return None
 
 
+def _echoed_audit_stage(reason: str) -> str | None:
+    """The stage of a rejection whose error echoes the caller's reason.
+
+    process_lifecycle rejects its reservation with reason "audit_failed" when
+    its own ledger event for the request does not append; the decision then
+    carries that error, so it names the step like every other audit_failed.
+    """
+    return "write" if reason == "audit_failed" else None
+
+
 @dataclass(frozen=True)
 class ClientIdentity:
     platform: str
@@ -1597,6 +1607,7 @@ class SessionCoordinator:
                     reason,
                     None,
                     cleanup_degraded=tuple(self._unique(degraded)),
+                    audit_stage=_echoed_audit_stage(reason),
                 )
             authorization_index = next(
                 (
@@ -1639,6 +1650,7 @@ class SessionCoordinator:
                 reason,
                 None,
                 cleanup_degraded=tuple(self._unique(degraded)),
+                audit_stage=_echoed_audit_stage(reason),
             )
 
     def discard_committed(
@@ -1760,6 +1772,7 @@ class SessionCoordinator:
                     reason,
                     None,
                     cleanup_degraded=tuple(self._unique(degraded)),
+                    audit_stage=_echoed_audit_stage(reason),
                 )
 
             authorization_index = next(
@@ -1800,6 +1813,7 @@ class SessionCoordinator:
                 reason,
                 None,
                 cleanup_degraded=tuple(self._unique(degraded)),
+                audit_stage=_echoed_audit_stage(reason),
             )
 
     def admin_release(self, lease_id: str, reason: str) -> tuple[int, dict[str, object]]:

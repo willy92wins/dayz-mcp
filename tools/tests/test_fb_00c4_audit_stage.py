@@ -223,6 +223,33 @@ class AuditStageCensusTest(unittest.TestCase):
         # not allowed to pass by finding nothing.
         self.assertGreaterEqual(decisions, 3)
 
+    def test_every_decision_echoing_its_reason_names_an_audit_failed_stage(self) -> None:
+        # process_lifecycle passes reason="audit_failed" to reject_reservation
+        # when its own ledger event fails, so a decision whose error is the
+        # caller's reason can be an audit_failed too (review R1, F1).
+        echoes = 0
+        for node in ast.walk(self.tree):
+            if not (
+                isinstance(node, ast.Call)
+                and getattr(node.func, "id", "") == "AuthorizationDecision"
+            ):
+                continue
+            error = node.args[2] if len(node.args) > 2 else None
+            if not (isinstance(error, ast.Name) and error.id == "reason"):
+                continue
+            echoes += 1
+            stage = next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "audit_stage"),
+                None,
+            )
+            self.assertTrue(
+                isinstance(stage, ast.Call)
+                and getattr(stage.func, "id", "") == "_echoed_audit_stage",
+                ast.dump(node),
+            )
+        # Two in reject_reservation, two in reject_authorization.
+        self.assertGreaterEqual(echoes, 4)
+
 
 class CoordinatorAuditStageTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -303,6 +330,54 @@ class CoordinatorAuditStageTest(unittest.TestCase):
         audit.fail_events = set()
         stolen = coordinator.authorize(self.waiter, token, "world_spawn")
         self.assertEqual((stolen.error, stolen.audit_stage), ("lease_invalid", None))
+
+    def test_write_travels_on_a_rejection_that_echoes_a_callers_audit_failed(self) -> None:
+        # process_lifecycle rejects with reason="audit_failed" after its own
+        # ledger event failed; the rejection's own audit succeeds, and the
+        # decision echoes the reason as its error (review R1, F1).
+        coordinator = _coordinator()
+        token = coordinator.acquire(self.owner, "drive")[1]["lease_token"]
+
+        allowed = coordinator.authorize(self.owner, token, "world_spawn")
+        self.assertTrue(allowed.allowed)
+        rejected = coordinator.reject_reservation(
+            self.owner.session_id,
+            allowed.lease_id,
+            allowed.reservation_id,
+            "audit_failed",
+        )
+        self.assertEqual(
+            (rejected.error, rejected.audit_stage), ("audit_failed", "write")
+        )
+        unknown_lease = coordinator.reject_reservation(
+            self.owner.session_id, "no-such-lease", "no-such-reservation", "audit_failed"
+        )
+        self.assertEqual(
+            (unknown_lease.error, unknown_lease.audit_stage), ("audit_failed", "write")
+        )
+
+        self.assertTrue(coordinator.authorize(self.owner, token, "world_spawn").allowed)
+        rejected = coordinator.reject_authorization(
+            self.owner.session_id, "world_spawn", "audit_failed"
+        )
+        self.assertEqual(
+            (rejected.error, rejected.audit_stage), ("audit_failed", "write")
+        )
+        not_owner = coordinator.reject_authorization(
+            self.waiter.session_id, "world_spawn", "audit_failed"
+        )
+        self.assertEqual(
+            (not_owner.error, not_owner.audit_stage), ("audit_failed", "write")
+        )
+
+        # Any other echoed reason still carries no stage.
+        self.assertTrue(coordinator.authorize(self.owner, token, "world_spawn").allowed)
+        quarantined = coordinator.reject_authorization(
+            self.owner.session_id, "world_spawn", "retail_quarantine"
+        )
+        self.assertEqual(
+            (quarantined.error, quarantined.audit_stage), ("retail_quarantine", None)
+        )
 
     def test_gate_names_an_audit_gate_that_cannot_be_taken(self) -> None:
         coordinator, ticket = self._fifo_claim(_Wal())
