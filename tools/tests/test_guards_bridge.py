@@ -141,7 +141,7 @@ class BridgeGuardsTest(unittest.TestCase):
         self.assertEqual(source.count('m_RestoreNoGameLogged = true;'), 1)
         self.assertLess(restore.index('if (!GetGame())'), restore.index('GetGame().GetPlayer()'))
         self.assertLess(restore.index('if (!GetGame())'), restore.index('GetGame().GetMission()'))
-        self.assertIn('if (player && m_PlayerSimulationDisabled)', restore)
+        self.assertIn('if (player && m_PlayerSimulationDisabled && !m_CameraHandoffPending)', restore)
         self.assertIn('mission.PlayerControlEnable(true);', restore)
 
     def test_g5_shutdown_latches_before_cleanup_but_allows_first_terminal_post(self) -> None:

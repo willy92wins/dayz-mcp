@@ -5096,7 +5096,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
-		if (player && m_PlayerSimulationDisabled)
+		// f47b: while a camera handoff runs, the simulation stays off until
+		// FinishCameraHandoff, even when a second restore lands meanwhile.
+		if (player && m_PlayerSimulationDisabled && !m_CameraHandoffPending)
 		{
 			player.DisableSimulation(false);
 			m_PlayerSimulationDisabled = false;

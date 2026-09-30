@@ -11,7 +11,8 @@ No game, no daemon. Two halves:
     an owned staticcamera active turns it off, turns the free camera on at its pose and
     turns the player simulation off; OnTick undoes that CAMERA_HANDOFF_TICKS later
     (free off, simulation on, staticcamera deleted); restore_gameplay replies only
-    after that; a camera_set and a shutdown finish a running handoff first.
+    after that; a camera_set and a shutdown finish a running handoff first; a second
+    restore during the handoff (same poll batch) leaves the simulation off until then.
   - The Python rule: render_frozen_signal fires when max_adjacent_delta is under
     RENDER_FROZEN_DELTA_EPS, even when the sha-distinct count is above 1.
 """
@@ -44,7 +45,9 @@ EXCLUSIVE = "protected bool HasExclusiveJob()"
 PROCESS_JOB = "override bool MCP_ProcessJob(MCPJob job)"
 POST_SUCCESS = "override void MCP_PostJobSuccess(MCPJob job)"
 RESTORE_BRANCH = 'else if (command.cmd == "restore_gameplay")'
+RESTORE_GAMEPLAY = "protected void RestoreGameplay()"
 OWNED_ACTIVE = "if (m_ActiveCam && m_ActiveCamOwned && m_ActiveCam.IsActive())"
+SIM_ON_OUTSIDE_HANDOFF = "if (player && m_PlayerSimulationDisabled && !m_CameraHandoffPending)"
 
 _TOKENS = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.S)
 
@@ -189,6 +192,54 @@ class CameraReleaseHandoffSourceTest(unittest.TestCase):
             "resultRestore.tick_dispatch = job.tick_dispatch;",
             "PostResult(resultRestore);",
         ])
+
+    def test_a_second_restore_in_the_same_batch_keeps_the_simulation_off(self) -> None:
+        # One poll batch or one DrainPending pass dispatches up to four commands
+        # (MAX_DISPATCH_PER_TICK), so a second restore_gameplay can run its
+        # RestoreGameplay while the first one's handoff is pending (review R2, F1).
+        source = _source()
+        self.assertIn("protected const int MAX_DISPATCH_PER_TICK = 4;", source)
+        restore = _body(source, RESTORE_GAMEPLAY)
+        guarded = _body(restore, SIM_ON_OUTSIDE_HANDOFF)
+        self.assertEqual(
+            [line.strip() for line in guarded.splitlines() if line.strip()],
+            ["player.DisableSimulation(false);", "m_PlayerSimulationDisabled = false;"],
+        )
+        # The rest of its cleanup still runs: weapon overrides, controls, HUD, focus.
+        self.assertIn('MCPWeaponControl.ReleaseAll("cleared");', restore)
+        after = restore[restore.index(guarded) + len(guarded):]
+        for statement in ("mission.PlayerControlEnable(true);", "mission.GetHud().Show(true);", "ReleaseGameFocus();"):
+            with self.subTest(statement=statement):
+                self.assertIn(statement, after)
+        # Then its ReleaseCamera returns on the pending handoff, and its reply is a
+        # second job that waits for the same FinishCameraHandoff.
+        guard = _body(_body(source, RELEASE), "if (!m_Shutdown)")
+        self.assertEqual(_body(guard, "if (m_CameraHandoffPending)").strip(), "return;")
+        branch = _body(_body(source, DISPATCH), RESTORE_BRANCH)
+        self._assert_in_order(branch, [
+            "RestoreGameplay();",
+            "ReleaseCamera();",
+            "postNow = !QueueRestoreGameplayJob(command, result);",
+        ])
+
+    def test_only_the_final_tick_turns_the_simulation_back_on_during_a_handoff(self) -> None:
+        source = _source()
+        # Two statements turn the simulation back on: RestoreGameplay's, which a
+        # pending handoff skips, and FinishCameraHandoff's.
+        self.assertEqual(source.count("DisableSimulation(false)"), 2)
+        self.assertIn("player.DisableSimulation(false);", _body(_body(source, RESTORE_GAMEPLAY), SIM_ON_OUTSIDE_HANDOFF))
+        self.assertIn("player.DisableSimulation(false);", _body(source, FINISH))
+        # The flag is cleared at birth and by those two statements only.
+        self.assertEqual(len(re.findall(r"\bm_PlayerSimulationDisabled\s*=\s*false;", source)), 3)
+        self.assertIn("m_PlayerSimulationDisabled = false;", _body(source, CONSTRUCTOR))
+        # Before the final tick, TickCameraHandoff only counts; FinishCameraHandoff
+        # runs at CAMERA_HANDOFF_TICKS (or earlier from a camera_set apply or shutdown).
+        tick = _body(source, TICK)
+        self.assertNotIn("DisableSimulation", tick)
+        self.assertEqual(tick.count("FinishCameraHandoff();"), 1)
+        self.assertEqual(
+            _body(tick, "if (m_CameraHandoffTicks >= CAMERA_HANDOFF_TICKS)").strip(), "FinishCameraHandoff();"
+        )
 
     def test_camera_set_during_a_handoff_is_refused_or_finishes_it_first(self) -> None:
         source = _source()
