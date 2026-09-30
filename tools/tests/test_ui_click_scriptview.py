@@ -23,55 +23,75 @@ def _method_body(source: str, signature: str) -> str:
 
 
 class UiClickScriptViewSourceContractTest(unittest.TestCase):
+    """The lookup behind InvokeUiClick is the walk it shares with
+    mode="complete" (backlog 20be): InvokeUiHandler visits each widget's script
+    and user-data slots, then the menu, and DeliverUiEvent makes the call. The
+    pins follow the walk there; InvokeUiClick hands it OnClick at (0, 0)
+    without bubbling, which keeps direct mode's first-handler return."""
+
     def setUp(self) -> None:
         source = BRIDGE_PATH.read_text(encoding="utf-8")
-        self.body = _method_body(source, "protected bool InvokeUiClick(")
-        self.compact = " ".join(self.body.split()).replace(
+        self.direct = _method_body(source, "protected bool InvokeUiClick(")
+        self.walk = _method_body(source, "protected void InvokeUiHandler(")
+        self.deliver = _method_body(source, "protected bool DeliverUiEvent(")
+        self.compact = " ".join(self.walk.split())
+        self.deliver_compact = " ".join(self.deliver.split()).replace(
             "CallFunctionParams( ", "CallFunctionParams("
         )
 
+    def test_direct_mode_hands_the_walk_onclick_at_origin_without_bubbling(self) -> None:
+        self.assertEqual(
+            " ".join(self.direct.split()),
+            "MCPUiClickPhase click = new MCPUiClickPhase(); "
+            'InvokeUiHandler(target, "OnClick", 0, 0, mouseButton, false, click); '
+            "handlerName = click.handler; return click.consumed;",
+        )
+
     def test_sweh_fast_paths_remain_first(self) -> None:
-        script_cast = "ScriptedWidgetEventHandler.Cast(scriptInst)"
-        user_cast = "ScriptedWidgetEventHandler.Cast(userInst)"
-        self.assertIn(script_cast, self.body)
-        self.assertIn(user_cast, self.body)
-        self.assertLess(self.body.index(script_cast), self.body.index(user_cast))
+        # Script slot before user-data slot, then the menu; in each slot the
+        # ScriptedWidgetEventHandler cast comes before the reflective call.
+        order = [
+            self.compact.index("cursor.GetScript(scriptInst);"),
+            self.compact.index("DeliverUiEvent(scriptInst, method, target, x, y, mouseButton, consumed)"),
+            self.compact.index("cursor.GetUserData(userInst);"),
+            self.compact.index("DeliverUiEvent(userInst, method, target, x, y, mouseButton, consumed)"),
+            self.compact.index("UIManager ui = GetGame().GetUIManager();"),
+        ]
+        self.assertEqual(order, sorted(order))
+        cast = "ScriptedWidgetEventHandler handler = ScriptedWidgetEventHandler.Cast(inst);"
+        self.assertIn(cast, self.deliver)
+        self.assertLess(self.deliver.index(cast), self.deliver.index("CallFunctionParams("))
 
     def test_failed_casts_fall_back_to_reflective_onclick_with_bool_result(self) -> None:
-        script_call = (
-            'int scriptCalled = g_Game.GameScript.CallFunctionParams(scriptInst, "OnClick", '
-            "scriptConsumed, new Param4<Widget, int, int, int>(target, 0, 0, mouseButton));"
+        reflective = (
+            "int called = g_Game.GameScript.CallFunctionParams(inst, method, "
+            "reflected, new Param4<Widget, int, int, int>(target, x, y, mouseButton));"
         )
-        user_call = (
-            'int userCalled = g_Game.GameScript.CallFunctionParams(userInst, "OnClick", '
-            "userConsumed, new Param4<Widget, int, int, int>(target, 0, 0, mouseButton));"
+        self.assertIn(reflective, self.deliver_compact)
+        self.assertEqual(self.deliver_compact.count("CallFunctionParams("), 1)
+        # A missing method is an empty slot; a found one hands back its bool.
+        self.assertIn(
+            "if (!called) { return false; } consumed = reflected; return true;",
+            self.deliver_compact,
         )
-        self.assertIn(script_call, self.compact)
-        self.assertIn(user_call, self.compact)
-        self.assertEqual(self.compact.count('CallFunctionParams('), 2)
-
-        script_cast = self.compact.index("ScriptedWidgetEventHandler.Cast(scriptInst)")
-        script_reflect = self.compact.index(script_call)
-        user_data = self.compact.index("cursor.GetUserData(userInst)")
-        user_cast = self.compact.index("ScriptedWidgetEventHandler.Cast(userInst)")
-        user_reflect = self.compact.index(user_call)
-        menu_fallback = self.compact.index("UIManager ui = GetGame().GetUIManager()")
-        self.assertLess(script_cast, script_reflect)
-        self.assertLess(script_reflect, user_data)
-        self.assertLess(user_cast, user_reflect)
-        self.assertLess(user_reflect, menu_fallback)
-
+        # Each slot names its handler from its own instance and stops the
+        # direct walk (no bubble) at the first one found, whatever it returned.
         for expected in (
-            "handlerName = scriptInst.ClassName(); return scriptConsumed;",
-            "handlerName = userInst.ClassName(); return userConsumed;",
+            "string scriptName = scriptInst.ClassName(); "
+            "if (DeliverUiEvent(scriptInst, method, target, x, y, mouseButton, consumed)) { "
+            "NoteUiHandler(walk, scriptName, consumed); if (consumed || !bubble) { return; }",
+            "string userName = userInst.ClassName(); "
+            "if (DeliverUiEvent(userInst, method, target, x, y, mouseButton, consumed)) { "
+            "NoteUiHandler(walk, userName, consumed); if (consumed || !bubble) { return; }",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.compact)
 
     def test_reader_has_no_dabs_compile_dependency_or_dead_define(self) -> None:
-        self.assertNotIn("ScriptedViewBase", self.body)
-        self.assertNotIn("DabsFramework", self.body)
-        self.assertNotIn("Relay_Command", self.body)
+        for body in (self.direct, self.walk, self.deliver):
+            self.assertNotIn("ScriptedViewBase", body)
+            self.assertNotIn("DabsFramework", body)
+            self.assertNotIn("Relay_Command", body)
 
 
 class UiClickDirectModeContractTest(unittest.TestCase):

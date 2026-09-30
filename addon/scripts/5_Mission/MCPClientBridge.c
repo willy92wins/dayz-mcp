@@ -2782,10 +2782,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! shared with the other UI verbs: an absent or ambiguous target returns
 	//! before any handler runs. mode is normalised only after the unique match:
 	//! "" is direct, and direct keeps the legacy lookup up to the first handler
-	//! and its return. `complete` (engine-owned down->up->click at the measured
-	//! centre) is gated behind a live viability RED; without that receipt the
-	//! bridge refuses it before dispatch instead of degrading it to direct.
-	//! `bubble` only selects branches of `complete`, so direct never reads it.
+	//! and its return. `complete` hands the resolved target to
+	//! DispatchUiClickComplete (down->up->click at the measured centre), the only
+	//! reader of `bubble`, so direct never reads it.
 	protected bool DispatchUiClick(MCPCommand command, MCPResult result)
 	{
 		BeginUiRequest(command.args, result);
@@ -2821,9 +2820,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 		if (mode == "complete")
 		{
-			result.ok = false;
-			result.error = "mode_not_implemented";
-			return true;
+			return DispatchUiClickComplete(command, result, target, mouseButton);
 		}
 		if (mode != "direct")
 		{
@@ -2856,6 +2853,75 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		result.ok = true;
 		return true;
+	}
+
+	//! ui_click mode="complete" on the target DispatchUiClick resolved. The
+	//! centre of its screen box (GetScreenPos/GetScreenSize,
+	//! 1_core\proto\enwidgets.c:153-154), rounded to whole pixels, is the x, y
+	//! of all three phases. OnMouseButtonDown, OnMouseButtonUp and OnClick then
+	//! run in that order, each through the direct-mode walk (InvokeUiHandler)
+	//! and each whatever the phases before it returned, because a real click
+	//! delivers all three; bubble only decides whether a phase a handler
+	//! declined moves on up the chain. This synthesizes handler calls in
+	//! script: no OS input, no cursor move, no focus, no hit test, and
+	//! engine-side widget state that only a real mouse drives (a button's
+	//! pressed look) does not change. handler and clicked describe the click
+	//! phase, as in direct mode. ok means a phase was consumed; otherwise
+	//! no_handler means no phase found a handler and not_handled that handlers
+	//! ran and none consumed.
+	protected bool DispatchUiClickComplete(MCPCommand command, MCPResult result, Widget target, int mouseButton)
+	{
+		float screenX;
+		float screenY;
+		float screenW;
+		float screenH;
+		target.GetScreenPos(screenX, screenY);
+		target.GetScreenSize(screenW, screenH);
+		int centerX = Math.Round(screenX + screenW / 2.0);
+		int centerY = Math.Round(screenY + screenH / 2.0);
+
+		MCPUiClickSequence sequence = new MCPUiClickSequence();
+		sequence.x = centerX;
+		sequence.y = centerY;
+		sequence.bubble = command.args.bubble;
+		result.click_sequence = sequence;
+		// Read before the phases run: a phase handler may unlink the target.
+		result.user_id = target.GetUserID();
+
+		MCPUiClickPhase down = RunUiClickPhase(target, "down", "OnMouseButtonDown", mouseButton, sequence);
+		MCPUiClickPhase up = RunUiClickPhase(target, "up", "OnMouseButtonUp", mouseButton, sequence);
+		MCPUiClickPhase click = RunUiClickPhase(target, "click", "OnClick", mouseButton, sequence);
+
+		result.handler = click.handler;
+		result.clicked = click.consumed;
+		if (down.consumed || up.consumed || click.consumed)
+		{
+			result.ok = true;
+			return true;
+		}
+
+		result.ok = false;
+		if (down.received == 0 && up.received == 0 && click.received == 0)
+		{
+			result.error = "no_handler";
+		}
+		else
+		{
+			result.error = "not_handled";
+		}
+		return true;
+	}
+
+	//! One phase of a complete click: a fresh walk from the target at the
+	//! sequence's centre and bubble setting. The phase joins the reply in the
+	//! order the phases run.
+	protected MCPUiClickPhase RunUiClickPhase(Widget target, string phaseName, string method, int mouseButton, MCPUiClickSequence sequence)
+	{
+		MCPUiClickPhase phase = new MCPUiClickPhase();
+		phase.phase = phaseName;
+		sequence.phases.Insert(phase);
+		InvokeUiHandler(target, method, sequence.x, sequence.y, mouseButton, sequence.bubble, phase);
+		return phase;
 	}
 
 	//! Hot UI iteration: rebuild a standalone preview root from a .layout on disk
@@ -3972,57 +4038,84 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 	}
 
-	//! Returns whether a handler CONSUMED the click, not whether one was found.
+	//! Direct mode's lookup: the shared walk with OnClick at (0, 0) and no
+	//! bubbling, so the first handler found ends it whatever it returns. Returns
+	//! whether that handler CONSUMED the click, not whether one was found:
 	//! ScriptedWidgetEventHandler.OnClick reports that in its return value
-	//! (1_core\proto\enwidgets.c:658). handlerName is set as soon as a handler is
-	//! located, so the caller can tell an absent handler from a declining one.
+	//! (1_core\proto\enwidgets.c:658). handlerName names the handler found and
+	//! stays empty when there was none, so the caller can tell an absent handler
+	//! from a declining one.
 	protected bool InvokeUiClick(Widget target, int mouseButton, out string handlerName)
 	{
-		handlerName = "";
+		MCPUiClickPhase click = new MCPUiClickPhase();
+		InvokeUiHandler(target, "OnClick", 0, 0, mouseButton, false, click);
+		handlerName = click.handler;
+		return click.consumed;
+	}
+
+	//! The handler walk of ui_click, one event per call. From target up through
+	//! its parents, each widget offers its script handler (GetScript), then its
+	//! user-data handler (GetUserData); the active menu comes last. Each one is
+	//! handed `method` (OnClick, OnMouseButtonDown or OnMouseButtonUp) with
+	//! (target, x, y, mouseButton) by DeliverUiEvent or DeliverUiMenuEvent.
+	//! Without bubble the first handler that receives the event ends the walk
+	//! whatever it returns; with bubble one that returns false passes it on to
+	//! the next, and the first that returns true ends it. Every receiver is
+	//! booked in `walk` (NoteUiHandler).
+	protected void InvokeUiHandler(Widget target, string method, int x, int y, int mouseButton, bool bubble, MCPUiClickPhase walk)
+	{
 		if (!GetGame())
 		{
-			return false;
+			return;
+		}
+		// An earlier phase may have unlinked the target: this one has no receiver.
+		if (!target)
+		{
+			return;
 		}
 
+		bool consumed = false;
 		Widget cursor = target;
 		while (cursor)
 		{
 			Class scriptInst;
 			cursor.GetScript(scriptInst);
-			ScriptedWidgetEventHandler scriptHandler = ScriptedWidgetEventHandler.Cast(scriptInst);
-			if (scriptHandler)
-			{
-				handlerName = scriptInst.ClassName();
-				return scriptHandler.OnClick(target, 0, 0, mouseButton);
-			}
 			if (scriptInst)
 			{
-				bool scriptConsumed = false;
-				int scriptCalled = g_Game.GameScript.CallFunctionParams(scriptInst, "OnClick", scriptConsumed, new Param4<Widget, int, int, int>(target, 0, 0, mouseButton));
-				if (scriptCalled)
+				string scriptName = scriptInst.ClassName();
+				if (DeliverUiEvent(scriptInst, method, target, x, y, mouseButton, consumed))
 				{
-					handlerName = scriptInst.ClassName();
-					return scriptConsumed;
+					NoteUiHandler(walk, scriptName, consumed);
+					if (consumed || !bubble)
+					{
+						return;
+					}
 				}
+			}
+			// A handler that declined may have unlinked the target. cursor is the
+			// target or one of its ancestors, so it cannot outlive the target.
+			if (!target)
+			{
+				return;
 			}
 
 			Class userInst;
 			cursor.GetUserData(userInst);
-			ScriptedWidgetEventHandler userHandler = ScriptedWidgetEventHandler.Cast(userInst);
-			if (userHandler)
-			{
-				handlerName = userInst.ClassName();
-				return userHandler.OnClick(target, 0, 0, mouseButton);
-			}
 			if (userInst)
 			{
-				bool userConsumed = false;
-				int userCalled = g_Game.GameScript.CallFunctionParams(userInst, "OnClick", userConsumed, new Param4<Widget, int, int, int>(target, 0, 0, mouseButton));
-				if (userCalled)
+				string userName = userInst.ClassName();
+				if (DeliverUiEvent(userInst, method, target, x, y, mouseButton, consumed))
 				{
-					handlerName = userInst.ClassName();
-					return userConsumed;
+					NoteUiHandler(walk, userName, consumed);
+					if (consumed || !bubble)
+					{
+						return;
+					}
 				}
+			}
+			if (!target)
+			{
+				return;
 			}
 
 			cursor = cursor.GetParent();
@@ -4034,12 +4127,93 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			UIScriptedMenu menu = ui.GetMenu();
 			if (menu)
 			{
-				handlerName = menu.ClassName();
-				return menu.OnClick(target, 0, 0, mouseButton);
+				string menuName = menu.ClassName();
+				if (DeliverUiMenuEvent(menu, method, target, x, y, mouseButton, consumed))
+				{
+					NoteUiHandler(walk, menuName, consumed);
+				}
 			}
 		}
+	}
 
+	//! Hands one walk candidate the event. A ScriptedWidgetEventHandler gets the
+	//! typed call (1_core\proto\enwidgets.c:658,668-669); any other instance, a
+	//! Dabs ScriptView for one, gets CallFunctionParams with the same method and
+	//! arguments. Returns false when the instance has no such method, which the
+	//! walk treats as an empty slot; consumed is the handler's return.
+	protected bool DeliverUiEvent(Class inst, string method, Widget target, int x, int y, int mouseButton, out bool consumed)
+	{
+		consumed = false;
+		ScriptedWidgetEventHandler handler = ScriptedWidgetEventHandler.Cast(inst);
+		if (handler)
+		{
+			if (method == "OnMouseButtonDown")
+			{
+				consumed = handler.OnMouseButtonDown(target, x, y, mouseButton);
+				return true;
+			}
+			if (method == "OnMouseButtonUp")
+			{
+				consumed = handler.OnMouseButtonUp(target, x, y, mouseButton);
+				return true;
+			}
+			if (method == "OnClick")
+			{
+				consumed = handler.OnClick(target, x, y, mouseButton);
+				return true;
+			}
+			return false;
+		}
+
+		bool reflected = false;
+		int called = g_Game.GameScript.CallFunctionParams(inst, method, reflected, new Param4<Widget, int, int, int>(target, x, y, mouseButton));
+		if (!called)
+		{
+			return false;
+		}
+
+		consumed = reflected;
+		return true;
+	}
+
+	//! The active menu's turn. UIScriptedMenu is not a
+	//! ScriptedWidgetEventHandler: it declares the three events itself
+	//! (3_game\tools\uiscriptedmenu.c:238,373,388) and gets the typed call.
+	protected bool DeliverUiMenuEvent(UIScriptedMenu menu, string method, Widget target, int x, int y, int mouseButton, out bool consumed)
+	{
+		consumed = false;
+		if (method == "OnMouseButtonDown")
+		{
+			consumed = menu.OnMouseButtonDown(target, x, y, mouseButton);
+			return true;
+		}
+		if (method == "OnMouseButtonUp")
+		{
+			consumed = menu.OnMouseButtonUp(target, x, y, mouseButton);
+			return true;
+		}
+		if (method == "OnClick")
+		{
+			consumed = menu.OnClick(target, x, y, mouseButton);
+			return true;
+		}
 		return false;
+	}
+
+	//! Books one receiver of a walk. The first one names the event until one
+	//! consumes it, so handler is the consumer when there is one; received
+	//! counts them.
+	protected void NoteUiHandler(MCPUiClickPhase walk, string handlerName, bool consumed)
+	{
+		walk.received = walk.received + 1;
+		if (walk.received == 1 || consumed)
+		{
+			walk.handler = handlerName;
+		}
+		if (consumed)
+		{
+			walk.consumed = true;
+		}
 	}
 
 	override bool MCP_ProcessJob(MCPJob job)
