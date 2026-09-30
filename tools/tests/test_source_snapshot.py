@@ -12,12 +12,16 @@ import importlib.util
 import inspect
 import os
 import tempfile
+import threading
 import unittest
 import uuid
+import warnings
 from pathlib import Path
 from types import ModuleType
+from unittest import mock
 
 from dayz_mcp import loopback, request_path_authority
+from tests import _source_snapshot
 from tests._source_snapshot import (
     SOURCE_CHANGED_MID_SUITE,
     SourceChangedMidSuite,
@@ -114,6 +118,17 @@ def tagged(tag):
 @tagged("label")
 def labelled():
     return "labelled"
+
+
+@functools.lru_cache(maxsize=None)
+def cached(value):
+    return value * 3
+
+
+class Memo:
+    @functools.lru_cache(maxsize=None)
+    def twice(self, value):
+        return value * 5
 '''
 
 PLAIN_SOURCE = "def plain(value):\n    return value + 1\n"
@@ -243,6 +258,87 @@ class SourceOfTest(unittest.TestCase):
             source_of(module)
         self.assertIn("Holder.method at line", self._assert_names_the_file(raised.exception))
 
+    def test_a_module_read_reaches_a_function_behind_a_callable_wrapper(self) -> None:
+        """Review R2 F1: functools.lru_cache leaves a callable that is not a
+        function and keeps the function as __wrapped__. A module read must
+        still check it, at module level and in a class."""
+        rewrites = (
+            ("return value * 3", "return value * 4", "cached"),
+            ("return value * 5", "return value * 6", "Memo.twice"),
+        )
+        for index, (old, new, qualname) in enumerate(rewrites):
+            with self.subTest(qualname):
+                self.assertEqual(FIXTURE.count(old), 1, old)
+                path = self.path.with_name(f"wrapped_{index}.py")
+                module = self._import(FIXTURE, path)
+                self.assertFalse(inspect.isfunction(module.cached))
+                self.assertFalse(inspect.isfunction(vars(module.Memo)["twice"]))
+                path.write_text(FIXTURE.replace(old, new), encoding="utf-8")
+
+                with self.assertRaises(SourceChangedMidSuite) as raised:
+                    source_of(module)
+                message = self._assert_names_the_file(raised.exception, path)
+                self.assertIn(f"{qualname} at line", message)
+
+    def test_a_warning_on_another_thread_survives_the_compile(self) -> None:
+        """Review R2 F2: catch_warnings() around the compile changed the
+        filters every thread reads, so a warning raised elsewhere during it
+        vanished. The compile is held open while this thread warns."""
+        module = self._import(FIXTURE)
+        entered, release = threading.Event(), threading.Event()
+        failures: list[BaseException] = []
+
+        def held_compile(*args: object, **kwargs: object) -> object:
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError("the held compile was never released")
+            return compile(*args, **kwargs)
+
+        def read() -> None:
+            try:
+                source_of(module.plain)
+            except BaseException as error:
+                failures.append(error)
+
+        reader = threading.Thread(target=read, daemon=True)
+        with (
+            mock.patch.object(_source_snapshot, "compile", held_compile, create=True),
+            warnings.catch_warnings(),
+        ):
+            warnings.simplefilter("error", UserWarning)
+            reader.start()
+            try:
+                self.assertTrue(entered.wait(10), "source_of never reached its compile")
+                with self.assertRaises(UserWarning):
+                    warnings.warn("raised on the test's own thread", UserWarning)
+            finally:
+                release.set()
+                reader.join(10)
+        self.assertFalse(reader.is_alive())
+        self.assertEqual([], failures)
+
+    def test_a_file_that_warns_at_compile_is_not_refused_under_an_error_filter(self) -> None:
+        """An unchanged file whose compile warns (an invalid escape) does not
+        compile while a filter turns that warning into an error. It falls
+        back to the byte check instead of being refused."""
+        text = 'def value():\n    return "\\q"\n'
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            module = self._import(text)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            # The filter does stop this compile, so the fallback is what runs.
+            with self.assertRaises(SyntaxError):
+                compile(self.path.read_bytes(), str(self.path), "exec", dont_inherit=True)
+            self.assertEqual(inspect.getsource(module.value), source_of(module.value))
+            self.assertEqual(inspect.getsource(module), source_of(module))
+
+        self.path.write_text(text + "\nLATE = 1\n", encoding="utf-8")
+        with self.assertRaises(SourceChangedMidSuite) as raised:
+            source_of(module.value)
+        self.assertIn("changed on disk", self._assert_names_the_file(raised.exception))
+
     def test_an_unchanged_file_is_not_refused_after_its_code_ran_hot(self) -> None:
         """A closure, a method calling super(), decorated functions and a
         comprehension compile again to equal code. They ran hot first: 3.11+
@@ -251,13 +347,16 @@ class SourceOfTest(unittest.TestCase):
         step = module.counter(0)
         child = module.Child()
         holder = module.Holder()
-        for _ in range(2000):
+        memo = module.Memo()
+        for index in range(2000):
             step()
             child.greet()
             module.squares(6)
             module.labelled()
             module.decorated(3)
             holder.prop
+            module.cached(index)
+            memo.twice(index)
         for obj in (
             module,
             step,
@@ -269,6 +368,8 @@ class SourceOfTest(unittest.TestCase):
             module.tagged,
             module.decorated,
             holder.method,
+            module.cached,
+            vars(module.Memo)["twice"],
         ):
             with self.subTest(obj=obj):
                 self.assertEqual(inspect.getsource(obj), source_of(obj))

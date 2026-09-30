@@ -17,7 +17,8 @@ source_changed_mid_suite and names the file, instead of answering when:
   code object gives, or starts there but compiles to other code: bytecode,
   names, local, free or cell variables, argument counts, constants and nested
   functions are compared. For a module, every function the module and its
-  classes define is checked the same way.
+  classes define is checked the same way, a function a decorator keeps as
+  __wrapped__ behind some other callable (functools.lru_cache) included.
 
 The second check is what ties the first read to the code this process
 imported. What it cannot see, before the first read, is an edit that compiles
@@ -25,8 +26,16 @@ to the same code (comments, blank lines or layout inside a body), or one to
 what runs outside a function's own body: a module's statements, class
 attributes, parameter defaults, decorator arguments. A module keeps no code
 object once imported, so a module asked about is checked through its
-functions only. After the first read every byte counts. Modules and functions
-only; anything else is a TypeError.
+functions only.
+
+The warning filters are never touched: every thread shares them, and
+catch_warnings() would change them under all of them. The compile therefore
+shows a file's compile-time warnings again, as its import did, and a filter
+set to "error" (python -W error, say) turns such a warning into a
+SyntaxError. While a filter like that covers SyntaxWarning or
+DeprecationWarning, a file that fails to compile keeps the byte check alone.
+After the first read every byte counts. Modules and functions only; anything
+else is a TypeError.
 """
 
 from __future__ import annotations
@@ -54,6 +63,9 @@ class _Snapshot:
     key: str
     sha256: str
     lines: tuple[str, ...]
+    # False when a warning filter set to "error" may have stopped the compile:
+    # that file gets the byte check only
+    compiled: bool
     # (qualname, first line) -> every code object compiled from the snapshot there
     code: dict[tuple[str, int], tuple[CodeType, ...]]
     # qualname -> every line a code object of that name starts on
@@ -114,24 +126,23 @@ def _snapshot(path: str) -> _Snapshot:
             raise OSError(f"could not read the source of {path}: {error}") from error
         try:
             lines = _decoded_lines(data)
-            # As SourceLoader.source_to_code compiles an import: the raw bytes,
-            # dont_inherit, the interpreter's optimisation level. Its warnings
-            # were the import's to give.
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                module_code = compile(data, path, "exec", dont_inherit=True, optimize=-1)
+            module_code = _compile_like_the_import(data, path)
         except (SyntaxError, UnicodeDecodeError, ValueError) as error:
             # The module compiled when it was imported, so this is a later text.
             raise SourceChangedMidSuite(
                 f"{SOURCE_CHANGED_MID_SUITE}: {path} no longer compiles as the "
                 f"module this process imported ({error})"
             ) from error
-        code, starts = _compiled_definitions(module_code)
+        if module_code is None:
+            code, starts = {}, {}
+        else:
+            code, starts = _compiled_definitions(module_code)
         snapshot = _Snapshot(
             path=path,
             key=key,
             sha256=hashlib.sha256(data).hexdigest(),
             lines=tuple(lines),
+            compiled=module_code is not None,
             code=code,
             starts=starts,
         )
@@ -148,6 +159,41 @@ def _decoded_lines(data: bytes) -> list[str]:
     elif not lines[-1].endswith("\n"):
         lines[-1] += "\n"
     return lines
+
+
+def _compile_like_the_import(data: bytes, path: str) -> CodeType | None:
+    """compile() as SourceLoader.source_to_code runs it for an import: the raw
+    bytes, dont_inherit, the interpreter's optimisation level.
+
+    None when a warning filter set to "error" may be what stopped it: compile
+    hands such a warning back as a SyntaxError (or, raised as is, as the
+    warning), and that says nothing about the file having changed.
+    """
+    try:
+        return compile(data, path, "exec", dont_inherit=True, optimize=-1)
+    except Warning:
+        return None
+    except SyntaxError:
+        if _warnings_can_stop_a_compile():
+            return None
+        raise
+
+
+def _warnings_can_stop_a_compile() -> bool:
+    """True when a filter set to "error" covers what compile() warns with:
+    SyntaxWarning, or DeprecationWarning on 3.11. Order and patterns are not
+    weighed, so the answer leans to the byte-only fallback. Read only."""
+    current = getattr(warnings, "_get_filters", None)  # 3.14, context-aware
+    filters = list(current() if current is not None else warnings.filters)
+    return any(
+        action == "error"
+        and isinstance(category, type)
+        and (
+            issubclass(SyntaxWarning, category)
+            or issubclass(DeprecationWarning, category)
+        )
+        for action, _message, category, _module, _line in filters
+    )
 
 
 def _compiled_definitions(
@@ -179,8 +225,10 @@ def _compiled_definitions(
 def _functions_defined_in(module: ModuleType) -> list[FunctionType]:
     """Every function in the module's namespace and in the classes it defines.
 
-    A function that wraps another (functools.wraps) is followed to it, the way
-    inspect.unwrap follows it.
+    Whatever keeps a function as __wrapped__ is followed to it, the way
+    inspect.unwrap follows it, callables that are not functions included
+    (functools.lru_cache). The attribute is read with getattr_static, so no
+    __getattr__ of a module, a proxy or a mock runs.
     """
     found: list[FunctionType] = []
     seen: set[int] = set()
@@ -190,6 +238,12 @@ def _functions_defined_in(module: ModuleType) -> list[FunctionType]:
         if id(value) in seen:
             continue
         seen.add(id(value))
+        try:
+            wrapped = inspect.getattr_static(value, "__wrapped__", None)
+        except Exception:
+            wrapped = None
+        if wrapped is not None:
+            pending.append(wrapped)
         if isinstance(value, (staticmethod, classmethod)):
             pending.append(value.__func__)
         elif isinstance(value, property):
@@ -200,9 +254,6 @@ def _functions_defined_in(module: ModuleType) -> list[FunctionType]:
             )
         elif inspect.isfunction(value):
             found.append(value)
-            wrapped = getattr(value, "__wrapped__", None)
-            if wrapped is not None:
-                pending.append(wrapped)
         elif inspect.isclass(value) and value.__module__ == module.__name__:
             pending.extend(vars(value).values())
     return found
@@ -227,6 +278,8 @@ def _require_same_bytes(snapshot: _Snapshot) -> None:
 
 
 def _require_same_code(snapshot: _Snapshot, code: CodeType) -> None:
+    if not snapshot.compiled:
+        return  # an "error" warning filter stopped the compile: bytes only
     if _key(code.co_filename) != snapshot.key:
         return  # defined in another file; this snapshot says nothing about it
     compiled = snapshot.code.get((code.co_qualname, code.co_firstlineno), ())
