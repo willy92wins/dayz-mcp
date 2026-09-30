@@ -7,6 +7,11 @@ by file. pack-addon.ps1 now writes mcp_build.json into the stage, and this tool
 fails on any entry that differs, any file missing, any extra entry other than that
 marker, and a marker that names another commit.
 
+Review R1 (Codex) F3: the verdict ignored the header's prefix property, so a PBO
+whose files and marker were right but whose prefix was another mod's got OK. The
+prefix is the path every file of the addon is served under; it must now equal
+addon/$PBOPREFIX$ at the ref, and a header that names a property twice is refused.
+
 The reader runs on synthetic PBOs from tests/pbo_helpers.py, which follow the layout
 measured on 24 DayZ_MCP.pbo builds; the command line runs against a throwaway git
 repository. The pack-addon side of the marker is tested in test_pack_addon_staging.
@@ -24,7 +29,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from tests._tiers import slow_test
-from tests.pbo_helpers import build_pbo, marker_bytes
+from tests.pbo_helpers import DEFAULT_PROPERTIES, build_pbo, marker_bytes
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 TOOL = TOOLS_DIR / "dev" / "pbo_provenance.py"
@@ -71,7 +76,7 @@ def _states(lines: list[str]) -> dict[str, str]:
     found: dict[str, str] = {}
     for line in lines:
         parts = line.split()
-        if not parts or parts[0] in ("marker", "pbo", "props", "ref", "PROVENANCE"):
+        if not parts or parts[0] in ("marker", "prefix", "pbo", "props", "ref", "PROVENANCE"):
             continue
         rest = parts[1:]
         if rest and rest[0].isdigit():
@@ -123,6 +128,16 @@ class ReadPboTest(unittest.TestCase):
             with self.subTest(data=data), self.assertRaises(provenance.PboFormatError):
                 provenance.read_pbo(data)
 
+    def test_r1_f3_a_property_named_twice_is_refused(self) -> None:
+        for properties in (
+            (("product", "dayz ugc"), ("prefix", "DayZ_MCP"), ("prefix", "OtherMod")),
+            (("product", "dayz ugc"), ("product", "other"), ("prefix", "DayZ_MCP")),
+        ):
+            with self.subTest(properties=properties):
+                with self.assertRaises(provenance.PboFormatError) as raised:
+                    provenance.read_pbo(build_pbo(_entries(), properties=properties))
+                self.assertIn("twice", str(raised.exception))
+
 
 class ParseMarkerTest(unittest.TestCase):
     def test_git_marker_parses(self) -> None:
@@ -161,8 +176,10 @@ class ParseMarkerTest(unittest.TestCase):
 
 
 class CompareTest(unittest.TestCase):
-    def compare(self, entries, blobs=BLOBS, commit=COMMIT, tree=TREE):
-        lines, ok = provenance.compare(entries, blobs, commit, tree)
+    def compare(self, entries, blobs=BLOBS, commit=COMMIT, tree=TREE, properties=None):
+        if properties is None:
+            properties = dict(DEFAULT_PROPERTIES)
+        lines, ok = provenance.compare(entries, blobs, commit, tree, properties)
         return lines, ok, _states(lines), "\n".join(lines)
 
     def test_exact_build_with_its_marker_passes(self) -> None:
@@ -174,7 +191,42 @@ class CompareTest(unittest.TestCase):
             {"$PBOPREFIX$": "exact", "config.cpp": "exact",
              "scripts/5_Mission/MCPBridge.c": "exact", "mcp_build.json": "marker"},
         )
+        self.assertIn("prefix OK DayZ_MCP", lines)
         self.assertEqual(lines[-1], "marker OK")
+
+    def test_r1_f3_a_header_prefix_other_than_pboprefix_fails(self) -> None:
+        # Every file and the marker are right; the PBO would serve them as OtherMod/...
+        lines, ok, _states_, text = self.compare(
+            _entries(), properties={"product": "dayz ugc", "prefix": "OtherMod"}
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("prefix FAIL: the PBO header says 'OtherMod'", text)
+        self.assertIn("says 'DayZ_MCP'", text)
+        self.assertIn("marker OK", lines)
+
+    def test_r1_f3_a_header_without_prefix_fails(self) -> None:
+        lines, ok, _states_, text = self.compare(_entries(), properties={"product": "dayz ugc"})
+
+        self.assertFalse(ok)
+        self.assertIn("prefix FAIL: the PBO header has no prefix property", text)
+
+    def test_r1_f3_a_ref_without_pboprefix_fails(self) -> None:
+        blobs = {rel: data for rel, data in BLOBS.items() if rel != "$PBOPREFIX$"}
+
+        lines, ok, states, text = self.compare(_entries(), blobs=blobs)
+
+        self.assertFalse(ok)
+        self.assertEqual(states["$PBOPREFIX$"], "MISSING_IN_GIT")
+        self.assertIn("prefix FAIL: addon/$PBOPREFIX$ is missing at the ref", text)
+
+    def test_r1_f3_the_prefix_is_compared_exactly(self) -> None:
+        for prefix in ("dayz_mcp", "DayZ_MCP ", "DayZ_MCP\\sub"):
+            with self.subTest(prefix=prefix):
+                lines, ok, _states_, text = self.compare(
+                    _entries(), properties={"product": "dayz ugc", "prefix": prefix}
+                )
+                self.assertFalse(ok, text)
 
     def test_a_changed_file_fails(self) -> None:
         blobs = dict(BLOBS, **{"config.cpp": b"class CfgPatches { changed };\n"})
@@ -373,6 +425,39 @@ class CommandLineTest(unittest.TestCase):
 
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
         self.assertIn("marker note: its addon/ tree equals the ref's", done.stdout)
+
+    @slow_test
+    def test_r1_f3_a_wrong_header_prefix_exits_1(self) -> None:
+        # The reviewer's repro: every file and the marker right, prefix=OtherMod.
+        wrong = self.root / "wrong-prefix.pbo"
+        wrong.write_bytes(
+            build_pbo(
+                _entries(marker=marker_bytes(self.commit, self.tree)),
+                properties=(("product", "dayz ugc"), ("prefix", "OtherMod")),
+            )
+        )
+
+        done = self.run_tool(str(wrong), str(self.repo), "HEAD")
+
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("prefix FAIL: the PBO header says 'OtherMod'", done.stdout)
+        self.assertIn("marker OK", done.stdout)
+        self.assertEqual(done.stdout.splitlines()[-1], "PROVENANCE FAIL entries=4")
+
+    @slow_test
+    def test_r1_f3_a_header_naming_the_prefix_twice_exits_2(self) -> None:
+        twice = self.root / "prefix-twice.pbo"
+        twice.write_bytes(
+            build_pbo(
+                _entries(marker=marker_bytes(self.commit, self.tree)),
+                properties=(("product", "dayz ugc"), ("prefix", "DayZ_MCP"), ("prefix", "OtherMod")),
+            )
+        )
+
+        done = self.run_tool(str(twice), str(self.repo), "HEAD")
+
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertIn("names the property 'prefix' twice", done.stderr)
 
     @slow_test
     def test_a_file_that_is_not_a_pbo_exits_2(self) -> None:

@@ -10,12 +10,16 @@ which commit built it (fb-20260819-024951-e307):
 
 This tool prints one line per PBO entry (exact, DIFF, DIFF-EOL, MISSING_IN_GIT,
 DUPLICATE, marker), one line per file of addon/ that the PBO lacks (NOT_IN_PBO),
-the marker verdict, and a last line PROVENANCE OK or PROVENANCE FAIL.
+the prefix verdict, the marker verdict, and a last line PROVENANCE OK or
+PROVENANCE FAIL.
 
 Exit status: 0 only when every entry equals its git blob byte for byte, no file of
-addon/ is missing, and the one extra entry is a marker that names <ref>'s commit
-and addon/ tree. 1 on any mismatch, line-ending-only differences included. 2 when
-the check cannot run: bad arguments, a file that is not a plain PBO, or a git error.
+addon/ is missing, the header's prefix property equals addon/$PBOPREFIX$ at <ref>
+(the prefix is the path every file of the addon is served under), and the one extra
+entry is a marker that names <ref>'s commit and addon/ tree. 1 on any mismatch,
+line-ending-only differences included. 2 when the check cannot run: bad arguments, a
+file that is not a plain PBO (a header that names a property twice included), or a
+git error.
 
 PBO layout, measured on 24 DayZ_MCP.pbo builds (2026-06..09, all carrying the
 property product=dayz ugc that AddonBuilder writes): a header of records, each a
@@ -43,6 +47,7 @@ from pathlib import Path
 MARKER_NAME = "mcp_build.json"
 MARKER_KEYS = frozenset({"commit", "tree", "built_utc", "source"})
 MARKER_SOURCES = frozenset({"git", "folder"})
+PREFIX_FILE = "$PBOPREFIX$"
 
 _MIME_PROPERTIES = 0x56657273  # 'Vers'
 _RECORD = struct.Struct("<5I")
@@ -91,6 +96,9 @@ def read_pbo(data: bytes) -> tuple[dict[str, str], list[tuple[str, bytes]]]:
                 if key == "":
                     break
                 value, pos = _read_cstr(data, pos)
+                if key in properties:
+                    # Readers disagree on which value wins; the header says two things.
+                    raise PboFormatError(f"the header names the property {key!r} twice")
                 properties[key] = value
             first = False
             continue
@@ -158,6 +166,23 @@ def parse_marker(data: bytes) -> dict[str, str | None]:
     return marker
 
 
+def _check_prefix(properties: dict[str, str], blobs: dict[str, bytes]) -> tuple[list[str], bool]:
+    """The header's prefix must be the one addon/$PBOPREFIX$ declares at the ref."""
+    declared = blobs.get(PREFIX_FILE)
+    if declared is None:
+        return [f"prefix FAIL: addon/{PREFIX_FILE} is missing at the ref, so nothing says what the prefix must be"], False
+    try:
+        expected = declared.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return [f"prefix FAIL: addon/{PREFIX_FILE} at the ref is not UTF-8"], False
+    actual = properties.get("prefix")
+    if actual is None:
+        return [f"prefix FAIL: the PBO header has no prefix property; addon/{PREFIX_FILE} says {expected!r}"], False
+    if actual != expected:
+        return [f"prefix FAIL: the PBO header says {actual!r}; addon/{PREFIX_FILE} at the ref says {expected!r}"], False
+    return [f"prefix OK {actual}"], True
+
+
 def _check_marker(markers: list[bytes], commit: str, tree: str) -> tuple[list[str], bool]:
     if not markers:
         return [
@@ -193,13 +218,14 @@ def compare(
     blobs: dict[str, bytes],
     commit: str,
     tree: str,
+    properties: dict[str, str],
 ) -> tuple[list[str], bool]:
-    """Report lines and the verdict for PBO entries against addon/ at one commit.
+    """Report lines and the verdict for a PBO against addon/ at one commit.
 
-    ``blobs`` maps every file under addon/ (path below addon/, forward slashes) to
-    its bytes; ``commit`` and ``tree`` are the ref's commit and addon/ tree ids.
-    Names match exactly: the stage keeps git's spelling, so a case difference is a
-    different file.
+    ``entries`` and ``properties`` come from read_pbo; ``blobs`` maps every file
+    under addon/ (path below addon/, forward slashes) to its bytes; ``commit`` and
+    ``tree`` are the ref's commit and addon/ tree ids. Names match exactly: the
+    stage keeps git's spelling, so a case difference is a different file.
     """
     lines: list[str] = []
     ok = True
@@ -241,9 +267,11 @@ def compare(
         elif rel not in matched:
             lines.append(f"{rel:60s} {'':8s} NOT_IN_PBO")
             ok = False
+    prefix_lines, prefix_ok = _check_prefix(properties, blobs)
+    lines.extend(prefix_lines)
     marker_lines, marker_ok = _check_marker(markers, commit, tree)
     lines.extend(marker_lines)
-    return lines, ok and marker_ok
+    return lines, ok and prefix_ok and marker_ok
 
 
 def _git(repo: str, *args: str, stdin: bytes | None = None) -> bytes:
@@ -340,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"pbo {options.pbo} {len(data)} B sha256 {hashlib.sha256(data).hexdigest().upper()}")
     print(f"props {properties}")
     print(f"ref {options.ref} commit {commit} addon/ tree {tree}")
-    lines, ok = compare(entries, blobs, commit, tree)
+    lines, ok = compare(entries, blobs, commit, tree, properties)
     for line in lines:
         print(line)
     print("PROVENANCE", "OK" if ok else "FAIL", f"entries={len(entries)}")

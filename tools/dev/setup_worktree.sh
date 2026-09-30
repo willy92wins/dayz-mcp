@@ -25,10 +25,14 @@
 # nothing about that map, so it stays green while the map points at another tree; a
 # test that starts a subprocess from another directory falls through to the map and
 # runs that other tree. So the check runs the venv's python isolated (-I: no
-# PYTHONPATH, no current directory on sys.path) from an empty temporary directory, and
-# requires every module the editable finder maps, and dayz_mcp itself, to resolve
-# inside <worktree-dir>/tools. It prints SEALED <tools> and exits 0, or one LEAK line
-# per module that escapes and exits 1.
+# PYTHONPATH, no current directory on sys.path) from an empty temporary directory,
+# hands it <worktree-dir>/tools as named, and requires:
+#   - that neither <worktree-dir>, its tools/ nor tools/.venv-mcp is a junction or a
+#     symlink, and that the interpreter's venv is that tools/.venv-mcp. Review R1 F4:
+#     a .venv-mcp junctioned to another checkout's venv sealed the other checkout;
+#   - that every module tools/pyproject.toml declares or the editable finder maps,
+#     and dayz_mcp itself, resolves inside that same tools/.
+# It prints SEALED <tools> and exits 0, or one LEAK line per problem and exits 1.
 #
 # The functions can be sourced without running anything (tools/tests use that).
 
@@ -61,44 +65,81 @@ pip_requirement() {
 }
 
 check_worktree() {
-  local tools python neutral status=0
+  local tools tools_arg python neutral status=0
   if ! tools="$(cd "$1/tools" 2>/dev/null && pwd)"; then
     echo "setup_worktree: no tools/ directory in $1" >&2
     return 1
+  fi
+  # The path as named. `pwd -P` and Git Bash's `pwd -W` resolve a junction, which
+  # would hide the very link the check looks for; cygpath only rewrites the name
+  # into the form the Windows interpreter reads.
+  if command -v cygpath > /dev/null 2>&1; then
+    tools_arg="$(cygpath -m "$tools")"
+  else
+    tools_arg="$tools"
   fi
   if ! python="$(venv_python "$tools")"; then
     echo "setup_worktree: no venv at $tools/.venv-mcp" >&2
     return 1
   fi
   neutral="$(mktemp -d)"
-  (cd "$neutral" && "$python" -I - <<'PY') || status=$?
+  (cd "$neutral" && "$python" -I - "$tools_arg" <<'PY') || status=$?
 import importlib.util
 import os
+import stat
 import sys
 from pathlib import Path
 
+REPARSE_POINT = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT: a junction or a symlink on Windows
+
+
+def real(path):
+    return os.path.normcase(os.path.realpath(path))
+
 
 def inside(path, root):
-    path = os.path.normcase(os.path.realpath(path))
-    root = os.path.normcase(os.path.realpath(root)).rstrip("\\/")
+    path, root = real(path), real(root).rstrip("\\/")
     return path == root or path.startswith(root + os.sep)
 
 
+def is_link(path):
+    try:
+        status = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISLNK(status.st_mode) or bool(getattr(status, "st_file_attributes", 0) & REPARSE_POINT)
+
+
+tools = Path(sys.argv[1])
+venv = tools / ".venv-mcp"
+leaks = []
+for part in (tools.parent, tools, venv):
+    if is_link(part):
+        leaks.append("%s is a junction or a symlink, so its code may be another tree's" % part)
 if sys.prefix == sys.base_prefix:
-    print("LEAK: %s is not a venv interpreter" % sys.executable)
-    sys.exit(1)
-tools = Path(sys.prefix).resolve().parent
+    leaks.append("%s is not a venv interpreter" % sys.executable)
+elif real(sys.prefix) != real(venv):
+    leaks.append("the interpreter's venv is %s, not %s" % (sys.prefix, venv))
+own = {"dayz_mcp"}
+pyproject = tools / "pyproject.toml"
+if pyproject.is_file():
+    try:
+        import tomllib
+
+        declared = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("tool", {}).get("setuptools", {})
+        own |= set(declared.get("packages", [])) | set(declared.get("py-modules", []))
+    except Exception as error:  # an unreadable declaration is a failed check, not a crash
+        leaks.append("cannot read the modules %s declares: %r" % (pyproject, error))
 mapped = {}
 for name, module in sorted(sys.modules.items()):
     if name.startswith("__editable__") and name.endswith("_finder"):
         mapping = getattr(module, "MAPPING", None)
         if isinstance(mapping, dict):
             mapped.update(mapping)
-leaks = []
 for name, target in sorted(mapped.items()):
     if not inside(target, tools):
-        leaks.append("the editable finder maps %s to %s" % (name, target))
-for name in sorted(set(mapped) | {"dayz_mcp"}):
+        leaks.append("the editable finder maps %s to %s, outside %s" % (name, target, tools))
+for name in sorted(own | set(mapped)):
     try:
         spec = importlib.util.find_spec(name)
     except Exception as error:  # a broken finder is a failed check, not a crash
@@ -107,9 +148,9 @@ for name in sorted(set(mapped) | {"dayz_mcp"}):
         origin = (spec.origin if spec is not None else None) or "nothing"
     print("%s from %s" % (name, origin))
     if spec is None or not spec.origin or not inside(spec.origin, tools):
-        leaks.append("%s resolves to %s" % (name, origin))
+        leaks.append("%s resolves to %s, outside %s" % (name, origin, tools))
 for leak in leaks:
-    print("LEAK: %s, outside %s" % (leak, tools))
+    print("LEAK: " + leak)
 if leaks:
     sys.exit(1)
 print("SEALED %s" % tools)

@@ -9,6 +9,12 @@ whose editable map points inside or outside a synthetic worktree, and run the
 script's --check from inside that worktree's tools/ with PYTHONPATH naming it: the
 two conditions that kept the old gate green.
 
+Review R1 (Codex) F4: the check derived the accepted tree from the interpreter's
+sys.prefix and resolved it, so a worktree whose .venv-mcp was a junction to another
+checkout's venv sealed that other checkout. The check now takes the requested
+worktree, refuses a junction or symlink on the way to its venv, and wants every own
+module inside that worktree's tools/.
+
 Not run here: the create path past its refusals. It adds a worktree to the
 repository that holds the script and downloads pip, the requirements and
 setuptools. Its refusals run on a copy of the script inside a throwaway repository,
@@ -108,8 +114,15 @@ class WorktreeCheckTest(unittest.TestCase):
         (tools / "mcp_capture.py").write_text(f"TREE = {name!r}\n", encoding="utf-8")
         return self.root / name
 
-    def _venv(self, mapping: dict[str, Path]) -> Path:
-        venv = self.wt / "tools" / ".venv-mcp"
+    def _junction(self, link: Path, target: Path) -> None:
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+        # Cleanups run last-in first-out: the junction goes before the temporary tree.
+        self.addCleanup(os.rmdir, link)
+
+    def _venv(self, mapping: dict[str, Path], tree: Path | None = None) -> Path:
+        venv = (tree or self.wt) / "tools" / ".venv-mcp"
         made = _run([sys.executable, "-m", "venv", "--without-pip", str(venv)])
         self.assertEqual(made.returncode, 0, made.stderr)
         python = venv / "Scripts" / "python.exe"
@@ -127,12 +140,13 @@ class WorktreeCheckTest(unittest.TestCase):
         )
         return python
 
-    def check(self) -> tuple[int, str]:
+    def check(self, worktree: Path | None = None) -> tuple[int, str]:
+        worktree = worktree or self.wt
         env = os.environ.copy()
-        env["PYTHONPATH"] = str(self.wt / "tools")
+        env["PYTHONPATH"] = str(worktree / "tools")
         done = _run(
-            [self.bash, SCRIPT.as_posix(), "--check", self.wt.as_posix()],
-            cwd=str(self.wt / "tools"),
+            [self.bash, SCRIPT.as_posix(), "--check", worktree.as_posix()],
+            cwd=str(worktree / "tools"),
             env=env,
             text=True,
             encoding="utf-8",
@@ -194,6 +208,36 @@ class WorktreeCheckTest(unittest.TestCase):
 
         self.assertEqual(code, 1, output)
         self.assertIn("LEAK: dayz_mcp resolves to nothing", output)
+
+    @slow_test
+    def test_r1_f4_a_venv_junctioned_from_another_checkout_leaks(self) -> None:
+        # The reviewer's repro: wt/tools/.venv-mcp is a junction to other/'s venv,
+        # whose map keeps dayz_mcp inside other/tools, so other/ looks sealed.
+        other = self.other / "tools"
+        self._venv({"dayz_mcp": other / "dayz_mcp", "mcp_capture": other / "mcp_capture"}, tree=self.other)
+        self._junction(self.wt / "tools" / ".venv-mcp", other / ".venv-mcp")
+
+        code, output = self.check()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn(".venv-mcp is a junction or a symlink", output)
+        self.assertIn("LEAK: dayz_mcp resolves to {0}".format(other / "dayz_mcp" / "__init__.py"), output)
+        self.assertNotIn("SEALED", output)
+
+    @slow_test
+    def test_r1_f4_a_tools_folder_junctioned_to_another_checkout_leaks(self) -> None:
+        other = self.other / "tools"
+        self._venv({"dayz_mcp": other / "dayz_mcp", "mcp_capture": other / "mcp_capture"}, tree=self.other)
+        junctioned = self.root / "junctioned"
+        junctioned.mkdir()
+        self._junction(junctioned / "tools", other)
+
+        code, output = self.check(junctioned)
+
+        self.assertEqual(code, 1, output)
+        # The path comes back through cygpath's mount table: compare without case.
+        self.assertIn("{0} is a junction or a symlink".format(junctioned / "tools").lower(), output.lower())
+        self.assertNotIn("SEALED", output)
 
     @slow_test
     def test_a_worktree_without_a_venv_is_refused(self) -> None:
@@ -345,7 +389,10 @@ class SetupScriptContractTest(unittest.TestCase):
 
     def test_the_create_path_ends_with_the_isolated_check(self) -> None:
         self.assertIn('neutral="$(mktemp -d)"', self.text)
-        self.assertIn('(cd "$neutral" && "$python" -I - <<\'PY\')', self.text)
+        # The check gets the worktree as named: `pwd -W` / `pwd -P` would resolve a junction.
+        self.assertIn('(cd "$neutral" && "$python" -I - "$tools_arg" <<\'PY\')', self.text)
+        code = [line for line in self.text.splitlines() if not line.lstrip().startswith("#")]
+        self.assertEqual([line for line in code if "pwd -W" in line or "pwd -P" in line], [])
         create = self.text[self.text.index("create_worktree() {"):self.text.index("main() {")]
         self.assertLess(create.index("pip install -q -e ."), create.index('check_worktree "$wt"'))
         self.assertLess(create.index('check_worktree "$wt"'), create.index('echo "READY'))

@@ -60,8 +60,9 @@ if ($LASTEXITCODE -ne 0) { throw "The PBO is not the build of HEAD" }
   --out .\dist
 ```
 
-`pbo_provenance.py` compares every PBO entry with `addon/` at HEAD byte for byte
-and requires `mcp_build.json` to name HEAD's commit and `addon/` tree; it exits
+`pbo_provenance.py` compares every PBO entry with `addon/` at HEAD byte for byte,
+requires the header's `prefix` to be the one `addon/$PBOPREFIX$` declares, and
+requires `mcp_build.json` to name HEAD's commit and `addon/` tree; it exits
 non-zero on any difference, extra entry or missing file. `make_release.py` reads
 the marker too and refuses a PBO built from another commit than the `git_sha` it
 records (`pbo_commit_mismatch`), one without a valid marker (`pbo_marker_missing`,
@@ -229,9 +230,14 @@ parameters in its header.
   empty directory that the editable install resolves `dayz_mcp` inside that
   worktree. `--check <worktree-dir>` runs only the check.
 - `tools/dev/pbo_provenance.py <pbo> <repo> <ref>` compares a built PBO file by file
-  with `addon/` at `<ref>` and checks its `mcp_build.json`; it exits 0 only when
-  everything matches.
+  with `addon/` at `<ref>` and checks its header `prefix` against
+  `addon/$PBOPREFIX$` and its `mcp_build.json`; it exits 0 only when everything
+  matches.
 - `tools/dev/swap_pbo.ps1 -Build <pbo> -WantNew <sha256> -WantOld <sha256>` replaces
   the deployed PBO only when the build and the live file have the expected hashes
-  and no DayZ game process runs; `-Backup` with `-WantBackup` also requires an
-  intact rollback copy.
+  and no DayZ game process runs. It holds the live PBO locked from its hash to the
+  swap, installs the bytes it hashed through renames that never overwrite a file,
+  and keeps the previous PBO beside it as
+  `<ModName>.pbo.swapped_out_<UTC time>_<hash prefix>`. `-Backup` with `-WantBackup`
+  also requires an intact rollback copy that is not the live file under another
+  name.
