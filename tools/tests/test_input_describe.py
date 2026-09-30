@@ -279,7 +279,7 @@ class InputDescribeFastMCPTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("32..126", str(ctx.exception))
         call.assert_not_awaited()
 
-    async def test_tool_returns_the_probe_and_states_the_4f50_caveat(self) -> None:
+    async def test_tool_returns_the_probe_and_states_the_index_rule(self) -> None:
         app, runtime = server.build_app(
             server.ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
         )
@@ -298,7 +298,7 @@ class InputDescribeFastMCPTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("An unknown name returns ok with exists false", description)
 
         probe = _sample_probe()
-        payload = {
+        registered = {
             "ok": 1,
             "input_describe": {
                 "exists": 1,
@@ -309,14 +309,36 @@ class InputDescribeFastMCPTest(unittest.IsolatedAsyncioTestCase):
                 "probe": probe,
             },
         }
+        placeholder_probe = _sample_probe()
+        placeholder_probe["input_id"] = -1
+        placeholder = {
+            "ok": 1,
+            "input_describe": {
+                "exists": 0,
+                "binding_count": 0,
+                "keys": [],
+                "probe": placeholder_probe,
+            },
+        }
         with patch.object(
-            runtime, "call_bridge", new=AsyncMock(return_value=payload)
+            runtime,
+            "call_bridge",
+            new=AsyncMock(side_effect=[registered, placeholder]),
         ):
-            result = _content_json(
+            registered_result = _content_json(
                 await app.call_tool(COMMAND, {"name": "UAFire", "timeout_s": 1.0})
             )
-        self.assertEqual(result["input_describe"]["probe"], probe)
-        self.assertEqual(result["input_describe"]["exists"], 1)
+            placeholder_result = _content_json(
+                await app.call_tool(
+                    COMMAND, {"name": "UA_DayZMCP_NoSuchInput", "timeout_s": 1.0}
+                )
+            )
+        self.assertEqual(
+            registered_result["input_describe"], registered["input_describe"]
+        )
+        self.assertEqual(
+            placeholder_result["input_describe"], placeholder["input_describe"]
+        )
 
 
 class InputDescribeEnforceContractTest(unittest.TestCase):
@@ -410,12 +432,13 @@ class InputDescribeEnforceContractTest(unittest.TestCase):
         self.assertEqual(body.count("int inputId = input.ID();"), 1)
         self.assertLess(body.index("int inputId = input.ID();"), body.index("if (inputId >= 0)"))
         registered = _brace_body_after(body, "if (inputId >= 0)")
-        placeholder = _brace_body_after(body, "if (inputId < 0)")
+        for absent in ("described.probe", "new MCPInputProbe", "GetInputByID"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, registered)
         self.assertIn("described.exists = true", registered)
+        self.assertEqual(registered.count("described.exists = true"), 1)
+        self.assertEqual(body.count("described.exists = true"), 1)
         self.assertNotIn("described.exists = false", registered)
-        self.assertIn("described.exists = false", placeholder)
-        self.assertNotIn("return", placeholder)
-        self.assertNotIn("described.probe", placeholder)
         for token in (
             "BindingCount(",
             "BindKeyCount(",
@@ -426,28 +449,29 @@ class InputDescribeEnforceContractTest(unittest.TestCase):
         ):
             with self.subTest(token=token):
                 self.assertIn(token, registered)
-                self.assertNotIn(token, placeholder)
                 self.assertEqual(body.count(token), registered.count(token))
 
-        self.assertEqual(body.count("described.exists = true"), 1)
-        self.assertEqual(body.count("described.exists = false"), 2)
+        self.assertEqual(body.count("described.exists = false"), 1)
         self.assertEqual(body.count("GetInputByName("), 1)
         self.assertEqual(body.count("GetActiveInputs("), 1)
         self.assertEqual(body.count("new TIntArray"), 1)
         self.assertEqual(body.count("new MCPInputProbe"), 1)
         self.assertEqual(body.count("input.ID()"), 1)
-        unreadable = body.index('result.error = "input_bind_unreadable"')
+        header_at = body.index("if (inputId >= 0)")
+        brace_at = body.index("{", header_at)
+        guard_end = brace_at + 1 + len(registered)
+        self.assertEqual(body[guard_end], "}")
         probe_at = body.index("described.probe = probe")
-        placeholder_at = body.index("if (inputId < 0)")
+        published = body.index("result.input_describe = described", probe_at)
+        self.assertLess(guard_end, probe_at)
+        self.assertLess(probe_at, published)
+        unreadable = body.index('result.error = "input_bind_unreadable"')
         self.assertLess(body.index("described.exists = false"), body.index("input.ID()"))
         self.assertLess(unreadable, probe_at)
         self.assertIn("return true", body[unreadable:probe_at])
         self.assertNotIn("described.probe", body[unreadable:probe_at])
         self.assertNotIn("result.input_describe", body[unreadable:probe_at])
         self.assertLess(body.index("described.exists = true"), probe_at)
-        self.assertLess(probe_at, placeholder_at)
-        published = body.index("result.input_describe = described", placeholder_at)
-        self.assertLess(placeholder_at, published)
         _assert_probe_true_guards(body)
 
         for token in (

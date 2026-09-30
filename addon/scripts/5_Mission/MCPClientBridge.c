@@ -1016,10 +1016,6 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			probe.in_active_inputs = true;
 		}
 		described.probe = probe;
-		if (inputId < 0)
-		{
-			described.exists = false;
-		}
 
 		result.input_describe = described;
 		result.ok = true;

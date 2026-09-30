@@ -490,8 +490,9 @@ class MCPInputProbe
 
 // input_describe payload. exists is true only when GetInputByName returns non-null
 // and input.ID() >= 0 (uainput.c:25, the input index). In 1.29 an unknown name
-// returns a shared placeholder whose index is -1, so exists is false and the
-// other fields stay at their defaults. probe is published on the non-null path,
+// returns a shared placeholder whose index is -1, so exists is false and
+// binding_count, locked, conflict_count and keys stay at their defaults.
+// probe is published on the non-null path,
 // including that placeholder, so a caller can see why exists is false. probe is
 // left unset when GetInputByName returns null, so none of its fields are present.
 // binding_count, locked, conflict_count and keys are meaningful only when
