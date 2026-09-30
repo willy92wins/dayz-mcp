@@ -1,7 +1,9 @@
 """Progressive tools/list disclosure (fb-20260917-092908-2ad1).
 
-Initial client-mode catalog stays near 8.5 KB. world_*/vehicle_*/ui_* appear
-only after a lease is held.
+The initial client-mode catalog is the session and lifecycle core plus the
+reads that need no lease: about 17 KB since fb-20260925-233937-b753 added the
+reads (11 KB before), against about 88 KB for the whole catalog. The mutating
+world_*/vehicle_*/ui_* tools appear only after a lease is held.
 """
 
 from __future__ import annotations
@@ -46,8 +48,11 @@ from tests._tiers import slow_test
 
 
 LEASE_REVEAL_PREFIXES = ("world_", "vehicle_", "ui_")
-INITIAL_CATALOG_MAX_BYTES = 12_000
-INITIAL_CATALOG_TARGET_BYTES = 8_500
+# The two lease-free reads behind a reveal prefix (b753); every other
+# world_*/vehicle_*/ui_* tool mutates and waits for the lease.
+PREFIXED_LEASE_FREE_READS = frozenset({"ui_tree", "vehicle_telemetry"})
+INITIAL_CATALOG_MAX_BYTES = 20_000
+INITIAL_CATALOG_TARGET_BYTES = 17_000
 
 
 class _FakeClientRuntime:
@@ -111,10 +116,12 @@ class ProgressiveDisclosureTest(unittest.IsolatedAsyncioTestCase):
             f"initial tools/list was {size} bytes, expected ~{INITIAL_CATALOG_TARGET_BYTES}",
         )
         for name in names:
-            self.assertFalse(
-                name.startswith(LEASE_REVEAL_PREFIXES),
-                f"{name} must stay hidden until lease",
-            )
+            if name.startswith(LEASE_REVEAL_PREFIXES):
+                self.assertIn(
+                    name,
+                    PREFIXED_LEASE_FREE_READS,
+                    f"{name} must stay hidden until lease",
+                )
         self.assertIn("session_acquire_wait", names)
         self.assertIn("bridge_status", names)
         self.assertNotIn("world_spawn", names)
@@ -152,10 +159,12 @@ class ProgressiveDisclosureTest(unittest.IsolatedAsyncioTestCase):
             f"protocol tools/list was {size} bytes, expected ~{INITIAL_CATALOG_TARGET_BYTES}",
         )
         for name in names:
-            self.assertFalse(
-                name.startswith(LEASE_REVEAL_PREFIXES),
-                f"{name} must stay hidden until lease on protocol tools/list",
-            )
+            if name.startswith(LEASE_REVEAL_PREFIXES):
+                self.assertIn(
+                    name,
+                    PREFIXED_LEASE_FREE_READS,
+                    f"{name} must stay hidden until lease on protocol tools/list",
+                )
         self.assertIn("session_acquire_wait", names)
         self.assertIn("bridge_status", names)
         self.assertNotIn("world_spawn", names)

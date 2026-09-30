@@ -775,7 +775,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--claude-no-progressive-disclosure",
         action="store_true",
-        help="Register Claude Code with --no-progressive-disclosure: it does not re-list tools after a lease.",
+        help="Also register Claude Code with --no-progressive-disclosure. Claude already lists every tool from the start; the switch is still accepted.",
     )
     parser.add_argument(
         "--no-supervised",
