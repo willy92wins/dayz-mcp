@@ -42,6 +42,11 @@ $ErrorActionPreference = "Stop"
 $ToolsRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $VenvDir = Join-Path $ToolsRoot ".venv-mcp"
 $Requirements = Join-Path $ToolsRoot "requirements-mcp.txt"
+# Exact pip, not --upgrade (dc90): --upgrade took whatever pip was newest, so a
+# pip release could break a fresh install with no change here. CI installs the
+# same pin and pyproject.toml [build-system] pins setuptools;
+# tests/test_packaging_declarations.py gates all three.
+$PipRequirement = "pip==26.2.1"
 # Floor matches pyproject.toml requires-python. The py launcher has no range
 # syntax; Resolve-HostPython reads `py -0p` and refuses anything older.
 $MinPythonVersion = [version]"3.11"
@@ -634,9 +639,9 @@ if (-not (Test-Path -LiteralPath $VenvDir)) {
 }
 
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
-& $VenvPython -m pip install --upgrade pip
+& $VenvPython -m pip install $PipRequirement
 if ($LASTEXITCODE -ne 0) {
-  throw "pip install --upgrade pip failed"
+  throw "pip install $PipRequirement failed"
 }
 & $VenvPython -m pip install -r $Requirements
 if ($LASTEXITCODE -ne 0) {
