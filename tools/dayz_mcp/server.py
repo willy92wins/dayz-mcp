@@ -8856,8 +8856,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "to those caps without guessing. Published minLength counts raw "
             "characters, spaces included; inbox strips title, so a "
             "whitespace-only title is schema-legal then bad_args: title empty. "
-            "Appends to a local shared inbox; ids cannot collide. Works "
-            "even when the game and daemon are down."
+            "Appends to a local shared inbox under a cross-process lock; ids "
+            "are checked unique under the append lock. If another writer "
+            "holds that lock for 10 s, the call fails with inbox_busy and "
+            "writes nothing. Works even when the game and daemon are down."
         )
     )
     async def pipeline_feedback(
@@ -8872,7 +8874,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         ],
         project: Annotated[str, Field(max_length=inbox.PROJECT_MAX_CHARS)] = "",
     ) -> dict[str, Any]:
-        """File pipeline feedback from any agent session: a bug you hit, a request for a missing capability, a finding worth recording, or a tool/playbook you built (kind=tool_contribution). For contributions, reference artifacts at DURABLE paths (never session scratchpads). Enforced limits, in characters: title 1..120, body 1..8000, project 0..64. An over-length value is rejected by the published inputSchema (Pydantic type=string_too_long) before inbox; trim to those caps without guessing. Published minLength counts raw characters, spaces included; inbox strips title, so a whitespace-only title is schema-legal then bad_args: title empty. Appends to a local shared inbox; ids cannot collide. Works even when the game and daemon are down."""
+        """File pipeline feedback from any agent session: a bug you hit, a request for a missing capability, a finding worth recording, or a tool/playbook you built (kind=tool_contribution). For contributions, reference artifacts at DURABLE paths (never session scratchpads). Enforced limits, in characters: title 1..120, body 1..8000, project 0..64. An over-length value is rejected by the published inputSchema (Pydantic type=string_too_long) before inbox; trim to those caps without guessing. Published minLength counts raw characters, spaces included; inbox strips title, so a whitespace-only title is schema-legal then bad_args: title empty. Appends to a local shared inbox under a cross-process lock; ids are checked unique under the append lock. If another writer holds that lock for 10 s, the call fails with inbox_busy and writes nothing. Works even when the game and daemon are down."""
         # The lock here only preserves the one-tool-at-a-time client invariant;
         # these tools do not call the bridge.
         async with runtime.tool_lock:
@@ -8886,7 +8888,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 )
             except ValueError as exc:
                 message = str(exc)
-                if message == "bad_args" or message.startswith("bad_args"):
+                if (
+                    message == "bad_args"
+                    or message.startswith("bad_args")
+                    or message.startswith("inbox_busy")
+                    or message.startswith("inbox_id_collision")
+                ):
                     raise ToolError(message) from None
                 raise
 
@@ -8927,7 +8934,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "nothing appended to it: a note, parentheses, a commit id or a #anchor "
             "make it an invalid path segment. An over-length resolution is "
             "rejected by the published inputSchema (Pydantic "
-            "type=string_too_long) before inbox; trim to 2000 without guessing."
+            "type=string_too_long) before inbox; trim to 2000 without guessing. "
+            "The append takes the inbox's cross-process lock; if another "
+            "writer holds it for 10 s, the call fails with inbox_busy and "
+            "writes nothing."
         )
     )
     async def pipeline_resolve(
@@ -8937,7 +8947,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             str | None, Field(max_length=inbox.EVIDENCE_REF_MAX_CHARS)
         ] = None,
     ) -> dict[str, Any]:
-        """Triage a feedback item by appending a resolution; deletes nothing, history is append-only. A feedback_id that matches no filed entry is refused with feedback_not_found; nothing is appended. Enforced limits, in characters: resolution 1..2000, evidence_ref 1..240. evidence_ref is a path only -- relative to DayZ_MCP_dev, starting at reviews | gates | reports | research, ASCII, segments of [A-Za-z0-9._-], no repo prefix and nothing appended (note, parentheses, commit id, #anchor). An over-length resolution is rejected by the published inputSchema (Pydantic type=string_too_long) before inbox; trim to 2000 without guessing."""
+        """Triage a feedback item by appending a resolution; deletes nothing, history is append-only. A feedback_id that matches no filed entry is refused with feedback_not_found; nothing is appended. Enforced limits, in characters: resolution 1..2000, evidence_ref 1..240. evidence_ref is a path only -- relative to DayZ_MCP_dev, starting at reviews | gates | reports | research, ASCII, segments of [A-Za-z0-9._-], no repo prefix and nothing appended (note, parentheses, commit id, #anchor). An over-length resolution is rejected by the published inputSchema (Pydantic type=string_too_long) before inbox; trim to 2000 without guessing. The append takes the inbox's cross-process lock; if another writer holds it for 10 s, the call fails with inbox_busy and writes nothing."""
         # The lock here only preserves the one-tool-at-a-time client invariant;
         # these tools do not call the bridge.
         async with runtime.tool_lock:
@@ -8954,6 +8964,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     message == "bad_args"
                     or message.startswith("bad_args")
                     or message.startswith("feedback_not_found")
+                    or message.startswith("inbox_busy")
                 ):
                     raise ToolError(message) from None
                 raise

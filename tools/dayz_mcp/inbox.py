@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import secrets
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
+
+try:
+    import msvcrt
+except ImportError:  # not Windows: the append lock is fcntl.flock
+    msvcrt = None  # type: ignore[assignment]
+    import fcntl
+else:
+    fcntl = None  # type: ignore[assignment]
 
 
 INBOX_DIR = Path(os.environ["LOCALAPPDATA"]) / "DayZ_MCP" / "inbox"
@@ -25,6 +37,15 @@ EVIDENCE_REF_MAX_CHARS = 240
 _FEEDBACK_ID_RE = re.compile(r"^fb-\d{8}-\d{6}-[0-9a-f]{4}$", re.ASCII)
 _EVIDENCE_ROOTS = frozenset({"reviews", "gates", "reports", "research"})
 _EVIDENCE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# Every append holds _append_lock (ficha fb-20260822-193753-6271). A writer
+# polls another's lock this long, then fails with inbox_busy, writing nothing.
+APPEND_LOCK_TIMEOUT_S = 10.0
+_APPEND_LOCK_POLL_S = 0.01
+# token_hex(2) draws for a new id before inbox_id_collision.
+ID_SUFFIX_ATTEMPTS = 16
+# What a non-blocking lock attempt raises while another handle holds it:
+# EACCES from msvcrt.locking(LK_NBLCK), EWOULDBLOCK (EAGAIN) from flock.
+_LOCK_BUSY_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK})
 
 
 def _require_str(value: object, field: str = "value") -> str:
@@ -91,19 +112,161 @@ def _age_fields(ts: object, now: datetime) -> dict[str, object]:
     return {"age_s": age_s, "age_label": age_label}
 
 
-def _append_jsonl(record: dict) -> None:
-    # a unique append <4KB on a local volume = concurrent processes' lines
-    # do not interleave; that is why this file is NEVER rewritten, only
-    # appended (resolutions are appends too).
-    os.makedirs(INBOX_DIR, exist_ok=True)
-    payload = (
-        json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
-    ).encode("utf-8")
-    fd = os.open(FEEDBACK_PATH, os.O_APPEND | os.O_CREAT | os.O_WRONLY)
+def _lock_path() -> Path:
+    # Derived at call time, like every use of FEEDBACK_PATH: a test that
+    # points the store at a temporary directory moves the lock with it.
+    return FEEDBACK_PATH.with_name(FEEDBACK_PATH.name + ".lock")
+
+
+def _try_lock(fd: int) -> bool:
+    """Take the append lock through fd without waiting; False while it is held."""
     try:
-        os.write(fd, payload)
+        if msvcrt is not None:
+            # msvcrt.locking starts at the file position: byte 0, one byte.
+            # A range past the end locks too, so the lock file stays empty.
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in _LOCK_BUSY_ERRNOS:
+            return False
+        raise
+    return True
+
+
+def _unlock(fd: int) -> None:
+    if msvcrt is not None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _append_lock() -> Iterator[None]:
+    """Hold the store's exclusive cross-process append lock.
+
+    An OS byte-range lock (msvcrt.locking on Windows, flock elsewhere) on
+    byte 0 of feedback.jsonl.lock, beside FEEDBACK_PATH. It belongs to the
+    open handle: closing the handle, or the death of the process, drops it,
+    so a writer that crashed leaves nothing stale and whether the lock file
+    exists means nothing. The file stays empty and is never removed. A lock
+    another handle holds is polled for up to APPEND_LOCK_TIMEOUT_S, then the
+    append fails with inbox_busy before anything is written. Only appends
+    take this lock; readers never do.
+    """
+    fd = os.open(_lock_path(), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + APPEND_LOCK_TIMEOUT_S
+        while not _try_lock(fd):
+            if time.monotonic() >= deadline:
+                raise ValueError(
+                    "inbox_busy: another writer held the inbox append lock for "
+                    f"{APPEND_LOCK_TIMEOUT_S:g} s; nothing was written, retry"
+                )
+            time.sleep(_APPEND_LOCK_POLL_S)
+        try:
+            yield
+        finally:
+            try:
+                _unlock(fd)
+            except OSError:
+                # Closing the handle below drops the lock too, and the record
+                # may already be on disk: this must not fail the append.
+                pass
     finally:
         os.close(fd)
+
+
+def _filed_ids() -> set[str]:
+    """Every "id" string that a line of the store which parses carries.
+
+    Framed as _feedback_state frames the store: split on b"\\n", each line
+    decoded and parsed on its own, a line that does not parse skipped. Any
+    dict counts, a resolution that carries an "id" included, so this is never
+    narrower than the ids _read_inbox lists.
+    """
+    filed: set[str] = set()
+    try:
+        handle = FEEDBACK_PATH.open("rb")
+    except FileNotFoundError:
+        return filed
+    with handle:
+        for raw in handle:
+            try:
+                obj = json.loads(raw.decode("utf-8"))
+            except ValueError:
+                continue
+            if type(obj) is dict and type(obj.get("id")) is str:
+                filed.add(obj["id"])
+    return filed
+
+
+def _unused_id(stamp: str) -> str:
+    """fb-<stamp>-<token_hex(2)> that no line of the store carries yet.
+
+    Called under _append_lock, so no other writer can file the same id between
+    this check and the write. The id keeps its shape: _FEEDBACK_ID_RE pins
+    the four hex digits, which the pipeline uses as the ticket's short name.
+    A suffix already filed for this stamp is drawn again instead, at most
+    ID_SUFFIX_ATTEMPTS times in all.
+    """
+    filed = _filed_ids()
+    for _attempt in range(ID_SUFFIX_ATTEMPTS):
+        candidate = f"fb-{stamp}-{secrets.token_hex(2)}"
+        if candidate not in filed:
+            return candidate
+    raise ValueError(
+        f"inbox_id_collision: {ID_SUFFIX_ATTEMPTS} draws for fb-{stamp}-xxxx "
+        "all hit a filed id; nothing was written, retry"
+    )
+
+
+def _ends_mid_line() -> bool:
+    """True when the store's last byte is not the b"\\n" that ends a record."""
+    try:
+        handle = FEEDBACK_PATH.open("rb")
+    except FileNotFoundError:
+        return False
+    with handle:
+        if handle.seek(0, os.SEEK_END) == 0:
+            return False
+        handle.seek(-1, os.SEEK_END)
+        return handle.read(1) != b"\n"
+
+
+def _append_jsonl(record: dict, id_stamp: str | None = None) -> None:
+    # Every append, entries and resolutions alike, holds _append_lock while it
+    # reads the store and writes its record with one os.write, so no other
+    # writer on this machine can land in between: records go in whole, one
+    # after another, whatever their size. The file is still never rewritten,
+    # only appended to. The old premise here, "a unique append <4KB on a local
+    # volume = concurrent processes' lines do not interleave", did not hold
+    # on Windows at any size (ficha fb-20260822-193753-6271). Measured on
+    # 2026-09-30 without the lock, six processes appending at once kept 255
+    # of 300 records of about 1 KB, and 35 of 150 records of about 24 KB with
+    # 39 torn lines beside them.
+    #
+    # With id_stamp, record["id"] is chosen here, under the lock (_unused_id),
+    # so the uniqueness check and the write are one step to every other writer.
+    os.makedirs(INBOX_DIR, exist_ok=True)
+    with _append_lock():
+        if id_stamp is not None:
+            record["id"] = _unused_id(id_stamp)
+        payload = (
+            json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        if _ends_mid_line():
+            # A writer died mid-record, its lock dying with it, or appended
+            # without the lock. End its torn line first, so it costs one
+            # malformed line and does not swallow this record as well.
+            payload = b"\n" + payload
+        fd = os.open(FEEDBACK_PATH, os.O_APPEND | os.O_CREAT | os.O_WRONLY)
+        try:
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
 
 
 def append_feedback(
@@ -128,7 +291,8 @@ def append_feedback(
         )
     stamp, ts = _utc_now()
     entry = {
-        "id": f"fb-{stamp}-{secrets.token_hex(2)}",
+        # Chosen by _append_jsonl under the append lock; the key stays first.
+        "id": None,
         "ts": ts,
         "kind": kind,
         "title": title,
@@ -136,7 +300,7 @@ def append_feedback(
         "project": project,
         "platform": platform,
     }
-    _append_jsonl(entry)
+    _append_jsonl(entry, id_stamp=stamp)
     result = dict(entry)
     result["path"] = str(FEEDBACK_PATH)
     return result
@@ -146,9 +310,11 @@ def _feedback_state(feedback_id: str) -> tuple[bool, bool]:
     """(entry exists, a resolution already follows it) for one id.
 
     Read from disk on every call, never cached: other processes append to the
-    same file. Records are split on the b"\\n" _append_jsonl ends each one with
-    (a JSON string never holds a raw newline); a line that does not decode or
-    parse is skipped, so it can never vouch for an id. Classification is the
+    same file. Takes no lock: a record another process is still writing is at
+    most an unterminated last line, which either does not parse or is that
+    whole record. Records are split on the b"\\n" _append_jsonl ends each one
+    with (a JSON string never holds a raw newline); a line that does not decode
+    or parse is skipped, so it can never vouch for an id. Classification is the
     one _read_inbox uses: a dict carrying "resolves" is a resolution whatever
     else it holds, so an orphan resolution or an id quoted in some body text
     proves nothing. A resolution counts only after its entry, the only order
@@ -190,10 +356,12 @@ def append_resolution(
         raise ValueError("bad_args: feedback_id must match fb-YYYYMMDD-HHMMSS-xxxx")
     _check_length(resolution, "resolution", RESOLUTION_MAX_CHARS)
     # Looked up only once every argument is valid, so a malformed call keeps
-    # its bad_args error. No lock: the file is never rewritten and entries are
-    # never removed, so an entry found here still exists when the single
-    # O_APPEND write below lands, and this read changes nothing on disk. An
-    # entry filed after the read is refused now and resolvable on retry.
+    # its bad_args error. Read without the append lock, like every reader: the
+    # file is never rewritten and entries are never removed, so an entry found
+    # here still exists when _append_jsonl writes the record below under the
+    # lock, and this read changes nothing on disk. An entry filed after the
+    # read is refused now and resolvable on retry. already_resolved is the
+    # store as read here, so two resolutions racing can both report false.
     exists, already_resolved = _feedback_state(feedback_id)
     if not exists:
         # feedback_id passed _FEEDBACK_ID_RE above, so the echo is that shape.
@@ -232,7 +400,8 @@ def _read_inbox(
     by_id: dict[str, dict] = {}
     malformed = 0
     if FEEDBACK_PATH.is_file():
-        # Split as _feedback_state splits: on the b"\n" ending each record
+        # Read as _feedback_state reads, without the append lock, and split
+        # the same way: on the b"\n" ending each record
         # (a CRLF's \r is JSON whitespace), each line decoded on its own.
         # str.splitlines() also broke at U+0085, U+2028 and U+2029, which
         # ensure_ascii=False writes raw, and one undecodable byte failed the
