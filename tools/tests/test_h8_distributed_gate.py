@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import json
 import sys
 import tempfile
@@ -9,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+from tests._source_snapshot import source_of
 
 
 COORDINATION_DIR = Path(__file__).resolve().parents[1] / "_session_coordination"
@@ -113,7 +114,7 @@ class H8DistributedGateTests(unittest.TestCase):
             )
 
     def test_roles_bind_context_to_observed_generation_not_acquire_payload(self) -> None:
-        source_a = inspect.getsource(gate._run_a)
+        source_a = source_of(gate._run_a)
         status_index = source_a.index('initial_status = _tool_result(')
         acquire_index = source_a.index('"session_acquire"')
         launch_index = source_a.index("_start_fixture(")
@@ -127,7 +128,7 @@ class H8DistributedGateTests(unittest.TestCase):
             source_a,
         )
 
-        source_queued = inspect.getsource(gate._run_queued)
+        source_queued = source_of(gate._run_queued)
         context_slice = source_queued[
             source_queued.index("active, wait_slices") :
             source_queued.index("active_at_utc")
@@ -249,12 +250,12 @@ class H8DistributedGateTests(unittest.TestCase):
             )
 
     def test_c_adopts_before_abrupt_exit_and_failure_paths_cleanup(self) -> None:
-        source = inspect.getsource(gate._run_queued)
+        source = source_of(gate._run_queued)
         role_c = source[source.index('if role == "C"') :]
         self.assertLess(role_c.index('"adopt"'), role_c.index("_kill_own_proxy"))
         self.assertIn("_cleanup_registered_runs", source)
-        self.assertIn("_cleanup_registered_runs", inspect.getsource(gate._run_a))
-        self.assertIn("runner_pids_not_unique", inspect.getsource(gate._finalize))
+        self.assertIn("_cleanup_registered_runs", source_of(gate._run_a))
+        self.assertIn("runner_pids_not_unique", source_of(gate._finalize))
 
     def test_cleanup_discovers_unregistered_run_owned_by_current_lease(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -380,7 +381,7 @@ class H8DistributedGateTests(unittest.TestCase):
                 [{"event": "bad", "lease_token": "secret"}]
             )
         )
-        source = inspect.getsource(gate._finalize)
+        source = source_of(gate._finalize)
         self.assertIn(
             "_has_forbidden_role_key(_all_audit_documents",
             source,

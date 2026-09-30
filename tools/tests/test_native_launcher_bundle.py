@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import ast
 import importlib
-import inspect
 import json
 import os
 import re
@@ -15,6 +14,7 @@ from pathlib import Path, PureWindowsPath
 
 from dayz_mcp import native_broker_protocol
 from tests._bundle_paths import requires_built_bundle
+from tests._source_snapshot import source_of
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -299,7 +299,7 @@ class NativeLauncherBundleTest(unittest.TestCase):
             launcher_source,
         )
 
-        build_source = inspect.getsource(self.builder.build)
+        build_source = source_of(self.builder.build)
         receipt_source = build_source[build_source.index("receipt =") :]
         self.assertIn("_acquire_cpython(lock, offline=True)", build_source)
         self.assertNotIn("**final_fingerprint", receipt_source)
@@ -641,7 +641,7 @@ class NativeLauncherBundleTest(unittest.TestCase):
         self.assertIn("FindAddonRoots(request->prefix)", parse)
         self.assertIn("roots != nullptr", parse)
         self.assertIn("SamePathText(request->temp, expected_temp)", parse)
-        prepare = inspect.getsource(self.builder._prepare_staging)
+        prepare = source_of(self.builder._prepare_staging)
         self.assertIn("_write_addon_roots_header(staging, host)", prepare)
         self.assertIn('(staging / "generated" / "addon_roots.h").unlink()', prepare)
         self.assertFalse((BUNDLE_DIR / "generated" / "addon_roots.h").exists())

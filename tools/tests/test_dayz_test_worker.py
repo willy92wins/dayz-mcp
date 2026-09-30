@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import hashlib
-import inspect
 import json
 import unittest
 
@@ -14,6 +13,7 @@ from dayz_mcp import (
     dayz_test_worker,
     native_broker_protocol,
 )
+from tests._source_snapshot import source_of
 
 
 POLICY = dayz_test_request.RequestProjectPolicy(
@@ -904,7 +904,7 @@ class DayzTestWorkerTests(unittest.TestCase):
                     broker=_Broker(),
                 )
             )
-        source = inspect.getsource(dayz_test_worker)
+        source = source_of(dayz_test_worker)
         for forbidden in ("subprocess", "multiprocessing", "ctypes", "os.system", "os.spawn"):
             self.assertNotIn(forbidden, source)
 

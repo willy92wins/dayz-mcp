@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import inspect
 import importlib.util
 import json
 import unittest
 from dataclasses import replace
+
+from tests._source_snapshot import source_of
 
 
 class DayzTestRequestTests(unittest.TestCase):
@@ -771,7 +772,7 @@ class RequestRejectionReasonsTests(unittest.TestCase):
         self.assertGreaterEqual(len(set(reasons)), 8)
 
     def test_the_vocabulary_is_closed_and_every_declared_reason_is_used(self) -> None:
-        source = inspect.getsource(self.request_module)
+        source = source_of(self.request_module)
         for reason in self.request_module.REQUEST_REJECTION_REASONS:
             self.assertIn(f'_invalid("{reason}")', source, reason)
 
@@ -809,7 +810,7 @@ class RequestRejectionReasonsTests(unittest.TestCase):
 
     def test_no_rejection_path_still_raises_the_bare_literal(self) -> None:
         """Grep as an assertion: the raw string may only live inside _invalid."""
-        lines = inspect.getsource(self.request_module).split("\n")
+        lines = source_of(self.request_module).split("\n")
         offenders = [
             line.strip()
             for line in lines

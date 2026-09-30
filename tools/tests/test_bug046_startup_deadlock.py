@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import faulthandler
 import json
 import os
+import re
+import signal
 import socket
 import subprocess
 import sys
@@ -36,9 +39,43 @@ from tests._tiers import slow_test
 
 DAEMON_FIXTURE_SITE = Path(__file__).resolve().parent / "fixtures" / "dayz_mcp"
 
+# fb-20260819-140207-ec0d: the daemon's idle watchdog checks once when it is
+# armed and then every max(5 s, idle timeout / 4) (daemon.py, run_daemon), with
+# no startup grace. Any idle timeout of 5 s or less therefore lets a fixture
+# daemon leave at the first tick, 5 s after LISTEN, and a test process slowed by
+# load that has not reached /status by then reads nothing. 8 s moves the
+# earliest idle exit to the second tick, 10 s after LISTEN.
+FIXTURE_DAEMON_IDLE_TIMEOUT_S = 8.0
+# A daemon the test did reach leaves at most one idle timeout plus one tick
+# (13 s) after the last /status; the rest is slack for a loaded host.
+FIXTURE_DAEMON_EXIT_BUDGET_S = 20.0
+# fb-20260820-004633-d541: every wait in this module is bounded, but a wait it
+# does not own (a pipe a grandchild still holds after a kill, a lock taken by a
+# process the test did not start) would sit until the CI job's 30 minutes ran
+# out, with nothing in the log. HangGuardedTestCase dumps every thread's stack
+# and exits instead. It sits above the most one test here can spend on bounded
+# waits: the crash-boundary test, 4 x (17 + 40 + 25) s = 328 s.
+HANG_GUARD_S = 480.0
+
 
 class SimulatedCrash(BaseException):
     pass
+
+
+class HangGuardedTestCase(unittest.TestCase):
+    """Each test runs under a faulthandler watchdog of HANG_GUARD_S (d541).
+
+    The dump goes to the process's own stderr: under ``unittest -b``
+    sys.stderr is a buffer with no file descriptor, which faulthandler
+    refuses.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        faulthandler.dump_traceback_later(
+            HANG_GUARD_S, exit=True, file=sys.__stderr__
+        )
+        self.addCleanup(faulthandler.cancel_dump_traceback_later)
 
 
 def runtime_paths(root: Path) -> RuntimePaths:
@@ -71,12 +108,34 @@ def communicate_owned_fixture(
         raise
 
 
+def run_owned_fixture(
+    argv: list[str], *, cwd: str, env: dict[str, str], timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """subprocess.run(argv, capture_output=True, text=True), with a bounded kill.
+
+    fb-20260820-004633-d541: on Windows subprocess.run follows its timeout kill
+    with a communicate() that has no timeout of its own, so it waits for as long
+    as a grandchild keeps the pipes open. communicate_owned_fixture gives that
+    wait 5 s.
+    """
+    child = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    stdout, stderr = communicate_owned_fixture(child, timeout)
+    return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
+
+
 def fixture_daemon_argv(port: int, keyfile: Path) -> list[str]:
     return build_daemon_argv(
         SimpleNamespace(
             port=port,
             keyfile=str(keyfile),
-            idle_timeout_s=0.5,
+            idle_timeout_s=FIXTURE_DAEMON_IDLE_TIMEOUT_S,
             expected_game_version=None,
             require_version=False,
             enable_exec_enforce=False,
@@ -174,7 +233,7 @@ def fixture_environment(
     return environment
 
 
-class BackupTransactionAdversarialTest(unittest.TestCase):
+class BackupTransactionAdversarialTest(HangGuardedTestCase):
     def run_gate(
         self,
         paths: RuntimePaths,
@@ -723,7 +782,7 @@ class BackupTransactionAdversarialTest(unittest.TestCase):
                     pass
 
 
-class DaemonStartupElectionProcessTest(unittest.TestCase):
+class DaemonStartupElectionProcessTest(HangGuardedTestCase):
     def _assert_real_client_is_not_a_blocker(self, arguments: list[str]) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -867,12 +926,10 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
                     migration=migration,
                 )
 
-                first = subprocess.run(
+                first = run_owned_fixture(
                     fixture_daemon_argv(port, keyfile),
                     cwd=cwd,
                     env=first_environment,
-                    capture_output=True,
-                    text=True,
                     timeout=12.0,
                 )
                 self.assertEqual(first.returncode, 91, first.stderr)
@@ -908,7 +965,9 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
                             payload = json.loads(response.read().decode("utf-8"))
                     except Exception:
                         time.sleep(0.02)
-                _stdout, stderr = communicate_owned_fixture(second, 10.0)
+                _stdout, stderr = communicate_owned_fixture(
+                    second, FIXTURE_DAEMON_EXIT_BUDGET_S
+                )
                 self.assertIsNotNone(payload, stderr)
                 self.assertEqual(second.returncode, 0, stderr)
                 self.assertIsInstance(payload.get("daemon_generation"), str)
@@ -994,7 +1053,9 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
                         time.sleep(0.02)
             finally:
                 for child in children:
-                    _stdout, stderr = communicate_owned_fixture(child, 12.0)
+                    _stdout, stderr = communicate_owned_fixture(
+                        child, FIXTURE_DAEMON_EXIT_BUDGET_S
+                    )
                     errors.append(
                         f"pid={child.pid};rc={child.returncode};stderr={stderr}"
                     )
@@ -1015,6 +1076,83 @@ class DaemonStartupElectionProcessTest(unittest.TestCase):
                 )
             )
             self.assertEqual(coordination["daemon_generation"], generation)
+
+    @slow_test
+    def test_fixture_daemon_still_serves_a_client_late_past_the_first_idle_tick(self) -> None:
+        """fb-20260819-140207-ec0d, measured under load: the test reached /status
+        after the idle watchdog's first tick and read nothing, because the
+        fixture daemon had already left. This client stays silent until just
+        past that tick, like a starved test process, and must still get an
+        answer."""
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            port = unused_port()
+            keyfile = base / "fixture.key"
+            keyfile.write_text("fixture-key", encoding="ascii")
+            base_environment = os.environ.copy()
+            base_environment["LOCALAPPDATA"] = str(base / "local")
+            environment = fixture_environment(
+                base_environment,
+                mode="none",
+                signal=base / "unused-signal",
+                migration=base / "migration",
+            )
+            child = subprocess.Popen(
+                fixture_daemon_argv(port, keyfile),
+                cwd=fixture_daemon_cwd(),
+                env=environment,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            lines: list[str] = []
+            armed: list[str] = []
+            armed_seen = threading.Event()
+
+            def read_stderr() -> None:
+                assert child.stderr is not None
+                for line in child.stderr:
+                    lines.append(line)
+                    if line.startswith("IDLE-WATCHDOG: armed") and not armed:
+                        armed.append(line)
+                        armed_seen.set()
+
+            reader = threading.Thread(target=read_stderr, daemon=True)
+            reader.start()
+            payload: dict[str, object] | None = None
+            try:
+                self.assertTrue(
+                    armed_seen.wait(DAEMON_STARTUP_BUDGET_S), "".join(lines)
+                )
+                tick = re.search(r"\bpoll=(\d+)s", armed[0])
+                self.assertIsNotNone(tick, armed[0])
+                time.sleep(float(tick.group(1)) + 0.5)
+                url = (
+                    f"http://127.0.0.1:{port}/status?key="
+                    + urllib.parse.quote("fixture-key", safe="")
+                )
+                deadline = time.monotonic() + 2.0
+                while payload is None and time.monotonic() < deadline:
+                    try:
+                        with urllib.request.urlopen(url, timeout=0.5) as response:
+                            payload = json.loads(response.read().decode("utf-8"))
+                    except Exception:
+                        time.sleep(0.02)
+            finally:
+                try:
+                    child.wait(timeout=FIXTURE_DAEMON_EXIT_BUDGET_S)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5.0)
+                    raise
+                finally:
+                    reader.join(timeout=5.0)
+                    if not reader.is_alive() and child.stderr is not None:
+                        child.stderr.close()
+            stderr = "".join(lines)
+            self.assertIsNotNone(payload, stderr)
+            self.assertEqual(child.returncode, 0, stderr)
+            self.assertIsInstance(payload.get("daemon_generation"), str)
 
     @slow_test
     def test_owner_process_death_releases_election_for_next_wave(self) -> None:
@@ -1169,7 +1307,7 @@ with daemon_startup_election(paths) as elected:
                 self.assertTrue(elected)
 
 
-class TreeIdentityTest(unittest.TestCase):
+class TreeIdentityTest(HangGuardedTestCase):
     def test_same_checkout_is_silent(self) -> None:
         import dayz_mcp
 
@@ -1389,7 +1527,7 @@ print(before, after, sep='\\n', flush=True)
         self.assertEqual(os.path.normcase(str(after_root)), os.path.normcase(str(test_root)))
 
 
-class FixturePythonGuardTest(unittest.TestCase):
+class FixturePythonGuardTest(HangGuardedTestCase):
     @slow_test
     def test_same_shape_venv_is_rejected_by_independent_host_reference(self) -> None:
         """A second ``<root>/.venv-mcp/Scripts/python.exe`` must not be approved.
@@ -1463,6 +1601,130 @@ class FixturePythonGuardTest(unittest.TestCase):
                         "daemon_python_not_approved",
                         completed.stdout + completed.stderr,
                     )
+
+
+class HangGuardTest(HangGuardedTestCase):
+    def test_every_test_case_in_this_module_runs_under_the_guard(self) -> None:
+        cases = [
+            value
+            for value in globals().values()
+            if isinstance(value, type)
+            and issubclass(value, unittest.TestCase)
+            and value.__module__ == __name__
+        ]
+        self.assertIn(DaemonStartupElectionProcessTest, cases)
+        self.assertEqual(
+            [case.__name__ for case in cases if not issubclass(case, HangGuardedTestCase)],
+            [],
+        )
+
+    def test_the_guard_arms_before_each_test_and_disarms_after_it(self) -> None:
+        events: list[object] = []
+
+        class Probe(HangGuardedTestCase):
+            def test_body(self) -> None:
+                events.append("body")
+
+        result = unittest.TestResult()
+        with (
+            patch.object(
+                faulthandler,
+                "dump_traceback_later",
+                side_effect=lambda *args, **kwargs: events.append(("arm", args, kwargs)),
+            ),
+            patch.object(
+                faulthandler,
+                "cancel_dump_traceback_later",
+                side_effect=lambda: events.append("disarm"),
+            ),
+        ):
+            Probe("test_body").run(result)
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+        self.assertEqual(
+            events,
+            [
+                ("arm", (HANG_GUARD_S,), {"exit": True, "file": sys.__stderr__}),
+                "body",
+                "disarm",
+            ],
+        )
+
+    def test_the_guard_arms_while_unittest_buffers_the_output(self) -> None:
+        class Probe(HangGuardedTestCase):
+            def test_body(self) -> None:
+                pass
+
+        result = unittest.TestResult()
+        result.buffer = True
+        # The real faulthandler: a buffered sys.stderr has no fileno to dump to.
+        # Probe's cleanup cancels the one process-wide watchdog, this test's
+        # included; nothing after it here can hang.
+        Probe("test_body").run(result)
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+
+
+class OwnedFixtureRunTest(HangGuardedTestCase):
+    @slow_test
+    def test_a_grandchild_holding_the_pipes_cannot_stall_the_owned_run(self) -> None:
+        """fb-20260820-004633-d541: subprocess.run(timeout=..., capture_output=True)
+        kills the child on timeout and then waits on the pipes with no timeout.
+        A grandchild that inherited them keeps that wait open (measured on 3.11
+        and 3.14: still blocked 12 s later, until the grandchild was killed).
+        run_owned_fixture must come back within its timeout plus the 5 s
+        post-kill wait."""
+        timeout = 2.0
+        child_code = (
+            "import subprocess, sys, time\n"
+            "from pathlib import Path\n"
+            "grandchild = subprocess.Popen(\n"
+            "    [sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+            "    stdout=sys.stdout,\n"
+            "    stderr=sys.stderr,\n"
+            ")\n"
+            "Path(sys.argv[1]).write_text(str(grandchild.pid), encoding='ascii')\n"
+            "time.sleep(60)\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_file = Path(temporary) / "grandchild.pid"
+            outcome: list[object] = []
+
+            def run() -> None:
+                try:
+                    outcome.append(
+                        run_owned_fixture(
+                            [sys.executable, "-c", child_code, str(pid_file)],
+                            cwd=str(Path(__file__).resolve().parents[1]),
+                            env=os.environ.copy(),
+                            timeout=timeout,
+                        )
+                    )
+                except BaseException as error:
+                    outcome.append(error)
+
+            worker = threading.Thread(target=run, daemon=True)
+            started = time.monotonic()
+            worker.start()
+            try:
+                worker.join(timeout=timeout + 5.0 + 10.0)
+                elapsed = time.monotonic() - started
+                self.assertFalse(
+                    worker.is_alive(),
+                    "run_owned_fixture still waiting while a grandchild holds the pipes",
+                )
+                self.assertTrue(
+                    pid_file.is_file(), "the child did not report a grandchild in time"
+                )
+                self.assertEqual(len(outcome), 1, outcome)
+                self.assertIsInstance(outcome[0], subprocess.TimeoutExpired)
+                # The kill left the pipes open, so the post-kill wait ran out:
+                # the case measured is the held pipe, not a quick end of file.
+                self.assertGreaterEqual(elapsed, timeout + 4.0)
+            finally:
+                try:
+                    os.kill(int(pid_file.read_text(encoding="ascii")), signal.SIGTERM)
+                except (OSError, ValueError):
+                    pass
+                worker.join(timeout=10.0)
 
 
 if __name__ == "__main__":

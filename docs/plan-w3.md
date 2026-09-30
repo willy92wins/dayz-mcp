@@ -10,7 +10,7 @@ Este fichero es el artefacto versionado de los veredictos W3 (cierra W3-P2-02). 
 |---|---|---|
 | **BUG-110** | **PASS** | `import dayz_mcp` carga este checkout, no `site-packages` ni un finder editable ajeno. `tests.test_bug046_startup_deadlock.TreeIdentityTest` + `tests.test_w3_bug_verdicts.Bug110CheckoutLoadTests`. Python global no es oráculo. |
 | **BUG-111** | **PASS** | `DEFAULT_STABILITY_THRESHOLD` ausente de `tools/mcp_capture.py` (fuente y atributo). Capture unittest de la familia existente, exit 0. |
-| **BUG-112** | **INCONCLUSO** | `tools/tests/test_capture_stability.py` no está en este árbol ni en `git log --all`. `choose_stable_frame` vive en `tools/mcp_capture.py`. El test existente `test_grab_stable_frame_keeps_the_chosen_frames_client_rect` usa 3 frames cuyo pick estable **es** el índice 1 = centro: no discrimina `return frames[len(frames)//2]`. No se inventó suite tautológica. |
+| **BUG-112** | **PASS** | `tools/tests/test_capture_stability.py`: casos de 4 y 5 frames cuyo par más estable no incluye el índice `len(frames)//2`, por `choose_stable_frame` y por `grab_stable_frame` (el camino de captura, que no llama a `choose_stable_frame`). Mutantes medidos el 2026-09-30: `return frames[len(frames)//2]` en `choose_stable_frame`, `chosen_index = len(captured)//2` en `grab_stable_frame` y `_stable_frame_index` devolviendo `len(frames)//2` ponen rojos sus casos. `test_grab_stable_frame_keeps_the_chosen_frames_client_rect` (3 frames, par estable en el centro) sigue verde con los tres: por eso no bastaba. |
 
 ## Fuera
 

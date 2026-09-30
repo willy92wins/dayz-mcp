@@ -22,6 +22,7 @@ from checks import fence_canary_probe as probe
 from dayz_mcp import loopback
 from dayz_mcp.core import EXPECTED_BRIDGE_VERSION, build_status
 from dayz_mcp.instance_fence import BINDING_AMBIGUOUS, BINDING_BOUND, BINDING_STARTING
+from tests._source_snapshot import source_of
 from tests.fence_helpers import INST_CLIENT, PID_CLIENT
 
 
@@ -87,7 +88,7 @@ class ClientPeerParserTest(unittest.TestCase):
         self.assertIsNone(probe.client_binding_state(raw))
 
     def test_source_mentions_client_peer_and_not_peers(self) -> None:
-        source = inspect.getsource(probe.client_binding_state)
+        source = source_of(probe.client_binding_state)
         self.assertIn("client_peer", source)
         self.assertNotIn("peers", source)
 
@@ -384,9 +385,9 @@ class UrlAndProfileTest(unittest.TestCase):
 class NoLiveDaemonTest(unittest.TestCase):
     def test_module_does_not_open_live_port_on_import(self) -> None:
         source = Path(probe.__file__).read_text(encoding="utf-8")
-        self.assertNotIn("urlopen", inspect.getsource(probe.client_binding_state))
-        self.assertNotIn("urlopen", inspect.getsource(probe.evaluate_verdict))
-        self.assertNotIn("urlopen", inspect.getsource(probe.run_probe_on_state))
+        self.assertNotIn("urlopen", source_of(probe.client_binding_state))
+        self.assertNotIn("urlopen", source_of(probe.evaluate_verdict))
+        self.assertNotIn("urlopen", source_of(probe.run_probe_on_state))
         self.assertIn("urlopen", source)
 
 

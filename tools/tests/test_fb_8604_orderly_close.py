@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import ntpath
 import os
@@ -33,6 +32,7 @@ from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.server import LEASE_TOOL_LINE, ServerConfig, build_app
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 from dayz_mcp.window_close import WM_CLOSE, Win32WindowFns
+from tests._source_snapshot import source_of
 from tests._tiers import slow_test
 
 
@@ -2173,7 +2173,7 @@ class RealWindow8604Test(unittest.TestCase):
 
 class StopKill8604Test(unittest.IsolatedAsyncioTestCase):
     async def test_8604_dayz_test_stop_still_builds_kill_request(self) -> None:
-        source = inspect.getsource(dayz_test_tool.execute_dayz_test_stop)
+        source = source_of(dayz_test_tool.execute_dayz_test_stop)
         self.assertIn("kill=True", source)
         self.assertIn('mode="offline"', source)
         captured: list[dict[str, object]] = []
@@ -2186,7 +2186,7 @@ class StopKill8604Test(unittest.IsolatedAsyncioTestCase):
         runtime = dayz_test_tool  # placeholder to keep patch target local
         _ = runtime
         with patch.object(dayz_test_tool, "build_run_request", wrapped):
-            source_after = inspect.getsource(dayz_test_tool.execute_dayz_test_stop)
+            source_after = source_of(dayz_test_tool.execute_dayz_test_stop)
         self.assertIn("kill=True", source_after)
         self.assertEqual(captured, [])
 

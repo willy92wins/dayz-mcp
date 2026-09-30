@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import ctypes
 import importlib
-import inspect
 import tempfile
 import unittest
 from pathlib import Path
+
+from tests._source_snapshot import source_of
 
 
 _FILE_READ_ATTRIBUTES = 0x00000080
@@ -81,7 +82,7 @@ class Win32FileStandardInfoTests(unittest.TestCase):
         self.assertIs(pinned._FILE_STANDARD_INFO, shared)
         self.assertIs(authority._FILE_STANDARD_INFO, shared)
         for name in ("pinned_keyfile", "request_path_authority"):
-            source = inspect.getsource(importlib.import_module(f"dayz_mcp.{name}"))
+            source = source_of(importlib.import_module(f"dayz_mcp.{name}"))
             self.assertNotIn("class _FILE_STANDARD_INFO", source)
             self.assertNotIn("class FILE_STANDARD_INFO", source)
 

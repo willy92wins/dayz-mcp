@@ -16,6 +16,7 @@ from dayz_mcp import server
 from dayz_mcp import steam_preflight
 import mcp_capture
 from dayz_mcp.control_client import ControlClientError
+from tests._source_snapshot import source_of
 from tests.dayz_test_tool_helpers import (
     RUN_ID,
     _Bundle,
@@ -2360,7 +2361,7 @@ class LaunchReadinessProjectionTest(unittest.TestCase):
         # _FENCE_BLOCK_READY, so the whitelist would have reported "unknown" for
         # real answers. The reason space is open: what must hold is that nothing
         # the server can say gets dropped on the way through.
-        source = inspect.getsource(server.compute_bridge_ready)
+        source = source_of(server.compute_bridge_ready)
         emitted = set(re.findall(r'"reason":\s*"([a-z_]+)"', source))
         emitted |= {
             value

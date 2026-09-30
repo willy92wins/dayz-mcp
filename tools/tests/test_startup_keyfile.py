@@ -7,12 +7,12 @@ returns 200000 bytes instead of raising.
 
 from __future__ import annotations
 
-import inspect
 import tempfile
 import unittest
 from pathlib import Path
 
 from dayz_mcp import daemon, loopback, server
+from tests._source_snapshot import source_of
 
 
 _OVERSIZE_BYTES = 200000
@@ -39,18 +39,18 @@ class StartupKeyfileHardeningTest(unittest.TestCase):
         self.assertNotIn("k" * 32, message)
 
     def test_read_key_delegates_to_the_pinned_reader(self) -> None:
-        source = inspect.getsource(loopback.read_key)
+        source = source_of(loopback.read_key)
         self.assertIn("read_pinned_keyfile", source)
         self.assertNotIn("open(", source)
 
     def test_both_startup_paths_load_the_key_through_read_key(self) -> None:
         self.assertIn(
             "read_key(_required_keyfile(config))",
-            inspect.getsource(daemon.run_daemon),
+            source_of(daemon.run_daemon),
         )
         self.assertIn(
             "read_key(required_keyfile(self.config))",
-            inspect.getsource(server.Runtime.start_loopback),
+            source_of(server.Runtime.start_loopback),
         )
 
 

@@ -19,6 +19,7 @@ import dayz_mcp.launcher_registry as registry
 import dayz_mcp.native_broker_protocol as broker
 import dayz_mcp.secure_launcher as launcher
 from tests._bundle_paths import requires_installed_launcher
+from tests._source_snapshot import source_of
 from tests._tiers import slow_test
 
 
@@ -89,7 +90,7 @@ class SecureLauncherRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "launcher_not_approved"):
             registry.open_approved_launcher("unavailable")
 
-        source = inspect.getsource(registry.open_approved_launcher)
+        source = source_of(registry.open_approved_launcher)
         self.assertIn("_read_canonical_registry", source)
         self.assertNotIn("registry_path", source)
 
@@ -130,8 +131,8 @@ class SecureLauncherRegistryTests(unittest.TestCase):
         assert callable(validate_payload)
         assert callable(open_entry)
 
-        run_source = inspect.getsource(launcher.run_secure_launcher)
-        main_source = inspect.getsource(launcher.main)
+        run_source = source_of(launcher.run_secure_launcher)
+        main_source = source_of(launcher.main)
         for helper_name in (
             "_create_registry_entry_for_test",
             "_validate_launcher_registry_payload",

@@ -16,6 +16,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from dayz_mcp import playbook_tool
 from dayz_mcp.server import ServerConfig, build_app
+from tests._source_snapshot import source_of
 
 
 def _playbooks() -> Path:
@@ -507,7 +508,7 @@ class PlaybookRunExecuteTest(unittest.IsolatedAsyncioTestCase):
         app, _runtime = build_app(ServerConfig(log_sink=lambda _m: None))
         tool = app._tool_manager.get_tool("playbook_run")
         self.assertIsNotNone(tool)
-        source = inspect.getsource(tool.fn)
+        source = source_of(tool.fn)
         self.assertNotIn("async with runtime.tool_lock", source)
         self.assertIn("execute_playbook_run", source)
         description = tool.description or ""

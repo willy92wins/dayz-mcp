@@ -9,11 +9,11 @@ socket deadline turns the suite red.
 from __future__ import annotations
 
 import ast
-import inspect
 import textwrap
 import unittest
 
 from dayz_mcp import loopback
+from tests._source_snapshot import source_of
 
 
 def _is_timeout_s(node: ast.expr) -> bool:
@@ -66,7 +66,7 @@ def _wait_branch(tree: ast.AST) -> ast.If:
 
 def _wait_timeout_ceiling_s() -> float:
     """Max timeout_s the /wait handler accepts, read from its comparison."""
-    source = textwrap.dedent(inspect.getsource(loopback.Handler._handle_session))
+    source = textwrap.dedent(source_of(loopback.Handler._handle_session))
     tree = ast.parse(source)
     namespace = dict(loopback.Handler._handle_session.__globals__)
     ceilings: list[float] = []

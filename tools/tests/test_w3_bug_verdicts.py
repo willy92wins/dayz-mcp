@@ -1,7 +1,8 @@
 """Versioned W3 verdicts for BUG-110 / 111 / 112 (W3-P2-02).
 
-BUG-112 stays INCONCLUSO: the named stability suite is absent. Do not add a
-center-pick tautology here.
+BUG-112 is PASS since the named stability suite exists and its minima are
+not the center frame (tests/test_capture_stability.py). A center-pick
+tautology added there would not keep the verdict honest.
 """
 
 from __future__ import annotations
@@ -70,17 +71,20 @@ class Bug111DeadConstantTests(unittest.TestCase):
         self.assertFalse(hasattr(capture, "DEFAULT_STABILITY_THRESHOLD"))
 
 
-class Bug112InconclusoTests(unittest.TestCase):
-    def test_capture_stability_suite_is_absent(self) -> None:
-        self.assertFalse(
+class Bug112PassTests(unittest.TestCase):
+    def test_capture_stability_suite_exists_and_reaches_both_entry_points(self) -> None:
+        self.assertTrue(
             _STABILITY_SUITE.is_file(),
-            "BUG-112 stays INCONCLUSO until test_capture_stability.py exists "
-            "with a non-center minimum; do not invent a tautological suite",
+            "BUG-112 is PASS only while test_capture_stability.py exists "
+            "with non-center minima",
         )
+        text = _STABILITY_SUITE.read_text(encoding="utf-8")
+        self.assertIn("mcp_capture.choose_stable_frame(", text)
+        self.assertIn("mcp_capture.grab_stable_frame(", text)
 
-    def test_plan_w3_keeps_bug112_inconcluso(self) -> None:
+    def test_plan_w3_records_bug112_pass(self) -> None:
         text = _PLAN_W3.read_text(encoding="utf-8")
-        self.assertRegex(text, r"\*\*BUG-112\*\*\s*\|\s*\*\*INCONCLUSO\*\*")
-        self.assertIsNone(re.search(r"\*\*BUG-112\*\*\s*\|\s*\*\*PASS\*\*", text))
+        self.assertRegex(text, r"\*\*BUG-112\*\*\s*\|\s*\*\*PASS\*\*")
+        self.assertIsNone(re.search(r"\*\*BUG-112\*\*\s*\|\s*\*\*INCONCLUSO\*\*", text))
         self.assertRegex(text, r"\*\*BUG-110\*\*\s*\|\s*\*\*PASS\*\*")
         self.assertRegex(text, r"\*\*BUG-111\*\*\s*\|\s*\*\*PASS\*\*")
