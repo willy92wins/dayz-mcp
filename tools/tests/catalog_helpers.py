@@ -1,7 +1,8 @@
 """Read the tools/list a client-mode lease holder sees (issue #103).
 
 Progressive disclosure (0b85e9c) keeps the pre-lease client catalog compact:
-descriptions cut to 80 chars and tools outside the core set hidden. Contract
+descriptions shortened to 120 chars at a sentence or word boundary (b753), and
+tools outside the core set and the lease-free reads hidden. Contract
 tests that pin description sentences or schemas of non-core tools must read
 the full catalog, which the server only publishes once a lease is held.
 test_progressive_disclosure.py pins the compact pre-lease view itself.

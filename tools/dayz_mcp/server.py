@@ -699,11 +699,14 @@ def compute_bridge_ready(status: dict[str, Any]) -> dict[str, Any]:
 _BRIDGE_WORLD_READ_COMMANDS = READ_ONLY_COMMANDS - {"logs_since"}
 
 # Progressive disclosure (fb-20260917-092908-2ad1): the first tools/list a
-# client-mode caller sees is a compact core (~8.5 KB). world_*/vehicle_*/ui_*
-# stay off the catalog until a lease is held. Embedded mode keeps the full
-# registry so in-process tests and the host-side catalog stay complete.
+# client-mode caller sees is a compact catalog: the session and lifecycle core
+# plus the reads that need no lease. The rest of world_*/vehicle_*/ui_* stays
+# off the catalog until a lease is held. Embedded mode keeps the full registry
+# so in-process tests and the host-side catalog stay complete. The listing is
+# not an access control: a tool it leaves out still runs when called by name,
+# and the lease gate refuses a mutation without a lease (fb-20260925-233937-b753).
 _LEASE_REVEAL_PREFIXES = ("world_", "vehicle_", "ui_")
-_INITIAL_CATALOG_NAMES = frozenset(
+_INITIAL_CORE_NAMES = frozenset(
     {
         "bridge_status",
         "dayz_knowledge_find",
@@ -724,7 +727,39 @@ _INITIAL_CATALOG_NAMES = frozenset(
         "wait_for",
     }
 )
-_INITIAL_DESCRIPTION_LIMIT = 80
+# The public tools whose only bridge command is in READ_ONLY_COMMANDS (the tool
+# _BRIDGE_COMMAND_TOOLS names for it), plus logs_since, which reads host logs
+# and never reaches the game. They run without a lease, so hiding them until
+# one is held only took the information away from weak callers (b753).
+_INITIAL_READ_TOOL_NAMES = frozenset(
+    {
+        "camera_get",
+        "entities_query",
+        "input_describe",
+        "logs_since",
+        "object_doors",
+        "object_inspect",
+        "query_all_players",
+        "query_get_in_condition",
+        "query_player_state",
+        "scene_raycast",
+        "surface_query",
+        "telemetry_read",
+        "ui_tree",
+        "vehicle_telemetry",
+        "weapon_state",
+    }
+)
+_INITIAL_CATALOG_NAMES = _INITIAL_CORE_NAMES | _INITIAL_READ_TOOL_NAMES
+# Whole sentences are kept up to this many characters (b753); see
+# _compact_description for what happens when the first sentence is longer.
+_INITIAL_DESCRIPTION_LIMIT = 120
+_COMPACT_DESCRIPTION_MARKER = "…"
+_OPENER_FOR_CLOSER = {")": "(", "]": "[", "}": "{"}
+# Claude Code never re-lists after tools/list_changed (#93, e7ef): a compact
+# catalog there hides the game verbs for the whole session, so this platform
+# lists the full catalog from the start, as --no-progressive-disclosure does.
+_FULL_CATALOG_PLATFORMS = frozenset({"claude"})
 
 
 def _runtime_holds_lease(runtime: Any) -> bool:
@@ -737,34 +772,122 @@ def _runtime_holds_lease(runtime: Any) -> bool:
     return bool(token)
 
 
-def _progressive_disclosure_active(runtime: Any) -> bool:
-    config = getattr(runtime, "config", None)
+def _progressive_disclosure_enabled(config: Any) -> bool:
+    """True when this process lists the compact catalog while it holds no lease."""
     return (
         getattr(config, "mode", None) == "client"
         and getattr(config, "progressive_disclosure", True) is not False
-        and not _runtime_holds_lease(runtime)
+        and getattr(config, "client_platform", None) not in _FULL_CATALOG_PLATFORMS
     )
+
+
+def _progressive_disclosure_active(runtime: Any) -> bool:
+    return _progressive_disclosure_enabled(
+        getattr(runtime, "config", None)
+    ) and not _runtime_holds_lease(runtime)
 
 
 def _is_lease_revealed_tool(name: str) -> bool:
     return name.startswith(_LEASE_REVEAL_PREFIXES)
 
 
+def _compact_description(description: str) -> str:
+    """Shorten a description for the compact catalog without a misleading cut.
+
+    Keeps the longest run of whole sentences that fits in
+    _INITIAL_DESCRIPTION_LIMIT. When even the first sentence is longer, it is
+    cut at the last space outside brackets that fits, with the separator it
+    leaves dangling removed. Either way the dropped text is marked with a
+    trailing "…", and with no such space the marker stands alone. A cut inside a
+    word read as a real value (b753: "kind must be bug | request | find…").
+    """
+    if len(description) <= _INITIAL_DESCRIPTION_LIMIT:
+        return description
+    room = _INITIAL_DESCRIPTION_LIMIT - len(" " + _COMPACT_DESCRIPTION_MARKER)
+    sentence_end = word_end = 0
+    open_brackets: list[str] = []
+    for index, char in enumerate(description[: room + 1]):
+        if char in "([{":
+            open_brackets.append(char)
+        elif char in _OPENER_FOR_CLOSER:
+            if open_brackets and open_brackets[-1] == _OPENER_FOR_CLOSER[char]:
+                open_brackets.pop()
+        elif char.isspace() and index > 0 and not open_brackets:
+            word_end = index
+            if description[index - 1] in ".!?" and description[
+                max(0, index - 4) : index
+            ].lower() not in ("e.g.", "i.e."):
+                sentence_end = index
+    if sentence_end:
+        kept = description[:sentence_end].rstrip()
+    else:
+        kept = description[:word_end].rstrip().rstrip(",;:|/-=>+&").rstrip()
+    if not kept:
+        return _COMPACT_DESCRIPTION_MARKER
+    return f"{kept} {_COMPACT_DESCRIPTION_MARKER}"
+
+
 def _compact_initial_catalog(tools: list[Any]) -> list[Any]:
-    """Keep the pre-lease tools/list near 8.5 KB for 8B clients."""
+    """The pre-lease tools/list for 8B clients: the core plus lease-free reads.
+
+    About 17 KB with the reads (b753), most of it input schemas, which stay
+    whole. Descriptions go through _compact_description; outputSchema is
+    dropped. A world_*/vehicle_*/ui_* tool is listed only when it is a read.
+    """
     compacted: list[Any] = []
     for tool in tools:
         name = getattr(tool, "name", "")
-        if name not in _INITIAL_CATALOG_NAMES or _is_lease_revealed_tool(name):
+        if name not in _INITIAL_CATALOG_NAMES:
+            continue
+        if _is_lease_revealed_tool(name) and name not in _INITIAL_READ_TOOL_NAMES:
             continue
         description = getattr(tool, "description", None) or ""
         updates: dict[str, Any] = {}
-        if len(description) > _INITIAL_DESCRIPTION_LIMIT:
-            updates["description"] = description[:_INITIAL_DESCRIPTION_LIMIT].rstrip() + "…"
+        compact_description = _compact_description(description)
+        if compact_description != description:
+            updates["description"] = compact_description
         if getattr(tool, "outputSchema", None) is not None:
             updates["outputSchema"] = None
         compacted.append(tool.model_copy(update=updates) if updates else tool)
     return compacted
+
+
+def _install_catalog_change_notice(app: Any, runtime: Any) -> None:
+    """Send tools/list_changed after a call that flips the compact catalog.
+
+    b753: a lease reveals the lease-gated tools, and session_release, or a call
+    that finds the lease expired or lost, hides them again. The client runtime
+    already tracks that state: ControlClient.active_lease_token, set by a grant
+    and cleared by session_release and by _clear_matching_lease on a
+    lease_expired / lease_invalid reply. So there is no timer: after every call
+    the view is compared with the one last announced, and only a difference is
+    sent, which also keeps concurrent calls from hiding a flip. A lease that
+    expires silently is seen by the next call that reaches the daemon with it.
+    A failed send never fails the call; the next call retries it.
+
+    Registered as the protocol tools/call handler before
+    install_result_freshness wraps that handler, so the freshness check still
+    finds its own wrapper outermost. In-process app.call_tool is not wrapped.
+    """
+    call_tool = app.call_tool
+    announced_compact = _progressive_disclosure_active(runtime)
+
+    async def call_tool_then_announce(name: str, arguments: dict[str, Any]) -> Any:
+        nonlocal announced_compact
+        try:
+            return await call_tool(name, arguments)
+        finally:
+            compact = _progressive_disclosure_active(runtime)
+            if compact != announced_compact:
+                try:
+                    session = app._mcp_server.request_context.session
+                    await session.send_tool_list_changed()
+                except Exception:
+                    pass
+                else:
+                    announced_compact = compact
+
+    app._mcp_server.call_tool(validate_input=False)(call_tool_then_announce)
 
 
 def _visible_public_tools(runtime: Any) -> frozenset[str]:
@@ -1526,8 +1649,10 @@ class ServerConfig:
     # Opt-in small-model surface. The full public registry remains the default.
     tool_pack: str = "full"
     # Client mode lists a compact catalog until a lease is held and relies on the
-    # host re-listing after tools/list_changed. Claude Code does not (#93, e7ef):
-    # --no-progressive-disclosure lists everything from the start instead.
+    # host re-listing after tools/list_changed. Claude Code does not (#93, e7ef),
+    # so client_platform claude lists everything from the start whatever this
+    # says (_progressive_disclosure_enabled); --no-progressive-disclosure does
+    # the same for any other platform.
     progressive_disclosure: bool = True
 
 
@@ -4941,8 +5066,11 @@ _TOOL_REGISTRY_STALE_HINT_KEY = "tool_registry_stale_hint"
 _TOOL_REGISTRY_STALE_HINT = (
     "The host must reconnect the dayz-mcp server to list the current tools. "
     "The agent cannot do that itself (Claude Code: /mcp, then reconnect "
-    "dayz-mcp). Hosts that do not re-list after tools/list_changed should "
-    "be registered with --no-progressive-disclosure."
+    "dayz-mcp). Claude Code gets every tool from the start; another host "
+    "that does not re-list after tools/list_changed should be registered "
+    "with --no-progressive-disclosure. The list does not gate calls: a tool "
+    "it leaves out still runs when called by name, and a mutation without "
+    "a lease is refused with lease_required."
 )
 
 
@@ -5586,11 +5714,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             payload = await client.session_acquire_wait(
                 purpose.strip(), validated_wait, report
             )
-        if ctx is not None and _runtime_holds_lease(client):
-            try:
-                await ctx.session.send_tool_list_changed()
-            except Exception:
-                pass
+        # tools/list_changed for the revealed catalog is sent by
+        # _install_catalog_change_notice once this call returns.
         return _with_ok_next_step(
             _annotate_caller_tool_registry(payload, caller_stale),
             "session_acquire_wait",
@@ -8588,6 +8713,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     _registered_tool_names.update(registered_tool_names)
     runtime._registered_tool_names = registered_tool_names
     _tool_registry_overlay.update(_frozen_tool_registry_overlay(app, config))
+    if _progressive_disclosure_enabled(config):
+        # Before install_result_freshness: its wrapper has to stay outermost.
+        _install_catalog_change_notice(app, runtime)
     observe_server_sources = install_result_freshness(app, server_sources)
     _original_list_tools = app.list_tools
 

@@ -197,12 +197,17 @@ If `claude` / `codex` on PATH are shims (`.cmd` / `.ps1`), pass the native x64
 executables with `--claude-exe` and `--codex-exe`. Re-run `--pin-clis` after those
 binaries change. `.\install-mcp.ps1 -Register` does not read that pin.
 
-Claude Code does not re-list tools after `tools/list_changed`, so in client mode it
-keeps the compact pre-lease catalog for the whole session and never sees the game
-verbs (#93). Register it with `--no-progressive-disclosure` to list every tool from
-the start: `.\install-mcp.ps1 -Register -ClaudeNoProgressiveDisclosure` or
-`python install_mcp.py --register --claude-no-progressive-disclosure`. Lease-gated
-tools still refuse to run without a lease, and Codex keeps the default.
+In client mode the first tool list is compact: the session and lifecycle tools plus
+the reads that need no lease. A lease reveals the rest; releasing it, or a call that
+finds it expired or lost, hides them again, and the server sends
+`tools/list_changed` each time. Claude Code does not re-list tools after
+`tools/list_changed` (#93), so a client registered with `--client-platform claude`
+lists every tool from the start, as `--no-progressive-disclosure` does: that is now
+the default for Claude. `.\install-mcp.ps1 -Register -ClaudeNoProgressiveDisclosure`
+and `python install_mcp.py --register --claude-no-progressive-disclosure`, which add
+the flag, are still accepted. Codex keeps the compact list. The list does not gate
+calls: a tool it leaves out still runs when called by name, and lease-gated tools
+refuse to run without a lease whatever the list shows.
 
 Both installers register the client with `--supervised`: it serves the host from a
 worker the supervisor can replace, so `server_reload` picks up edited sources without

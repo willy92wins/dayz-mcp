@@ -726,8 +726,9 @@ if (-not $AllowLegacy) {
 $serverArgs += @("--idle-timeout", "$IdleTimeoutSeconds")
 
 $claudeArgs = $serverArgs + @('--client-platform','claude')
-# Claude Code does not re-list tools after tools/list_changed (#93): opt in to
-# listing the full catalog before the lease. Codex keeps the default.
+# Claude Code does not re-list tools after tools/list_changed (#93). The server
+# already lists the full catalog for --client-platform claude; the switch is still
+# accepted and adds the explicit flag. Codex keeps the compact default.
 if ($ClaudeNoProgressiveDisclosure) {
   $claudeArgs += @('--no-progressive-disclosure')
 }
