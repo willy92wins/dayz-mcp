@@ -59,14 +59,16 @@ def _frame(seed: int, black: bool = False) -> Image.Image:
     return image
 
 
-def _backend(seed: int, black: bool = False, distinct_per_frame: bool = False):
+def _backend(seed: int, black: bool = False, distinct_per_frame: bool = False, frame_step: int = 1):
     """Fake _run_window_capture. distinct_per_frame=True gives every grab of the SAME call
-    a different image, which is what a healthy render looks like."""
+    a different image. frame_step is how far the block's red channel moves per grab: the
+    default 1 is a max_adjacent_delta of ~5.9e-04, under mcp_capture.RENDER_FROZEN_DELTA_EPS
+    (a near-identical pair, f47b); 16 is ~9.5e-03, the scale of a live render."""
     counter = {"n": 0}
 
     def fake(output_path: str, **_: object) -> dict[str, object]:
         counter["n"] += 1
-        effective = seed + (counter["n"] if distinct_per_frame else 0)
+        effective = seed + (counter["n"] * frame_step if distinct_per_frame else 0)
         _frame(effective, black=black).save(output_path, format="PNG")
         return {
             "ok": True,
