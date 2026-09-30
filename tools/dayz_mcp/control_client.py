@@ -71,6 +71,7 @@ class ControlClientError(RuntimeError):
         policy_cause: str | None = None,
         body: VerifiedErrorBody | None = None,
         audit_stage: object = None,
+        reaccreditation_stage: object = None,
     ) -> None:
         self.code = code
         self.request_stage = request_stage
@@ -83,6 +84,13 @@ class ControlClientError(RuntimeError):
         # closed AUDIT_STAGES set is kept; anything else from the wire is dropped.
         self.audit_stage = (
             public_audit_stage(audit_stage) if code == "audit_failed" else None
+        )
+        # The re-accreditation step that failed (acf3), from the closed
+        # daemon_credential.REACCREDITATION_STAGES set and for that code only.
+        self.reaccreditation_stage = (
+            daemon_credential.public_reaccreditation_stage(reaccreditation_stage)
+            if code == daemon_credential.REACCREDITATION_FAILED
+            else None
         )
         super().__init__(
             code if self.hint is None else f"{code}: {self.hint}"
@@ -319,10 +327,16 @@ class ControlClient:
                 **refresh_kwargs,
             )
         except daemon_credential.CredentialRefreshError as error:
+            # A re-accreditation failure carries its stage and remedy as the
+            # hint the MCP adapter publishes; every other code stays bare.
             raise ControlClientError(
                 error.code,
                 request_stage=error.request_stage,
                 http_bytes_sent=error.http_bytes_sent,
+                hint=daemon_credential.reaccreditation_hint(
+                    error.reaccreditation_stage
+                ),
+                reaccreditation_stage=error.reaccreditation_stage,
             ) from None
         except transport.AccreditedTransportError as error:
             if error.code == "daemon_identity_unverified":

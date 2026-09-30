@@ -1705,11 +1705,15 @@ class DoctorTest(unittest.TestCase):
             claude_config=lambda: (_ for _ in ()).throw(RuntimeError("sensitive"))
         )
         self.assertEqual(exit_code, 2)
+        # 88c2 part 3: the failure names its check and exception class, never
+        # the exception's message.
         self.assertEqual(
             payload,
             {
                 "ok": False,
                 "error": "diagnostic_failure",
+                "failed_check": "registrations",
+                "exception_class": "RuntimeError",
                 "findings": [],
                 "summary": {"fail": 0, "warn": 0},
             },

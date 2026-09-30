@@ -72,6 +72,12 @@ _CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 # crashed DayZ never permanently blocks the box (latency of auto-heal, not correctness).
 REAP_INTERVAL_S = 30.0
 DAEMON_STARTUP_CONTENDED = 75
+# fb-20260823-040320-8575: the interpreter is not <tools>/.venv-mcp/Scripts/
+# python.exe. 78 is EX_CONFIG in sysexits.h, as 75 above is EX_TEMPFAIL. The
+# ticket expected 91, but 91 (and 92) are exit codes the startup-deadlock test
+# fixtures use for a simulated crash (and a lost election), so a real startup
+# failure must not share them.
+DAEMON_PYTHON_NOT_APPROVED = 78
 MIGRATION_CANDIDATE_DRAIN_S = 30.0
 STATUS_ACTIVATION_TIMEOUT_S = 5.0
 STARTUP_BUDGET_MARGIN_S = 2.0
@@ -188,6 +194,30 @@ def _required_keyfile(config: Any) -> str:
     return keyfile
 
 
+class DaemonPythonNotApproved(RuntimeError):
+    """The daemon runs only under <tools>/.venv-mcp/Scripts/python.exe.
+
+    str() stays daemon_python_not_approved. run_daemon turns it into one line
+    and DAEMON_PYTHON_NOT_APPROVED instead of a traceback (8575).
+    """
+
+    def __init__(self, approved: Path, current: str) -> None:
+        super().__init__("daemon_python_not_approved")
+        self.approved = approved
+        self.current = current
+
+
+def _python_not_approved_line(error: DaemonPythonNotApproved) -> str:
+    # The daemon's own stderr, never the MCP wire, so both paths may appear.
+    return (
+        "DAEMON: daemon_python_not_approved: this interpreter is "
+        f"{error.current}, but the daemon runs only under {error.approved}, the "
+        "path it checks its own identity against. Create that venv with "
+        "tools\\install-mcp.ps1 (it installs this package into "
+        "tools\\.venv-mcp) and start the daemon with its python.exe."
+    )
+
+
 def _ensure_identity_migration(config: Any) -> None:
     approved_python = (
         Path(__file__).resolve().parents[1]
@@ -199,9 +229,9 @@ def _ensure_identity_migration(config: Any) -> None:
         approved = approved_python.resolve(strict=True)
         current = Path(sys.executable).resolve(strict=True)
     except OSError as error:
-        raise RuntimeError("daemon_python_not_approved") from error
+        raise DaemonPythonNotApproved(approved_python, sys.executable) from error
     if os.path.normcase(str(current)) != os.path.normcase(str(approved)):
-        raise RuntimeError("daemon_python_not_approved")
+        raise DaemonPythonNotApproved(approved_python, sys.executable)
     guard = NativeProcessGuard()
     identity = guard.snapshot(os.getpid())
     if (
@@ -1514,6 +1544,9 @@ def run_daemon(config: Any, *, stop: threading.Event | None = None) -> int:
         except TimeoutError:
             log("DAEMON: startup deadline expired during identity migration")
             return DAEMON_STARTUP_CONTENDED
+        except DaemonPythonNotApproved as error:
+            log(_python_not_approved_line(error))
+            return DAEMON_PYTHON_NOT_APPROVED
 
         state = build_server_state(
             config,

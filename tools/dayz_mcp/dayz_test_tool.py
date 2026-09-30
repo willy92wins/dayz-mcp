@@ -1565,6 +1565,20 @@ _SERVER_START_HUNG_REMEDIATION = (
     "fb-20260818-232129-1233 one relaunch was enough both times."
 )
 
+# fb-20260930-171015-4fdf. The sealed worker (native-launchers/dayz-test-v1/src/
+# app_main.py, main) answers internal_failure for any exception it does not
+# classify, and its DZW1 terminal carries only that code: the exception and its
+# class stay in the sealed process, whose stderr the launcher sends to NUL.
+# _execute_request is where that result leaves the sealed code, so the stage is
+# named there and the class is published as unknown (null), not left out.
+WORKER_INTERNAL_FAILURE = "internal_failure"
+WORKER_INTERNAL_FAILURE_REASON = "sealed_worker_exception"
+_WORKER_INTERNAL_FAILURE_REMEDIATION = (
+    "the sealed dayz-test-v1 worker ended on an exception it does not "
+    "classify, and it reports no exception class. Retry once; if it fails "
+    "the same way, report it with pipeline_feedback (tool, args, error)."
+)
+
 
 def _server_start_hung(status: object, run_id: str | None) -> bool:
     """Whether the daemon's hung verdict is about the start this call made.
@@ -1746,7 +1760,7 @@ async def _execute_request(
     steam_startup, steam_pid_repair, steam_restarted = _steam_fields_from_status(
         status, terminal.run_id
     )
-    return _compact_result(
+    result = _compact_result(
         terminal=terminal,
         project=policy.mod,
         mode=public_mode,
@@ -1776,6 +1790,12 @@ async def _execute_request(
         steam_restarted=steam_restarted,
         client_dump_baseline=client_dump_baseline,
     )
+    if not terminal.ok and terminal.error_code == WORKER_INTERNAL_FAILURE:
+        # 4fdf: the stage is known here, the exception class is not (see above).
+        result["reason"] = WORKER_INTERNAL_FAILURE_REASON
+        result["exception_class"] = None
+        result["remediation"] = _WORKER_INTERNAL_FAILURE_REMEDIATION
+    return result
 
 
 def _steam_fields_from_status(

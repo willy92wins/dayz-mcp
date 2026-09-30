@@ -14,6 +14,80 @@ RETRY_HEADER_NAME = "X-DayZ-MCP-Credential-Retry"
 RETRY_HEADER_VALUE = "1"
 REACCREDITED_HEADER_NAME = "X-DayZ-MCP-Reaccredited"
 REACCREDITED_HEADER_VALUE = "1"
+REACCREDITATION_FAILED = "daemon_reaccreditation_failed_open_new_session"
+
+# The re-accreditation step that failed, and the remedy that holds for it
+# (fb-20260824-010234-acf3). The code keeps its name, which other tools grep,
+# but "open a new session" cures none of these steps: a new session derives the
+# same authority from the same registration and checks the same listener. Each
+# stage is one raise site of REACCREDITATION_FAILED below; the replay site is
+# split by what the transport reported, because that decides whether anything
+# was sent. Only a stage from this closed set ever reaches a caller.
+_REACCREDITATION_REMEDIES = {
+    "identity_after_send": (
+        "The identity check failed after request bytes may have left, so the "
+        "request was not replayed and may have reached an unverified process. "
+        "Call session_status before repeating a mutation: it checks the "
+        "daemon's identity before it sends anything. A new MCP session is not "
+        "needed."
+    ),
+    "replay_identity": (
+        "The process on the daemon port still fails the identity check against "
+        "this client's registration after one re-accreditation. Retrying, or "
+        "opening a new MCP session, repeats the same check against the same "
+        "process and the same registration. What changes it is a new daemon "
+        "generation started from the registered argv: the daemon exits by "
+        "itself after its --idle-timeout without game polls or client "
+        "requests, or the host operator stops that daemon process outside "
+        "MCP; the next call then starts a new one. This client can do neither. "
+        "python -m dayz_mcp.doctor --daemon-policy normal --json shows what "
+        "the listener fails."
+    ),
+    "replay_transport": (
+        "The replay could not reach the daemon and sent nothing, so nothing "
+        "ran. Retry the call: the next call looks for the daemon again. A new "
+        "MCP session is not needed."
+    ),
+    "replay_deadline": (
+        "The call's time budget ran out before the replay was sent, so nothing "
+        "ran. Retry the call, with a longer timeout when the tool takes one. A "
+        "new MCP session is not needed."
+    ),
+    "replay_response": (
+        "The replay was sent but its answer was lost, so the request may have "
+        "run. Call session_status before repeating a mutation. A new MCP "
+        "session is not needed."
+    ),
+    "replay_unauthorized": (
+        "The replacement daemon passed the identity check but refused this "
+        "client's credential, so nothing ran. Retry the call once: when the "
+        "daemon refuses it too, the client reads the pinned keyfile again and "
+        "retries with that credential. A new MCP session is not needed."
+    ),
+    "refresh_retry_identity": (
+        "The daemon changed while this client retried a refused request: the "
+        "first attempt was refused and the retry failed its identity check "
+        "before sending, so nothing ran. Retry the call once; if it fails with "
+        "reaccreditation_stage=replay_identity, follow that stage's remedy. A "
+        "new MCP session is not needed."
+    ),
+}
+REACCREDITATION_STAGES = frozenset(_REACCREDITATION_REMEDIES)
+
+
+def public_reaccreditation_stage(value: object) -> str | None:
+    """Return value only when it is a member of REACCREDITATION_STAGES."""
+    if isinstance(value, str) and value in REACCREDITATION_STAGES:
+        return value
+    return None
+
+
+def reaccreditation_hint(stage: object) -> str | None:
+    """reaccreditation_stage=<stage>. <remedy>, or None without a known stage."""
+    known = public_reaccreditation_stage(stage)
+    if known is None:
+        return None
+    return f"reaccreditation_stage={known}. {_REACCREDITATION_REMEDIES[known]}"
 
 
 class CredentialRefreshError(RuntimeError):
@@ -36,13 +110,49 @@ class CredentialRefreshError(RuntimeError):
         *,
         request_stage: str = "post_request",
         http_bytes_sent: int = 1,
+        reaccreditation_stage: str | None = None,
     ) -> None:
         if code not in self._CODES:
+            raise ValueError("invalid_credential_refresh_error")
+        if reaccreditation_stage is not None and (
+            code != REACCREDITATION_FAILED
+            or public_reaccreditation_stage(reaccreditation_stage) is None
+        ):
             raise ValueError("invalid_credential_refresh_error")
         self.code = code
         self.request_stage = request_stage
         self.http_bytes_sent = http_bytes_sent
+        # Separate metadata, like request_stage: str() stays the bare code.
+        self.reaccreditation_stage = reaccreditation_stage
         super().__init__(code)
+
+
+def public_refresh_error(error: CredentialRefreshError) -> str:
+    """The text a caller reads: the stable code, then the stage and its remedy.
+
+    Every other code, and a re-accreditation failure without a known stage,
+    stays the bare code.
+    """
+    hint = reaccreditation_hint(getattr(error, "reaccreditation_stage", None))
+    return error.code if hint is None else f"{error.code}: {hint}"
+
+
+def _replay_transport_stage(
+    error: accredited_daemon_transport.AccreditedTransportError,
+) -> str:
+    """Name the replay step a transport error stopped (acf3).
+
+    Only a failure reported before anything was sent is an identity, deadline
+    or transport step. Anything else may have reached the daemon, so it is the
+    response step, whose remedy does not assume that nothing ran.
+    """
+    if error.request_stage != "pre_request" or error.http_bytes_sent != 0:
+        return "replay_response"
+    if error.code == "daemon_identity_unverified":
+        return "replay_identity"
+    if error.code == "daemon_request_deadline_exceeded":
+        return "replay_deadline"
+    return "replay_transport"
 
 
 @dataclass(frozen=True)
@@ -228,18 +338,21 @@ class RefreshingDaemonCredential:
                 "daemon_reaccreditation_failed_open_new_session",
                 request_stage=error.request_stage,
                 http_bytes_sent=error.http_bytes_sent,
+                reaccreditation_stage=_replay_transport_stage(error),
             ) from None
         except TimeoutError:
             raise CredentialRefreshError(
                 "daemon_reaccreditation_failed_open_new_session",
                 request_stage="pre_request",
                 http_bytes_sent=0,
+                reaccreditation_stage="replay_deadline",
             ) from None
         if retry_status == 401:
             raise CredentialRefreshError(
                 "daemon_reaccreditation_failed_open_new_session",
                 request_stage="post_request",
                 http_bytes_sent=1,
+                reaccreditation_stage="replay_unauthorized",
             )
         return retry_status, retry_body
 
@@ -281,6 +394,7 @@ class RefreshingDaemonCredential:
                     "daemon_reaccreditation_failed_open_new_session",
                     request_stage=error.request_stage,
                     http_bytes_sent=error.http_bytes_sent,
+                    reaccreditation_stage="identity_after_send",
                 ) from None
             return self._retry_after_daemon_replacement(
                 observed_reaccredit_epoch=observed_reaccredit_epoch,
@@ -347,6 +461,7 @@ class RefreshingDaemonCredential:
                     "daemon_reaccreditation_failed_open_new_session",
                     request_stage="post_request",
                     http_bytes_sent=1,
+                    reaccreditation_stage="refresh_retry_identity",
                 ) from None
             raise CredentialRefreshError(
                 "stale_client_credential_retry_transport_failed",

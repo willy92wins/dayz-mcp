@@ -328,7 +328,8 @@ Remove-Item Env:DAYZ_MCP_FAST_TESTS   # back to the whole suite
 
 The virtualenv has to be the one the installer creates, at `tools/.venv-mcp`:
 the daemon resolves that path when it checks its own identity, and an environment
-somewhere else fails at startup rather than falling back.
+somewhere else fails at startup rather than falling back. The daemon then prints
+one line naming the interpreter it expects and exits with code 78.
 
 ## Licence
 
