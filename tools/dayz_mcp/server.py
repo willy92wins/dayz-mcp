@@ -2781,7 +2781,7 @@ class ClientRuntime:
                 return False
             raise ToolError("daemon_response_ambiguous") from None
         except daemon_credential.CredentialRefreshError as error:
-            raise ToolError(error.code) from None
+            raise ToolError(daemon_credential.public_refresh_error(error)) from None
         if not 200 <= status < 300:
             raise ToolError("daemon_health_unexpected_status")
         try:
@@ -2931,7 +2931,7 @@ class ClientRuntime:
                 method, path, payload, query, remaining_timeout()
             )
         except daemon_credential.CredentialRefreshError as error:
-            raise ToolError(error.code) from None
+            raise ToolError(daemon_credential.public_refresh_error(error)) from None
         except AccreditedTransportError as error:
             if error.code == "daemon_identity_unverified":
                 raise ToolError(error.code) from None
@@ -2950,7 +2950,9 @@ class ClientRuntime:
                     method, path, payload, query, remaining_timeout()
                 )
             except daemon_credential.CredentialRefreshError as retry_error:
-                raise ToolError(retry_error.code) from None
+                raise ToolError(
+                    daemon_credential.public_refresh_error(retry_error)
+                ) from None
             except AccreditedTransportError as retry_error:
                 if retry_error.code == "daemon_identity_unverified":
                     raise ToolError(retry_error.code) from None
@@ -5356,6 +5358,31 @@ async def _observe_caller_tool_registry_stale(
         return True
 
 
+# fb-20260930-171015-4fdf. This process builds the request with the modules it
+# loaded at start, and the sealed worker it launches comes from the bundle on
+# disk; load_verified_bundle compares that bundle with the files on disk, not
+# with this process. After a promotion the two can disagree, and the worker
+# answers internal_failure. Only a new serving process loads the files on disk.
+_STALE_SOURCES_INTERNAL_FAILURE_REMEDIATION = (
+    "this MCP server process cannot show that it runs the sources on disk "
+    "(server_modules is stale or unknown), so the request it built can "
+    "disagree with the sealed worker it launched. If the tool list includes "
+    "server_reload, call it: it replaces this process without the host "
+    "reconnecting. Otherwise the host has to reopen the MCP client (Claude "
+    "Code: /mcp, then reconnect dayz-mcp). Then call dayz_test_run again."
+)
+
+
+def _annotate_worker_internal_failure(
+    payload: dict[str, Any], stale: bool
+) -> dict[str, Any]:
+    """On a server whose own sources are stale or unknown, the sealed worker's
+    internal_failure names server_reload or a reopened client (4fdf)."""
+    if stale and payload.get("error_code") == dayz_test_tool.WORKER_INTERNAL_FAILURE:
+        payload["remediation"] = _STALE_SOURCES_INTERNAL_FAILURE_REMEDIATION
+    return payload
+
+
 async def _heartbeat_box_claim(
     client: Any,
     ticket: str,
@@ -6190,7 +6217,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         )
 
         def annotated(payload: dict[str, Any]) -> dict[str, Any]:
-            return _annotate_caller_tool_registry(payload, caller_stale)
+            return _annotate_worker_internal_failure(
+                _annotate_caller_tool_registry(payload, caller_stale), caller_stale
+            )
 
         # Both parses run BEFORE the box queue: a request that is already
         # invalid must not be able to take a queue slot, hold the tool lock or
@@ -6459,7 +6488,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     return failed
             try:
                 with _typed_dayz_test_value_errors():
-                    return await dayz_test_tool.execute_dayz_test_stop(
+                    result = await dayz_test_tool.execute_dayz_test_stop(
                         client, run_id, progress_cb=report
                     )
             except dayz_test_tool.DayzTestToolError as error:
@@ -6474,6 +6503,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 # __cause__ for LOCAL diagnosis (needed to see why build:true failed), not for the wire.
                 _log_opaque_failure(client, "dayz_test_stop", exc)
                 raise ToolError(_opaque_dayz_test_failure(exc)) from exc
+        if (
+            isinstance(result, dict)
+            and result.get("error_code") == dayz_test_tool.WORKER_INTERNAL_FAILURE
+        ):
+            # 4fdf: the same sealed-worker failure dayz_test_run annotates.
+            stale = await _observe_caller_tool_registry_stale(observe_server_sources)
+            result = _annotate_worker_internal_failure(result, stale)
+        return result
 
     @app.tool(
         description=(

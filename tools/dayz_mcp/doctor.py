@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 from dayz_mcp import accredited_daemon_transport as transport
-from dayz_mcp import daemon_policy, orphan_guard
+from dayz_mcp import daemon_policy, host_config, orphan_guard
 from dayz_mcp import pinned_keyfile
 from dayz_mcp.daemon_policy import AccreditedDaemonPolicy
 from dayz_mcp.knowledge_pack import (
@@ -88,6 +88,27 @@ _CONFIG_PROBE_FAILED_MESSAGE = (
     "Read the platform config file directly before changing anything; "
     "do not re-register."
 )
+# The step a diagnostic_failure stopped at (fb-20260823-144715-88c2, part 3).
+# A bare diagnostic_failure next to fail=0/warn=0 read as healthy and named
+# nothing to fix. Each name is one real step of main, execute or _diagnose.
+DIAGNOSTIC_CHECKS = frozenset(
+    {
+        "daemon_policy",
+        "sources",
+        "registrations",
+        "listeners",
+        "daemon_status",
+        "processes",
+        "runs",
+        "manifest_backup_retention",
+        "manifest_backup_quarantine",
+        "launchers",
+        "native_bundle",
+        "knowledge_pack",
+        "summary",
+    }
+)
+_HOST_CONFIG_CODE = re.compile(r"[a-z][a-z0-9_]{2,63}")
 
 
 CommandSource = Callable[[], tuple[int, str]]
@@ -1121,7 +1142,16 @@ def _check_launchers(
                 )
 
 
-def _diagnose(sources: DoctorSources, *, require_clean: bool) -> dict[str, object]:
+def _diagnose(
+    sources: DoctorSources,
+    *,
+    require_clean: bool,
+    step: list[str] | None = None,
+) -> dict[str, object]:
+    # step[0] names the check running now; execute() reports it when an
+    # exception escapes (88c2 part 3). Every name is in DIAGNOSTIC_CHECKS.
+    step = [""] if step is None else step
+    step[0] = "registrations"
     findings: list[dict[str, object]] = []
     registrations: dict[str, _Registration] = {}
     for platform, source in (
@@ -1163,6 +1193,7 @@ def _diagnose(sources: DoctorSources, *, require_clean: bool) -> dict[str, objec
         ):
             findings.append(_finding("CONFIG_MISMATCH", platform="shared"))
 
+    step[0] = "listeners"
     listeners: dict[int, tuple[int, _Registration]] = {}
     checked_ports: set[int] = set()
     for registration in registrations.values():
@@ -1200,6 +1231,7 @@ def _diagnose(sources: DoctorSources, *, require_clean: bool) -> dict[str, objec
     listener_pids = sorted({pid for pid, _ in listeners.values()})
     if len(listener_pids) > 1:
         findings.append(_finding("MULTIPLE_LISTENERS", pids=listener_pids))
+    step[0] = "daemon_status"
     for port, (pid, registration) in sorted(listeners.items()):
         try:
             argv = sources.process_argv(pid)
@@ -1261,6 +1293,7 @@ def _diagnose(sources: DoctorSources, *, require_clean: bool) -> dict[str, objec
                 )
             )
 
+    step[0] = "processes"
     retail = _safe_snapshot(
         sources.process_snapshot, _RETAIL_NAMES, "retail", findings
     )
@@ -1275,13 +1308,20 @@ def _diagnose(sources: DoctorSources, *, require_clean: bool) -> dict[str, objec
                 processes=retail,
             )
         )
+    step[0] = "runs"
     _check_runs(sources, managed, findings)
+    step[0] = "manifest_backup_retention"
     _check_manifest_backup_retention(sources, findings)
+    step[0] = "manifest_backup_quarantine"
     _check_manifest_backup_quarantined(sources, findings)
+    step[0] = "launchers"
     _check_launchers(sources.scan_roots, findings)
+    step[0] = "native_bundle"
     _check_native_bundle_closure(sources, findings)
+    step[0] = "knowledge_pack"
     _check_knowledge_pack(sources, registrations, findings)
 
+    step[0] = "summary"
     findings.sort(
         key=lambda item: (
             str(item.get("code", "")),
@@ -1299,28 +1339,45 @@ def _diagnose(sources: DoctorSources, *, require_clean: bool) -> dict[str, objec
     }
 
 
+def _diagnostic_failure(check: str, error: BaseException) -> dict[str, object]:
+    """The exit-2 payload: the check that raised and the exception class.
+
+    Like every finding it carries no exception message, which can hold a host
+    path or a key. A HostConfigError is the one exception: host_config builds
+    each one from a literal code, so that code travels as exception_code when
+    it is also identifier-shaped.
+    """
+    payload: dict[str, object] = {
+        "ok": False,
+        "error": "diagnostic_failure",
+        "failed_check": check,
+        "exception_class": type(error).__name__,
+        "findings": [],
+        "summary": {"fail": 0, "warn": 0},
+    }
+    if type(error) is host_config.HostConfigError:
+        code = str(error)
+        if _HOST_CONFIG_CODE.fullmatch(code):
+            payload["exception_code"] = code
+    return payload
+
+
 def execute(
     sources: DoctorSources | None = None,
     *,
     require_clean: bool = False,
     policy: AccreditedDaemonPolicy | None = None,
 ) -> tuple[dict[str, object], int]:
+    step = ["daemon_policy"]
     try:
         if sources is None:
             if type(policy) is not AccreditedDaemonPolicy:
                 raise ValueError("missing_daemon_policy")
+            step[0] = "sources"
             sources = default_sources(policy)
-        payload = _diagnose(sources, require_clean=require_clean)
-    except Exception:
-        return (
-            {
-                "ok": False,
-                "error": "diagnostic_failure",
-                "findings": [],
-                "summary": {"fail": 0, "warn": 0},
-            },
-            2,
-        )
+        payload = _diagnose(sources, require_clean=require_clean, step=step)
+    except Exception as error:
+        return _diagnostic_failure(step[0], error), 2
     return payload, 0 if payload["ok"] else 1
 
 
@@ -1342,7 +1399,13 @@ def render_human(payload: dict[str, object]) -> str:
                     line += f": {message}"
             lines.append(line)
     if payload.get("error"):
-        lines.append("[ERROR] diagnostic_failure")
+        line = "[ERROR] diagnostic_failure"
+        cause = " ".join(
+            f"{key}={payload[key]}"
+            for key in ("failed_check", "exception_class", "exception_code")
+            if isinstance(payload.get(key), str)
+        )
+        lines.append(f"{line}: {cause}" if cause else line)
     return "\n".join(lines)
 
 
@@ -1360,18 +1423,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         policy = daemon_policy.load_daemon_policy(args.daemon_policy)
+    except Exception as error:
+        payload, exit_code = _diagnostic_failure("daemon_policy", error), 2
+    else:
+        # execute() turns every exception into its own diagnostic_failure.
         payload, exit_code = execute(
             require_clean=args.require_clean, policy=policy
-        )
-    except Exception:
-        payload, exit_code = (
-            {
-                "ok": False,
-                "error": "diagnostic_failure",
-                "findings": [],
-                "summary": {"fail": 0, "warn": 0},
-            },
-            2,
         )
     print(render_json(payload) if args.json else render_human(payload))
     return exit_code
