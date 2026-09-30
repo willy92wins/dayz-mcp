@@ -1,5 +1,10 @@
 // Above ERPCs.RPC_END (erpcs.c:207). DIAG_DEVELOPER shifts that enum; this does not.
 const int MCP_RPC_HANDS_TAKE = 78541063;
+// ScriptInputUserData types of the owner's weapon_fire and weapon_raise.
+// Vanilla INPUT_UDT_* are 1..16 (_constants.c:2-19); these sit far above
+// them, beside MCP_RPC_HANDS_TAKE, so the small ids of other mods miss them.
+const int MCP_INPUT_UDT_WEAPON_FIRE = 78541064;
+const int MCP_INPUT_UDT_WEAPON_RAISE = 78541065;
 
 // EEFired is an engine event on the side that simulates the shot
 // (weapon_base.c:341). Particles run only when not a dedicated server;
@@ -38,6 +43,12 @@ modded class Weapon_Base
 // HandleWeapons itself runs before this script, and a true return from
 // ModCommandHandlerInside aborts the rest (dayzplayerimplement.c:2410),
 // so the shot is consumed after super.
+// WeaponManager.Fire only processes the event on this peer
+// (weaponmanager.c:485-502), and nothing shows the raise override reaches
+// the server, which fires from its own HandleWeapons
+// (dayzplayerimplement.c:1148-1157). In multiplayer both requests also go
+// to the server as ScriptInputUserData, as the weapon lift does
+// (playerbase.c:8446-8458); PlayerBase below applies them there.
 class MCPWeaponControl
 {
 	// Same deadman as vehicle_control (3s / 30s). 3s is past the 0.2s raise
@@ -482,131 +493,509 @@ class MCPWeaponControl
 	// (weapon_base.c:1268). Both are bools, so the reason is the first
 	// failing public clause. Empty, fired-out and jammed refuse here:
 	// WeaponManager.Fire would still dry-fire those chambers.
-	static void ConsumeFire(PlayerBase player)
+	// "" when the shot may go. The client's ConsumeFire and the server's
+	// copy of the request both call this one chain, each on its own values.
+	static string FireRefusal(PlayerBase player)
 	{
 		Weapon_Base held;
 		WeaponManager manager;
 		DayZPlayerInventory inventory;
 		int muzzle;
 
-		s_FirePending = false;
-		s_FireAccepted = false;
-		s_FireReason = "";
-		s_FireDone = true;
 		if (!player)
 		{
-			s_FireReason = "no_player";
-			return;
+			return "no_player";
 		}
 		held = Weapon_Base.Cast(player.GetEntityInHands());
 		if (!held)
 		{
-			s_FireReason = "no_weapon_in_hands";
-			return;
+			return "no_weapon_in_hands";
 		}
 		if (player.IsLiftWeapon())
 		{
-			s_FireReason = "weapon_lifted";
-			return;
+			return "weapon_lifted";
 		}
 		if (!player.IsRaised())
 		{
-			s_FireReason = "not_raised";
-			return;
+			return "not_raised";
 		}
 		if (held.IsDamageDestroyed())
 		{
-			s_FireReason = "weapon_destroyed";
-			return;
+			return "weapon_destroyed";
 		}
 		inventory = player.GetDayZPlayerInventory();
 		if (!inventory)
 		{
-			s_FireReason = "inventory_processing";
-			return;
+			return "inventory_processing";
 		}
 		if (inventory.IsProcessing())
 		{
-			s_FireReason = "inventory_processing";
-			return;
+			return "inventory_processing";
 		}
 		if (!player.IsWeaponRaiseCompleted())
 		{
-			s_FireReason = "raise_not_completed";
-			return;
+			return "raise_not_completed";
 		}
 		if (player.IsFighting())
 		{
-			s_FireReason = "fighting";
-			return;
+			return "fighting";
 		}
 		if (held.IsCoolDown())
 		{
-			s_FireReason = "cooldown";
-			return;
+			return "cooldown";
 		}
 		muzzle = held.GetCurrentMuzzle();
 		if (held.IsChamberEmpty(muzzle))
 		{
-			s_FireReason = "chamber_empty";
-			return;
+			return "chamber_empty";
 		}
 		if (held.IsChamberFiredOut(muzzle))
 		{
-			s_FireReason = "chamber_fired_out";
-			return;
+			return "chamber_fired_out";
 		}
 		if (held.IsJammed())
 		{
-			s_FireReason = "jammed";
-			return;
+			return "jammed";
 		}
 		if (!held.CanFire())
 		{
-			s_FireReason = "weapon_lifted";
-			return;
+			return "weapon_lifted";
 		}
 		manager = player.GetWeaponManager();
 		if (!manager)
 		{
-			s_FireReason = "cannot_fire";
-			return;
+			return "cannot_fire";
 		}
 		if (!manager.CanFire(held))
 		{
-			s_FireReason = "cannot_fire";
-			return;
+			return "cannot_fire";
 		}
 		// CanFire (weaponmanager.c:79-87) skips these. Same predicates as
 		// dispatch: IsAlive (object.c:523), IsUnconscious (playerbase.c:3655),
 		// IsRestrained (playerbase.c:2040), IsInVehicle (dayzplayerimplement.c:465).
 		if (!player.IsAlive())
 		{
-			s_FireReason = "player_dead";
-			return;
+			return "player_dead";
 		}
 		if (player.IsUnconscious())
 		{
-			s_FireReason = "player_unconscious";
-			return;
+			return "player_unconscious";
 		}
 		if (player.IsRestrained())
 		{
-			s_FireReason = "player_restrained";
-			return;
+			return "player_restrained";
 		}
 		if (player.IsInVehicle())
 		{
-			s_FireReason = "player_in_vehicle";
+			return "player_in_vehicle";
+		}
+		return "";
+	}
+
+	static void ConsumeFire(PlayerBase player)
+	{
+		Weapon_Base held;
+		WeaponManager manager;
+		string refusal;
+
+		s_FirePending = false;
+		s_FireAccepted = false;
+		s_FireReason = "";
+		s_FireDone = true;
+		refusal = FireRefusal(player);
+		if (refusal != "")
+		{
+			s_FireReason = refusal;
 			return;
 		}
+		held = Weapon_Base.Cast(player.GetEntityInHands());
+		manager = player.GetWeaponManager();
+		// The server copy goes first: when it cannot be sent, the client
+		// does not fire either, so the two chambers do not disagree.
+		refusal = SendFireRequest(held);
+		if (refusal != "")
+		{
+			s_FireReason = refusal;
+			return;
+		}
+		// The owner's prediction. Vanilla's HandleWeapons has no instance
+		// gate and reads synced buttons (human.c:119-122), so the owner and
+		// the server both call Fire there too.
 		manager.Fire(held);
 		s_FireAccepted = true;
+	}
+
+	// "" when the server has the request or needs none, else the refusal.
+	// Multiplayer client only, as SendLiftWeaponSync (playerbase.c:8446):
+	// offline, this one process is the server. CanStoreInputUserData is
+	// false while the input channel is taken or full (gameplay.c:130).
+	static string SendFireRequest(Weapon_Base held)
+	{
+		ScriptInputUserData request;
+		if (!GetGame())
+		{
+			return "no_player";
+		}
+		if (!GetGame().IsMultiplayer())
+		{
+			return "";
+		}
+		if (!GetGame().IsClient())
+		{
+			return "";
+		}
+		if (!ScriptInputUserData.CanStoreInputUserData())
+		{
+			return "input_busy";
+		}
+		request = new ScriptInputUserData();
+		request.Write(MCP_INPUT_UDT_WEAPON_FIRE);
+		request.Write(held);
+		request.Send();
+		return "";
+	}
+
+	// Same channel and gate as SendFireRequest. The caller sends before it
+	// touches the client override, so a refusal changes neither side.
+	static string SendRaiseRequest(bool raised, float ttlS)
+	{
+		ScriptInputUserData request;
+		if (!GetGame())
+		{
+			return "no_player";
+		}
+		if (!GetGame().IsMultiplayer())
+		{
+			return "";
+		}
+		if (!GetGame().IsClient())
+		{
+			return "";
+		}
+		if (!ScriptInputUserData.CanStoreInputUserData())
+		{
+			return "input_busy";
+		}
+		request = new ScriptInputUserData();
+		request.Write(MCP_INPUT_UDT_WEAPON_RAISE);
+		request.Write(raised);
+		request.Write(ttlS);
+		request.Send();
+		return "";
 	}
 }
 
 modded class PlayerBase
 {
+	// Server copy of the owner's weapon_fire and weapon_raise, per player.
+	// OnInputUserDataProcess stores a request; this player's next
+	// CommandHandler applies it, as vanilla does with the lift request
+	// (playerbase.c:8415-8420, applied at :8496-8511). No ref on entities.
+	protected bool m_MCPFireRequested;
+	protected Weapon_Base m_MCPFireWeapon;
+	protected bool m_MCPRaiseRequested;
+	protected bool m_MCPRaiseRequestUp;
+	protected float m_MCPRaiseRequestTtlS;
+	protected bool m_MCPRaiseArmed;
+	protected float m_MCPRaiseDeadlineS;
+	protected Weapon_Base m_MCPRaiseWeapon;
+
+	// playerbase.c:6250. Ours stop here: super's chain resets the melee
+	// target for every type (dayzplayerimplement.c:2998-3001) and offers the
+	// rest to the action manager (playerbase.c:6294-6295).
+	override bool OnInputUserDataProcess(int userDataType, ParamsReadContext ctx)
+	{
+		if (userDataType == MCP_INPUT_UDT_WEAPON_FIRE)
+		{
+			MCPReadFireRequest(ctx);
+			return true;
+		}
+		if (userDataType == MCP_INPUT_UDT_WEAPON_RAISE)
+		{
+			MCPReadRaiseRequest(ctx);
+			return true;
+		}
+		return super.OnInputUserDataProcess(userDataType, ctx);
+	}
+
+	protected void MCPReadFireRequest(ParamsReadContext ctx)
+	{
+		Weapon_Base requested = null;
+		if (!ctx.Read(requested))
+		{
+			MCPFireVerdict(false, "read_failed");
+			return;
+		}
+		if (m_MCPFireRequested)
+		{
+			MCPFireVerdict(false, "superseded");
+		}
+		m_MCPFireRequested = true;
+		m_MCPFireWeapon = requested;
+	}
+
+	protected void MCPReadRaiseRequest(ParamsReadContext ctx)
+	{
+		bool raised = false;
+		float ttlS = 0.0;
+		if (!ctx.Read(raised))
+		{
+			MCPRaiseVerdict(false, false, "read_failed");
+			return;
+		}
+		if (!ctx.Read(ttlS))
+		{
+			MCPRaiseVerdict(false, raised, "read_failed");
+			return;
+		}
+		if (m_MCPRaiseRequested)
+		{
+			MCPRaiseVerdict(false, m_MCPRaiseRequestUp, "superseded");
+		}
+		m_MCPRaiseRequested = true;
+		m_MCPRaiseRequestUp = raised;
+		m_MCPRaiseRequestTtlS = ttlS;
+	}
+
+	// One script-log line per request: the server's own verdict.
+	protected void MCPFireVerdict(bool accepted, string reason)
+	{
+		if (accepted)
+		{
+			Print("[DayZ_MCP] weapon_fire server accepted=1 reason=" + reason);
+			return;
+		}
+		Print("[DayZ_MCP] weapon_fire server accepted=0 reason=" + reason);
+	}
+
+	// raised is the state the request asked for.
+	protected void MCPRaiseVerdict(bool accepted, bool raised, string reason)
+	{
+		string line;
+		line = "[DayZ_MCP] weapon_raise server accepted=0";
+		if (accepted)
+		{
+			line = "[DayZ_MCP] weapon_raise server accepted=1";
+		}
+		if (raised)
+		{
+			line = line + " raised=1 reason=" + reason;
+		}
+		else
+		{
+			line = line + " raised=0 reason=" + reason;
+		}
+		Print(line);
+	}
+
+	// Runs every tick for every player; while nothing is pending or armed it
+	// is three bool reads. Only the server instance acts on a request.
+	protected void MCPServerWeaponRequests()
+	{
+		bool onServer;
+		if (!m_MCPFireRequested)
+		{
+			if (!m_MCPRaiseRequested)
+			{
+				if (!m_MCPRaiseArmed)
+				{
+					return;
+				}
+			}
+		}
+		onServer = GetInstanceType() == DayZPlayerInstanceType.INSTANCETYPE_SERVER;
+		MCPServerApplyRaise(onServer);
+		MCPServerMaintainRaise();
+		MCPServerApplyFire(onServer);
+	}
+
+	// A request replaces the previous one, as BeginRaise does on the client.
+	protected void MCPServerApplyRaise(bool onServer)
+	{
+		bool raised;
+		float ttlS;
+		string refusal;
+		HumanInputController hic;
+		if (!m_MCPRaiseRequested)
+		{
+			return;
+		}
+		m_MCPRaiseRequested = false;
+		raised = m_MCPRaiseRequestUp;
+		ttlS = m_MCPRaiseRequestTtlS;
+		MCPServerReleaseRaise();
+		if (!onServer)
+		{
+			MCPRaiseVerdict(false, raised, "not_server");
+			return;
+		}
+		if (!raised)
+		{
+			MCPRaiseVerdict(true, false, "");
+			return;
+		}
+		refusal = MCPServerRaiseRefusal(ttlS);
+		if (refusal != "")
+		{
+			MCPRaiseVerdict(false, true, refusal);
+			return;
+		}
+		hic = GetInputController();
+		hic.OverrideRaise(HumanInputControllerOverrideType.ENABLED, true);
+		m_MCPRaiseArmed = true;
+		m_MCPRaiseDeadlineS = GetGame().GetTickTime() + ttlS;
+		m_MCPRaiseWeapon = Weapon_Base.Cast(GetEntityInHands());
+		MCPRaiseVerdict(true, true, "");
+	}
+
+	// The client's bounds (DispatchWeaponRaise) and actor checks
+	// (WeaponActorError), again on the server's copy. NaN fails every
+	// comparison, so it is the one value that needs the self-test.
+	protected string MCPServerRaiseRefusal(float ttlS)
+	{
+		Weapon_Base held;
+		if (ttlS != ttlS)
+		{
+			return "bad_hold_ttl_s";
+		}
+		if (ttlS <= 0.0)
+		{
+			return "bad_hold_ttl_s";
+		}
+		if (ttlS > MCPWeaponControl.RAISE_MAX_TTL_S)
+		{
+			return "bad_hold_ttl_s";
+		}
+		if (!GetGame())
+		{
+			return "no_player";
+		}
+		if (!IsAlive())
+		{
+			return "player_dead";
+		}
+		if (IsUnconscious())
+		{
+			return "player_unconscious";
+		}
+		if (IsRestrained())
+		{
+			return "player_restrained";
+		}
+		if (IsInVehicle())
+		{
+			return "player_in_vehicle";
+		}
+		held = Weapon_Base.Cast(GetEntityInHands());
+		if (!held)
+		{
+			return "no_weapon_in_hands";
+		}
+		if (!GetInputController())
+		{
+			return "no_input_controller";
+		}
+		return "";
+	}
+
+	// The server's own deadman, the same timer as the client's: expiry,
+	// death, or the raised weapon leaving the hands drops the override.
+	protected void MCPServerMaintainRaise()
+	{
+		Weapon_Base held;
+		HumanInputController hic;
+		if (!m_MCPRaiseArmed)
+		{
+			return;
+		}
+		if (!GetGame())
+		{
+			MCPServerReleaseRaise();
+			return;
+		}
+		if (!IsAlive())
+		{
+			MCPServerReleaseRaise();
+			Print("[DayZ_MCP] weapon_raise server released reason=player_dead");
+			return;
+		}
+		held = Weapon_Base.Cast(GetEntityInHands());
+		if (!held || held != m_MCPRaiseWeapon)
+		{
+			MCPServerReleaseRaise();
+			Print("[DayZ_MCP] weapon_raise server released reason=weapon_left_hands");
+			return;
+		}
+		if (GetGame().GetTickTime() > m_MCPRaiseDeadlineS)
+		{
+			MCPServerReleaseRaise();
+			Print("[DayZ_MCP] weapon_raise server released reason=expired");
+			return;
+		}
+		hic = GetInputController();
+		if (hic)
+		{
+			hic.OverrideRaise(HumanInputControllerOverrideType.ENABLED, true);
+		}
+	}
+
+	// Touches the input controller only when this code enabled the override.
+	protected void MCPServerReleaseRaise()
+	{
+		HumanInputController hic;
+		if (!m_MCPRaiseArmed)
+		{
+			return;
+		}
+		m_MCPRaiseArmed = false;
+		m_MCPRaiseWeapon = null;
+		hic = GetInputController();
+		if (hic)
+		{
+			hic.OverrideRaise(HumanInputControllerOverrideType.DISABLED, false);
+		}
+	}
+
+	// Inside CommandHandler, where ProcessWeaponEvent may run
+	// (weapon_base.c:293). The client's own Fire does not reach this copy.
+	protected void MCPServerApplyFire(bool onServer)
+	{
+		Weapon_Base requested;
+		Weapon_Base held;
+		string refusal;
+		if (!m_MCPFireRequested)
+		{
+			return;
+		}
+		requested = m_MCPFireWeapon;
+		m_MCPFireRequested = false;
+		m_MCPFireWeapon = null;
+		if (!onServer)
+		{
+			MCPFireVerdict(false, "not_server");
+			return;
+		}
+		held = Weapon_Base.Cast(GetEntityInHands());
+		if (!held)
+		{
+			MCPFireVerdict(false, "no_weapon_in_hands");
+			return;
+		}
+		if (held != requested)
+		{
+			MCPFireVerdict(false, "weapon_mismatch");
+			return;
+		}
+		refusal = MCPWeaponControl.FireRefusal(this);
+		if (refusal != "")
+		{
+			MCPFireVerdict(false, refusal);
+			return;
+		}
+		GetWeaponManager().Fire(held);
+		MCPFireVerdict(true, "");
+	}
+
 	override void OnRPC(PlayerIdentity sender, int rpc_type, ParamsReadContext ctx)
 	{
 		super.OnRPC(sender, rpc_type, ctx);
@@ -916,12 +1305,15 @@ modded class PlayerBase
 		PredictiveTakeEntityToHands(item);
 	}
 
-	// Local player only, and only while an override or a one-tick read is
-	// outstanding. super runs HandleWeapons first; the shot is after that.
+	// super runs HandleWeapons first; the shot is after that. The server
+	// applies the owner's requests before the returns below, which it never
+	// passes (the statics stay idle there and GetPlayer() is null). The rest
+	// is the local player only, while an override or a one-tick read is out.
 	override void CommandHandler(float pDt, int pCurrentCommandID, bool pCurrentCommandFinished)
 	{
 		PlayerBase live;
 		super.CommandHandler(pDt, pCurrentCommandID, pCurrentCommandFinished);
+		MCPServerWeaponRequests();
 		if (!MCPWeaponControl.IsBusy())
 		{
 			return;
