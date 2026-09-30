@@ -14,6 +14,23 @@ _Result = tuple[bool, str | None]
 _Case = tuple[str, dict[str, object], _Result]
 
 
+def _anim_args(*, drop: str = "", **overrides: object) -> dict[str, object]:
+    """A valid anim_timeline payload with `overrides` applied and `drop` removed."""
+    args: dict[str, object] = {
+        "mode": "start",
+        "trace_id": "0123456789abcdef0123456789abcdef",
+        "cursor": 0,
+        "limit": 64,
+        "sample_hz": 20,
+        "max_samples": 4096,
+        "sources": [],
+    }
+    args.update(overrides)
+    if drop:
+        del args[drop]
+    return args
+
+
 _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
     "restore_gameplay": (
         ("valid_empty", {}, (True, None)),
@@ -769,6 +786,46 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             },
             (False, "bad_args"),
         ),
+    ),
+    "anim_timeline": (
+        ("valid_empty_sources", _anim_args(), (True, None)),
+        (
+            "valid_eight_sources_of_64",
+            _anim_args(sources=[chr(ord("a") + i) * 64 for i in range(8)]),
+            (True, None),
+        ),
+        ("valid_printable_edges", _anim_args(sources=[" ~"]), (True, None)),
+        ("valid_hz_10", _anim_args(sample_hz=10), (True, None)),
+        ("valid_hz_60", _anim_args(sample_hz=60), (True, None)),
+        ("valid_read_bounds", _anim_args(mode="read", limit=64, max_samples=8192), (True, None)),
+        ("valid_limit_1", _anim_args(mode="read", limit=1), (True, None)),
+        ("valid_max_samples_2", _anim_args(max_samples=2), (True, None)),
+        ("valid_clear", _anim_args(mode="clear"), (True, None)),
+        ("dump_is_not_a_mode", _anim_args(mode="dump"), (False, "bad_args")),
+        ("upper_mode", _anim_args(mode="START"), (False, "bad_args")),
+        ("unhashable_mode", _anim_args(mode=["start"]), (False, "bad_args")),
+        ("upper_trace_id", _anim_args(trace_id="A" * 32), (False, "bad_args")),
+        ("short_trace_id", _anim_args(trace_id="a" * 31), (False, "bad_args")),
+        ("negative_cursor", _anim_args(cursor=-1), (False, "bad_args")),
+        ("limit_0", _anim_args(limit=0), (False, "bad_args")),
+        ("limit_65", _anim_args(limit=65), (False, "bad_args")),
+        ("hz_9", _anim_args(sample_hz=9), (False, "bad_args")),
+        ("hz_61", _anim_args(sample_hz=61), (False, "bad_args")),
+        ("hz_bool", _anim_args(sample_hz=True), (False, "bad_args")),
+        ("max_samples_1", _anim_args(max_samples=1), (False, "bad_args")),
+        ("max_samples_8193", _anim_args(max_samples=8193), (False, "bad_args")),
+        ("nine_sources", _anim_args(sources=["a"] * 9), (False, "bad_args")),
+        ("sources_string", _anim_args(sources="lid"), (False, "bad_args")),
+        ("sources_null", _anim_args(sources=None), (False, "bad_args")),
+        ("source_empty", _anim_args(sources=[""]), (False, "bad_args")),
+        ("source_65", _anim_args(sources=["a" * 65]), (False, "bad_args")),
+        ("source_int", _anim_args(sources=[1]), (False, "bad_args")),
+        ("source_newline", _anim_args(sources=["lid\n"]), (False, "bad_args")),
+        ("source_del", _anim_args(sources=["lid\x7f"]), (False, "bad_args")),
+        ("source_non_ascii", _anim_args(sources=["tapañ"]), (False, "bad_args")),
+        ("missing_sources", _anim_args(drop="sources"), (False, "bad_args")),
+        ("missing_trace_id", _anim_args(drop="trace_id"), (False, "bad_args")),
+        ("extra_key", _anim_args(extra=None), (False, "bad_args")),
     ),
     "exec_enforce": (
         ("valid_empty", {}, (True, None)),

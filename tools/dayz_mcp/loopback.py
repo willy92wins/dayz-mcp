@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
-from dayz_mcp import daemon_credential, orphan_guard, pinned_keyfile, ui_dialog
+from dayz_mcp import anim_timeline, daemon_credential, orphan_guard, pinned_keyfile, ui_dialog
 from dayz_mcp.client_dump_registry import ClientDumpRegistry
 from dayz_mcp.core import (
     BLOCKED_VERSION_STATES,
@@ -99,6 +99,7 @@ CLIENT_COMMANDS = {
     "action_use",
     "action_use_door",
     "action_use_target",
+    "anim_timeline",
     "weapon_aim",
     "weapon_fire",
     "weapon_raise",
@@ -960,6 +961,39 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "door_index": _integer_in_range(minimum=0, maximum=63),
                 "pos": _is_real_vector3,
                 "radius": _SAFE_RADIUS_200,
+            },
+        )
+    ),
+    # Every key travels in every mode, like vehicle_trace. The bounds mirror
+    # MCPAnimTimeline (addon/scripts/4_World/MCP_AnimTimeline.c) through
+    # anim_timeline.py; sources may be an empty list.
+    "anim_timeline": _command_schema(
+        _schema_variant(
+            required=(
+                "mode",
+                "trace_id",
+                "cursor",
+                "limit",
+                "sample_hz",
+                "max_samples",
+                "sources",
+            ),
+            validators={
+                "mode": _one_of(*sorted(anim_timeline.TIMELINE_MODES)),
+                "trace_id": _lower_hex(32),
+                "cursor": _integer_in_range(minimum=0),
+                "limit": _integer_in_range(
+                    minimum=anim_timeline.LIMIT_MIN, maximum=anim_timeline.LIMIT_MAX
+                ),
+                "sample_hz": _integer_in_range(
+                    minimum=anim_timeline.SAMPLE_HZ_MIN,
+                    maximum=anim_timeline.SAMPLE_HZ_MAX,
+                ),
+                "max_samples": _integer_in_range(
+                    minimum=anim_timeline.MAX_SAMPLES_MIN,
+                    maximum=anim_timeline.MAX_SAMPLES_MAX,
+                ),
+                "sources": anim_timeline.is_source_list,
             },
         )
     ),

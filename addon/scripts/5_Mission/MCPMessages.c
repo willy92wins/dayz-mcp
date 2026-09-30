@@ -113,6 +113,9 @@ class MCPArgs
 	string slot;
 	// F3.6 object_inspect — memory-point / bounding_center names
 	ref array<string> want;
+	// anim_timeline: animation source names read from the item in hands.
+	// Up to 8, printable ASCII, 1..64 chars each; empty is valid.
+	ref array<string> sources;
 	// Optional player identity (GetPlainId). Empty = first human / broadcast.
 	string uid;
 	// input_describe: UAInput name. Empty on every other command.
@@ -149,6 +152,7 @@ class MCPArgs
 		cam_matrix = new array<float>();
 		look_at = new array<float>();
 		want = new array<string>();
+		sources = new array<string>();
 		fields = new array<ref MCPDialogField>();
 		component = -1;
 		dik = -1;
@@ -661,6 +665,8 @@ class MCPResult
 	// weapon_raise / weapon_aim / weapon_fire / weapon_sights read-back.
 	// Unassigned on other commands.
 	ref MCPWeaponAction weapon_action;
+	// anim_timeline header and paged samples. Unassigned on other commands.
+	ref MCPAnimTimelineRead timeline;
 };
 
 class MCPJob

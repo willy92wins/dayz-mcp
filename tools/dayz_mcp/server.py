@@ -110,6 +110,7 @@ from dayz_mcp.session_coordination import (
     command_requires_lease,
 )
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
+from dayz_mcp import anim_timeline as anim_timeline_contract
 
 # Import the production lazy closures before freezing their source baseline.
 # These imports bind definitions only; they do not launch or acquire anything.
@@ -969,6 +970,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "action_use": "action_use",
         "action_use_door": "action_use",
         "action_use_target": "action_use",
+        "anim_timeline": "anim_timeline",
         "camera_get": "camera_get",
         "camera_set": "camera_set",
         "engine_set": "engine_set",
@@ -7784,6 +7786,62 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def vehicle_release(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_release", {}, "client", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Record a timeline of the local player's action "
+            "and the item in hands, to time an object animation against the "
+            "action. Client side only: the server is not sampled in this "
+            "version. t_s is seconds since start in client tick time "
+            "(GetTickTime), not server or wall time. Each sample has action "
+            "(running action type or empty), action_state, callback (command, "
+            "modifier or empty; command wins and callback_both=true when both "
+            "run), state, state_name, hands and phases: one value per name in "
+            "sources, read from the item in hands (all 0 and "
+            "hands_present=false with empty hands). Samples come at sample_hz, "
+            "plus one with edge=true on the frame the action type or the "
+            "callback state changes; both share max_samples and a full "
+            "timeline stops with overflow=true. mode=start while a timeline "
+            "exists returns trace_exists; other modes need the trace_id that "
+            "start returned. action_use started=true is not proof the action "
+            "ran; this timeline is the evidence. Recipe: start with sources, "
+            "then action_use, then read (stop first: eof needs a stopped "
+            "timeline), then clear."
+        )
+    )
+    async def anim_timeline(
+        mode: str,
+        trace_id: str = "",
+        cursor: StrictInt = 0,
+        limit: StrictInt = 64,
+        sample_hz: StrictInt = 20,
+        max_samples: StrictInt = 4096,
+        sources: list[str] | None = None,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        try:
+            args = anim_timeline_contract.normalize_request(
+                mode,
+                trace_id,
+                cursor,
+                limit,
+                sample_hz,
+                max_samples,
+                sources,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        async with runtime.tool_lock:
+            raw_result = await runtime.call_bridge(
+                "anim_timeline",
+                args,
+                "client",
+                _timeout(timeout_s),
+            )
+        try:
+            return anim_timeline_contract.normalize_bridge_result(raw_result)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
 
     @app.tool(description=(
         "Walk the client widget tree from an optional named root, or the active "

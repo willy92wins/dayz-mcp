@@ -246,6 +246,8 @@ COERCIBLE_ALLOWLIST.update(
     {
         ("action_use", "action"): "free text Enforce action class name",
         ("action_use", "classname"): "free text target GetType()",
+        ("anim_timeline", "mode"): _ENUM_LIKE_STR,
+        ("anim_timeline", "trace_id"): "free text trace id",
         ("camera_get", "cam_mode"): _ENUM_LIKE_STR,
         ("camera_set", "cam_mode"): _ENUM_LIKE_STR,
         ("capture_screenshot", "scale"): _ENUM_LIKE_STR,

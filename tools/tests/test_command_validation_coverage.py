@@ -86,6 +86,16 @@ def _minimal_args(cmd: str) -> dict:
             "sample_hz": 20,
             "max_samples": 2,
         }
+    if cmd == "anim_timeline":
+        return {
+            "mode": "start",
+            "trace_id": "a" * 32,
+            "cursor": 0,
+            "limit": 1,
+            "sample_hz": 10,
+            "max_samples": 2,
+            "sources": [],
+        }
     if cmd == "vehicle_prepare_fixture":
         return {"mode": "object_at", "type": "CarScript", "pos": [0.0, 0.0, 0.0], "radius": 1.0}
     if cmd == "surface_query":
