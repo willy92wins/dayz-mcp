@@ -1,37 +1,56 @@
-﻿# HANDOFF — DayZ-MCP
+# HANDOFF — DayZ-MCP
 
 <!-- LIVE-STATE:START -->
-# DayZ-MCP - Estado vivo - 2026-09-26 noche (Madrid)
+# DayZ-MCP - Estado vivo - 2026-09-30 17:00 (Madrid; medido: main, PBO, daemon y caja)
 
-- **main** = `f1b7b85` (higiene: untrack sessions crudos inbox-plan-v6; working tree LIMPIO; solo rama `main` local y remota).
-- **Gauntlet 26-sep cerrado al 100%** (issues **#102/#103/#104/#105 CLOSED** con veredicto Sol y arbitraje publicados):
-  - #102 gate caps/ach + fixture GamePeer (`48fe322`) + deuda C.4 shims standalone (`5829ce8`) — APPROVE.
-  - #103 disclosure vs contrato via helper `active_lease_token` (`03873ed`) — APPROVE.
-  - #104 triaje deriva residual ficha a ficha (`31620b5`); ficha 15 (a429 capa 2) = duplicado de #102 (verificado en integración).
-  - #105 bug037 fix PRODUCCIÓN: `call_bridge` acota probe de liveness por deadline (`da22937`, server.py:2284) — APPROVE; repro 0.4/2.0 OK.
-- **Integración**: merges `--no-ff` #103→#102→#104→#105 (`cc02221`→`db6c430`) + docs `93af08c`. **Suite final: 4174 tests en 372s — 5F/0E/10S** (baseline roto era 56F/5E). Los 5 fallos restantes son PREEXISTENTES (telemetry ×3, session_e2e release, mcp_tools description — verificados contra `ut-fails-4174.txt`).
-- **Limpieza repo (26/27-sep)**: 11 ramas locales + 8 remotas borradas (solo `main`); worktrees Temp purgados; commits de higiene `1901c59`/`1ee9315`/`f1b7b85`; untracked 461→0; ~25 GB de chatarra movida a `C:/Users/guill/DayZ_MCP_backups/` (bak, _fase*, _poc, _s0, snapshots reserva, evidence, cursor scratch). `.gitignore` nuevo anti-bak/scratch/logs-crudos.
-- Prior: #100 `8e6d0ad` tool-count SSOT 62→63; #98 `1785212` run_not_owned/session_acquire_wait / 9ccc; #97 `515fb94` camera_set RestoreGameplay / 9957; #95 `e03282b` foreign_ports / 1432; #94 `9af5cbf` arg-contract / 0878; #92 `72f6354` wave1.
-- Checkout: ff `origin/main` when clean; do **not** reset --hard. Canonical tip is `f1b7b85`.
-- Abierto: **deuda técnica documentada** (`_orquestacion/gauntlet-r2-CIERRE.md`): 3 probes de liveness sin acotar (~server.py:2331/2432/2486), C.1 (rediseño test e2e), GamePeer extra sin censar en `tools/_session_coordination/e2e_agent_sessions.py:183`. Issue #93 (instalación Windows) sigue OPEN. 0 PRs abiertos.
-- HOLD dueño: Workshop re-pack / heater / GATES / e7ef - no tocar desde Orq sin OT/GO. Ticket `fb-20260924-235528-0878`: su fix está en main (PR #94); el issue de GitHub #102 que lo cubría está CLOSED.
-- **PENDIENTE DUEÑO**: decisión de orquestación (asistente GLM vs Qwen Flash-Next para el slot GX10) tras prueba 26-sep superada; fase 2 MCP in-game cuando la caja esté libre.
+- **main** = `8bd83dc` (#164). El árbol vivo está limpio y en esa cabeza; no hay PR abiertos. Se hace fast-forward de `origin/main` solo dentro de una promoción. Nunca `reset --hard`.
+- **PBO vivo:** `E923B94B57B180F3AB99F417EBE9CBD8729E0B85E0A50571F2411CB34548D0DE` (338 377 B), construido desde `8bd83dc` con procedencia 17/17 exacta.
+  - Copias y evidencia: `C:\Users\guill\DayZ_MCP_backups\p11-20260930\`.
+  - La copia de la P8, `DayZ_MCP.pbo.bak_pre_p10_20260930` (`32505440…`), sigue siendo la vuelta atrás.
+- **Daemon:** generación `57cd5458`, arrancado a las 11:13 sobre `8bd83dc`. Doctor ok. Caja libre a las 17:00; otras sesiones han lanzado corridas desde entonces.
+- **Superficie:** 73 herramientas (+ `exec_enforce` opt-in). Tier rápido: `Ran 4791 tests / OK (skipped=450)`; la suite completa pasa en la CI (Python 3.11 y 3.14).
+- **Hoy (2026-09-30), sesión autónoma**, todo fusionado con el APROBADO de un revisor de otra familia y la CI en verde:
+  - #152-#158: 114e (Steam.dll), 4f50, df3a, ba11, d1d9 (`action_use` `door_index`), 5535 (`anim_timeline`), los P3.
+  - **#159** `5b615a0`: `weapon_fire`/`weapon_raise` llegan al servidor (486e/0063).
+  - **#160** `0f207ae`: DayZDiag registra `PluginInventoryDebug` (c4e1: el NULL pointer de la toma a manos).
+  - **#161** `a2acb5d`: verbo nuevo `vehicle_door` (29c1).
+  - **#162** `0d0b75e`: banderas de presencia `*_set` (8779).
+  - **#163** `4471e1a`: la frase de puertas de edificio de `object_anim`/`object_doors` (d1d9).
+  - **#164** `8bd83dc`: `world_spawn(lifetime_s)` (bd28/e0af).
+  - Todo se probó en juego con un cliente stdio propio (`dzn-night/promo/p1*_ingame.py`); la evidencia está en `DayZ_MCP_backups\p11-20260930\ingame-*`.
+- **Hallazgos que cambian lo que se daba por hecho:**
+  - **Antes de #162**, un argumento opcional omitido llegaba al addon como 0: `JsonSerializer` no conserva los valores por defecto del constructor de `MCPArgs`. Así, `object_anim` leído escribía fase 0 (la «reversión» de df3a/29c1) y `world_weather_set` parcial ponía a cero el resto. Todo opcional nuevo lleva una bandera `<campo>_set`.
+  - **Vehículos de `world_spawn`:** la economía central los borra cuando no hay jugadores a menos de `CleanupAvoidance`, 100 m (`globals.xml:4`). La causa es su `<lifetime>` de types.xml: 3 s en `CivilianSedan`. Con `lifetime_s` sobreviven.
+- **Proceso:**
+  - Un verbo nuevo o un cambio del contrato del cable se prueba en juego después de fusionar y promover con reinicio del daemon, porque el daemon valida los comandos con su propio `loopback.py`.
+  - Receta de promoción: `C:\Users\guill\AppData\Local\Temp\dzn-night\promo\` (`p11_archive.sh`, `swap_pbo.ps1`, `restart_daemon_p8.ps1`, `p11_doctor.py`).
+- **Puertas de modelos:** Codex sin cuota hasta el 2026-10-06 a las 13:16; Grok con el límite semanal al 0 %. Implementa Opus (subagente) y revisa Gemini 3.8 Flash por `agy` (`dzn-night/run_agy_review.sh`).
+- **Abierto:**
+  - f5e6/35c1 (validador): el Knowledge Pack tiene WIP de otra sesión.
+  - 7695: dependencias externas; decide el dueño.
+  - Del dueño: 250f (rescate del pase B), e1ae, 120f, a2d5, 6ed1/75e7 (resellado).
+  - En HOLD: 9ab8 (heater), e7ef, GATES.
+  - fd52/5363: el Bash tool de Claude Code falla en su envoltorio; hay que reportarlo a Anthropic.
+- **Handoff completo:** `C:\Users\guill\ObsidianVault\AI\30_Sessions\2026-09-30-HANDOFF-dayz-mcp-p10.md`. Decisiones: D-93 en el decision-log del vault.
 <!-- LIVE-STATE:END -->
 
 ---
 
 ## Árboles: `main` público vs leftovers locales
 
-| Árbol | Qué es | Estado 2026-09-26 |
+| Árbol | Qué es | Estado 2026-09-30 |
 |---|---|---|
-| `P:\DayZ_MCP` | Addon compilable (`$PBOPREFIX$=DayZ_MCP`). **Sin `.git`.** | **DESFASADO (medido 2026-09-26 contra `main`):** 5 de los 13 ficheros versionados de `addon/` difieren (`MCPBridge.c`, `MCPClientBridge.c`, `MCPDialogController.c`, `MCPMessages.c`, `MissionGameplay.c`) (lleva `vehicle_drive`/`drive_probe_client`, retirados en `5892014`) con la misma version `"10"`. No empaquetar desde aqui (ficha `fb-20260925-233932-aa11`). |
-| `P:\DayZ_MCP_dev` (=`...\DayZ Projects\DayZ_MCP_dev`) | Repo de producto (Python MCP, plans, reviews, este HANDOFF). `addon/` es la copia git del bridge. | Git `https://github.com/willy92wins/dayz-mcp.git`. HEAD = `main` = `origin/main` (`f1b7b85`). **Limpieza 26-sep: única rama `main`; sin untracked.** Los backups de sesión viven en `C:/Users/guill/DayZ_MCP_backups/` (fuera del repo). |
-| `…\!Workshop\@DayZ_MCP\Addons\DayZ_MCP.pbo` | PBO desplegado | SHA-256 `1E79BF80EADE48C98BB318A96C7F4ECF73F8782EC3AD3DDD08045B7751F98C9B` (2026-09-16, desde `1737dc5`) — **desfasado vs main (merges 26-sep: caps/ach gate, disclosure fix, bug037); re-pack bajo HOLD del dueño.** |
+| `P:\DayZ_MCP` | Addon compilable (`$PBOPREFIX$=DayZ_MCP`). **Sin `.git`.** | **DESFASADO** (medido el 2026-09-26 contra `main`; no se ha vuelto a medir): 5 de los 13 ficheros versionados de `addon/` diferían. No empaquetar desde aquí (ficha `fb-20260925-233932-aa11`). |
+| `P:\DayZ_MCP_dev` (=`...\DayZ Projects\DayZ_MCP_dev`) | Repo de producto (Python MCP, plans, reviews, este HANDOFF). `addon/` es la copia git del bridge. | Git `https://github.com/willy92wins/dayz-mcp.git`. HEAD = `main` = `origin/main` (`8bd83dc`). Los backups de sesión viven en `C:/Users/guill/DayZ_MCP_backups/`, fuera del repo. |
+| `…\!Workshop\@DayZ_MCP\Addons\DayZ_MCP.pbo` | PBO desplegado | SHA-256 `E923B94B57B180F3AB99F417EBE9CBD8729E0B85E0A50571F2411CB34548D0DE` (2026-09-30, desde `8bd83dc`, procedencia 17/17). Se sustituye solo con DayZ parado, el lease tomado y `swap_pbo.ps1 -WantOld <sha vivo>`. |
 | `C:\Users\guill\Repos\dayz-mcp` | Otro clone | Rancio. No usarlo como checkout. |
 
-Empaquetar SOLO desde `DayZ_MCP_dev\addon` (`pack-addon.ps1` empaqueta por defecto el `addon/` de git en `-Ref`, `HEAD` si se omite; `-Source` cambia el arbol empaquetado y no debe apuntar a `DayZ_MCP`). `DayZ_MCP` no esta alineado con `main`.
+Empaquetar SOLO desde `DayZ_MCP_dev\addon`. `pack-addon.ps1 -Ref <sha> -PackOnly -Clear -Destination …` empaqueta el `addon/` de git en esa ref; después, `pbo_provenance.py <pbo> <repo> <ref>` compara fichero a fichero. `-Source` cambia el árbol empaquetado y no debe apuntar a `DayZ_MCP`.
 
-**Higiene 26-sep**: `reviews/2026-09-04-reserva/` y `reviews/2026-09-07-reserva-cierre/` eran snapshots de árboles completos (5,8 y 5,4 GB) — **nunca versionar ni "rescatar"**; están en backups fuera del repo. El scratch de Cursor (`cursor-home/`) dentro de reviews rompe `git add` por MAX_PATH: excluido por gitignore. El decision-log D-NN canónico vive en el vault Obsidian (`AI/10_Projects/DayZ_MCP/decisions/decision-log.md`, hasta D-64), NO en el repo.
+**Higiene:**
+- `reviews/2026-09-04-reserva/` y `reviews/2026-09-07-reserva-cierre/` eran snapshots de árboles completos (5,8 y 5,4 GB). **No versionarlos ni «rescatarlos» nunca**; están en backups fuera del repo.
+- El scratch de Cursor (`cursor-home/`) dentro de reviews rompe `git add` por MAX_PATH; está excluido por gitignore.
+- El decision-log D-NN canónico vive en el vault Obsidian (`AI/10_Projects/DayZ_MCP/decisions/decision-log.md`, hasta D-93), NO en el repo.
 
 ## Cola aparcada (PARK / PARO)
 
@@ -43,11 +62,13 @@ Ninguna de estas fichas está en implementación.
 | **PARO** | `3fc1`, `1025` | Parados a propósito. **No reabrir sin ángulo nuevo.** |
 | **LEAVE_UNTRACKED** | `d50e` (`fb-20260907-232253-d50e`) | Juicio Sol 12-sep. La auditoría original queda sin promocionar. |
 
-Nota 26-sep: la ficha `a429` capa 2 quedó resuelta como duplicado del fix de #102 (verificado en integración). El buzon historico (`plans/inbox-20260830/`) está versionado en el repo desde la higiene 26-sep.
-
 ## Superficie (no recontar a ciegas)
 
-README / architecture / `build_app`: **63 tools** (+ `exec_enforce` opt-in) — SSOT `8e6d0ad` (#100). Suite de tests: `tools/tests/test_*.py` con `tools\.venv-mcp\Scripts\python.exe -m unittest discover -s tools/tests -p "test_*.py"` (4174 tests, ~6 min; sin pytest). Estado 26-sep: 5F/0E/10S (los 5 preexistentes). `CLAUDE.md`/`AGENTS.md`/`GATES.md`/`PROJECT-MAP.md` versionados desde `1901c59`.
+- README / architecture / `build_app`: **73 tools** (+ `exec_enforce` opt-in).
+- Suite de tests: `tools/tests/test_*.py`.
+  - Suite completa: `tools\.venv-mcp\Scripts\python.exe -m unittest discover -s tests -t .` desde `tools\`; sin pytest.
+  - Tier rápido: la misma orden con `DAYZ_MCP_FAST_TESTS=1`, unos 95 s y `Ran 4791 tests / OK (skipped=450)` el 2026-09-30.
+- `CLAUDE.md`, `AGENTS.md`, `GATES.md` y `PROJECT-MAP.md` están versionados.
 
 ## Gotchas que siguen vigentes
 
@@ -55,11 +76,13 @@ README / architecture / `build_app`: **63 tools** (+ `exec_enforce` opt-in) — 
 - `SetHeader` solo Content-Type → API-key en query string.
 - `*_now` bloquea el tick.
 - `SetTimeMultiplier(0)` congela la sim.
-- Lanes claude headless: SIEMPRE `--allowedTools` explícito (Read/Write/Edit/Glob/Grep/Bash(venv)+git+gh) y 1 lane = 1 git worktree (en el mismo cwd se pisan). Sol revisor: `codex.cmd exec -s read-only --skip-git-repo-check -m gpt-5.6-sol` (sandbox sin tmp: briefs dentro del cwd; done marker "tokens used" en stderr).
-- Suite: usar venv absoluto; `python -m unittest tools.tests.X` NO funciona; `PYTHONPATH=tools` necesario desde worktrees.
-<!-- Asistente distill 2026-09-26 noche Madrid
-- Gauntlet r2 completo: 3 tickets iniciales + #105 iterados hasta OK (mandato "no pares"); integracion en main verificada con suite 4174 (5F/0E/10S vs baseline 56F/5E); issues cerrados con veredicto; commit+push.
-- Limpieza integral: ramas (solo main), worktrees, 25 GB chatarra -> DayZ_MCP_backups, gitignore anti-bak, docs vivos versionados (1901c59/1ee9315/f1b7b85).
-- Veredictos y cierres: _orquestacion/gauntlet-2026-09-26-RESUMEN.md, _orquestacion/gauntlet-r2-CIERRE.md, _orquestacion/veredictos/.
-- LIVE-STATE header rewritten 2026-09-26 noche to tip f1b7b85 (higiene); origin/main fetched = f1b7b85.
+- **Argumentos opcionales hacia el addon:** un campo omitido en el JSON llega a `MCPArgs` como 0/false/vacío, no con el valor del constructor. Un opcional nuevo lleva su bandera `<campo>_set` y el addon mira la bandera (#162).
+- **Fixtures de vehículo:** sin `world_spawn(lifetime_s)`, la economía central borra el vehículo entre 3 y 27 s después de que el jugador se aleje más de 100 m.
+- **Sesiones de Claude Code:** la lista de herramientas se fija al arrancar (clase e7ef), así que un verbo o argumento nuevo solo se ve con un cliente stdio propio (patrón en `dzn-night/promo/p11c5_ingame.py`). El Bash tool falla en el envoltorio del arnés (fd52/5363): usar PowerShell con `& 'C:\Program Files\Git\bin\bash.exe' -lc '<script>'`.
+- **Lanes claude headless:** SIEMPRE `--allowedTools` explícito (Read/Write/Edit/Glob/Grep/Bash(venv)+git+gh) y 1 lane = 1 git worktree (en el mismo cwd se pisan).
+- **Suite:** usar el venv absoluto; `python -m unittest tools.tests.X` NO funciona; desde worktrees hace falta `PYTHONPATH=tools`.
+<!-- Distill 2026-09-30 11:20 Madrid (sesión autónoma, Claude orquestador)
+- #152-#164 fusionados con revisión de otra familia (Opus o Gemini) y CI en verde; P11a-P16 promovidas.
+- Hallazgos: 8779 (opcionales omitidos llegan como 0; object_anim leído escribía) y la causa de e0af (CE: lifetime de types.xml + CleanupAvoidance 100 m).
+- Evidencia en juego: C:\Users\guill\DayZ_MCP_backups\p11-20260930\ingame-*; scripts en C:\Users\guill\AppData\Local\Temp\dzn-night\promo\.
 -->
