@@ -447,6 +447,73 @@ class RestartAndManifestTest(unittest.TestCase):
                 daemon._activate_server_coordination(state, "new-generation")
             self.assertEqual(paths.runs_path.read_bytes(), before)
 
+    def test_restart_recovery_touches_only_owned_running_and_interrupted_runs(self) -> None:
+        """fb-20260820-110945-8625: the scope rule of recover_after_restart.
+
+        daemon.py calls it at every start. It releases a RUNNING run that has
+        an owner and quarantines STARTING/STOPPING, and nothing else. An
+        UNRECONCILED run can keep its owner (_settle_failed_launch when the
+        launch handle could not be confirmed closed); widening the release
+        branch would turn it into an adoptable RUNNING_IDLE, widening the
+        quarantine branch would strip a run that is idle or already exited.
+        Every other row must leave the restart as it entered, on disk too.
+        """
+        with TemporaryDirectory() as temporary:
+            paths = RuntimePaths.from_env({"LOCALAPPDATA": temporary})
+            store = RunManifestStore(paths)
+            rows = [
+                RunRecord("owned-running", "s", "l", "RUNNING", "", "", "", "", [record(8601)]),
+                RunRecord("idle", None, None, "RUNNING_IDLE", "", "", "", "", [record(8602)]),
+                RunRecord(
+                    "unreconciled-owned", "s", "l", "UNRECONCILED", "", "", "", "", [record(8603)]
+                ),
+                RunRecord("unreconciled", None, None, "UNRECONCILED", "", "", "", "", [record(8604)]),
+                RunRecord("exited", None, None, "EXITED", "", "", "", "", []),
+                RunRecord("starting", "s", "l", "STARTING", "", "", "", "", [record(8605)]),
+                RunRecord("stopping", None, None, "STOPPING", "", "", "", "", [record(8606)]),
+            ]
+            for row in rows:
+                store.add(row)
+            untouched = {
+                row.run_id: row
+                for row in rows
+                if row.run_id in {"idle", "unreconciled-owned", "unreconciled", "exited"}
+            }
+
+            def durable_rows() -> dict[str, object]:
+                payload = json.loads(paths.runs_path.read_text(encoding="utf-8"))
+                return {item["run_id"]: item for item in payload["runs"]}
+
+            durable_before = durable_rows()
+
+            changed = store.recover_after_restart()
+
+            self.assertEqual(
+                changed,
+                {"released": ["owned-running"], "unreconciled": ["starting", "stopping"]},
+            )
+            durable_after = durable_rows()
+            for run_id, original in untouched.items():
+                with self.subTest(run_id=run_id):
+                    self.assertEqual(store.get(run_id), original)
+                    self.assertEqual(durable_after[run_id], durable_before[run_id])
+            released = store.get("owned-running")
+            self.assertEqual(
+                (released.state, released.owner_session_id, released.owner_lease_id),
+                ("RUNNING_IDLE", None, None),
+            )
+            for run_id in ("starting", "stopping"):
+                with self.subTest(run_id=run_id):
+                    quarantined = store.get(run_id)
+                    self.assertEqual(
+                        (
+                            quarantined.state,
+                            quarantined.owner_session_id,
+                            quarantined.owner_lease_id,
+                        ),
+                        ("UNRECONCILED", None, None),
+                    )
+
     def test_corrupt_version_duplicate_and_invalid_strong_record_are_rejected(self) -> None:
         valid = {
             "run_id": "r",
