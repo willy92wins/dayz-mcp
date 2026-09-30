@@ -190,6 +190,8 @@ Do not start a capture tandem after `frame_client_all_black`; that error is the 
 
 `logs_since(marker=None, max_lines=200)` reads the active run's `script_*.log` and `.RPT` (server and client), tail-capped at the last 256 KiB per file, and returns a `marker` for the next call. No lease. Player chat is not exposed: `wait_for` `log_matches` and `logs_since` read script/RPT only, where chat does not appear. With `-adminlog` the server writes a profiles `.ADM` file (`Chat("Name"(id=<hash>)): text`, plus Connect/Disconnect); no tool reads it — inspect `.ADM` by hand.
 
+DayZDiag defines `DIAG_DEVELOPER` but `IsDebug()` is false there, so vanilla never registers `PluginInventoryDebug`, which `DayZPlayerInventory` reads without a null check. The addon registers it with the plugin's own defaults (the retail branch at every read), and each peer's script log gets `[DayZ_MCP] diag PluginInventoryDebug registered=1` (`registered=0` when it is still missing) every time a mission starts its plugin manager; match it with `lookback_from="launch"`.
+
 ### Spawn safely
 
 1. `session_acquire(purpose="spawn")` — keep `lease_token`; call `session_heartbeat(lease_token)` before the 120 s TTL. If the queue is held, use `session_acquire_wait(purpose="spawn", max_wait_s=...)` instead.
