@@ -881,7 +881,9 @@ class InputTriggerToolTest(unittest.IsolatedAsyncioTestCase):
             "a physical Alt sets that flag and nothing can read it",
             "an Alt held through entry=game would let a physical F4 exit",
             "entry=mission delivers these keys to the mission handlers only",
-            "not_held, with observed=released_by=...",
+            "not_held; observed=released_by=... is added only when the most recent "
+            "release this tool made was of that same entry and key (one release is "
+            "remembered, not a history per key)",
             "in DayZ 1.29 no script setter feeds UAInput.Local*, so mods that poll "
             "UAInput (LocalPress, LocalValue and the like, Community Framework input "
             "bindings included) cannot be driven by this tool",
