@@ -42,6 +42,7 @@
       "camera_set": "camera_set",
       "engine_set": "engine_set",
       "input_describe": "input_describe",
+      "input_trigger": "input_trigger",
       "key_press": "key_press",
       "player_respawn": "player_respawn",
       "restore_gameplay": "restore_gameplay",

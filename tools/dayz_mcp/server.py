@@ -87,6 +87,9 @@ from dayz_mcp.server_freshness import (
 from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import (
     INPUT_NAME_MAX_CHARS,
+    INPUT_TRIGGER_DIK_MAX,
+    INPUT_TRIGGER_HOLD_MAX_S,
+    INPUT_TRIGGER_PRESS_MAX_TTL_S,
     MAX_CLIENT_DUMP_RUN_IDS,
     LoopbackServer,
     is_printable_input_name,
@@ -126,6 +129,9 @@ UiReloadLayoutMode = Literal["reload", "close"]
 TelemetryReadMode = Literal["object_at", "fixture_jsonl"]
 WeaponSightsMode = Literal["ironsights", "optics", "none"]
 VehicleDoorMode = Literal["read", "open", "close"]
+InputTriggerKind = Literal["key", "input"]
+InputTriggerEntry = Literal["game", "mission"]
+InputTriggerPhase = Literal["click", "hold", "press", "release"]
 
 _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "pipeline_resolve",
@@ -1113,6 +1119,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "camera_set": "camera_set",
         "engine_set": "engine_set",
         "input_describe": "input_describe",
+        "input_trigger": "input_trigger",
         "key_press": "key_press",
         "player_respawn": "player_respawn",
         "restore_gameplay": "restore_gameplay",
@@ -1468,6 +1475,45 @@ def _vehicle_door_missing_detail(result: dict[str, Any]) -> str:
     return " ".join(pairs)
 
 
+# input_trigger fills its reply before refusing (MCPClientBridge.c
+# DispatchInputTrigger). Only a reason token, a known released_by and 0/1
+# facts cross, and each code publishes only its own facts: the reply is one
+# flat class, so an unread fact still arrives as 0. name is caller input and
+# stays out.
+_INPUT_TRIGGER_REASON_RE = re.compile(r"[a-z_]{1,64}")
+_INPUT_TRIGGER_RELEASED_BY = frozenset(
+    {"phase", "ttl", "restore", "player_changed", "shutdown"}
+)
+_INPUT_TRIGGER_OBSERVED_KEYS: dict[str, tuple[str, ...]] = {
+    "input_not_drivable": ("exists", "locked", "in_active_inputs"),
+    "not_held": ("released_by",),
+    "aborted": ("released_by",),
+}
+
+
+def _input_trigger_detail(result: dict[str, Any]) -> str:
+    report = result.get("input_trigger")
+    if not isinstance(report, dict):
+        return ""
+    parts: list[str] = []
+    reason = report.get("reason")
+    if isinstance(reason, str) and _INPUT_TRIGGER_REASON_RE.fullmatch(reason):
+        parts.append(f"reason={reason}")
+    pairs: list[str] = []
+    code = str(result.get("error") or "")
+    for key in _INPUT_TRIGGER_OBSERVED_KEYS.get(code, ()):
+        value = report.get(key)
+        if key == "released_by":
+            if isinstance(value, str) and value in _INPUT_TRIGGER_RELEASED_BY:
+                pairs.append(f"released_by={value}")
+        elif isinstance(value, int) and value in (0, 1):
+            # Enforce sends a bool as 0 or 1; Python's bool is an int too.
+            pairs.append(f"{key}={int(value)}")
+    if pairs:
+        parts.append("observed=" + " ".join(pairs))
+    return "; ".join(parts)
+
+
 def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     """Diagnostics the bridge filled BEFORE deciding the error, as message text.
 
@@ -1487,6 +1533,11 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     empty crew-door slot, and the caller needs it to fill that slot
     (inventory_attach takes slot=). Only slot, state and phase cross.
 
+    input_trigger is the fourth: its refusals carry reason= (a token, e.g.
+    no_local_setter) and observed= with the facts of that code only
+    (exists/locked/in_active_inputs for input_not_drivable, released_by for
+    not_held and aborted). The name it resolved is caller input and stays out.
+
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
     clicked=false, and a world_spawn timeout has to stay "timeout". The click
@@ -1503,6 +1554,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _fixture_not_ready_detail(result)
     if cmd == "vehicle_door" and str(result.get("error") or "") == "door_missing":
         return _vehicle_door_missing_detail(result)
+    if cmd == "input_trigger":
+        return _input_trigger_detail(result)
     if cmd not in _UI_ECHO_VERBS:
         return ""
     parts: list[str] = []
@@ -1538,8 +1591,9 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # the bridge filled before the error follow the code after "; " -- see
     # _bridge_error_detail; other verbs keep the bare code except
     # vehicle_prepare_fixture/fixture_not_ready, which carries the
-    # observed= telemetry allowlist the bridge already filled, and
-    # vehicle_door/door_missing, which carries the empty slot.
+    # observed= telemetry allowlist the bridge already filled,
+    # vehicle_door/door_missing, which carries the empty slot, and
+    # input_trigger, whose refusals carry reason= and observed=.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
     if code in {"binding_retired", "run_not_owned"}:
@@ -3217,6 +3271,97 @@ def _finite_float(value: float, error: str = "bad_args") -> float:
     if not math.isfinite(converted):
         raise ToolError(resolved_error)
     return converted
+
+
+# A hold answers after its release, hold_s after the press: the tool waits at
+# least hold_s plus this, the slack MCPClientBridge.c INPUT_TRIGGER_JOB_SLACK_S
+# gives the job before it releases the key itself.
+INPUT_TRIGGER_HOLD_SLACK_S = 5.0
+
+
+def _input_trigger_seconds(field: str, value: object, maximum: float, when: str) -> float:
+    requirement = f"be a finite number in (0, {maximum}] with {when}"
+    if value is None or isinstance(value, bool):
+        raise ToolError(_bad_args(field, value, requirement))
+    seconds = _finite_float(value, _bad_args(field, value, requirement))
+    if seconds <= 0.0 or seconds > maximum:
+        raise ToolError(_bad_args(field, value, requirement))
+    return seconds
+
+
+def _input_trigger_request(
+    kind: object,
+    dik: object,
+    name: object,
+    entry: object,
+    phase: object,
+    hold_s: object,
+    ttl_s: object,
+    timeout_s: object,
+) -> tuple[dict[str, Any], float]:
+    """The input_trigger wire args and wait budget, or ToolError bad_args.
+
+    Each kind and phase sends exactly the keys of its ingress variant
+    (loopback._input_trigger_variant). No number travels without its phase,
+    so an absent key never reaches Enforce as 0 (fb-20260930-065425-8779).
+    """
+    if kind not in ("key", "input"):
+        raise ToolError(_bad_args("kind", kind, "be 'key' or 'input'"))
+    if phase not in ("click", "hold", "press", "release"):
+        raise ToolError(
+            _bad_args("phase", phase, "be 'click', 'hold', 'press' or 'release'")
+        )
+    args: dict[str, Any] = {"trigger_kind": kind, "trigger_edge": phase}
+    if kind == "key":
+        if (
+            isinstance(dik, bool)
+            or not isinstance(dik, int)
+            or dik < 0
+            or dik > INPUT_TRIGGER_DIK_MAX
+        ):
+            raise ToolError(
+                _bad_args(
+                    "dik", dik, f"be an int from 0 to {INPUT_TRIGGER_DIK_MAX} with kind='key'"
+                )
+            )
+        if name is not None:
+            raise ToolError(_bad_args("name", name, "be omitted with kind='key'"))
+        chosen_entry = "game" if entry is None else entry
+        if chosen_entry not in ("game", "mission"):
+            raise ToolError(_bad_args("entry", entry, "be 'game' or 'mission'"))
+        args["trigger_entry"] = chosen_entry
+        args["dik"] = dik
+    else:
+        if not is_printable_input_name(name):
+            raise ToolError(
+                _bad_args(
+                    "name",
+                    name,
+                    f"be 1..{INPUT_NAME_MAX_CHARS} printable ASCII characters "
+                    "(codes 32..126) with kind='input'",
+                )
+            )
+        if dik is not None:
+            raise ToolError(_bad_args("dik", dik, "be omitted with kind='input'"))
+        if entry is not None:
+            raise ToolError(_bad_args("entry", entry, "be omitted with kind='input'"))
+        args["name"] = name
+    if phase == "hold":
+        args["hold_s"] = _input_trigger_seconds(
+            "hold_s", hold_s, INPUT_TRIGGER_HOLD_MAX_S, "phase='hold'"
+        )
+    elif hold_s is not None:
+        raise ToolError(_bad_args("hold_s", hold_s, "be omitted unless phase is 'hold'"))
+    if phase == "press":
+        args["hold_ttl_s"] = _input_trigger_seconds(
+            "ttl_s", ttl_s, INPUT_TRIGGER_PRESS_MAX_TTL_S, "phase='press'"
+        )
+    elif ttl_s is not None:
+        raise ToolError(_bad_args("ttl_s", ttl_s, "be omitted unless phase is 'press'"))
+    timeout = _timeout(timeout_s)
+    if phase == "hold":
+        timeout = max(timeout, args["hold_s"] + INPUT_TRIGGER_HOLD_SLACK_S)
+    return args, timeout
 
 
 def _is_int_clock_part(value: object) -> bool:
@@ -7808,6 +7953,68 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return await runtime.call_bridge(
                 "key_press", {"dik": dik}, "client", _timeout(timeout_s)
             )
+
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Deliver a DIK key code to the client's script key "
+        "handlers, or report why a named UAInput cannot be driven. No OS input "
+        "and no focus. kind=key sends dik (0..255, ESC is 1) through "
+        "entry=game (default), DayZGame.OnKeyPress/OnKeyRelease, the CGame key "
+        "callbacks, which set the Ctrl and Alt flags, feed the keyboard handler "
+        "a menu registered, then call the mission; or through "
+        "entry=mission, Mission.OnKeyPress/OnKeyRelease only, what key_press "
+        "calls. phase=click (default) presses, releases on the next client "
+        "tick and answers after the release. phase=hold presses, releases "
+        f"after hold_s (required, 0 < hold_s <= {INPUT_TRIGGER_HOLD_MAX_S:g}) "
+        "and answers after the release; the tool waits at least hold_s + "
+        f"{INPUT_TRIGGER_HOLD_SLACK_S:g} s. phase=press presses and answers at "
+        "once with release_due_s; the key stays pressed until phase=release "
+        "with the same dik and entry, its ttl_s (required, 0 < ttl_s <= "
+        f"{INPUT_TRIGGER_PRESS_MAX_TTL_S:g}), restore_gameplay, a change or "
+        "death of the local player, or the bridge shutting down. One key at a "
+        "time: a click, hold or press while one is held, or a release while a "
+        "click or hold runs, is input_trigger_busy. "
+        "The answer is input_trigger: kind, entry, phase, dik, delivered_press, "
+        "delivered_release, press_tick and release_tick (client ticks), "
+        "release_due_s and tick_time_s (client GetTickTime seconds), menu_open "
+        "(a scripted menu was open) and released_by (phase, ttl, restore, "
+        "player_changed, which also covers a death, or shutdown). "
+        "delivered_press and delivered_release mean the bridge called the "
+        "handler, not that anything consumed the key: the handlers return "
+        "nothing, so check the effect you expect. With entry=game, F4 is "
+        "refused as would_request_exit while this tool holds Alt: DayZGame "
+        "requests exit on Alt+F4 in developer builds. phase=release of a key "
+        "this tool does not hold is not_held, with "
+        "observed=released_by=... naming the last release of that key when "
+        "there was one. A click or hold that something else released first is "
+        "aborted, with observed=released_by=.... kind=input resolves name "
+        f"(1..{INPUT_NAME_MAX_CHARS} printable ASCII) with GetInputByName and "
+        "never drives it: in DayZ 1.29 no script setter feeds UAInput.Local*, "
+        "so mods that poll UAInput (LocalPress, LocalValue and the like, "
+        "Community Framework input bindings included) cannot be driven by "
+        "this tool. It answers input_unknown (null, or ID() < 0), "
+        "input_locked (IsLocked), input_denied (UAWalkRunForced and "
+        "UATempRaiseWeapon, whose force vanilla manages) and otherwise always "
+        "input_not_drivable; reason=no_local_setter; observed=exists=1 "
+        "locked=0 in_active_inputs=0|1. Errors: bad_args, client_not_in_game, "
+        "no_mission, input_trigger_busy, not_held, would_request_exit, aborted, "
+        "input_api_unavailable, input_unknown, input_locked, input_denied, "
+        "input_not_drivable."
+    ))
+    async def input_trigger(
+        kind: InputTriggerKind,
+        dik: StrictInt | None = None,
+        name: StrictStr | None = None,
+        entry: InputTriggerEntry | None = None,
+        phase: InputTriggerPhase = "click",
+        hold_s: StrictFloat | None = None,
+        ttl_s: StrictFloat | None = None,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        args, timeout = _input_trigger_request(
+            kind, dik, name, entry, phase, hold_s, ttl_s, timeout_s
+        )
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("input_trigger", args, "client", timeout)
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Request a random local-player respawn through the "

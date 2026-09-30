@@ -84,6 +84,7 @@ CLIENT_COMMANDS = {
     "restore_gameplay",
     "key_press",
     "input_describe",
+    "input_trigger",
     "player_respawn",
     "vehicle_get_in_client",
     "engine_set",
@@ -401,6 +402,17 @@ def is_printable_input_name(value: object) -> bool:
     return all(32 <= ord(character) <= 126 for character in value)
 
 
+# input_trigger bounds. Mirror MCPInputTriggerControl (DIK_MAX, HOLD_MAX_S,
+# PRESS_MAX_TTL_S) in addon/scripts/5_Mission/MCPClientBridge.c; a test keeps
+# the copies equal. hold_s and the press TTL are refused outside (0, max].
+INPUT_TRIGGER_DIK_MAX = 255
+INPUT_TRIGGER_HOLD_MAX_S = 10.0
+INPUT_TRIGGER_PRESS_MAX_TTL_S = 30.0
+INPUT_TRIGGER_KINDS = ("key", "input")
+INPUT_TRIGGER_EDGES = ("click", "release", "hold", "press")
+INPUT_TRIGGER_ENTRIES = ("game", "mission")
+
+
 def _equal_to(expected: object) -> _FieldValidator:
     def validate(value: object) -> bool:
         return value == expected
@@ -628,6 +640,45 @@ def _camera_variant(mode: str, *vectors: str) -> _SchemaVariant:
     )
 
 
+_SAFE_INPUT_TRIGGER_HOLD = _reject_numeric_errors(
+    _real_in_range(
+        minimum=0.0, maximum=INPUT_TRIGGER_HOLD_MAX_S, minimum_inclusive=False
+    )
+)
+_SAFE_INPUT_TRIGGER_TTL = _reject_numeric_errors(
+    _real_in_range(
+        minimum=0.0, maximum=INPUT_TRIGGER_PRESS_MAX_TTL_S, minimum_inclusive=False
+    )
+)
+
+
+def _input_trigger_variant(kind: str, edge: str) -> _SchemaVariant:
+    # One exact shape per kind and edge, eight in all, and no optional key:
+    # hold_s travels only with the hold edge and hold_ttl_s only with the press
+    # edge, because the bridge reads an absent key as 0 and refuses that 0
+    # (fb-20260930-065425-8779). dik (key) and name (input) travel with every
+    # edge of their kind, release included.
+    required = ["trigger_kind", "trigger_edge"]
+    validators: dict[str, _FieldValidator] = {
+        "trigger_kind": _equal_to(kind),
+        "trigger_edge": _equal_to(edge),
+    }
+    if kind == "key":
+        required += ["trigger_entry", "dik"]
+        validators["trigger_entry"] = _one_of(*INPUT_TRIGGER_ENTRIES)
+        validators["dik"] = _integer_in_range(minimum=0, maximum=INPUT_TRIGGER_DIK_MAX)
+    else:
+        required.append("name")
+        validators["name"] = is_printable_input_name
+    if edge == "hold":
+        required.append("hold_s")
+        validators["hold_s"] = _SAFE_INPUT_TRIGGER_HOLD
+    elif edge == "press":
+        required.append("hold_ttl_s")
+        validators["hold_ttl_s"] = _SAFE_INPUT_TRIGGER_TTL
+    return _schema_variant(required=tuple(required), validators=validators)
+
+
 # Command schemas keep the authenticated ingress contract in one place. Variants
 # preserve alternate payload shapes without duplicating command dispatch logic.
 _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
@@ -643,6 +694,14 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         _schema_variant(
             required=("name",),
             validators={"name": is_printable_input_name},
+        )
+    ),
+    # {key, input} x {click, release, hold, press}: see _input_trigger_variant.
+    "input_trigger": _command_schema(
+        *(
+            _input_trigger_variant(kind, edge)
+            for kind in INPUT_TRIGGER_KINDS
+            for edge in INPUT_TRIGGER_EDGES
         )
     ),
     "vehicle_trace": _command_schema(

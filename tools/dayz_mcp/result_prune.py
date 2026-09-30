@@ -65,6 +65,8 @@ PRUNABLE_FIELDS = (
     "vehicle_door",
     # world_spawn fills it only when the command carried lifetime_s.
     "lifetime",
+    # input_trigger fills it, also on its refusals (e1ae part 2).
+    "input_trigger",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
