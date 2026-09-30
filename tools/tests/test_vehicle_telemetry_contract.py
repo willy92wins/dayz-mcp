@@ -217,7 +217,7 @@ def assert_vehicle_telemetry_source(source: str) -> None:
         raise AssertionError("live transport helper must reject missing crew membership")
 
     forbidden = (
-        "ResolveOwnedCar()",
+        "ResolveOwnedCar(",
         'result.error = "not_seated"',
         "GetSeatAnimationType",
         "metrics_available",
@@ -301,7 +301,7 @@ def assert_get_in_wire_source(source: str) -> None:
     prep = _method_body(source, "protected bool ProcessVehicleGetInClientPrep(MCPJob job)")
     result = _get_in_result_block(source)
     probe = _method_body(source, "protected bool ProcessDriveProbeClientPrep(MCPJob job)")
-    owned = _method_body(source, "protected CarScript ResolveOwnedCar()")
+    owned = _method_body(source, "protected CarScript ResolveOwnedCar(out string error)")
     select = ""
     mapper = ""
     if "protected Transport SelectVehicleGetInTransport(" in source:

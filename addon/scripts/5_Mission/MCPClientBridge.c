@@ -405,8 +405,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
-		string loopbackPrefix = "http://127.0.0.1:";
-		if (!StringHasPrefix(cfg.url, loopbackPrefix))
+		if (!IsLoopbackBridgeUrl(cfg.url))
 		{
 			LogInitFailure("config url not loopback");
 			return;
@@ -1201,11 +1200,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool DispatchEngineSet(MCPCommand command, MCPResult result)
 	{
 		string mode = "";
-		CarScript car = ResolveOwnedCar();
+		string carError = "";
+		CarScript car = ResolveOwnedCar(carError);
 		if (!car)
 		{
 			result.ok = false;
-			result.error = "not_seated";
+			result.error = carError;
 			return true;
 		}
 
@@ -1238,6 +1238,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	{
 		MCPArgs args;
 		CarScript car;
+		string carError = "";
 		float throttle = 0.0;
 		float steer = 0.0;
 		float brake = 0.0;
@@ -1286,11 +1287,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
-		car = ResolveOwnedCar();
+		car = ResolveOwnedCar(carError);
 		if (!car)
 		{
 			result.ok = false;
-			result.error = "not_seated";
+			result.error = carError;
 			return true;
 		}
 
@@ -3591,21 +3592,53 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return best;
 	}
 
-	protected CarScript ResolveOwnedCar()
+	// fb-20260822-191204-1b40: engine_set and vehicle_control act only on a car
+	// the local player drives and whose simulation this client owns, as
+	// vehicle_trace start requires. Seat: HumanCommandVehicle.GetVehicleSeat
+	// (human.c:696); vehicle_get_in_client already demands VEHICLESEAT_DRIVER
+	// for crew position 0 of a car. Owner: Pawn.IsOwner, true when "simulated by
+	// the owner" (pawn.c:193-194); vanilla hands a car to its driver's identity
+	// in PlayerBase.OnVehicleSeatDriverEnter (playerbase.c:4266-4281). On a
+	// refusal it returns null and error names the first check that failed:
+	// not_seated (no player, no vehicle command, or not a CarScript, as before),
+	// then not_driver, then not_owner.
+	protected CarScript ResolveOwnedCar(out string error)
 	{
+		error = "";
 		PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
 		if (!player)
 		{
+			error = "not_seated";
 			return null;
 		}
 
 		HumanCommandVehicle vehicleCommand = player.GetCommand_Vehicle();
 		if (!vehicleCommand)
 		{
+			error = "not_seated";
 			return null;
 		}
 
-		return CarScript.Cast(vehicleCommand.GetTransport());
+		CarScript car = CarScript.Cast(vehicleCommand.GetTransport());
+		if (!car)
+		{
+			error = "not_seated";
+			return null;
+		}
+
+		if (vehicleCommand.GetVehicleSeat() != DayZPlayerConstants.VEHICLESEAT_DRIVER)
+		{
+			error = "not_driver";
+			return null;
+		}
+
+		if (!car.IsOwner())
+		{
+			error = "not_owner";
+			return null;
+		}
+
+		return car;
 	}
 
 	protected bool ProcessVehicleGetInClientJob(MCPJob job)
@@ -4862,6 +4895,59 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		return false;
+	}
+
+	// fb-20260822-191204-46b3: the only bridge URL is "http://127.0.0.1:<port>/",
+	// the form the daemon and both installers write. It is the RestContext base
+	// that "poll?..." and "result?..." are appended to, so the final "/" belongs
+	// to it (see PollContextUrl). <port> is 1 to 5 ASCII digits (ToAscii
+	// 48..57) worth 1..65535. Anything else, userinfo, path, query, fragment,
+	// whitespace or backslash included, is refused. The same rule is in
+	// MCPBridge.c.
+	protected bool IsLoopbackBridgeUrl(string url)
+	{
+		string prefix = "http://127.0.0.1:";
+		int prefixLength = prefix.Length();
+		int digitCount = url.Length() - prefixLength - 1;
+		int port = 0;
+		int index = 0;
+		int code = 0;
+		string digit;
+
+		if (digitCount < 1 || digitCount > 5)
+		{
+			return false;
+		}
+
+		if (!StringHasPrefix(url, prefix))
+		{
+			return false;
+		}
+
+		if (url.Substring(prefixLength + digitCount, 1) != "/")
+		{
+			return false;
+		}
+
+		while (index < digitCount)
+		{
+			digit = url.Substring(prefixLength + index, 1);
+			code = digit.ToAscii();
+			if (code < 48 || code > 57)
+			{
+				return false;
+			}
+
+			port = port * 10 + code - 48;
+			index = index + 1;
+		}
+
+		if (port < 1 || port > 65535)
+		{
+			return false;
+		}
+
+		return true;
 	}
 
 	protected string GetPollVersion()
