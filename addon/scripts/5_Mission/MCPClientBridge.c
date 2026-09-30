@@ -144,7 +144,8 @@ class MCPUiNameMatch
 //! shutdown: nothing stays pressed without a scheduled release. Maintained
 //! from MCPClientBridge.OnTick on the MCPWeaponControl.MaintainFromTick
 //! pattern. Entry game is DayZGame.OnKeyPress/OnKeyRelease (dayzgame.c:2804-2918:
-//! modifier flags, the keyboard handler, then the mission). Entry mission is
+//! modifier flags, the keyboard handler, then the mission); it never presses
+//! F4, LMENU or RMENU (IsExitComboKey). Entry mission is
 //! Mission.OnKeyPress/OnKeyRelease (gameplay.c:709-710), what key_press calls.
 //! Only the call is known: the handlers return nothing.
 class MCPInputTriggerControl
@@ -201,19 +202,23 @@ class MCPInputTriggerControl
 		return s_Edge;
 	}
 
-	// DayZGame.OnKeyPress calls RequestExit for F4 while its Alt flag is set
-	// (dayzgame.c:2855-2863, :2876-2881, DEVELOPER builds).
-	static bool HoldsAlt()
+	// DayZGame.OnKeyPress sets its left Alt flag on KC_LMENU and calls
+	// RequestExit for F4 while that flag is set (dayzgame.c:2855-2858,
+	// :2876-2881, DEVELOPER builds). The flag is private and a physical Alt
+	// sets it too, so entry game never delivers F4, nor an Alt key that would
+	// leave the flag set for a physical F4. KC_RMENU is refused as well:
+	// vanilla tests the left flag twice (:2877), and a fix there would count it.
+	static bool IsExitComboKey(int dik)
 	{
-		if (!s_Held)
-		{
-			return false;
-		}
-		if (s_Dik == KeyCode.KC_LMENU)
+		if (dik == KeyCode.KC_F4)
 		{
 			return true;
 		}
-		if (s_Dik == KeyCode.KC_RMENU)
+		if (dik == KeyCode.KC_LMENU)
+		{
+			return true;
+		}
+		if (dik == KeyCode.KC_RMENU)
 		{
 			return true;
 		}
@@ -1486,9 +1491,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			reply.menu_open = true;
 		}
 		result.input_trigger = reply;
-		// DayZGame.OnKeyPress requests exit for F4 while its Alt flag is set
-		// (dayzgame.c:2876-2881). Checked before busy, so the refusal names it.
-		if (entry == "game" && dik == KeyCode.KC_F4 && edge != "release" && MCPInputTriggerControl.HoldsAlt())
+		// Entry game never presses F4, LMENU or RMENU, whatever this verb or the
+		// physical keyboard holds (see IsExitComboKey). Entry mission reaches the
+		// mission handlers without DayZGame's flags. A release goes on: none of
+		// these keys can be held on entry game. Checked before busy.
+		if (entry == "game" && edge != "release" && MCPInputTriggerControl.IsExitComboKey(dik))
 		{
 			result.ok = false;
 			result.error = "would_request_exit";

@@ -96,7 +96,7 @@ DELIVER = "static bool Deliver(string entry, int dik, bool press)"
 PRESS = "static int Press("
 RELEASE_ALL = "static void ReleaseAll(string why)"
 MAINTAIN = "static void MaintainFromTick()"
-HOLDS_ALT = "static bool HoldsAlt()"
+EXIT_COMBO = "static bool IsExitComboKey(int dik)"
 NEW_METHODS = (
     DISPATCH,
     TIMES_OK,
@@ -112,8 +112,70 @@ NEW_METHODS = (
     PRESS,
     RELEASE_ALL,
     MAINTAIN,
-    HOLDS_ALT,
+    EXIT_COMBO,
 )
+
+# The would_request_exit guard, evaluated clause by clause for a scenario. An
+# unknown clause is a KeyError, so a new condition cannot pass unread. The
+# round-1 clauses are known too, so that guard runs here and fails the physical
+# Alt scenarios instead of stopping at a missing method (review R1 F1).
+_EXIT_GUARD_CLAUSES = {
+    'entry == "game"': lambda state: state["entry"] == "game",
+    'edge != "release"': lambda state: state["edge"] != "release",
+    "MCPInputTriggerControl.IsExitComboKey(dik)": lambda state: state["dik"] in state["exit_keys"],
+    "dik == KeyCode.KC_F4": lambda state: state["dik"] == "KC_F4",
+    "MCPInputTriggerControl.HoldsAlt()": lambda state: state["verb_holds_alt"],
+}
+
+
+def _exit_scenario(entry: str, edge: str, dik: str, physical_alt: bool) -> dict[str, object]:
+    # The verb holds no Alt in any scenario: a physical Alt is the case the
+    # bridge cannot see (DayZGame.m_IsLeftAltHolding is private, dayzgame.c:933).
+    return {
+        "entry": entry,
+        "edge": edge,
+        "dik": dik,
+        "physical_alt": physical_alt,
+        "verb_holds_alt": False,
+    }
+
+
+# (label, scenario, refused as would_request_exit)
+EXIT_GUARD_SCENARIOS = (
+    ("physical_alt_synthetic_f4_click", _exit_scenario("game", "click", "KC_F4", True), True),
+    ("physical_alt_synthetic_f4_hold", _exit_scenario("game", "hold", "KC_F4", True), True),
+    ("physical_alt_synthetic_f4_press", _exit_scenario("game", "press", "KC_F4", True), True),
+    ("no_alt_synthetic_f4_click", _exit_scenario("game", "click", "KC_F4", False), True),
+    # The mirror: a synthetic Alt left down on entry game arms a physical F4.
+    ("synthetic_left_alt_press", _exit_scenario("game", "press", "KC_LMENU", False), True),
+    ("synthetic_left_alt_hold", _exit_scenario("game", "hold", "KC_LMENU", False), True),
+    ("synthetic_right_alt_click", _exit_scenario("game", "click", "KC_RMENU", False), True),
+    # entry mission never reaches DayZGame's flags or its exit check.
+    ("physical_alt_mission_f4_click", _exit_scenario("mission", "click", "KC_F4", True), False),
+    ("mission_left_alt_press", _exit_scenario("mission", "press", "KC_LMENU", False), False),
+    # Nothing on entry game can hold F4 or Alt, so a release is not_held.
+    ("game_release_of_f4", _exit_scenario("game", "release", "KC_F4", True), False),
+    ("physical_alt_game_escape_click", _exit_scenario("game", "click", "KC_ESCAPE", True), False),
+)
+
+
+def _exit_guard_condition(source: str) -> str:
+    """The condition of the single if whose body refuses would_request_exit."""
+    body = _method_body(source, KEY)
+    found = re.findall(
+        r'if \(([^\n]+)\)\n\s*\{\n\s*result\.ok = false;\n\s*result\.error = "would_request_exit";',
+        body,
+    )
+    if len(found) != 1:
+        raise AssertionError(f"{len(found)} would_request_exit guards in DispatchInputTriggerKey")
+    return found[0]
+
+
+def _exit_combo_keys(source: str) -> set[str]:
+    """KeyCode names IsExitComboKey accepts; empty when the helper is absent."""
+    if EXIT_COMBO not in source:
+        return set()
+    return set(re.findall(r"if \(dik == KeyCode\.(KC_\w+)\)", _method_body(source, EXIT_COMBO)))
 
 _COMMENT_OR_STRING = re.compile(r'"(?:\\.|[^"\\\n])*"|//[^\n]*|/\*[\s\S]*?\*/')
 _MEMBER_RE = re.compile(
@@ -498,25 +560,48 @@ class InputTriggerKeyContractTest(unittest.TestCase):
                 with self.subTest(condition=condition):
                     self.assertEqual(_if_body(block, condition).strip(), "return false;")
 
-    def test_f4_is_refused_before_busy_while_alt_is_held(self) -> None:
+    def test_a_physical_alt_with_a_synthetic_f4_is_refused_on_entry_game(self) -> None:
+        # Review R1 F1: DayZGame.OnKeyPress sets its private left Alt flag on
+        # KC_LMENU, physical or not, and calls RequestExit for F4 while it is set
+        # (dayzgame.c:2855-2858, :2876-2881, DEVELOPER builds). The bridge cannot
+        # read that flag, so the refusal must not depend on any Alt state: the
+        # scenarios carry physical_alt and no clause may read it.
+        condition = _exit_guard_condition(self.source)
+        clauses = [clause.strip() for clause in condition.split("&&")]
+        exit_keys = _exit_combo_keys(self.source)
+        for label, scenario, refused in EXIT_GUARD_SCENARIOS:
+            with self.subTest(scenario=label):
+                state = {**scenario, "exit_keys": exit_keys}
+                self.assertEqual(
+                    all(_EXIT_GUARD_CLAUSES[clause](state) for clause in clauses),
+                    refused,
+                    f"{label}: guard `{condition}`",
+                )
+
+    def test_entry_game_never_presses_f4_or_an_alt_key_and_says_so_first(self) -> None:
         key = _method_body(self.source, KEY)
-        exit_guard = (
-            'entry == "game" && dik == KeyCode.KC_F4 && edge != "release" '
-            "&& MCPInputTriggerControl.HoldsAlt()"
+        guard = (
+            'entry == "game" && edge != "release" '
+            "&& MCPInputTriggerControl.IsExitComboKey(dik)"
         )
-        self.assertIn('result.error = "would_request_exit";', _if_body(key, exit_guard))
+        self.assertEqual(_exit_guard_condition(self.source), guard)
+        self.assertIn('result.error = "would_request_exit";', _if_body(key, guard))
         _in_order(
             self,
             key,
-            f"if ({exit_guard})",
+            f"if ({guard})",
             'if (edge == "release")',
             'result.error = "input_trigger_busy";',
             "MCPInputTriggerControl.Press(entry, dik, edge, dueS, player);",
         )
-        holds_alt = _method_body(self.source, HOLDS_ALT)
-        for alt in ("KeyCode.KC_LMENU", "KeyCode.KC_RMENU"):
-            with self.subTest(alt=alt):
-                self.assertEqual(_if_body(holds_alt, f"s_Dik == {alt}").strip(), "return true;")
+        combo = _method_body(self.source, EXIT_COMBO)
+        for key_code in ("KeyCode.KC_F4", "KeyCode.KC_LMENU", "KeyCode.KC_RMENU"):
+            with self.subTest(key_code=key_code):
+                self.assertEqual(_if_body(combo, f"dik == {key_code}").strip(), "return true;")
+        self.assertEqual(_exit_combo_keys(self.source), {"KC_F4", "KC_LMENU", "KC_RMENU"})
+        self.assertTrue(combo.rstrip().endswith("return false;"))
+        # The Alt this verb holds is no longer the criterion anywhere.
+        self.assertNotIn("HoldsAlt", self.source)
 
     def test_one_key_at_a_time_and_the_press_answers_at_once(self) -> None:
         key = _method_body(self.source, KEY)
@@ -791,7 +876,11 @@ class InputTriggerToolTest(unittest.IsolatedAsyncioTestCase):
             "One key at a time",
             "delivered_press and delivered_release mean the bridge called the "
             "handler, not that anything consumed the key",
-            "F4 is refused as would_request_exit while this tool holds Alt",
+            "entry=game never presses F4, LMENU or RMENU, whatever this tool or "
+            "the physical keyboard holds (would_request_exit)",
+            "a physical Alt sets that flag and nothing can read it",
+            "an Alt held through entry=game would let a physical F4 exit",
+            "entry=mission delivers these keys to the mission handlers only",
             "not_held, with observed=released_by=...",
             "in DayZ 1.29 no script setter feeds UAInput.Local*, so mods that poll "
             "UAInput (LocalPress, LocalValue and the like, Community Framework input "
@@ -805,6 +894,9 @@ class InputTriggerToolTest(unittest.IsolatedAsyncioTestCase):
         for cause in RELEASED_BY:
             with self.subTest(cause=cause):
                 self.assertIn(cause, description[description.index("released_by (") :])
+        # Review R1 F1 retracted the round-1 promise: the Alt this tool holds
+        # was never the only Alt that can close the game.
+        self.assertNotIn("while this tool holds Alt", description)
 
     async def test_description_names_every_error_the_bridge_can_return(self) -> None:
         # Read from the Enforce source: a new refusal there fails here until the
