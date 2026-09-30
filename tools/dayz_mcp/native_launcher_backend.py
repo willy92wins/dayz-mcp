@@ -166,6 +166,8 @@ class _DebugImageAuthority(Protocol):
 
     def approve_addon_tree_module(self, file_handle: int) -> bool: ...
 
+    def approve_addon_tree_steam_launcher(self, file_handle: int) -> bool: ...
+
 
 class NativeLauncherBackendError(RuntimeError):
     """Stable-code launcher failure; optional local-only diagnostic detail.
@@ -1407,6 +1409,7 @@ def _supervise_created_launcher(
             drain_announcements()
             accepted_direct_kind: BrokerKind | None = None
             accepted_addon_helper = False
+            accepted_steam_launcher = False
             if (
                 event.kind == "CREATE_PROCESS"
                 and event.pid == root_pid
@@ -1486,6 +1489,25 @@ def _supervise_created_launcher(
                             )
                         )
                         accepted_addon_helper = approved is True
+                        # Not added to addon_helper_pids: that set is what
+                        # opens the Steam DLL list, and this process's loads
+                        # stay on the ordinary image rule. The launch still
+                        # spends one slot of the helper cap. Tree membership
+                        # is the live AddonBuilder root of this run, the same
+                        # predicate the helper path uses; the debug event has
+                        # no parent pid.
+                        if (
+                            approved is not True
+                            and job_approved
+                            and len(addon_builder_pids) == 1
+                            and addon_helper_launches < _MAX_ADDON_HELPER_LAUNCHES
+                        ):
+                            approved = (
+                                image_authority.approve_addon_tree_steam_launcher(
+                                    event.file_handle
+                                )
+                            )
+                            accepted_steam_launcher = approved is True
                 except BaseException:
                     approved = False
                 event = replace(event, image_approved=approved is True)
@@ -1518,6 +1540,8 @@ def _supervise_created_launcher(
                     addon_builder_pids.add(event.pid)
                 elif accepted_addon_helper:
                     addon_helper_pids.add(event.pid)
+                    addon_helper_launches += 1
+                elif accepted_steam_launcher:
                     addon_helper_launches += 1
             drain_outputs()
             if event.kind == "EXIT_PROCESS" and event.pid == root_pid:
