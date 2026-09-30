@@ -22,6 +22,7 @@ from dayz_mcp import (
 )
 from dayz_mcp.launcher_registry import open_approved_launcher
 from dayz_mcp.native_launcher_transaction import preflight_vpp_request
+from dayz_mcp.peer_liveness import PEER_STALE_S
 from dayz_mcp.client_steam_bootstrap import (
     ClientDumpBaseline,
     baseline_to_wire,
@@ -855,6 +856,7 @@ _CLIENT_POLLING = "client_polling"
 _CLIENT_NOT_POLLING = "client_not_polling"
 _CLIENT_NOT_ACCREDITED = "client_not_accredited"
 _CLIENT_STILL_STARTING = "client_still_starting"
+_CLIENT_START_STALLED = "client_start_stalled"
 _CLIENT_PROCESS_DEAD = "client_process_dead"
 _CLIENT_RECORD_AGE_UNKNOWN = "client_record_age_unknown"
 _BRIDGE_STATUS_UNKNOWN = "bridge_status_unknown"
@@ -863,6 +865,7 @@ _LIFECYCLE_STATUS_INVALID = "lifecycle_status_invalid"
 CLIENT_ALREADY_POLLING = "client_already_polling"
 BRIDGE_STATUS_UNKNOWN = "bridge_status_unknown"
 CLIENT_STILL_STARTING = "client_still_starting"
+CLIENT_START_STALLED = "client_start_stalled"
 CLIENT_RECORD_AGE_UNKNOWN = "client_record_age_unknown"
 LIFECYCLE_STATUS_INVALID = "lifecycle_status_invalid"
 
@@ -878,6 +881,7 @@ _REFUSAL_ERROR_CODE = {
     _BRIDGE_STATUS_UNKNOWN: BRIDGE_STATUS_UNKNOWN,
     _CLIENT_RECORD_AGE_UNKNOWN: CLIENT_RECORD_AGE_UNKNOWN,
     _CLIENT_STILL_STARTING: CLIENT_STILL_STARTING,
+    _CLIENT_START_STALLED: CLIENT_START_STALLED,
     _LIFECYCLE_STATUS_INVALID: LIFECYCLE_STATUS_INVALID,
 }
 _REFUSAL_REMEDIATION = {
@@ -908,6 +912,15 @@ _REFUSAL_REMEDIATION = {
         "poll. Wait and retry, or dayz_test_stop(run_id=...) then dayz_test_run "
         "to start over. Override the budget with "
         "DAYZ_MCP_CLIENT_START_BUDGET_S when a shorter one is known to be safe."
+    ),
+    _CLIENT_START_STALLED: (
+        "the registered client wrote the header of its RPT and nothing after "
+        f"it for {PEER_STALE_S:g} s or more, and has not polled for as long: "
+        "it is stalled at engine start, not loading (a healthy client writes "
+        "its first line within a second of the header). It is younger than "
+        "the startup budget, so nothing was touched. Repeat this call with "
+        "client_start_budget_s=0 to supersede it now, or "
+        "dayz_test_stop(run_id=...) then dayz_test_run to start over."
     ),
 }
 
@@ -965,6 +978,68 @@ def _client_start_budget_s(override: float | None = None) -> float:
     if value != value or not 0.0 <= value <= 3600.0:
         return _CLIENT_START_BUDGET_S
     return value
+
+
+# fb-20260819-123453-9359 (residue). A client that hangs at engine start keeps
+# its process and its RPT stops at the header: three rules of '=' around the
+# exe, the command line, the times and the version. Every later line is the
+# engine at work. Measured 2026-09-30 over the 443 client RPTs of
+# DayZ_MCP_dev\_client\profiles: the 400 that got past the header all wrote
+# their first line within 0.99 s of the header's "Current time" (p50 0.57 s);
+# the other 43 never wrote a line after it. The stall threshold is
+# PEER_STALE_S, the same 15 s after which a silent peer stops counting as
+# polling: about fifteen times the slowest header-to-first-line gap. It is
+# measured from the header's own write (the RPT mtime), not from the process
+# start: two healthy clients wrote their first line 16.8 and 27.2 s after the
+# time in their RPT name, because their header itself came that late.
+_RPT_HEADER_RULE = re.compile(rb"^={20,}\s*$")
+_RPT_HEADER_RULES = 3
+_RPT_HEADER_SCAN_BYTES = 64 * 1024
+_CLIENT_START_STALL_S = PEER_STALE_S
+
+
+def _rpt_header_only(path: Path) -> bool | None:
+    """True for an RPT that holds its complete header and nothing after it.
+
+    False when anything but blank lines follows the header, or when the file
+    is larger than the scan window, which no header is. None when the file
+    cannot be read or its header is not complete: no evidence either way.
+    """
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(_RPT_HEADER_SCAN_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > _RPT_HEADER_SCAN_BYTES:
+        return False
+    lines = data.splitlines()
+    rules = [index for index, line in enumerate(lines) if _RPT_HEADER_RULE.match(line)]
+    if len(rules) < _RPT_HEADER_RULES:
+        return None
+    return all(not line.strip() for line in lines[rules[_RPT_HEADER_RULES - 1] + 1 :])
+
+
+def _client_start_stalled(
+    profiles_dirs: list[str], born: float, now: float
+) -> bool | None:
+    """Does the RPT of the client started at ``born`` sit at its bare header?
+
+    True only when the newest RPT written since that start holds the complete
+    header and nothing else, and was last written _CLIENT_START_STALL_S or
+    more before ``now``. None when no such RPT can be found or read.
+    """
+    newest: tuple[str, int, float] | None = None
+    for directory in profiles_dirs:
+        found = process_lifecycle._launch_rpt(directory, born)
+        if found is not None and (newest is None or found[2] > newest[2]):
+            newest = found
+    if newest is None:
+        return None
+    path, _size, mtime = newest
+    header_only = _rpt_header_only(Path(path))
+    if header_only is not True:
+        return header_only
+    return now - mtime >= _CLIENT_START_STALL_S
 
 
 @dataclass(frozen=True)
@@ -1086,6 +1161,25 @@ def _client_record_from_status(
     )
 
 
+def _client_start_stall_evidence(
+    record: ClientRecordProjection, profiles_dirs: list[str]
+) -> bool | None:
+    """The RPT evidence the gate folds in; None whenever it has none.
+
+    Read only for a client record that is present with a readable age: the
+    RPT of that client is the newest one written since its process started.
+    """
+    if not record.valid or not record.present or record.age_s is None:
+        return None
+    if not profiles_dirs:
+        return None
+    now = time.time()
+    try:
+        return _client_start_stalled(profiles_dirs, now - record.age_s, now)
+    except Exception:
+        return None
+
+
 @dataclass(frozen=True)
 class ClientReplacementDecision:
     """Whether this call may supersede the client already on the run, and why."""
@@ -1174,6 +1268,7 @@ def _decide_client_replacement(
     bridge_status_payload: object,
     *,
     budget_s: float | None = None,
+    start_stalled: bool | None = None,
 ) -> ClientReplacementDecision:
     """Decide from the run row and the bridge snapshot, before anything is sent.
 
@@ -1197,6 +1292,12 @@ def _decide_client_replacement(
 
     Pure, like _project_launch_readiness above it: it reads snapshots fetched
     elsewhere, takes no runtime and no broker, and authorises nothing by itself.
+
+    ``start_stalled`` is the RPT evidence of _client_start_stalled (9359): True
+    names a client stuck at its bare header. It only renames what the startup
+    budget already decides -- client_still_starting under it (still refused),
+    client_not_polling past it (still replaced) -- and anything but True
+    leaves the decision exactly as it was.
     """
     if not record.valid:
         # Codex C-01. Nothing is known about the client role, so nothing may be
@@ -1242,9 +1343,19 @@ def _decide_client_replacement(
         return ClientReplacementDecision(
             False, _CLIENT_RECORD_AGE_UNKNOWN, age, None
         )
+    # 9359: its RPT sat at the bare header for PEER_STALE_S and no poll came
+    # for as long. A poll younger than that is someone polling, not a stall.
+    stalled = start_stalled is True and (age is None or age >= server.PEER_STALE_S)
     if record.age_s < (
         budget_s if budget_s is not None else _client_start_budget_s()
     ):
+        if stalled:
+            # Still a refusal: the budget is the only kill line that was ever
+            # calibrated. The name says it will not come up by waiting, and
+            # the remediation names the explicit override.
+            return ClientReplacementDecision(
+                False, _CLIENT_START_STALLED, age, record.age_s
+            )
         # A4-H1: it has not polled because it has not finished starting. The
         # response of the call that launched it says client_not_polling too;
         # without this branch that response is a licence to kill what it started.
@@ -1257,6 +1368,10 @@ def _decide_client_replacement(
         # to an age of 0.2 s is a response that contradicts itself.
         return ClientReplacementDecision(
             True, _CLIENT_NOT_ACCREDITED, age, record.age_s
+        )
+    if stalled:
+        return ClientReplacementDecision(
+            True, _CLIENT_START_STALLED, age, record.age_s
         )
     return ClientReplacementDecision(True, _CLIENT_NOT_POLLING, age, record.age_s)
 
@@ -1435,6 +1550,60 @@ def _stop_artifacts(
     return matches
 
 
+# fb-20260818-232129-1233. The sealed worker answers readiness_timeout both for
+# a server still loading and for one that hung while loading. The daemon
+# watched the RPT of that server launch, and the stop that followed the
+# timeout recorded whether the RPT had been silent for more than
+# SERVER_START_HUNG_AFTER_S; that is published on /lifecycle/status as
+# server_start_verdict and cleared by every server launch.
+SERVER_START_HUNG = process_lifecycle.SERVER_START_HUNG
+_SERVER_START_HUNG_REMEDIATION = (
+    "the server stopped writing its RPT for more than "
+    f"{process_lifecycle.SERVER_START_HUNG_AFTER_S:g} s before it bound its "
+    "UDP port: it hung while loading, it was not slow. The run was stopped "
+    "like any readiness timeout. Relaunch with dayz_test_run; in "
+    "fb-20260818-232129-1233 one relaunch was enough both times."
+)
+
+
+def _server_start_hung(status: object, run_id: str | None) -> bool:
+    """Whether the daemon's hung verdict is about the start this call made.
+
+    A server launch clears the verdict, and a readiness_timeout means this
+    call launched a server, so a verdict present now was reached after it.
+    It must still name a run that is not alive any more (the worker stopped
+    it), or the very run the terminal names when that stop degraded.
+    Anything that does not read exactly like that keeps the generic timeout.
+    """
+    if not isinstance(status, dict):
+        return False
+    verdict = status.get("server_start_verdict")
+    if not isinstance(verdict, dict) or verdict.get("code") != SERVER_START_HUNG:
+        return False
+    hung_run = verdict.get("run_id")
+    if not _valid_uuid4(hung_run):
+        return False
+    stalled = verdict.get("rpt_stalled_s")
+    if (
+        isinstance(stalled, bool)
+        or not isinstance(stalled, (int, float))
+        or not math.isfinite(stalled)
+        or stalled <= process_lifecycle.SERVER_START_HUNG_AFTER_S
+    ):
+        return False
+    if run_id is not None:
+        return hung_run == run_id
+    runs = status.get("runs")
+    if not isinstance(runs, list):
+        return False
+    return not any(
+        isinstance(item, dict)
+        and item.get("run_id") == hung_run
+        and item.get("state") != "EXITED"
+        for item in runs
+    )
+
+
 async def _execute_request(
     runtime: _Runtime,
     *,
@@ -1525,6 +1694,13 @@ async def _execute_request(
             reason = failed_status.get("last_start_error")
             if type(reason) is str and reason:
                 terminal = replace(terminal, error_code=reason)
+    if not terminal.ok and terminal.error_code == "readiness_timeout":
+        try:
+            readiness_status = await runtime.lifecycle_status()
+        except Exception:
+            readiness_status = None
+        if _server_start_hung(readiness_status, terminal.run_id):
+            terminal = replace(terminal, error_code=SERVER_START_HUNG)
     server_alive: bool | None = None
     client_alive: bool | None = None
     readiness: LaunchReadinessProjection | None = None
@@ -1579,6 +1755,11 @@ async def _execute_request(
         server_alive=server_alive,
         client_alive=client_alive,
         readiness=readiness,
+        remediation=(
+            _SERVER_START_HUNG_REMEDIATION
+            if terminal.error_code == SERVER_START_HUNG
+            else None
+        ),
         client_terminated=client_terminated,
         client_relaunched=client_relaunched,
         client_replace_reason=None if replacement is None else replacement.reason,
@@ -1843,7 +2024,12 @@ async def execute_dayz_test_run(
                         bridge = None
                         bridge_cause = _bridge_status_cause(exc)
                     replacement = _decide_client_replacement(
-                        record, bridge, budget_s=budget_s
+                        record,
+                        bridge,
+                        budget_s=budget_s,
+                        start_stalled=_client_start_stall_evidence(
+                            record, _client_profile_roots(policy, mode)
+                        ),
                     )
                     if not replacement.replace:
                         refused = _compact_result(

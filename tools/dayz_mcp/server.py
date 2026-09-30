@@ -3658,7 +3658,9 @@ CLIENT_START_BUDGET_MAX_S = 3600.0
 CLIENT_START_BUDGET_DESCRIPTION = (
     "Seconds a freshly launched client may take to reach its first poll before "
     "it counts as hung. Under it, relaunching is refused with "
-    "client_still_starting. Must be a number in [0, 3600]; anything else is "
+    "client_still_starting, or with client_start_stalled when the client's RPT "
+    f"has sat at its bare header without a poll for {PEER_STALE_S:g} s (0 then "
+    "supersedes it). Must be a number in [0, 3600]; anything else is "
     "rejected, not ignored. It governs THIS call only, so a client reattach "
     "(mode=client) must pass it again -- it does not configure the launched "
     "client. Omit to fall back to "

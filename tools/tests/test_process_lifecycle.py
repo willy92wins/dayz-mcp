@@ -2819,47 +2819,6 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.assertEqual(poll.get("commands"), [])
         self.assertIn("run-existing", state._fenced_runs)
 
-    def test_release_all_running_owners_poll_during_persist_is_empty(self) -> None:
-        record = process(8092)
-        self.add_run(record)
-        self.guard.snapshots[record.pid] = snapshot(record)
-        state = self._bind_run()
-        queued, payload = self._world_spawn(state)
-        self.assertEqual(queued, 200, payload)
-        armado = threading.Event()
-        dentro = threading.Event()
-        puerta = threading.Event()
-        release_real = self.store.release_all_running_owners
-
-        def _release_lento() -> list[str]:
-            salida = release_real()
-            if armado.is_set() and not dentro.is_set():
-                dentro.set()
-                puerta.wait(5.0)
-            return salida
-
-        self.store.release_all_running_owners = _release_lento  # type: ignore[method-assign]
-        returned: dict[str, object] = {}
-
-        def _liberador() -> None:
-            returned["changed"] = self.lifecycle.release_all_running_owners()
-
-        thread = threading.Thread(target=_liberador, daemon=True)
-        armado.set()
-        thread.start()
-        self.assertTrue(dentro.wait(5.0))
-        self.assertNotIn("changed", returned)
-        durable = self.store.get("run-existing").state
-        self.assertEqual(durable, "RUNNING_IDLE")
-        poll_status, poll = accredited_poll(state, "server")
-        puerta.set()
-        thread.join(timeout=5)
-        self.store.release_all_running_owners = release_real  # type: ignore[method-assign]
-        self.assertEqual(returned.get("changed"), ["run-existing"])
-        self.assertEqual(poll_status, 200, poll)
-        self.assertEqual(poll.get("commands"), [])
-        self.assertIn("run-existing", state._fenced_runs)
-
     def test_reader_during_rollback_replace_publishes_unknown(self) -> None:
         inherited = process(703)
         self.add_run(inherited)

@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextvars
 import dataclasses
 import hashlib
+import io
 import json
 import logging
 import math
@@ -88,6 +89,16 @@ _DAYZ_PORT_RANGE = range(2302, 3000)
 SW_SHOWNOACTIVATE = 4
 # Minimized window that does not take the foreground (the server, f298).
 SW_SHOWMINNOACTIVE = 7
+# fb-20260822-025926-bad7: what DayZ writes on stdout/stderr is kept in files
+# beside the role's RPT instead of being lost. Each stream keeps its first
+# LAUNCH_OUTPUT_CAP_BYTES, then only the last LAUNCH_OUTPUT_TAIL_BYTES, which
+# are appended when the stream ends: the exit reason a dying process prints is
+# at the end, and a chatty one cannot fill the disk. A whole session RPT is
+# 50-110 KB (profiles of 2026-09-30), so the cap holds any normal run whole.
+LAUNCH_OUTPUT_CAP_BYTES = 4 * 1024 * 1024
+LAUNCH_OUTPUT_TAIL_BYTES = 64 * 1024
+_LAUNCH_OUTPUT_CHUNK_BYTES = 64 * 1024
+_LAUNCH_OUTPUT_NAME_TOKEN = re.compile(r"[^A-Za-z0-9_.-]")
 _PORT_SCAN_UNKNOWN_HINT = (
     "port_scan_unknown: the daemon could not read the host UDP socket table "
     "(psutil/netstat); waiting does not help, restore that first"
@@ -221,6 +232,271 @@ def _requested_port(argv: object) -> int | None:
     if isinstance(ports, list) and ports and isinstance(ports[0], int):
         return ports[0]
     return None
+
+
+def _launch_output_dir(argv: object) -> str | None:
+    """The -profiles folder of a launch, where its RPT goes, or None.
+
+    Only an absolute folder named by the argv itself: the capture must land
+    beside the RPT of that process, never in a directory guessed for it.
+    """
+    profiles = parse_dayz_launch_argv(argv).get("profiles")
+    if not isinstance(profiles, str) or not profiles:
+        return None
+    try:
+        absolute = Path(profiles).is_absolute()
+    except (OSError, ValueError):
+        return None
+    return profiles if absolute else None
+
+
+def _open_launch_output(target: Path) -> io.RawIOBase | None:
+    """Create the capture file; never truncate one that already exists.
+
+    Opened by the daemon after the spawn and not inheritable (PEP 446), so
+    no process holds it but the drain thread, which closes it at EOF.
+    """
+    stem, _dot, suffix = target.name.partition(".")
+    for attempt in range(1, 10):
+        name = target.name if attempt == 1 else f"{stem}-{attempt}.{suffix}"
+        try:
+            return open(target.with_name(name), "xb", buffering=0)
+        except FileExistsError:
+            continue
+        except (OSError, ValueError):
+            return None
+    return None
+
+
+def _write_all(handle: io.RawIOBase, data: bytes | bytearray) -> None:
+    """A raw write may take part of the buffer; loop until it took all."""
+    view = memoryview(data)
+    while view:
+        count = handle.write(view)
+        if not count:
+            raise OSError("launch_output_short_write")
+        view = view[count:]
+
+
+def _pump_launch_output(
+    stream: object, target: Path, cap: int, tail_cap: int
+) -> None:
+    """Drain one console stream of a launched DayZ into its capture file.
+
+    The pipe is read to its end whatever happens to the file: a child that
+    writes into a pipe nobody reads blocks, and a blocked game is worse than
+    a lost log. The file is created on the first byte, so a process that
+    writes nothing leaves nothing. Up to ``cap`` bytes are written as they
+    arrive; past that only the last ``tail_cap`` bytes are kept, and they are
+    appended after a marker when the stream ends. Whenever this returns, the
+    read end is closed, so the child can never block on it afterwards.
+    """
+    read = getattr(stream, "read1", None) or getattr(stream, "read", None)
+    handle: io.RawIOBase | None = None
+    failed = False
+    written = 0
+    dropped = 0
+    tail = bytearray()
+    try:
+        while callable(read):
+            try:
+                chunk = read(_LAUNCH_OUTPUT_CHUNK_BYTES)
+            except (OSError, ValueError):
+                break
+            if not chunk or not isinstance(chunk, (bytes, bytearray)):
+                break
+            if failed:
+                continue
+            try:
+                if handle is None:
+                    handle = _open_launch_output(target)
+                    if handle is None:
+                        failed = True
+                        continue
+                head = chunk[: max(0, cap - written)]
+                if head:
+                    _write_all(handle, head)
+                    written += len(head)
+                rest = chunk[len(head):]
+                if rest:
+                    dropped += len(rest)
+                    tail += rest
+                    if len(tail) > tail_cap:
+                        del tail[: len(tail) - tail_cap]
+            except Exception:
+                # Disk full, a vanished folder: stop writing, keep draining.
+                failed = True
+    finally:
+        if handle is not None:
+            try:
+                if dropped and not failed:
+                    marker = (
+                        f"\n[dayz-mcp] capture cap of {cap} bytes reached: "
+                        f"{dropped - len(tail)} bytes not kept, the last "
+                        f"{len(tail)} follow\n"
+                    )
+                    _write_all(handle, marker.encode("ascii") + bytes(tail))
+            except Exception:
+                pass
+            try:
+                handle.close()
+            except Exception:
+                pass
+        try:
+            stream.close()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
+def _start_launch_output_capture(
+    process: object, directory: str, argv: list[str]
+) -> None:
+    """One drain thread per console stream of a real Popen. Never raises.
+
+    Named after the RPT DayZ writes in the same folder (exe stem, local
+    launch time) plus the pid, with a .txt suffix so no RPT or script-log
+    reader (log_tail, _script_log_for_server_rpt) ever picks it up.
+    """
+    pending = [
+        (channel, stream)
+        for channel, stream in (
+            ("stdout", getattr(process, "stdout", None)),
+            ("stderr", getattr(process, "stderr", None)),
+        )
+        if isinstance(stream, io.IOBase)
+    ]
+    try:
+        pid = getattr(process, "pid", None)
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            pid = 0
+        stem = _LAUNCH_OUTPUT_NAME_TOKEN.sub("_", Path(str(argv[0])).stem)[:64]
+        stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+        while pending:
+            channel, stream = pending[0]
+            target = Path(directory) / (
+                f"{stem or 'dayz'}_{stamp}_{pid}.{channel}.txt"
+            )
+            threading.Thread(
+                target=_pump_launch_output,
+                args=(
+                    stream,
+                    target,
+                    LAUNCH_OUTPUT_CAP_BYTES,
+                    LAUNCH_OUTPUT_TAIL_BYTES,
+                ),
+                name=f"dayz-launch-{channel}-{pid}",
+                daemon=True,
+            ).start()
+            pending.pop(0)
+    except Exception:
+        # A stream without a reader is closed, so the child's writes fail
+        # instead of blocking once the pipe buffer fills.
+        for _channel, stream in pending:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+
+# fb-20260818-232129-1233: a server that hangs while loading keeps its process
+# and stops writing its RPT; the UDP readiness probe (sealed, in the worker)
+# only sees readiness_timeout. The daemon watches the RPT of each server launch
+# while it starts, and when that start is stopped it records whether the RPT
+# had gone silent for more than SERVER_START_HUNG_AFTER_S. The 75 s is the
+# watchdog of the ficha, which told the two hangs of 2026-08-19 (over 6 min
+# without a line) from the loads of 60-90 s. Measured 2026-09-30 over the 443
+# server RPTs of DayZ_MCP_dev\_server\profiles that reach "Player connect
+# enabled": the longest silence of a start is p50 6.4 s, p99 19.7 s, but three
+# healthy starts went silent for 80.7, 108.3 and 113.7 s (CE map load, entity
+# load) and then finished. The verdict only names a readiness timeout that
+# already happened; it stops, kills or relaunches nothing.
+SERVER_START_HUNG = "server_start_hung"
+SERVER_START_HUNG_AFTER_S = 75.0
+# The widest readiness window a request can ask for (dayz_test_request bounds
+# server_wait_s to [1, 3600]); past it no readiness is left to explain.
+_SERVER_START_WATCH_MAX_S = 3600.0
+_SERVER_START_SAMPLE_INTERVAL_S = 1.0
+# An RPT of this launch cannot be older than the launch; the slack absorbs
+# file-time granularity between the daemon clock and the file system.
+_LAUNCH_RPT_SLACK_S = 2.0
+
+
+def _launch_rpt(profiles: str, launched_at: float) -> tuple[str, int, float] | None:
+    """(path, size, mtime) of the newest .rpt written since a launch, or None.
+
+    The directory listing only selects candidates: an RPT open for writing
+    can show a stale size and time in it. Each candidate is stat'ed again,
+    which reads the file itself.
+    """
+    floor = launched_at - _LAUNCH_RPT_SLACK_S
+    candidates: list[str] = []
+    try:
+        with os.scandir(profiles) as entries:
+            for entry in entries:
+                if not entry.name.casefold().endswith(".rpt"):
+                    continue
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    listed = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if listed.st_mtime >= floor:
+                    candidates.append(entry.path)
+    except (OSError, ValueError):
+        return None
+    newest: tuple[str, int, float] | None = None
+    for path in candidates:
+        try:
+            fresh = os.stat(path)
+        except OSError:
+            continue
+        if newest is None or fresh.st_mtime > newest[2]:
+            newest = (path, int(fresh.st_size), float(fresh.st_mtime))
+    return newest
+
+
+@dataclass
+class _ServerStartWatch:
+    """What the daemon saw of the RPT of one server launch while it started."""
+
+    run_id: str
+    profiles: str
+    launched_at: float
+    seen: tuple[str, int, float] | None = None
+    grew_at: float | None = None
+    sampled_at: float | None = None
+
+    def sample(self, now: float) -> None:
+        self.observe(_launch_rpt(self.profiles, self.launched_at), now)
+
+    def observe(self, found: tuple[str, int, float] | None, now: float) -> None:
+        """Fold one look at the RPT (path, size, mtime) taken at ``now``."""
+        if self.sampled_at is not None and now < self.sampled_at:
+            return
+        previous = self.sampled_at if self.sampled_at is not None else self.launched_at
+        self.sampled_at = now
+        if found is None or found == self.seen:
+            return
+        self.seen = found
+        # It changed after the previous look. Its mtime says when, unless the
+        # mtime falls outside that window: then the latest moment it can have
+        # been, so a doubtful clock never lengthens a silence.
+        mtime = found[2]
+        self.grew_at = mtime if previous < mtime <= now else now
+
+    def verdict(self, now: float) -> dict[str, object] | None:
+        """The hung verdict, or None: no RPT seen means no verdict at all."""
+        if self.grew_at is None:
+            return None
+        stalled = now - self.grew_at
+        if stalled <= SERVER_START_HUNG_AFTER_S:
+            return None
+        return {
+            "run_id": self.run_id,
+            "code": SERVER_START_HUNG,
+            "rpt_stalled_s": round(stalled, 1),
+        }
 
 
 def _utc_epoch(value: object) -> float | None:
@@ -1443,29 +1719,6 @@ class RunManifestStore:
                     raise
             return changed
 
-    def release_all_running_owners(self) -> list[str]:
-        """Atomically orphan every persisted RUNNING run after daemon restart."""
-
-        self._require_writable()
-        with self._lock:
-            changed: list[str] = []
-            previous = dict(self._runs)
-            for run_id, current in list(self._runs.items()):
-                if current.state == "RUNNING" and current.owner_session_id is not None:
-                    run = self._clone(current)
-                    run.owner_session_id = None
-                    run.owner_lease_id = None
-                    run.state = "RUNNING_IDLE"
-                    self._runs[run_id] = run
-                    changed.append(run_id)
-            if changed:
-                try:
-                    self._persist_locked()
-                except Exception:
-                    self._runs = previous
-                    raise
-            return changed
-
     def recover_after_restart(self) -> dict[str, list[str]]:
         """Atomically release stable owners and quarantine interrupted mutations."""
 
@@ -1618,6 +1871,16 @@ class ProcessLifecycle:
         # test can shorten it without patching the module.
         self._role_release_tries = _ROLE_RELEASE_TRIES
         self._role_release_interval_s = _ROLE_RELEASE_INTERVAL_S
+        # fb-20260818-232129-1233: the RPT watch of each server launch while
+        # it starts, and the hung verdict of the last one that was stopped
+        # hung. Daemon memory only; a new server launch clears the verdict,
+        # so one that is present was reached after the latest server launch.
+        # Leaf lock: nothing else is taken while it is held. The clock is
+        # instance state so a test can drive it without patching the module.
+        self._server_start_lock = threading.Lock()
+        self._server_start_watches: dict[str, _ServerStartWatch] = {}
+        self._server_start_verdict: dict[str, object] | None = None
+        self._server_start_clock: Callable[[], float] = time.time
         # One diagnostic per lifecycle startup, before the first launch request.
         # This warning grants no authority; load_verified_bundle remains the gate.
         if os.name == "nt":
@@ -1821,7 +2084,21 @@ class ProcessLifecycle:
                 SW_SHOWMINNOACTIVE if server else SW_SHOWNOACTIVATE
             )
             kwargs["startupinfo"] = startupinfo
-        return subprocess.Popen(argv, **kwargs)
+        # fb-20260822-025926-bad7: the console streams used to be dropped.
+        # They go to pipes the daemon drains into files beside the RPT; the
+        # child inherits only those pipe ends and NUL (close_fds limits the
+        # inherited set to the three std handles), and the files are opened
+        # by the daemon, so nothing holds them once the process is gone. An
+        # argv without an absolute -profiles folder launches as before.
+        capture_dir = _launch_output_dir(argv)
+        if capture_dir is not None:
+            kwargs["stdin"] = subprocess.DEVNULL
+            kwargs["stdout"] = subprocess.PIPE
+            kwargs["stderr"] = subprocess.PIPE
+        process = subprocess.Popen(argv, **kwargs)
+        if capture_dir is not None:
+            _start_launch_output_capture(process, capture_dir, argv)
+        return process
 
     @staticmethod
     def _error(error: str, status: int) -> dict[str, object]:
@@ -1876,6 +2153,84 @@ class ProcessLifecycle:
                     # pre-daemon basal when this daemon has not sealed yet.
                     self._seal_activity_locked(key, max(stamps))
             self._bump_box_revision_locked()
+
+    def _clear_server_start_verdict(self) -> None:
+        with self._server_start_lock:
+            self._server_start_verdict = None
+
+    def _begin_server_start_watch(
+        self, run_id: str, argv: object, launched_at: float
+    ) -> None:
+        """Watch the RPT of a server launch that just reached RUNNING."""
+        profiles = _launch_output_dir(argv)
+        if profiles is None:
+            return
+        watch = _ServerStartWatch(run_id, profiles, launched_at)
+        try:
+            watch.sample(self._server_start_clock())
+        except Exception:
+            pass
+        with self._server_start_lock:
+            self._server_start_watches[run_id] = watch
+
+    def _end_server_start_watch(self, run_id: str) -> None:
+        with self._server_start_lock:
+            self._server_start_watches.pop(run_id, None)
+
+    def _sample_server_start_watches(self) -> None:
+        """One look at each watched RPT, at most once per interval.
+
+        Called from status(), which the readiness probe of the worker polls
+        about every 2 s while it waits. The directory is read outside the
+        lock and folded in only if the watch is still the same object.
+        """
+        now = self._server_start_clock()
+        with self._server_start_lock:
+            for run_id in [
+                run_id
+                for run_id, watch in self._server_start_watches.items()
+                if now - watch.launched_at > _SERVER_START_WATCH_MAX_S
+            ]:
+                self._server_start_watches.pop(run_id, None)
+            due = [
+                watch
+                for watch in self._server_start_watches.values()
+                if watch.sampled_at is None
+                or now - watch.sampled_at >= _SERVER_START_SAMPLE_INTERVAL_S
+            ]
+        for watch in due:
+            try:
+                found = _launch_rpt(watch.profiles, watch.launched_at)
+            except Exception:
+                continue
+            with self._server_start_lock:
+                if self._server_start_watches.get(watch.run_id) is watch:
+                    watch.observe(found, now)
+
+    def _settle_server_start_watch(self, run_id: str) -> None:
+        """A watched start is being stopped: one last look, then the verdict.
+
+        No verdict unless that last look still finds the RPT: a silence is
+        only claimed up to a moment at which the file was seen unchanged.
+        """
+        with self._server_start_lock:
+            watch = self._server_start_watches.pop(run_id, None)
+        if watch is None:
+            return
+        now = self._server_start_clock()
+        found = _launch_rpt(watch.profiles, watch.launched_at)
+        if found is None:
+            return
+        watch.observe(found, now)
+        verdict = watch.verdict(now)
+        if verdict is not None:
+            with self._server_start_lock:
+                self._server_start_verdict = verdict
+
+    def _server_start_verdict_payload(self) -> dict[str, object] | None:
+        with self._server_start_lock:
+            verdict = self._server_start_verdict
+            return dict(verdict) if verdict is not None else None
 
     def record_input_sample(self, sample: InputSample) -> list[str]:
         """250f: attribute one input sample to the runs whose windows had the focus.
@@ -2072,6 +2427,8 @@ class ProcessLifecycle:
             while len(self._retired_use_keys) > 256:
                 self._retired_use_keys.pop(next(iter(self._retired_use_keys)))
             self._bump_box_revision_locked()
+        # fb-20260818-232129-1233: a retired run has no start left to watch.
+        self._end_server_start_watch(run_id)
         bindings = self.bindings
         unfence = getattr(bindings, "unfence_runs", None)
         if callable(unfence):
@@ -3261,6 +3618,15 @@ class ProcessLifecycle:
                         launched=None, record=None, confirmed_error="steam_identity_changed",
                         attempt_started_at=attempt_started_at,
                     )
+                # fb-20260818-232129-1233: "-server" in the argv decides, as
+                # for the Steam gate above. A hung verdict older than this
+                # launch attempt can never be read as this launch's.
+                server_launch = "-server" in [
+                    arg.casefold() for arg in parsed["argv"][1:]
+                ]
+                if server_launch:
+                    self._clear_server_start_verdict()
+                launched_at = self._server_start_clock()
                 try:
                     launched = self.launcher(
                         list(parsed["argv"]),
@@ -3325,6 +3691,14 @@ class ProcessLifecycle:
                         self._launched_by.setdefault(
                             self._activity_key(run_id), client
                         )
+                if server_launch:
+                    self._begin_server_start_watch(
+                        run_id, parsed["argv"], launched_at
+                    )
+                elif existing is not None:
+                    # The worker adds the client only after readiness saw the
+                    # server's port bound: that start is over.
+                    self._end_server_start_watch(run_id)
 
                 result: dict[str, object] = {
                     "ok": True,
@@ -3789,6 +4163,12 @@ class ProcessLifecycle:
             if command_id is None:
                 return self._error("lease_invalid", 409)
             try:
+                # fb-20260818-232129-1233: the worker stops a run whose
+                # readiness timed out; read its RPT before anything dies.
+                try:
+                    self._settle_server_start_watch(run_id)
+                except Exception:
+                    pass
                 if stop_guard is not None:
                     refusal = self._idle_destruction_refusal(run, stop_guard)
                     if refusal is not None:
@@ -5622,21 +6002,6 @@ class ProcessLifecycle:
                 self._invalidate_box_cache()
             return changed
 
-    def release_all_running_owners(self) -> list[str]:
-        with self._operation_lock:
-            self._require_legacy_identity_safe()
-            candidates = [
-                run.run_id
-                for run in self.manifest.list_runs()
-                if run.state == "RUNNING" and run.owner_session_id is not None
-            ]
-            changed = self._transition_to_idle(
-                candidates, self.manifest.release_all_running_owners
-            )
-            if changed:
-                self._invalidate_box_cache()
-            return changed
-
     def begin_release_owner(
         self, session_id: str, lease_id: str
     ) -> CleanupDisposition:
@@ -6136,6 +6501,11 @@ class ProcessLifecycle:
                 _steam_preparation_key(client.session_id)
             )
             preparation = dict(stored) if stored is not None else None
+        try:
+            self._sample_server_start_watches()
+        except Exception:
+            # A diagnostic never fails the status read.
+            pass
         runs, diagnostics = self._status_snapshot()
         payload: dict[str, object] = {
             "runs": [self._projected_run(run) for run in runs],
@@ -6147,6 +6517,9 @@ class ProcessLifecycle:
             payload["last_start_error"] = self._last_start_error
         if preparation is not None:
             payload["steam_preparation"] = preparation
+        verdict = self._server_start_verdict_payload()
+        if verdict is not None:
+            payload["server_start_verdict"] = verdict
         return payload
 
     def public_status(self) -> dict[str, object]:
