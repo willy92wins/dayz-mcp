@@ -8,6 +8,10 @@ fb-20260822-191204-48bc: OnInput turns SetBrakesActivateWithoutDriver off while
 it drives and MCPCarDrive.Clear never turned it back on. Vanilla
 ActionPushCar.OnEndServer restores it (actionpushcar.c:111).
 
+48bc review P3: MCPCarDrive.Set reassigned s_Car when a different car took
+over without a Clear, so the previous car kept its driverless brake off. Set
+now restores it on the previous car before the reassignment.
+
 File-only: reads the Enforce sources; does not import the server stack.
 """
 
@@ -35,12 +39,15 @@ BELOW_IDLE = r"\bif\s*\(\s*rpm\s*<\s*EngineGetRPMIdle\(\)\s*\)"
 THROTTLE_ASKED = r"\bif\s*\(\s*MCPCarDrive\.s_Throttle\s*>\s*0(?:\.0+)?\s*\)"
 ENGINE_READY = r"\bif\s*\(\s*engineReady\s*\)"
 CAR_GUARD = r"\bif\s*\(\s*s_Car\s*\)"
+SET = re.escape("static void Set(")
+TAKEOVER_GUARD = r"\bif\s*\(\s*s_Car\s*&&\s*s_Car\s*!=\s*car\s*\)"
 
 BRAKE = "SetBrake(MCPCarDrive.s_Brake);"
 HANDBRAKE = "SetHandbrake(MCPCarDrive.s_Handbrake);"
 RESTORE = "s_Car.SetBrakesActivateWithoutDriver(true);"
 TURN_OFF = "SetBrakesActivateWithoutDriver(false);"
 DROP = "s_Car = null;"
+REASSIGN = "s_Car = car;"
 
 
 def _without_comments(text: str) -> str:
@@ -80,6 +87,10 @@ def _on_input() -> str:
 
 def _drive_clear() -> str:
     return _block(_block(_car_code(), DRIVE_CLASS), CLEAR)
+
+
+def _drive_set() -> str:
+    return _block(_block(_car_code(), DRIVE_CLASS), SET)
 
 
 # Pre-fix shape (origin/main 847c563), trimmed to the lines the contracts read.
@@ -142,6 +153,47 @@ static void Clear()
 }
 """
 
+# Pre-fix Set (origin/main 65bff29): a takeover drops the previous car as is.
+PRE_FIX_SET = """
+static void Set(CarScript car, float throttle, float steer, float brake, float handbrake, float deadlineS)
+{
+	if (!s_Active || s_Car != car || GetGame().GetTickTime() > s_DeadlineS)
+	{
+		s_LastAutoShiftS = -1.0;
+	}
+
+	s_Car = car;
+	s_Throttle = throttle;
+	s_Active = true;
+}
+"""
+
+# After the reassignment s_Car is car, so the guard never holds.
+RESTORE_AFTER_REASSIGN_SET = """
+static void Set(CarScript car, float throttle, float steer, float brake, float handbrake, float deadlineS)
+{
+	s_Car = car;
+	if (s_Car && s_Car != car)
+	{
+		s_Car.SetBrakesActivateWithoutDriver(true);
+	}
+	s_Active = true;
+}
+"""
+
+# Without the car comparison every command re-brakes the car it keeps driving.
+RESTORE_SAME_CAR_SET = """
+static void Set(CarScript car, float throttle, float steer, float brake, float handbrake, float deadlineS)
+{
+	if (s_Car)
+	{
+		s_Car.SetBrakesActivateWithoutDriver(true);
+	}
+	s_Car = car;
+	s_Active = true;
+}
+"""
+
 
 class CarBrakesSourceContractTest(unittest.TestCase):
     def _assert_brakes_ignore_engine_state(self, on_input: str) -> None:
@@ -173,6 +225,18 @@ class CarBrakesSourceContractTest(unittest.TestCase):
         self.assertEqual(clear.count(DROP), 1)
         self.assertLess(clear.index(RESTORE), clear.index(DROP))
 
+    def _assert_takeover_restores_previous_car(self, set_body: str) -> None:
+        # The restore is the whole body of the takeover guard, the guard is not
+        # nested in another block, and it runs before s_Car is reassigned.
+        takeover = _block(set_body, TAKEOVER_GUARD)
+        self.assertEqual(takeover.strip(), RESTORE)
+        guard_at = re.search(TAKEOVER_GUARD, set_body).start()
+        self.assertEqual(_depth_at(set_body, guard_at), 0)
+        self.assertEqual(set_body.count("SetBrakesActivateWithoutDriver("), 1)
+        self.assertEqual(set_body.count(REASSIGN), 1)
+        self.assertLess(set_body.index(RESTORE), set_body.index(REASSIGN))
+        self.assertNotIn(TURN_OFF, set_body)
+
     def test_fb_3cc4_brake_and_handbrake_apply_whatever_the_engine_state(self) -> None:
         self._assert_brakes_ignore_engine_state(_on_input())
 
@@ -199,10 +263,28 @@ class CarBrakesSourceContractTest(unittest.TestCase):
     ) -> None:
         code = _car_code()
         self.assertEqual(code.count(TURN_OFF), 1)
-        self.assertEqual(code.count(RESTORE), 1)
-        self.assertEqual(code.count("SetBrakesActivateWithoutDriver("), 2)
+        # Two restores since the 48bc review P3: Clear, and Set on a takeover.
+        self.assertEqual(code.count(RESTORE), 2)
+        self.assertEqual(code.count("SetBrakesActivateWithoutDriver("), 3)
+        self.assertEqual(_drive_clear().count(RESTORE), 1)
+        self.assertEqual(_drive_set().count(RESTORE), 1)
         ready = _block(_block(_on_input(), APPLY_CONTROL), ENGINE_READY)
         self.assertIn(TURN_OFF, ready)
+
+    def test_fb_48bc_p3_a_takeover_restores_the_previous_cars_driverless_brake(
+        self,
+    ) -> None:
+        self._assert_takeover_restores_previous_car(_drive_set())
+
+    def test_fb_48bc_p3_pre_fix_and_misplaced_restores_fail_the_contract(self) -> None:
+        for label, source in (
+            ("pre_fix", PRE_FIX_SET),
+            ("restore_after_reassign", RESTORE_AFTER_REASSIGN_SET),
+            ("restore_same_car", RESTORE_SAME_CAR_SET),
+        ):
+            with self.subTest(label):
+                with self.assertRaises(AssertionError):
+                    self._assert_takeover_restores_previous_car(_block(source, SET))
 
     def test_fb_48bc_ttl_expiry_release_and_shutdown_all_go_through_clear(self) -> None:
         self.assertIn("MCPCarDrive.Clear();", _block(_on_input(), TTL_EXPIRY))

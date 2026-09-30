@@ -694,6 +694,19 @@ class MCPSpawnLifetime
 	float max_s;
 };
 
+// world_time_get read: the server's World.GetDate (world.c:33) when the reply
+// is built, as the engine reports it. The tool carries a minute of 60 into the
+// hour, as world_time_set does for its applied echo. World has no time
+// multiplier getter, so none is carried. Primitives only: no entity reference.
+class MCPWorldTime
+{
+	int year;
+	int month;
+	int day;
+	int hour;
+	int minute;
+};
+
 class MCPResult
 {
 	int id;
@@ -789,6 +802,8 @@ class MCPResult
 	ref MCPSpawnLifetime lifetime;
 	// input_trigger reply, also on its refusals. Unassigned on other commands.
 	ref MCPInputTrigger input_trigger;
+	// world_time_get read. Unassigned on other commands.
+	ref MCPWorldTime world_time;
 };
 
 class MCPJob

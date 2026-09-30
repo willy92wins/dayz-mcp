@@ -1435,6 +1435,13 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             (False, "bad_args"),
         ),
     ),
+    # A read with no argument: timeout_s stays on the tool side, never on the wire.
+    "world_time_get": (
+        ("valid_empty", {}, (True, None)),
+        ("timeout_on_the_wire", {"timeout_s": 1.0}, (False, "bad_args")),
+        ("set_shape", {"year": 2026, "month": 9, "day": 28, "hour": 9, "minute": 0}, (False, "bad_args")),
+        ("extra_key", {"extra": None}, (False, "bad_args")),
+    ),
     # time_multiplier travels with time_multiplier_set true (fb-20260930-065425-8779).
     "world_time_set": (
         (

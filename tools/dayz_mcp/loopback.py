@@ -62,6 +62,7 @@ SERVER_COMMANDS = {
     "scene_raycast",
     "telemetry_read",
     "query_get_in_condition",
+    "world_time_get",
     "world_time_set",
     "world_weather_set",
     "vehicle_prepare_fixture",
@@ -1220,6 +1221,8 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={"pos": _is_real_vector3, "component": _integer_in_range()},
         )
     ),
+    # world_time_get reads the clock and takes no argument.
+    "world_time_get": _command_schema(_schema_variant()),
     # time_multiplier travels with time_multiplier_set true, or neither travels:
     # the bridge reads an absent key as 0 or false (fb-20260930-065425-8779).
     "world_time_set": _command_schema(

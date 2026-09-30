@@ -48,9 +48,9 @@ from tests._tiers import slow_test
 
 
 LEASE_REVEAL_PREFIXES = ("world_", "vehicle_", "ui_")
-# The two lease-free reads behind a reveal prefix (b753); every other
-# world_*/vehicle_*/ui_* tool mutates and waits for the lease.
-PREFIXED_LEASE_FREE_READS = frozenset({"ui_tree", "vehicle_telemetry"})
+# The three lease-free reads behind a reveal prefix (b753, and world_time_get);
+# every other world_*/vehicle_*/ui_* tool mutates and waits for the lease.
+PREFIXED_LEASE_FREE_READS = frozenset({"ui_tree", "vehicle_telemetry", "world_time_get"})
 INITIAL_CATALOG_MAX_BYTES = 20_000
 INITIAL_CATALOG_TARGET_BYTES = 17_000
 

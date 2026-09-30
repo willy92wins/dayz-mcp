@@ -27,6 +27,14 @@ class MCPCarDrive
 			s_LastAutoShiftS = -1.0;
 		}
 
+		// A different car taking over without a Clear leaves the previous
+		// one driverless: give it back the driverless brake OnInput turned
+		// off, as Clear does, before it is dropped (48bc review P3).
+		if (s_Car && s_Car != car)
+		{
+			s_Car.SetBrakesActivateWithoutDriver(true);
+		}
+
 		s_Car = car;
 		s_Throttle = throttle;
 		s_Steer = steer;
