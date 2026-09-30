@@ -106,6 +106,8 @@ def _minimal_args(cmd: str) -> dict:
         return {"type": "Infected", "pos": [0.0, 0.0, 0.0], "heading": 0.0, "speed": 1.0}
     if cmd == "object_anim":
         return {"type": "CarScript", "pos": [0.0, 0.0, 0.0], "source": "idle"}
+    if cmd == "vehicle_door":
+        return {"object_id": 1, "source": "DoorsDriver", "mode": "read"}
     if cmd == "inventory_give":
         return {"classname": "Item", "dest": "hands"}
     if cmd == "inventory_attach":

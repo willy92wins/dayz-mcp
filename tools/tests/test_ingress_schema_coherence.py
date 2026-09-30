@@ -167,6 +167,13 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
         "object_doors",
     ),
     ("object_doors", {"object_id": 1}, "object_doors"),
+    ("vehicle_door", {"object_id": 1, "source": "DoorsDriver", "mode": "read"}, "vehicle_door"),
+    ("vehicle_door", {"object_id": 7, "source": "DoorsCargo1", "mode": "open"}, "vehicle_door"),
+    (
+        "vehicle_door",
+        {"type": "CivilianSedan", "pos": _POS, "source": "DoorsTrunk", "mode": "close"},
+        "vehicle_door",
+    ),
     ("input_describe", {"name": "UAMoveForward"}, "input_describe"),
     ("input_describe", {"name": "a" * 128}, "input_describe"),
     ("weapon_raise", {"raised": True}, "weapon_raise"),

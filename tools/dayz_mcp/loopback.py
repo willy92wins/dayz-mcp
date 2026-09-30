@@ -68,6 +68,7 @@ SERVER_COMMANDS = {
     "surface_query",
     "player_teleport",
     "object_anim",
+    "vehicle_door",
     "inventory_attach",
     "inventory_give",
     "object_inspect",
@@ -714,6 +715,27 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "object_id": _integer_in_range(minimum=1),
                 "source": _is_non_empty_string,
                 "phase": _SAFE_FINITE_REAL,
+            },
+        ),
+    ),
+    # object_anim's two target shapes with a required mode and no phase: an
+    # absent mode never means a write (MCPBridge.c DispatchVehicleDoor).
+    "vehicle_door": _command_schema(
+        _schema_variant(
+            required=("object_id", "source", "mode"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "source": _is_non_empty_string,
+                "mode": _one_of("read", "open", "close"),
+            },
+        ),
+        _schema_variant(
+            required=("type", "pos", "source", "mode"),
+            validators={
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "source": _is_non_empty_string,
+                "mode": _one_of("read", "open", "close"),
             },
         ),
     ),

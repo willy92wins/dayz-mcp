@@ -578,6 +578,38 @@ class MCPBuildingDoors
 	}
 };
 
+// vehicle_door payload. phase and state are read before any write; phase_reply
+// and state_reply in the same tick after it. state and state_reply are
+// GetCarDoorsState as open, closed or missing. slot is the door part's
+// attachment slot (on door_missing, the empty crew-door slot); pos is the world
+// position of selection on the door part. component_index stays -1 and
+// phase_requested -1.0 unless set. Primitives only: no entity reference.
+class MCPVehicleDoor
+{
+	string source;
+	string mode;
+	string slot;
+	string door_type;
+	string selection;
+	int component_index;
+	float phase;
+	string state;
+	bool written;
+	float phase_requested;
+	float phase_reply;
+	string state_reply;
+	bool is_authority_owner;
+	float tick_time_s;
+	ref array<float> pos;
+
+	void MCPVehicleDoor()
+	{
+		component_index = -1;
+		phase_requested = -1.0;
+		pos = new array<float>();
+	}
+};
+
 class MCPResult
 {
 	int id;
@@ -667,6 +699,8 @@ class MCPResult
 	ref MCPWeaponAction weapon_action;
 	// anim_timeline header and paged samples. Unassigned on other commands.
 	ref MCPAnimTimelineRead timeline;
+	// vehicle_door read-back, also on door_missing. Unassigned on other commands.
+	ref MCPVehicleDoor vehicle_door;
 };
 
 class MCPJob
