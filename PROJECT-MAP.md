@@ -1,6 +1,6 @@
 # DayZ_MCP - location map
 
-Generated 2026-09-30 15:03:55 UTC by `tools\gen-project-map.ps1`.
+Generated 2026-10-01 00:25:04 UTC by `tools\gen-project-map.ps1`.
 Este mapa indica DÓNDE están las cosas. El estado actual vive en `HANDOFF.md`.
 Regenerar tras mover o cambiar archivos: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\gen-project-map.ps1`.
 Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más cercano.
@@ -9,15 +9,15 @@ Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más c
 
 | What | Path |
 |---|---|
-| Dev / docs | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev` |
-| Mod source (censo Enforce) | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\addon` |
-| Tools | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools` |
-| Tests | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests` |
-| Plans | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\plans` |
-| Reviews | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews` |
-| Decisions | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\decisions` (ausente en este checkout) |
-| Server logs (RPT + script.log) | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_server\profiles` (ausente en este checkout) |
-| Client logs (RPT + script.log) | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_client\profiles` (ausente en este checkout) |
+| Dev / docs | `C:\Users\guill\AppData\Local\Temp\dzn-changelog` |
+| Mod source (censo Enforce) | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\addon` |
+| Tools | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\tools` |
+| Tests | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\tools\tests` |
+| Plans | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\plans` |
+| Reviews | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\reviews` |
+| Decisions | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\decisions` (ausente en este checkout) |
+| Server logs (RPT + script.log) | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\_server\profiles` (ausente en este checkout) |
+| Client logs (RPT + script.log) | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\_client\profiles` (ausente en este checkout) |
 | Destino PBO | `tools/pack-addon.ps1`: parámetro `-Destination`; evidencias de builds en `reviews/` |
 
 ## HANDOFF: cuánto leer
@@ -27,31 +27,31 @@ Detener la lectura inicial en `LIVE-STATE:END`; buscar después solo las seccion
 No fijar números de línea, límites de lectura ni tamaños: el bloque cambia en cada cierre.
 El histórico separado, si existe, está en `HANDOFF-ARCHIVE.md`.
 
-## Enforce scripts (13 files, 321 KB)
+## Enforce scripts (13 files, 359 KB)
 
-Rutas relativas a la fuente del mod: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\addon`.
+Rutas relativas a la fuente del mod: `C:\Users\guill\AppData\Local\Temp\dzn-changelog\addon`.
 Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (incluidos junctions).
 
 **4_World/**
 
 - `scripts/4_World/MCP_AnimTimeline.c` - 14 KB
 - `scripts/4_World/MCP_CarDoor.c` - 4 KB
-- `scripts/4_World/MCP_CarScript.c` - 18 KB
+- `scripts/4_World/MCP_CarScript.c` - 19 KB
 - `scripts/4_World/MCP_DiagPlugins.c` - 2 KB
 - `scripts/4_World/MCP_Weapon.c` - 29 KB
 
 **5_Mission/**
 
-- `scripts/5_Mission/MCPBridge.c` - 94 KB
+- `scripts/5_Mission/MCPBridge.c` - 96 KB
 - `scripts/5_Mission/MCPCallbacks.c` - 2 KB
-- `scripts/5_Mission/MCPClientBridge.c` - 121 KB
+- `scripts/5_Mission/MCPClientBridge.c` - 152 KB
 - `scripts/5_Mission/MCPDialogController.c` - 17 KB
 - `scripts/5_Mission/MCPJobRunner.c` - 2 KB
-- `scripts/5_Mission/MCPMessages.c` - 18 KB
+- `scripts/5_Mission/MCPMessages.c` - 21 KB
 - `scripts/5_Mission/MissionGameplay.c` - 647 B
 - `scripts/5_Mission/MissionServer.c` - 409 B
 
-- **config.cpp** -> `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\addon\config.cpp` (536 B)
+- **config.cpp** -> `C:\Users\guill\AppData\Local\Temp\dzn-changelog\addon\config.cpp` (536 B)
 
 ## Build / test entry points
 
@@ -81,15 +81,15 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `AUDITORIA_MCP_2026-09-07.md` - 51 KB, touched 2026-09-30 (UTC)
 - `AUDITORIA_PROFUNDA_2026-08-22.md` - 45 KB, touched 2026-09-30 (UTC)
 - `AUDITORIA_SOBREINGENIERIA_RONDA2_2026-08-22.md` - 39 KB, touched 2026-09-30 (UTC)
-- `CHANGELOG.md` - 9 KB, touched 2026-09-30 (UTC)
+- `CHANGELOG.md` - 34 KB, touched 2026-10-01 (UTC)
 - `CLAUDE.md` - 7 KB, touched 2026-09-30 (UTC)
 - `dayz-harness-apis.md` - 26 KB, touched 2026-09-30 (UTC)
 - `dayz-mcp-architecture.md` - 20 KB, touched 2026-09-30 (UTC)
 - `GATES.md` - 4 KB, touched 2026-09-30 (UTC)
 - `HANDOFF-ARCHIVE.md` - 272 KB, touched 2026-09-30 (UTC)
-- `product-spec.md` - 66 KB, touched 2026-09-30 (UTC)
+- `product-spec.md` - 69 KB, touched 2026-10-01 (UTC)
 - `QUICKSTART.md` - 4 KB, touched 2026-09-30 (UTC)
-- `README.md` - 22 KB, touched 2026-09-30 (UTC)
+- `README.md` - 23 KB, touched 2026-10-01 (UTC)
 
 ## Reparse points omitidos
 

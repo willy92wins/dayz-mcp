@@ -204,7 +204,10 @@ class H15SpecContractTests(unittest.TestCase):
         ):
             self.assertNotIn(phrase, spec, phrase)
         self.assertEqual(rows["H13"]["criterion"], _H13_CRITERION)
-        self.assertEqual(rows["H13"]["state"], "❓")
+        self.assertEqual(
+            rows["H13"]["state"],
+            "✓ offline + in-game (validation-matrix: H8 0ab2 wall-clock)",
+        )
         self.assertIn(
             "Un `RUNNING_IDLE` sin dueño que no está `abandoned`",
             rows["H13"]["verification"],

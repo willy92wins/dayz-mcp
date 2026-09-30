@@ -1277,7 +1277,7 @@ class Bug046DpfContractTests(unittest.TestCase):
             {
                 "criterion": "Adquisición en espera request-bound y liveness de cola",
                 "verification": "`session_acquire_wait` request-bound nunca devuelve `queued`; timeout/cancel no deja ticket/lease oculto; sólo `session_wait` vivo promueve cabeza; release/expiry no hacen grant ciego; launcher nativo/neutral respecto al consumidor, registrado (path+SHA, sin identidad/token), no autoriza PowerShell ni `.ps1`; gate local `fifo_grants_without_live_wait=0`; gate real 2 Claude+2 Codex abierto hasta proveniencia externa",
-                "state": "[verify] offline ✓; falta gate real 2 Claude + 2 Codex",
+                "state": "✓ offline + gate real 2 Claude + 2 Codex (2026-09-30: `fifo_grants_without_live_wait=0` en 17 grants; cancelación y timeout sin ticket ni lease ocultos)",
             },
         )
         self.assertEqual(
