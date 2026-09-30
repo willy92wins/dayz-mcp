@@ -38,6 +38,15 @@ class MCPCarDrive
 
 	static void Clear()
 	{
+		// OnInput turns the driverless brake off while it drives. Turn it
+		// back on before dropping the car, as vanilla ActionPushCar.OnEndServer
+		// does (actionpushcar.c:111), so TTL expiry, release and shutdown
+		// leave a driverless car braked (48bc).
+		if (s_Car)
+		{
+			s_Car.SetBrakesActivateWithoutDriver(true);
+		}
+
 		s_Active = false;
 		s_Car = null;
 		s_TickEngineReady = false;
@@ -741,19 +750,28 @@ modded class CarScript
 			float spd = GetSpeedometerAbsolute();
 			bool engineReady = true;
 
-			// Engine management (espeja autopiloto :1311-1325)
+			// Engine management (espeja autopiloto :1311-1325). Only a
+			// throttle request starts or restarts the engine; a brake-only
+			// command leaves the engine as it is (3cc4).
 			if (rpm < EngineGetRPMIdle())
 			{
-				if (rpm < 1.0 && EngineIsOn())
+				if (MCPCarDrive.s_Throttle > 0.0)
 				{
-					EngineStop();
-				}
-				else if (!EngineIsOn())
-				{
-					EngineStart();
+					if (rpm < 1.0 && EngineIsOn())
+					{
+						EngineStop();
+					}
+					else if (!EngineIsOn())
+					{
+						EngineStart();
+					}
 				}
 				engineReady = false;
 			}
+
+			// Brakes do not wait for the engine (3cc4).
+			SetBrake(MCPCarDrive.s_Brake);
+			SetHandbrake(MCPCarDrive.s_Handbrake);
 
 			MCPCarDrive.s_TickEngineReady = engineReady;
 			if (engineReady)
@@ -787,8 +805,6 @@ modded class CarScript
 				SetThrottle(throttle);
 				MCPCarDrive.s_TickThrottleSet = true;
 				SetSteering(MCPCarDrive.s_Steer);
-				SetBrake(MCPCarDrive.s_Brake);
-				SetHandbrake(MCPCarDrive.s_Handbrake);
 				SetBrakesActivateWithoutDriver(false);
 			}
 		}
