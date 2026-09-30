@@ -1,6 +1,8 @@
 """input_describe: client read of a registered UAInput and its selected bind."""
 from __future__ import annotations
 
+import copy
+import re
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -79,6 +81,22 @@ def _brace_body_after(source: str, header: str) -> str:
             if depth == 0:
                 return source[brace + 1 : index]
     raise AssertionError(f"unterminated guard: {header}")
+
+
+_RETURN_WORD = re.compile(r"\breturn\b")
+# A // or /* */ comment, or a double-quoted literal with its escapes.
+_ENFORCE_NOT_CODE = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"', re.S)
+
+
+def _blank_enforce_comments_and_strings(source: str) -> str:
+    """`source` with its comments and string literals turned into spaces.
+
+    Newlines stay, so an index into `source` is the same index into the
+    result, and a brace or a `return` inside a comment or a literal is gone.
+    """
+    return _ENFORCE_NOT_CODE.sub(
+        lambda found: re.sub(r"[^\n]", " ", found.group()), source
+    )
 
 
 # Each true write is the body of its own guard, and the flag is false before
@@ -320,6 +338,11 @@ class InputDescribeFastMCPTest(unittest.IsolatedAsyncioTestCase):
                 "probe": placeholder_probe,
             },
         }
+        # Deep copies taken before the call. The tool hands back the dicts the
+        # mock returns, so a change made in place would move a live expected
+        # value with it, and a shallow dict(result) still shares input_describe.
+        expected_registered = copy.deepcopy(registered["input_describe"])
+        expected_placeholder = copy.deepcopy(placeholder["input_describe"])
         with patch.object(
             runtime,
             "call_bridge",
@@ -333,12 +356,11 @@ class InputDescribeFastMCPTest(unittest.IsolatedAsyncioTestCase):
                     COMMAND, {"name": "UA_DayZMCP_NoSuchInput", "timeout_s": 1.0}
                 )
             )
-        self.assertEqual(
-            registered_result["input_describe"], registered["input_describe"]
-        )
-        self.assertEqual(
-            placeholder_result["input_describe"], placeholder["input_describe"]
-        )
+        # Read directly: a registered answer without its probe is a KeyError.
+        registered_probe = registered_result["input_describe"]["probe"]
+        self.assertEqual(registered_probe, expected_registered["probe"])
+        self.assertEqual(registered_result["input_describe"], expected_registered)
+        self.assertEqual(placeholder_result["input_describe"], expected_placeholder)
 
 
 class InputDescribeEnforceContractTest(unittest.TestCase):
@@ -472,6 +494,50 @@ class InputDescribeEnforceContractTest(unittest.TestCase):
         self.assertNotIn("described.probe", body[unreadable:probe_at])
         self.assertNotIn("result.input_describe", body[unreadable:probe_at])
         self.assertLess(body.index("described.exists = true"), probe_at)
+
+        # Every non-null hit publishes the probe. Braces and returns count in
+        # code only, not in a comment or a string literal.
+        code = _blank_enforce_comments_and_strings(body)
+        self.assertTrue(
+            code.startswith("described.probe = probe", probe_at),
+            "described.probe = probe is in a comment or a literal",
+        )
+        # Top level of the method: not inside a block such as
+        # if (described.exists), and not the body of a braceless if or else.
+        before = code[:probe_at]
+        self.assertEqual(
+            before.count("{") - before.count("}"),
+            0,
+            "described.probe = probe is inside a block",
+        )
+        self.assertIn(
+            before.rstrip()[-1:], (";", "}"), "described.probe = probe is conditional"
+        )
+        # From the end of the null block to the publish, the only return is
+        # the input_bind_unreadable one, inside the index block.
+        null_open = body.index("{", body.index("if (!input)"))
+        null_end = null_open + 1 + len(null_branch)
+        self.assertEqual(body[null_end], "}")
+        self.assertLess(null_end, header_at)
+        index_returns = [
+            brace_at + 1 + found.start()
+            for found in _RETURN_WORD.finditer(code[brace_at + 1 : guard_end])
+        ]
+        self.assertEqual(len(index_returns), 1, "the index block must return exactly once")
+        self.assertLess(unreadable, index_returns[0])
+        self.assertNotRegex(
+            code[unreadable : index_returns[0]],
+            "[{}]",
+            "the index block's return is not the input_bind_unreadable one",
+        )
+        self.assertEqual(
+            [
+                len(_RETURN_WORD.findall(code[null_end + 1 : header_at])),
+                len(_RETURN_WORD.findall(code[guard_end:published])),
+            ],
+            [0, 0],
+            "a return outside the index block skips the probe",
+        )
         _assert_probe_true_guards(body)
 
         for token in (
