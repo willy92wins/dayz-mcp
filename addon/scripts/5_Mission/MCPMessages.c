@@ -478,8 +478,9 @@ class MCPInputKey
 	int device;
 };
 
-// input_describe probe. Raw UAInput / UAInputAPI values for one GetInputByName
-// hit, published so a later rule can be measured (ficha 4f50). Not a verdict.
+// input_describe probe. Raw UAInput / UAInputAPI values for one non-null
+// GetInputByName hit, including the shared placeholder whose index is -1.
+// Published so a caller can see why exists is false (ficha 4f50). Not a verdict.
 class MCPInputProbe
 {
 	int input_id;
@@ -490,10 +491,13 @@ class MCPInputProbe
 	bool in_active_inputs;
 };
 
-// input_describe payload. exists is true when GetInputByName returns non-null.
-// In 1.29 an unknown name can also return exists true (ficha 4f50). probe is
-// raw engine values published to measure that rule, and is left unset when
-// GetInputByName returns null, so none of its fields are present.
+// input_describe payload. exists is true only when GetInputByName returns non-null
+// and input.ID() >= 0 (uainput.c:25, the input index). In 1.29 an unknown name
+// returns a shared placeholder whose index is -1, so exists is false and
+// binding_count, locked, conflict_count and keys stay at their defaults.
+// probe is published on the non-null path,
+// including that placeholder, so a caller can see why exists is false. probe is
+// left unset when GetInputByName returns null, so none of its fields are present.
 // binding_count, locked, conflict_count and keys are meaningful only when
 // exists is true.
 class MCPInputDescribe
