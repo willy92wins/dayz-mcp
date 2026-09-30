@@ -135,6 +135,23 @@ broker daemon over raw authenticated HTTP and never launches DayZ itself).
    (`not_seated`), then `restore_gameplay`.
 10. Release the session lease.
 
+A vehicle field arrives only from a verb that fills it. `seated`, `seat`,
+`vehicle_fixture_ready`, `engine_on_server`, `speedo_max`, `gear`,
+`net_strategy`, `is_owner`, `is_authority_owner`, `owner_identity` and the net
+id pair are dropped from every other verb's result (`OWNED_SCALAR_FIELDS` in
+`tools/dayz_mcp/result_prune.py`; fb-20260823-130809-a412): `vehicle_telemetry`
+carries all of them but `vehicle_fixture_ready`; `vehicle_get_in_client` all but
+`engine_on_server`, `speedo_max` and `gear`; `vehicle_enter` `seated` and `seat`;
+`vehicle_prepare_fixture` `vehicle_fixture_ready`; `engine_set` and
+`vehicle_control` only `engine_on_server`. Those two replies confirm the command
+reached the car and are not telemetry, so read gear, speed, position and
+ownership with `vehicle_telemetry`. No result carries `pos_delta`: no verb fills
+it (fb-20260823-141958-dde3), so displacement is the difference of two
+`vehicle_telemetry` `pos_real` reads or comes from `vehicle_trace` samples.
+`query_player_state` and `query_all_players` do not follow a client-owned car:
+the server-side body stays where the server last put it, and
+`query_all_players` reports `in_vehicle` 0 (fb-20260823-130833-95d8).
+
 Steps 2-9 are exactly `prepare_site` / `run_cell` / `finish_site` in
 [`tools/g0_abba_gate.py`](../tools/g0_abba_gate.py); drive new tests through
 that library instead of re-implementing the ladder. The threshold judgement

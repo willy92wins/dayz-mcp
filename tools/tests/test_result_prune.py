@@ -12,11 +12,52 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp import loopback, result_prune
 from dayz_mcp.result_prune import (
+    NEVER_FILLED_SCALAR_FIELDS,
     PRUNABLE_FIELDS,
     SEMANTIC_EMPTY_FIELDS,
     prune_unfilled_fields,
 )
 from tests._addon_paths import addon_root
+
+# Every command the prune can see: call_bridge sends these names.
+ALL_COMMANDS = (
+    loopback.SERVER_COMMANDS | loopback.CLIENT_COMMANDS | loopback.EXEC_COMMANDS
+)
+
+# fb-20260823-130809-a412: each vehicle scalar and the commands whose dispatch
+# writes it (MCPBridge.c / MCPClientBridge.c; tests/test_owned_scalar_census.py
+# re-derives the sets from those files). Stated here as the contract the prune
+# must keep, so a change to OWNED_SCALAR_FIELDS is visible in this file too.
+VEHICLE_SCALAR_OWNERS = {
+    "seated": {"vehicle_enter", "vehicle_get_in_client", "vehicle_telemetry"},
+    "seat": {"vehicle_enter", "vehicle_get_in_client", "vehicle_telemetry"},
+    "vehicle_fixture_ready": {"vehicle_prepare_fixture", "vehicle_get_in_client"},
+    "engine_on_server": {"engine_set", "vehicle_control", "vehicle_telemetry"},
+    "speedo_max": {"vehicle_telemetry"},
+    "gear": {"vehicle_telemetry"},
+    "net_strategy": {"vehicle_get_in_client", "vehicle_telemetry"},
+    "is_owner": {"vehicle_get_in_client", "vehicle_telemetry"},
+    "is_authority_owner": {"vehicle_get_in_client", "vehicle_telemetry"},
+    "owner_identity": {"vehicle_get_in_client", "vehicle_telemetry"},
+    "net_id_low": {"vehicle_get_in_client", "vehicle_telemetry"},
+    "net_id_high": {"vehicle_get_in_client", "vehicle_telemetry"},
+}
+
+# The unassigned default of each, as the Enforce serializer sends it.
+VEHICLE_SCALAR_DEFAULTS = {
+    "seated": 0,
+    "seat": "",
+    "vehicle_fixture_ready": 0,
+    "engine_on_server": 0,
+    "speedo_max": 0.0,
+    "gear": 0,
+    "net_strategy": 0,
+    "is_owner": 0,
+    "is_authority_owner": 0,
+    "owner_identity": "",
+    "net_id_low": 0,
+    "net_id_high": 0,
+}
 
 
 # A bridge answer as the wire actually carries it: MCPResult is one flat class,
@@ -140,14 +181,16 @@ class ResultPruneTest(unittest.TestCase):
     def test_scalars_are_never_pruned_even_when_falsy(self) -> None:
         # False/0/"" are indistinguishable from "never assigned", so they are
         # real answers that must survive: deleted:0 and found:false are results.
+        # seated/seat/gear used to stand here too; since a412 they are owned
+        # scalars (OWNED_SCALAR_FIELDS) and object_delete does not own them.
         result = _wire_result()
         result.update(
-            {"deleted": 0, "found": False, "seated": False, "seat": "", "gear": 0}
+            {"deleted": 0, "found": False, "object_id": 0, "type": "", "phase": 0.0}
         )
 
         pruned = prune_unfilled_fields("object_delete", result)
 
-        for field in ("deleted", "found", "seated", "seat", "gear"):
+        for field in ("deleted", "found", "object_id", "type", "phase"):
             self.assertIn(field, pruned, field)
 
     def test_every_public_verb_keeps_ok_and_loses_only_empty_refs(self) -> None:
@@ -204,10 +247,100 @@ class ResultPruneTest(unittest.TestCase):
                 )
                 self.assertEqual(pruned["door_index"], door)
                 self.assertEqual(pruned["component_index"], component)
+        # Each owned scalar maps to a set of owners since a412; the door
+        # fields still have exactly one.
+        for field in ("door_index", "component_index"):
+            self.assertEqual(
+                result_prune.OWNED_SCALAR_FIELDS[field], frozenset({"action_use_door"})
+            )
+
+    def test_vehicle_scalars_have_exactly_their_writing_commands_as_owners(self) -> None:
         self.assertEqual(
-            result_prune.OWNED_SCALAR_FIELDS,
-            {"door_index": "action_use_door", "component_index": "action_use_door"},
+            {
+                field: set(owners)
+                for field, owners in result_prune.OWNED_SCALAR_FIELDS.items()
+                if field not in ("door_index", "component_index")
+            },
+            VEHICLE_SCALAR_OWNERS,
         )
+
+    def test_vehicle_scalars_are_kept_for_each_owner_even_at_their_default(self) -> None:
+        # vehicle_telemetry seated=0 off a car is an answer; so is gear 0.
+        for field, owners in sorted(VEHICLE_SCALAR_OWNERS.items()):
+            default = VEHICLE_SCALAR_DEFAULTS[field]
+            for command in sorted(owners):
+                with self.subTest(field=field, command=command):
+                    self.assertIn(command, ALL_COMMANDS)
+                    pruned = prune_unfilled_fields(
+                        command, _wire_result(**{field: default})
+                    )
+                    self.assertIn(field, pruned)
+                    self.assertEqual(pruned[field], default)
+
+    def test_vehicle_scalars_are_dropped_from_every_other_command(self) -> None:
+        # The flat class sends every vehicle scalar on every verb. For a command
+        # that does not write one, its 0 is the unassigned default, never an
+        # answer (a412: vehicle_control read seated=0 gear=0 on a car in gear 2).
+        for field, owners in sorted(VEHICLE_SCALAR_OWNERS.items()):
+            for command in sorted(ALL_COMMANDS - owners):
+                with self.subTest(field=field, command=command):
+                    pruned = prune_unfilled_fields(
+                        command,
+                        _wire_result(**{field: VEHICLE_SCALAR_DEFAULTS[field]}),
+                    )
+                    self.assertNotIn(field, pruned)
+                    self.assertEqual(pruned["ok"], 1)
+
+    def test_pos_delta_is_dropped_from_every_result(self) -> None:
+        # dde3: declared in MCPResult, assigned by no command. Its 0.0 reads as
+        # "did not move" on every verb, vehicle_telemetry included.
+        self.assertEqual(NEVER_FILLED_SCALAR_FIELDS, frozenset({"pos_delta"}))
+        for command in sorted(ALL_COMMANDS):
+            with self.subTest(command=command):
+                pruned = prune_unfilled_fields(command, _wire_result(pos_delta=0.0))
+                self.assertNotIn("pos_delta", pruned)
+                self.assertEqual(pruned["ok"], 1)
+
+    def test_a412_vehicle_control_reply_keeps_only_what_the_verb_fills(self) -> None:
+        # The ticket's reply: ok=1, seated=0, seat="", gear=0, pos_delta=0,
+        # engine_on_server=1, is_owner=0. Only engine_on_server is filled.
+        wire = _wire_result(**VEHICLE_SCALAR_DEFAULTS)
+        wire.update({"engine_on_server": 1, "pos_delta": 0.0})
+
+        pruned = prune_unfilled_fields("vehicle_control", wire)
+
+        self.assertEqual(pruned["engine_on_server"], 1)
+        for field in set(VEHICLE_SCALAR_DEFAULTS) - {"engine_on_server"}:
+            self.assertNotIn(field, pruned, field)
+        self.assertNotIn("pos_delta", pruned)
+
+    def test_dde3_entities_query_carries_no_vehicle_field(self) -> None:
+        # The ticket's entities_query reply carried seated, gear, speedo_max,
+        # pos_delta ... at 0 beside count_total and entities.
+        wire = _wire_result(**VEHICLE_SCALAR_DEFAULTS)
+        wire.update({"pos_delta": 0.0, "count_total": 23, "entities": [{"type": "X"}]})
+
+        pruned = prune_unfilled_fields("entities_query", wire)
+
+        self.assertEqual(pruned["count_total"], 23)
+        self.assertEqual(pruned["entities"], [{"type": "X"}])
+        for field in (*VEHICLE_SCALAR_DEFAULTS, "pos_delta"):
+            self.assertNotIn(field, pruned, field)
+
+    def test_vehicle_telemetry_keeps_every_field_it_writes(self) -> None:
+        # vehicle_telemetry writes all of them but vehicle_fixture_ready; a real
+        # reading of a parked car is mostly zeros and must arrive whole.
+        wire = _wire_result(**VEHICLE_SCALAR_DEFAULTS)
+        wire.update({"seated": 1, "seat": "driver", "gear": 0, "speedo_max": 0.0})
+
+        pruned = prune_unfilled_fields("vehicle_telemetry", wire)
+
+        for field, owners in VEHICLE_SCALAR_OWNERS.items():
+            with self.subTest(field=field):
+                if "vehicle_telemetry" in owners:
+                    self.assertEqual(pruned[field], wire[field])
+                else:
+                    self.assertNotIn(field, pruned)
 
     def test_empty_dialog_is_pruned_except_on_ui_dialog(self) -> None:
         empty_object = prune_unfilled_fields(

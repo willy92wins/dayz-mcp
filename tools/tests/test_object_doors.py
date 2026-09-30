@@ -14,7 +14,16 @@ COMMAND = "object_doors"
 VALID_ARGS = {"type": "Land_Garage_Row_Small", "pos": [7500.0, 0.0, 7500.0]}
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 MESSAGES_PATH = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
+# #93 point 6, measured in game on 2026-09-30 on Land_Shed_M1 door 0: the
+# sentence that said the raycast was out of scope now states what was seen.
 RAYCAST_SENTENCE = (
+    "scene_raycast follows the leaf's animated position (measured on "
+    "1.29, Land_Shed_M1 door 0): a ray through the doorway hits the leaf "
+    "(component 2) at the door line while the door is closed and passes "
+    "while it is open, and a lateral ray hits component 2 where the open "
+    "leaf swung."
+)
+OUT_OF_SCOPE_SENTENCE = (
     "Whether a raycast passes through an open door leaf is out of scope."
 )
 
@@ -104,6 +113,7 @@ class ObjectDoorsFastMCPTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(COMMAND, tools)
         description = tools[COMMAND].description or ""
         self.assertIn(RAYCAST_SENTENCE, description)
+        self.assertNotIn(OUT_OF_SCOPE_SENTENCE, description)
         self.assertIn("not_a_building", description)
         self.assertIn("object_anim is unchanged", description)
         # Re-measured after fb-20260930-065425-8779: an open door's exact source

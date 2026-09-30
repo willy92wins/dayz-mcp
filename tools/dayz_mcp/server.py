@@ -3226,6 +3226,25 @@ def _bad_args(field: str, value: object, requirement: str) -> str:
     return f"bad_args: {field} {value!r} must {requirement}"
 
 
+# fb-20260823-131632-4f1c: the bridge answers a bare unknown_type when type is
+# empty or ConfigIsExisting("CfgVehicles " + type) is false (MCPBridge.c
+# ValidateSpawnArgs), so type="vehicle" never said what type is. The tool knows
+# the type it sent and names it. type is caller input of any length, so the
+# echo is cut at _SPAWN_TYPE_ECHO_MAX characters.
+_SPAWN_TYPE_ECHO_MAX = 64
+
+
+def _unknown_spawn_type(type_name: str) -> str:
+    shown = repr(type_name[:_SPAWN_TYPE_ECHO_MAX])
+    if len(type_name) > _SPAWN_TYPE_ECHO_MAX:
+        shown += f" (first {_SPAWN_TYPE_ECHO_MAX} of {len(type_name)} characters)"
+    return (
+        f"unknown_type: type {shown} is not a CfgVehicles classname; type takes "
+        "a classname such as CivilianSedan (a mod's classnames exist only while "
+        "that mod is loaded)"
+    )
+
+
 def _require_vec3(value: list[float] | None, name: str) -> list[float]:
     error = (
         "bad_pos"
@@ -6068,7 +6087,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "when known, how long until it can be abandoned; blocked_on names "
             "session_acquire_wait, not the launch FIFO, only when this caller "
             "can adopt. blocked_on names the resource and next queue, or is "
-            "null when neither lease nor box is busy. "
+            "null when neither lease nor box is busy. claimable only says that "
+            "no fault, fence, handoff, or grant or release in flight blocks the "
+            "next grant. It stays true while a session holds the lease and "
+            "while grace reserves a lapsed lease for its former holder, so "
+            "claimable=true does not mean the lease is free: owner is null when "
+            "no session holds it, and another session's acquire is granted at "
+            "once only when grace is null and queue is empty too. "
             f"{_lease_renewal_contract(config.session_ttl_s)}"
         )
     )
@@ -6554,12 +6579,33 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 _log_opaque_failure(client, "dayz_test_close", exc)
                 raise ToolError(_opaque_dayz_test_failure(exc)) from exc
 
-    @app.tool(description="Read the authoritative server-side player state.")
+    # fb-20260823-130833-95d8: after vehicle_get_in_client and a 54.7 m client
+    # drive, query_all_players still gave the player_teleport position and
+    # in_vehicle=0. The client-owned car moves on the client; the server-side
+    # body is not in the server crew (vehicle_get_in_client) and stays put.
+    @app.tool(
+        description=(
+            "Read the authoritative server-side player state. "
+            "vehicle_get_in_client seats only the client: the server-side body "
+            "does not travel with the client-owned car, so after client driving "
+            "pos stays where the server last put the player (for example the "
+            "player_teleport position). Read the car with vehicle_telemetry."
+        )
+    )
     async def query_player_state(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("query_player_state", {}, "server", _timeout(timeout_s))
 
-    @app.tool(description="Read the authoritative state of every connected player.")
+    @app.tool(
+        description=(
+            "Read the authoritative state of every connected player. "
+            "vehicle_get_in_client seats only the client: the server-side body "
+            "does not travel with the client-owned car, so after client driving "
+            "a player's pos stays where the server last put it (for example the "
+            "player_teleport position) and in_vehicle stays 0. Read the car with "
+            "vehicle_telemetry."
+        )
+    )
     async def query_all_players(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("query_all_players", {}, "server", _timeout(timeout_s))
@@ -6681,7 +6727,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             f"{LEASE_TOOL_LINE} Spawn a DayZ object through the existing "
-            "world_spawn bridge command. rotation is an RF_* CreateObjectEx "
+            "world_spawn bridge command. type is a CfgVehicles classname, for "
+            'example type="CivilianSedan"; any other value, such as '
+            '"vehicle", returns unknown_type naming the type received. '
+            "rotation is an RF_* CreateObjectEx "
             "flag integer, not an angle; 0 uses the bridge default RF_DEFAULT. "
             f"{WORLD_SPAWN_FLAGS_LINE} "
             "Does not attach wheels, battery, or spark plug; for a usable "
@@ -6734,7 +6783,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["lifetime_s"] = lifetime_value
             args["lifetime_s_set"] = True
         async with runtime.tool_lock:
-            return await runtime.call_bridge("world_spawn", args, "server", _timeout(timeout_s))
+            try:
+                return await runtime.call_bridge(
+                    "world_spawn", args, "server", _timeout(timeout_s)
+                )
+            except ToolError as error:
+                # unknown_type is refused before CreateObjectEx, so no object
+                # exists and there is no object_id to carry over.
+                if str(error) != "unknown_type":
+                    raise
+                raise ToolError(_unknown_spawn_type(type)) from None
 
     @app.tool(
         description=(
@@ -7598,6 +7656,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return await runtime.call_bridge("object_inspect", args, "server", _timeout(timeout_s))
 
     # Building door predicates. object_anim's phase read is a different API.
+    # The raycast sentence is #93 point 6, measured in game on 2026-09-30 (run
+    # ola1, rays b.rays_A_open / b.rays_B_closed / b.rays_C_open): the ray
+    # along the doorway at y=4.4 hit component 2 at the door line only while
+    # the door was closed; the lateral ray hit component 2 only while it was open.
     @app.tool(
         description=(
             "Read Building door state. Target by object_id (from world_spawn) "
@@ -7612,7 +7674,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "show that a door is closed. A target that is not a Building "
             "returns not_a_building. A door count outside 0..64 returns "
             "door_count_unsupported with that count and an empty doors list. "
-            "Whether a raycast passes through an open door leaf is out of scope."
+            "scene_raycast follows the leaf's animated position (measured on "
+            "1.29, Land_Shed_M1 door 0): a ray through the doorway hits the leaf "
+            "(component 2) at the door line while the door is closed and passes "
+            "while it is open, and a lateral ray hits component 2 where the open "
+            "leaf swung."
         )
     )
     async def object_doors(
@@ -8338,7 +8404,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "The local player must drive a car this client owns: otherwise the "
             "bridge returns not_seated (not seated in a car), not_driver "
             "(seated, but not in the driver seat) or not_owner (in the driver "
-            "seat, but this client does not own the car)."
+            "seat, but this client does not own the car). The reply confirms "
+            "the command reached the car and is not telemetry: engine_on_server "
+            "is the only vehicle field it carries. vehicle_telemetry reports "
+            "gear, speed, position and ownership."
         )
     )
     async def engine_set(mode: str, timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
@@ -8373,7 +8442,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "The local player must drive a car this client owns: otherwise the "
             "bridge returns not_seated (not seated in a car), not_driver "
             "(seated, but not in the driver seat) or not_owner (in the driver "
-            "seat, but this client does not own the car)."
+            "seat, but this client does not own the car). The reply confirms "
+            "the control reached the car and is not telemetry: engine_on_server "
+            "is the only vehicle field it carries. vehicle_telemetry reports "
+            "gear, speed, position and ownership."
         )
     )
     async def vehicle_control(
@@ -8747,7 +8819,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "by this tool. started:true / started:1 only means the client manager "
         "retained a running/pending action immediately after the start call; "
         "it proves neither server acceptance, callback execution nor "
-        "completion. The "
+        "completion. condition_failed means this call did not dispatch the "
+        "action (action.Can was false, so PerformActionStart was not called); "
+        "it does not guarantee that nothing follows: once the same action "
+        "still ran about 10 s later, by a path not identified. Confirm with a "
+        "later read. The "
         "tool does not sustain continuous-action input or wait for progress "
         "completion. Verify the intended effect separately; client callback "
         "reachability by code is not an in-engine test of your mod."
