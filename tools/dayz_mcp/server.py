@@ -125,6 +125,7 @@ InventoryAttachDest = Literal["attachment", "cargo"]
 UiReloadLayoutMode = Literal["reload", "close"]
 TelemetryReadMode = Literal["object_at", "fixture_jsonl"]
 WeaponSightsMode = Literal["ironsights", "optics", "none"]
+VehicleDoorMode = Literal["read", "open", "close"]
 
 _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "pipeline_resolve",
@@ -959,6 +960,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "scene_raycast": "scene_raycast",
         "surface_query": "surface_query",
         "telemetry_read": "telemetry_read",
+        "vehicle_door": "vehicle_door",
         "vehicle_enter": "vehicle_enter",
         "vehicle_prepare_fixture": "vehicle_prepare_fixture",
         "weapon_state": "weapon_state",
@@ -1303,6 +1305,33 @@ def _fixture_not_ready_detail(result: dict[str, Any]) -> str:
     return "observed=" + " ".join(pairs)
 
 
+# vehicle_door fills vehicle_door.slot, state and phase before door_missing
+# (MCPBridge.c DispatchVehicleDoor). slot is the car script's slot name for the
+# crew door's seat, never caller input; a value that is not a plain slot token
+# is omitted, not leaked. source is caller input and stays out.
+_VEHICLE_DOOR_SLOT_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
+
+
+def _vehicle_door_missing_detail(result: dict[str, Any]) -> str:
+    report = result.get("vehicle_door")
+    if not isinstance(report, dict):
+        return ""
+    pairs: list[str] = []
+    slot = report.get("slot")
+    if isinstance(slot, str) and _VEHICLE_DOOR_SLOT_RE.fullmatch(slot):
+        pairs.append(f"slot={slot}")
+    if report.get("state") == "missing":
+        pairs.append("state=missing")
+    phase = report.get("phase")
+    if (
+        isinstance(phase, (int, float))
+        and not isinstance(phase, bool)
+        and math.isfinite(phase)
+    ):
+        pairs.append(f"phase={float(phase)!r}")
+    return " ".join(pairs)
+
+
 def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     """Diagnostics the bridge filled BEFORE deciding the error, as message text.
 
@@ -1318,6 +1347,10 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     is not in the echo, so the allowlist is observed scalars only, published
     under an ``observed=`` label (P34-P2-1). Do not invent ``expected``.
 
+    vehicle_door's door_missing is the third: the bridge already filled the
+    empty crew-door slot, and the caller needs it to fill that slot
+    (inventory_attach takes slot=). Only slot, state and phase cross.
+
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
     clicked=false, and a world_spawn timeout has to stay "timeout". The click
@@ -1332,6 +1365,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     """
     if cmd == "vehicle_prepare_fixture" and str(result.get("error") or "") == "fixture_not_ready":
         return _fixture_not_ready_detail(result)
+    if cmd == "vehicle_door" and str(result.get("error") or "") == "door_missing":
+        return _vehicle_door_missing_detail(result)
     if cmd not in _UI_ECHO_VERBS:
         return ""
     parts: list[str] = []
@@ -1367,7 +1402,8 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # the bridge filled before the error follow the code after "; " -- see
     # _bridge_error_detail; other verbs keep the bare code except
     # vehicle_prepare_fixture/fixture_not_ready, which carries the
-    # observed= telemetry allowlist the bridge already filled.
+    # observed= telemetry allowlist the bridge already filled, and
+    # vehicle_door/door_missing, which carries the empty slot.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
     if code in {"binding_retired", "run_not_owned"}:
@@ -6680,8 +6716,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "on the vehicle (measured on 1.29: the reply read 0, a later read "
             "1, then 0 again; with no player near, 0 throughout), so there it "
             "is an instantaneous probe and cannot keep a door open (ficha "
-            "df3a). For building doors, read object_doors: object_anim can "
-            "read 0 for an open building door. Omit phase to read."
+            "df3a). For a car door, use vehicle_door. For building doors, read "
+            "object_doors: object_anim can read 0 for an open building door. "
+            "Omit phase to read."
         )
     )
     async def object_anim(
@@ -6702,6 +6739,55 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
         async with runtime.tool_lock:
             return await runtime.call_bridge("object_anim", args, "server", _timeout(timeout_s))
+
+    # One car door through the server half of the vanilla door action
+    # (MCPBridge.c DispatchVehicleDoor). The lease follows the command name, so
+    # mode=read is leased too, as object_anim's read is.
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Open, close or read one car door on the server "
+            "the way the vanilla door action does. mode=open or close calls "
+            "ForceUpdateLightsStart and SetAnimationPhase(source, 1 or 0), the "
+            "server half of ActionCarDoorsOutside, and ForceUpdateLightsEnd one "
+            "second later; it does not use SetAnimationPhaseNow, which "
+            "object_anim uses. mode=read changes nothing. source is the car's "
+            "door animation source, the name object_anim takes (CivilianSedan: "
+            "DoorsDriver, DoorsCoDriver, DoorsCargo1, DoorsCargo2, DoorsHood, "
+            "DoorsTrunk). Target by object_id (world_spawn) or by classname "
+            "near pos. The door part must be attached: door_missing names the "
+            "empty slot of a crew door (vehicle_prepare_fixture or "
+            "inventory_attach fills it), and door_not_found means no attached "
+            "door part maps to source. The reply gives phase "
+            "(GetAnimationPhase) and state (GetCarDoorsState: open above 0.5, "
+            "closed, or missing) read before the call, the door part's type, "
+            "slot and world pos, is_authority_owner and the server "
+            "tick_time_s. The door takes 0.5 s to move and phase_reply is read "
+            "in the same tick, so it still shows the old value after a write: "
+            "confirm with mode=read at +1 s or later. It checks neither the "
+            "player's reach nor an obstructed door, unlike the player action. "
+            "Errors: bad_args, object_not_found, ambiguous_object, "
+            "object_id_unknown, object_id_stale, not_a_car, door_missing, "
+            "door_not_found."
+        )
+    )
+    async def vehicle_door(
+        source: StrictStr,
+        mode: VehicleDoorMode,
+        type: StrictStr = "",
+        pos: list[StrictFloat] | None = None,
+        object_id: StrictInt = 0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(source, str) or source == "":
+            raise ToolError(_bad_args("source", source, "be a non-empty string"))
+        if mode not in ("read", "open", "close"):
+            raise ToolError(
+                _bad_args("mode", mode, "be one of 'read', 'open' or 'close'")
+            )
+        args: dict[str, Any] = {"source": source, "mode": mode}
+        args.update(_object_target_args(type, pos, object_id))
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("vehicle_door", args, "server", _timeout(timeout_s))
 
     # Probe verb: drive an infected server-side via its AI input controller.
     @app.tool(

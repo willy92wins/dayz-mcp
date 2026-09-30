@@ -25,6 +25,7 @@
       "scene_raycast": "scene_raycast",
       "surface_query": "surface_query",
       "telemetry_read": "telemetry_read",
+      "vehicle_door": "vehicle_door",
       "vehicle_enter": "vehicle_enter",
       "vehicle_prepare_fixture": "vehicle_prepare_fixture",
       "weapon_state": "weapon_state",

@@ -78,6 +78,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "scene_raycast",
     "surface_query",
     "telemetry_read",
+    "vehicle_door",
     "vehicle_enter",
     "vehicle_prepare_fixture",
     "weapon_state",

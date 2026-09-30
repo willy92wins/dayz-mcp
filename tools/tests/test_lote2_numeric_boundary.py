@@ -85,7 +85,12 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 1 from action_use door_index (StrictInt | None).
         # + 5 from ficha 5535 (anim_timeline cursor/limit/sample_hz/max_samples/timeout_s;
         # sources is a string list, not in this census).
-        self.assertEqual(len(rows), 143)
+        # + 3 from fb-29c1 (vehicle_door pos/object_id/timeout_s; source, mode and
+        # type are strings, not in this census).
+        self.assertEqual(len(rows), 146)
+        self.assertIn(("vehicle_door", "pos", "vector"), rows)
+        self.assertIn(("vehicle_door", "object_id", "int"), rows)
+        self.assertIn(("vehicle_door", "timeout_s", "float"), rows)
         self.assertIn(("anim_timeline", "sample_hz", "int"), rows)
         self.assertIn(("anim_timeline", "timeout_s", "float"), rows)
         self.assertIn(("lease_acquire", "max_wait_s", "float"), rows)

@@ -296,6 +296,69 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             (False, "bad_args"),
         ),
     ),
+    "vehicle_door": (
+        (
+            "valid_object_id_read",
+            {"object_id": 1, "source": "DoorsDriver", "mode": "read"},
+            (True, None),
+        ),
+        (
+            "valid_object_id_open",
+            {"object_id": 1, "source": "DoorsDriver", "mode": "open"},
+            (True, None),
+        ),
+        (
+            "valid_type_pos_close",
+            {
+                "type": "CivilianSedan",
+                "pos": [1.0, 2.0, 3.0],
+                "source": "DoorsTrunk",
+                "mode": "close",
+            },
+            (True, None),
+        ),
+        (
+            "missing_mode",
+            {"object_id": 1, "source": "DoorsDriver"},
+            (False, "bad_args"),
+        ),
+        (
+            "bad_mode",
+            {"object_id": 1, "source": "DoorsDriver", "mode": "toggle"},
+            (False, "bad_args"),
+        ),
+        (
+            "unhashable_mode",
+            {"object_id": 1, "source": "DoorsDriver", "mode": ["open"]},
+            (False, "bad_args"),
+        ),
+        (
+            "empty_source",
+            {"object_id": 1, "source": "", "mode": "read"},
+            (False, "bad_args"),
+        ),
+        ("missing_source", {"object_id": 1, "mode": "read"}, (False, "bad_args")),
+        (
+            "phase_is_not_this_verb",
+            {"object_id": 1, "source": "DoorsDriver", "mode": "open", "phase": 1.0},
+            (False, "bad_args"),
+        ),
+        (
+            "object_id_zero",
+            {"object_id": 0, "source": "DoorsDriver", "mode": "read"},
+            (False, "bad_args"),
+        ),
+        (
+            "type_without_pos",
+            {"type": "CivilianSedan", "source": "DoorsDriver", "mode": "read"},
+            (False, "bad_args"),
+        ),
+        (
+            "extra_key",
+            {"object_id": 1, "source": "DoorsDriver", "mode": "read", "extra": None},
+            (False, "bad_args"),
+        ),
+    ),
     "inventory_give": (
         (
             "valid_without_uid",

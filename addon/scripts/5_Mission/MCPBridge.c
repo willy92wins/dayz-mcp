@@ -19,13 +19,17 @@ class MCPBridge : Managed
 	protected const float OBJECT_LOOKUP_RADIUS = 25.0;
 	// object_doors refuses a larger GetDoorCount instead of emitting an unbounded list.
 	protected const int DOOR_READ_MAX = 64;
+	// vehicle_door calls ForceUpdateLightsEnd this long after its write. Vanilla
+	// ends the pulse in OnEndServer (actioncardoorsoutside.c:109-118); 1000 ms spans
+	// the door's animPeriod of 0.5 s (config.cpp CarScript AnimationSources).
+	protected const int VEHICLE_DOOR_LIGHTS_PULSE_MS = 1000;
 	// Capability census announced on every poll (caps=). Sorted ascending,
 	// comma separated; one entry per branch of Dispatch() before unknown_command.
 	// The daemon crosses this list against its registered tools; keep it in
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
@@ -528,6 +532,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "object_anim")
 		{
 			postNow = DispatchObjectAnim(command, result);
+		}
+		else if (command.cmd == "vehicle_door")
+		{
+			postNow = DispatchVehicleDoor(command, result);
 		}
 		else if (command.cmd == "infected_drive")
 		{
@@ -1451,6 +1459,122 @@ class MCPBridge : Managed
 		{
 			result.object_id = command.args.object_id;
 		}
+		result.ok = true;
+		return true;
+	}
+
+	// vehicle_door: the server half of ActionCarDoorsOutside (actioncardoorsoutside.c:66-118)
+	// on one door of a CarScript, found through the attached CarDoor parts
+	// (MCPCarDoorResolver). mode is explicit: read writes nothing; open and close call
+	// ForceUpdateLightsStart, SetAnimationPhase on the target (not SetAnimationPhaseNow)
+	// and ForceUpdateLightsEnd VEHICLE_DOOR_LIGHTS_PULSE_MS later. phase and state are
+	// read before any write; phase_reply and state_reply in the same tick after it.
+	// Neither reach nor IsAreaAtDoorFree is checked, and a client-owned car is not
+	// refused: is_authority_owner reports it. Target resolution is ResolveCommandObject.
+	protected bool DispatchVehicleDoor(MCPCommand command, MCPResult result)
+	{
+		string error = "";
+		string doorMode = "";
+		string crewSlot = "";
+		string doorSelection = "";
+		int doorComponent = -1;
+		float targetPhase = 0.0;
+		vector doorWorldPos = vector.Zero;
+		Object match = null;
+		CarScript car = null;
+		CarDoor carDoor = null;
+		MCPVehicleDoor report = null;
+
+		if (!command.args || command.args.source == "")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		// An absent mode arrives as "" and is refused: it never means a write.
+		doorMode = command.args.mode;
+		if (doorMode != "read" && doorMode != "open" && doorMode != "close")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		match = ResolveCommandObject(command.args, error);
+		if (!match)
+		{
+			result.ok = false;
+			result.error = error;
+			return true;
+		}
+
+		result.type = match.GetType();
+		if (command.args.object_id > 0)
+		{
+			result.object_id = command.args.object_id;
+		}
+
+		car = CarScript.Cast(match);
+		if (!car)
+		{
+			result.ok = false;
+			result.error = "not_a_car";
+			return true;
+		}
+
+		report = new MCPVehicleDoor();
+		report.source = command.args.source;
+		report.mode = doorMode;
+		report.is_authority_owner = car.IsAuthorityOwner();
+		report.tick_time_s = GetGame().GetTickTime();
+		report.phase = car.GetAnimationPhase(command.args.source);
+		result.vehicle_door = report;
+
+		// An empty crew-door slot leaves the outside action nothing to target
+		// (actioncardoorsoutside.c:34-35). The refusal still carries slot and phase.
+		crewSlot = MCPCarDoorResolver.CrewDoorSlot(car, command.args.source);
+		if (crewSlot != "" && !car.FindAttachmentBySlotName(crewSlot))
+		{
+			report.slot = crewSlot;
+			report.state = "missing";
+			result.ok = false;
+			result.error = "door_missing";
+			return true;
+		}
+
+		if (!MCPCarDoorResolver.Resolve(car, command.args.source, carDoor, doorComponent, doorSelection))
+		{
+			result.ok = false;
+			result.error = "door_not_found";
+			return true;
+		}
+
+		report.door_type = carDoor.GetType();
+		report.slot = MCPCarDoorResolver.SlotName(carDoor);
+		report.selection = doorSelection;
+		report.component_index = doorComponent;
+		report.state = MCPCarDoorResolver.StateName(car.GetCarDoorsState(report.slot));
+		doorWorldPos = carDoor.ModelToWorld(carDoor.GetSelectionPositionMS(doorSelection));
+		VectorToArray(doorWorldPos, report.pos);
+
+		if (doorMode != "read")
+		{
+			if (doorMode == "open")
+			{
+				targetPhase = 1.0;
+			}
+			car.ForceUpdateLightsStart();
+			car.SetAnimationPhase(command.args.source, targetPhase);
+			GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(car.ForceUpdateLightsEnd, VEHICLE_DOOR_LIGHTS_PULSE_MS, false);
+			report.written = true;
+			report.phase_requested = targetPhase;
+		}
+
+		// Same tick as the write: the door takes animPeriod (0.5 s) to move, so this
+		// is not a confirmation. A later mode=read is.
+		report.phase_reply = car.GetAnimationPhase(command.args.source);
+		report.state_reply = MCPCarDoorResolver.StateName(car.GetCarDoorsState(report.slot));
 		result.ok = true;
 		return true;
 	}
