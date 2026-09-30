@@ -219,6 +219,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool m_PlayerSimulationDisabled;
 	protected bool m_ActiveCamOwned;
 	protected Camera m_ActiveCam;
+	//! Owned staticcamera a release deactivated but did not delete (f47b).
+	//! Not ref: an entity, owned by the world; the pointer only lets us delete it.
+	protected Camera m_RetiredCam;
 	protected ref array<ref RestCallback> m_CallbackRefs;
 	protected ref array<ref RestCallback> m_PollCallbackRefs;
 	protected ref MCPClientPollCallback m_PollCallback;
@@ -4144,6 +4147,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		cam.SetActive(true);
 		m_ActiveCam = cam;
 		m_ActiveCamOwned = true;
+		// A camera an earlier release retired goes only now, with this one live.
+		DeleteRetiredCamera();
 		return true;
 	}
 
@@ -4188,6 +4193,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		freeCam.SetActive(true);
 		m_ActiveCam = freeCam;
 		m_ActiveCamOwned = false;
+		// Same as the static path: a retired camera goes once this one is live.
+		DeleteRetiredCamera();
 		return true;
 	}
 
@@ -5067,7 +5074,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// it is what stops the two paths drifting apart again.
 	// Ownership is the subtlety: FreeDebugCamera is a singleton the bridge does not
 	// own and is only deactivated, while the staticcamera built for
-	// orient/lookat/matrix is owned and must also be deleted.
+	// orient/lookat/matrix is owned and must also be deleted -- but not in the
+	// frame that deactivates it (f47b, RetireOwnedCamera).
 	protected void ReleaseCamera()
 	{
 		if (m_ActiveCam)
@@ -5083,7 +5091,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			freeCam.SetActive(false);
 		}
 
-		DeleteOwnedCamera();
+		RetireOwnedCamera();
 	}
 
 	// Windowed diag clients capture the OS mouse on join (f298). Resetting
@@ -5112,6 +5120,36 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 		m_ActiveCam = null;
 		m_ActiveCamOwned = false;
+	}
+
+	// f47b: deleting the owned staticcamera in the frame that deactivated it left
+	// the client render frozen on that camera's last frame while camera_get read
+	// view:"player"; the FreeDebugCamera path only deactivates and came back live.
+	// So a release keeps the deactivated camera in m_RetiredCam, and
+	// DeleteRetiredCamera runs once another camera is live (the next camera_set)
+	// or at shutdown. Not the call queue: the SYSTEM queue ticks right after
+	// mission.OnUpdate in the same DayZGame.OnUpdate (dayzgame.c:2968, 2982), so a
+	// Call queued from the bridge tick still runs in the release frame, and a
+	// CallLater delay would only guess how many frames the engine needs.
+	protected void RetireOwnedCamera()
+	{
+		if (m_ActiveCam && m_ActiveCamOwned)
+		{
+			// Never overwrite a retired reference: that would strand its camera.
+			DeleteRetiredCamera();
+			m_RetiredCam = m_ActiveCam;
+		}
+		m_ActiveCam = null;
+		m_ActiveCamOwned = false;
+	}
+
+	protected void DeleteRetiredCamera()
+	{
+		if (m_RetiredCam)
+		{
+			g_Game.ObjectDelete(m_RetiredCam);
+		}
+		m_RetiredCam = null;
 	}
 
 	protected void PostCommandError(MCPCommand command, string error)
@@ -5269,6 +5307,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPCarDrive.Clear();
 		RestoreGameplay();
 		ReleaseCamera();
+		// The mission is ending: there is no later frame to keep a retired camera for.
+		DeleteRetiredCamera();
 
 		// A completed cached callback is absent from m_PollCallbackRefs.
 		if (m_PollCallback)

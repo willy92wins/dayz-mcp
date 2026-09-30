@@ -245,7 +245,7 @@ class BridgeGuardsTest(unittest.TestCase):
         self.assertNotIn('"player_camera_active"', build)
         release = _body(source, 'protected void ReleaseCamera()')
         self.assertIn('FreeDebugCamera.GetInstance()', release)
-        self.assertLess(release.index('freeCam.SetActive(false);'), release.index('DeleteOwnedCamera();'))
+        self.assertLess(release.index('freeCam.SetActive(false);'), release.index('RetireOwnedCamera();'))
         restore = _body(source, 'protected void RestoreGameplay()')
         self.assertIn('ReleaseGameFocus();', restore)
         focus = _body(source, 'void ReleaseGameFocus()')

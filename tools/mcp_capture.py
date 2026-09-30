@@ -756,6 +756,16 @@ def _frame_evidence(frames: list[Image.Image], pair_deltas: list[float]) -> dict
 
 
 RENDER_FROZEN_SIGNAL = "render_frozen_signal"
+# Below this max_adjacent_delta the frames of one call are one picture even when their sha differ
+# (f47b). The delta is mean_abs_pixel_delta: mean per-channel difference / 255 on a <=160 px
+# LANCZOS downscale, so 1/255 ~= 0.0039 is one grey level on every pixel. DayZDiag 1.29, runs
+# ad4aaa5f and 151b98d0 (2026-09-30): a render frozen on the last scripted frame gave 0.0,
+# 8.7e-08, 1.39e-06 and 4.69e-04 (distinct_frames up to 5); live renders gave 0.004 (a still
+# scripted view), 0.0079, 0.009, 0.013, 0.080, 0.114 and 0.119. 1e-3 sits in that gap, 2.1x above
+# the largest frozen value and 4x below the smallest live one. The wider margin is on the live side
+# because a still scripted view is what every camera_set is checked with. It stays a warning, not
+# a verdict: a genuinely still live view can fall under it too.
+RENDER_FROZEN_DELTA_EPS = 1e-3
 
 
 def _is_metric_number(value: object) -> bool:
@@ -776,7 +786,9 @@ def _is_render_frozen_signal(detail: object) -> bool:
         and _is_metric_number(delta)
     ):
         return False
-    return frames >= 2 and distinct == 1 and delta == 0
+    # distinct_frames == 1 with delta 0 (byte-identical frames) is the bottom of the band, so the
+    # sha count no longer decides. A negative mean absolute difference is not evidence of anything.
+    return frames >= 2 and 0 <= delta < RENDER_FROZEN_DELTA_EPS
 
 
 def _annotate_render_frozen_signal(payload: dict[str, Any]) -> dict[str, Any]:

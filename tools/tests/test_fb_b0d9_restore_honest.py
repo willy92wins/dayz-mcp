@@ -169,11 +169,14 @@ class CaptureFrozenSignalB0d9Test(unittest.TestCase):
         *,
         distinct_per_frame: bool = False,
         frames: int = 1,
+        frame_step: int = 1,
     ) -> dict[str, Any]:
         with mock.patch.object(
             mcp_capture,
             "_run_window_capture",
-            side_effect=_backend(seed, distinct_per_frame=distinct_per_frame),
+            side_effect=_backend(
+                seed, distinct_per_frame=distinct_per_frame, frame_step=frame_step
+            ),
         ):
             return mcp_capture.capture_dual(frames=frames, cmdline_match=CMDLINE, scale=128)
 
@@ -197,15 +200,34 @@ class CaptureFrozenSignalB0d9Test(unittest.TestCase):
 
     @slow_test
     def test_b0d9_frames_4_distinct_do_not_carry_render_frozen_signal(self) -> None:
+        # f47b: "live" has to move like a live render (0.004 and up measured), not
+        # merely change sha: frame_step=16 is a max_adjacent_delta of ~9.5e-03.
         try:
             frozen = self._capture(seed=7, frames=4)
-            live = self._capture(seed=500, frames=4, distinct_per_frame=True)
+            live = self._capture(seed=500, frames=4, distinct_per_frame=True, frame_step=16)
         except Exception as exc:
             if isinstance(exc, self.failureException):
                 raise
             self.fail(str(exc))
         self.assertIn("render_frozen_signal", _warnings(frozen.get("meta")))
         self.assertNotIn("render_frozen_signal", _warnings(live.get("meta")))
+
+    @slow_test
+    def test_f47b_frames_4_near_identical_carry_render_frozen_signal(self) -> None:
+        # f47b: after restore_gameplay the render stayed on the last scripted frame
+        # with distinct_frames 2..5 and max_adjacent_delta up to 4.69e-04. Every grab
+        # here has its own sha, but one grey level of red on the block is ~5.9e-04.
+        try:
+            near = self._capture(seed=500, frames=4, distinct_per_frame=True)
+        except Exception as exc:
+            if isinstance(exc, self.failureException):
+                raise
+            self.fail(str(exc))
+        detail = (near.get("meta") or {}).get("frame_stale_detail") or {}
+        self.assertEqual(detail.get("distinct_frames"), 4)
+        self.assertGreater(detail.get("max_adjacent_delta"), 0.0)
+        self.assertLess(detail.get("max_adjacent_delta"), mcp_capture.RENDER_FROZEN_DELTA_EPS)
+        self.assertIn("render_frozen_signal", _warnings(near.get("meta")))
 
     @slow_test
     def test_b0d9_frames_1_does_not_carry_render_frozen_signal(self) -> None:
