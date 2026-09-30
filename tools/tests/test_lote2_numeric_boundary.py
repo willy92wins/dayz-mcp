@@ -83,7 +83,11 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 7 from fb-0063 part 2 (weapon_raise hold_ttl_s/timeout_s, weapon_aim dx/dy/timeout_s,
         # weapon_fire timeout_s, weapon_sights timeout_s). raised is a bool, not in this census.
         # + 1 from action_use door_index (StrictInt | None).
-        self.assertEqual(len(rows), 138)
+        # + 5 from ficha 5535 (anim_timeline cursor/limit/sample_hz/max_samples/timeout_s;
+        # sources is a string list, not in this census).
+        self.assertEqual(len(rows), 143)
+        self.assertIn(("anim_timeline", "sample_hz", "int"), rows)
+        self.assertIn(("anim_timeline", "timeout_s", "float"), rows)
         self.assertIn(("lease_acquire", "max_wait_s", "float"), rows)
         self.assertIn(("exec_enforce", "timeout_s", "float"), rows)
         self.assertIn(("object_anim", "phase", "float"), rows)

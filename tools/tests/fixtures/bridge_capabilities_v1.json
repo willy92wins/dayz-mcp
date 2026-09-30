@@ -36,6 +36,7 @@
       "action_use": "action_use",
       "action_use_door": "action_use",
       "action_use_target": "action_use",
+      "anim_timeline": "anim_timeline",
       "camera_get": "camera_get",
       "camera_set": "camera_set",
       "engine_set": "engine_set",

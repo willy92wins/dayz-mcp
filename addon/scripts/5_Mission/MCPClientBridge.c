@@ -188,7 +188,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_use,action_use_door,action_use_target,camera_get,camera_set,engine_set,input_describe,key_press,player_respawn," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_use,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,key_press,player_respawn," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -308,6 +308,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_Tick = m_Tick + 1;
 		// Returns before any engine call while no weapon override is armed.
 		MCPWeaponControl.MaintainFromTick();
+		// anim_timeline samples here on every frame, never from a job: the edge
+		// sample belongs to the frame the action or callback state changed.
+		// Returns before any engine call while no timeline is active.
+		MCPAnimTimeline.Tick(timeslice);
 
 		if (m_JobRunner)
 		{
@@ -862,6 +866,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "action_use_target")
 		{
 			postNow = DispatchActionUse(command, result);
+		}
+		else if (command.cmd == "anim_timeline")
+		{
+			postNow = DispatchAnimTimeline(command, result);
 		}
 		else if (command.cmd == "input_describe")
 		{
@@ -1886,6 +1894,105 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	{
 		MCPVehicleTrace.Abort("vehicle_release");
 		MCPCarDrive.Clear();
+		result.ok = true;
+		return true;
+	}
+
+	// Client-only timeline of the local player's action and the item in hands
+	// (ficha 5535). Sampling itself runs in OnTick via MCPAnimTimeline.Tick.
+	protected bool DispatchAnimTimeline(MCPCommand command, MCPResult result)
+	{
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		MCPArgs args = command.args;
+		if (args.mode != "start" && args.mode != "status" && args.mode != "stop" && args.mode != "read" && args.mode != "clear")
+		{
+			result.ok = false;
+			result.error = "bad_mode";
+			return true;
+		}
+		if (!IsValidTraceId(args.trace_id) || args.cursor < 0 || args.limit < 1 || args.limit > MCPAnimTimeline.LIMIT_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (args.sample_hz < MCPAnimTimeline.SAMPLE_HZ_MIN || args.sample_hz > MCPAnimTimeline.SAMPLE_HZ_MAX || args.max_samples < MCPAnimTimeline.MAX_SAMPLES_MIN || args.max_samples > MCPAnimTimeline.MAX_SAMPLES_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (!MCPAnimTimeline.SourcesOk(args.sources))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		if (args.mode == "start")
+		{
+			if (!MCPAnimTimeline.Start(args.trace_id, args.sample_hz, args.max_samples, args.sources))
+			{
+				result.ok = false;
+				result.error = MCPAnimTimeline.GetLastError();
+				return true;
+			}
+
+			result.timeline = MCPAnimTimeline.View("start", args.trace_id, 0, 1);
+			result.ok = result.timeline != null;
+			if (!result.ok)
+			{
+				result.error = MCPAnimTimeline.GetLastError();
+			}
+			return true;
+		}
+
+		if (!MCPAnimTimeline.Matches(args.trace_id))
+		{
+			result.ok = false;
+			result.error = "trace_not_found";
+			return true;
+		}
+
+		if (args.mode == "stop")
+		{
+			if (!MCPAnimTimeline.Stop(args.trace_id))
+			{
+				result.ok = false;
+				result.error = MCPAnimTimeline.GetLastError();
+				return true;
+			}
+			result.timeline = MCPAnimTimeline.View("stop", args.trace_id, 0, 1);
+		}
+		else if (args.mode == "clear")
+		{
+			// The header is read before the wipe: it is the last view of the trace.
+			MCPAnimTimelineRead clearView = MCPAnimTimeline.View("clear", args.trace_id, 0, 1);
+			if (!clearView || !MCPAnimTimeline.Clear(args.trace_id))
+			{
+				result.ok = false;
+				result.error = MCPAnimTimeline.GetLastError();
+				return true;
+			}
+			result.timeline = clearView;
+		}
+		else
+		{
+			result.timeline = MCPAnimTimeline.View(args.mode, args.trace_id, args.cursor, args.limit);
+		}
+
+		if (!result.timeline)
+		{
+			result.ok = false;
+			result.error = MCPAnimTimeline.GetLastError();
+			return true;
+		}
 		result.ok = true;
 		return true;
 	}
@@ -5147,6 +5254,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_DialogJob = null;
 		m_DialogHostTried = false;
 		MCPVehicleTrace.Abort("shutdown");
+		MCPAnimTimeline.Abort("shutdown");
 		MCPCarDrive.Clear();
 		RestoreGameplay();
 		ReleaseCamera();
