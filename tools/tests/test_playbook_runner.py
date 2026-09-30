@@ -590,5 +590,137 @@ class RequiresBridgeAbsentTest(unittest.TestCase):
         runner.validate_schema(playbook)
 
 
+ASK_RESTART = PLAYBOOKS / "ask_restart.toml"
+ASK_RESTART_FIXTURES = PLAYBOOKS / "fixtures" / "ask_restart"
+
+
+def _ui_dialog_module():
+    tools_dir = Path(__file__).resolve().parents[1]
+    if str(tools_dir) not in sys.path:
+        sys.path.insert(0, str(tools_dir))
+    from dayz_mcp import ui_dialog
+
+    return ui_dialog
+
+
+def _ask_restart_answers() -> list[tuple[str, dict]]:
+    """(fixture file, S1 answer) for every fixture of ask_restart."""
+    return [
+        (path.name, runner.load_fixture(path)["responses"]["S1"])
+        for path in sorted(ASK_RESTART_FIXTURES.glob("*.json"))
+    ]
+
+
+class AskRestartPlaybookTest(unittest.TestCase):
+    """ask_restart asks the local player before an agent restarts the game (4ed0).
+
+    Only Yes is a PASS. No, Cancel/Esc, no answer in time, a disconnect and a
+    busy dialog all STOP at S1 with one reason, and S1's observed keeps the
+    answer. A timeout is not consent: the playbook fails closed.
+    """
+
+    def _run(self, answer: object, params: dict | None = None) -> tuple[dict, list]:
+        calls: list[tuple[str, str, object]] = []
+
+        def invoke(step_id: str, tool: str, arguments: object) -> object:
+            calls.append((step_id, tool, arguments))
+            if isinstance(answer, Exception):
+                raise answer
+            return copy.deepcopy(answer)
+
+        verdict = runner.run_playbook(
+            runner.load_playbook(ASK_RESTART), params=params, invoke=invoke, mode="live"
+        )
+        return verdict, calls
+
+    def test_only_yes_allows_the_restart(self) -> None:
+        answers = _ask_restart_answers()
+        self.assertGreaterEqual(len(answers), 6)
+        for name, answer in answers:
+            with self.subTest(fixture=name):
+                verdict, calls = self._run(answer)
+                self.assertEqual([call[1] for call in calls], ["ui_dialog"])
+                self.assertEqual(verdict["steps"][0]["observed"], answer)
+                if (answer["state"], answer.get("choice")) == ("completed", "yes"):
+                    self.assertEqual(verdict["overall"], "PASS")
+                    self.assertIsNone(verdict["stopped_at"])
+                    self.assertIsNone(verdict["reason"])
+                else:
+                    self.assertEqual(verdict["overall"], "FAIL")
+                    self.assertEqual(verdict["stopped_at"], "S1")
+                    self.assertEqual(verdict["reason"], "restart_not_confirmed")
+
+    def test_fixture_answers_are_what_ui_dialog_returns(self) -> None:
+        """Each fixture's S1 is an answer ui_dialog can return for a confirm,
+        and together they cover every terminal state plus both choices. A
+        cancelled answer that carried a choice, say, is refused by the producer
+        and would be refused here too."""
+        ui_dialog = _ui_dialog_module()
+        request = ui_dialog.parse_request("confirm", "T", "M")
+        seen: set[tuple[str, object]] = set()
+        for name, answer in _ask_restart_answers():
+            with self.subTest(fixture=name):
+                dialog = {key: value for key, value in answer.items() if key != "ok"}
+                wire = {"ok": answer["ok"], "dialog": dialog}
+                self.assertEqual(ui_dialog.interpret_result(request, wire), answer)
+                seen.add((answer["state"], answer.get("choice")))
+        self.assertEqual({state for state, _choice in seen}, set(ui_dialog.TERMINAL_STATES))
+        self.assertIn(("completed", "yes"), seen)
+        self.assertIn(("completed", "no"), seen)
+
+    def test_a_dialog_that_was_never_shown_is_not_a_yes(self) -> None:
+        verdict, _calls = self._run(
+            runner.ToolCallError("lease_required: call session_acquire_wait(purpose=...)")
+        )
+        self.assertEqual(verdict["overall"], "FAIL")
+        self.assertEqual(verdict["stopped_at"], "S1")
+        self.assertTrue(verdict["reason"].startswith("tool_error:lease_required"))
+        self.assertIsNone(verdict["steps"][0]["observed"])
+
+    def test_one_confirm_dialog_and_nothing_that_closes_or_launches(self) -> None:
+        playbook = runner.load_playbook(ASK_RESTART)
+        runner.validate_schema(playbook)
+        self.assertEqual(playbook["id"], "ask_restart")
+        self.assertEqual(playbook["requires_tools"], ["ui_dialog"])
+        self.assertEqual([step["tool"] for step in playbook["steps"]], ["ui_dialog"])
+        self.assertEqual(playbook["steps"][0]["args"]["kind"], "confirm")
+
+    def test_defaults_are_a_confirm_ui_dialog_accepts(self) -> None:
+        ui_dialog = _ui_dialog_module()
+        _verdict, calls = self._run(
+            {"ok": 1, "state": "completed", "elapsed_s": 1.0, "choice": "yes"}
+        )
+        self.assertEqual(len(calls), 1)
+        request = ui_dialog.parse_request(**calls[0][2])
+        self.assertEqual(request.kind, "confirm")
+        # The request's answer window; a timeout still means no restart.
+        self.assertEqual(request.timeout_s, 30.0)
+        self.assertIn("agent", request.message)
+        self.assertIn("restart", request.message)
+
+    def test_caller_message_and_timeout_reach_the_dialog(self) -> None:
+        message = "Redeploy @MyMod: may an agent restart DayZ now?"
+        _verdict, calls = self._run(
+            {"ok": 1, "state": "cancelled", "elapsed_s": 1.0},
+            params={"message": message, "timeout_s": 45},
+        )
+        defaults = runner.load_playbook(ASK_RESTART)["params"]
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "S1",
+                    "ui_dialog",
+                    {
+                        "kind": "confirm",
+                        "title": defaults["title"],
+                        "message": message,
+                        "timeout_s": 45,
+                    },
+                )
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

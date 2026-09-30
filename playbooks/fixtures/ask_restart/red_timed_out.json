@@ -1,0 +1,14 @@
+{
+  "name": "red_timed_out",
+  "params": {},
+  "responses": {
+    "S1": {
+      "ok": 1,
+      "state": "timed_out",
+      "elapsed_s": 30.0
+    }
+  },
+  "expect_overall": "FAIL",
+  "expect_stopped_at": "S1",
+  "expect_reason": "restart_not_confirmed"
+}

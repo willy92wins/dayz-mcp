@@ -33,6 +33,7 @@ PLAYBOOK_DENIED_TOOLS = frozenset(
     {
         "dayz_test_run",
         "dayz_test_stop",
+        "dayz_test_close",
         "exec_enforce",
         "session_release",
         "session_acquire",

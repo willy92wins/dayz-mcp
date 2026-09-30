@@ -396,6 +396,72 @@ class PlaybookRunExecuteTest(unittest.IsolatedAsyncioTestCase):
                 result2["reason"] or "",
             )
 
+    async def test_lifecycle_tools_are_denied_without_running(self) -> None:
+        # No playbook may close, stop or launch the game: dayz_test_close is
+        # denied like dayz_test_run and dayz_test_stop. The stubs succeed, so a
+        # tool missing from the denylist would run and the playbook would pass.
+        ran: list[str] = []
+
+        def recorder(tool_name: str):
+            async def handler(**kwargs):
+                ran.append(tool_name)
+                return {"ok": 1}
+
+            return handler
+
+        app = _StubApp(
+            {
+                name: _StubTool(recorder(name))
+                for name in (
+                    "dayz_test_close",
+                    "dayz_test_stop",
+                    "dayz_test_run",
+                    "query_all_players",
+                )
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for tool_name in ("dayz_test_close", "dayz_test_stop", "dayz_test_run"):
+                with self.subTest(tool=tool_name):
+                    _write_playbook(
+                        root,
+                        "lifecycle",
+                        "\n".join(
+                            [
+                                'id = "lifecycle"',
+                                'version = "1"',
+                                'status = "DRAFT"',
+                                f'requires_tools = ["{tool_name}", "query_all_players"]',
+                                "",
+                                "[[steps]]",
+                                'id = "S1"',
+                                f'tool = "{tool_name}"',
+                                'args = { run_id = "r1" }',
+                                "expect = []",
+                                'on_fail = { action = "STOP", reason = "denied" }',
+                                "",
+                                "[[steps]]",
+                                'id = "S2"',
+                                'tool = "query_all_players"',
+                                "args = {}",
+                                "expect = []",
+                                'on_fail = { action = "STOP", reason = "denied" }',
+                            ]
+                        ),
+                    )
+                    result = await playbook_tool.execute_playbook_run(
+                        app, "lifecycle", playbooks_dir=root
+                    )
+                    self.assertEqual(result["overall"], "FAIL")
+                    self.assertEqual(result["stopped_at"], "S1")
+                    self.assertIn(
+                        f"tool '{tool_name}' is not allowed inside a playbook",
+                        result["reason"] or "",
+                    )
+                    self.assertEqual(result["steps"][1]["status"], "SKIPPED")
+        self.assertEqual(ran, [])
+
     async def test_too_many_steps_is_bad_args(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -501,6 +567,173 @@ class PlaybookFixturesStillGreenTest(unittest.TestCase):
         self.assertEqual(report["overall"], "PASS")
         self.assertGreaterEqual(len(report["results"]), 5)
         self.assertTrue(all(item["match"] for item in report["results"]))
+
+
+def _ask_restart_app(answer: object) -> tuple[_StubApp, list[dict]]:
+    calls: list[dict] = []
+
+    async def ui_dialog(**kwargs):
+        calls.append(dict(kwargs))
+        if isinstance(answer, Exception):
+            raise answer
+        return dict(answer)
+
+    async def boom(**kwargs):
+        raise AssertionError("ask_restart must not close or launch the game")
+
+    tools = {"ui_dialog": _StubTool(ui_dialog)}
+    for name in ("dayz_test_close", "dayz_test_stop", "dayz_test_run"):
+        tools[name] = _StubTool(boom)
+    return _StubApp(tools), calls
+
+
+class AskRestartRunTest(unittest.IsolatedAsyncioTestCase):
+    """playbook_run(name="ask_restart") (4ed0): restart only on the player's Yes."""
+
+    async def test_yes_is_a_draft_pass_from_one_confirm(self) -> None:
+        app, calls = _ask_restart_app(
+            {"ok": 1, "state": "completed", "elapsed_s": 2.0, "choice": "yes"}
+        )
+        result = await playbook_tool.execute_playbook_run(app, "ask_restart")
+        self.assertEqual(result["overall"], "PASS")
+        self.assertEqual(result["mode"], "live")
+        self.assertEqual(result["playbook"]["id"], "ask_restart")
+        self.assertEqual(result["playbook"]["status"], "DRAFT")
+        self.assertIs(result["playbook"]["certified"], False)
+        self.assertEqual(result["note"], playbook_tool.DRAFT_NOTE)
+        defaults = runner.load_playbook(PLAYBOOKS / "ask_restart.toml")["params"]
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "kind": "confirm",
+                    "title": defaults["title"],
+                    "message": defaults["message"],
+                    "timeout_s": 30.0,
+                }
+            ],
+        )
+
+    async def test_no_cancel_and_timeout_are_not_a_restart(self) -> None:
+        answers = (
+            {"ok": 1, "state": "completed", "elapsed_s": 3.0, "choice": "no"},
+            {"ok": 1, "state": "cancelled", "elapsed_s": 1.5},
+            {"ok": 1, "state": "timed_out", "elapsed_s": 30.0},
+        )
+        for answer in answers:
+            with self.subTest(state=answer["state"]):
+                app, _calls = _ask_restart_app(answer)
+                result = await playbook_tool.execute_playbook_run(app, "ask_restart")
+                self.assertEqual(result["overall"], "FAIL")
+                self.assertEqual(result["stopped_at"], "S1")
+                self.assertEqual(result["reason"], "restart_not_confirmed")
+                self.assertEqual(result["steps"][0]["observed"], answer)
+
+    async def test_no_answer_from_the_bridge_is_not_a_restart(self) -> None:
+        app, _calls = _ask_restart_app(ToolError("timeout waiting for ui_dialog id=7"))
+        result = await playbook_tool.execute_playbook_run(app, "ask_restart")
+        self.assertEqual(result["overall"], "FAIL")
+        self.assertEqual(result["stopped_at"], "S1")
+        self.assertIn("tool_error:timeout waiting for ui_dialog", result["reason"] or "")
+
+    async def test_caller_cannot_change_the_dialog_kind(self) -> None:
+        app, calls = _ask_restart_app(
+            {"ok": 1, "state": "completed", "elapsed_s": 2.0, "choice": "yes"}
+        )
+        with self.assertRaises(ToolError) as ctx:
+            await playbook_tool.execute_playbook_run(
+                app, "ask_restart", {"kind": "acknowledge"}
+            )
+        message = str(ctx.exception)
+        self.assertIn(
+            "bad_args: params.kind is not declared by playbook 'ask_restart'", message
+        )
+        self.assertIn("declared: message, timeout_s, title", message)
+        self.assertEqual(calls, [])
+
+    async def _through_registered_ui_dialog(
+        self, dialog: dict, params: dict | None = None
+    ) -> tuple[dict, list[tuple], list[tuple]]:
+        """Run the playbook against the real ui_dialog tool; the bridge answers with dialog."""
+        app, runtime = build_app(ServerConfig(log_sink=lambda _m: None))
+        enqueued: list[tuple] = []
+        abandoned: list[tuple] = []
+
+        async def fake_enqueue(cmd, args, peer, timeout_s):
+            enqueued.append((cmd, dict(args), peer, timeout_s))
+            return len(enqueued)
+
+        async def fake_probe(cmd, command_id, peer):
+            del cmd, command_id, peer
+            return {"ok": 1, "dialog": dict(dialog)}
+
+        async def fake_abandon(command_id, reason):
+            abandoned.append((command_id, reason))
+
+        with (
+            patch.object(runtime, "enqueue_bridge", side_effect=fake_enqueue),
+            patch.object(runtime, "probe_bridge_result", side_effect=fake_probe),
+            patch.object(runtime, "abandon_bridge", side_effect=fake_abandon),
+        ):
+            result = await playbook_tool.execute_playbook_run(app, "ask_restart", params)
+        self.assertFalse(runtime.tool_lock.locked())
+        return result, enqueued, abandoned
+
+    async def test_registered_ui_dialog_gets_the_confirm_and_yes_passes(self) -> None:
+        result, enqueued, abandoned = await self._through_registered_ui_dialog(
+            {"state": "completed", "choice": "yes", "elapsed_s": 3.0},
+            {"message": "Redeploy @MyMod: restart DayZ now?"},
+        )
+        self.assertEqual(result["overall"], "PASS")
+        self.assertEqual(
+            result["steps"][0]["observed"],
+            {"ok": 1, "state": "completed", "elapsed_s": 3.0, "choice": "yes"},
+        )
+        defaults = runner.load_playbook(PLAYBOOKS / "ask_restart.toml")["params"]
+        # One client command: the confirm, with the 30 s window plus the 10 s bridge slack.
+        self.assertEqual(
+            enqueued,
+            [
+                (
+                    "ui_dialog",
+                    {
+                        "kind": "confirm",
+                        "title": defaults["title"],
+                        "message": "Redeploy @MyMod: restart DayZ now?",
+                        "timeout_s": 30.0,
+                    },
+                    "client",
+                    40.0,
+                )
+            ],
+        )
+        self.assertEqual(abandoned, [])
+
+    async def test_registered_ui_dialog_cancel_is_not_a_restart(self) -> None:
+        result, enqueued, _abandoned = await self._through_registered_ui_dialog(
+            {"state": "cancelled", "elapsed_s": 1.0}
+        )
+        self.assertEqual(result["overall"], "FAIL")
+        self.assertEqual(result["stopped_at"], "S1")
+        self.assertEqual(result["reason"], "restart_not_confirmed")
+        self.assertEqual(
+            result["steps"][0]["observed"],
+            {"ok": 1, "state": "cancelled", "elapsed_s": 1.0},
+        )
+        self.assertEqual(len(enqueued), 1)
+
+    async def test_out_of_range_timeout_shows_no_dialog(self) -> None:
+        # The bridge would answer Yes; the request must be refused before it.
+        result, enqueued, _abandoned = await self._through_registered_ui_dialog(
+            {"state": "completed", "choice": "yes", "elapsed_s": 1.0},
+            {"timeout_s": 300},
+        )
+        self.assertEqual(result["overall"], "FAIL")
+        self.assertEqual(result["stopped_at"], "S1")
+        self.assertTrue(
+            (result["reason"] or "").startswith("tool_error:bad_args: timeout_s")
+        )
+        self.assertEqual(enqueued, [])
 
 
 if __name__ == "__main__":

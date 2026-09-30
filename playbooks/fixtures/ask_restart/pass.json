@@ -1,0 +1,15 @@
+{
+  "name": "pass",
+  "params": {},
+  "responses": {
+    "S1": {
+      "ok": 1,
+      "state": "completed",
+      "elapsed_s": 4.2,
+      "choice": "yes"
+    }
+  },
+  "expect_overall": "PASS",
+  "expect_stopped_at": null,
+  "expect_reason": null
+}

@@ -1,0 +1,15 @@
+{
+  "name": "red_rejected_busy",
+  "params": {},
+  "responses": {
+    "S1": {
+      "ok": 1,
+      "state": "rejected",
+      "elapsed_s": 0.01,
+      "reason": "busy"
+    }
+  },
+  "expect_overall": "FAIL",
+  "expect_stopped_at": "S1",
+  "expect_reason": "restart_not_confirmed"
+}
