@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,10 @@ _ID_RE = r"^fb-\d{8}-\d{6}-[0-9a-f]{4}$"
 # entry had, and was told it worked; the ticket it meant was _REAL_ID.
 _REAL_ID = "fb-20260930-053537-7863"
 _NEAR_MISS_ID = "fb-20260930-053510-7863"
+# Ficha fb-20260930-172226-89c9: str.splitlines() breaks on these, and
+# json.dumps(ensure_ascii=False) leaves them raw inside a string (every other
+# character splitlines() breaks on, json.dumps escapes).
+_RAW_LINE_BREAKS = {"U+2028": chr(0x2028), "U+0085": chr(0x85), "U+2029": chr(0x2029)}
 
 
 def _entry(entry_id: str, title: str = "t") -> dict:
@@ -410,6 +415,30 @@ class InboxTest(unittest.TestCase):
                 )
         self.assertEqual(inbox.FEEDBACK_PATH.read_bytes(), before)
 
+    def test_an_id_with_non_ascii_digits_is_bad_args(self) -> None:
+        # Ficha fb-20260930-172226-89c9: \d without re.ASCII matched any
+        # script's decimal digit, so these had the id shape and reached the
+        # lookup. append_feedback never makes one (strftime digits, token_hex),
+        # and an entry filed under that very id by hand does not make it
+        # resolvable either: the shape is checked before the store is read.
+        shape_error = "bad_args: feedback_id must match fb-YYYYMMDD-HHMMSS-xxxx"
+        fullwidth_date = "".join(chr(0xFF10 + int(digit)) for digit in "20260930")
+        arabic_indic_time = "".join(chr(0x0660 + int(digit)) for digit in "053537")
+        lookalikes = (
+            f"fb-{fullwidth_date}-053537-7863",
+            f"fb-20260930-{arabic_indic_time}-7863",
+            f"fb-2026093{chr(0x0966)}-053537-7863",  # one Devanagari zero
+        )
+        before = _seed_store(_jsonl(*(_entry(feedback_id) for feedback_id in lookalikes)))
+        for feedback_id in lookalikes:
+            with self.subTest(feedback_id=ascii(feedback_id)):
+                # The shape before the fix, so only re.ASCII can refuse it.
+                self.assertIsNotNone(re.fullmatch(r"fb-\d{8}-\d{6}-[0-9a-f]{4}", feedback_id))
+                with self.assertRaises(ValueError) as ctx:
+                    inbox.append_resolution(feedback_id, "fix")
+                self.assertEqual(str(ctx.exception), shape_error)
+        self.assertEqual(inbox.FEEDBACK_PATH.read_bytes(), before)
+
     def test_age_boundaries_are_derived_from_original_ts_without_persistence(self) -> None:
         from datetime import datetime, timedelta, timezone
 
@@ -460,6 +489,101 @@ class InboxTest(unittest.TestCase):
         self.assertEqual(result["malformed"], 1)
         self.assertEqual(result["count_total"], 2)
         self.assertEqual(len(result["entries"]), 2)
+
+    def _assert_listed_intact(self, char: str) -> None:
+        # Ficha fb-20260930-172226-89c9 (live: fb-20260930-172204-2adc):
+        # str.splitlines() tore such a record in two, both halves counted as
+        # malformed and the entry was never listed. append_feedback strips
+        # the title, which would drop the character at either edge.
+        text = f"before{char}after"
+        in_title = inbox.append_feedback("bug", text, "body")
+        in_body = inbox.append_feedback("bug", "title", text)
+        raw = inbox.FEEDBACK_PATH.read_bytes()
+        # Written raw, and still one b"\n" per record.
+        self.assertEqual(raw.count(char.encode("utf-8")), 2)
+        self.assertEqual(raw.count(b"\n"), 2)
+        result = inbox.read_inbox()
+        self.assertEqual(result["malformed"], 0)
+        self.assertEqual(result["count_total"], 2)
+        listed = result["entries"]
+        self.assertEqual([item["id"] for item in listed], [in_body["id"], in_title["id"]])
+        self.assertEqual(listed[1]["title"], text)
+        self.assertEqual(listed[0]["body"], text)
+
+    def test_u2028_in_a_title_or_body_is_listed_intact(self) -> None:
+        self._assert_listed_intact(_RAW_LINE_BREAKS["U+2028"])
+
+    def test_u0085_in_a_title_or_body_is_listed_intact(self) -> None:
+        self._assert_listed_intact(_RAW_LINE_BREAKS["U+0085"])
+
+    def test_u2029_in_a_title_or_body_is_listed_intact(self) -> None:
+        self._assert_listed_intact(_RAW_LINE_BREAKS["U+2029"])
+
+    def test_a_resolution_holding_a_raw_line_break_still_closes_its_entry(self) -> None:
+        # Torn the same way, a resolution was lost: pipeline_inbox kept the
+        # entry open while pipeline_resolve (_feedback_state) saw it resolved.
+        for name, char in _RAW_LINE_BREAKS.items():
+            with self.subTest(char=name):
+                entry = inbox.append_feedback("bug", "title", "body")
+                resolution = f"fixed{char}see the review"
+                inbox.append_resolution(entry["id"], resolution)
+                result = inbox.read_inbox(include_resolved=True, limit=100)
+                self.assertEqual(result["malformed"], 0)
+                self.assertEqual(result["unresolved_total"], 0)
+                self.assertEqual(result["entries"][0]["id"], entry["id"])
+                self.assertEqual(result["entries"][0]["resolution"], resolution)
+
+    def test_an_undecodable_line_costs_only_that_line(self) -> None:
+        # Ficha fb-20260930-172226-89c9: read_text() failed the whole read on
+        # one invalid UTF-8 byte, so pipeline_inbox listed nothing. The bad
+        # line is JSON but for those bytes, so a lossy decode would list an
+        # entry that was never written.
+        before_id = "fb-20260930-172200-aaaa"
+        bad_id = "fb-20260930-172201-bbbb"
+        after_id = "fb-20260930-172202-cccc"
+        for name, bad in (
+            ("invalid byte", b"\xff"),
+            ("U+2028 cut short", b"\xe2\x80"),
+            ("encoded surrogate", b"\xed\xa0\x80"),
+        ):
+            with self.subTest(name):
+                line = _jsonl(_entry(bad_id, title="<bad>")).replace(b"<bad>", bad)
+                _seed_store(_jsonl(_entry(before_id)) + line + _jsonl(_entry(after_id)))
+                result = inbox.read_inbox()
+                self.assertEqual(result["malformed"], 1)
+                self.assertEqual(result["count_total"], 2)
+                self.assertEqual(
+                    {item["id"] for item in result["entries"]}, {before_id, after_id}
+                )
+
+    def test_pipeline_inbox_lists_exactly_the_ids_pipeline_resolve_finds(self) -> None:
+        # _read_inbox frames the store as _feedback_state has since #166: b"\n"
+        # alone ends a record and each line is decoded on its own, so an entry
+        # pipeline_inbox lists is one pipeline_resolve finds, and the other way
+        # round. A bare CR ends nothing: _append_jsonl writes a CR only before
+        # its \n (json.dumps escapes one in a string); read_text() split there.
+        separator_id = "fb-20260930-172210-89c9"
+        crlf_id = "fb-20260930-172211-89c9"
+        cr_first = "fb-20260930-172212-89c9"
+        cr_second = "fb-20260930-172213-89c9"
+        bad_id = "fb-20260930-172214-89c9"
+        _seed_store(
+            _jsonl(_entry(separator_id, title="a" + _RAW_LINE_BREAKS["U+2028"] + "b"))
+            # CRLF, as _append_jsonl writes on Windows (os.open without
+            # O_BINARY is text mode); the \r is JSON whitespace
+            + _jsonl(_entry(crlf_id))[:-1] + b"\r\n"
+            # two records joined by a bare CR: one line, and not JSON
+            + _jsonl(_entry(cr_first))[:-1] + b"\r" + _jsonl(_entry(cr_second))
+            + _jsonl(_entry(bad_id, title="<bad>")).replace(b"<bad>", b"\xff")
+        )
+        result = inbox.read_inbox(limit=100)
+        listed = {item["id"] for item in result["entries"]}
+        self.assertEqual(listed, {separator_id, crlf_id})
+        self.assertEqual(result["malformed"], 2)
+        for feedback_id in (separator_id, crlf_id, cr_first, cr_second, bad_id):
+            with self.subTest(feedback_id=feedback_id):
+                exists, _already_resolved = inbox._feedback_state(feedback_id)
+                self.assertIs(exists, feedback_id in listed)
 
 
 class PipelineToolsTest(unittest.IsolatedAsyncioTestCase):
@@ -564,6 +688,36 @@ class PipelineResolveUnknownIdToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(first["already_resolved"], False)
         self.assertIs(second["already_resolved"], True)
         self.assertEqual(len(inbox.FEEDBACK_PATH.read_bytes().splitlines()), 3)
+
+
+class PipelineInboxRawLineBreakToolTest(unittest.IsolatedAsyncioTestCase):
+    """Ficha fb-20260930-172226-89c9 at the tools, as it was measured live."""
+
+    def setUp(self) -> None:
+        self._orig_dir = inbox.INBOX_DIR
+        self._orig_path = inbox.FEEDBACK_PATH
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        inbox.INBOX_DIR = root / "inbox"
+        inbox.FEEDBACK_PATH = inbox.INBOX_DIR / "feedback.jsonl"
+
+    def tearDown(self) -> None:
+        inbox.INBOX_DIR = self._orig_dir
+        inbox.FEEDBACK_PATH = self._orig_path
+        self._tmp.cleanup()
+
+    async def test_an_entry_filed_with_u2028_is_listed_by_pipeline_inbox(self) -> None:
+        # fb-20260930-172204-2adc was filed with a U+2028 in its body; after
+        # that pipeline_inbox did not list it and malformed went from 0 to 2.
+        app, _runtime = server.build_app(server.ServerConfig())
+        body = "tool: pipeline_inbox" + _RAW_LINE_BREAKS["U+2028"] + "repro: file this, then list"
+        filed = _content_json(await app.call_tool(
+            "pipeline_feedback", {"kind": "bug", "title": "t", "body": body}
+        ))
+        listed = _content_json(await app.call_tool("pipeline_inbox", {}))
+        self.assertEqual(listed["malformed"], 0)
+        self.assertEqual([item["id"] for item in listed["entries"]], [filed["id"]])
+        self.assertEqual(listed["entries"][0]["body"], body)
 
 
 class PipelineFeedbackInputSchemaLimitsTest(unittest.IsolatedAsyncioTestCase):
