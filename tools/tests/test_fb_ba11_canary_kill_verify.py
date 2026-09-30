@@ -21,6 +21,15 @@ from pathlib import Path
 from unittest import mock
 
 
+class _PollDidNotStop(BaseException):
+    """The fake wmic was called past its bound, so the poll did not stop.
+
+    BaseException on purpose: _intruder_still_running catches Exception and
+    would count an AssertionError as "still running", so a poll without an end
+    would hang the test instead of failing it (R2 mutants M5 and M6).
+    """
+
+
 _CANARY_PATH = (
     Path(__file__).resolve().parents[2]
     / "reviews"
@@ -109,7 +118,7 @@ class CanaryKillVerifyTest(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
             if exe == "wmic":
                 if commands.count("wmic") > 20:
-                    raise AssertionError("poll did not stop")
+                    raise _PollDidNotStop("poll did not stop")
                 outcome = on_wmic()
                 if isinstance(outcome, BaseException):
                     raise outcome
@@ -218,6 +227,41 @@ class CanaryKillVerifyTest(unittest.TestCase):
         self.assertEqual(written["kill_verify_elapsed_s"], clock.now)
         self.assertEqual(commands.count("wmic"), window // interval + 1)
 
+    def test_nonzero_wmic_with_header_and_client_only_is_not_verified(self) -> None:
+        # Reviewer S7, not measured: the intruder is alive, and query 3 fails
+        # (rc != 0) yet prints the CommandLine header with only the registered
+        # client. That stdout alone reads as gone; only the rc vetoes it.
+        queries = {"n": 0}
+        with tempfile.TemporaryDirectory() as evidence:
+            client_only = _listing(evidence, running=False)
+            failed_with_listing = subprocess.CompletedProcess(
+                args=["wmic"],
+                returncode=2147749911,
+                stdout=client_only,
+                stderr="ERROR:\n",
+            )
+            # Control: the same stdout with rc 0 is a clean kill.
+            with mock.patch.object(
+                self.canary.subprocess, "run", return_value=_completed(client_only)
+            ):
+                self.assertIs(self.canary._intruder_still_running(evidence), False)
+
+            def on_wmic():
+                queries["n"] += 1
+                if queries["n"] == 3:
+                    return failed_with_listing
+                return _completed(_listing(evidence, running=True))
+
+            written, sleep, commands, clock = self._run_after(evidence, on_wmic)
+        window = self.canary.KILL_VERIFY_WINDOW_S
+        interval = self.canary.KILL_VERIFY_INTERVAL_S
+        self.assertIs(written["killed_verified"], False)
+        self.assertEqual(written["kill_verify_queries"], window // interval + 1)
+        self.assertEqual(written["kill_verify_waited_s"], window)
+        self.assertEqual(written["kill_verify_elapsed_s"], clock.now)
+        self.assertEqual(written["kill_verify_elapsed_s"], window)
+        self.assertEqual(commands.count("wmic"), window // interval + 1)
+
     def test_no_instances_available_with_rc_0_is_gone(self) -> None:
         with tempfile.TemporaryDirectory() as evidence:
             def on_wmic():
@@ -271,6 +315,34 @@ class CanaryKillVerifyTest(unittest.TestCase):
         self.assertEqual(clock.now, window)
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [interval])
         self.assertEqual(commands.count("wmic"), 2)
+
+    def test_last_sleep_is_shortened_to_end_on_the_deadline(self) -> None:
+        # Reviewer S6: each query costs 0.3 s and the intruder stays listed.
+        # Query 12 ends at 14.6 s, so the last sleep is cut to 0.4 s, query 13
+        # starts on the deadline and the poll ends at 15.3 s. An uncut 1 s
+        # sleep would end it at 15.9 s.
+        window = self.canary.KILL_VERIFY_WINDOW_S
+        interval = self.canary.KILL_VERIFY_INTERVAL_S
+        query_cost = 0.3
+        clock = _Clock()
+        with tempfile.TemporaryDirectory() as evidence:
+            def on_wmic():
+                clock.now += query_cost
+                return _completed(_listing(evidence, running=True))
+
+            written, sleep, commands, same_clock = self._run_after(
+                evidence, on_wmic, clock
+            )
+        self.assertIs(same_clock, clock)
+        slept = [call.args[0] for call in sleep.call_args_list]
+        self.assertIs(written["killed_verified"], False)
+        self.assertEqual(written["kill_verify_queries"], 13)
+        self.assertEqual(commands.count("wmic"), 13)
+        self.assertEqual(slept[:-1], [interval] * 11)
+        self.assertAlmostEqual(slept[-1], 0.4)
+        self.assertAlmostEqual(written["kill_verify_waited_s"], 11.4)
+        self.assertAlmostEqual(written["kill_verify_elapsed_s"], window + query_cost)
+        self.assertEqual(written["kill_verify_elapsed_s"], clock.now)
 
     def test_a_wmic_past_the_deadline_does_not_start_another_query(self) -> None:
         clock = _Clock()
