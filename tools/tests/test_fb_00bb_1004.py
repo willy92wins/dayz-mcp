@@ -88,8 +88,12 @@ class Fb00bbSourceContractTest(unittest.TestCase):
             body.index('"vehicle_telemetry"'),
             body.index("occupant_client_seated(telemetry)"),
         )
-        self.assertIn("from dayz_mcp.peer_liveness import", source)
-        self.assertIn("client_peer_probeable as _client_peer_probeable", source)
+        # The helper the teleport calls lives in bridge_readiness.py since the
+        # server.py split (71fc), so its predicate import is checked there, and
+        # RuntimeClientPeerProbeableTest runs it.
+        readiness = BRIDGE_READINESS_PY.read_text(encoding="utf-8")
+        self.assertIn("from dayz_mcp.peer_liveness import", readiness)
+        self.assertIn("client_peer_probeable as _client_peer_probeable", readiness)
 
     def test_runtime_helper_fails_open_on_status_error(self) -> None:
         source = BRIDGE_READINESS_PY.read_text(encoding="utf-8")
@@ -101,6 +105,48 @@ class Fb00bbSourceContractTest(unittest.TestCase):
         self.assertIn("except Exception:", body)
         self.assertIn("return False", body)
         self.assertIn("bridge_status_payload", body)
+
+
+class RuntimeClientPeerProbeableTest(unittest.TestCase):
+    """Runs the helper itself, so a wrong predicate behind it goes red.
+
+    bridge_readiness imports only the standard library and pure dayz_mcp
+    modules, so this stays host-safe.
+    """
+
+    @staticmethod
+    def _probeable(status_or_error: object) -> bool:
+        import asyncio
+
+        from dayz_mcp.bridge_readiness import _runtime_client_peer_probeable
+
+        class _Runtime:
+            async def bridge_status_payload(self) -> object:
+                if isinstance(status_or_error, BaseException):
+                    raise status_or_error
+                return status_or_error
+
+        return asyncio.run(_runtime_client_peer_probeable(_Runtime()))
+
+    def test_probing_client_is_probeable(self) -> None:
+        self.assertTrue(self._probeable({"client_peer": {"last_poll_age_s": 0.1}}))
+        self.assertTrue(
+            self._probeable(
+                {"client_peer": {"binding_state": "BOUND", "bound_last_poll_age_s": 0.2}}
+            )
+        )
+
+    def test_absent_stale_or_unbound_client_is_not_probeable(self) -> None:
+        self.assertFalse(self._probeable({}))
+        self.assertFalse(self._probeable({"client_peer": {"last_poll_age_s": 20.0}}))
+        self.assertFalse(
+            self._probeable(
+                {"client_peer": {"binding_state": "LEGACY_UNBOUND", "last_poll_age_s": 0.1}}
+            )
+        )
+
+    def test_status_error_is_not_probeable(self) -> None:
+        self.assertFalse(self._probeable(RuntimeError("bridge_status failed")))
 
 
 class Fb1004TeardownCopyTest(unittest.TestCase):
