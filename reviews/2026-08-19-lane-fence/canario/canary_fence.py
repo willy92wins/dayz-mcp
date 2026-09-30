@@ -29,6 +29,10 @@ Uso:
     python canary_fence.py --phase before  --client-profiles <dir> --evidence <dir>
     python canary_fence.py --phase spawn   ...        (lanza el intruso)
     python canary_fence.py --phase after   ...        (captura + contadores + mata el extra)
+
+No volver a programar este canario sin una segunda cuenta de Steam o un intruso
+que no dependa de Steam: dos clientes comparten Steam ID y el intruso se queda
+en el menu con 0x000400B3 (ficha e4cf).
 """
 from __future__ import annotations
 
@@ -91,6 +95,40 @@ def _intruder_still_running(evidence: str) -> bool:
     except Exception:
         return True  # unknown means NOT verified; never report a clean kill on doubt
     return marker in listing.lower()
+
+
+# One wmic snapshot races the exit. Poll for this long before calling it a miss.
+KILL_VERIFY_WINDOW_S = 15
+KILL_VERIFY_INTERVAL_S = 1
+
+
+def _poll_intruder_exit(evidence: str) -> dict:
+    """Re-query until the intruder profile is gone or the window ends.
+
+    The first look is immediate; the next ones are KILL_VERIFY_INTERVAL_S
+    apart. Stop at the first query that says it is gone. A query that cannot
+    classify counts as still running (_intruder_still_running), so a wmic
+    failure on every attempt stays unverified. waited_s is the sum of the
+    sleeps, not wall time around the queries themselves.
+    """
+    queries = 0
+    waited_s = 0
+    while True:
+        queries += 1
+        if not _intruder_still_running(evidence):
+            verified = True
+            break
+        if waited_s >= KILL_VERIFY_WINDOW_S:
+            verified = False
+            break
+        step = min(KILL_VERIFY_INTERVAL_S, KILL_VERIFY_WINDOW_S - waited_s)
+        time.sleep(step)
+        waited_s += step
+    return {
+        "killed_verified": verified,
+        "kill_verify_queries": queries,
+        "kill_verify_waited_s": waited_s,
+    }
 
 
 def spawn_intruder(client_profiles: str, evidence: str, diag_exe: str, extra_args: list[str]) -> dict:
@@ -168,7 +206,10 @@ def main() -> int:
             out["killed_pid"] = args.intruder_pid
             # DayZDiag launcher pid != window pid, so the spawned pid may outlive
             # the call. Confirm by profile instead of trusting the return code.
-            out["killed_verified"] = not _intruder_still_running(args.evidence)
+            poll = _poll_intruder_exit(args.evidence)
+            out["killed_verified"] = poll["killed_verified"]
+            out["kill_verify_queries"] = poll["kill_verify_queries"]
+            out["kill_verify_waited_s"] = poll["kill_verify_waited_s"]
 
     path = os.path.join(args.evidence, "canary_%s.json" % args.phase)
     with open(path, "w", encoding="utf-8") as fh:
