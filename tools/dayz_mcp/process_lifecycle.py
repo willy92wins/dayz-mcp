@@ -35,6 +35,7 @@ from dayz_mcp.session_coordination import (
     CleanupDisposition,
     ClientIdentity,
     SessionCoordinator,
+    public_audit_stage,
 )
 
 
@@ -2199,8 +2200,17 @@ class ProcessLifecycle:
     def _authorize(self, client: ClientIdentity, token: str | None, command: str):
         decision = self.coordinator.authorize(client, token, command, 15.0)
         if not decision.allowed:
-            return decision, self._error(decision.error, decision.http_status)
+            return decision, self._decision_error(decision)
         return decision, None
+
+    @classmethod
+    def _decision_error(cls, decision: AuthorizationDecision) -> dict[str, object]:
+        """The refusal as a result; a coordinator audit_failed keeps its audit_stage."""
+        result = cls._error(decision.error, decision.http_status)
+        audit_stage = public_audit_stage(decision.audit_stage)
+        if audit_stage is not None:
+            result["audit_stage"] = audit_stage
+        return result
 
     @staticmethod
     def _authority(
@@ -2228,7 +2238,7 @@ class ProcessLifecycle:
         decision = self.coordinator.reject_reservation(
             authority[0], authority[1], authority[2], reason, status
         )
-        result = self._error(decision.error, decision.http_status)
+        result = self._decision_error(decision)
         if decision.cleanup_degraded:
             result["cleanup_degraded"] = list(decision.cleanup_degraded)
         return result

@@ -48,6 +48,7 @@ from dayz_mcp.session_coordination import (
     MAX_SESSION_QUEUE,
     SessionCoordinator,
     command_requires_lease,
+    public_audit_stage,
 )
 
 
@@ -2204,6 +2205,9 @@ class ServerState:
         )
         if not decision.allowed:
             payload: dict[str, object] = {"error": decision.error}
+            audit_stage = public_audit_stage(decision.audit_stage)
+            if audit_stage is not None:
+                payload["audit_stage"] = audit_stage
             if decision.cleanup_degraded:
                 payload["cleanup_degraded"] = list(decision.cleanup_degraded)
             if decision.error == "lease_required":
@@ -2241,6 +2245,9 @@ class ServerState:
                 "error": rejected.error,
                 "reason": retail_quarantine_reason,
             }
+            audit_stage = public_audit_stage(rejected.audit_stage)
+            if audit_stage is not None:
+                rejected_payload["audit_stage"] = audit_stage
             if rejected.cleanup_degraded:
                 rejected_payload["cleanup_degraded"] = list(
                     rejected.cleanup_degraded
