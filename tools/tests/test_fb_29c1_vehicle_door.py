@@ -120,7 +120,7 @@ OBJECT_ANIM_PINNED = (
     "A read writes nothing.",
     "A written phase holds",
     "For building doors, read object_doors",
-    "read 0 for an open building door",
+    "an unknown source name also reads 0",
 )
 
 _COMMENT_OR_STRING = re.compile(r'"(?:\\.|[^"\\\n])*"|//[^\n]*|/\*[\s\S]*?\*/')
