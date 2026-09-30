@@ -1,9 +1,16 @@
-"""Stage deterministic GitHub Release assets from a prebuilt DayZ_MCP PBO."""
+"""Stage deterministic GitHub Release assets from a prebuilt DayZ_MCP PBO.
+
+The PBO must carry the build marker tools/pack-addon.ps1 writes (mcp_build.json),
+and the commit it names must be the git_sha that VERSION.json records; anything
+else is refused (fb-20260819-024951-e307). tools/dev/pbo_provenance.py owns the
+PBO layout and the marker contract.
+"""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import subprocess
@@ -18,6 +25,7 @@ TOOLS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TOOLS_DIR.parent
 PROJECT_FILE = TOOLS_DIR / "pyproject.toml"
 BRIDGE_FILE = REPO_ROOT / "addon" / "scripts" / "5_Mission" / "MCPMessages.c"
+PROVENANCE_TOOL = TOOLS_DIR / "dev" / "pbo_provenance.py"
 
 PBO_ASSET_NAME = "DayZ_MCP.pbo"
 PBO_ARCHIVE_PATH = f"@DayZ_MCP/Addons/{PBO_ASSET_NAME}"
@@ -111,6 +119,49 @@ def read_git_sha(repo_root: Path) -> str:
     return _run_git(repo_root, "rev-parse", "HEAD")
 
 
+def _provenance_tool():
+    if not PROVENANCE_TOOL.is_file():
+        raise ReleaseRefusal(
+            "provenance_tool_missing",
+            f"{PROVENANCE_TOOL} is missing",
+            "run from a complete checkout of this repository",
+        )
+    spec = importlib.util.spec_from_file_location("pbo_provenance", PROVENANCE_TOOL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def read_build_commit(pbo_bytes: bytes) -> str | None:
+    """The commit the PBO's mcp_build.json names (None for a -Source build)."""
+    provenance = _provenance_tool()
+    rebuild = "rebuild the PBO from HEAD with tools/pack-addon.ps1 (docs/RELEASE.md step 2)"
+    try:
+        _properties, entries = provenance.read_pbo(pbo_bytes)
+    except provenance.PboFormatError as error:
+        raise ReleaseRefusal(
+            "pbo_unreadable",
+            f"the --pbo input is not a PBO: {error}",
+            "pass the DayZ_MCP.pbo path that tools/pack-addon.ps1 printed",
+        ) from error
+    markers = [data for name, data in entries if name == provenance.MARKER_NAME]
+    if len(markers) != 1:
+        raise ReleaseRefusal(
+            "pbo_marker_missing",
+            f"the PBO carries {len(markers)} {provenance.MARKER_NAME} entries, expected exactly one",
+            rebuild,
+        )
+    try:
+        marker = provenance.parse_marker(markers[0])
+    except provenance.MarkerError as error:
+        raise ReleaseRefusal(
+            "pbo_marker_invalid",
+            f"{provenance.MARKER_NAME} is malformed: {error}",
+            rebuild,
+        ) from error
+    return marker["commit"]
+
+
 def current_built_utc() -> str:
     return (
         datetime.now(timezone.utc)
@@ -170,6 +221,14 @@ def stage_release(
     built_utc = built_utc_fn()
     pbo_bytes = pbo_path.read_bytes()
     pbo_sha256 = _sha256(pbo_bytes)
+    build_commit = read_build_commit(pbo_bytes)
+    if build_commit != git_sha:
+        raise ReleaseRefusal(
+            "pbo_commit_mismatch",
+            f"the PBO was built from {build_commit or 'a folder (-Source), not a commit'}; "
+            f"VERSION.json would record git_sha {git_sha}",
+            "rebuild the PBO from HEAD with tools/pack-addon.ps1 (docs/RELEASE.md step 2)",
+        )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     zip_path = out_dir / f"DayZ_MCP-v{version}-addon.zip"

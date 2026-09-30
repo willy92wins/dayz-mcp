@@ -1,0 +1,355 @@
+"""tools/dev/setup_worktree.sh: a worktree's venv must run THAT worktree's code.
+
+fb-20260818-220336-2eb5: setuptools' editable finder sits at the end of
+sys.meta_path, behind PathFinder, and maps dayz_mcp to an absolute tree. From inside
+tools/, `python -c "import dayz_mcp"` finds the local folder first and stays green
+while the map points at another checkout; a test subprocess started elsewhere falls
+through to the map and runs that other checkout. These tests build a throwaway venv
+whose editable map points inside or outside a synthetic worktree, and run the
+script's --check from inside that worktree's tools/ with PYTHONPATH naming it: the
+two conditions that kept the old gate green.
+
+Not run here: the create path past its refusals. It adds a worktree to the
+repository that holds the script and downloads pip, the requirements and
+setuptools. Its refusals run on a copy of the script inside a throwaway repository,
+so a regression can never add a worktree to this one.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from tests._tiers import slow_test
+
+TOOLS_DIR = Path(__file__).resolve().parents[1]
+SCRIPT = TOOLS_DIR / "dev" / "setup_worktree.sh"
+INSTALLER = TOOLS_DIR / "install-mcp.ps1"
+_TIMEOUT_S = 120
+_PIP_REQUIREMENT = re.compile(r'(?m)^\$PipRequirement\s*=\s*"([^"\n]*)"[ \t]*$')
+
+# A minimal setuptools editable finder: appended to sys.meta_path by a .pth file,
+# it maps top-level names to absolute paths, which is where the 2eb5 leak lives.
+_FINDER = '''\
+import importlib.util
+import sys
+from pathlib import Path
+
+MAPPING = {mapping!r}
+
+
+class _Finder:
+    @classmethod
+    def find_spec(cls, fullname, path=None, target=None):
+        if fullname not in MAPPING:
+            return None
+        base = Path(MAPPING[fullname])
+        if (base / "__init__.py").is_file():
+            return importlib.util.spec_from_file_location(
+                fullname, base / "__init__.py", submodule_search_locations=[str(base)]
+            )
+        if base.with_suffix(".py").is_file():
+            return importlib.util.spec_from_file_location(fullname, base.with_suffix(".py"))
+        return None
+
+
+def install():
+    if _Finder not in sys.meta_path:
+        sys.meta_path.append(_Finder)
+'''
+
+
+def _git_bash() -> str | None:
+    """Git's bash. A bare "bash" from Python can be WSL's System32\\bash.exe."""
+    bases = [
+        os.environ.get("ProgramFiles"),
+        os.environ.get("ProgramW6432"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
+    ]
+    for base in bases:
+        if base:
+            candidate = Path(base) / "Git" / "bin" / "bash.exe"
+            if candidate.is_file():
+                return str(candidate)
+    git = shutil.which("git")
+    if git:
+        candidate = Path(git).resolve().parents[1] / "bin" / "bash.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, check=False, timeout=_TIMEOUT_S, **kwargs)
+
+
+@unittest.skipUnless(sys.platform == "win32", "the synthetic venv uses the Windows layout")
+class WorktreeCheckTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.bash = _git_bash()
+        if self.bash is None:
+            self.skipTest("Git Bash not found under ProgramFiles, LOCALAPPDATA or beside git")
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.wt = self._tree("wt")
+        self.other = self._tree("other")
+
+    def _tree(self, name: str) -> Path:
+        tools = self.root / name / "tools"
+        (tools / "dayz_mcp").mkdir(parents=True)
+        (tools / "dayz_mcp" / "__init__.py").write_text(f"TREE = {name!r}\n", encoding="utf-8")
+        (tools / "mcp_capture.py").write_text(f"TREE = {name!r}\n", encoding="utf-8")
+        return self.root / name
+
+    def _venv(self, mapping: dict[str, Path]) -> Path:
+        venv = self.wt / "tools" / ".venv-mcp"
+        made = _run([sys.executable, "-m", "venv", "--without-pip", str(venv)])
+        self.assertEqual(made.returncode, 0, made.stderr)
+        python = venv / "Scripts" / "python.exe"
+        purelib = _run(
+            [str(python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+            text=True,
+        )
+        self.assertEqual(purelib.returncode, 0, purelib.stderr)
+        site = Path(purelib.stdout.strip())
+        finder = _FINDER.format(mapping={name: str(path) for name, path in mapping.items()})
+        (site / "__editable___fake_1_0_0_finder.py").write_text(finder, encoding="utf-8")
+        (site / "__editable__.fake-1.0.0.pth").write_text(
+            "import __editable___fake_1_0_0_finder; __editable___fake_1_0_0_finder.install()\n",
+            encoding="utf-8",
+        )
+        return python
+
+    def check(self) -> tuple[int, str]:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(self.wt / "tools")
+        done = _run(
+            [self.bash, SCRIPT.as_posix(), "--check", self.wt.as_posix()],
+            cwd=str(self.wt / "tools"),
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return done.returncode, done.stdout + done.stderr
+
+    @slow_test
+    def test_a_map_into_the_worktree_is_sealed(self) -> None:
+        tools = self.wt / "tools"
+        self._venv({"dayz_mcp": tools / "dayz_mcp", "mcp_capture": tools / "mcp_capture"})
+
+        code, output = self.check()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("SEALED", output)
+        self.assertNotIn("LEAK", output)
+
+    @slow_test
+    def test_a_map_into_another_checkout_leaks_even_from_inside_tools(self) -> None:
+        other = self.other / "tools"
+        python = self._venv({"dayz_mcp": other / "dayz_mcp", "mcp_capture": other / "mcp_capture"})
+
+        code, output = self.check()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("LEAK: the editable finder maps dayz_mcp to {0}".format(other / "dayz_mcp"), output)
+        self.assertIn("LEAK: dayz_mcp resolves to {0}".format(other / "dayz_mcp" / "__init__.py"), output)
+        self.assertNotIn("SEALED", output)
+        # The gate this replaces stays green in the same venv: the local folder wins.
+        old_gate = _run(
+            [str(python), "-c", "import dayz_mcp; print(dayz_mcp.TREE)"],
+            cwd=str(self.wt / "tools"),
+            text=True,
+        )
+        self.assertEqual(old_gate.returncode, 0, old_gate.stderr)
+        self.assertEqual(old_gate.stdout.strip(), "wt")
+
+    @slow_test
+    def test_one_module_outside_the_worktree_is_enough_to_leak(self) -> None:
+        self._venv(
+            {
+                "dayz_mcp": self.wt / "tools" / "dayz_mcp",
+                "mcp_capture": self.other / "tools" / "mcp_capture",
+            }
+        )
+
+        code, output = self.check()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("LEAK: mcp_capture resolves to", output)
+        self.assertNotIn("LEAK: dayz_mcp", output)
+
+    @slow_test
+    def test_a_venv_that_only_pythonpath_could_satisfy_is_not_sealed(self) -> None:
+        self._venv({})
+
+        code, output = self.check()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("LEAK: dayz_mcp resolves to nothing", output)
+
+    @slow_test
+    def test_a_worktree_without_a_venv_is_refused(self) -> None:
+        code, output = self.check()
+
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("no venv at", output)
+
+
+@unittest.skipUnless(sys.platform == "win32", "Git Bash is the shell this script is written for")
+class SetupScriptTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.bash = _git_bash()
+        if self.bash is None:
+            self.skipTest("Git Bash not found under ProgramFiles, LOCALAPPDATA or beside git")
+
+    def pip_requirement(self, installer: bytes) -> subprocess.CompletedProcess:
+        # Sourcing defines the functions and runs nothing.
+        return _run(
+            [self.bash, "-c", 'source "$1"; pip_requirement', "setup_worktree", SCRIPT.as_posix()],
+            input=installer,
+        )
+
+    def throwaway_copy(self, installer: bytes | None = None) -> tuple[Path, Path]:
+        """A copy of the script inside a fresh repository: git work lands there, never here.
+
+        With ``installer``, tools/install-mcp.ps1 holds it and everything is committed.
+        """
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        repo = root / "repo"
+        (repo / "tools" / "dev").mkdir(parents=True)
+        copy = repo / "tools" / "dev" / "setup_worktree.sh"
+        shutil.copyfile(SCRIPT, copy)
+        self.assertEqual(_run(["git", "init", "-q", str(repo)]).returncode, 0)
+        if installer is not None:
+            (repo / "tools" / "install-mcp.ps1").write_bytes(installer)
+            for args in (
+                ("config", "user.name", "setup-worktree-test"),
+                ("config", "user.email", "setup-worktree-test@example.invalid"),
+                ("add", "-A"),
+                ("commit", "-q", "-m", "seed"),
+            ):
+                done = _run(["git", "-C", str(repo), *args])
+                self.assertEqual(done.returncode, 0, done.stderr)
+        return root, copy
+
+    def branch_exists(self, copy: Path, branch: str) -> bool:
+        listed = _run(["git", "-C", str(copy.parents[2]), "branch", "--list", branch], text=True)
+        return listed.stdout.strip() != ""
+
+    @slow_test
+    def test_a_base_without_an_exact_pip_pin_is_refused_before_the_worktree_exists(self) -> None:
+        root, copy = self.throwaway_copy(installer=b'$PipRequirement = "pip>=26"\n')
+
+        done = _run(
+            [self.bash, copy.as_posix(), (root / "wt").as_posix(), "new-branch", "HEAD"], text=True
+        )
+
+        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("$PipRequirement", done.stderr)
+        self.assertFalse((root / "wt").exists())
+        self.assertFalse(self.branch_exists(copy, "new-branch"))
+
+    @slow_test
+    def test_a_relative_worktree_path_is_relative_to_the_caller(self) -> None:
+        root, copy = self.throwaway_copy(installer=INSTALLER.read_bytes())
+        env = os.environ.copy()
+        # Stop right after `git worktree add`: nothing is installed, nothing downloaded.
+        env["PYTHON"] = "no-such-python-for-this-test"
+
+        done = _run(
+            [self.bash, copy.as_posix(), "relative-wt", "new-branch", "HEAD"],
+            cwd=str(root),
+            env=env,
+            text=True,
+        )
+
+        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn("READY", done.stdout)
+        self.assertTrue((root / "relative-wt" / "tools" / "install-mcp.ps1").is_file(), done.stderr)
+        self.assertFalse((copy.parents[2] / "relative-wt").exists())
+        self.assertTrue(self.branch_exists(copy, "new-branch"))
+
+    @slow_test
+    def test_pip_requirement_is_the_installer_pin(self) -> None:
+        pins = _PIP_REQUIREMENT.findall(INSTALLER.read_text(encoding="utf-8"))
+        self.assertEqual(len(pins), 1, pins)
+
+        done = self.pip_requirement(INSTALLER.read_bytes())
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.decode("utf-8").strip(), pins[0])
+
+    @slow_test
+    def test_pip_requirement_refuses_anything_but_one_exact_pin(self) -> None:
+        cases = (
+            b"Write-Host 'no pin here'\n",
+            b'$PipRequirement = "pip>=26"\n',
+            b'$PipRequirement = "pip=="\n',
+            b'$PipRequirement = "pip==1.0"\n$PipRequirement = "pip==2.0"\n',
+        )
+        for installer in cases:
+            with self.subTest(installer=installer):
+                done = self.pip_requirement(installer)
+
+                self.assertNotEqual(done.returncode, 0)
+                self.assertEqual(done.stdout, b"")
+                self.assertIn(b"$PipRequirement", done.stderr)
+
+    @slow_test
+    def test_an_existing_directory_is_refused_before_git_is_touched(self) -> None:
+        root, copy = self.throwaway_copy()
+        existing = root / "existing"
+        existing.mkdir()
+
+        done = _run([self.bash, copy.as_posix(), existing.as_posix(), "new-branch"], text=True)
+
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertIn("EXISTS", done.stderr)
+        self.assertFalse(self.branch_exists(copy, "new-branch"))
+        worktrees = _run(["git", "-C", str(copy.parents[2]), "worktree", "list", "--porcelain"], text=True)
+        self.assertEqual(worktrees.stdout.count("worktree "), 1, worktrees.stdout)
+
+    @slow_test
+    def test_wrong_arguments_print_the_usage_and_exit_2(self) -> None:
+        _root, copy = self.throwaway_copy()
+        for args in ((), ("only-one",), ("--check",), ("--check", "a", "b"), ("-x", "y"), ("a", "b", "c", "d")):
+            with self.subTest(args=args):
+                done = _run([self.bash, copy.as_posix(), *args], text=True)
+
+                self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+                self.assertIn("usage: setup_worktree.sh", done.stderr)
+
+
+class SetupScriptContractTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.text = SCRIPT.read_text(encoding="utf-8")
+
+    def test_pip_comes_pinned_from_the_installer_and_is_never_upgraded(self) -> None:
+        installs = [line for line in self.text.splitlines() if re.search(r"-m\s+pip\s+install\b", line)]
+        self.assertEqual(len(installs), 3, installs)
+        for line in installs:
+            self.assertNotRegex(line, r"--upgrade|\s-[A-Za-z]*U\b")
+        self.assertIn('"$python" -m pip install -q "$pip_req"', installs[0])
+        pin = self.text.index('pip_req="$(git -C "$repo" show "$base:tools/install-mcp.ps1" | pip_requirement)"')
+        self.assertLess(pin, self.text.index('git -C "$repo" worktree add'))
+
+    def test_the_create_path_ends_with_the_isolated_check(self) -> None:
+        self.assertIn('neutral="$(mktemp -d)"', self.text)
+        self.assertIn('(cd "$neutral" && "$python" -I - <<\'PY\')', self.text)
+        create = self.text[self.text.index("create_worktree() {"):self.text.index("main() {")]
+        self.assertLess(create.index("pip install -q -e ."), create.index('check_worktree "$wt"'))
+        self.assertLess(create.index('check_worktree "$wt"'), create.index('echo "READY'))
+
+
+if __name__ == "__main__":
+    unittest.main()

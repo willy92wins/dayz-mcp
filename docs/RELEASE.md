@@ -37,10 +37,14 @@ on a host without that environment.
 .\tools\pack-addon.ps1 -ModName DayZ_MCP
 ```
 
-It packs the committed `addon/` at HEAD, which step 1 left clean.
+It packs the committed `addon/` at HEAD, which step 1 left clean. Before packing
+it writes `mcp_build.json` into the staged addon root: the commit, the `addon/`
+tree id and the build time in UTC. The file is not in git; the PBO carries it in
+its root, so a PBO says which commit built it. Enforce never reads it:
+`addon/config.cpp` compiles only `scripts/4_World` and `scripts/5_Mission`.
 The script prints the resulting `DayZ_MCP.pbo` path and byte size after
 AddonBuilder succeeds
-([`tools/pack-addon.ps1:565-565`](../tools/pack-addon.ps1#L565-L565)). Record that
+([`tools/pack-addon.ps1:599-599`](../tools/pack-addon.ps1#L599-L599)). Record that
 printed path; do not substitute a source-tree file or an older deployed PBO.
 
 ## 3. Stage the release assets
@@ -49,10 +53,19 @@ printed path; do not substitute a source-tree file or an older deployed PBO.
 
 ```powershell
 $Pbo = "C:\path\printed\by\pack-addon\DayZ_MCP.pbo"
+.\tools\.venv-mcp\Scripts\python.exe .\tools\dev\pbo_provenance.py $Pbo . HEAD
+if ($LASTEXITCODE -ne 0) { throw "The PBO is not the build of HEAD" }
 .\tools\.venv-mcp\Scripts\python.exe .\tools\make_release.py `
   --pbo $Pbo `
   --out .\dist
 ```
+
+`pbo_provenance.py` compares every PBO entry with `addon/` at HEAD byte for byte
+and requires `mcp_build.json` to name HEAD's commit and `addon/` tree; it exits
+non-zero on any difference, extra entry or missing file. `make_release.py` reads
+the marker too and refuses a PBO built from another commit than the `git_sha` it
+records (`pbo_commit_mismatch`), one without a valid marker (`pbo_marker_missing`,
+`pbo_marker_invalid`) and bytes that are not a PBO (`pbo_unreadable`).
 
 The command creates exactly these publishable assets:
 
@@ -205,3 +218,20 @@ a bridge version and classifies `<bridge_version>~<game_version>` as accepted or
 `bridge_version` in `VERSION.json` gives doctor and release diagnostics the
 release-side value needed to name a PBO/server mismatch instead of reporting an
 opaque failure. The live handshake result remains authoritative.
+
+## Development tools (`tools/dev/`)
+
+Tools for working on this repository and promoting a build; each documents its
+parameters in its header.
+
+- `tools/dev/setup_worktree.sh <worktree-dir> <new-branch> [base-ref]` creates a git
+  worktree with its own `tools/.venv-mcp`, installed like CI, then checks from an
+  empty directory that the editable install resolves `dayz_mcp` inside that
+  worktree. `--check <worktree-dir>` runs only the check.
+- `tools/dev/pbo_provenance.py <pbo> <repo> <ref>` compares a built PBO file by file
+  with `addon/` at `<ref>` and checks its `mcp_build.json`; it exits 0 only when
+  everything matches.
+- `tools/dev/swap_pbo.ps1 -Build <pbo> -WantNew <sha256> -WantOld <sha256>` replaces
+  the deployed PBO only when the build and the live file have the expected hashes
+  and no DayZ game process runs; `-Backup` with `-WantBackup` also requires an
+  intact rollback copy.

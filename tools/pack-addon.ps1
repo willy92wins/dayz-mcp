@@ -11,6 +11,10 @@
 #
 # Launched with no arguments AddonBuilder opens its GUI and never returns, so every
 # invocation here passes source and destination positionally.
+#
+# Before packing, the stage gets one file that is not in git, mcp_build.json in its
+# root: the commit, the addon/ tree id and the build time in UTC. The PBO carries it,
+# and tools/dev/pbo_provenance.py checks a built PBO against it.
 
 param(
   [string]$ModName = "DayZ_MCP",
@@ -325,9 +329,12 @@ if ($ModName -notmatch '^[A-Za-z][A-Za-z0-9_]{0,63}$') {
 $folderMode = -not [string]::IsNullOrWhiteSpace($Source)
 $excluded = New-Object System.Collections.Generic.List[string]
 $commitSha = $null
+$addonTreeSha = $null
 $sourceKind = 'git'
 $fromRoot = $null
 $fromInfo = $null
+# The build marker written into the staged addon root before packing (see below).
+$markerName = 'mcp_build.json'
 
 # Validate Source and resolve Destination before creating the stage. A StageRoot
 # inside Source copies into itself; a StageRoot equal to Destination writes under
@@ -341,6 +348,10 @@ if ($folderMode) {
   $fromInfo = New-Object IO.DirectoryInfo $fromRoot
   if (($fromInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw "Source is a reparse point (junction or symlink); refusing to follow it: $fromRoot"
+  }
+  if (Test-Path -LiteralPath (Join-Path $fromRoot $markerName)) {
+    throw ("Source carries $markerName at its root: $fromRoot`n" +
+           "That name is reserved for the build marker this script writes; remove the file.")
   }
 }
 
@@ -373,6 +384,11 @@ if ($folderMode) {
     throw "Could not resolve git ref '$Ref' to a commit in $repoRoot."
   }
   $commitSha = ([string]$resolved).Trim()
+  $treeResolved = Invoke-Git -RepoRoot $repoRoot -ArgumentList @('rev-parse', '--verify', "${commitSha}:addon")
+  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($treeResolved)) {
+    throw "Could not resolve addon/ at $commitSha in $repoRoot."
+  }
+  $addonTreeSha = ([string]$treeResolved).Trim()
   $treeRaw = Invoke-Git -RepoRoot $repoRoot -ArgumentList @('ls-tree', '-r', $commitSha, '--', 'addon')
   if ($LASTEXITCODE -ne 0) {
     throw "git ls-tree of addon/ at $commitSha failed with exit $LASTEXITCODE"
@@ -387,6 +403,10 @@ if ($folderMode) {
   foreach ($entry in $treeEntries) {
     if ($entry.Mode -eq '120000' -or $entry.Mode -eq '160000') {
       throw "Refusing to pack git symlink or submodule (mode $($entry.Mode)): $($entry.Path)"
+    }
+    if ([string]::Equals([string]$entry.Path, "addon/$markerName", [StringComparison]::OrdinalIgnoreCase)) {
+      throw ("$($entry.Path) is tracked at ${commitSha}. That name is reserved for the build marker " +
+             "this script writes; rename the file.")
     }
   }
   $zipFile = Join-Path $batchDir 'addon.zip'
@@ -403,6 +423,20 @@ if ($folderMode) {
   # git archive applies .gitattributes; the stage must still equal the commit tree.
   Assert-StageMatchesGitTree -StageDir $stage -Entries $treeEntries -CommitSha $commitSha
 }
+
+# fb-20260819-024951-e307: a PBO has to say which commit built it, or deploying a
+# stale one silently reverts someone else's work. AddonBuilder -packonly packs every
+# file of the stage (fb-63c9), so this marker reaches the PBO root; it is not in git.
+# tools/dev/pbo_provenance.py expects exactly this one extra entry and checks its
+# commit against the ref it compares with. Enforce never reads it: config.cpp
+# compiles only scripts/4_World and scripts/5_Mission. A binarizing build (a tree
+# with .p3d/.paa/.rvmat) honours include.lst and would leave the marker out.
+$builtUtc = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
+$markerJson = ('{"commit":' + (ConvertTo-JsonValue $commitSha) +
+  ',"tree":' + (ConvertTo-JsonValue $addonTreeSha) +
+  ',"built_utc":' + (ConvertTo-JsonValue $builtUtc) +
+  ',"source":' + (ConvertTo-JsonValue $sourceKind) + '}')
+[IO.File]::WriteAllText((Join-Path $stage $markerName), ($markerJson + "`n"), (New-Object System.Text.UTF8Encoding $false))
 
 $prefixFile = Join-Path $stage '$PBOPREFIX$'
 if (-not (Test-Path -LiteralPath $prefixFile)) {

@@ -1,4 +1,10 @@
-"""Release staging contract for a prebuilt DayZ_MCP PBO."""
+"""Release staging contract for a prebuilt DayZ_MCP PBO.
+
+The fixture is a synthetic PBO whose build marker (mcp_build.json) names GIT_SHA:
+make_release refuses a PBO built from any other commit, or one that does not say
+(fb-20260819-024951-e307). The opaque bytes the fixture used to be are now one of
+its entries, so the release still has to copy the PBO byte for byte.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +18,7 @@ import zipfile
 from pathlib import Path
 
 from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
+from tests.pbo_helpers import build_pbo, marker_bytes
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -19,9 +26,21 @@ REPO_ROOT = TOOLS_DIR.parent
 PROJECT_FILE = TOOLS_DIR / "pyproject.toml"
 BRIDGE_FILE = REPO_ROOT / "addon" / "scripts" / "5_Mission" / "MCPMessages.c"
 
-PBO_BYTES = b"\x00DayZ-MCP release fixture\xff\r\n"
+OPAQUE_BYTES = b"\x00DayZ-MCP release fixture\xff\r\n"
 GIT_SHA = "0123456789abcdef0123456789abcdef01234567"
+OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98"
+ADDON_TREE = "89abcdef0123456789abcdef0123456789abcdef"
 BUILT_UTC = "2026-08-24T12:34:56Z"
+
+
+def _pbo(marker: bytes | None) -> bytes:
+    entries = [("config.cpp", b"class CfgPatches {};\n"), ("scripts\\fixture.bin", OPAQUE_BYTES)]
+    if marker is not None:
+        entries.append(("mcp_build.json", marker))
+    return build_pbo(entries)
+
+
+PBO_BYTES = _pbo(marker_bytes(GIT_SHA, ADDON_TREE))
 PROJECT_VERSION = tomllib.loads(PROJECT_FILE.read_text(encoding="utf-8"))[
     "project"
 ]["version"]
@@ -158,6 +177,56 @@ class MakeReleaseTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "pbo_missing")
         self.assertIn("--pbo", str(raised.exception))
+
+    def assert_refused(self, code: str, pbo_bytes: bytes, **overrides: object) -> str:
+        release = self.require_release()
+        self.pbo.write_bytes(pbo_bytes)
+
+        with self.assertRaises(release.ReleaseRefusal) as raised:
+            self.stage(**overrides)
+
+        self.assertEqual(raised.exception.code, code)
+        self.assertFalse(self.out.exists(), "a refused release must not write any asset")
+        return str(raised.exception)
+
+    def test_pbo_built_from_another_commit_is_refused(self) -> None:
+        message = self.assert_refused(
+            "pbo_commit_mismatch", _pbo(marker_bytes(OTHER_SHA, ADDON_TREE))
+        )
+
+        self.assertIn(OTHER_SHA, message)
+        self.assertIn(GIT_SHA, message)
+        self.assertIn("tools/pack-addon.ps1", message)
+
+    def test_pbo_built_from_a_folder_is_refused(self) -> None:
+        message = self.assert_refused(
+            "pbo_commit_mismatch", _pbo(marker_bytes(None, None, source="folder"))
+        )
+
+        self.assertIn("-Source", message)
+
+    def test_allow_dirty_does_not_bypass_the_build_commit_check(self) -> None:
+        self.assert_refused(
+            "pbo_commit_mismatch",
+            _pbo(marker_bytes(OTHER_SHA, ADDON_TREE)),
+            allow_dirty=True,
+            git_status_fn=lambda _repo: "?? local-output.txt",
+        )
+
+    def test_pbo_without_a_build_marker_is_refused(self) -> None:
+        message = self.assert_refused("pbo_marker_missing", _pbo(None))
+
+        self.assertIn("mcp_build.json", message)
+
+    def test_malformed_build_marker_is_refused(self) -> None:
+        self.assert_refused(
+            "pbo_marker_invalid", _pbo(b'{"commit":"' + GIT_SHA.encode() + b'"}\n')
+        )
+
+    def test_bytes_that_are_not_a_pbo_are_refused(self) -> None:
+        message = self.assert_refused("pbo_unreadable", OPAQUE_BYTES)
+
+        self.assertIn("--pbo", message)
 
     def test_parsers_watch_real_workspace_files(self) -> None:
         release = self.require_release()
