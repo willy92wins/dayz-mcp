@@ -20,13 +20,25 @@ Two deliberate limits:
    but its description promises `entities: []` and an agent indexes by
    that key (ficha 59d9), so the empty list stays too.
 
-Rule 1 has one exception it does not cover: a scalar with ONE known owner.
+Rule 1 has one exception it does not cover: a scalar with known owners.
 `door_index` and `component_index` are filled only by `action_use_door`, yet
 the flat class sends them on every verb, so a plain `action_use` reported
 `component_index: 0` although its target used -1 (#156 R1 F2). Outside their
-owner their 0 is always the unassigned default, never an answer, so they are
-dropped there; for the owner they are kept whatever the value, because door 0
+owners their 0 is always the unassigned default, never an answer, so they are
+dropped there; for an owner they are kept whatever the value, because door 0
 and component 0 are real. Such fields live in OWNED_SCALAR_FIELDS.
+
+The vehicle scalars are the same case (fb-20260823-130809-a412): `vehicle_control`
+answered `seated=0, gear=0, is_owner=0` while the car it drove was in gear 2 and
+owned, because it fills only `engine_on_server`. Each vehicle scalar is kept for
+the commands whose dispatch writes it and dropped from every other result.
+tests/test_owned_scalar_census.py reads both bridges and fails when a command
+writes an owned field without being one of its owners, or is listed without
+writing it.
+
+`pos_delta` is declared in MCPResult and assigned by no command, so it is always
+the unassigned 0.0 (fb-20260823-141958-dde3) and is dropped from every result:
+NEVER_FILLED_SCALAR_FIELDS.
 
 This is an observable contract change for a published server: see the changelog.
 """
@@ -37,7 +49,8 @@ from typing import Any
 
 # The `ref` members of MCPResult, in declaration order (MCPMessages.c MCPResult).
 # Scalars (y, phase, classname, source, ...) are never pruned — 0/"" is real data —
-# except the owned scalars of OWNED_SCALAR_FIELDS on a command that does not own them.
+# except the owned scalars of OWNED_SCALAR_FIELDS on a command that does not own
+# them and the never-filled scalars of NEVER_FILLED_SCALAR_FIELDS.
 PRUNABLE_FIELDS = (
     "state",
     "players",
@@ -87,14 +100,36 @@ SEMANTIC_EMPTY_FIELDS = frozenset(
     }
 )
 
-# Scalar field -> the one bridge command that fills it. The key is dropped from
-# every other command's result and kept, even at 0, for its owner. The owner is
-# the command name call_bridge sends: action_use with door_index goes out as
+# Scalar field -> the bridge commands whose dispatch writes it. The key is dropped
+# from every other command's result and kept, even at 0, for its owners. An owner
+# is the command name call_bridge sends: action_use with door_index goes out as
 # action_use_door (server.py action_use), and that name reaches this module.
-OWNED_SCALAR_FIELDS = {
-    "door_index": "action_use_door",
-    "component_index": "action_use_door",
+# The sets come from the assignments in MCPBridge.c and MCPClientBridge.c; a
+# field whose owners could not be established exactly is left out, because
+# dropping a real answer is worse than a stale 0.
+OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
+    "door_index": frozenset({"action_use_door"}),
+    "component_index": frozenset({"action_use_door"}),
+    # vehicle_enter answers from its seat job (PostSeatSuccess), vehicle_get_in_client
+    # from its vehicle_get_in job (MCP_PostJobSuccess).
+    "seated": frozenset({"vehicle_enter", "vehicle_get_in_client", "vehicle_telemetry"}),
+    "seat": frozenset({"vehicle_enter", "vehicle_get_in_client", "vehicle_telemetry"}),
+    "vehicle_fixture_ready": frozenset({"vehicle_prepare_fixture", "vehicle_get_in_client"}),
+    "engine_on_server": frozenset({"engine_set", "vehicle_control", "vehicle_telemetry"}),
+    "speedo_max": frozenset({"vehicle_telemetry"}),
+    "gear": frozenset({"vehicle_telemetry"}),
+    "net_strategy": frozenset({"vehicle_get_in_client", "vehicle_telemetry"}),
+    "is_owner": frozenset({"vehicle_get_in_client", "vehicle_telemetry"}),
+    "is_authority_owner": frozenset({"vehicle_get_in_client", "vehicle_telemetry"}),
+    "owner_identity": frozenset({"vehicle_get_in_client", "vehicle_telemetry"}),
+    "net_id_low": frozenset({"vehicle_get_in_client", "vehicle_telemetry"}),
+    "net_id_high": frozenset({"vehicle_get_in_client", "vehicle_telemetry"}),
 }
+
+# Scalars MCPResult declares and no command assigns (dde3). Every result carries
+# the unassigned default, which is never an answer, so the key is always dropped.
+# A command that starts writing one moves it to OWNED_SCALAR_FIELDS.
+NEVER_FILLED_SCALAR_FIELDS = frozenset({"pos_delta"})
 
 
 def _is_empty_container(value: Any) -> bool:
@@ -106,16 +141,17 @@ def _is_empty_container(value: Any) -> bool:
 
 
 def _owned_by_another_command(command: str, key: str) -> bool:
-    owner = OWNED_SCALAR_FIELDS.get(key)
-    return owner is not None and owner != command
+    owners = OWNED_SCALAR_FIELDS.get(key)
+    return owners is not None and command not in owners
 
 
 def prune_unfilled_fields(command: str, result: dict[str, Any]) -> dict[str, Any]:
     """Return `result` without the reference fields this verb never filled.
 
     Non-empty values, scalars and unknown keys are returned untouched, so a verb
-    gaining a field later needs no change here. The exception is an owned scalar
-    (OWNED_SCALAR_FIELDS), which only its owning command keeps.
+    gaining a field later needs no change here. The exceptions are an owned
+    scalar (OWNED_SCALAR_FIELDS), which only its owning commands keep, and a
+    never-filled scalar (NEVER_FILLED_SCALAR_FIELDS), which no command keeps.
     """
     if not isinstance(result, dict):
         return result
@@ -128,5 +164,6 @@ def prune_unfilled_fields(command: str, result: dict[str, Any]) -> dict[str, Any
             and (command, key) not in SEMANTIC_EMPTY_FIELDS
         )
         and not _owned_by_another_command(command, key)
+        and key not in NEVER_FILLED_SCALAR_FIELDS
     }
     return pruned
