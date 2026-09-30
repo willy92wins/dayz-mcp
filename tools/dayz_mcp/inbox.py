@@ -140,6 +140,40 @@ def append_feedback(
     return result
 
 
+def _feedback_state(feedback_id: str) -> tuple[bool, bool]:
+    """(entry exists, a resolution already follows it) for one id.
+
+    Read from disk on every call, never cached: other processes append to the
+    same file. Records are split on the b"\\n" _append_jsonl ends each one with
+    (a JSON string never holds a raw newline); a line that does not decode or
+    parse is skipped, so it can never vouch for an id. Classification is the
+    one _read_inbox uses: a dict carrying "resolves" is a resolution whatever
+    else it holds, so an orphan resolution or an id quoted in some body text
+    proves nothing. A resolution counts only after its entry, the only order
+    in which _read_inbox attaches it.
+    """
+    exists = False
+    already_resolved = False
+    try:
+        handle = FEEDBACK_PATH.open("rb")
+    except FileNotFoundError:
+        return exists, already_resolved
+    with handle:
+        for raw in handle:
+            try:
+                obj = json.loads(raw.decode("utf-8"))
+            except ValueError:
+                continue
+            if type(obj) is not dict:
+                continue
+            if "resolves" in obj:
+                if exists and obj.get("resolves") == feedback_id:
+                    already_resolved = True
+            elif obj.get("id") == feedback_id:
+                exists = True
+    return exists, already_resolved
+
+
 def append_resolution(
     feedback_id: str,
     resolution: str,
@@ -153,6 +187,15 @@ def append_resolution(
     if _FEEDBACK_ID_RE.fullmatch(feedback_id) is None:
         raise ValueError("bad_args: feedback_id must match fb-YYYYMMDD-HHMMSS-xxxx")
     _check_length(resolution, "resolution", RESOLUTION_MAX_CHARS)
+    # Looked up only once every argument is valid, so a malformed call keeps
+    # its bad_args error. No lock: the file is never rewritten and entries are
+    # never removed, so an entry found here still exists when the single
+    # O_APPEND write below lands, and this read changes nothing on disk. An
+    # entry filed after the read is refused now and resolvable on retry.
+    exists, already_resolved = _feedback_state(feedback_id)
+    if not exists:
+        # feedback_id passed _FEEDBACK_ID_RE above, so the echo is that shape.
+        raise ValueError(f"feedback_not_found: {feedback_id}")
     _stamp, ts = _utc_now()
     record = {
         "resolves": feedback_id,
@@ -163,7 +206,11 @@ def append_resolution(
     if evidence_ref is not None:
         record["evidence_ref"] = evidence_ref
     _append_jsonl(record)
-    return record
+    # Reply-only, like append_feedback's path: derived from the store as read
+    # above, so it is never written into the record.
+    result = dict(record)
+    result["already_resolved"] = already_resolved
+    return result
 
 
 def _read_inbox(
