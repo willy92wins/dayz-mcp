@@ -21,7 +21,7 @@ La ficha pide `{reason, expected, observed}` **o al menos** la telemetría consu
 
 | Sitio | Cambio |
 |---|---|
-| `tools/dayz_mcp/server.py` `_bridge_error_detail` | Si `cmd==vehicle_prepare_fixture` **y** `error==fixture_not_ready`, allowlist de escalares de `telemetry` + `vehicle_fixture_ready`. Decisión por verbo+código, no por presencia de keys (MCPResult plano). |
+| `tools/dayz_mcp/bridge_errors.py` `_bridge_error_detail` | Si `cmd==vehicle_prepare_fixture` **y** `error==fixture_not_ready`, allowlist de escalares de `telemetry` + `vehicle_fixture_ready`. Decisión por verbo+código, no por presencia de keys (MCPResult plano). |
 | Tests | Extender el patrón de `test_ui_error_diagnostics.py`. |
 
 ## Schema del mensaje [EXACT]

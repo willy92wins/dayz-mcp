@@ -6,7 +6,17 @@ import ast
 import unittest
 from typing import Any
 
-from dayz_mcp import control_client, server
+from dayz_mcp import (
+    box_occupancy,
+    bridge_errors,
+    bridge_readiness,
+    control_client,
+    launch_logs,
+    server,
+    tool_args,
+    tool_catalog,
+    world_results,
+)
 from dayz_mcp.server import ServerConfig, build_app
 from tests._source_snapshot import source_of
 from tests._tiers import slow_test
@@ -126,10 +136,15 @@ class BadArgsMessagesTest(unittest.IsolatedAsyncioTestCase):
 
     @slow_test
     def test_server_has_no_bare_bad_args_tool_error(self) -> None:
-        tree = ast.parse(source_of(server))
+        # server.py and the modules its helpers moved to (backlog 71fc).
+        modules = (
+            server, box_occupancy, bridge_errors, bridge_readiness, launch_logs,
+            tool_args, tool_catalog, world_results,
+        )
         bare_lines = [
-            node.lineno
-            for node in ast.walk(tree)
+            f"{module.__name__}:{node.lineno}"
+            for module in modules
+            for node in ast.walk(ast.parse(source_of(module)))
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and node.func.id == "ToolError"

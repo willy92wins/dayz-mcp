@@ -15,6 +15,7 @@ from dayz_mcp.peer_liveness import client_peer_probeable, peer_is_live
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 SERVER_PY = TOOLS_DIR / "dayz_mcp" / "server.py"
+BRIDGE_READINESS_PY = TOOLS_DIR / "dayz_mcp" / "bridge_readiness.py"
 
 
 def _python_def(source: str, signature: str, stop: str) -> str:
@@ -91,7 +92,7 @@ class Fb00bbSourceContractTest(unittest.TestCase):
         self.assertIn("client_peer_probeable as _client_peer_probeable", source)
 
     def test_runtime_helper_fails_open_on_status_error(self) -> None:
-        source = SERVER_PY.read_text(encoding="utf-8")
+        source = BRIDGE_READINESS_PY.read_text(encoding="utf-8")
         body = _python_def(
             source,
             "async def _runtime_client_peer_probeable(",
