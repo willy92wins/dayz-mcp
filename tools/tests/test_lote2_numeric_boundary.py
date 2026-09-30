@@ -87,7 +87,9 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # sources is a string list, not in this census).
         # + 3 from fb-29c1 (vehicle_door pos/object_id/timeout_s; source, mode and
         # type are strings, not in this census).
-        self.assertEqual(len(rows), 146)
+        # + 1 from fb-bd28 (world_spawn lifetime_s, StrictFloat | None).
+        self.assertEqual(len(rows), 147)
+        self.assertIn(("world_spawn", "lifetime_s", "float"), rows)
         self.assertIn(("vehicle_door", "pos", "vector"), rows)
         self.assertIn(("vehicle_door", "object_id", "int"), rows)
         self.assertIn(("vehicle_door", "timeout_s", "float"), rows)

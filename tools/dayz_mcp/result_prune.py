@@ -63,6 +63,8 @@ PRUNABLE_FIELDS = (
     "weapon_action",
     "timeline",
     "vehicle_door",
+    # world_spawn fills it only when the command carried lifetime_s.
+    "lifetime",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.

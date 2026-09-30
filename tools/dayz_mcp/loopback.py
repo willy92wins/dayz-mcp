@@ -527,6 +527,17 @@ _VEHICLE_CONTROL_MAX_TTL_S = 30.0
 WEAPON_RAISE_DEFAULT_TTL_S = 3.0
 WEAPON_RAISE_MAX_TTL_S = 30.0
 WEAPON_AIM_ABS_MAX = 3.141593
+# world_spawn lifetime_s is seconds in (0, 3888000]. Mirrors
+# server.WORLD_SPAWN_LIFETIME_MAX_S and SPAWN_LIFETIME_MAX_S in MCPBridge.c; a
+# test keeps the three equal.
+_WORLD_SPAWN_LIFETIME_MAX_S = 3888000.0
+_SAFE_SPAWN_LIFETIME = _reject_numeric_errors(
+    _real_in_range(
+        minimum=0.0,
+        maximum=_WORLD_SPAWN_LIFETIME_MAX_S,
+        minimum_inclusive=False,
+    )
+)
 
 
 def _is_real_list(length: int) -> _FieldValidator:
@@ -1079,6 +1090,9 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "vehicle_release": _command_schema(_schema_variant()),
     # flags goes through the same ECE mask policy as the tool
     # (core.is_allowed_spawn_flags), which mirrors the bridge's IsAllowedSpawnFlags.
+    # lifetime_s travels with lifetime_s_set true, or neither travels: the bridge
+    # reads an absent key as 0 or false (fb-20260930-065425-8779), so only the
+    # flag asks for the economy lifetime override (fb-20260930-080543-bd28).
     "world_spawn": _command_schema(
         _schema_variant(
             required=("type", "pos", "flags", "rotation"),
@@ -1088,7 +1102,18 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "flags": _is_spawn_flags,
                 "rotation": _integer_in_range(),
             },
-        )
+        ),
+        _schema_variant(
+            required=("type", "pos", "flags", "rotation", "lifetime_s", "lifetime_s_set"),
+            validators={
+                "type": _is_string,
+                "pos": _is_real_vector3,
+                "flags": _is_spawn_flags,
+                "rotation": _integer_in_range(),
+                "lifetime_s": _SAFE_SPAWN_LIFETIME,
+                "lifetime_s_set": _is_true,
+            },
+        ),
     ),
     "vehicle_enter": _command_schema(
         _schema_variant(required=("pos",), validators={"pos": _is_real_vector3})

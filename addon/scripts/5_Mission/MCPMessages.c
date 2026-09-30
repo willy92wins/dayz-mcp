@@ -155,6 +155,11 @@ class MCPArgs
 	// weapon_aim. Absolute value capped at MCPWeaponControl.AIM_CHANGE_ABS_MAX.
 	float dx;
 	float dy;
+	// world_spawn economy lifetime override in seconds (fb-20260930-080543-bd28).
+	// lifetime_s_set true sets it on the spawned entity; false, which is what an
+	// absent key arrives as, leaves the economy lifetime alone (see the class comment).
+	float lifetime_s;
+	bool lifetime_s_set;
 
 	void MCPArgs()
 	{
@@ -184,6 +189,7 @@ class MCPArgs
 		timeout_s = 0.0;
 		heading = MCP_ARG_FLOAT_UNSET;
 		speed = MCP_ARG_FLOAT_UNSET;
+		lifetime_s = MCP_ARG_FLOAT_UNSET;
 	}
 };
 
@@ -626,6 +632,16 @@ class MCPVehicleDoor
 	}
 };
 
+// world_spawn lifetime read-back (fb-20260930-080543-bd28), assigned only when
+// the command carried lifetime_s. remaining_s is GetLifetime() and max_s is
+// GetLifetimeMax() (entityai.c:3377-3387), both read when the reply is built.
+// Primitives only: no entity reference.
+class MCPSpawnLifetime
+{
+	float remaining_s;
+	float max_s;
+};
+
 class MCPResult
 {
 	int id;
@@ -717,6 +733,8 @@ class MCPResult
 	ref MCPAnimTimelineRead timeline;
 	// vehicle_door read-back, also on door_missing. Unassigned on other commands.
 	ref MCPVehicleDoor vehicle_door;
+	// world_spawn lifetime read-back. Unassigned unless the command carried lifetime_s.
+	ref MCPSpawnLifetime lifetime;
 };
 
 class MCPJob

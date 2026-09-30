@@ -10,6 +10,10 @@ class MCPBridge : Managed
 	protected const int VEHICLE_SEARCH_RADIUS = 4;
 	// 8 m covers a truck-length hull around the subject's origin after ECE_TRACE snap.
 	protected const float SPAWN_READY_RADIUS = 8.0;
+	// world_spawn lifetime_s upper bound, in seconds: 3888000 (45 days) is the largest
+	// <lifetime> in dayzOffline.chernarusplus db/types.xml (Barrel_Blue among others).
+	// Mirrors WORLD_SPAWN_LIFETIME_MAX_S in tools/dayz_mcp/server.py.
+	protected const float SPAWN_LIFETIME_MAX_S = 3888000.0;
 	protected const int TELEMETRY_ITEMS_CAP = 16;
 	protected const int TELEMETRY_JSONL_DEFAULT_MAX_LINES = 64;
 	protected const int MAX_JSONL_LINE_CHARS = 4096;
@@ -496,6 +500,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "world_spawn")
 		{
 			postNow = DispatchWorldSpawn(command, result);
+			if (!postNow)
+			{
+				postNow = ApplySpawnLifetime(command, result);
+			}
 		}
 		else if (command.cmd == "object_delete")
 		{
@@ -3165,9 +3173,77 @@ class MCPBridge : Managed
 			validation.rotation = args.rotation;
 		}
 
+		// fb-20260930-080543-bd28: checked here, before CreateObjectEx, so a bad
+		// lifetime_s spawns nothing. Only the flag asks for the override (see
+		// MCPArgs); IsFiniteFloat refuses NaN, which the range test alone would pass.
+		if (args.lifetime_s_set)
+		{
+			if (!IsFiniteFloat(args.lifetime_s) || args.lifetime_s <= 0.0 || args.lifetime_s > SPAWN_LIFETIME_MAX_S)
+			{
+				validation.error = "bad_lifetime";
+				return validation;
+			}
+		}
+
 		validation.pos = Vector(x, y, z);
 		validation.ok = true;
 		return validation;
+	}
+
+	// fb-20260930-080543-bd28: the mission's CE deletes an entity whose economy
+	// lifetime has run out once no player is within CleanupAvoidance (100 m in
+	// dayzOffline.chernarusplus db/globals.xml), and CivilianSedan's types.xml
+	// lifetime is 3 s. lifetime_s overrides that lifetime on the entity world_spawn
+	// has just created, in the same call: Dispatch runs this as soon as
+	// DispatchWorldSpawn has queued the spawn job, because that method is a pinned
+	// region (tests/test_task9_spawn_phase_markers.py). ValidateSpawnArgs has
+	// already refused a value outside (0, SPAWN_LIFETIME_MAX_S]. SetLifetimeMax,
+	// then SetLifetime (entityai.c:3377-3387), make lifetime_s both the entity's
+	// own maximum and what remains of it. Those setters are EntityAI protos: an
+	// object that is not an EntityAI has no economy lifetime to set, so it is
+	// deleted and the command refused with lifetime_unsupported, rather than
+	// answered ok for a lifetime that was never set. Returns true when that
+	// refusal is to be posted now; false leaves the reply to the spawn job.
+	protected bool ApplySpawnLifetime(MCPCommand command, MCPResult result)
+	{
+		MCPJob job;
+		Object spawned;
+		EntityAI entity;
+
+		if (!command.args || !command.args.lifetime_s_set)
+		{
+			return false;
+		}
+
+		// DispatchWorldSpawn returns false only after queuing, under the command
+		// id, a spawn job whose subject is the object it has just created. The job
+		// is read, not m_RuntimeObjects: that registry is never cleared and the
+		// daemon restarts its ids at 1, so an id can still name an older object.
+		job = m_Jobs.Get(command.id);
+		if (job)
+		{
+			spawned = job.subject;
+		}
+		entity = EntityAI.Cast(spawned);
+		if (entity)
+		{
+			entity.SetLifetimeMax(command.args.lifetime_s);
+			entity.SetLifetime(command.args.lifetime_s);
+			Log("spawn lifetime set id=" + command.id + " lifetime_s=" + command.args.lifetime_s);
+			return false;
+		}
+
+		m_Jobs.Remove(command.id);
+		m_RuntimeObjects.Remove(command.id);
+		if (spawned)
+		{
+			GetGame().ObjectDelete(spawned);
+		}
+
+		result.ok = false;
+		result.error = "lifetime_unsupported";
+		Log("spawn lifetime refused id=" + command.id + " reason=not_entityai");
+		return true;
 	}
 
 	protected MCPSpawnValidation ValidatePositionArgs(MCPArgs args)
@@ -3593,6 +3669,19 @@ class MCPBridge : Managed
 		result.pos_real.Insert(pos[0]);
 		result.pos_real.Insert(pos[1]);
 		result.pos_real.Insert(pos[2]);
+
+		// fb-20260930-080543-bd28: what the entity reads now, so the caller sees the
+		// override ApplySpawnLifetime set when the spawn was dispatched.
+		if (job.args.lifetime_s_set)
+		{
+			EntityAI lifetimeEntity = EntityAI.Cast(job.subject);
+			if (lifetimeEntity)
+			{
+				result.lifetime = new MCPSpawnLifetime();
+				result.lifetime.remaining_s = lifetimeEntity.GetLifetime();
+				result.lifetime.max_s = lifetimeEntity.GetLifetimeMax();
+			}
+		}
 		PostResult(result);
 	}
 

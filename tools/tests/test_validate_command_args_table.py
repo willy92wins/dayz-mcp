@@ -31,6 +31,15 @@ def _anim_args(*, drop: str = "", **overrides: object) -> dict[str, object]:
     return args
 
 
+# A valid world_spawn payload without the optional lifetime_s pair.
+_SPAWN: dict[str, object] = {
+    "type": "CivilianSedan",
+    "pos": [1.0, 2.0, 3.0],
+    "flags": 0,
+    "rotation": 0,
+}
+
+
 _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
     "restore_gameplay": (
         ("valid_empty", {}, (True, None)),
@@ -1117,6 +1126,70 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "extra_key",
             {"type": "CivilianSedan", "pos": [1.0, 2.0, 3.0], "flags": 0, "rotation": 0, "extra": None},
+            (False, "bad_args"),
+        ),
+        # lifetime_s travels with lifetime_s_set true, in (0, 3888000]
+        # (fb-20260930-080543-bd28).
+        (
+            "valid_lifetime",
+            {**_SPAWN, "lifetime_s": 600.0, "lifetime_s_set": True},
+            (True, None),
+        ),
+        (
+            "valid_lifetime_max",
+            {**_SPAWN, "lifetime_s": 3888000.0, "lifetime_s_set": True},
+            (True, None),
+        ),
+        (
+            "valid_lifetime_int",
+            {**_SPAWN, "lifetime_s": 600, "lifetime_s_set": True},
+            (True, None),
+        ),
+        ("lifetime_without_flag", {**_SPAWN, "lifetime_s": 600.0}, (False, "bad_args")),
+        ("flag_without_lifetime", {**_SPAWN, "lifetime_s_set": True}, (False, "bad_args")),
+        (
+            "lifetime_flag_false",
+            {**_SPAWN, "lifetime_s": 600.0, "lifetime_s_set": False},
+            (False, "bad_args"),
+        ),
+        (
+            "lifetime_flag_int",
+            {**_SPAWN, "lifetime_s": 600.0, "lifetime_s_set": 1},
+            (False, "bad_args"),
+        ),
+        (
+            "lifetime_zero",
+            {**_SPAWN, "lifetime_s": 0.0, "lifetime_s_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "lifetime_negative",
+            {**_SPAWN, "lifetime_s": -1.0, "lifetime_s_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "lifetime_over_max",
+            {**_SPAWN, "lifetime_s": 3888000.5, "lifetime_s_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "lifetime_nan",
+            {**_SPAWN, "lifetime_s": float("nan"), "lifetime_s_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "lifetime_inf",
+            {**_SPAWN, "lifetime_s": float("inf"), "lifetime_s_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "lifetime_bool",
+            {**_SPAWN, "lifetime_s": True, "lifetime_s_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "lifetime_huge_int",
+            {**_SPAWN, "lifetime_s": 10**400, "lifetime_s_set": True},
             (False, "bad_args"),
         ),
     ),

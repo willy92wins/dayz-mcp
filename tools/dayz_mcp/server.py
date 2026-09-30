@@ -210,6 +210,10 @@ WORLD_SPAWN_FLAGS_LINE = (
     f"flags={_WORLD_SPAWN_NOPERSIST_FLAGS} "
     "(ECE_PLACE_ON_SURFACE|ECE_NOPERSISTENCY_WORLD)."
 )
+# world_spawn lifetime_s upper bound, in seconds. Mirrors SPAWN_LIFETIME_MAX_S in
+# addon/scripts/5_Mission/MCPBridge.c: 3888000 (45 days) is the largest
+# <lifetime> in the dayzOffline.chernarusplus db/types.xml.
+WORLD_SPAWN_LIFETIME_MAX_S = 3888000.0
 DAEMON_AUTOSPAWN_DISABLED = (
     "daemon_autospawn_disabled: start the daemon (--daemon) or omit "
     "--no-daemon-autospawn"
@@ -6265,7 +6269,19 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "flag integer, not an angle; 0 uses the bridge default RF_DEFAULT. "
             f"{WORLD_SPAWN_FLAGS_LINE} "
             "Does not attach wheels, battery, or spark plug; for a usable "
-            "vehicle follow with vehicle_prepare_fixture."
+            "vehicle follow with vehicle_prepare_fixture. "
+            "Once no player is within the mission's CleanupAvoidance, a "
+            "spawned object lives only as long as its economy lifetime: "
+            "measured on 1.29, a CivilianSedan (types.xml lifetime 3 s, "
+            "CleanupAvoidance 100 m) vanished 3-27 s after the player went "
+            "~114 m away and survived at ~44 m. lifetime_s (seconds, above 0 "
+            f"and at most {int(WORLD_SPAWN_LIFETIME_MAX_S)}) overrides the "
+            "economy lifetime for fixtures: the bridge calls SetLifetimeMax "
+            "then SetLifetime on the new entity, and the reply's lifetime "
+            "gives remaining_s (GetLifetime) and max_s (GetLifetimeMax). A "
+            "type that is not an EntityAI has no economy lifetime to set: "
+            "with lifetime_s it is deleted and the call fails with "
+            "lifetime_unsupported."
         )
     )
     async def world_spawn(
@@ -6273,6 +6289,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         pos: list[StrictFloat],
         flags: StrictInt = 0,
         rotation: StrictInt = 0,
+        lifetime_s: StrictFloat | None = None,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         parsed_flags = int(flags)
@@ -6284,6 +6301,22 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "flags": parsed_flags,
             "rotation": int(rotation),
         }
+        # The flag travels with the value: the bridge reads an absent key as 0
+        # or false, so only lifetime_s_set asks for the override
+        # (fb-20260930-065425-8779). Without lifetime_s neither travels and the
+        # economy lifetime is left alone (fb-20260930-080543-bd28).
+        if lifetime_s is not None:
+            lifetime_error = _bad_args(
+                "lifetime_s",
+                lifetime_s,
+                "be a finite number of seconds greater than 0 and at most "
+                f"{int(WORLD_SPAWN_LIFETIME_MAX_S)}",
+            )
+            lifetime_value = _finite_float(lifetime_s, lifetime_error)
+            if lifetime_value <= 0.0 or lifetime_value > WORLD_SPAWN_LIFETIME_MAX_S:
+                raise ToolError(lifetime_error)
+            args["lifetime_s"] = lifetime_value
+            args["lifetime_s_set"] = True
         async with runtime.tool_lock:
             return await runtime.call_bridge("world_spawn", args, "server", _timeout(timeout_s))
 
