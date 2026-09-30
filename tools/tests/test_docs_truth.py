@@ -711,5 +711,64 @@ class ProjectMapEntryPointsDocsTest(unittest.TestCase):
             f"Update PROJECT-MAP.md by hand or delete the stale lines")
 
 
+def _tool_description(source: str, name: str) -> str:
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == name:
+            for dec in node.decorator_list:
+                if not isinstance(dec, ast.Call):
+                    continue
+                for kw in dec.keywords:
+                    if kw.arg == "description":
+                        return ast.literal_eval(kw.value)
+    raise AssertionError(f"{name} description not found")
+
+
+class InputDescribeExistsRuleDocsTest(unittest.TestCase):
+    """exists is the engine index, not a non-null GetInputByName.
+
+    Ground truth is DispatchInputDescribe's `inputId >= 0` guard. The tool
+    description and the MCPInputDescribe contract comment state that rule,
+    the measured 1.29 shared placeholder (index -1), and that the probe is
+    published for the placeholder. The retracted caveat is gone from both.
+    """
+
+    def test_texts_state_the_index_rule_the_guard_implements(self) -> None:
+        bridge = (
+            REPO / "addon" / "scripts" / "5_Mission" / "MCPClientBridge.c"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(
+            bridge.count("if (inputId >= 0)"),
+            1,
+            "exists is not gated on input.ID() >= 0 in DispatchInputDescribe",
+        )
+        self.assertIn("int inputId = input.ID();", bridge)
+        messages = (
+            REPO / "addon" / "scripts" / "5_Mission" / "MCPMessages.c"
+        ).read_text(encoding="utf-8")
+        description = _tool_description(
+            _doc("tools/dayz_mcp/server.py"), "input_describe"
+        )
+        retracted = "an unknown name can also return exists true"
+        for label, text in (
+            ("MCPMessages.c", messages),
+            ("input_describe description", description),
+        ):
+            self.assertIn("input.ID() >= 0", text, label)
+            self.assertIn("shared placeholder whose index is -1", text, label)
+            self.assertIn(
+                "including that placeholder, so a caller can see why exists is false",
+                text,
+                label,
+            )
+            self.assertIn("uainput.c:25", text, label)
+            self.assertNotIn(retracted, text, label)
+        self.assertIn(
+            "exists is true only when GetInputByName returns non-null and "
+            "input.ID() >= 0",
+            description,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

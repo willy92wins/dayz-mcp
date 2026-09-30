@@ -17,9 +17,12 @@ MESSAGES_PATH = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
 PRESSING_SENTENCE = (
     "Pressing the input is out of scope; use key_press for an OnKeyPress handler."
 )
-CAVEAT_SENTENCE = (
-    "In 1.29 an unknown name can also return exists true (ficha 4f50)."
+EXISTS_RULE = (
+    "exists is true only when GetInputByName returns non-null and input.ID() >= 0"
 )
+PLACEHOLDER_RULE = "shared placeholder whose index is -1"
+PROBE_WHY = "including that placeholder, so a caller can see why exists is false"
+RETRACTED_CAVEAT = "an unknown name can also return exists true"
 PROBE_FIELDS = (
     ("int", "input_id"),
     ("int", "name_hash"),
@@ -282,7 +285,11 @@ class InputDescribeFastMCPTest(unittest.IsolatedAsyncioTestCase):
         )
         tools = {tool.name: tool for tool in await app.list_tools()}
         description = tools[COMMAND].description or ""
-        self.assertIn(CAVEAT_SENTENCE, description)
+        self.assertIn(EXISTS_RULE, description)
+        self.assertIn(PLACEHOLDER_RULE, description)
+        self.assertIn(PROBE_WHY, description)
+        self.assertIn("uainput.c:25", description)
+        self.assertNotIn(RETRACTED_CAVEAT, description)
         self.assertIn("none of its fields are present", description)
         self.assertNotIn("empty object", description)
         for _kind, field in PROBE_FIELDS:
@@ -376,12 +383,10 @@ class InputDescribeEnforceContractTest(unittest.TestCase):
         self.assertEqual(result["reason"], "census_disagrees_with_registered_tools")
         self.assertEqual(result["registered_without_announced_command"], [COMMAND])
 
-    def test_probe_reads_raw_engine_values_and_exists_stays_non_null(self) -> None:
+    def test_index_gates_exists_and_the_placeholder_skips_binds(self) -> None:
         source = BRIDGE_PATH.read_text(encoding="utf-8")
         body = _method_body(source, "protected bool DispatchInputDescribe(")
-        null_at = body.index("if (!input)")
-        bind_at = body.index("BindingCount()")
-        null_branch = body[null_at:bind_at]
+        null_branch = _brace_body_after(body, "if (!input)")
         self.assertIn("described.exists = false", null_branch)
         for absent in (
             "described.probe",
@@ -390,23 +395,59 @@ class InputDescribeEnforceContractTest(unittest.TestCase):
             ".Hash()",
             "GetInputByID",
             "input.ID()",
+            "BindingCount",
+            "BindKeyCount",
+            "GetBindKey",
+            "GetBindDevice",
+            "IsLocked",
+            "ConflictCount",
         ):
             with self.subTest(absent=absent):
                 self.assertNotIn(absent, null_branch)
 
+        # ID() >= 0 is the exists rule (uainput.c:25, the input index). The
+        # comparison is int against int: the proto result is stored first.
+        self.assertEqual(body.count("int inputId = input.ID();"), 1)
+        self.assertLess(body.index("int inputId = input.ID();"), body.index("if (inputId >= 0)"))
+        registered = _brace_body_after(body, "if (inputId >= 0)")
+        placeholder = _brace_body_after(body, "if (inputId < 0)")
+        self.assertIn("described.exists = true", registered)
+        self.assertNotIn("described.exists = false", registered)
+        self.assertIn("described.exists = false", placeholder)
+        self.assertNotIn("return", placeholder)
+        self.assertNotIn("described.probe", placeholder)
+        for token in (
+            "BindingCount(",
+            "BindKeyCount(",
+            "GetBindKey(",
+            "GetBindDevice(",
+            "IsLocked(",
+            "ConflictCount(",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, registered)
+                self.assertNotIn(token, placeholder)
+                self.assertEqual(body.count(token), registered.count(token))
+
         self.assertEqual(body.count("described.exists = true"), 1)
-        self.assertEqual(body.count("described.exists = false"), 1)
+        self.assertEqual(body.count("described.exists = false"), 2)
         self.assertEqual(body.count("GetInputByName("), 1)
         self.assertEqual(body.count("GetActiveInputs("), 1)
         self.assertEqual(body.count("new TIntArray"), 1)
         self.assertEqual(body.count("new MCPInputProbe"), 1)
+        self.assertEqual(body.count("input.ID()"), 1)
         unreadable = body.index('result.error = "input_bind_unreadable"')
         probe_at = body.index("described.probe = probe")
+        placeholder_at = body.index("if (inputId < 0)")
         self.assertLess(body.index("described.exists = false"), body.index("input.ID()"))
         self.assertLess(unreadable, probe_at)
         self.assertIn("return true", body[unreadable:probe_at])
         self.assertNotIn("described.probe", body[unreadable:probe_at])
+        self.assertNotIn("result.input_describe", body[unreadable:probe_at])
         self.assertLess(body.index("described.exists = true"), probe_at)
+        self.assertLess(probe_at, placeholder_at)
+        published = body.index("result.input_describe = described", placeholder_at)
+        self.assertLess(placeholder_at, published)
         _assert_probe_true_guards(body)
 
         for token in (
@@ -433,6 +474,12 @@ class InputDescribeEnforceContractTest(unittest.TestCase):
 
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
         self.assertNotIn("exists false means the name is not registered", messages)
+        self.assertNotIn(RETRACTED_CAVEAT, messages)
+        self.assertIn("exists is true only when GetInputByName returns non-null", messages)
+        self.assertIn("input.ID() >= 0", messages)
+        self.assertIn(PLACEHOLDER_RULE, messages)
+        self.assertIn(PROBE_WHY, messages)
+        self.assertIn("uainput.c:25", messages)
         self.assertIn("ficha 4f50", messages)
         self.assertIn("none of its fields are present", messages)
         self.assertNotIn("serializes as {}", messages)

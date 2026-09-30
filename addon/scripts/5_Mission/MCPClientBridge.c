@@ -920,10 +920,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return true;
 	}
 
-	// Read GetInputByName and the selected alternative's bind. In 1.29 a
-	// non-null return is not proof the name is registered (ficha 4f50);
-	// probe publishes the raw values. SelectAlternative is not called: it
-	// would change which bind is active. LocalPress is not called.
+	// Read GetInputByName. exists is input.ID() >= 0, the input index
+	// (uainput.c:25). In 1.29 an unknown name is a shared placeholder whose
+	// index is -1 (ficha 4f50): exists stays false and no bind is read.
+	// The probe is still published for that placeholder, so a caller can
+	// see why exists is false. SelectAlternative is not called: it would
+	// change which bind is active. LocalPress is not called.
 	protected bool DispatchInputDescribe(MCPCommand command, MCPResult result)
 	{
 		if (!command.args || !IsPrintableInputName(command.args.name))
@@ -945,43 +947,50 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPInputDescribe described = new MCPInputDescribe();
 		if (!input)
 		{
-			// Probe stays unassigned. exists false is only this null return.
+			// Probe stays unassigned. A null GetInputByName is exists false.
 			described.exists = false;
 			result.input_describe = described;
 			result.ok = true;
 			return true;
 		}
 
-		int bindingCount = input.BindingCount();
-		int keyCount = input.BindKeyCount();
-		int conflictCount = input.ConflictCount();
-		if (bindingCount < 0 || keyCount < 0 || keyCount > INPUT_KEY_MAX || conflictCount < 0)
-		{
-			result.ok = false;
-			result.error = "input_bind_unreadable";
-			return true;
-		}
-
-		described.exists = true;
-		described.binding_count = bindingCount;
-		described.locked = input.IsLocked();
-		described.conflict_count = conflictCount;
-
-		int keyIndex = 0;
-		while (keyIndex < keyCount)
-		{
-			MCPInputKey bound = new MCPInputKey();
-			bound.index = keyIndex;
-			bound.key_code = input.GetBindKey(keyIndex);
-			bound.device = input.GetBindDevice(keyIndex);
-			described.keys.Insert(bound);
-			keyIndex = keyIndex + 1;
-		}
-
-		// One active-input array per call. ID and NameHash are read into locals
-		// so GetInputByID and the active-list scan use the same values.
-		MCPInputProbe probe = new MCPInputProbe();
+		// Index first. Below 0 is the shared placeholder and must not reach
+		// a bind read. The same int is what the probe publishes as input_id.
 		int inputId = input.ID();
+		if (inputId >= 0)
+		{
+			int bindingCount = input.BindingCount();
+			int keyCount = input.BindKeyCount();
+			int conflictCount = input.ConflictCount();
+			if (bindingCount < 0 || keyCount < 0 || keyCount > INPUT_KEY_MAX || conflictCount < 0)
+			{
+				result.ok = false;
+				result.error = "input_bind_unreadable";
+				return true;
+			}
+
+			described.exists = true;
+			described.binding_count = bindingCount;
+			described.locked = input.IsLocked();
+			described.conflict_count = conflictCount;
+
+			int keyIndex = 0;
+			while (keyIndex < keyCount)
+			{
+				MCPInputKey bound = new MCPInputKey();
+				bound.index = keyIndex;
+				bound.key_code = input.GetBindKey(keyIndex);
+				bound.device = input.GetBindDevice(keyIndex);
+				described.keys.Insert(bound);
+				keyIndex = keyIndex + 1;
+			}
+		}
+
+		// Probe for every non-null hit, including the placeholder, so a
+		// caller can see why exists is false. One active-input array per
+		// call. NameHash is stored so GetInputByID and the active-list
+		// scan use the same value.
+		MCPInputProbe probe = new MCPInputProbe();
 		int nameHash = input.NameHash();
 		probe.input_id = inputId;
 		probe.name_hash = nameHash;
@@ -1007,6 +1016,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			probe.in_active_inputs = true;
 		}
 		described.probe = probe;
+		if (inputId < 0)
+		{
+			described.exists = false;
+		}
 
 		result.input_describe = described;
 		result.ok = true;
