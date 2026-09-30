@@ -87,8 +87,6 @@ _DAYZ_IMAGE_NAMES = frozenset(
 _DAYZ_PORT_RANGE = range(2302, 3000)
 # Visible window that does not take the foreground.
 SW_SHOWNOACTIVATE = 4
-# Minimized window that does not take the foreground (the server, f298).
-SW_SHOWMINNOACTIVE = 7
 # fb-20260822-025926-bad7: what DayZ writes on stdout/stderr is kept in files
 # beside the role's RPT instead of being lost. Each stream keeps its first
 # LAUNCH_OUTPUT_CAP_BYTES, then only the last LAUNCH_OUTPUT_TAIL_BYTES, which
@@ -2074,15 +2072,7 @@ class ProcessLifecycle:
         elif os.name == "nt" and window_style == "normal":
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            # fb-20260930-171421-fa6f (f298): DayZ still takes the foreground
-            # under SW_SHOWNOACTIVATE. Captures target the client, so the
-            # server starts minimized; the client must render and keeps its
-            # visible window. "-server" in the argv decides, as it does for the
-            # Steam gate in _start_run_reserved; the role label does not.
-            server = "-server" in [arg.casefold() for arg in argv[1:]]
-            startupinfo.wShowWindow = (
-                SW_SHOWMINNOACTIVE if server else SW_SHOWNOACTIVATE
-            )
+            startupinfo.wShowWindow = SW_SHOWNOACTIVATE
             kwargs["startupinfo"] = startupinfo
         # fb-20260822-025926-bad7: the console streams used to be dropped.
         # They go to pipes the daemon drains into files beside the RPT; the
