@@ -29,6 +29,10 @@ Uso:
     python canary_fence.py --phase before  --client-profiles <dir> --evidence <dir>
     python canary_fence.py --phase spawn   ...        (lanza el intruso)
     python canary_fence.py --phase after   ...        (captura + contadores + mata el extra)
+
+No volver a programar este canario sin una segunda cuenta de Steam o un intruso
+que no dependa de Steam: dos clientes comparten Steam ID y el intruso se queda
+en el menu con 0x000400B3 (ficha e4cf).
 """
 from __future__ import annotations
 
@@ -84,13 +88,62 @@ def _intruder_still_running(evidence: str) -> bool:
     """True while any DayZDiag is still running against the intruder profile."""
     marker = os.path.join(evidence, "intruder_profiles").lower()
     try:
-        listing = subprocess.run(
+        proc = subprocess.run(
             ["wmic", "process", "where", "name='DayZDiag_x64.exe'", "get", "CommandLine"],
             capture_output=True, text=True, timeout=20,
-        ).stdout
+        )
     except Exception:
         return True  # unknown means NOT verified; never report a clean kill on doubt
-    return marker in listing.lower()
+    listing = (proc.stdout or "").lower()
+    if marker in listing:
+        return True
+    if proc.returncode == 0 and (
+        "commandline" in listing or "no instance" in (proc.stderr or "").lower()
+    ):
+        return False  # a real listing (or wmic's own "none") without the intruder
+    return True  # wmic ran but failed or answered nothing: unknown, not a clean kill
+
+
+# One wmic snapshot races the exit. Poll for this long before calling it a miss.
+KILL_VERIFY_WINDOW_S = 15
+KILL_VERIFY_INTERVAL_S = 1
+
+
+def _poll_intruder_exit(evidence: str) -> dict:
+    """Re-query until the intruder profile is gone or the window ends.
+
+    KILL_VERIFY_WINDOW_S is a monotonic deadline (time.monotonic) from the
+    start of this call. Time inside wmic counts. The first look is immediate;
+    later looks stay KILL_VERIFY_INTERVAL_S apart, and a sleep is shortened so
+    it does not run past the deadline. The look that lands on the deadline
+    still runs. After that, or as soon as a query itself reaches the deadline,
+    the loop does not sleep or query again. Stop earlier at the first query
+    that says the profile is gone. A query that cannot classify counts as
+    still running. waited_s is time slept; elapsed_s is monotonic time from
+    the start through the last query.
+    """
+    queries = 0
+    waited_s = 0
+    started = time.monotonic()
+    deadline = started + KILL_VERIFY_WINDOW_S
+    while True:
+        queries += 1
+        if not _intruder_still_running(evidence):
+            verified = True
+            break
+        now = time.monotonic()
+        if now >= deadline:
+            verified = False
+            break
+        step = min(KILL_VERIFY_INTERVAL_S, deadline - now)
+        time.sleep(step)
+        waited_s += step
+    return {
+        "killed_verified": verified,
+        "kill_verify_queries": queries,
+        "kill_verify_waited_s": waited_s,
+        "kill_verify_elapsed_s": time.monotonic() - started,
+    }
 
 
 def spawn_intruder(client_profiles: str, evidence: str, diag_exe: str, extra_args: list[str]) -> dict:
@@ -168,7 +221,11 @@ def main() -> int:
             out["killed_pid"] = args.intruder_pid
             # DayZDiag launcher pid != window pid, so the spawned pid may outlive
             # the call. Confirm by profile instead of trusting the return code.
-            out["killed_verified"] = not _intruder_still_running(args.evidence)
+            poll = _poll_intruder_exit(args.evidence)
+            out["killed_verified"] = poll["killed_verified"]
+            out["kill_verify_queries"] = poll["kill_verify_queries"]
+            out["kill_verify_waited_s"] = poll["kill_verify_waited_s"]
+            out["kill_verify_elapsed_s"] = poll["kill_verify_elapsed_s"]
 
     path = os.path.join(args.evidence, "canary_%s.json" % args.phase)
     with open(path, "w", encoding="utf-8") as fh:
