@@ -3,8 +3,8 @@
 Ficha fb-20260915-014753-ba11: one wmic snapshot immediately after taskkill
 reported the intruder still running, and the pid was gone twenty seconds later.
 These tests load reviews/2026-08-19-lane-fence/canario/canary_fence.py by path
-(it is not a package) and patch subprocess.run and time.sleep. No wmic, no
-sleep, no process.
+(it is not a package) and patch subprocess.run, time.sleep and time.monotonic.
+No wmic, no sleep, no process.
 """
 from __future__ import annotations
 
@@ -63,12 +63,43 @@ def _completed(stdout: str) -> subprocess.CompletedProcess:
     )
 
 
+# Measured by the R1 wmic probe: a bad query and a real "none" share a blank
+# stdout. Only rc and stderr tell them apart. rc 2147749911, stdout newlines.
+_WMIC_FAILED = subprocess.CompletedProcess(
+    args=["wmic"],
+    returncode=2147749911,
+    stdout="\n\n\n\n",
+    stderr="Node - WILLY\n\nERROR:\n\nDescription = Consulta no valida\n\n",
+)
+_WMIC_NONE = subprocess.CompletedProcess(
+    args=["wmic"],
+    returncode=0,
+    stdout="\n\n\n\n",
+    stderr="No Instance(s) Available.\n\n",
+)
+
+
+class _Clock:
+    """Fake monotonic clock. Sleep advances it; wmic time must advance it too."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += float(seconds)
+
+
 class CanaryKillVerifyTest(unittest.TestCase):
     def setUp(self) -> None:
         self.canary = _load_canary()
 
-    def _run_after(self, evidence: str, on_wmic):
+    def _run_after(self, evidence: str, on_wmic, clock: _Clock | None = None):
         canary = self.canary
+        if clock is None:
+            clock = _Clock()
         commands: list[str] = []
 
         def fake_run(cmd, *args, **kwargs):
@@ -77,6 +108,8 @@ class CanaryKillVerifyTest(unittest.TestCase):
             if exe == "taskkill":
                 return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
             if exe == "wmic":
+                if commands.count("wmic") > 20:
+                    raise AssertionError("poll did not stop")
                 outcome = on_wmic()
                 if isinstance(outcome, BaseException):
                     raise outcome
@@ -92,12 +125,14 @@ class CanaryKillVerifyTest(unittest.TestCase):
             "--key", "not-a-real-key",
             "--intruder-pid", "33788",
         ]
+        sleep = mock.Mock(side_effect=clock.sleep)
         with contextlib.redirect_stdout(io.StringIO()), \
                 mock.patch.object(sys, "argv", argv), \
                 mock.patch.object(canary, "capture", return_value={"patched": True}), \
                 mock.patch.object(canary, "daemon_status", return_value={"fence": {}}), \
                 mock.patch.object(canary.subprocess, "run", side_effect=fake_run), \
-                mock.patch.object(canary.time, "sleep") as sleep:
+                mock.patch.object(canary.time, "sleep", sleep), \
+                mock.patch.object(canary.time, "monotonic", clock.monotonic):
             rc = canary.main()
         self.assertEqual(rc, 0)
         written = json.loads(
@@ -106,7 +141,7 @@ class CanaryKillVerifyTest(unittest.TestCase):
         self.assertEqual(commands[0], "taskkill")
         self.assertEqual(commands.count("taskkill"), 1)
         self.assertTrue(all(name == "wmic" for name in commands[1:]))
-        return written, sleep, commands
+        return written, sleep, commands, clock
 
     def test_window_is_fifteen_seconds_stepped_once_a_second(self) -> None:
         self.assertEqual(self.canary.KILL_VERIFY_WINDOW_S, 15)
@@ -119,13 +154,14 @@ class CanaryKillVerifyTest(unittest.TestCase):
                 queries["n"] += 1
                 return _completed(_listing(evidence, running=queries["n"] < 3))
 
-            written, sleep, commands = self._run_after(evidence, on_wmic)
+            written, sleep, commands, clock = self._run_after(evidence, on_wmic)
         self.assertIs(written["killed_verified"], True)
         self.assertEqual(written["kill_verify_queries"], 3)
         self.assertEqual(
             written["kill_verify_waited_s"],
             2 * self.canary.KILL_VERIFY_INTERVAL_S,
         )
+        self.assertEqual(written["kill_verify_elapsed_s"], clock.now)
         self.assertEqual(sleep.call_count, 2)
         self.assertEqual(commands.count("wmic"), 3)
 
@@ -134,12 +170,14 @@ class CanaryKillVerifyTest(unittest.TestCase):
             def on_wmic():
                 return _completed(_listing(evidence, running=True))
 
-            written, sleep, commands = self._run_after(evidence, on_wmic)
+            written, sleep, commands, clock = self._run_after(evidence, on_wmic)
         window = self.canary.KILL_VERIFY_WINDOW_S
         interval = self.canary.KILL_VERIFY_INTERVAL_S
         self.assertIs(written["killed_verified"], False)
         self.assertEqual(written["kill_verify_waited_s"], window)
         self.assertEqual(written["kill_verify_queries"], window // interval + 1)
+        self.assertEqual(written["kill_verify_elapsed_s"], clock.now)
+        self.assertEqual(written["kill_verify_elapsed_s"], window)
         slept = [call.args[0] for call in sleep.call_args_list]
         self.assertEqual(slept, [interval] * (window // interval))
         self.assertEqual(commands.count("wmic"), window // interval + 1)
@@ -149,14 +187,113 @@ class CanaryKillVerifyTest(unittest.TestCase):
             return OSError("wmic failed")
 
         with tempfile.TemporaryDirectory() as evidence:
-            written, sleep, commands = self._run_after(evidence, on_wmic)
+            written, sleep, commands, clock = self._run_after(evidence, on_wmic)
         window = self.canary.KILL_VERIFY_WINDOW_S
         interval = self.canary.KILL_VERIFY_INTERVAL_S
         self.assertIs(written["killed_verified"], False)
         self.assertEqual(written["kill_verify_waited_s"], window)
         self.assertEqual(written["kill_verify_queries"], window // interval + 1)
+        self.assertEqual(written["kill_verify_elapsed_s"], clock.now)
         self.assertEqual(sleep.call_count, window // interval)
         self.assertEqual(commands.count("wmic"), window // interval + 1)
+
+    def test_one_nonzero_wmic_while_intruder_alive_is_not_verified(self) -> None:
+        # Reviewer S2: the intruder is alive, and query 5 is the measured
+        # failure (rc 2147749911, blank stdout, error on stderr).
+        queries = {"n": 0}
+        with tempfile.TemporaryDirectory() as evidence:
+            def on_wmic():
+                queries["n"] += 1
+                if queries["n"] == 5:
+                    return _WMIC_FAILED
+                return _completed(_listing(evidence, running=True))
+
+            written, sleep, commands, clock = self._run_after(evidence, on_wmic)
+        window = self.canary.KILL_VERIFY_WINDOW_S
+        interval = self.canary.KILL_VERIFY_INTERVAL_S
+        self.assertIs(written["killed_verified"], False)
+        self.assertEqual(written["kill_verify_queries"], window // interval + 1)
+        self.assertGreater(written["kill_verify_queries"], 5)
+        self.assertEqual(written["kill_verify_waited_s"], window)
+        self.assertEqual(written["kill_verify_elapsed_s"], clock.now)
+        self.assertEqual(commands.count("wmic"), window // interval + 1)
+
+    def test_no_instances_available_with_rc_0_is_gone(self) -> None:
+        with tempfile.TemporaryDirectory() as evidence:
+            def on_wmic():
+                return _WMIC_NONE
+
+            written, sleep, commands, clock = self._run_after(evidence, on_wmic)
+        self.assertIs(written["killed_verified"], True)
+        self.assertEqual(written["kill_verify_queries"], 1)
+        self.assertEqual(written["kill_verify_waited_s"], 0)
+        self.assertEqual(written["kill_verify_elapsed_s"], 0)
+        self.assertEqual(clock.now, 0)
+        self.assertEqual(sleep.call_count, 0)
+        self.assertEqual(commands.count("wmic"), 1)
+
+    def test_blank_wmic_output_without_positive_evidence_is_not_verified(self) -> None:
+        blank = subprocess.CompletedProcess(
+            args=["wmic"], returncode=0, stdout="\n\n\n\n", stderr=""
+        )
+        with tempfile.TemporaryDirectory() as evidence:
+            def on_wmic():
+                return blank
+
+            written, sleep, commands, clock = self._run_after(evidence, on_wmic)
+        window = self.canary.KILL_VERIFY_WINDOW_S
+        interval = self.canary.KILL_VERIFY_INTERVAL_S
+        self.assertIs(written["killed_verified"], False)
+        self.assertEqual(written["kill_verify_queries"], window // interval + 1)
+        self.assertEqual(written["kill_verify_elapsed_s"], clock.now)
+        self.assertEqual(commands.count("wmic"), window // interval + 1)
+
+    def test_wmic_time_counts_against_the_monotonic_deadline(self) -> None:
+        # Two queries of (window - interval) / 2 each, plus one spacing sleep,
+        # land on the deadline. waited_s stays the single sleep.
+        window = self.canary.KILL_VERIFY_WINDOW_S
+        interval = self.canary.KILL_VERIFY_INTERVAL_S
+        query_cost = (window - interval) // 2
+        clock = _Clock()
+        with tempfile.TemporaryDirectory() as evidence:
+            def on_wmic():
+                clock.now += query_cost
+                return _completed(_listing(evidence, running=True))
+
+            written, sleep, commands, same_clock = self._run_after(
+                evidence, on_wmic, clock
+            )
+        self.assertIs(same_clock, clock)
+        self.assertIs(written["killed_verified"], False)
+        self.assertEqual(written["kill_verify_queries"], 2)
+        self.assertEqual(written["kill_verify_waited_s"], interval)
+        self.assertEqual(written["kill_verify_elapsed_s"], window)
+        self.assertEqual(clock.now, window)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [interval])
+        self.assertEqual(commands.count("wmic"), 2)
+
+    def test_a_wmic_past_the_deadline_does_not_start_another_query(self) -> None:
+        clock = _Clock()
+        with tempfile.TemporaryDirectory() as evidence:
+            def on_wmic():
+                clock.now += 20
+                raise subprocess.TimeoutExpired(cmd=["wmic"], timeout=20)
+
+            written, sleep, commands, same_clock = self._run_after(
+                evidence, on_wmic, clock
+            )
+        self.assertIs(written["killed_verified"], False)
+        self.assertEqual(written["kill_verify_queries"], 1)
+        self.assertEqual(written["kill_verify_waited_s"], 0)
+        self.assertEqual(written["kill_verify_elapsed_s"], 20)
+        self.assertEqual(same_clock.now, 20)
+        self.assertEqual(sleep.call_count, 0)
+        self.assertEqual(commands.count("wmic"), 1)
+
+    def test_poll_docstring_says_the_window_is_monotonic(self) -> None:
+        doc = self.canary._poll_intruder_exit.__doc__ or ""
+        self.assertIn("monotonic", doc)
+        self.assertIn("KILL_VERIFY_WINDOW_S", doc)
 
     def test_docstring_says_not_to_reschedule_on_one_steam_account(self) -> None:
         doc = self.canary.__doc__ or ""
