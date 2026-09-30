@@ -858,12 +858,19 @@ def _install_catalog_change_notice(app: Any, runtime: Any) -> None:
     b753: a lease reveals the lease-gated tools, and session_release, or a call
     that finds the lease expired or lost, hides them again. The client runtime
     already tracks that state: ControlClient.active_lease_token, set by a grant
-    and cleared by session_release and by _clear_matching_lease on a
-    lease_expired / lease_invalid reply. So there is no timer: after every call
-    the view is compared with the one last announced, and only a difference is
-    sent, which also keeps concurrent calls from hiding a flip. A lease that
-    expires silently is seen by the next call that reaches the daemon with it.
+    and cleared by session_release, by _clear_matching_lease on a
+    lease_expired / lease_invalid reply, and by a session_status reply that no
+    longer shows the lease. So there is no timer: after every call the view is
+    compared with the one last announced, and only a difference is sent. A lease
+    that expires silently is seen by the next call that reaches the daemon.
     A failed send never fails the call; the next call retries it.
+
+    The comparison, the send and the update run under one lock, and the view is
+    read inside it. Calls run concurrently and release tool_lock before this
+    point, so without the lock a call finishing while another's notice is still
+    being sent compares against the value that notice is about to overwrite: it
+    can stay silent about a new flip, and leave a stale view that makes a later
+    call miss one or announce nothing new (b753 review, F1).
 
     Registered as the protocol tools/call handler before
     install_result_freshness wraps that handler, so the freshness check still
@@ -871,21 +878,23 @@ def _install_catalog_change_notice(app: Any, runtime: Any) -> None:
     """
     call_tool = app.call_tool
     announced_compact = _progressive_disclosure_active(runtime)
+    announce_lock = asyncio.Lock()
 
     async def call_tool_then_announce(name: str, arguments: dict[str, Any]) -> Any:
         nonlocal announced_compact
         try:
             return await call_tool(name, arguments)
         finally:
-            compact = _progressive_disclosure_active(runtime)
-            if compact != announced_compact:
-                try:
-                    session = app._mcp_server.request_context.session
-                    await session.send_tool_list_changed()
-                except Exception:
-                    pass
-                else:
-                    announced_compact = compact
+            async with announce_lock:
+                compact = _progressive_disclosure_active(runtime)
+                if compact != announced_compact:
+                    try:
+                        session = app._mcp_server.request_context.session
+                        await session.send_tool_list_changed()
+                    except Exception:
+                        pass
+                    else:
+                        announced_compact = compact
 
     app._mcp_server.call_tool(validate_input=False)(call_tool_then_announce)
 
@@ -1894,6 +1903,28 @@ class _CallBudgetExpired(Exception):
     """``ClientRuntime._call`` had no time left to start this HTTP hop."""
 
 
+def _status_disowns_lease(status: object, lease_id: object) -> bool:
+    """Whether a /session/status reply shows this identity no longer holds a lease.
+
+    The daemon honours a token only while its lease is this identity's active
+    lease (SessionCoordinator._validate_token_locked), which status reports as
+    self.state "active" with that lease_id. none, queued and releasing all say
+    it is not: an expired lease reads releasing while its cleanup runs, then
+    none. "active" under another lease_id says so too, when both ids are known.
+    A reply without a readable self block decides nothing.
+    """
+    own = status.get("self") if isinstance(status, dict) else None
+    if not isinstance(own, dict):
+        return False
+    state = own.get("state")
+    if state in {"none", "queued", "releasing"}:
+        return True
+    if state != "active" or not isinstance(lease_id, str) or not lease_id:
+        return False
+    named = own.get("lease_id")
+    return isinstance(named, str) and bool(named) and named != lease_id
+
+
 class ClientRuntime:
     """Client-mode runtime: proxies bridge calls over HTTP to the broker daemon.
 
@@ -2543,7 +2574,23 @@ class ClientRuntime:
         return result
 
     async def session_status(self) -> dict[str, Any]:
-        return await self._control_with_lazy_spawn(self._control.session_status)
+        # Read before the request, so a token granted while it is in flight is
+        # never the one forgotten below. getattr: tests compose a bare runtime
+        # with a control fake that tracks no lease.
+        held_token = getattr(self._control, "active_lease_token", None)
+        held_lease_id = getattr(self._control, "active_lease_id", None)
+        status = await self._control_with_lazy_spawn(self._control.session_status)
+        if isinstance(held_token, str) and held_token and _status_disowns_lease(
+            status, held_lease_id
+        ):
+            # b753 review F2: the daemon no longer holds the lease (it expired,
+            # was released, or the daemon restarted), so forget the token as a
+            # lease_expired reply does. ControlClient.session_status stays a pure
+            # read; its own recovery is reconcile_idle_session, which proves the
+            # identity idle and cancels the operation before clearing it.
+            self._control._clear_matching_lease(held_token)
+            await self._finish_carrier_io()
+        return status
 
     # 296b r3: the daemon's client dump registry. Never spawns a daemon: a
     # daemon that is not running holds no record, and the caller maps any

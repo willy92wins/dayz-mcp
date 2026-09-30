@@ -23,7 +23,7 @@ import contextlib
 import json
 import unittest
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 from unittest.mock import AsyncMock, patch
 
 import mcp.types as mcp_types
@@ -170,14 +170,30 @@ class ClaudeFullCatalogTest(unittest.IsolatedAsyncioTestCase):
 
 
 class _ScriptedDaemon:
-    """The daemon as the client runtime sees it: canned replies for one lease."""
+    """The daemon as the client runtime sees it: canned replies, one lease at a time.
 
-    TOKEN = "token-a"
+    Each grant hands out a new token (token-1, token-2, ...). /session/status
+    answers from the lease the daemon holds, so forget_lease() stands for the
+    TTL expiry that leaves the client holding a token the daemon disowned.
+    """
 
     def __init__(self) -> None:
         self.operation_id: str | None = None
+        self.grants = 0
+        self.holds_lease = False
         self.heartbeat_error: str | None = None
         self.enqueue_error: str | None = None
+
+    @property
+    def token(self) -> str:
+        return f"token-{self.grants}"
+
+    @property
+    def lease_id(self) -> str:
+        return f"lease-{self.grants}"
+
+    def forget_lease(self) -> None:
+        self.holds_lease = False
 
     def control(
         self, path: str, payload: dict[str, Any], _timeout_s: float
@@ -191,10 +207,12 @@ class _ScriptedDaemon:
                 "operation_id": self.operation_id,
             }
         if path == "/session/wait":
+            self.grants += 1
+            self.holds_lease = True
             return {
                 "status": "active",
-                "lease_token": self.TOKEN,
-                "lease_id": "lease-a",
+                "lease_token": self.token,
+                "lease_id": self.lease_id,
                 "ticket": "ticket-a",
                 "operation_id": self.operation_id,
             }
@@ -203,13 +221,19 @@ class _ScriptedDaemon:
                 raise control_client.ControlClientError(
                     self.heartbeat_error, request_stage="post_request", http_bytes_sent=1
                 )
-            return {"status": "active", "lease_id": "lease-a"}
+            return {"status": "active", "lease_id": self.lease_id}
         if path == "/session/release":
-            if payload.get("lease_token") != self.TOKEN:
+            if not self.holds_lease or payload.get("lease_token") != self.token:
                 raise control_client.ControlClientError(
                     "lease_invalid", request_stage="post_request", http_bytes_sent=1
                 )
+            self.holds_lease = False
             return {"released": True}
+        if path == "/session/status":
+            own: dict[str, Any] = {"state": "none", "position": None}
+            if self.holds_lease:
+                own = {"state": "active", "lease_id": self.lease_id, "position": 0}
+            return {"owner": None, "queue": [], "self": own}
         raise AssertionError(f"unexpected control request {path}")
 
     def bridge(
@@ -246,6 +270,16 @@ async def _listed(session) -> set[str]:
     return _names((await session.list_tools()).tools)
 
 
+async def _until(condition: Callable[[], bool], timeout_s: float = 5.0) -> None:
+    """Yield to the event loop until condition() holds; fail after timeout_s."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while not condition():
+        if loop.time() >= deadline:
+            raise AssertionError("condition not reached")
+        await asyncio.sleep(0.01)
+
+
 class CatalogChangeNoticeTest(unittest.IsolatedAsyncioTestCase):
     """b753: tools/list_changed is sent whenever the visible catalog flips."""
 
@@ -262,23 +296,23 @@ class CatalogChangeNoticeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(built, runtime)
         return app, runtime, daemon
 
-    async def _acquire(self, session, runtime) -> None:
+    async def _acquire(self, session, runtime, daemon) -> None:
         acquired = await session.call_tool(
             "session_acquire_wait", {"purpose": "catalog"}
         )
         self.assertFalse(acquired.isError, acquired.content)
-        self.assertEqual(runtime.active_lease_token, _ScriptedDaemon.TOKEN)
+        self.assertEqual(runtime.active_lease_token, daemon.token)
 
     async def test_acquire_and_release_each_announce_the_flip(self) -> None:
-        app, runtime, _daemon = self._app()
+        app, runtime, daemon = self._app()
         async with _recording_session(app) as (session, changed):
             before = await _listed(session)
-            await self._acquire(session, runtime)
+            await self._acquire(session, runtime, daemon)
             self.assertEqual(len(changed), 1)
             during = await _listed(session)
 
             released = await session.call_tool(
-                "session_release", {"lease_token": _ScriptedDaemon.TOKEN}
+                "session_release", {"lease_token": daemon.token}
             )
 
             self.assertFalse(released.isError, released.content)
@@ -294,11 +328,11 @@ class CatalogChangeNoticeTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         app, runtime, daemon = self._app()
         async with _recording_session(app) as (session, changed):
-            await self._acquire(session, runtime)
+            await self._acquire(session, runtime, daemon)
             daemon.heartbeat_error = "lease_expired"
 
             beat = await session.call_tool(
-                "session_heartbeat", {"lease_token": _ScriptedDaemon.TOKEN}
+                "session_heartbeat", {"lease_token": daemon.token}
             )
 
             self.assertTrue(beat.isError)
@@ -312,7 +346,7 @@ class CatalogChangeNoticeTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(code=code):
                 app, runtime, daemon = self._app()
                 async with _recording_session(app) as (session, changed):
-                    await self._acquire(session, runtime)
+                    await self._acquire(session, runtime, daemon)
                     daemon.enqueue_error = code
 
                     spawned = await session.call_tool(
@@ -324,14 +358,85 @@ class CatalogChangeNoticeTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(runtime.active_lease_token)
                     self.assertEqual(len(changed), 2)
 
+    async def test_a_status_that_no_longer_shows_the_lease_announces_the_flip(
+        self,
+    ) -> None:
+        # Review F2: the daemon expired the lease (status reads self.state none)
+        # and no other call has reached it with the token since.
+        app, runtime, daemon = self._app()
+        async with _recording_session(app) as (session, changed):
+            await self._acquire(session, runtime, daemon)
+            held = await session.call_tool("session_status", {})
+            self.assertFalse(held.isError, held.content)
+            self.assertEqual(len(changed), 1)
+            daemon.forget_lease()
+
+            status = await session.call_tool("session_status", {})
+
+            self.assertFalse(status.isError, status.content)
+            self.assertEqual(json.loads(status.content[0].text)["self"]["state"], "none")
+            self.assertIsNone(runtime.active_lease_token)
+            self.assertEqual(len(changed), 2)
+            self.assertNotIn("world_spawn", await _listed(session))
+
+    async def test_a_grant_while_the_release_notice_is_in_flight_is_announced(
+        self,
+    ) -> None:
+        # Review F1: the release's notice is held until the next grant has
+        # landed. That grant must still be announced, and the view left behind
+        # must be the real one: nothing new after an unrelated call, one notice
+        # for the next release.
+        app, runtime, daemon = self._app()
+        original_send = ServerSession.send_tool_list_changed
+        release_notice_held = asyncio.Event()
+        let_release_notice_go = asyncio.Event()
+        sends = 0
+
+        async def send_holding_the_second(server_session: ServerSession) -> None:
+            nonlocal sends
+            sends += 1
+            if sends == 2:
+                release_notice_held.set()
+                await let_release_notice_go.wait()
+            await original_send(server_session)
+
+        async with _recording_session(app) as (session, changed):
+            with patch.object(
+                ServerSession, "send_tool_list_changed", send_holding_the_second
+            ):
+                await self._acquire(session, runtime, daemon)
+                release = asyncio.create_task(
+                    session.call_tool("session_release", {"lease_token": daemon.token})
+                )
+                await release_notice_held.wait()
+                regrant = asyncio.create_task(
+                    session.call_tool("session_acquire_wait", {"purpose": "again"})
+                )
+                await _until(lambda: runtime.active_lease_token == "token-2")
+                let_release_notice_go.set()
+                released, regranted = await asyncio.gather(release, regrant)
+
+            self.assertFalse(released.isError, released.content)
+            self.assertFalse(regranted.isError, regranted.content)
+            self.assertEqual(runtime.active_lease_token, "token-2")
+            self.assertEqual(len(changed), 3)
+            self.assertIn("world_spawn", await _listed(session))
+            beat = await session.call_tool(
+                "session_heartbeat", {"lease_token": daemon.token}
+            )
+            self.assertFalse(beat.isError, beat.content)
+            self.assertEqual(len(changed), 3)
+            await session.call_tool("session_release", {"lease_token": daemon.token})
+            self.assertEqual(len(changed), 4)
+
     async def test_a_call_that_leaves_the_catalog_as_it_was_announces_nothing(
         self,
     ) -> None:
-        app, runtime, _daemon = self._app()
+        app, runtime, daemon = self._app()
         async with _recording_session(app) as (session, changed):
-            await self._acquire(session, runtime)
+            await self._acquire(session, runtime, daemon)
             beat = await session.call_tool(
-                "session_heartbeat", {"lease_token": _ScriptedDaemon.TOKEN}
+                "session_heartbeat", {"lease_token": daemon.token}
             )
             refused = await session.call_tool(
                 "session_release", {"lease_token": "token-b"}
@@ -339,17 +444,15 @@ class CatalogChangeNoticeTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertFalse(beat.isError, beat.content)
             self.assertTrue(refused.isError)
-            self.assertEqual(runtime.active_lease_token, _ScriptedDaemon.TOKEN)
+            self.assertEqual(runtime.active_lease_token, daemon.token)
             self.assertEqual(len(changed), 1)
 
     async def test_the_full_catalog_platform_is_never_told_about_a_flip(self) -> None:
-        app, runtime, _daemon = self._app(platform="claude")
+        app, runtime, daemon = self._app(platform="claude")
         async with _recording_session(app) as (session, changed):
             full = await _listed(session)
-            await self._acquire(session, runtime)
-            await session.call_tool(
-                "session_release", {"lease_token": _ScriptedDaemon.TOKEN}
-            )
+            await self._acquire(session, runtime, daemon)
+            await session.call_tool("session_release", {"lease_token": daemon.token})
 
             self.assertEqual(changed, [])
             self.assertEqual(await _listed(session), full)
@@ -358,18 +461,18 @@ class CatalogChangeNoticeTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_failed_notification_does_not_fail_the_call_and_is_retried(
         self,
     ) -> None:
-        app, runtime, _daemon = self._app()
+        app, runtime, daemon = self._app()
         async with _recording_session(app) as (session, changed):
             with patch.object(
                 ServerSession,
                 "send_tool_list_changed",
                 AsyncMock(side_effect=RuntimeError("stream closed")),
             ):
-                await self._acquire(session, runtime)
+                await self._acquire(session, runtime, daemon)
             self.assertEqual(changed, [])
 
             beat = await session.call_tool(
-                "session_heartbeat", {"lease_token": _ScriptedDaemon.TOKEN}
+                "session_heartbeat", {"lease_token": daemon.token}
             )
 
             self.assertFalse(beat.isError, beat.content)
@@ -454,6 +557,154 @@ class CatalogChangeNoticeOrderTest(unittest.IsolatedAsyncioTestCase):
         await verb
 
         self.assertEqual(sent.await_count, 2)
+
+    async def test_a_notice_in_flight_does_not_hide_the_next_flip(self) -> None:
+        # Review F1 without the SDK: the release's notice is held while the next
+        # grant completes. Unserialized, that grant compared against the view
+        # the held notice had not written yet and stayed silent; the notice then
+        # left "compact" behind while the catalog was full.
+        runtime = SimpleNamespace(
+            config=_client_config(client_platform="codex"), active_lease_token=None
+        )
+        release_notice_held = asyncio.Event()
+        let_release_notice_go = asyncio.Event()
+        regrant_done = asyncio.Event()
+        sends: list[str] = []
+        grants = 0
+
+        async def send() -> None:
+            sends.append("sent")
+            if len(sends) == 2:
+                release_notice_held.set()
+                await let_release_notice_go.wait()
+
+        async def call_tool(name: str, _arguments: dict[str, Any]) -> list[Any]:
+            nonlocal grants
+            if name == "grant":
+                grants += 1
+                runtime.active_lease_token = f"token-{grants}"
+                if grants == 2:
+                    regrant_done.set()
+            elif name == "release":
+                runtime.active_lease_token = None
+            return []
+
+        low_level = _FakeLowLevelServer(SimpleNamespace(send_tool_list_changed=send))
+        server._install_catalog_change_notice(
+            SimpleNamespace(call_tool=call_tool, _mcp_server=low_level), runtime
+        )
+
+        await low_level.handler("grant", {})
+        release = asyncio.create_task(low_level.handler("release", {}))
+        await release_notice_held.wait()
+        regrant = asyncio.create_task(low_level.handler("grant", {}))
+        await regrant_done.wait()
+        let_release_notice_go.set()
+        await asyncio.gather(release, regrant)
+        self.assertEqual(len(sends), 3)
+
+        await low_level.handler("noop", {})
+        self.assertEqual(len(sends), 3)
+        await low_level.handler("release", {})
+        self.assertEqual(len(sends), 4)
+
+
+class SessionStatusReconcileTest(unittest.IsolatedAsyncioTestCase):
+    """Review F2: a status reply that no longer shows the lease forgets the token."""
+
+    def _runtime(self, own: dict[str, Any] | None):
+        runtime = _fixture_client_runtime(
+            _client_config(
+                key="test-key", client_platform="codex", auto_spawn_daemon=False
+            )
+        )
+        control = runtime._control
+        control.active_lease_token = "token-1"
+        control.active_lease_id = "lease-1"
+        control.state = "ACTIVE"
+        reply: dict[str, Any] = {"owner": None, "queue": []}
+        if own is not None:
+            reply["self"] = own
+
+        def request(
+            path: str, _payload: dict[str, Any], _timeout_s: float
+        ) -> dict[str, Any]:
+            if path != "/session/status":
+                raise AssertionError(f"unexpected control request {path}")
+            return dict(reply)
+
+        control._request_once = request
+        announced: list[tuple[str | None, str | None]] = []
+        control.on_lease_change = lambda token, lease_id: announced.append(
+            (token, lease_id)
+        )
+        return runtime, announced
+
+    async def test_a_status_that_no_longer_shows_the_lease_forgets_the_token(
+        self,
+    ) -> None:
+        for own in (
+            {"state": "none", "position": None},
+            {"state": "releasing", "lease_id": "lease-1", "position": 0},
+            {"state": "queued", "ticket": "ticket-9", "position": 1},
+            {"state": "active", "lease_id": "lease-2", "position": 0},
+        ):
+            with self.subTest(own=own):
+                runtime, announced = self._runtime(own)
+
+                await runtime.session_status()
+
+                self.assertIsNone(runtime.active_lease_token)
+                self.assertIsNone(runtime._control.active_lease_id)
+                self.assertEqual(announced, [(None, None)])
+
+    async def test_a_status_that_still_shows_the_lease_keeps_the_token(self) -> None:
+        for own in (
+            {"state": "active", "lease_id": "lease-1", "position": 0},
+            {"state": "active", "position": 0},
+            None,
+        ):
+            with self.subTest(own=own):
+                runtime, announced = self._runtime(own)
+
+                await runtime.session_status()
+
+                self.assertEqual(runtime.active_lease_token, "token-1")
+                self.assertEqual(runtime._control.active_lease_id, "lease-1")
+                self.assertEqual(announced, [])
+
+    async def test_a_token_granted_while_status_was_asked_is_kept(self) -> None:
+        runtime, announced = self._runtime({"state": "none", "position": None})
+        control = runtime._control
+        answer = control._request_once
+
+        def answer_then_regrant(
+            path: str, payload: dict[str, Any], timeout_s: float
+        ) -> dict[str, Any]:
+            reply = answer(path, payload, timeout_s)
+            with control._state_lock:
+                control.active_lease_token = "token-2"
+                control.active_lease_id = "lease-2"
+            return reply
+
+        control._request_once = answer_then_regrant
+
+        await runtime.session_status()
+
+        self.assertEqual(runtime.active_lease_token, "token-2")
+        self.assertEqual(announced, [])
+
+    async def test_the_control_client_read_itself_changes_nothing(self) -> None:
+        # The reconciliation lives in ClientRuntime. ControlClient.session_status
+        # stays a pure read: after a daemon restart its caller recovers through
+        # reconcile_idle_session (test_client_credential_rotation_e2e).
+        runtime, announced = self._runtime({"state": "none", "position": None})
+
+        await runtime._control.session_status()
+
+        self.assertEqual(runtime.active_lease_token, "token-1")
+        self.assertEqual(runtime._control.state, "ACTIVE")
+        self.assertEqual(announced, [])
 
 
 class LeaseFreeReadsTest(unittest.IsolatedAsyncioTestCase):
