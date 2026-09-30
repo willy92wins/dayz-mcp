@@ -148,6 +148,30 @@ class ObjectAnimAppToolTest(unittest.IsolatedAsyncioTestCase):
                 COMMAND, {"source": "Doors1", "object_id": 7}, "server", 1.0
             )
 
+    async def test_description_states_same_tick_reread_vehicle_hold_and_doors(self) -> None:
+        app, _runtime = server.build_app(
+            server.ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
+        )
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        description = tools[COMMAND].description or ""
+        for sentence in (
+            "same-tick re-read",
+            "can still read the old value",
+            "does not hold a written phase",
+            "instantaneous probe",
+            "cannot keep a door open",
+            "ficha df3a",
+            "with no player near, 0 throughout",
+            "For building doors, read object_doors",
+            "read 0 for an open building door",
+        ):
+            with self.subTest(sentence=sentence):
+                self.assertIn(sentence, description)
+        self.assertIn("SetAnimationPhaseNow", description)
+        self.assertIn("phase is a unitless value", description)
+        self.assertIn("Omit phase to read.", description)
+        self.assertNotIn("apply instantly", description)
+
 
 if __name__ == "__main__":
     unittest.main()

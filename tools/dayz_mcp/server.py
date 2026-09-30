@@ -6668,9 +6668,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Read or set an entity animation phase. Target by object_id (as "
             "returned by world_spawn; position-independent, reaches a "
             "client-authoritative fixture whose server replica sits at spawn) "
-            "or by classname near pos. phase is a unitless value; writes apply "
-            "instantly via SetAnimationPhaseNow and the returned phase is "
-            "re-read after the write. Omit phase to read."
+            "or by classname near pos. phase is a unitless value; the write "
+            "uses SetAnimationPhaseNow. The returned phase is the same-tick "
+            "re-read and can still read the old value, so confirm a write "
+            "with a later read. On a vehicle the server does not hold a "
+            "written phase (measured on 1.29: the reply read 0, a later read "
+            "1, then 0 again; with no player near, 0 throughout), so there it "
+            "is an instantaneous probe and cannot keep a door open (ficha "
+            "df3a). For building doors, read object_doors: object_anim can "
+            "read 0 for an open building door. Omit phase to read."
         )
     )
     async def object_anim(
