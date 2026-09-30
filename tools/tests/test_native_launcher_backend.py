@@ -2295,6 +2295,24 @@ class NativeDebugOwnershipTests(unittest.TestCase):
             self.assertEqual(authority.helper_calls, [823, 833])
             self.assertEqual(authority.addon_tree_calls, [834])
 
+        with self.subTest(name="outside_this_job"):
+            authority = _ImageAuthority(
+                helper_approved=False,
+                steam_launcher_approved=True,
+            )
+            result, _fake = run(
+                [root, builder, launcher, launcher_exit, builder_exit, root_exit],
+                [
+                    (True, 6, 501, 703),
+                    (True, 6, 501, 900),
+                    (True, 6, 777, 910),
+                    (True, 4, 501, 0),
+                ],
+                authority,
+            )
+            self.assertIsInstance(result, backend.NativeLauncherBackendError)
+            self.assertEqual(authority.steam_launcher_calls, [])
+
         with self.subTest(name="outside_before_addon_builder"):
             authority = _ImageAuthority(
                 helper_approved=False,

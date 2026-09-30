@@ -766,6 +766,19 @@ class AddonTreeSteamDllTest(unittest.TestCase):
         directory_identity: PathIdentity | None = None,
     ) -> bool:
         file_identity = self._FILE_IDENTITY
+        pinned = (
+            authority.steam_install_identity
+            if directory_identity is None
+            else directory_identity
+        )
+        seen: list[str] = []
+
+        def directory_identity(queried: str) -> PathIdentity:
+            seen.append(queried)
+            if ntpath.normcase(queried) == ntpath.normcase(self._STEAM):
+                return pinned
+            return PathIdentity(7, "77" * 16)
+
         with patch.object(
             native_bundle,
             "_file_identity",
@@ -773,19 +786,19 @@ class AddonTreeSteamDllTest(unittest.TestCase):
         ), patch.object(
             native_bundle, "_final_handle_path", return_value=path
         ), patch.object(
-            native_bundle,
-            "_directory_identity",
-            return_value=(
-                authority.steam_install_identity
-                if directory_identity is None
-                else directory_identity
-            ),
+            native_bundle, "_directory_identity", side_effect=directory_identity
         ), patch.object(
             native_bundle, "_path_identity", return_value=file_identity
         ), patch.object(
             native_bundle, "_valve_signature_of_handle", return_value=signed
         ):
-            return authority.approve_addon_tree_steam_launcher(11)
+            approved = authority.approve_addon_tree_steam_launcher(11)
+        if approved or seen:
+            self.assertEqual(
+                [ntpath.normcase(queried) for queried in seen],
+                [ntpath.normcase(self._STEAM)],
+            )
+        return approved
 
     def test_measured_basenames_are_the_closed_set(self) -> None:
         self.assertEqual(
