@@ -106,6 +106,10 @@ class ObjectDoorsFastMCPTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(RAYCAST_SENTENCE, description)
         self.assertIn("not_a_building", description)
         self.assertIn("object_anim is unchanged", description)
+        # Re-measured after fb-20260930-065425-8779: an open door's exact source
+        # reads 1.0; only an unknown source name reads 0.
+        self.assertIn("an unknown source name also reads 0", description)
+        self.assertNotIn("read 0 for an open building door", description)
         self.assertIn("GetDoorSoundPos", description)
         self.assertIn("3-float array", description)
         self.assertNotIn("Requires a lease", description)

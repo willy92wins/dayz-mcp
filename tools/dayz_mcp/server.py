@@ -6715,8 +6715,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "with a later read. A read writes nothing. A written phase holds: "
             "measured on 1.29, a car door written with phase=1 read back 1.0 "
             "through vehicle_door at +0.6, +1.2 and +5 s. For a car door, use "
-            "vehicle_door. For building doors, read object_doors: object_anim "
-            "can read 0 for an open building door. Omit phase to read."
+            "vehicle_door. For building doors, read object_doors, which gives "
+            "each door's state by index. object_anim reads a door's animation "
+            "source only under its exact name (measured on 1.29: Land_Shed_M1 "
+            "door 0, source Doors1, read 1.0 open and 0.0 closed), and an "
+            "unknown source name also reads 0, so a 0 alone does not show that "
+            "a door is closed. Omit phase to read."
         )
     )
     async def object_anim(
@@ -7153,8 +7157,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "opening_ajar, opened, ajar, closing, closed and locked. These are "
             "the engine door predicates. Each door also carries pos, the world "
             "position Building.GetDoorSoundPos returns as a 3-float array, so "
-            "a caller knows where to stand. object_anim is unchanged and can still "
-            "read 0 for an open building door. A target that is not a Building "
+            "a caller knows where to stand. object_anim is unchanged: it reads "
+            "a door's animation source only under its exact name, and an "
+            "unknown source name also reads 0, so a 0 from object_anim does not "
+            "show that a door is closed. A target that is not a Building "
             "returns not_a_building. A door count outside 0..64 returns "
             "door_count_unsupported with that count and an empty doors list. "
             "Whether a raycast passes through an open door leaf is out of scope."

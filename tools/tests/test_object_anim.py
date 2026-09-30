@@ -168,7 +168,7 @@ class ObjectAnimAppToolTest(unittest.IsolatedAsyncioTestCase):
             "A written phase holds",
             "For a car door, use vehicle_door.",
             "For building doors, read object_doors",
-            "read 0 for an open building door",
+            "an unknown source name also reads 0",
             "Omit phase to read.",
         ):
             with self.subTest(sentence=sentence):
@@ -183,7 +183,15 @@ class ObjectAnimAppToolTest(unittest.IsolatedAsyncioTestCase):
         # fb-20260930-065425-8779 retracted "a written phase does not hold on
         # the vehicle": each object_anim read wrote phase 0. The hold is stated
         # with the instrument that measured it, vehicle_door reads.
-        for retracted in ("does not hold", "cannot keep a door open", "instantaneous probe"):
+        # The d1d9 sentence "object_anim can read 0 for an open building door"
+        # was retracted too: re-measured after the fix, source Doors1 of an open
+        # Land_Shed_M1 door read 1.0; only an unknown source name reads 0.
+        for retracted in (
+            "does not hold",
+            "cannot keep a door open",
+            "instantaneous probe",
+            "read 0 for an open building door",
+        ):
             with self.subTest(retracted=retracted):
                 self.assertNotIn(retracted, description)
         hold = ""
