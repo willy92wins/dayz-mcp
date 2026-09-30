@@ -97,6 +97,7 @@ CLIENT_COMMANDS = {
     "ui_focus",
     "ui_dialog",
     "action_use",
+    "action_use_door",
     "action_use_target",
     "weapon_aim",
     "weapon_fire",
@@ -943,6 +944,21 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "action": _is_non_empty_string,
                 "target": _one_of("hands", "self"),
                 "classname": _is_string,
+                "radius": _SAFE_RADIUS_200,
+            },
+        )
+    ),
+    # Door mode is the command name. door_index is not optional on action_use:
+    # 0 is a valid door, so an absent field cannot mean "no door".
+    "action_use_door": _command_schema(
+        _schema_variant(
+            required=("action", "classname", "door_index"),
+            optional=("pos", "radius"),
+            validators={
+                "action": _is_non_empty_string,
+                "classname": _is_non_empty_string,
+                "door_index": _integer_in_range(minimum=0, maximum=63),
+                "pos": _is_real_vector3,
                 "radius": _SAFE_RADIUS_200,
             },
         )

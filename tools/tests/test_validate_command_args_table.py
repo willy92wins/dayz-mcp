@@ -645,6 +645,11 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             {"action": "open", "extra": None},
             (False, "bad_args"),
         ),
+        (
+            "door_index_rejected",
+            {"action": "open", "door_index": 0},
+            (False, "bad_args"),
+        ),
         ("missing_action", {"radius": 1.0}, (False, "bad_args")),
         (
             "radius_not_positive",
@@ -693,6 +698,75 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "extra_key",
             {"action": "open", "target": "hands", "extra": None},
+            (False, "bad_args"),
+        ),
+    ),
+    "action_use_door": (
+        (
+            "valid_door_zero",
+            {"action": "ActionOpenDoors", "classname": "Land_House_2W03", "door_index": 0},
+            (True, None),
+        ),
+        (
+            "valid_last_door_with_optional",
+            {
+                "action": "ActionCloseDoors",
+                "classname": "Land_House_2W03",
+                "door_index": 63,
+                "pos": [1.0, 2.0, 3.0],
+                "radius": 200.0,
+            },
+            (True, None),
+        ),
+        (
+            "missing_classname",
+            {"action": "ActionOpenDoors", "door_index": 0},
+            (False, "bad_args"),
+        ),
+        (
+            "empty_classname",
+            {"action": "ActionOpenDoors", "classname": "", "door_index": 0},
+            (False, "bad_args"),
+        ),
+        (
+            "missing_door_index",
+            {"action": "ActionOpenDoors", "classname": "Land_House_2W03"},
+            (False, "bad_args"),
+        ),
+        (
+            "door_index_64",
+            {"action": "ActionOpenDoors", "classname": "Land_House_2W03", "door_index": 64},
+            (False, "bad_args"),
+        ),
+        (
+            "door_index_negative",
+            {"action": "ActionOpenDoors", "classname": "Land_House_2W03", "door_index": -1},
+            (False, "bad_args"),
+        ),
+        (
+            "door_index_bool",
+            {"action": "ActionOpenDoors", "classname": "Land_House_2W03", "door_index": True},
+            (False, "bad_args"),
+        ),
+        (
+            "target_rejected",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "door_index": 0,
+                "target": "world",
+            },
+            (False, "bad_args"),
+        ),
+        ("missing_action", {"classname": "Land_House_2W03", "door_index": 0}, (False, "bad_args")),
+        (
+            "extra_key",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "door_index": 0,
+                "extra": None,
+            },
             (False, "bad_args"),
         ),
     ),

@@ -121,6 +121,9 @@ class MCPArgs
 	string action;
 	// action_use_target: hands or self. action_use: empty or world.
 	string target;
+	// action_use_door. Enforce ints default to 0, and 0 is a valid door, so
+	// the command name, not this field, turns door mode on.
+	int door_index;
 	// ui_dialog (wire v1.1). title is reused above. kind is this class only.
 	string kind;
 	string message;
@@ -520,6 +523,13 @@ class MCPDoorState
 	bool closing;
 	bool closed;
 	bool locked;
+	// World position from Building.GetDoorSoundPos for this door index.
+	ref array<float> pos;
+
+	void MCPDoorState()
+	{
+		pos = new array<float>();
+	}
 };
 
 // Read-back for weapon_raise, weapon_aim, weapon_fire and weapon_sights.
@@ -628,6 +638,11 @@ class MCPResult
 	string target;
 	float distance;
 	bool started;
+	// action_use_door. Same default-0 rule as MCPArgs.door_index: 0 is a valid
+	// door and a valid component, so the command name, not these fields, is
+	// what turns door mode on. Filled only by that command.
+	int door_index;
+	int component_index;
 	// ui_dialog nested payload. Unassigned on other commands.
 	ref MCPDialogResult dialog;
 	// hands_take: accepted means the request passed server checks. confirmed

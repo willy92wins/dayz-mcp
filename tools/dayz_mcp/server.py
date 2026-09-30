@@ -967,6 +967,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
     },
     "client": {
         "action_use": "action_use",
+        "action_use_door": "action_use",
         "action_use_target": "action_use",
         "camera_get": "camera_get",
         "camera_set": "camera_set",
@@ -7041,7 +7042,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "or by classname near pos, the same lookup object_inspect uses. "
             "Returns door_count and, per door index, open, opening, "
             "opening_ajar, opened, ajar, closing, closed and locked. These are "
-            "the engine door predicates. object_anim is unchanged and can still "
+            "the engine door predicates. Each door also carries pos, the world "
+            "position Building.GetDoorSoundPos returns as a 3-float array, so "
+            "a caller knows where to stand. object_anim is unchanged and can still "
             "read 0 for an open building door. A target that is not a Building "
             "returns not_a_building. A door count outside 0..64 returns "
             "door_count_unsupported with that count and an empty doors list. "
@@ -7982,9 +7985,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "without calling the bridge; they suit actions whose target condition "
         "does not read the cursor position (for example ActionDrink). A hands or "
         "self call whose result does not echo that mode is target_not_supported. "
+        "door_index selects one door of a Building (0 <= door_index < 64) on "
+        "the nearest world object of classname. It needs an addon that "
+        "announces action_use_door and otherwise returns door_not_supported "
+        "without calling the bridge. A result that does not echo the same "
+        "door_index is door_not_supported. The player must stand within 2 m "
+        "of that door: read its pos from object_doors, then player_teleport. "
+        "started still does not prove the door moved; read object_doors after. "
         "Routes to MCPClientBridge on the CLIENT and calls "
-        "ActionManagerClient.PerformActionStart with the held item and a "
-        "synthetic target (component=-1). This enters the normal client action "
+        "ActionManagerClient.PerformActionStart with the held item. Without "
+        "door_index the synthetic target uses component=-1. With door_index "
+        "the target uses the view-geometry component of that door. This enters the normal client action "
         "lifecycle, including client callbacks such as OnStartClient and, for "
         "AnimatedActionBase when its execution animation event arrives, "
         "OnExecuteClient; client-only mod code compiled under #ifndef SERVER "
@@ -8004,6 +8015,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         pos: list[StrictFloat] | None = None,
         radius: StrictFloat = 5.0,
         target: StrictStr = "world",
+        door_index: StrictInt | None = None,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(action, str) or action == "":
@@ -8022,6 +8034,32 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(
                 _bad_args("classname", classname, "be omitted when target is self")
             )
+        if door_index is not None:
+            if (
+                isinstance(door_index, bool)
+                or not isinstance(door_index, int)
+                or door_index < 0
+                or door_index >= 64
+            ):
+                raise ToolError(
+                    _bad_args("door_index", door_index, "be an int from 0 to 63")
+                )
+            if target != "world":
+                raise ToolError(
+                    _bad_args(
+                        "door_index",
+                        door_index,
+                        "be omitted unless target is world",
+                    )
+                )
+            if classname == "":
+                raise ToolError(
+                    _bad_args(
+                        "classname",
+                        classname,
+                        "be a non-empty string when door_index is set",
+                    )
+                )
         radius_error = _bad_args(
             "radius",
             radius,
@@ -8035,6 +8073,24 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["classname"] = classname
         if pos is not None:
             args["pos"] = _require_vec3(pos, "pos")
+        if door_index is not None:
+            announced = False
+            try:
+                status = await runtime.bridge_status_payload()
+                announced = _client_peer_announces_command(status, "action_use_door")
+            except Exception:
+                announced = False
+            if not announced:
+                raise ToolError("door_not_supported")
+            args["door_index"] = door_index
+            async with runtime.tool_lock:
+                result = await runtime.call_bridge(
+                    "action_use_door", args, "client", _timeout(timeout_s)
+                )
+            echoed = result.get("door_index") if isinstance(result, dict) else None
+            if echoed != door_index:
+                raise ToolError("door_not_supported")
+            return result
         if target == "world":
             async with runtime.tool_lock:
                 return await runtime.call_bridge(

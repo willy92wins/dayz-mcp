@@ -173,6 +173,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const int UI_TREE_DEFAULT_LIMIT = 256;
 	protected const int UI_TREE_MAX_LIMIT = 512;
 	protected const float ACTION_USE_DEFAULT_RADIUS = 5.0;
+	// action_use_door scans view-geometry components for GetDoorIndex == door.
+	// A component that is not that door returns -1 (actionopendoors.c:39-45),
+	// so the scan cannot stop on -1. Past this cap the result is
+	// door_component_not_found. One native call per index, once per command.
+	protected const int ACTION_USE_DOOR_COMPONENT_CAP = 512;
 	// input_describe: printable ASCII name, and the selected alternative's keys.
 	protected const int INPUT_NAME_MAX = 128;
 	protected const int INPUT_KEY_MAX = 16;
@@ -183,7 +188,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_use,action_use_target,camera_get,camera_set,engine_set,input_describe,key_press,player_respawn," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_use,action_use_door,action_use_target,camera_get,camera_set,engine_set,input_describe,key_press,player_respawn," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -847,6 +852,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			postNow = DispatchUiFocus(command, result);
 		}
 		else if (command.cmd == "action_use")
+		{
+			postNow = DispatchActionUse(command, result);
+		}
+		else if (command.cmd == "action_use_door")
 		{
 			postNow = DispatchActionUse(command, result);
 		}
@@ -2568,8 +2577,88 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			// measures DistanceSq from GetCursorHitPos (cctcursor.c:30-33).
 			// ForceTarget writes vector.Zero (actionmanagerclient.c:466), which
 			// is ~10 km from the player on Chernarus and always fails.
+			// action_use_door replaces the building centre with the component
+			// point IsInReach measures (actionbase.c:1196-1206).
 			vector cursorHitPos = targetObj.GetPosition();
-			actionTarget = new ActionTarget(targetObj, null, -1, cursorHitPos, 0);
+			if (command.cmd == "action_use_door")
+			{
+				// Echo the requested index before any refusal. The int defaults
+				// to 0, which is a real door, so an early return would otherwise
+				// look like door 0 to the caller.
+				int wantedDoor = command.args.door_index;
+				result.door_index = wantedDoor;
+
+				Building doorBuilding = Building.Cast(targetObj);
+				if (!doorBuilding)
+				{
+					result.ok = false;
+					result.error = "not_a_building";
+					return true;
+				}
+
+				int doorCount = doorBuilding.GetDoorCount();
+				if (wantedDoor < 0 || wantedDoor >= doorCount)
+				{
+					result.ok = false;
+					result.error = "door_out_of_range";
+					return true;
+				}
+
+				int doorComponent = -1;
+				int componentScan = 0;
+				while (componentScan < ACTION_USE_DOOR_COMPONENT_CAP && doorComponent < 0)
+				{
+					if (doorBuilding.GetDoorIndex(componentScan) == wantedDoor)
+					{
+						doorComponent = componentScan;
+					}
+
+					componentScan = componentScan + 1;
+				}
+
+				if (doorComponent < 0)
+				{
+					result.ok = false;
+					result.error = "door_component_not_found";
+					return true;
+				}
+
+				array<string> doorComponentNames = new array<string>();
+				doorBuilding.GetActionComponentNameList(doorComponent, doorComponentNames);
+				bool doorSelectionFound = false;
+				string doorSelection = "";
+				int nameScan = 0;
+				string doorComponentName = "";
+				while (nameScan < doorComponentNames.Count() && !doorSelectionFound)
+				{
+					doorComponentName = doorComponentNames.Get(nameScan);
+					if (doorComponentName.Contains("doorstwin"))
+					{
+						nameScan = nameScan + 1;
+					}
+					else
+					{
+						doorSelection = doorComponentName;
+						doorSelectionFound = true;
+					}
+				}
+
+				if (!doorSelectionFound)
+				{
+					result.ok = false;
+					result.error = "door_component_not_found";
+					return true;
+				}
+
+				vector doorModelPos = doorBuilding.GetSelectionPositionMS(doorSelection);
+				cursorHitPos = doorBuilding.ModelToWorld(doorModelPos);
+				actionTarget = new ActionTarget(doorBuilding, null, doorComponent, cursorHitPos, 0);
+				result.component_index = doorComponent;
+			}
+			else
+			{
+				actionTarget = new ActionTarget(targetObj, null, -1, cursorHitPos, 0);
+			}
 
 			result.classname = targetObj.GetType();
 			result.pos_real = new array<float>();
