@@ -756,6 +756,50 @@ class AddonTreeSteamDllTest(unittest.TestCase):
         ):
             return authority.approve_addon_tree_module(11)
 
+    def _approve_launcher(
+        self,
+        authority: native_bundle.DebugImageAuthority,
+        path: str,
+        *,
+        signed: bool = True,
+        after_identity: PathIdentity | None = None,
+        directory_identity: PathIdentity | None = None,
+    ) -> bool:
+        file_identity = self._FILE_IDENTITY
+        pinned = (
+            authority.steam_install_identity
+            if directory_identity is None
+            else directory_identity
+        )
+        seen: list[str] = []
+
+        def directory_identity(queried: str) -> PathIdentity:
+            seen.append(queried)
+            if ntpath.normcase(queried) == ntpath.normcase(self._STEAM):
+                return pinned
+            return PathIdentity(7, "77" * 16)
+
+        with patch.object(
+            native_bundle,
+            "_file_identity",
+            side_effect=[file_identity, after_identity or file_identity],
+        ), patch.object(
+            native_bundle, "_final_handle_path", return_value=path
+        ), patch.object(
+            native_bundle, "_directory_identity", side_effect=directory_identity
+        ), patch.object(
+            native_bundle, "_path_identity", return_value=file_identity
+        ), patch.object(
+            native_bundle, "_valve_signature_of_handle", return_value=signed
+        ):
+            approved = authority.approve_addon_tree_steam_launcher(11)
+        if approved or seen:
+            self.assertEqual(
+                [ntpath.normcase(queried) for queried in seen],
+                [ntpath.normcase(self._STEAM)],
+            )
+        return approved
+
     def test_measured_basenames_are_the_closed_set(self) -> None:
         self.assertEqual(
             native_bundle._ADDON_TREE_STEAM_CLIENT_DLLS,
@@ -764,11 +808,16 @@ class AddonTreeSteamDllTest(unittest.TestCase):
                     "cserhelper.dll",
                     "gameoverlayrenderer.dll",
                     "gameoverlayrenderer64.dll",
+                    "steam.dll",
                     "steamclient.dll",
                     "tier0_s.dll",
                     "vstdlib_s.dll",
                 }
             ),
+        )
+        self.assertEqual(
+            native_bundle._ADDON_TREE_STEAM_LAUNCHER_RELATIVE,
+            ("bin", "x64launcher.exe"),
         )
 
     def test_listed_dll_in_the_steam_directory_is_approved(self) -> None:
@@ -844,6 +893,90 @@ class AddonTreeSteamDllTest(unittest.TestCase):
                 self.assertFalse(self._approve(authority, path))
         with self.assertRaises(TypeError):
             self._authority(steam_client_dll_directories=frozenset({self._STEAM + r"\bin"}))
+
+    def test_steam_dll_uses_the_same_directory_and_signature_rule(self) -> None:
+        authority = self._authority(
+            steam_client_dll_names=native_bundle._ADDON_TREE_STEAM_CLIENT_DLLS,
+        )
+        listed = self._STEAM + r"\steam.dll"
+        self.assertTrue(self._approve(authority, listed))
+        self.assertTrue(self._approve(authority, listed.upper()))
+        self.assertFalse(self._approve(authority, listed, signed=False))
+        self.assertFalse(
+            self._approve(
+                authority,
+                listed,
+                directory_identity=PathIdentity(9, "11" * 16),
+            )
+        )
+        for path in (
+            self._STEAM + r"\bin\steam.dll",
+            self._STEAM + r"\bin\nested\steam.dll",
+            self._STEAM + r"\steamapps\steam.dll",
+            r"C:\Users\guill\AppData\Local\Temp\steam.dll",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(self._approve(authority, path))
+        self.assertFalse(
+            self._approve(
+                self._authority(steam_install_directory=None),
+                listed,
+            )
+        )
+
+    def test_x64launcher_is_approved_only_at_bin_of_the_pinned_directory(self) -> None:
+        authority = self._authority()
+        listed = self._STEAM + r"\bin\x64launcher.exe"
+        self.assertTrue(self._approve_launcher(authority, listed))
+        self.assertTrue(
+            self._approve_launcher(authority, self._STEAM + r"\BIN\X64LAUNCHER.EXE")
+        )
+        self.assertFalse(self._approve_launcher(authority, listed, signed=False))
+        self.assertFalse(
+            self._approve_launcher(
+                authority,
+                listed,
+                directory_identity=PathIdentity(9, "11" * 16),
+            )
+        )
+        self.assertFalse(
+            self._approve_launcher(
+                authority,
+                listed,
+                after_identity=PathIdentity(2, "22" * 16),
+            )
+        )
+        rejected = (
+            self._STEAM + r"\x64launcher.exe",
+            self._STEAM + r"\bin\win64\x64launcher.exe",
+            self._STEAM + r"\bin\nested\x64launcher.exe",
+            self._STEAM + r"\steamapps\bin\x64launcher.exe",
+            self._STEAM + r"\bin\steam.exe",
+            self._STEAM + r"\bin\x64launcher.dll",
+            self._STEAM + r"\bin\..\bin\x64launcher.exe",
+            r"C:\Program Files (x86)\SteamSibling\bin\x64launcher.exe",
+            r"D:\Steam\bin\x64launcher.exe",
+        )
+        for path in rejected:
+            with self.subTest(path=path):
+                self.assertFalse(self._approve_launcher(authority, path))
+        self.assertFalse(authority.approve_addon_tree_steam_launcher(0))
+        self.assertFalse(authority.approve_addon_tree_steam_launcher(True))  # type: ignore[arg-type]
+        self.assertFalse(
+            self._approve(authority, listed),
+        )
+        self.assertFalse(
+            self._approve_launcher(
+                self._authority(steam_install_directory=None),
+                listed,
+            )
+        )
+        self.assertFalse(
+            self._approve_launcher(
+                self._authority(steam_client_dll_names=frozenset()),
+                listed,
+            )
+        )
 
     def test_unresolved_steam_directory_disables_the_rule(self) -> None:
         authority = self._authority(steam_install_directory=None)
@@ -1253,6 +1386,106 @@ class AddonTreeSteamDllTest(unittest.TestCase):
             self.assertTrue(authority.approve_addon_tree_module(numeric))
         finally:
             native_bundle._close_kernel_handle(numeric)
+
+    @requires_installed_steam
+    def test_real_steam_dll_handle_is_approved(self) -> None:
+        dll = self._STEAM + r"\Steam.dll"
+        self.assertTrue(Path(dll).is_file())
+        pinned = native_bundle._directory_identity(self._STEAM)
+        self.assertIsInstance(pinned, PathIdentity)
+        authority = self._authority(
+            steam_client_dll_names=native_bundle._ADDON_TREE_STEAM_CLIENT_DLLS,
+            steam_install_identity=pinned,
+        )
+        readable = native_bundle._open_share_read(dll)
+        self.assertIsNotNone(readable)
+        assert readable is not None
+        try:
+            final = native_bundle._final_handle_path(readable)
+            self.assertEqual(
+                ntpath.normcase(ntpath.dirname(final)),
+                ntpath.normcase(self._STEAM),
+            )
+            self.assertEqual(ntpath.basename(final).casefold(), "steam.dll")
+            self.assertTrue(authority.approve_addon_tree_module(readable))
+        finally:
+            native_bundle._close_kernel_handle(readable)
+
+    @requires_installed_steam
+    def test_real_x64launcher_handle_is_approved_only_for_that_image(self) -> None:
+        exe = self._STEAM + r"\bin\x64launcher.exe"
+        self.assertTrue(Path(exe).is_file())
+        pinned = native_bundle._directory_identity(self._STEAM)
+        self.assertIsInstance(pinned, PathIdentity)
+        authority = self._authority(
+            steam_client_dll_names=native_bundle._ADDON_TREE_STEAM_CLIENT_DLLS,
+            steam_install_identity=pinned,
+        )
+        readable = native_bundle._open_share_read(exe)
+        self.assertIsNotNone(readable)
+        assert readable is not None
+        try:
+            final = native_bundle._final_handle_path(readable)
+            self.assertEqual(
+                ntpath.normcase(final),
+                ntpath.normcase(exe),
+            )
+            self.assertTrue(authority.approve_addon_tree_steam_launcher(readable))
+            self.assertFalse(authority.approve_addon_tree_module(readable))
+        finally:
+            native_bundle._close_kernel_handle(readable)
+
+    @requires_installed_steam
+    def test_unsigned_x64launcher_handle_is_rejected_when_the_path_is_swapped(self) -> None:
+        real = Path(self._STEAM + r"\bin\x64launcher.exe")
+        self.assertTrue(real.is_file())
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            bin_dir = directory / "bin"
+            bin_dir.mkdir()
+            module = bin_dir / "x64launcher.exe"
+            held = directory / "held-unsigned.exe"
+            signed = directory / "signed-copy.exe"
+            module.write_bytes(b"unsigned launcher image")
+            shutil.copyfile(real, signed)
+            handle = native_bundle._open_share_read(str(module))
+            self.assertIsNotNone(handle)
+            assert handle is not None
+            final = native_bundle._final_handle_path(handle)
+            install = ntpath.dirname(ntpath.dirname(final))
+            pinned = native_bundle._directory_identity(install)
+            self.assertIsInstance(pinned, PathIdentity)
+            authority = self._authority(
+                steam_install_directory=install,
+                steam_install_identity=pinned,
+                steam_client_dll_names=native_bundle._ADDON_TREE_STEAM_CLIENT_DLLS,
+            )
+            before = native_bundle._file_identity(handle)
+            seen = {"calls": 0, "path_valve": False}
+
+            def swap(file_handle: int, *, path: str) -> bool:
+                seen["calls"] += 1
+                os.replace(module, held)
+                os.replace(signed, module)
+                try:
+                    seen["path_valve"] = authenticode.is_valve_signed(path)
+                    return authenticode.is_valve_signed_handle(file_handle, path=path)
+                finally:
+                    os.replace(module, signed)
+                    os.replace(held, module)
+
+            try:
+                with patch.object(
+                    native_bundle, "is_valve_signed_handle", side_effect=swap
+                ):
+                    approved = authority.approve_addon_tree_steam_launcher(handle)
+                self.assertEqual(native_bundle._file_identity(handle), before)
+            finally:
+                native_bundle._close_kernel_handle(handle)
+            self.assertFalse(approved)
+            self.assertEqual(seen["calls"], 1)
+            self.assertTrue(seen["path_valve"])
+            self.assertFalse(authenticode.is_valve_signed(str(module)))
 
 
 if __name__ == "__main__":

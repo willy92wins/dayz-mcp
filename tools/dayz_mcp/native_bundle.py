@@ -174,20 +174,25 @@ def _is_trusted_winsxs_common_controls(path: str, windows_directory: str) -> boo
     )
 
 
-# Basenames loaded from the Steam install by AddonBuilder.exe (32-bit),
-# FileBank.exe (32-bit) and binarize.exe (64-bit) during the pack-only
-# LF_VStorage run measured 2026-09-29. Every parent was the install directory
-# itself; no subdirectory was loaded. Compared case-insensitively.
+# Basenames loaded from the Steam install directory itself (no subdirectory)
+# by AddonBuilder.exe (32-bit), FileBank.exe (32-bit) and binarize.exe (64-bit)
+# on the pack-only LF_VStorage run. Measured 2026-09-29, and again on
+# 2026-09-30 when steam.dll appeared beside the same five. Compared
+# case-insensitively.
 _ADDON_TREE_STEAM_CLIENT_DLLS = frozenset(
     {
         "cserhelper.dll",
         "gameoverlayrenderer.dll",
         "gameoverlayrenderer64.dll",
+        "steam.dll",
         "steamclient.dll",
         "tier0_s.dll",
         "vstdlib_s.dll",
     }
 )
+# The 2026-09-30 run also starts this one child. Exactly one subdirectory of
+# the pinned Steam directory, this basename. Its DLL loads are not this list.
+_ADDON_TREE_STEAM_LAUNCHER_RELATIVE = ("bin", "x64launcher.exe")
 _FILE_READ_ATTRIBUTES = 0x00000080
 _FILE_SHARE_READ = 0x00000001
 _FILE_SHARE_WRITE = 0x00000002
@@ -354,6 +359,56 @@ class DebugImageAuthority:
             return False
         try:
             if _directory_identity(parent) != pinned:
+                return False
+            # WinVerifyTrust reads WINTRUST_FILE_INFO.hFile. The path is only
+            # the required pcwszFilePath; a swap of that name does not approve.
+            if _valve_signature_of_handle(file_handle, path) is not True:
+                return False
+            after = _file_identity(file_handle)
+            reopened = _path_identity(path)
+        except (OSError, ValueError):
+            return False
+        return before == after == reopened and type(reopened) is PathIdentity
+
+    def approve_addon_tree_steam_launcher(self, file_handle: int) -> bool:
+        if type(file_handle) is not int or file_handle <= 0:
+            return False
+        directory = self.steam_install_directory
+        pinned = self.steam_install_identity
+        names = self.steam_client_dll_names
+        if (
+            type(directory) is not str
+            or not ntpath.isabs(directory)
+            or ntpath.normpath(directory) != directory
+            or type(pinned) is not PathIdentity
+            or type(names) is not frozenset
+            or not names
+            or _ADDON_TREE_STEAM_LAUNCHER_RELATIVE
+            != ("bin", "x64launcher.exe")
+        ):
+            return False
+        subdirectory, base_name = _ADDON_TREE_STEAM_LAUNCHER_RELATIVE
+        try:
+            before = _file_identity(file_handle)
+            path = _final_handle_path(file_handle)
+        except (OSError, ValueError):
+            return False
+        if ntpath.normpath(path) != path:
+            return False
+        pure = PureWindowsPath(path)
+        if pure.suffix.lower() != ".exe" or pure.name.casefold() != base_name:
+            return False
+        parent = ntpath.dirname(path)
+        install = ntpath.dirname(parent)
+        expected = ntpath.join(directory, subdirectory, base_name)
+        if (
+            PureWindowsPath(parent).name.casefold() != subdirectory
+            or ntpath.normcase(install) != ntpath.normcase(directory)
+            or ntpath.normcase(path) != ntpath.normcase(expected)
+        ):
+            return False
+        try:
+            if _directory_identity(install) != pinned:
                 return False
             # WinVerifyTrust reads WINTRUST_FILE_INFO.hFile. The path is only
             # the required pcwszFilePath; a swap of that name does not approve.

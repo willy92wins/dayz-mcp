@@ -35,15 +35,18 @@ class _ImageAuthority:
         child_approved: bool = True,
         helper_approved: bool = True,
         addon_tree_approved: bool = False,
+        steam_launcher_approved: bool = False,
     ) -> None:
         self.approved = approved
         self.child_approved = child_approved
         self.helper_approved = helper_approved
         self.addon_tree_approved = addon_tree_approved
+        self.steam_launcher_approved = steam_launcher_approved
         self.calls: list[tuple[int, str]] = []
         self.child_calls: list[tuple[int, object]] = []
         self.helper_calls: list[int] = []
         self.addon_tree_calls: list[int] = []
+        self.steam_launcher_calls: list[int] = []
         self.process_descriptors = (
             _SealedAddonBuilder(_ADDON_BUILDER_ANNOUNCE.decode("utf-8")),
         )
@@ -63,6 +66,10 @@ class _ImageAuthority:
     def approve_addon_tree_module(self, file_handle: int) -> bool:
         self.addon_tree_calls.append(file_handle)
         return self.addon_tree_approved
+
+    def approve_addon_tree_steam_launcher(self, file_handle: int) -> bool:
+        self.steam_launcher_calls.append(file_handle)
+        return self.steam_launcher_approved
 
     @property
     def debug_image_authority(self) -> "_ImageAuthority":
@@ -2127,6 +2134,265 @@ class NativeDebugOwnershipTests(unittest.TestCase):
                 finally:
                     backend._kernel32 = original
                 self.assertEqual(authority.addon_tree_calls, tree_calls)
+
+    def test_x64launcher_is_admitted_only_inside_the_addon_tree_and_under_the_cap(self) -> None:
+        backend = self._backend()
+        pipes = backend.NativeRuntimePipes(11, 21, 22, 12, 23, 13, 14, 24, 15, 25)
+
+        def create(pid: int, file_handle: int) -> object:
+            return backend.NativeDebugEvent(
+                "CREATE_PROCESS",
+                pid=pid,
+                tid=pid + 1,
+                process_handle=file_handle - 2,
+                thread_handle=file_handle - 1,
+                file_handle=file_handle,
+            )
+
+        def exit_process(pid: int) -> object:
+            return backend.NativeDebugEvent(
+                "EXIT_PROCESS", pid=pid, tid=pid + 1, exit_code=0
+            )
+
+        root = create(703, 803)
+        builder = create(900, 813)
+        launcher = create(910, 823)
+        second = create(920, 833)
+        root_exit = exit_process(703)
+        builder_exit = exit_process(900)
+        launcher_exit = exit_process(910)
+
+        def run(
+            events: list[object],
+            completions: list[tuple[bool, int, int, int]],
+            authority: _ImageAuthority,
+            *,
+            cap: int | None = None,
+            announce: bool = True,
+        ) -> tuple[object, _FakeKernel32]:
+            fake = _FakeKernel32()
+            if announce:
+                fake.pipe_bytes[23] = bytearray(
+                    _announcement_frame(kind=3, path=_ADDON_BUILDER_ANNOUNCE)
+                )
+            fake.completion_events = completions
+            fake.debug_events = events
+            original_kernel = backend._kernel32
+            original_cap = backend._MAX_ADDON_HELPER_LAUNCHES
+            if cap is not None:
+                backend._MAX_ADDON_HELPER_LAUNCHES = cap
+            backend._kernel32 = fake
+            try:
+                created = self._create(backend, fake)
+                try:
+                    result: object = backend._supervise_created_launcher(
+                        created,
+                        canonical_request=b"{}",
+                        runtime_pipes=pipes,
+                        image_authority=authority,
+                        cancel_signal=threading.Event(),
+                    )
+                except backend.NativeLauncherBackendError as error:
+                    result = error
+            finally:
+                backend._kernel32 = original_kernel
+                backend._MAX_ADDON_HELPER_LAUNCHES = original_cap
+            return result, fake
+
+        def job(*pids: int) -> list[tuple[bool, int, int, int]]:
+            return [(True, 6, 501, pid) for pid in pids] + [(True, 4, 501, 0)]
+
+        with self.subTest(name="admitted"):
+            authority = _ImageAuthority(
+                helper_approved=False,
+                steam_launcher_approved=True,
+            )
+            result, fake = run(
+                [root, builder, launcher, launcher_exit, builder_exit, root_exit],
+                job(703, 900, 910),
+                authority,
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual(authority.steam_launcher_calls, [823])
+            self.assertEqual(authority.helper_calls, [823])
+            self.assertLess(
+                fake.events.index("new_process:910"),
+                fake.events.index("continue:910:911"),
+            )
+
+        with self.subTest(name="dll_stays_on_the_ordinary_rule"):
+            authority = _ImageAuthority(
+                approved=False,
+                helper_approved=False,
+                addon_tree_approved=True,
+                steam_launcher_approved=True,
+            )
+            result, _fake = run(
+                [
+                    root,
+                    builder,
+                    launcher,
+                    backend.NativeDebugEvent(
+                        "LOAD_DLL", pid=910, tid=911, file_handle=824
+                    ),
+                    launcher_exit,
+                    builder_exit,
+                    root_exit,
+                ],
+                job(703, 900, 910),
+                authority,
+            )
+            self.assertIsInstance(result, backend.NativeLauncherBackendError)
+            self.assertIn("native_debug_gate_rejected", str(result))
+            self.assertEqual(authority.calls, [(824, "LOAD_DLL")])
+            self.assertEqual(authority.addon_tree_calls, [])
+
+        with self.subTest(name="helper_still_loads_steam_dlls_while_it_is_alive"):
+            authority = _ImageAuthority(
+                approved=False,
+                helper_approved=False,
+                addon_tree_approved=True,
+                steam_launcher_approved=False,
+            )
+
+            def approve_debug_image(file_handle: int, *, event_kind: str) -> bool:
+                authority.calls.append((file_handle, event_kind))
+                return file_handle == 824
+
+            def approve_addon_helper_process(file_handle: int) -> bool:
+                authority.helper_calls.append(file_handle)
+                return file_handle == 833
+
+            def approve_addon_tree_steam_launcher(file_handle: int) -> bool:
+                authority.steam_launcher_calls.append(file_handle)
+                return file_handle == 823
+
+            authority.approve_debug_image = approve_debug_image  # type: ignore[method-assign]
+            authority.approve_addon_helper_process = approve_addon_helper_process  # type: ignore[method-assign]
+            authority.approve_addon_tree_steam_launcher = approve_addon_tree_steam_launcher  # type: ignore[method-assign]
+            result, _fake = run(
+                [
+                    root,
+                    builder,
+                    launcher,
+                    backend.NativeDebugEvent(
+                        "LOAD_DLL", pid=910, tid=911, file_handle=824
+                    ),
+                    second,
+                    backend.NativeDebugEvent(
+                        "LOAD_DLL", pid=920, tid=921, file_handle=834
+                    ),
+                    exit_process(920),
+                    launcher_exit,
+                    builder_exit,
+                    root_exit,
+                ],
+                job(703, 900, 910, 920),
+                authority,
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual(authority.steam_launcher_calls, [823])
+            self.assertEqual(authority.helper_calls, [823, 833])
+            self.assertEqual(authority.addon_tree_calls, [834])
+
+        with self.subTest(name="outside_this_job"):
+            authority = _ImageAuthority(
+                helper_approved=False,
+                steam_launcher_approved=True,
+            )
+            result, _fake = run(
+                [root, builder, launcher, launcher_exit, builder_exit, root_exit],
+                [
+                    (True, 6, 501, 703),
+                    (True, 6, 501, 900),
+                    (True, 6, 777, 910),
+                    (True, 4, 501, 0),
+                ],
+                authority,
+            )
+            self.assertIsInstance(result, backend.NativeLauncherBackendError)
+            self.assertEqual(authority.steam_launcher_calls, [])
+
+        with self.subTest(name="outside_before_addon_builder"):
+            authority = _ImageAuthority(
+                helper_approved=False,
+                steam_launcher_approved=True,
+            )
+            result, _fake = run(
+                [root, launcher, launcher_exit, root_exit],
+                job(703, 910),
+                authority,
+                announce=False,
+            )
+            self.assertIsInstance(result, backend.NativeLauncherBackendError)
+            self.assertEqual(authority.steam_launcher_calls, [])
+            self.assertEqual(authority.helper_calls, [])
+
+        with self.subTest(name="outside_after_addon_builder_exit"):
+            authority = _ImageAuthority(
+                helper_approved=False,
+                steam_launcher_approved=True,
+            )
+            result, _fake = run(
+                [
+                    root,
+                    builder,
+                    builder_exit,
+                    launcher,
+                    launcher_exit,
+                    root_exit,
+                ],
+                job(703, 900, 910),
+                authority,
+            )
+            self.assertIsInstance(result, backend.NativeLauncherBackendError)
+            self.assertEqual(authority.steam_launcher_calls, [])
+            self.assertEqual(authority.helper_calls, [])
+
+        with self.subTest(name="past_the_cap"):
+            authority = _ImageAuthority(
+                helper_approved=False,
+                steam_launcher_approved=True,
+            )
+            result, fake = run(
+                [
+                    root,
+                    builder,
+                    launcher,
+                    launcher_exit,
+                    second,
+                    exit_process(920),
+                    builder_exit,
+                    root_exit,
+                ],
+                job(703, 900, 910, 920),
+                authority,
+                cap=1,
+            )
+            self.assertIsInstance(result, backend.NativeLauncherBackendError)
+            self.assertEqual(authority.steam_launcher_calls, [823])
+            self.assertLess(
+                fake.events.index("continue:910:911"),
+                fake.events.index("close:501"),
+            )
+            self.assertLess(
+                fake.events.index("close:501"),
+                fake.events.index("continue:920:921"),
+            )
+
+        with self.subTest(name="authority_rejects"):
+            authority = _ImageAuthority(
+                helper_approved=False,
+                steam_launcher_approved=False,
+            )
+            result, _fake = run(
+                [root, builder, launcher, launcher_exit, builder_exit, root_exit],
+                job(703, 900, 910),
+                authority,
+            )
+            self.assertIsInstance(result, backend.NativeLauncherBackendError)
+            self.assertEqual(authority.helper_calls, [823])
+            self.assertEqual(authority.steam_launcher_calls, [823])
 
     @slow_test
     def test_gate_rejection_preserves_fine_code_kind_and_pid(self) -> None:
