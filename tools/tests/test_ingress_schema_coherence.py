@@ -122,6 +122,10 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     # hypothetical fov <= 0.9 cap passed the first 30 shapes).
     ("world_spawn", {"type": "ZmbM_CitizenASkinny", "pos": _POS, "flags": 3108}, "world_spawn"),
     ("world_spawn", {"type": "CivilianSedan", "pos": _POS, "flags": 1028}, "world_spawn"),
+    # lifetime_s travels with its presence flag (fb-20260930-080543-bd28).
+    ("world_spawn", {"type": "CivilianSedan", "pos": _POS, "lifetime_s": 600}, "world_spawn"),
+    ("world_spawn", {"type": "CivilianSedan", "pos": _POS, "lifetime_s": 0.001}, "world_spawn"),
+    ("world_spawn", {"type": "CivilianSedan", "pos": _POS, "lifetime_s": 3888000.0}, "world_spawn"),
     (
         "camera_set",
         {

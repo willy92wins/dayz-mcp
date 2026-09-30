@@ -41,6 +41,14 @@ Surface limits that shape site choice:
 - `object_anim` / `object_inspect` resolve by position on the **server**,
   which still has a driven fixture at its spawn point — target them there,
   or not at all (fb-20260824-133301-ecf5).
+- A `world_spawn` fixture lives only as long as its **economy lifetime** once
+  no player is within the mission's `CleanupAvoidance` (100 m in
+  `dayzOffline.chernarusplus` `db/globals.xml`), and `CivilianSedan`'s
+  `types.xml` lifetime is 3 s. Measured 2026-09-30 on DayZDiag 1.29: the sedan
+  vanished 3-27 s after the player teleported ~114 m or more away, and
+  survived 60+ s at ~25 m and ~44 m. Pass `lifetime_s` (seconds, at most
+  3888000) to `world_spawn` when the player will leave the fixture; the
+  reply's `lifetime` gives what the entity then reads (fb-20260930-080543-bd28).
 
 ## Site certification bar
 
