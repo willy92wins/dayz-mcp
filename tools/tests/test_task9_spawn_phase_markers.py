@@ -137,8 +137,9 @@ BRIDGE = WORKSPACE_ROOT / "scripts" / "5_Mission" / "MCPBridge.c"
 # -- DispatchObjectAnim/DispatchObjectInspect resolve through ResolveCommandObject
 # (args.object_id > 0 -> m_RuntimeObjects registry, position-independent, reaches a
 # client-authoritative fixture whose server replica never left spawn; otherwise classname
-# near pos), writes use SetAnimationPhaseNow (the plain setter interpolates and a same-tick
-# read reports the stale pre-write phase), and MCP_BRIDGE_VERSION bumped 8 -> 9 together
+# near pos), writes use SetAnimationPhaseNow (which does not make the same-tick re-read
+# fresh: measured 2026-09-30, the reply can still read the old value, and on a vehicle a
+# phase written by object_anim does not hold, ficha df3a), and MCP_BRIDGE_VERSION bumped 8 -> 9 together
 # with core.EXPECTED_BRIDGE_VERSION (the equality gate forces a matched pair). Offline
 # contracts: tests/test_object_anim.py, tests/test_object_inspect.py,
 # tests/test_wave_fixes_20260824.py. Re-freeze both halves after the in-game gate of this

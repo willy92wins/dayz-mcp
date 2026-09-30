@@ -1399,8 +1399,9 @@ class MCPBridge : Managed
 	}
 
 	// F3.4: read GetAnimationPhase or write SetAnimationPhaseNow on Entity (entity.c:12-25).
-	// phase == MCP_ARG_FLOAT_UNSET means read-only. Writes use the Now variant: the plain
-	// setter interpolates, so a same-tick read reports the stale pre-write phase.
+	// phase == MCP_ARG_FLOAT_UNSET means read-only. Writes use the Now variant, which does
+	// not make the same-tick re-read fresh: measured 2026-09-30, the reply can still read the
+	// old value, and on a vehicle a phase written here does not hold (ficha df3a).
 	// Resolution: args.object_id > 0 selects from the runtime registry (position-independent,
 	// reaches a client-authoritative fixture whose server replica never left spawn);
 	// otherwise classname near pos within OBJECT_LOOKUP_RADIUS.

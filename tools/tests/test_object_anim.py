@@ -166,12 +166,11 @@ class ObjectAnimAppToolTest(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(sentence=sentence):
                 self.assertIn(sentence, description)
+        # The retracted claim is that a write applies instantly. Any order or
+        # verb ("instantly applied", "take effect instantly") brings it back, so
+        # the description must not use the word at all; "instantaneous" is fine.
         self.assertIsNone(
-            re.search(
-                r"\bappl(?:y|ied|ies)\s+instantly\b",
-                description,
-                re.IGNORECASE,
-            ),
+            re.search(r"\binstantly\b", description, re.IGNORECASE),
             description,
         )
         hold = ""

@@ -951,6 +951,9 @@ class AddonTreeSteamDllTest(unittest.TestCase):
             self._STEAM + r"\bin\win64\x64launcher.exe",
             self._STEAM + r"\bin\nested\x64launcher.exe",
             self._STEAM + r"\steamapps\bin\x64launcher.exe",
+            # Same depth as bin\x64launcher.exe: only the bin name check and the
+            # full-path check reject it, the grandparent check does not.
+            self._STEAM + r"\steamapps\x64launcher.exe",
             self._STEAM + r"\bin\steam.exe",
             self._STEAM + r"\bin\x64launcher.dll",
             self._STEAM + r"\bin\..\bin\x64launcher.exe",
