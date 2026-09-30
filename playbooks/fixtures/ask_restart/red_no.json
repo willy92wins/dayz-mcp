@@ -1,0 +1,15 @@
+{
+  "name": "red_no",
+  "params": {},
+  "responses": {
+    "S1": {
+      "ok": 1,
+      "state": "completed",
+      "elapsed_s": 3.1,
+      "choice": "no"
+    }
+  },
+  "expect_overall": "FAIL",
+  "expect_stopped_at": "S1",
+  "expect_reason": "restart_not_confirmed"
+}

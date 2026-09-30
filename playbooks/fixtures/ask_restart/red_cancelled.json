@@ -1,0 +1,14 @@
+{
+  "name": "red_cancelled",
+  "params": {},
+  "responses": {
+    "S1": {
+      "ok": 1,
+      "state": "cancelled",
+      "elapsed_s": 2.0
+    }
+  },
+  "expect_overall": "FAIL",
+  "expect_stopped_at": "S1",
+  "expect_reason": "restart_not_confirmed"
+}

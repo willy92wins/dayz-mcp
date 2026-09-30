@@ -1,0 +1,26 @@
+id = "ask_restart"
+version = "1.0.0"
+status = "DRAFT"
+# DRAFT: nothing to calibrate, and the lifecycle's cold probe by two independent agents has not been done.
+# fb-20260824-015538-4ed0: an agent that launched the game asks the local player before it restarts it.
+# Only Yes allows the restart. A timeout is not consent: the request proposed that silence restarts,
+# this playbook fails closed, so a short timeout_s can never force a restart.
+# Does NOT close, stop or launch anything. dayz_test_close / dayz_test_stop / dayz_test_run stay with
+# the caller, after a PASS only (all three are also denied inside playbooks).
+summary = "Before an agent restarts the game it launched (close and relaunch, e.g. to redeploy a PBO): one ui_dialog confirm asks the local player. overall PASS (S1 state completed, choice yes) is the only answer that allows the restart. Every other verdict means do not restart and leave closing the game to the player: restart_not_confirmed for No (completed/no), Cancel or Esc (cancelled), no answer within timeout_s (timed_out), disconnected, or rejected (another dialog is open); tool_error when the dialog could not be shown. S1 observed carries the answer. Does NOT close, stop or launch anything."
+requires_tools = ["ui_dialog"]
+
+[params]
+title = "Restart DayZ?"
+message = "An agent is about to restart DayZ: it will close the game and launch it again. Yes allows the restart. No, Cancel or Esc keeps the game running and leaves closing it to you. If you do not answer, the game is not restarted."
+timeout_s = 30.0             # the 30 s answer window of the request; ui_dialog accepts 5..240
+
+[[steps]]
+id = "S1"
+tool = "ui_dialog"
+args = { kind = "confirm", title = "$title", message = "$message", timeout_s = "$timeout_s" }
+expect = [
+  { field = "state", op = "eq", value = "completed" },
+  { field = "choice", op = "eq", value = "yes" },
+]
+on_fail = { action = "STOP", reason = "restart_not_confirmed" }

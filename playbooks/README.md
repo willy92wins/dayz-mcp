@@ -27,6 +27,7 @@ gates. A FAIL on that expect is downgraded to WARN and the verdict reason is
 | box_is_mine | Before a mutating verb: this session holds the lease, no unmanaged DayZDiag, `box.runs[0].run_id` is the run I intend to handle. | DRAFT | `session_status` |
 | run_really_started | After `dayz_test_run` returns a `run_id`: that id is in `session_status.box.runs`, `state` is `RUNNING`, and `bridge_status.ready.reason` is `ready`. Complements `last_start_error` on the compact. | DRAFT | `session_status`, `bridge_status` |
 | lease_spawn_prepare_trace | Before `vehicle_trace`: the known path **lease → spawn → prepare → trace** as four ordered gates. A STOP names the skipped stage (`lease_not_held`, `spawn_missing`, `fixture_not_ready`, `trace_not_ready`). Does not mutate. Complements `box_is_mine` and `place_safely`; does not replace them. **DRAFT** — a PASS does not start a trace. | DRAFT | `session_status`, `object_inspect`, `vehicle_telemetry` |
+| ask_restart | Before an agent restarts the game it launched: one `ui_dialog` confirm asks the local player. Only a PASS (the player chose Yes) allows the restart; any other verdict means do not restart. Does not close or launch anything. See [Ask before a restart](#ask-before-a-restart). | DRAFT | `ui_dialog` |
 
 ## Running
 
@@ -89,11 +90,12 @@ is not unwrapped.
 when a file's `expect_*` fields do not match the verdict.
 
 Lifecycle and lease tools (`dayz_test_run`, `dayz_test_stop`,
-`exec_enforce`, `session_release`, `session_acquire`,
-`session_acquire_wait`, `lease_acquire`, `session_wait`,
-`session_cancel`, `session_heartbeat`, `playbook_run`) are denied by
-the MCP adapter (`tools/dayz_mcp/playbook_tool.py`), not by this
-runner. CLI `--live` does not apply that denylist.
+`dayz_test_close`, `exec_enforce`, `session_release`,
+`session_acquire`, `session_acquire_wait`, `lease_acquire`,
+`session_wait`, `session_cancel`, `session_heartbeat`,
+`playbook_run`, `playbook_reload`) are denied by the MCP adapter
+(`tools/dayz_mcp/playbook_tool.py`), not by this runner. CLI `--live`
+does not apply that denylist.
 
 There is no `requires_bridge` field. Live version gating is the MCP
 client's `--require-version` (see `CONFIG` in `runner.py`).
@@ -148,4 +150,40 @@ is the compositor for steps 1–4. CLI:
 
 ```text
 python playbooks/runner.py playbooks/lease_spawn_prepare_trace.toml --fixtures playbooks/fixtures/lease_spawn_prepare_trace
+```
+
+## Ask before a restart
+
+An agent that launched the game and must restart it (for example to redeploy
+a PBO) asks the local player first. `ask_restart` shows one `ui_dialog`
+confirm (Yes / No / Cancel) and returns the answer; it does not close, stop
+or launch anything. Like any `ui_dialog`, it needs the lease.
+
+```text
+playbook_run(name="ask_restart", params={"message": "Redeploy @MyMod: restart DayZ now?"})
+```
+
+`title`, `message` and `timeout_s` are optional. The defaults are
+`Restart DayZ?`, a message saying an agent is about to restart the game, and
+30 s (`ui_dialog` accepts 5..240).
+
+| Player | `steps[0].observed` | Verdict |
+| --- | --- | --- |
+| Yes | `state` `completed`, `choice` `yes` | `PASS`: restart |
+| No | `state` `completed`, `choice` `no` | `FAIL` / `restart_not_confirmed` |
+| Cancel or Esc | `state` `cancelled` | `FAIL` / `restart_not_confirmed` |
+| No answer within `timeout_s` | `state` `timed_out` | `FAIL` / `restart_not_confirmed` |
+| Client disconnected, or another `ui_dialog` already open | `state` `disconnected` / `rejected` | `FAIL` / `restart_not_confirmed` |
+| No dialog shown (no lease, game down, bad params) | `null` | `FAIL` / `tool_error:...` |
+
+Restart only when `overall` is `PASS`. Anything else leaves the game running
+and closing it to the player; tell the user so. A timeout is not consent: the
+request proposed that silence restarts, but the playbook fails closed, so a
+short `timeout_s` cannot force a restart. Never answer the dialog yourself
+(`ui_click`). After a PASS the caller restarts with its own lifecycle verbs,
+outside the playbook: `dayz_test_close` for its run (on `stop_required`,
+release the lease and call `dayz_test_stop`), then `dayz_test_run`.
+
+```text
+python playbooks/runner.py playbooks/ask_restart.toml --fixtures playbooks/fixtures/ask_restart
 ```
