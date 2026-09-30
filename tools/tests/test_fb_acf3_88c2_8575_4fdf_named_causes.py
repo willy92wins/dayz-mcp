@@ -799,8 +799,11 @@ class DaemonPythonNotApprovedTest(unittest.TestCase):
                 self.assertIn("daemon_python_not_approved", line)
                 self.assertIn(str(_approved_python()), line)
                 self.assertIn(foreign, line)
-                self.assertIn("tools\\install-mcp.ps1", line)
+                self.assertIn('README "Install"', line)
                 self.assertIn("tools\\.venv-mcp", line)
+                # No PowerShell name in dayz_mcp strings (test_dependency_lock:
+                # ps1 stays static, non-launcher evidence).
+                self.assertNotIn(".ps1", line.casefold())
                 guard.assert_not_called()
                 build.assert_not_called()
 

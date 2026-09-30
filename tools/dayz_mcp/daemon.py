@@ -212,8 +212,8 @@ def _python_not_approved_line(error: DaemonPythonNotApproved) -> str:
     return (
         "DAEMON: daemon_python_not_approved: this interpreter is "
         f"{error.current}, but the daemon runs only under {error.approved}, the "
-        "path it checks its own identity against. Create that venv with "
-        "tools\\install-mcp.ps1 (it installs this package into "
+        "path it checks its own identity against. Create that venv with the "
+        "installer in README \"Install\" (it installs this package into "
         "tools\\.venv-mcp) and start the daemon with its python.exe."
     )
 
