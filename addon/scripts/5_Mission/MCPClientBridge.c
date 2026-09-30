@@ -1376,6 +1376,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	{
 		PlayerBase player;
 		string actorError;
+		string requestError;
 		float holdTtl;
 		int generation;
 		MCPJob job;
@@ -1422,6 +1423,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			result.ok = false;
 			result.error = "bad_hold_ttl_s";
+			return true;
+		}
+		// Multiplayer: the server holds its own copy of the override, so its
+		// CanFire sees the weapon raised. Sent before the client override
+		// changes: input_busy leaves both sides as they were.
+		requestError = MCPWeaponControl.SendRaiseRequest(command.args.raised, holdTtl);
+		if (requestError != "")
+		{
+			result.ok = false;
+			result.error = requestError;
 			return true;
 		}
 		if (command.args.raised)

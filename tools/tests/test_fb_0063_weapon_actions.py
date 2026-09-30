@@ -7,6 +7,7 @@ launch DayZ.
 from __future__ import annotations
 
 import math
+import re
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -22,6 +23,10 @@ CLIENT = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
 WEAPON = addon_root() / "scripts" / "4_World" / "MCP_Weapon.c"
 
 VERBS = ("weapon_raise", "weapon_aim", "weapon_fire", "weapon_sights")
+
+# Vanilla INPUT_UDT_* are 1..16 (3_game/tools/component/_constants.c:2-19).
+VANILLA_UDT_MAX = 16
+OUR_UDTS = ("MCP_INPUT_UDT_WEAPON_FIRE", "MCP_INPUT_UDT_WEAPON_RAISE")
 
 
 def _method_body(source: str, signature: str) -> str:
@@ -173,10 +178,15 @@ class WeaponActionEnforceContractTest(unittest.TestCase):
             command.index("MCPWeaponControl.OnCommandHandler("),
         )
         consume = _method_body(weapon, "static void ConsumeFire(")
+        # fb-20260930-033753-486e: the chain lives in FireRefusal, which the
+        # server's copy of the request calls too. ConsumeFire runs it first.
+        checks = _method_body(weapon, "static string FireRefusal(")
         handler = _method_body(weapon, "static void OnCommandHandler(")
         self.assertIn("manager.Fire(", consume)
         self.assertNotIn("new ", consume)
         self.assertNotIn("%", consume)
+        self.assertNotIn("new ", checks)
+        self.assertNotIn("%", checks)
         self.assertNotIn("new ", handler)
         self.assertNotIn("%", handler)
         reasons = (
@@ -195,26 +205,33 @@ class WeaponActionEnforceContractTest(unittest.TestCase):
         )
         previous = -1
         for reason in reasons:
-            found = consume.index(f'"{reason}"')
+            found = checks.index(f'"{reason}"')
             self.assertGreater(found, previous, reason)
             previous = found
+        go = checks.rindex('return "";')
         self.assertLess(consume.index("s_FirePending = false"), consume.index("manager.Fire("))
-        self.assertLess(consume.index("held.CanFire()"), consume.index("manager.Fire("))
-        self.assertLess(consume.index("manager.CanFire(held)"), consume.index("manager.Fire("))
-        self.assertLess(consume.index("manager.CanFire(held)"), consume.index("player.IsAlive()"))
+        self.assertLess(consume.index("FireRefusal(player)"), consume.index("manager.Fire("))
+        self.assertLess(checks.index("held.CanFire()"), go)
+        self.assertLess(checks.index("manager.CanFire(held)"), go)
+        self.assertLess(checks.index("manager.CanFire(held)"), checks.index("player.IsAlive()"))
 
     def test_consume_fire_rechecks_the_actor_immediately_before_fire(self) -> None:
-        consume = _method_body(WEAPON.read_text(encoding="utf-8"), "static void ConsumeFire(")
-        fire_at = consume.index("manager.Fire(")
-        previous = consume.index("manager.CanFire(held)")
+        weapon = WEAPON.read_text(encoding="utf-8")
+        consume = _method_body(weapon, "static void ConsumeFire(")
+        # fb-20260930-033753-486e: the rechecks live in FireRefusal; its
+        # final "" is the go that ConsumeFire needs before its Fire.
+        checks = _method_body(weapon, "static string FireRefusal(")
+        self.assertLess(consume.index("FireRefusal(player)"), consume.index("manager.Fire("))
+        fire_at = checks.rindex('return "";')
+        previous = checks.index("manager.CanFire(held)")
         for predicate, reason in (
             ("player.IsAlive()", "player_dead"),
             ("player.IsUnconscious()", "player_unconscious"),
             ("player.IsRestrained()", "player_restrained"),
             ("player.IsInVehicle()", "player_in_vehicle"),
         ):
-            found = consume.index(predicate)
-            named = consume.index(f'"{reason}"')
+            found = checks.index(predicate)
+            named = checks.index(f'"{reason}"')
             self.assertGreater(found, previous, predicate)
             self.assertLess(found, fire_at, predicate)
             self.assertGreater(named, previous, reason)
@@ -310,7 +327,223 @@ class WeaponActionEnforceContractTest(unittest.TestCase):
         self.assertNotIn("SetOptics(", leave)
 
 
+class WeaponServerRequestContractTest(unittest.TestCase):
+    """fb-20260930-033753-486e: the client's Fire and raise override stay on
+    the client, so weapon_fire and weapon_raise also go to the server as
+    ScriptInputUserData, which applies them in its own CommandHandler."""
+
+    def setUp(self) -> None:
+        self.weapon = WEAPON.read_text(encoding="utf-8")
+        self.client = CLIENT.read_text(encoding="utf-8")
+
+    def test_udt_ids_are_unique_and_outside_vanilla(self) -> None:
+        declared: dict[str, list[int]] = {}
+        for path in sorted((addon_root() / "scripts").rglob("*.c")):
+            source = path.read_text(encoding="utf-8")
+            for name, value in re.findall(r"^\s*const int (\w+) = (-?\d+);", source, re.MULTILINE):
+                declared.setdefault(name, []).append(int(value))
+        every_value = [value for values in declared.values() for value in values]
+        for name in OUR_UDTS:
+            with self.subTest(name=name):
+                self.assertEqual(len(declared.get(name, [])), 1, name)
+                value = declared[name][0]
+                self.assertGreater(value, VANILLA_UDT_MAX)
+                self.assertEqual(every_value.count(value), 1, f"{name}={value} is not unique")
+
+    def test_client_sends_only_in_multiplayer_and_refuses_when_busy(self) -> None:
+        for signature, udt in (
+            ("static string SendFireRequest(", "MCP_INPUT_UDT_WEAPON_FIRE"),
+            ("static string SendRaiseRequest(", "MCP_INPUT_UDT_WEAPON_RAISE"),
+        ):
+            with self.subTest(signature=signature):
+                body = _method_body(self.weapon, signature)
+                offline = body.index("if (!GetGame().IsMultiplayer())")
+                self.assertIn('return "";', body[offline : body.index("}", offline)])
+                busy = body.index("if (!ScriptInputUserData.CanStoreInputUserData())")
+                self.assertIn('return "input_busy";', body[busy : body.index("}", busy)])
+                created = body.index("new ScriptInputUserData()")
+                written = body.index(f"request.Write({udt});")
+                sent = body.index("request.Send();")
+                self.assertLess(offline, busy)
+                self.assertLess(busy, created)
+                self.assertLess(created, written)
+                self.assertLess(written, sent)
+                self.assertEqual(body.count(".Send()"), 1)
+        self.assertIn("request.Write(held);", _method_body(self.weapon, "static string SendFireRequest("))
+        # A refused send returns before the local Fire.
+        consume = _method_body(self.weapon, "static void ConsumeFire(")
+        sent = consume.index("refusal = SendFireRequest(held);")
+        fired = consume.index("manager.Fire(held);")
+        self.assertLess(sent, fired)
+        self.assertIn("s_FireReason = refusal;\n\t\t\treturn;", consume[sent:fired])
+        self.assertEqual(consume.count(".Fire("), 1)
+        # A refused raise request returns before either override changes.
+        dispatch = _method_body(self.client, "protected bool DispatchWeaponRaise(")
+        sent = dispatch.index(
+            "requestError = MCPWeaponControl.SendRaiseRequest(command.args.raised, holdTtl);"
+        )
+        refused = dispatch.index("result.error = requestError;\n\t\t\treturn true;", sent)
+        self.assertLess(dispatch.rindex('"bad_hold_ttl_s"'), sent)
+        for begin in ("MCPWeaponControl.BeginRaise(", "MCPWeaponControl.BeginRelease("):
+            self.assertLess(refused, dispatch.index(begin), begin)
+
+    def test_server_handler_consumes_ours_before_super(self) -> None:
+        signature = "override bool OnInputUserDataProcess(int userDataType, ParamsReadContext ctx)"
+        self.assertEqual(self.weapon.count("OnInputUserDataProcess(int"), 1)
+        body = _method_body(self.weapon, signature)
+        deferred = "return super.OnInputUserDataProcess(userDataType, ctx);"
+        self.assertEqual(body.count("super.OnInputUserDataProcess("), 1)
+        self.assertTrue(body.rstrip().endswith(deferred))
+        for udt, reader in (
+            ("MCP_INPUT_UDT_WEAPON_FIRE", "MCPReadFireRequest(ctx);"),
+            ("MCP_INPUT_UDT_WEAPON_RAISE", "MCPReadRaiseRequest(ctx);"),
+        ):
+            with self.subTest(udt=udt):
+                branch_at = body.index(f"if (userDataType == {udt})")
+                branch = body[branch_at : body.index("}", branch_at)]
+                self.assertIn(reader, branch)
+                self.assertIn("return true;", branch)
+        # The server reads what the client wrote, in the same order and types.
+        fire_read = _method_body(self.weapon, "protected void MCPReadFireRequest(")
+        self.assertIn("Weapon_Base requested = null;", fire_read)
+        self.assertIn("if (!ctx.Read(requested))", fire_read)
+        raise_read = _method_body(self.weapon, "protected void MCPReadRaiseRequest(")
+        raise_sent = _method_body(self.weapon, "static string SendRaiseRequest(")
+        self.assertLess(raise_read.index("ctx.Read(raised)"), raise_read.index("ctx.Read(ttlS)"))
+        self.assertLess(raise_sent.index("request.Write(raised);"), raise_sent.index("request.Write(ttlS);"))
+        self.assertIn("bool raised = false;", raise_read)
+        self.assertIn("float ttlS = 0.0;", raise_read)
+
+    def test_server_applies_requests_in_command_handler_before_client_returns(self) -> None:
+        self.assertEqual(self.weapon.count("override void CommandHandler("), 1)
+        command = _method_body(self.weapon, "override void CommandHandler(")
+        applied = command.index("MCPServerWeaponRequests();")
+        self.assertLess(command.index("super.CommandHandler("), applied)
+        for early in ("if (!MCPWeaponControl.IsBusy())", "if (!GetGame())", "if (this != live)"):
+            with self.subTest(early=early):
+                self.assertLess(applied, command.index(early))
+        requests = _method_body(self.weapon, "protected void MCPServerWeaponRequests(")
+        self.assertIn(
+            "onServer = GetInstanceType() == DayZPlayerInstanceType.INSTANCETYPE_SERVER;", requests
+        )
+        fire = _method_body(self.weapon, "protected void MCPServerApplyFire(")
+        order = [
+            fire.index("m_MCPFireRequested = false;"),
+            fire.index("if (!onServer)"),
+            fire.index("if (held != requested)"),
+            fire.index("refusal = MCPWeaponControl.FireRefusal(this);"),
+            fire.index("GetWeaponManager().Fire(held);"),
+            fire.index('MCPFireVerdict(true, "");'),
+        ]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(fire.count(".Fire("), 1)
+        for reason in ("not_server", "no_weapon_in_hands", "weapon_mismatch"):
+            with self.subTest(reason=reason):
+                self.assertIn(f'MCPFireVerdict(false, "{reason}");\n\t\t\treturn;', fire)
+        self.assertIn("MCPFireVerdict(false, refusal);\n\t\t\treturn;", fire)
+
+    def test_client_and_server_share_one_fire_check(self) -> None:
+        checks = _method_body(self.weapon, "static string FireRefusal(PlayerBase player)")
+        consume = _method_body(self.weapon, "static void ConsumeFire(")
+        server_fire = _method_body(self.weapon, "protected void MCPServerApplyFire(")
+        self.assertLess(consume.index("refusal = FireRefusal(player);"), consume.index("manager.Fire(held);"))
+        self.assertLess(
+            server_fire.index("refusal = MCPWeaponControl.FireRefusal(this);"),
+            server_fire.index("GetWeaponManager().Fire(held);"),
+        )
+        # One chain: its reasons and predicates occur nowhere else in the file.
+        for token in (
+            '"weapon_lifted"',
+            '"not_raised"',
+            '"weapon_destroyed"',
+            '"inventory_processing"',
+            '"raise_not_completed"',
+            '"fighting"',
+            '"cooldown"',
+            '"chamber_empty"',
+            '"chamber_fired_out"',
+            '"jammed"',
+            '"cannot_fire"',
+            "CanFire(",
+            "IsLiftWeapon()",
+            "IsWeaponRaiseCompleted()",
+            "IsChamberEmpty(",
+        ):
+            with self.subTest(token=token):
+                self.assertGreater(checks.count(token), 0)
+                self.assertEqual(self.weapon.count(token), checks.count(token))
+
+    def test_server_raise_has_its_own_deadman(self) -> None:
+        apply = _method_body(self.weapon, "protected void MCPServerApplyRaise(")
+        refusal = _method_body(self.weapon, "protected string MCPServerRaiseRefusal(")
+        maintain = _method_body(self.weapon, "protected void MCPServerMaintainRaise(")
+        release = _method_body(self.weapon, "protected void MCPServerReleaseRaise(")
+        requests = _method_body(self.weapon, "protected void MCPServerWeaponRequests(")
+        enable = "OverrideRaise(HumanInputControllerOverrideType.ENABLED, true)"
+        # A request replaces the previous one; raised=false only releases.
+        order = [
+            apply.index("MCPServerReleaseRaise();"),
+            apply.index("if (!raised)"),
+            apply.index("refusal = MCPServerRaiseRefusal(ttlS);"),
+            apply.index(enable),
+        ]
+        self.assertEqual(order, sorted(order))
+        armed = apply[order[-1] :]
+        self.assertIn("m_MCPRaiseArmed = true;", armed)
+        self.assertIn("m_MCPRaiseDeadlineS = GetGame().GetTickTime() + ttlS;", armed)
+        for bound in ("if (ttlS != ttlS)", "if (ttlS <= 0.0)", "if (ttlS > MCPWeaponControl.RAISE_MAX_TTL_S)"):
+            with self.subTest(bound=bound):
+                self.assertIn(bound, refusal)
+        # Armed is maintained every tick: the fast path returns only when idle.
+        self.assertIn("if (!m_MCPRaiseArmed)", requests)
+        self.assertLess(requests.index("MCPServerApplyRaise(onServer);"), requests.index("MCPServerMaintainRaise();"))
+        for trigger in (
+            "if (!IsAlive())",
+            "if (!held || held != m_MCPRaiseWeapon)",
+            "if (GetGame().GetTickTime() > m_MCPRaiseDeadlineS)",
+        ):
+            with self.subTest(trigger=trigger):
+                at = maintain.index(trigger)
+                self.assertIn("MCPServerReleaseRaise();", maintain[at : maintain.index("}", at)])
+                self.assertLess(at, maintain.index(enable))
+        self.assertIn("OverrideRaise(HumanInputControllerOverrideType.DISABLED, false)", release)
+        self.assertIn("m_MCPRaiseArmed = false;", release)
+        # ENABLED on the server only where it is armed with a deadline or re-armed after the checks.
+        player = self.weapon[self.weapon.index("modded class PlayerBase") :]
+        self.assertEqual(player.count(enable), 2)
+
+
 class WeaponActionAppToolTest(unittest.IsolatedAsyncioTestCase):
+    async def test_descriptions_state_the_server_request_and_its_log_line(self) -> None:
+        app, _runtime = server.build_app(
+            server.ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
+        )
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        fire = tools["weapon_fire"].description or ""
+        raised = tools["weapon_raise"].description or ""
+        for verb, text in (("weapon_fire", fire), ("weapon_raise", raised)):
+            with self.subTest(verb=verb):
+                self.assertIn("In multiplayer the request is", text)
+                self.assertIn("sent to the server", text)
+                self.assertIn("prints its verdict in the script log", text)
+                self.assertIn("input_busy", text)
+        self.assertIn("accepted=true means the client called Fire, not that the server counted a shot", fire)
+        self.assertIn("confirm the shot with weapon_state", fire)
+        self.assertIn("[DayZ_MCP] weapon_fire server accepted=0|1 reason=", fire)
+        self.assertIn("[DayZ_MCP] weapon_raise server accepted=0|1 raised=0|1 reason=", raised)
+        # The documented lines are the ones the server prints.
+        weapon = WEAPON.read_text(encoding="utf-8")
+        for literal in (
+            '"[DayZ_MCP] weapon_fire server accepted=1 reason="',
+            '"[DayZ_MCP] weapon_fire server accepted=0 reason="',
+            '"[DayZ_MCP] weapon_raise server accepted=1"',
+            '"[DayZ_MCP] weapon_raise server accepted=0"',
+            '" raised=1 reason="',
+            '" raised=0 reason="',
+        ):
+            with self.subTest(literal=literal):
+                self.assertIn(literal, weapon)
+
     async def test_tools_are_leased_and_report_the_read_back(self) -> None:
         app, runtime = server.build_app(
             server.ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
