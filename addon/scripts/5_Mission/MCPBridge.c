@@ -1906,6 +1906,8 @@ class MCPBridge : Managed
 			row.closing = building.IsDoorClosing(doorIndex);
 			row.closed = building.IsDoorClosed(doorIndex);
 			row.locked = building.IsDoorLocked(doorIndex);
+			vector doorSoundPos = building.GetDoorSoundPos(doorIndex);
+			VectorToArray(doorSoundPos, row.pos);
 			report.doors.Insert(row);
 			doorIndex = doorIndex + 1;
 		}

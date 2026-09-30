@@ -34,6 +34,7 @@
     },
     "client": {
       "action_use": "action_use",
+      "action_use_door": "action_use",
       "action_use_target": "action_use",
       "camera_get": "camera_get",
       "camera_set": "camera_set",

@@ -106,6 +106,8 @@ class ObjectDoorsFastMCPTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(RAYCAST_SENTENCE, description)
         self.assertIn("not_a_building", description)
         self.assertIn("object_anim is unchanged", description)
+        self.assertIn("GetDoorSoundPos", description)
+        self.assertIn("3-float array", description)
         self.assertNotIn("Requires a lease", description)
 
         payload = {
@@ -171,6 +173,8 @@ class ObjectDoorsEnforceContractTest(unittest.TestCase):
             "building.IsDoorClosing(doorIndex)",
             "building.IsDoorClosed(doorIndex)",
             "building.IsDoorLocked(doorIndex)",
+            "building.GetDoorSoundPos(doorIndex)",
+            "VectorToArray(doorSoundPos, row.pos)",
             "result.building_doors = report",
         ):
             with self.subTest(token=token):
@@ -200,6 +204,9 @@ class ObjectDoorsEnforceContractTest(unittest.TestCase):
         self.assertIn("class MCPDoorState", messages)
         self.assertIn("class MCPBuildingDoors", messages)
         self.assertIn("ref MCPBuildingDoors building_doors;", messages)
+        door_state = _method_body(messages, "class MCPDoorState")
+        self.assertIn("ref array<float> pos;", door_state)
+        self.assertIn("GetDoorSoundPos", door_state)
 
     def test_stale_server_census_names_this_tool_without_flipping_the_hash(self) -> None:
         announced = sorted(server._BRIDGE_COMMAND_TOOLS["server"])
