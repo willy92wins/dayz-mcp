@@ -1,6 +1,6 @@
 # DayZ_MCP - location map
 
-Generated 2026-09-26 00:25:37 UTC by `tools\gen-project-map.ps1`.
+Generated 2026-09-30 15:03:55 UTC by `tools\gen-project-map.ps1`.
 Este mapa indica DÓNDE están las cosas. El estado actual vive en `HANDOFF.md`.
 Regenerar tras mover o cambiar archivos: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\gen-project-map.ps1`.
 Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más cercano.
@@ -16,8 +16,8 @@ Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más c
 | Plans | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\plans` |
 | Reviews | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews` |
 | Decisions | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\decisions` (ausente en este checkout) |
-| Server logs (RPT + script.log) | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_server\profiles` |
-| Client logs (RPT + script.log) | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_client\profiles` |
+| Server logs (RPT + script.log) | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_server\profiles` (ausente en este checkout) |
+| Client logs (RPT + script.log) | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_client\profiles` (ausente en este checkout) |
 | Destino PBO | `tools/pack-addon.ps1`: parámetro `-Destination`; evidencias de builds en `reviews/` |
 
 ## HANDOFF: cuánto leer
@@ -27,23 +27,27 @@ Detener la lectura inicial en `LIVE-STATE:END`; buscar después solo las seccion
 No fijar números de línea, límites de lectura ni tamaños: el bloque cambia en cada cierre.
 El histórico separado, si existe, está en `HANDOFF-ARCHIVE.md`.
 
-## Enforce scripts (9 files, 229 KB)
+## Enforce scripts (13 files, 321 KB)
 
 Rutas relativas a la fuente del mod: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\addon`.
 Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (incluidos junctions).
 
 **4_World/**
 
+- `scripts/4_World/MCP_AnimTimeline.c` - 14 KB
+- `scripts/4_World/MCP_CarDoor.c` - 4 KB
 - `scripts/4_World/MCP_CarScript.c` - 18 KB
+- `scripts/4_World/MCP_DiagPlugins.c` - 2 KB
+- `scripts/4_World/MCP_Weapon.c` - 29 KB
 
 **5_Mission/**
 
-- `scripts/5_Mission/MCPBridge.c` - 79 KB
+- `scripts/5_Mission/MCPBridge.c` - 94 KB
 - `scripts/5_Mission/MCPCallbacks.c` - 2 KB
-- `scripts/5_Mission/MCPClientBridge.c` - 100 KB
+- `scripts/5_Mission/MCPClientBridge.c` - 121 KB
 - `scripts/5_Mission/MCPDialogController.c` - 17 KB
 - `scripts/5_Mission/MCPJobRunner.c` - 2 KB
-- `scripts/5_Mission/MCPMessages.c` - 10 KB
+- `scripts/5_Mission/MCPMessages.c` - 18 KB
 - `scripts/5_Mission/MissionGameplay.c` - 647 B
 - `scripts/5_Mission/MissionServer.c` - 409 B
 
@@ -70,22 +74,22 @@ Los módulos unittest están en `tools/tests/`; el gate de este mapa es `tests.t
 
 Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar autorreferencia.
 - `HANDOFF.md` - estado vivo; leer hasta `LIVE-STATE:END`.
-- `AGENTS.md` - 381 B, touched 2026-07-15 (UTC)
-- `ARCHITECTURE-DECISIONS.md` - 10 KB, touched 2026-09-28 (UTC)
-- `AUDITORIA_2026-08-23.md` - 26 KB, touched 2026-09-14 (UTC)
-- `AUDITORIA_ANGULOS_ADICIONALES_2026-08-23.md` - 20 KB, touched 2026-09-14 (UTC)
-- `AUDITORIA_MCP_2026-09-07.md` - 51 KB, touched 2026-09-07 (UTC)
-- `AUDITORIA_PROFUNDA_2026-08-22.md` - 45 KB, touched 2026-09-14 (UTC)
-- `AUDITORIA_SOBREINGENIERIA_RONDA2_2026-08-22.md` - 39 KB, touched 2026-09-14 (UTC)
-- `CHANGELOG.md` - 9 KB, touched 2026-09-29 (UTC)
-- `CLAUDE.md` - 7 KB, touched 2026-09-25 (UTC)
-- `dayz-harness-apis.md` - 26 KB, touched 2026-08-22 (UTC)
-- `dayz-mcp-architecture.md` - 20 KB, touched 2026-09-16 (UTC)
-- `GATES.md` - 4 KB, touched 2026-09-08 (UTC)
-- `HANDOFF-ARCHIVE.md` - 272 KB, touched 2026-08-29 (UTC)
-- `product-spec.md` - 65 KB, touched 2026-09-29 (UTC)
-- `QUICKSTART.md` - 3 KB, touched 2026-09-19 (UTC)
-- `README.md` - 22 KB, touched 2026-09-29 (UTC)
+- `AGENTS.md` - 381 B, touched 2026-09-30 (UTC)
+- `ARCHITECTURE-DECISIONS.md` - 11 KB, touched 2026-09-30 (UTC)
+- `AUDITORIA_2026-08-23.md` - 26 KB, touched 2026-09-30 (UTC)
+- `AUDITORIA_ANGULOS_ADICIONALES_2026-08-23.md` - 20 KB, touched 2026-09-30 (UTC)
+- `AUDITORIA_MCP_2026-09-07.md` - 51 KB, touched 2026-09-30 (UTC)
+- `AUDITORIA_PROFUNDA_2026-08-22.md` - 45 KB, touched 2026-09-30 (UTC)
+- `AUDITORIA_SOBREINGENIERIA_RONDA2_2026-08-22.md` - 39 KB, touched 2026-09-30 (UTC)
+- `CHANGELOG.md` - 9 KB, touched 2026-09-30 (UTC)
+- `CLAUDE.md` - 7 KB, touched 2026-09-30 (UTC)
+- `dayz-harness-apis.md` - 26 KB, touched 2026-09-30 (UTC)
+- `dayz-mcp-architecture.md` - 20 KB, touched 2026-09-30 (UTC)
+- `GATES.md` - 4 KB, touched 2026-09-30 (UTC)
+- `HANDOFF-ARCHIVE.md` - 272 KB, touched 2026-09-30 (UTC)
+- `product-spec.md` - 66 KB, touched 2026-09-30 (UTC)
+- `QUICKSTART.md` - 4 KB, touched 2026-09-30 (UTC)
+- `README.md` - 22 KB, touched 2026-09-30 (UTC)
 
 ## Reparse points omitidos
 
