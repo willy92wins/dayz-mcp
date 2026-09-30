@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ctypes
 import importlib
-import inspect
 import json
 import os
 import stat
@@ -11,6 +10,8 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+from tests._source_snapshot import source_of
 
 
 def _is_junction(path: Path) -> bool:
@@ -237,7 +238,7 @@ class RequestPathAuthorityTests(unittest.TestCase):
 
     def test_module_is_read_only_and_not_launch_capable(self) -> None:
         authority = importlib.import_module("dayz_mcp.request_path_authority")
-        source = inspect.getsource(authority)
+        source = source_of(authority)
         for forbidden in (
             "secure_launcher",
             "native_launcher_backend",

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import ast
-import inspect
 import unittest
 from typing import Any
 
 from dayz_mcp import control_client, server
 from dayz_mcp.server import ServerConfig, build_app
+from tests._source_snapshot import source_of
 from tests._tiers import slow_test
 
 
@@ -126,7 +126,7 @@ class BadArgsMessagesTest(unittest.IsolatedAsyncioTestCase):
 
     @slow_test
     def test_server_has_no_bare_bad_args_tool_error(self) -> None:
-        tree = ast.parse(inspect.getsource(server))
+        tree = ast.parse(source_of(server))
         bare_lines = [
             node.lineno
             for node in ast.walk(tree)

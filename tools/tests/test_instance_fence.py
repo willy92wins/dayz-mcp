@@ -10,7 +10,6 @@ from tests.steam_helpers import FakeSteamGate
 import ast
 import dataclasses
 import hashlib
-import inspect
 import json
 import os
 import re
@@ -38,10 +37,11 @@ from dayz_mcp.process_lifecycle import (
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 from tests.lifecycle_helpers import stamp_launcher
+from tests._source_snapshot import source_of
 from tests._tiers import slow_test
 
 
-INST_C1 = "11111111-1111-4111-8111-111111111111"
+INST_C1 ="11111111-1111-4111-8111-111111111111"
 INST_C2 = "22222222-2222-4222-8222-222222222222"
 INST_S1 = "33333333-3333-4333-8333-333333333333"
 INST_OFF = "44444444-4444-4444-8444-444444444444"
@@ -1267,7 +1267,7 @@ class Round4FenceRegressionTest(unittest.TestCase):
         self.assertTrue(formatted.endswith("Z"))
         self.assertNotIn("+00:00", formatted)
         self.assertRegex(formatted, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
-        snapshot_src = inspect.getsource(NativeProcessGuard._snapshot_process)
+        snapshot_src = source_of(NativeProcessGuard._snapshot_process)
         self.assertIn('isoformat(timespec="microseconds")', snapshot_src)
         self.assertIn('"+00:00"', snapshot_src)
         self.assertIn('"Z"', snapshot_src)
@@ -1397,7 +1397,7 @@ class Round4FenceRegressionTest(unittest.TestCase):
         self.assertEqual(state.resolve_poll_pid(minted, sock_new), 61099)
 
     def test_handle_poll_does_not_lookup_creation_time(self) -> None:
-        source = inspect.getsource(loopback.Handler._handle_poll)
+        source = source_of(loopback.Handler._handle_poll)
         self.assertNotIn("_lookup_creation_time", source)
 
     def test_record_poll_looks_up_creation_time_once(self) -> None:

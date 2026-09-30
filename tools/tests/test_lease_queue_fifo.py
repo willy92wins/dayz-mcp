@@ -7,7 +7,6 @@ Moved verbatim from test_session_coordination.py, test_bug046_lease_queue_livene
 from __future__ import annotations
 
 import dataclasses
-import inspect
 import json
 import re
 import sys
@@ -53,6 +52,7 @@ from tests.lease_helpers import (
     TTL,
 )
 from tests.lifecycle_helpers import Clock, IDENTITY, IDENTITY_B, Sequence
+from tests._source_snapshot import source_of
 from tests._tiers import slow_test
 
 
@@ -2462,7 +2462,7 @@ class StateMachineR9Tests(unittest.TestCase):
         self.assertEqual((status, payload["status"]), (200, "active"))
 
     def test_release_active_probes_before_cleanup_in_source(self) -> None:
-        source = inspect.getsource(SessionCoordinator._release_active_locked)
+        source = source_of(SessionCoordinator._release_active_locked)
         probe_at = source.find("_probe_attached_run_locked")
         cleanup_at = source.find("self._cleanup(")
         self.assertGreater(probe_at, 0)

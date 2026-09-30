@@ -149,9 +149,9 @@ class NormalizationTest(unittest.TestCase):
         dayz_test_storage. A table that merely agrees would keep passing over
         two copies of the rule, which is the defect ficha 9d46 documents.
         """
-        import inspect
+        from tests._source_snapshot import source_of
 
-        source = inspect.getsource(dayz_test_worker._mod_path)
+        source = source_of(dayz_test_worker._mod_path)
         self.assertIn("dayz_test_storage.normalize_mod_path", source)
 
 

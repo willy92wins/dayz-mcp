@@ -998,12 +998,13 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
         # must translate to a caller-facing code. An unmapped token reaches the
         # wire as a bare "dayz_test_failed:ValueError" with nothing to act on.
         import importlib
-        import inspect
         import re
+
+        from tests._source_snapshot import source_of
 
         tokens: set[str] = set()
         for name in ("dayz_test_request", "request_path_authority"):
-            source = inspect.getsource(importlib.import_module(f"dayz_mcp.{name}"))
+            source = source_of(importlib.import_module(f"dayz_mcp.{name}"))
             tokens |= set(
                 re.findall(r'ValueError\(\s*"(invalid_dayz_test_[a-z_]+)"', source)
             )

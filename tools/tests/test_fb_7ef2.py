@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import dataclasses
-import inspect
 import json
 import os
 import sys
@@ -19,6 +18,7 @@ from dayz_mcp.process_lifecycle import ProcessLifecycle, RunManifestStore, RunRe
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.server import ServerConfig
 from dayz_mcp.session_coordination import SessionCoordinator
+from tests._source_snapshot import source_of
 from tests.steam_helpers import FakeSteamGate
 from tests.dayz_test_tool_helpers import (
     RUN_ID,
@@ -109,7 +109,7 @@ class Fb7ef2LifecycleTests(unittest.TestCase):
         return str(result["run_id"])
 
     def test_fb_7ef2_generation_recorded_at_launch(self) -> None:
-        source = inspect.getsource(daemon._activate_server_coordination)
+        source = source_of(daemon._activate_server_coordination)
         lifecycle_call = source[source.index("ProcessLifecycle") :]
         self.assertIn("daemon_generation=daemon_generation", lifecycle_call)
         forwarded: list[object] = []
@@ -235,7 +235,7 @@ class Fb7ef2LifecycleTests(unittest.TestCase):
         self.assertIs(projected["generation_changed"], False)
 
     def test_fb_7ef2_session_release_description_contains_the_sentence(self) -> None:
-        source = inspect.getsource(server.build_app)
+        source = source_of(server.build_app)
         self.assertIn(_RELEASE_SENTENCE, source)
 
 

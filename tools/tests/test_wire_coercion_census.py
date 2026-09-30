@@ -34,6 +34,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from pydantic import Strict, StrictBool, StrictFloat, StrictInt
 
 from dayz_mcp.server import ServerConfig, ToolError, build_app
+from tests._source_snapshot import source_of
 from tests._tiers import slow_test
 
 
@@ -550,7 +551,7 @@ class RegistryCensusTests(unittest.TestCase):
         )
 
     def test_gate_uses_the_shared_ratchet_check(self) -> None:
-        src = inspect.getsource(
+        src = source_of(
             RegistryCensusTests.test_new_coercible_parameter_is_not_silently_accepted
         )
         self.assertIn("assert_no_unallowlisted_coercibles", src)
@@ -617,7 +618,7 @@ class RegistryCensusTests(unittest.TestCase):
         )
 
     def test_conditional_registry_flags_are_inventoried(self) -> None:
-        src = inspect.getsource(build_app)
+        src = source_of(build_app)
         found = tuple(sorted(set(re.findall(r"config\.(enable_\w+)", src))))
         self.assertEqual(found, CONDITIONAL_TOOL_REGISTRY_FLAGS)
         self.assertEqual(found, ("enable_exec_enforce",))

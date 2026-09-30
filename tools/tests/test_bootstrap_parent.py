@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import importlib
-import inspect
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+from tests._source_snapshot import source_of
 
 
 class BootstrapParentAccreditationTests(unittest.TestCase):
@@ -103,8 +104,8 @@ class BootstrapParentAccreditationTests(unittest.TestCase):
         module = importlib.import_module("dayz_mcp.bootstrap_parent")
         registry = importlib.import_module("dayz_mcp.launcher_registry")
 
-        bootstrap_source = inspect.getsource(module)
-        registry_source = inspect.getsource(registry)
+        bootstrap_source = source_of(module)
+        registry_source = source_of(registry)
         self.assertNotIn("secure_launcher", bootstrap_source)
         self.assertNotIn("native_launcher_backend", bootstrap_source)
         self.assertNotIn("secure_launcher", registry_source)
