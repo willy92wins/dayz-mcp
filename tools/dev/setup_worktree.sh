@@ -25,11 +25,16 @@
 # nothing about that map, so it stays green while the map points at another tree; a
 # test that starts a subprocess from another directory falls through to the map and
 # runs that other tree. So the check runs the venv's python isolated (-I: no
-# PYTHONPATH, no current directory on sys.path) from an empty temporary directory,
-# hands it <worktree-dir>/tools as named, and requires:
-#   - that neither <worktree-dir>, its tools/ nor tools/.venv-mcp is a junction or a
-#     symlink, and that the interpreter's venv is that tools/.venv-mcp. Review R1 F4:
-#     a .venv-mcp junctioned to another checkout's venv sealed the other checkout;
+# PYTHONPATH, no current directory on sys.path; -B: it writes no bytecode into the
+# tree it inspects) from an empty temporary directory, hands it <worktree-dir>/tools
+# as named, and requires:
+#   - that no component of <worktree-dir>/tools/.venv-mcp, from the drive root down, is
+#     a junction or a symlink: a name-surrogate reparse point (tag bit 0x20000000), read
+#     with lstat before anything is resolved. Other reparse points, such as the
+#     cloud-file placeholders of a synced folder, keep their own name and pass.
+#     Reviews R1 F4 and R2 F5: a junctioned .venv-mcp, tools/ or ancestor made another
+#     checkout look sealed;
+#   - that the interpreter's venv is that tools/.venv-mcp;
 #   - that every module tools/pyproject.toml declares or the editable finder maps,
 #     and dayz_mcp itself, resolves inside that same tools/.
 # It prints SEALED <tools> and exits 0, or one LEAK line per problem and exits 1.
@@ -83,14 +88,40 @@ check_worktree() {
     return 1
   fi
   neutral="$(mktemp -d)"
-  (cd "$neutral" && "$python" -I - "$tools_arg" <<'PY') || status=$?
+  (cd "$neutral" && "$python" -I -B - "$tools_arg" <<'PY') || status=$?
 import importlib.util
 import os
 import stat
 import sys
 from pathlib import Path
 
-REPARSE_POINT = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT: a junction or a symlink on Windows
+# Junctions (IO_REPARSE_TAG_MOUNT_POINT, 0xA0000003) and symlinks (IO_REPARSE_TAG_SYMLINK,
+# 0xA000000C) carry this bit; the cloud-file tags of a synced folder (IO_REPARSE_TAG_CLOUD_*)
+# do not.
+NAME_SURROGATE_BIT = 0x20000000
+
+
+def redirecting_components(path, lstat=os.lstat):
+    """(component, why) for each component, drive root down, that may name another tree.
+
+    Read with lstat on the path as named, before anything resolves it. Only name
+    surrogates redirect; other reparse points keep their own name and pass. A
+    component that cannot be inspected fails closed.
+    """
+    found = []
+    absolute = Path(os.path.abspath(path))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current = current / part
+        try:
+            status = lstat(current)
+        except OSError as error:
+            found.append((current, "cannot be inspected (%s)" % error))
+            break
+        tag = int(getattr(status, "st_reparse_tag", 0) or 0)
+        if stat.S_ISLNK(status.st_mode) or tag & NAME_SURROGATE_BIT:
+            found.append((current, "is a junction or a symlink (reparse tag 0x%08X)" % tag))
+    return found
 
 
 def real(path):
@@ -102,58 +133,62 @@ def inside(path, root):
     return path == root or path.startswith(root + os.sep)
 
 
-def is_link(path):
-    try:
-        status = os.lstat(path)
-    except OSError:
-        return False
-    return stat.S_ISLNK(status.st_mode) or bool(getattr(status, "st_file_attributes", 0) & REPARSE_POINT)
+def check(tools):
+    """The problems of the worktree whose tools/ folder is ``tools``: none means sealed."""
+    venv = tools / ".venv-mcp"
+    leaks = [
+        "%s %s, so the path may name another tree's code" % (component, why)
+        for component, why in redirecting_components(venv)
+    ]
+    if sys.prefix == sys.base_prefix:
+        leaks.append("%s is not a venv interpreter" % sys.executable)
+    elif real(sys.prefix) != real(venv):
+        leaks.append("the interpreter's venv is %s, not %s" % (sys.prefix, venv))
+    own = {"dayz_mcp"}
+    pyproject = tools / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            import tomllib
+
+            declared = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("tool", {}).get("setuptools", {})
+            own |= set(declared.get("packages", [])) | set(declared.get("py-modules", []))
+        except Exception as error:  # an unreadable declaration is a failed check, not a crash
+            leaks.append("cannot read the modules %s declares: %r" % (pyproject, error))
+    mapped = {}
+    for name, module in sorted(sys.modules.items()):
+        if name.startswith("__editable__") and name.endswith("_finder"):
+            mapping = getattr(module, "MAPPING", None)
+            if isinstance(mapping, dict):
+                mapped.update(mapping)
+    for name, target in sorted(mapped.items()):
+        if not inside(target, tools):
+            leaks.append("the editable finder maps %s to %s, outside %s" % (name, target, tools))
+    for name in sorted(own | set(mapped)):
+        try:
+            spec = importlib.util.find_spec(name)
+        except Exception as error:  # a broken finder is a failed check, not a crash
+            spec, origin = None, "an error: %r" % (error,)
+        else:
+            origin = (spec.origin if spec is not None else None) or "nothing"
+        print("%s from %s" % (name, origin))
+        if spec is None or not spec.origin or not inside(spec.origin, tools):
+            leaks.append("%s resolves to %s, outside %s" % (name, origin, tools))
+    return leaks
 
 
-tools = Path(sys.argv[1])
-venv = tools / ".venv-mcp"
-leaks = []
-for part in (tools.parent, tools, venv):
-    if is_link(part):
-        leaks.append("%s is a junction or a symlink, so its code may be another tree's" % part)
-if sys.prefix == sys.base_prefix:
-    leaks.append("%s is not a venv interpreter" % sys.executable)
-elif real(sys.prefix) != real(venv):
-    leaks.append("the interpreter's venv is %s, not %s" % (sys.prefix, venv))
-own = {"dayz_mcp"}
-pyproject = tools / "pyproject.toml"
-if pyproject.is_file():
-    try:
-        import tomllib
+def main(argv):
+    tools = Path(argv[1])
+    leaks = check(tools)
+    for leak in leaks:
+        print("LEAK: " + leak)
+    if leaks:
+        return 1
+    print("SEALED %s" % tools)
+    return 0
 
-        declared = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("tool", {}).get("setuptools", {})
-        own |= set(declared.get("packages", [])) | set(declared.get("py-modules", []))
-    except Exception as error:  # an unreadable declaration is a failed check, not a crash
-        leaks.append("cannot read the modules %s declares: %r" % (pyproject, error))
-mapped = {}
-for name, module in sorted(sys.modules.items()):
-    if name.startswith("__editable__") and name.endswith("_finder"):
-        mapping = getattr(module, "MAPPING", None)
-        if isinstance(mapping, dict):
-            mapped.update(mapping)
-for name, target in sorted(mapped.items()):
-    if not inside(target, tools):
-        leaks.append("the editable finder maps %s to %s, outside %s" % (name, target, tools))
-for name in sorted(own | set(mapped)):
-    try:
-        spec = importlib.util.find_spec(name)
-    except Exception as error:  # a broken finder is a failed check, not a crash
-        spec, origin = None, "an error: %r" % (error,)
-    else:
-        origin = (spec.origin if spec is not None else None) or "nothing"
-    print("%s from %s" % (name, origin))
-    if spec is None or not spec.origin or not inside(spec.origin, tools):
-        leaks.append("%s resolves to %s, outside %s" % (name, origin, tools))
-for leak in leaks:
-    print("LEAK: " + leak)
-if leaks:
-    sys.exit(1)
-print("SEALED %s" % tools)
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
 PY
   rmdir "$neutral" 2>/dev/null || true
   return "$status"

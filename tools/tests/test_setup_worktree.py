@@ -15,6 +15,14 @@ checkout's venv sealed that other checkout. The check now takes the requested
 worktree, refuses a junction or symlink on the way to its venv, and wants every own
 module inside that worktree's tools/.
 
+Review R2 (Codex) F5: only the worktree, tools/ and .venv-mcp were checked, so the
+same tree named through a junctioned ancestor passed as sealed. The check now reads
+every component from the drive root down with lstat, before anything resolves it,
+and refuses a name surrogate (a junction or a symlink, tag bit 0x20000000). Other
+reparse points pass: the live repository sits under OneDrive, whose cloud-file
+placeholders carry non-surrogate tags. A real cloud tag cannot be made in a test, so
+the walk also runs in-process against a fake lstat, as the launcher-registry tests do.
+
 Not run here: the create path past its refusals. It adds a worktree to the
 repository that holds the script and downloads pip, the requirements and
 setuptools. Its refusals run on a copy of the script inside a throwaway repository,
@@ -26,11 +34,13 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 from tests._tiers import slow_test
 
@@ -240,11 +250,100 @@ class WorktreeCheckTest(unittest.TestCase):
         self.assertNotIn("SEALED", output)
 
     @slow_test
+    def test_r2_f5_a_junction_on_the_worktrees_parent_is_refused(self) -> None:
+        # The reviewer's R2 repro: a tree sealed under its own name must not pass
+        # when named through a junctioned parent.
+        worktree = self._tree("physical/wt")
+        tools = worktree / "tools"
+        self._venv({"dayz_mcp": tools / "dayz_mcp", "mcp_capture": tools / "mcp_capture"}, tree=worktree)
+        code, output = self.check(worktree)
+        self.assertEqual(code, 0, output)
+        self.assertIn("SEALED", output)
+        alias = self.root / "alias"
+        self._junction(alias, worktree.parent)
+
+        code, output = self.check(alias / "wt")
+
+        self.assertEqual(code, 1, output)
+        # The path comes back through cygpath's mount table: compare without case.
+        self.assertIn("{0} is a junction or a symlink (reparse tag 0xa0000003)".format(alias).lower(), output.lower())
+        self.assertNotIn("SEALED", output)
+
+    @slow_test
     def test_a_worktree_without_a_venv_is_refused(self) -> None:
         code, output = self.check()
 
         self.assertNotEqual(code, 0, output)
         self.assertIn("no venv at", output)
+
+
+class RedirectingComponentsTest(unittest.TestCase):
+    """--check's component walk, run in-process against a fake lstat.
+
+    Only a name surrogate (tag bit 0x20000000: a junction or a symlink) can make a
+    path name another tree. The live repository sits under OneDrive, whose
+    cloud-file placeholders carry other tags and must pass; a real cloud tag cannot
+    be made in a test, so these stand in for it (as in test_secure_launcher).
+    """
+
+    FIXTURE = "C:\\fixture\\parent\\wt\\tools\\.venv-mcp"
+    ANCESTOR = "C:\\fixture\\parent"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        text = SCRIPT.read_text(encoding="utf-8")
+        opening = "<<'PY') || status=$?\n"
+        start = text.index(opening) + len(opening)
+        end = text.index("\nPY\n", start)
+        namespace: dict[str, object] = {"__name__": "setup_worktree_check"}
+        exec(compile(text[start:end], str(SCRIPT), "exec"), namespace)
+        cls.walk = staticmethod(namespace["redirecting_components"])
+
+    def walk_with(self, tags: dict[str, int], *, link: str = "", missing: str = "") -> list[str]:
+        def lstat(path: object) -> SimpleNamespace:
+            name = str(path)
+            if name == missing:
+                raise PermissionError(13, "Access is denied", name)
+            mode = stat.S_IFLNK if name == link else stat.S_IFDIR
+            return SimpleNamespace(st_mode=mode, st_reparse_tag=tags.get(name, 0))
+
+        return [f"{component} {why}" for component, why in self.walk(self.FIXTURE, lstat=lstat)]
+
+    @unittest.skipUnless(sys.platform == "win32", "the fixture is a Windows path")
+    def test_r2_f5_non_surrogate_tags_on_an_ancestor_pass(self) -> None:
+        for tag in (0x9000001A, 0x9000601A, 0x80000021, 0x8000001E, 0x8000001A):
+            with self.subTest(tag=hex(tag)):
+                self.assertEqual(self.walk_with({self.ANCESTOR: tag}), [])
+
+    @unittest.skipUnless(sys.platform == "win32", "the fixture is a Windows path")
+    def test_r2_f5_a_name_surrogate_on_an_ancestor_is_refused(self) -> None:
+        for tag in (0xA0000003, 0xA000000C, 0xA000001D):
+            with self.subTest(tag=hex(tag)):
+                self.assertEqual(
+                    self.walk_with({self.ANCESTOR: tag}),
+                    [f"{self.ANCESTOR} is a junction or a symlink (reparse tag 0x{tag:08X})"],
+                )
+
+    @unittest.skipUnless(sys.platform == "win32", "the fixture is a Windows path")
+    def test_r2_f5_a_symlink_without_a_tag_is_refused(self) -> None:
+        self.assertEqual(
+            self.walk_with({}, link=self.ANCESTOR),
+            [f"{self.ANCESTOR} is a junction or a symlink (reparse tag 0x00000000)"],
+        )
+
+    @unittest.skipUnless(sys.platform == "win32", "the fixture is a Windows path")
+    def test_r2_f5_every_component_is_read_and_one_that_cannot_be_fails_closed(self) -> None:
+        tags = {self.FIXTURE: 0xA0000003, "C:\\fixture": 0xA000000C}
+        self.assertEqual(
+            self.walk_with(tags),
+            [
+                "C:\\fixture is a junction or a symlink (reparse tag 0xA000000C)",
+                f"{self.FIXTURE} is a junction or a symlink (reparse tag 0xA0000003)",
+            ],
+        )
+        found = self.walk_with({}, missing=self.ANCESTOR)
+        self.assertEqual(len(found), 1, found)
+        self.assertTrue(found[0].startswith(f"{self.ANCESTOR} cannot be inspected"), found)
 
 
 @unittest.skipUnless(sys.platform == "win32", "Git Bash is the shell this script is written for")
@@ -390,7 +489,7 @@ class SetupScriptContractTest(unittest.TestCase):
     def test_the_create_path_ends_with_the_isolated_check(self) -> None:
         self.assertIn('neutral="$(mktemp -d)"', self.text)
         # The check gets the worktree as named: `pwd -W` / `pwd -P` would resolve a junction.
-        self.assertIn('(cd "$neutral" && "$python" -I - "$tools_arg" <<\'PY\')', self.text)
+        self.assertIn('(cd "$neutral" && "$python" -I -B - "$tools_arg" <<\'PY\')', self.text)
         code = [line for line in self.text.splitlines() if not line.lstrip().startswith("#")]
         self.assertEqual([line for line in code if "pwd -W" in line or "pwd -P" in line], [])
         create = self.text[self.text.index("create_worktree() {"):self.text.index("main() {")]

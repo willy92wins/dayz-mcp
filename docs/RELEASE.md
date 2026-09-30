@@ -228,7 +228,8 @@ parameters in its header.
 - `tools/dev/setup_worktree.sh <worktree-dir> <new-branch> [base-ref]` creates a git
   worktree with its own `tools/.venv-mcp`, installed like CI, then checks from an
   empty directory that the editable install resolves `dayz_mcp` inside that
-  worktree. `--check <worktree-dir>` runs only the check.
+  worktree and that no junction or symlink lies on the path to its venv (cloud-file
+  placeholders such as OneDrive's pass). `--check <worktree-dir>` runs only the check.
 - `tools/dev/pbo_provenance.py <pbo> <repo> <ref>` compares a built PBO file by file
   with `addon/` at `<ref>` and checks its header `prefix` against
   `addon/$PBOPREFIX$` and its `mcp_build.json`; it exits 0 only when everything
