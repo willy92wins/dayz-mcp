@@ -20,6 +20,14 @@ Two deliberate limits:
    but its description promises `entities: []` and an agent indexes by
    that key (ficha 59d9), so the empty list stays too.
 
+Rule 1 has one exception it does not cover: a scalar with ONE known owner.
+`door_index` and `component_index` are filled only by `action_use_door`, yet
+the flat class sends them on every verb, so a plain `action_use` reported
+`component_index: 0` although its target used -1 (#156 R1 F2). Outside their
+owner their 0 is always the unassigned default, never an answer, so they are
+dropped there; for the owner they are kept whatever the value, because door 0
+and component 0 are real. Such fields live in OWNED_SCALAR_FIELDS.
+
 This is an observable contract change for a published server: see the changelog.
 """
 from __future__ import annotations
@@ -28,7 +36,8 @@ from typing import Any
 
 
 # The `ref` members of MCPResult, in declaration order (MCPMessages.c MCPResult).
-# Scalars (y, phase, classname, source, ...) are never pruned — 0/"" is real data.
+# Scalars (y, phase, classname, source, ...) are never pruned — 0/"" is real data —
+# except the owned scalars of OWNED_SCALAR_FIELDS on a command that does not own them.
 PRUNABLE_FIELDS = (
     "state",
     "players",
@@ -71,6 +80,15 @@ SEMANTIC_EMPTY_FIELDS = frozenset(
     }
 )
 
+# Scalar field -> the one bridge command that fills it. The key is dropped from
+# every other command's result and kept, even at 0, for its owner. The owner is
+# the command name call_bridge sends: action_use with door_index goes out as
+# action_use_door (server.py action_use), and that name reaches this module.
+OWNED_SCALAR_FIELDS = {
+    "door_index": "action_use_door",
+    "component_index": "action_use_door",
+}
+
 
 def _is_empty_container(value: Any) -> bool:
     # `null` for a ref member means the same as {} / []: the verb never filled it.
@@ -80,11 +98,17 @@ def _is_empty_container(value: Any) -> bool:
     return (isinstance(value, (list, dict))) and not value
 
 
+def _owned_by_another_command(command: str, key: str) -> bool:
+    owner = OWNED_SCALAR_FIELDS.get(key)
+    return owner is not None and owner != command
+
+
 def prune_unfilled_fields(command: str, result: dict[str, Any]) -> dict[str, Any]:
     """Return `result` without the reference fields this verb never filled.
 
     Non-empty values, scalars and unknown keys are returned untouched, so a verb
-    gaining a field later needs no change here.
+    gaining a field later needs no change here. The exception is an owned scalar
+    (OWNED_SCALAR_FIELDS), which only its owning command keeps.
     """
     if not isinstance(result, dict):
         return result
@@ -96,5 +120,6 @@ def prune_unfilled_fields(command: str, result: dict[str, Any]) -> dict[str, Any
             and _is_empty_container(value)
             and (command, key) not in SEMANTIC_EMPTY_FIELDS
         )
+        and not _owned_by_another_command(command, key)
     }
     return pruned

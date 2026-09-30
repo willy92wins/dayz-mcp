@@ -5438,8 +5438,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "wait_for(log_matches) lookback_lines=200 includes the last N "
             "lines already on disk so a sequential action_use then wait_for "
             "does not miss a ~200ms response. action_use: held item is the "
-            "ItemBase in the local player's hands (null if empty); "
-            "componentIndex=-1; classname is exact GetType()."
+            "ItemBase in the local player's hands (null if empty); world "
+            "targets use componentIndex=-1 unless door_index targets one door "
+            "of a Building (then that door's view-geometry component); "
+            "classname is exact GetType()."
         ),
         lifespan=lifespan,
     )
@@ -8050,7 +8052,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "the nearest world object of classname. It needs an addon that "
         "announces action_use_door and otherwise returns door_not_supported "
         "without calling the bridge. A result that does not echo the same "
-        "door_index is door_not_supported. The player must stand within 2 m "
+        "door_index is door_not_supported. Door errors: door_not_supported, "
+        "not_a_building, door_out_of_range (door_index >= that building's "
+        "door count) and door_component_not_found. The player must stand within 2 m "
         "of that door: read its pos from object_doors, then player_teleport. "
         "started still does not prove the door moved; read object_doors after. "
         "Routes to MCPClientBridge on the CLIENT and calls "

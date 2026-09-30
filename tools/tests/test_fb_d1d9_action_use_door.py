@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -25,6 +27,43 @@ MESSAGES_PATH = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
 CENSUS_FIXTURE = (
     Path(__file__).resolve().parent / "fixtures" / "bridge_capabilities_v1.json"
 )
+
+# The door branch's range check, component scan and selection scan, compared
+# whitespace-squashed. Tokens and their order let three mutants live (#156 R1
+# F4): the cap bound as <= or >, the doorstwin skip inverted, and a scan without
+# `doorComponent < 0` that keeps the highest matching component.
+DOOR_RANGE_CHECK = "if (wantedDoor < 0 || wantedDoor >= doorCount)"
+DOOR_COMPONENT_SCAN = """
+int doorComponent = -1;
+int componentScan = 0;
+while (componentScan < ACTION_USE_DOOR_COMPONENT_CAP && doorComponent < 0)
+{
+    if (doorBuilding.GetDoorIndex(componentScan) == wantedDoor)
+    {
+        doorComponent = componentScan;
+    }
+    componentScan = componentScan + 1;
+}
+"""
+DOOR_SELECTION_SCAN = """
+while (nameScan < doorComponentNames.Count() && !doorSelectionFound)
+{
+    doorComponentName = doorComponentNames.Get(nameScan);
+    if (doorComponentName.Contains("doorstwin"))
+    {
+        nameScan = nameScan + 1;
+    }
+    else
+    {
+        doorSelection = doorComponentName;
+        doorSelectionFound = true;
+    }
+}
+"""
+
+
+def _squash(text: str) -> str:
+    return " ".join(text.split())
 
 
 def _method_body(source: str, signature: str) -> str:
@@ -106,9 +145,57 @@ class ActionUseDoorToolTest(unittest.IsolatedAsyncioTestCase):
             "player_teleport",
             "started still does not prove the door moved",
             "component=-1",
+            "Door errors: door_not_supported, not_a_building, door_out_of_range",
+            "door_component_not_found",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, description)
+
+    async def test_description_names_every_error_the_door_branch_sets(self) -> None:
+        # #156 R1 F5. The codes are read from the Enforce branch, so a new
+        # refusal there fails here until the description names it too.
+        tools = {tool.name: tool for tool in await self.app.list_tools()}
+        description = tools[COMMAND].description or ""
+        body = _method_body(
+            BRIDGE_PATH.read_text(encoding="utf-8"), "protected bool DispatchActionUse("
+        )
+        door = _if_body(body, 'command.cmd == "action_use_door"')
+        codes = set(re.findall(r'result\.error = "(\w+)"', door))
+        self.assertEqual(
+            codes, {"not_a_building", "door_out_of_range", "door_component_not_found"}
+        )
+        for code in sorted(codes | {"door_not_supported"}):
+            with self.subTest(code=code):
+                self.assertIn(code, description)
+
+    def test_instructions_scope_component_minus_one_to_targets_without_door_index(
+        self,
+    ) -> None:
+        # #156 R1 F1: the server instructions are the first text an agent reads,
+        # and a bare componentIndex=-1 there contradicted door_index.
+        instructions = self.app.instructions or ""
+        self.assertIn(
+            "world targets use componentIndex=-1 unless door_index targets one "
+            "door of a Building (then that door's view-geometry component)",
+            instructions,
+        )
+        self.assertNotIn("(null if empty); componentIndex=-1;", instructions)
+
+    async def test_the_awaited_command_name_decides_which_door_scalars_survive(
+        self,
+    ) -> None:
+        # #156 R1 F2 through the runtime: a door call awaits action_use_door, so
+        # its real door 0 and component 0 survive the prune (and the echo check);
+        # a plain action_use drops both flat defaults instead of reporting 0.
+        wire = {"ok": 1, "started": True, "door_index": 0, "component_index": 0}
+        state = SimpleNamespace(take_result=lambda *_args, **_kwargs: dict(wire))
+        with patch.object(self.runtime, "loopback", SimpleNamespace(state=state)):
+            door = await self.runtime.wait_for_result(DOOR_COMMAND, 1, "client", 1.0)
+            plain = await self.runtime.wait_for_result(COMMAND, 2, "client", 1.0)
+        self.assertEqual((door["door_index"], door["component_index"]), (0, 0))
+        self.assertNotIn("door_index", plain)
+        self.assertNotIn("component_index", plain)
+        self.assertIs(plain["started"], True)
 
     async def test_without_door_index_the_command_and_args_stay_action_use(self) -> None:
         status = AsyncMock(side_effect=RuntimeError("status must not be read"))
@@ -344,7 +431,7 @@ class ActionUseDoorEnforceContractTest(unittest.TestCase):
         self.assertIn("ACTION_USE_DOOR_COMPONENT_CAP", door)
         for token in (
             "Building.Cast(targetObj)",
-            "building.GetDoorCount()" if False else "doorBuilding.GetDoorCount()",
+            "doorBuilding.GetDoorCount()",
             "doorBuilding.GetDoorIndex(componentScan)",
             'doorComponentName.Contains("doorstwin")',
             "doorBuilding.GetActionComponentNameList(doorComponent, doorComponentNames)",
@@ -389,6 +476,23 @@ class ActionUseDoorEnforceContractTest(unittest.TestCase):
             "new ActionTarget(targetObj, null, -1, cursorHitPos, 0)",
             door,
         )
+
+    def test_door_scan_stops_at_the_first_component_below_the_cap_and_skips_doorstwin(
+        self,
+    ) -> None:
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        body = _method_body(source, "protected bool DispatchActionUse(")
+        door = _squash(_if_body(body, 'command.cmd == "action_use_door"'))
+        blocks = (
+            ("range check", _squash(DOOR_RANGE_CHECK)),
+            ("component scan", _squash(DOOR_COMPONENT_SCAN)),
+            ("selection scan", _squash(DOOR_SELECTION_SCAN)),
+        )
+        for name, block in blocks:
+            with self.subTest(block=name):
+                self.assertEqual(door.count(block), 1, block)
+        positions = [door.find(block) for _name, block in blocks]
+        self.assertEqual(positions, sorted(positions))
 
     def test_messages_keep_door_mode_on_the_command_name(self) -> None:
         messages = MESSAGES_PATH.read_text(encoding="utf-8")

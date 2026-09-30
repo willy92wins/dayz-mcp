@@ -169,6 +169,46 @@ class ResultPruneTest(unittest.TestCase):
                     {field for field in PRUNABLE_FIELDS if field in pruned}, expected
                 )
 
+    def test_door_scalars_are_dropped_from_every_command_but_action_use_door(self) -> None:
+        # #156 R1 F2: the flat class sends door_index:0 and component_index:0 on
+        # every verb, so a plain action_use read component_index 0 although its
+        # target used -1. Driven off the real whitelist like the test above.
+        verbs = (loopback.SERVER_COMMANDS | loopback.CLIENT_COMMANDS) - {
+            "action_use_door"
+        }
+        self.assertIn("action_use", verbs)
+        for verb in sorted(verbs):
+            with self.subTest(verb=verb):
+                pruned = prune_unfilled_fields(
+                    verb,
+                    _wire_result(
+                        door_index=0, component_index=0, started=False, distance=0.0
+                    ),
+                )
+                self.assertNotIn("door_index", pruned)
+                self.assertNotIn("component_index", pruned)
+                # Every other scalar keeps rule 1.
+                self.assertIs(pruned["started"], False)
+                self.assertEqual(pruned["distance"], 0.0)
+
+    def test_action_use_door_keeps_door_zero_and_component_zero(self) -> None:
+        # Door 0 and component 0 are real, and the action_use tool compares the
+        # echoed door_index with the request: pruning it would turn a real door 0
+        # into door_not_supported.
+        self.assertIn("action_use_door", loopback.CLIENT_COMMANDS)
+        for door, component in ((0, 0), (3, 17)):
+            with self.subTest(door=door, component=component):
+                pruned = prune_unfilled_fields(
+                    "action_use_door",
+                    _wire_result(door_index=door, component_index=component),
+                )
+                self.assertEqual(pruned["door_index"], door)
+                self.assertEqual(pruned["component_index"], component)
+        self.assertEqual(
+            result_prune.OWNED_SCALAR_FIELDS,
+            {"door_index": "action_use_door", "component_index": "action_use_door"},
+        )
+
     def test_empty_dialog_is_pruned_except_on_ui_dialog(self) -> None:
         empty_object = prune_unfilled_fields(
             "world_spawn", {**_wire_result(), "dialog": {}}
