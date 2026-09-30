@@ -20,7 +20,9 @@ BODY_MAX_CHARS = 8000
 PROJECT_MAX_CHARS = 64
 RESOLUTION_MAX_CHARS = 2000
 EVIDENCE_REF_MAX_CHARS = 240
-_FEEDBACK_ID_RE = re.compile(r"^fb-\d{8}-\d{6}-[0-9a-f]{4}$")
+# re.ASCII: a bare \d also matches other scripts' digits (fullwidth,
+# Arabic-Indic, ...), which no id from append_feedback holds.
+_FEEDBACK_ID_RE = re.compile(r"^fb-\d{8}-\d{6}-[0-9a-f]{4}$", re.ASCII)
 _EVIDENCE_ROOTS = frozenset({"reviews", "gates", "reports", "research"})
 _EVIDENCE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -230,10 +232,16 @@ def _read_inbox(
     by_id: dict[str, dict] = {}
     malformed = 0
     if FEEDBACK_PATH.is_file():
-        text = FEEDBACK_PATH.read_text(encoding="utf-8")
-        for line in text.splitlines():
+        # Split as _feedback_state splits: on the b"\n" ending each record
+        # (a CRLF's \r is JSON whitespace), each line decoded on its own.
+        # str.splitlines() also broke at U+0085, U+2028 and U+2029, which
+        # ensure_ascii=False writes raw, and one undecodable byte failed the
+        # whole read (fb-20260930-172226-89c9); now either costs one line.
+        with FEEDBACK_PATH.open("rb") as handle:
+            lines = handle.readlines()
+        for raw in lines:
             try:
-                obj = json.loads(line)
+                obj = json.loads(raw.decode("utf-8"))
             except ValueError:
                 malformed += 1
                 continue
