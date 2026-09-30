@@ -73,6 +73,7 @@ READ_ONLY = {
     "ui_tree",
     "weapon_state",
     "input_describe",
+    "world_time_get",
 }
 
 

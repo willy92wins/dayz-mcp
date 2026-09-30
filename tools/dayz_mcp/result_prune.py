@@ -67,6 +67,8 @@ PRUNABLE_FIELDS = (
     "lifetime",
     # input_trigger fills it, also on its refusals (e1ae part 2).
     "input_trigger",
+    # world_time_get fills it with the World.GetDate read.
+    "world_time",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.

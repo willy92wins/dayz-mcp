@@ -41,6 +41,8 @@ READ_ONLY_COMMANDS = frozenset(
         # Server read of the weapon in hands, including the EEFired tally.
         "weapon_state",
         "input_describe",
+        # Server read of the in-game clock (World.GetDate); it writes nothing.
+        "world_time_get",
     }
 )
 MAX_OPERATION_PIN_S = 300.0

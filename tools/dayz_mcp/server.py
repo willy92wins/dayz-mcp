@@ -755,6 +755,7 @@ _INITIAL_READ_TOOL_NAMES = frozenset(
         "ui_tree",
         "vehicle_telemetry",
         "weapon_state",
+        "world_time_get",
     }
 )
 _INITIAL_CATALOG_NAMES = _INITIAL_CORE_NAMES | _INITIAL_READ_TOOL_NAMES
@@ -1108,6 +1109,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "vehicle_prepare_fixture": "vehicle_prepare_fixture",
         "weapon_state": "weapon_state",
         "world_spawn": "world_spawn",
+        "world_time_get": "world_time_get",
         "world_time_set": "world_time_set",
         "world_weather_set": "world_weather_set",
     },
@@ -3456,6 +3458,40 @@ def _normalize_applied_clock(applied: dict[str, Any]) -> dict[str, Any]:
     out["minute"] = minute
     _add_applied_days(out, extra_days)
     return out
+
+
+# The five World.GetDate fields world_time_get answers in world_time.
+WORLD_TIME_FIELDS = ("year", "month", "day", "hour", "minute")
+
+
+def _world_time_reply(result: dict[str, Any]) -> dict[str, Any]:
+    """world_time_get's answer: world_time normalized, the raw read beside it.
+
+    GetDate can report hour=8, minute=60 for 9:00 (fb-20260911-230929-311d),
+    so world_time goes through _normalize_applied_clock, as world_time_set's
+    applied echo does; world_time_echo keeps the raw values. An answer that
+    is not ok (the not-ready envelope a world read returns before enqueue)
+    passes through untouched. An ok answer without the five integral fields
+    is ok=0 with world_time_incomplete: a clock that did not arrive is not a
+    reading.
+    """
+    if not isinstance(result, dict) or not result.get("ok"):
+        return result
+    response = dict(result)
+    world_time = result.get("world_time")
+    if isinstance(world_time, dict):
+        echo = dict(world_time)
+        normalized = _normalize_applied_clock(echo)
+        response["world_time"] = normalized
+        response["world_time_echo"] = echo
+        response["clock_normalized"] = _clock_was_normalized(echo, normalized)
+    complete = isinstance(world_time, dict) and all(
+        _is_int_clock_part(world_time.get(field)) for field in WORLD_TIME_FIELDS
+    )
+    if not complete:
+        response["ok"] = 0
+        response["warnings"] = ["world_time_incomplete"]
+    return response
 
 
 def _optional_finite_float(
@@ -7632,7 +7668,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "SetTimeMultiplier and no GetTimeMultiplier; MCPApplied does "
             "not echo one) and warnings includes multiplier_unconfirmed — "
             "that is not confirmation it was applied. Visual/particle "
-            "confirmation is in_game_required, not a wire guarantee."
+            "confirmation is in_game_required, not a wire guarantee. "
+            "Read the clock again later, without a lease, with world_time_get."
         )
     )
     async def world_time_set(
@@ -7730,6 +7767,35 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if warnings:
             response["warnings"] = warnings
         return response
+
+    @app.tool(
+        description=(
+            "Read the server's in-game date and time: world_time {year, "
+            "month, day, hour, minute} from World.GetDate. It changes nothing "
+            "and needs no lease: read the clock before and after a test, or "
+            "twice to see whether time moves. world_time is the normalized "
+            "clock: GetDate can report minute=60 (hour=8, minute=60 for "
+            "9:00), so minute>=60 carries into the hour and then the calendar "
+            "day, the divmod rule world_time_set applies to its applied echo; "
+            "world_time_echo keeps the raw GetDate values and clock_normalized "
+            "is true when they differ. ok is 0 and warnings includes "
+            "world_time_incomplete when the answer lacks one of the five "
+            "fields. The time multiplier cannot be read: World has "
+            "SetTimeMultiplier and no getter, so no tool can confirm it. What "
+            "a world_time_set did is in that call's own answer (applied, "
+            "applied_echo, date_applied, multiplier_applied); this tool is for "
+            "a later read. Errors: world_unavailable (the server has no "
+            "World) and, from a PBO built before this verb, unknown_command."
+        )
+    )
+    async def world_time_get(
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            result = await runtime.call_bridge(
+                "world_time_get", {}, "server", _timeout(timeout_s)
+            )
+        return _world_time_reply(result)
 
     @app.tool(
         description=(

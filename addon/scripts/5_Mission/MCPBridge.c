@@ -33,7 +33,7 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
@@ -563,6 +563,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "world_time_set")
 		{
 			postNow = DispatchWorldTimeSet(command, result);
+		}
+		else if (command.cmd == "world_time_get")
+		{
+			postNow = DispatchWorldTimeGet(command, result);
 		}
 		else if (command.cmd == "world_weather_set")
 		{
@@ -2248,6 +2252,37 @@ class MCPBridge : Managed
 		applied.hour = appliedHour;
 		applied.minute = appliedMinute;
 		result.applied = applied;
+		result.ok = true;
+		return true;
+	}
+
+	// world_time_get is a read: the same World.GetDate that DispatchWorldTimeSet
+	// makes after its write, and nothing is written. World has SetTimeMultiplier
+	// and no getter (world.c:19), so the multiplier is not read.
+	protected bool DispatchWorldTimeGet(MCPCommand command, MCPResult result)
+	{
+		int year;
+		int month;
+		int day;
+		int hour;
+		int minute;
+		World world = GetGame().GetWorld();
+		MCPWorldTime worldTime;
+		if (!world)
+		{
+			result.ok = false;
+			result.error = "world_unavailable";
+			return true;
+		}
+
+		world.GetDate(year, month, day, hour, minute);
+		worldTime = new MCPWorldTime();
+		worldTime.year = year;
+		worldTime.month = month;
+		worldTime.day = day;
+		worldTime.hour = hour;
+		worldTime.minute = minute;
+		result.world_time = worldTime;
 		result.ok = true;
 		return true;
 	}

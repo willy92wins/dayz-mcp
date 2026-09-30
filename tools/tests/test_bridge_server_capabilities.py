@@ -83,6 +83,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "vehicle_prepare_fixture",
     "weapon_state",
     "world_spawn",
+    "world_time_get",
     "world_time_set",
     "world_weather_set",
 )

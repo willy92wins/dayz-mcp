@@ -90,7 +90,9 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 1 from fb-bd28 (world_spawn lifetime_s, StrictFloat | None).
         # + 4 from fb-e1ae part 2 (input_trigger dik/hold_s/ttl_s/timeout_s; kind,
         # entry, phase and name are strings, not in this census).
-        self.assertEqual(len(rows), 151)
+        # + 1 from world_time_get (timeout_s, its only parameter).
+        self.assertEqual(len(rows), 152)
+        self.assertIn(("world_time_get", "timeout_s", "float"), rows)
         self.assertIn(("input_trigger", "dik", "int"), rows)
         self.assertIn(("input_trigger", "hold_s", "float"), rows)
         self.assertIn(("input_trigger", "ttl_s", "float"), rows)

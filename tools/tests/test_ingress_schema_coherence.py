@@ -65,6 +65,8 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
         "telemetry_read",
     ),
     ("query_get_in_condition", {"pos": _POS}, "query_get_in_condition"),
+    ("world_time_get", {}, "world_time_get"),
+    ("world_time_get", {"timeout_s": 300.0}, "world_time_get"),
     ("world_time_set", dict(_DATE), "world_time_set"),
     ("world_time_set", {**_DATE, "time_multiplier": -1.0}, "world_time_set"),
     ("world_time_set", {**_DATE, "time_multiplier": 64.0}, "world_time_set"),

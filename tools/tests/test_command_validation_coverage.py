@@ -31,6 +31,7 @@ def _minimal_args(cmd: str) -> dict:
         "camera_get",
         "weapon_state",
         "weapon_fire",
+        "world_time_get",
     }:
         return {}
 
