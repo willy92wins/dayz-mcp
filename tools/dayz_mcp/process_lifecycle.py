@@ -85,6 +85,8 @@ _DAYZ_IMAGE_NAMES = frozenset(
 _DAYZ_PORT_RANGE = range(2302, 3000)
 # Visible window that does not take the foreground.
 SW_SHOWNOACTIVATE = 4
+# Minimized window that does not take the foreground (the server, f298).
+SW_SHOWMINNOACTIVE = 7
 _PORT_SCAN_UNKNOWN_HINT = (
     "port_scan_unknown: the daemon could not read the host UDP socket table "
     "(psutil/netstat); waiting does not help, restore that first"
@@ -1808,7 +1810,15 @@ class ProcessLifecycle:
         elif os.name == "nt" and window_style == "normal":
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = SW_SHOWNOACTIVATE
+            # fb-20260930-171421-fa6f (f298): DayZ still takes the foreground
+            # under SW_SHOWNOACTIVATE. Captures target the client, so the
+            # server starts minimized; the client must render and keeps its
+            # visible window. "-server" in the argv decides, as it does for the
+            # Steam gate in _start_run_reserved; the role label does not.
+            server = "-server" in [arg.casefold() for arg in argv[1:]]
+            startupinfo.wShowWindow = (
+                SW_SHOWMINNOACTIVE if server else SW_SHOWNOACTIVATE
+            )
             kwargs["startupinfo"] = startupinfo
         return subprocess.Popen(argv, **kwargs)
 
