@@ -129,7 +129,8 @@ class MCPArgs
 	ref array<string> sources;
 	// Optional player identity (GetPlainId). Empty = first human / broadcast.
 	string uid;
-	// input_describe: UAInput name. Empty on every other command.
+	// input_describe, and input_trigger with trigger_kind input: UAInput name.
+	// Empty on every other command.
 	string name;
 	// action_use: ActionBase typename (Type().ToString()), e.g. LFPG_ActionOpenBTCAtm.
 	string action;
@@ -155,6 +156,15 @@ class MCPArgs
 	// weapon_aim. Absolute value capped at MCPWeaponControl.AIM_CHANGE_ABS_MAX.
 	float dx;
 	float dy;
+	// input_trigger (e1ae). trigger_kind is key or input, trigger_edge is click,
+	// hold, press or release, trigger_entry is game or mission (key only). dik
+	// (key) and name (input) are reused. hold_s travels only with the hold edge
+	// and hold_ttl_s only with the press edge; an absent key reads 0, which the
+	// bridge refuses (see the class comment).
+	string trigger_kind;
+	string trigger_edge;
+	string trigger_entry;
+	float hold_s;
 	// world_spawn economy lifetime override in seconds (fb-20260930-080543-bd28).
 	// lifetime_s_set true sets it on the spawned entity; false, which is what an
 	// absent key arrives as, leaves the economy lifetime alone (see the class comment).
@@ -632,6 +642,48 @@ class MCPVehicleDoor
 	}
 };
 
+// input_trigger payload (e1ae part 2). kind, entry, phase and dik or name echo
+// the request. delivered_press and delivered_release say the bridge called
+// OnKeyPress and OnKeyRelease; the handlers return nothing, so neither says a
+// handler consumed the key. press_tick and release_tick count client bridge
+// OnTick calls; release_due_s (the scheduled release of a hold or press) and
+// tick_time_s (the dispatch) are client GetTickTime seconds. released_by is
+// phase, ttl, restore, player_changed or shutdown. menu_open is UIManager.GetMenu
+// at dispatch. kind input fills input_id, exists, locked, in_active_inputs and
+// reason and delivers nothing. -1 marks an unset dik, id, tick or time.
+// Primitives only: no entity reference.
+class MCPInputTrigger
+{
+	string kind;
+	string entry;
+	string phase;
+	int dik;
+	string name;
+	int input_id;
+	bool delivered_press;
+	bool delivered_release;
+	int press_tick;
+	int release_tick;
+	float release_due_s;
+	float tick_time_s;
+	string released_by;
+	bool menu_open;
+	bool exists;
+	bool locked;
+	bool in_active_inputs;
+	string reason;
+
+	void MCPInputTrigger()
+	{
+		dik = -1;
+		input_id = -1;
+		press_tick = -1;
+		release_tick = -1;
+		release_due_s = -1.0;
+		tick_time_s = -1.0;
+	}
+};
+
 // world_spawn lifetime read-back (fb-20260930-080543-bd28), assigned only when
 // the command carried lifetime_s. remaining_s is GetLifetime() and max_s is
 // GetLifetimeMax() (entityai.c:3377-3387), both read when the reply is built.
@@ -735,6 +787,8 @@ class MCPResult
 	ref MCPVehicleDoor vehicle_door;
 	// world_spawn lifetime read-back. Unassigned unless the command carried lifetime_s.
 	ref MCPSpawnLifetime lifetime;
+	// input_trigger reply, also on its refusals. Unassigned on other commands.
+	ref MCPInputTrigger input_trigger;
 };
 
 class MCPJob
@@ -771,6 +825,8 @@ class MCPJob
 	int generation;
 	int sim_seen;
 	ref MCPWeaponAction weapon_action;
+	// input_trigger click or hold: the reply posted after the release.
+	ref MCPInputTrigger input_trigger;
 };
 
 class MCPSpawnValidation

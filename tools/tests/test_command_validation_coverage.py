@@ -78,6 +78,8 @@ def _minimal_args(cmd: str) -> dict:
         return {"dik": 1}
     if cmd == "input_describe":
         return {"name": "UAMoveForward"}
+    if cmd == "input_trigger":
+        return {"trigger_kind": "key", "trigger_edge": "click", "trigger_entry": "game", "dik": 1}
     if cmd == "vehicle_trace":
         return {
             "mode": "start",

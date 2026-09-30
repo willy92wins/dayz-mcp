@@ -137,6 +137,273 @@ class MCPUiNameMatch
 	}
 };
 
+//! input_trigger (e1ae part 2): the one key this bridge holds. The press is
+//! delivered at dispatch. The release comes from the phase (click on the next
+//! tick, hold once hold_s has passed), from phase=release, from the press TTL,
+//! from RestoreGameplay, when the local player changes or dies, and at
+//! shutdown: nothing stays pressed without a scheduled release. Maintained
+//! from MCPClientBridge.OnTick on the MCPWeaponControl.MaintainFromTick
+//! pattern. Entry game is DayZGame.OnKeyPress/OnKeyRelease (dayzgame.c:2804-2918:
+//! modifier flags, the keyboard handler, then the mission); it never presses
+//! F4, LMENU or RMENU (IsExitComboKey). Entry mission is
+//! Mission.OnKeyPress/OnKeyRelease (gameplay.c:709-710), what key_press calls.
+//! Only the call is known: the handlers return nothing.
+class MCPInputTriggerControl
+{
+	// Mirrored by loopback.INPUT_TRIGGER_*; tools/tests keep the copies equal.
+	// hold_s and the press TTL are refused outside (0, max], not clamped.
+	static const int DIK_MAX = 255;
+	static const float HOLD_MAX_S = 10.0;
+	static const float PRESS_MAX_TTL_S = 30.0;
+
+	// Counts MaintainFromTick calls, one per bridge OnTick. Its own counter,
+	// so a new bridge instance cannot move it back under a held press tick.
+	static int s_Tick;
+	static bool s_Held;
+	static int s_Dik;
+	static string s_Entry;
+	static string s_Edge;
+	static int s_PressTick;
+	static float s_DueS;
+	static PlayerBase s_Player;
+	static int s_Gen;
+	// The last release, read by the job that waits on it and by not_held.
+	static int s_ReleasedGen;
+	static int s_ReleasedDik;
+	static string s_ReleasedEntry;
+	static string s_ReleasedBy;
+	static int s_ReleaseTick;
+	static bool s_ReleaseDelivered;
+
+	static bool IsHeld()
+	{
+		return s_Held;
+	}
+
+	static bool Holds(string entry, int dik)
+	{
+		if (!s_Held)
+		{
+			return false;
+		}
+		if (s_Entry != entry)
+		{
+			return false;
+		}
+		return s_Dik == dik;
+	}
+
+	static string HeldEdge()
+	{
+		if (!s_Held)
+		{
+			return "";
+		}
+		return s_Edge;
+	}
+
+	// DayZGame.OnKeyPress sets its left Alt flag on KC_LMENU and calls
+	// RequestExit for F4 while that flag is set (dayzgame.c:2855-2858,
+	// :2876-2881, DEVELOPER builds). The flag is private and a physical Alt
+	// sets it too, so entry game never delivers F4, nor an Alt key that would
+	// leave the flag set for a physical F4. KC_RMENU is refused as well:
+	// vanilla tests the left flag twice (:2877), and a fix there would count it.
+	static bool IsExitComboKey(int dik)
+	{
+		if (dik == KeyCode.KC_F4)
+		{
+			return true;
+		}
+		if (dik == KeyCode.KC_LMENU)
+		{
+			return true;
+		}
+		if (dik == KeyCode.KC_RMENU)
+		{
+			return true;
+		}
+		return false;
+	}
+
+	static int Generation()
+	{
+		return s_Gen;
+	}
+
+	static int PressTick()
+	{
+		return s_PressTick;
+	}
+
+	static bool WasReleased(int generation)
+	{
+		return s_ReleasedGen == generation;
+	}
+
+	static bool LastReleaseWas(string entry, int dik)
+	{
+		if (s_ReleasedGen <= 0)
+		{
+			return false;
+		}
+		if (s_ReleasedEntry != entry)
+		{
+			return false;
+		}
+		return s_ReleasedDik == dik;
+	}
+
+	static string ReleasedBy()
+	{
+		return s_ReleasedBy;
+	}
+
+	static int ReleaseTick()
+	{
+		return s_ReleaseTick;
+	}
+
+	static bool ReleaseDelivered()
+	{
+		return s_ReleaseDelivered;
+	}
+
+	// false when nothing was called: no game, or entry mission without a mission.
+	static bool Deliver(string entry, int dik, bool press)
+	{
+		Mission mission;
+		if (!GetGame())
+		{
+			return false;
+		}
+		if (entry == "game")
+		{
+			if (press)
+			{
+				GetGame().OnKeyPress(dik);
+			}
+			else
+			{
+				GetGame().OnKeyRelease(dik);
+			}
+			return true;
+		}
+		if (entry != "mission")
+		{
+			return false;
+		}
+		mission = GetGame().GetMission();
+		if (!mission)
+		{
+			return false;
+		}
+		if (press)
+		{
+			mission.OnKeyPress(dik);
+		}
+		else
+		{
+			mission.OnKeyRelease(dik);
+		}
+		return true;
+	}
+
+	// Delivers the press, then arms its release. -1 while a key is held and 0
+	// when nothing was delivered; nothing new is held in either case.
+	static int Press(string entry, int dik, string edge, float dueS, PlayerBase player)
+	{
+		if (s_Held)
+		{
+			return -1;
+		}
+		if (!Deliver(entry, dik, true))
+		{
+			return 0;
+		}
+		s_Gen = s_Gen + 1;
+		s_Held = true;
+		s_Dik = dik;
+		s_Entry = entry;
+		s_Edge = edge;
+		s_PressTick = s_Tick;
+		s_DueS = dueS;
+		s_Player = player;
+		return s_Gen;
+	}
+
+	// Delivers OnKeyRelease on the held key's entry and records why. The held
+	// state is cleared first, so a handler that reaches here again finds
+	// nothing to release.
+	static void ReleaseAll(string why)
+	{
+		if (!s_Held)
+		{
+			return;
+		}
+		s_Held = false;
+		s_Player = null;
+		s_ReleasedGen = s_Gen;
+		s_ReleasedDik = s_Dik;
+		s_ReleasedEntry = s_Entry;
+		s_ReleasedBy = why;
+		s_ReleaseTick = s_Tick;
+		s_ReleaseDelivered = false;
+		s_ReleaseDelivered = Deliver(s_Entry, s_Dik, false);
+	}
+
+	// Returns before any engine call while no key is held. A dead, changed or
+	// missing local player releases at once; otherwise the release waits for
+	// a later tick than the press.
+	static void MaintainFromTick()
+	{
+		PlayerBase live;
+		s_Tick = s_Tick + 1;
+		if (!s_Held)
+		{
+			return;
+		}
+		live = null;
+		if (GetGame())
+		{
+			live = PlayerBase.Cast(GetGame().GetPlayer());
+		}
+		if (!live)
+		{
+			ReleaseAll("player_changed");
+			return;
+		}
+		if (live != s_Player)
+		{
+			ReleaseAll("player_changed");
+			return;
+		}
+		if (!live.IsAlive())
+		{
+			ReleaseAll("player_changed");
+			return;
+		}
+		if (s_Tick <= s_PressTick)
+		{
+			return;
+		}
+		if (s_Edge == "click")
+		{
+			ReleaseAll("phase");
+			return;
+		}
+		if (GetGame().GetTickTime() < s_DueS)
+		{
+			return;
+		}
+		if (s_Edge == "hold")
+		{
+			ReleaseAll("phase");
+			return;
+		}
+		ReleaseAll("ttl");
+	}
+};
+
 class MCPClientBridge extends MCPJobRunnerOwner
 {
 	protected const int MAX_DISPATCH_PER_TICK = 4;
@@ -184,6 +451,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// input_describe: printable ASCII name, and the selected alternative's keys.
 	protected const int INPUT_NAME_MAX = 128;
 	protected const int INPUT_KEY_MAX = 16;
+	// input_trigger click and hold answer after their release. Past it by this
+	// much, the job releases the key itself and answers aborted. The tool waits
+	// hold_s plus the same 5 s for a hold.
+	protected const float INPUT_TRIGGER_JOB_SLACK_S = 5.0;
 	//! Capability census announced on every poll as `caps=`: the exact set of
 	//! command.cmd branches Dispatch() handles before falling to unknown_command,
 	//! sorted bytewise and comma-separated. tools/tests/test_bridge_client_capabilities.py
@@ -191,7 +462,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_use,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,key_press,player_respawn," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_use,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,input_trigger,key_press,player_respawn," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -318,6 +589,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_Tick = m_Tick + 1;
 		// Returns before any engine call while no weapon override is armed.
 		MCPWeaponControl.MaintainFromTick();
+		// Releases the input_trigger key when its phase, its TTL or the local
+		// player says so. Before the job runner, so a click or hold answers in
+		// the tick of its release. Returns before any engine call while no key is held.
+		MCPInputTriggerControl.MaintainFromTick();
 		// anim_timeline samples here on every frame, never from a job: the edge
 		// sample belongs to the frame the action or callback state changed.
 		// Returns before any engine call while no timeline is active.
@@ -763,15 +1038,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	{
 		int blocking;
 		int weaponJobs;
+		int triggerJobs;
 		if (!m_JobRunner)
 		{
 			return false;
 		}
 
 		// weapon_action is a one-tick read-back. It must not refuse camera_set.
+		// Nor does an input_trigger click or hold, which waits on a key release.
 		blocking = m_JobRunner.CountExcluding("ui_dialog");
 		weaponJobs = m_JobRunner.CountOfKind("weapon_action");
-		blocking = blocking - weaponJobs;
+		triggerJobs = m_JobRunner.CountOfKind("input_trigger");
+		blocking = blocking - weaponJobs - triggerJobs;
 		return blocking > 0;
 	}
 
@@ -889,6 +1167,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "input_describe")
 		{
 			postNow = DispatchInputDescribe(command, result);
+		}
+		else if (command.cmd == "input_trigger")
+		{
+			postNow = DispatchInputTrigger(command, result);
 		}
 		else if (command.cmd == "weapon_aim")
 		{
@@ -1076,6 +1358,340 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		result.dik = dik;
 		result.ok = true;
 		return true;
+	}
+
+	// input_trigger (e1ae part 2). kind key delivers one DIK code to a script
+	// key handler and releases it (MCPInputTriggerControl). kind input resolves
+	// a UAInput and refuses: 1.29 has no script setter for UAInput.Local*.
+	protected bool DispatchInputTrigger(MCPCommand command, MCPResult result)
+	{
+		MCPArgs args;
+		MCPInputTrigger reply;
+		if (!m_JobRunner)
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			return true;
+		}
+		// Client only. The Dispatch gate already needs a local player.
+		if (GetGame().IsDedicatedServer())
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			return true;
+		}
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		args = command.args;
+		if (args.trigger_edge != "click" && args.trigger_edge != "hold" && args.trigger_edge != "press" && args.trigger_edge != "release")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (!InputTriggerTimesOk(args))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		reply = new MCPInputTrigger();
+		reply.kind = args.trigger_kind;
+		reply.phase = args.trigger_edge;
+		reply.tick_time_s = GetGame().GetTickTime();
+		if (args.trigger_kind == "key")
+		{
+			return DispatchInputTriggerKey(command, result, reply);
+		}
+		if (args.trigger_kind == "input")
+		{
+			return DispatchInputTriggerInput(command, result, reply);
+		}
+		result.ok = false;
+		result.error = "bad_args";
+		return true;
+	}
+
+	// hold_s with the hold edge and hold_ttl_s with the press edge, finite and
+	// in (0, max]. An absent key arrives as 0 and is refused here (fb-8779).
+	protected bool InputTriggerTimesOk(MCPArgs args)
+	{
+		if (args.trigger_edge == "hold")
+		{
+			if (!IsStrictFinite(args.hold_s))
+			{
+				return false;
+			}
+			if (args.hold_s <= 0.0)
+			{
+				return false;
+			}
+			if (args.hold_s > MCPInputTriggerControl.HOLD_MAX_S)
+			{
+				return false;
+			}
+		}
+		if (args.trigger_edge == "press")
+		{
+			if (!IsStrictFinite(args.hold_ttl_s))
+			{
+				return false;
+			}
+			if (args.hold_ttl_s <= 0.0)
+			{
+				return false;
+			}
+			if (args.hold_ttl_s > MCPInputTriggerControl.PRESS_MAX_TTL_S)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	// One key at a time. click and hold answer after their release (a job);
+	// press answers at once and stays held until release, its TTL, restore,
+	// a player change or death, or shutdown.
+	protected bool DispatchInputTriggerKey(MCPCommand command, MCPResult result, MCPInputTrigger reply)
+	{
+		MCPArgs args;
+		UIManager ui;
+		PlayerBase player;
+		MCPJob job;
+		string entry;
+		string edge;
+		int dik;
+		int generation;
+		float dueS;
+		args = command.args;
+		entry = args.trigger_entry;
+		edge = args.trigger_edge;
+		dik = args.dik;
+		if (entry != "game" && entry != "mission")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (dik < 0 || dik > MCPInputTriggerControl.DIK_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		reply.entry = entry;
+		reply.dik = dik;
+		ui = GetGame().GetUIManager();
+		if (ui && ui.GetMenu())
+		{
+			reply.menu_open = true;
+		}
+		result.input_trigger = reply;
+		// Entry game never presses F4, LMENU or RMENU, whatever this verb or the
+		// physical keyboard holds (see IsExitComboKey). Entry mission reaches the
+		// mission handlers without DayZGame's flags. A release goes on: none of
+		// these keys can be held on entry game. Checked before busy.
+		if (entry == "game" && edge != "release" && MCPInputTriggerControl.IsExitComboKey(dik))
+		{
+			result.ok = false;
+			result.error = "would_request_exit";
+			return true;
+		}
+		if (edge == "release")
+		{
+			return ReleaseInputTriggerKey(result, reply, entry, dik);
+		}
+		if (MCPInputTriggerControl.IsHeld() || m_JobRunner.CountOfKind("input_trigger") > 0)
+		{
+			result.ok = false;
+			result.error = "input_trigger_busy";
+			return true;
+		}
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!player)
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			return true;
+		}
+		dueS = -1.0;
+		if (edge == "hold")
+		{
+			dueS = reply.tick_time_s + args.hold_s;
+		}
+		if (edge == "press")
+		{
+			dueS = reply.tick_time_s + args.hold_ttl_s;
+		}
+		generation = MCPInputTriggerControl.Press(entry, dik, edge, dueS, player);
+		if (generation < 0)
+		{
+			result.ok = false;
+			result.error = "input_trigger_busy";
+			return true;
+		}
+		if (generation == 0)
+		{
+			result.ok = false;
+			result.error = "no_mission";
+			return true;
+		}
+		reply.delivered_press = true;
+		reply.press_tick = MCPInputTriggerControl.PressTick();
+		reply.release_due_s = dueS;
+		if (edge == "press")
+		{
+			result.ok = true;
+			return true;
+		}
+		job = new MCPJob();
+		job.id = command.id;
+		job.kind = "input_trigger";
+		job.generation = generation;
+		job.deadline_s = m_JobRunner.GetElapsedS() + INPUT_TRIGGER_JOB_SLACK_S;
+		if (edge == "hold")
+		{
+			job.deadline_s = job.deadline_s + args.hold_s;
+		}
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		job.input_trigger = reply;
+		m_JobRunner.AddJob(job);
+		return false;
+	}
+
+	// release ends a press this verb holds on the same entry and dik. A click
+	// or hold owns its release. Anything else is not_held, which carries the
+	// last release of that same key when there was one.
+	protected bool ReleaseInputTriggerKey(MCPResult result, MCPInputTrigger reply, string entry, int dik)
+	{
+		string heldEdge;
+		heldEdge = MCPInputTriggerControl.HeldEdge();
+		if (heldEdge == "press" && MCPInputTriggerControl.Holds(entry, dik))
+		{
+			MCPInputTriggerControl.ReleaseAll("phase");
+			FillInputTriggerRelease(reply);
+			result.ok = true;
+			return true;
+		}
+		if (heldEdge == "click" || heldEdge == "hold" || m_JobRunner.CountOfKind("input_trigger") > 0)
+		{
+			result.ok = false;
+			result.error = "input_trigger_busy";
+			return true;
+		}
+		if (MCPInputTriggerControl.LastReleaseWas(entry, dik))
+		{
+			FillInputTriggerRelease(reply);
+		}
+		result.ok = false;
+		result.error = "not_held";
+		return true;
+	}
+
+	protected void FillInputTriggerRelease(MCPInputTrigger reply)
+	{
+		reply.released_by = MCPInputTriggerControl.ReleasedBy();
+		reply.release_tick = MCPInputTriggerControl.ReleaseTick();
+		reply.delivered_release = MCPInputTriggerControl.ReleaseDelivered();
+	}
+
+	// kind input: resolve the UAInput, publish what was read, then refuse.
+	// UAInput.Local* are getters (uainput.c:48-55) and no script setter feeds
+	// them in 1.29; ForceEnable (uainput.c:83) is unmeasured and not called.
+	protected bool DispatchInputTriggerInput(MCPCommand command, MCPResult result, MCPInputTrigger reply)
+	{
+		MCPArgs args;
+		UAInputAPI api;
+		UAInput input;
+		TIntArray activeIds;
+		int resolvedId;
+		args = command.args;
+		if (!IsPrintableInputName(args.name))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		reply.name = args.name;
+		result.input_trigger = reply;
+		api = GetUApi();
+		if (!api)
+		{
+			result.ok = false;
+			result.error = "input_api_unavailable";
+			return true;
+		}
+		input = api.GetInputByName(args.name);
+		if (!input)
+		{
+			result.ok = false;
+			result.error = "input_unknown";
+			return true;
+		}
+		// Index first: below 0 is the shared 1.29 placeholder (ficha 4f50).
+		resolvedId = input.ID();
+		reply.input_id = resolvedId;
+		if (resolvedId < 0)
+		{
+			result.ok = false;
+			result.error = "input_unknown";
+			return true;
+		}
+		reply.exists = true;
+		reply.locked = input.IsLocked();
+		activeIds = new TIntArray();
+		api.GetActiveInputs(activeIds);
+		if (activeIds.Find(resolvedId) >= 0)
+		{
+			reply.in_active_inputs = true;
+		}
+		if (reply.locked)
+		{
+			result.ok = false;
+			result.error = "input_locked";
+			return true;
+		}
+		if (IsVanillaForcedInput(api, resolvedId))
+		{
+			result.ok = false;
+			result.error = "input_denied";
+			return true;
+		}
+		// The one place a route that drives UAInput.Local* goes once one is
+		// measured in game (the design's force_enable, after its Gate 0).
+		// This version has none: the answer is always input_not_drivable.
+		reply.reason = "no_local_setter";
+		result.ok = false;
+		result.error = "input_not_drivable";
+		return true;
+	}
+
+	// Inputs whose force vanilla manages: MissionGameplay forces UAWalkRunForced
+	// on and off with the inventory and the map (missiongameplay.c:949-957,
+	// :1008-1023) and PlayerBase suppresses UATempRaiseWeapon (playerbase.c:3019).
+	// No getter reads a forced state (uainput.c:23-93), so a forcing route must
+	// never touch them. Compared by input index, so the spelling cannot slip past.
+	protected bool IsVanillaForcedInput(UAInputAPI api, int inputId)
+	{
+		UAInput walkRun;
+		UAInput tempRaise;
+		walkRun = api.GetInputByName("UAWalkRunForced");
+		if (walkRun && walkRun.ID() == inputId)
+		{
+			return true;
+		}
+		tempRaise = api.GetInputByName("UATempRaiseWeapon");
+		if (tempRaise && tempRaise.ID() == inputId)
+		{
+			return true;
+		}
+		return false;
 	}
 
 	protected bool DispatchPlayerRespawn(MCPCommand command, MCPResult result)
@@ -3459,8 +4075,34 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			// Done once OnTick has finished the camera handoff (TickCameraHandoff).
 			return !m_CameraHandoffPending;
 		}
+		else if (job.kind == "input_trigger")
+		{
+			return ProcessInputTriggerJob(job);
+		}
 
 		return false;
+	}
+
+	// A click or hold answers once its key is released. MaintainFromTick runs
+	// before the job runner in OnTick, so the answer leaves on the release
+	// tick. A release by anything but the phase itself is aborted.
+	protected bool ProcessInputTriggerJob(MCPJob job)
+	{
+		if (!job.input_trigger)
+		{
+			job.error = "bad_args";
+			return true;
+		}
+		if (!MCPInputTriggerControl.WasReleased(job.generation))
+		{
+			return false;
+		}
+		FillInputTriggerRelease(job.input_trigger);
+		if (job.input_trigger.released_by != "phase")
+		{
+			job.error = "aborted";
+		}
+		return true;
 	}
 
 	// Posted one command tick after the override, so the numbers are what
@@ -4365,6 +5007,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			resultRestore.tick_dispatch = job.tick_dispatch;
 			PostResult(resultRestore);
 		}
+
+		if (job.kind == "input_trigger")
+		{
+			PostInputTriggerJob(job);
+		}
 	}
 
 	override void MCP_PostJobFailure(MCPJob job)
@@ -4372,6 +5019,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job && job.kind == "weapon_action")
 		{
 			PostWeaponActionJob(job, "");
+			return;
+		}
+
+		if (job && job.kind == "input_trigger")
+		{
+			PostInputTriggerJob(job);
 			return;
 		}
 
@@ -4422,6 +5075,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job.kind == "weapon_action")
 		{
 			PostWeaponActionJob(job, "weapon_read_timeout");
+			return;
+		}
+
+		if (job.kind == "input_trigger")
+		{
+			PostInputTriggerTimeout(job);
 			return;
 		}
 
@@ -5162,11 +5821,55 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		PostResult(result);
 	}
 
+	protected void PostInputTriggerJob(MCPJob job)
+	{
+		MCPResult result;
+		if (!job)
+		{
+			return;
+		}
+		result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		result.input_trigger = job.input_trigger;
+		if (job.error != "")
+		{
+			result.ok = false;
+			result.error = job.error;
+		}
+		else
+		{
+			result.ok = true;
+		}
+		PostResult(result);
+	}
+
+	// The click or hold outlived its scheduled release by
+	// INPUT_TRIGGER_JOB_SLACK_S: release the key now if this job still holds
+	// it, then answer aborted with what released it.
+	protected void PostInputTriggerTimeout(MCPJob job)
+	{
+		if (MCPInputTriggerControl.IsHeld() && MCPInputTriggerControl.Generation() == job.generation)
+		{
+			MCPInputTriggerControl.ReleaseAll("ttl");
+		}
+		if (job.input_trigger && MCPInputTriggerControl.WasReleased(job.generation))
+		{
+			FillInputTriggerRelease(job.input_trigger);
+		}
+		job.error = "aborted";
+		PostInputTriggerJob(job);
+	}
+
 	protected void RestoreGameplay()
 	{
 		// Drops every override this bridge armed. Same method for the
 		// restore_gameplay command, vehicle get-in cleanup and shutdown.
 		MCPWeaponControl.ReleaseAll("cleared");
+		// A held input_trigger key too. Shutdown releases first, as shutdown.
+		MCPInputTriggerControl.ReleaseAll("restore");
 		// Destructor cleanup can outlive CGame, whose destructor nulls g_Game.
 		// Latched: this method has eight call sites and must not log per call.
 		// Log reaches only Print, which needs no CGame, so the line survives the
@@ -5533,6 +6236,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPVehicleTrace.Abort("shutdown");
 		MCPAnimTimeline.Abort("shutdown");
 		MCPCarDrive.Clear();
+		// Before RestoreGameplay, so the held key's release names shutdown.
+		MCPInputTriggerControl.ReleaseAll("shutdown");
 		RestoreGameplay();
 		// m_Shutdown is already set, so this finishes any camera handoff and
 		// deactivates and deletes at once (f47b).

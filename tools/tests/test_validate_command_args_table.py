@@ -31,6 +31,25 @@ def _anim_args(*, drop: str = "", **overrides: object) -> dict[str, object]:
     return args
 
 
+def _trigger_args(
+    kind: str = "key", edge: str = "click", *, drop: str = "", **overrides: object
+) -> dict[str, object]:
+    """A valid input_trigger payload for kind and edge, `overrides` applied, `drop` removed."""
+    args: dict[str, object] = {"trigger_kind": kind, "trigger_edge": edge}
+    if kind == "key":
+        args.update(trigger_entry="game", dik=1)
+    else:
+        args["name"] = "UAGear"
+    if edge == "hold":
+        args["hold_s"] = 1.0
+    if edge == "press":
+        args["hold_ttl_s"] = 2.0
+    args.update(overrides)
+    if drop:
+        del args[drop]
+    return args
+
+
 # A valid world_spawn payload without the optional lifetime_s pair.
 _SPAWN: dict[str, object] = {
     "type": "CivilianSedan",
@@ -69,6 +88,61 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("del", {"name": "UA\x7f"}, (False, "bad_args")),
         ("non_ascii", {"name": "UA\u00f1"}, (False, "bad_args")),
         ("extra_key", {"name": "UAMoveForward", "extra": None}, (False, "bad_args")),
+    ),
+    "input_trigger": (
+        ("valid_key_click", _trigger_args("key", "click"), (True, None)),
+        ("valid_key_release", _trigger_args("key", "release"), (True, None)),
+        ("valid_key_hold", _trigger_args("key", "hold"), (True, None)),
+        ("valid_key_press", _trigger_args("key", "press"), (True, None)),
+        ("valid_input_click", _trigger_args("input", "click"), (True, None)),
+        ("valid_input_release", _trigger_args("input", "release"), (True, None)),
+        ("valid_input_hold", _trigger_args("input", "hold"), (True, None)),
+        ("valid_input_press", _trigger_args("input", "press"), (True, None)),
+        ("valid_mission_entry", _trigger_args(trigger_entry="mission"), (True, None)),
+        ("valid_dik_0", _trigger_args(dik=0), (True, None)),
+        ("valid_dik_255", _trigger_args(dik=255), (True, None)),
+        ("valid_hold_max", _trigger_args(edge="hold", hold_s=10.0), (True, None)),
+        ("valid_ttl_max", _trigger_args(edge="press", hold_ttl_s=30), (True, None)),
+        ("valid_name_128", _trigger_args("input", name="a" * 128), (True, None)),
+        ("missing_kind", _trigger_args(drop="trigger_kind"), (False, "bad_args")),
+        ("missing_edge", _trigger_args(drop="trigger_edge"), (False, "bad_args")),
+        ("missing_entry", _trigger_args(drop="trigger_entry"), (False, "bad_args")),
+        ("missing_dik", _trigger_args(drop="dik"), (False, "bad_args")),
+        ("release_missing_dik", _trigger_args(edge="release", drop="dik"), (False, "bad_args")),
+        ("missing_name", _trigger_args("input", drop="name"), (False, "bad_args")),
+        ("hold_missing_hold_s", _trigger_args(edge="hold", drop="hold_s"), (False, "bad_args")),
+        ("press_missing_ttl", _trigger_args(edge="press", drop="hold_ttl_s"), (False, "bad_args")),
+        ("unknown_kind", _trigger_args(trigger_kind="mouse"), (False, "bad_args")),
+        ("unknown_edge", _trigger_args(trigger_edge="tap"), (False, "bad_args")),
+        ("unhashable_edge", _trigger_args(trigger_edge=["click"]), (False, "bad_args")),
+        ("unknown_entry", _trigger_args(trigger_entry="world"), (False, "bad_args")),
+        ("dik_negative", _trigger_args(dik=-1), (False, "bad_args")),
+        ("dik_256", _trigger_args(dik=256), (False, "bad_args")),
+        ("dik_bool", _trigger_args(dik=True), (False, "bad_args")),
+        ("dik_float", _trigger_args(dik=1.0), (False, "bad_args")),
+        ("dik_string", _trigger_args(dik="1"), (False, "bad_args")),
+        ("name_empty", _trigger_args("input", name=""), (False, "bad_args")),
+        ("name_129", _trigger_args("input", name="a" * 129), (False, "bad_args")),
+        ("name_newline", _trigger_args("input", name="UA\n"), (False, "bad_args")),
+        ("name_non_ascii", _trigger_args("input", name="UA\u00f1"), (False, "bad_args")),
+        ("hold_zero", _trigger_args(edge="hold", hold_s=0.0), (False, "bad_args")),
+        ("hold_negative", _trigger_args(edge="hold", hold_s=-1.0), (False, "bad_args")),
+        ("hold_over_max", _trigger_args(edge="hold", hold_s=10.5), (False, "bad_args")),
+        ("hold_nan", _trigger_args(edge="hold", hold_s=float("nan")), (False, "bad_args")),
+        ("hold_inf", _trigger_args(edge="hold", hold_s=float("inf")), (False, "bad_args")),
+        ("hold_bool", _trigger_args(edge="hold", hold_s=True), (False, "bad_args")),
+        ("ttl_zero", _trigger_args(edge="press", hold_ttl_s=0), (False, "bad_args")),
+        ("ttl_over_max", _trigger_args(edge="press", hold_ttl_s=30.5), (False, "bad_args")),
+        ("ttl_nan", _trigger_args(edge="press", hold_ttl_s=float("nan")), (False, "bad_args")),
+        ("click_with_hold_s", _trigger_args(hold_s=1.0), (False, "bad_args")),
+        ("click_with_ttl", _trigger_args(hold_ttl_s=1.0), (False, "bad_args")),
+        ("release_with_ttl", _trigger_args(edge="release", hold_ttl_s=1.0), (False, "bad_args")),
+        ("hold_with_ttl", _trigger_args(edge="hold", hold_ttl_s=1.0), (False, "bad_args")),
+        ("press_with_hold_s", _trigger_args(edge="press", hold_s=1.0), (False, "bad_args")),
+        ("key_with_name", _trigger_args(name="UAGear"), (False, "bad_args")),
+        ("input_with_dik", _trigger_args("input", dik=1), (False, "bad_args")),
+        ("input_with_entry", _trigger_args("input", trigger_entry="game"), (False, "bad_args")),
+        ("extra_key", _trigger_args(extra=None), (False, "bad_args")),
     ),
     "vehicle_trace": (
         (
