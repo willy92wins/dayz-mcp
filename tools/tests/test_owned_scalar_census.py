@@ -21,6 +21,14 @@ call on a variable of a message class, a static call on a message class, or
 calling result.SetGear(2), with SetGear declared in MCPResult, went unseen while
 MCPMessages.c was not read.
 
+Inheritance is followed only inside MCPMessages.c. A class declared anywhere
+else that derives from a message class, directly or through other classes, or
+that redeclares or mods one, fails the census instead of being resolved (review
+R2 F1: an MCPReplyEx derived from MCPResult inside a bridge hid the SetGear it
+inherits). Following Enforce method lookup across files, with overrides and
+bases outside the census sources, is the kind of inference that misses a case;
+no script needs such a class today, and the failure names what to extend.
+
 This is attribution, not execution. Comments are blanked, preprocessor lines
 ignored and string contents masked, then every method of every class is found
 by brace depth. A write, a call or a `job.kind = "..."` is attributed through
@@ -113,6 +121,13 @@ _ROOT_BEFORE = re.compile(r"(?<![\w.)\]])(\w+)\s*$")
 _KIND_WRITE = re.compile(r"(?<![\w.])(\w+)\s*\.\s*kind\s*=(?!=)\s*")
 _KEYWORD_CALLS = frozenset({"if", "while", "for", "foreach", "switch", "return"})
 _SELF = frozenset({"this", "super"})
+# `class Name`, `modded class Name`, optional template parameters and base (with
+# its own template arguments), then `{`.
+_TEMPLATE_ARGS = r"(?:<[^<>{};]*(?:<[^<>{};]*>[^<>{};]*)*>\s*)?"
+_CLASS_DECLARATION = re.compile(
+    rf"(?<![\w.])(modded\s+)?class\s+(\w+)\s*{_TEMPLATE_ARGS}"
+    rf"(?:(?::|extends)\s*(\w+)\s*{_TEMPLATE_ARGS})?(?=\{{)"
+)
 
 
 @dataclass
@@ -472,6 +487,56 @@ def _result_types(bases: dict[str, str | None]) -> frozenset[str]:
     return frozenset(found)
 
 
+def _class_declarations(source: _Source) -> list[tuple[str, str | None, bool, int]]:
+    """(name, base, modded, position) of every class `source` declares or mods.
+
+    A regex over the masked text rather than _blocks: every script is scanned,
+    and one whose braces an #ifdef leaves unbalanced must still be read.
+    """
+    return [
+        (match.group(2), match.group(3), bool(match.group(1)), match.start())
+        for match in _CLASS_DECLARATION.finditer(source.masked)
+    ]
+
+
+def _message_class_descendants(sources: dict[str, str], messages: str) -> list[str]:
+    """Classes outside `messages` that derive from, redeclare or mod one of its classes.
+
+    `sources` maps a path to its text and must contain `messages`. A chain is
+    followed through every file given, so a base declared in another script
+    counts, and a class is reported whether it derives directly or indirectly.
+    """
+    prepared = {path: _prepare(path, text) for path, text in sources.items()}
+    declared = {path: _class_declarations(source) for path, source in prepared.items()}
+    message_classes = {name for name, _base, _modded, _pos in declared[messages]}
+    bases: dict[str, str | None] = {}
+    for classes in declared.values():
+        for name, base, modded, _pos in classes:
+            if not modded:
+                bases.setdefault(name, base)
+    problems: list[str] = []
+    for path, classes in declared.items():
+        if path == messages:
+            continue
+        for name, base, modded, pos in classes:
+            where = f"{path}:{prepared[path].line(pos)}"
+            if name in message_classes:
+                verb = "mods" if modded else "redeclares"
+                problems.append(f"{where}: {verb} {name}, a class of {MESSAGES}")
+                continue
+            seen: set[str] = set()
+            current = base
+            while current is not None and current not in seen:
+                if current in message_classes:
+                    problems.append(
+                        f"{where}: {name} derives from {current}, a class of {MESSAGES}"
+                    )
+                    break
+                seen.add(current)
+                current = bases.get(current)
+    return problems
+
+
 def _enclosing_call(before: str) -> str | None:
     """Name before the innermost unclosed `(` that ends `before`, if any."""
     depth = 0
@@ -714,12 +779,30 @@ def census(sources: dict[str, str]) -> dict[str, frozenset[str]]:
         raise AssertionError(
             f"the census reads {MESSAGES}, where MCPResult and its methods are declared"
         )
+    descendants = _message_class_descendants(sources, MESSAGES)
+    if descendants:
+        raise AssertionError(
+            f"the census follows inheritance only inside {MESSAGES}: "
+            + "; ".join(descendants)
+            + ". Extend the census to resolve calls through such a class to the "
+            f"message methods it inherits, or declare the class in {MESSAGES}"
+        )
     messages = _prepare(MESSAGES, sources[MESSAGES])
     parsed_messages = _parse(messages)
     parsed_bridges = [
         (source, _parse(source))
         for source in (_prepare(path, raw) for path, raw in sources.items() if path != MESSAGES)
     ]
+    for source, parsed in [(messages, parsed_messages), *parsed_bridges]:
+        # The inheritance check above used the lighter declaration scan: a class
+        # it missed would have passed unseen.
+        scanned = {name for name, _base, _modded, _pos in _class_declarations(source)}
+        missed = sorted(set(parsed.bases) - scanned)
+        if missed:
+            raise AssertionError(
+                f"{source.path}: {missed} escaped the class declaration scan; "
+                "extend _CLASS_DECLARATION"
+            )
     bases = dict(parsed_messages.bases)
     for _source, parsed in parsed_bridges:
         bases.update(parsed.bases)
@@ -958,6 +1041,18 @@ class OwnedScalarCensusTest(unittest.TestCase):
             and re.search(r"\bMCPResult\b", clean(path.read_text(encoding="utf-8")))
         ]
         self.assertEqual(others, [])
+
+    def test_no_script_outside_the_messages_file_derives_from_a_message_class(self) -> None:
+        # census() checks its own three files. This follows every chain through
+        # every script, so a base declared in a file the census does not read
+        # counts too.
+        files = {
+            path.relative_to(SCRIPTS).as_posix(): path.read_text(encoding="utf-8")
+            for path in sorted(SCRIPTS.rglob("*.c"))
+        }
+        messages = (MISSION / MESSAGES).relative_to(SCRIPTS).as_posix()
+        self.assertIn(messages, files)
+        self.assertEqual(_message_class_descendants(files, messages), [])
 
     def test_the_census_does_not_run_without_the_message_classes(self) -> None:
         sources = _census_sources()
@@ -1222,15 +1317,95 @@ class OwnedScalarCensusControlTest(unittest.TestCase):
         self.assertEqual(_owner_problems(census(mutated)), [])
 
     def test_a_result_class_declared_in_a_bridge_file_fails_closed(self) -> None:
-        # A class derived from MCPResult inside a bridge file: its public method
-        # can be called from anywhere, so its bare write reaches any command.
+        # A class derived from MCPResult inside a bridge file, writing a field
+        # itself. Since R2 F1 it fails before any attribution: the census follows
+        # inheritance only inside MCPMessages.c.
         mutated = dict(self.sources)
         mutated["MCPBridge.c"] = (
             self.sources["MCPBridge.c"]
             + "\nclass MCPReplyEx : MCPResult\n{\n\tvoid MarkGear()\n\t{\n\t\tgear = 3;\n\t}\n};\n"
         )
-        with self.assertRaisesRegex(AssertionError, "any command reaches"):
+        with self.assertRaisesRegex(AssertionError, "MCPReplyEx derives from MCPResult"):
             census(mutated)
+
+    # R2 F1: a class outside MCPMessages.c that inherits from a message class.
+
+    def test_a_writer_inherited_through_a_bridge_subclass_fails_closed(self) -> None:
+        # The review's case: SetGear declared in MCPResult, MCPReplyEx derived
+        # from it in MCPBridge.c, and a new verb that posts reply.SetGear(2). The
+        # owner comparison cannot pass on these sources.
+        mutated = _mutant(self.sources, MESSAGES, "\tint gear;\n", self.SET_GEAR)
+        mutated = self._peek_branch(
+            mutated,
+            "MCPReplyEx reply = new MCPReplyEx();\n\t\t\treply.SetGear(2);\n\t\t\tresult = reply;",
+        )
+        mutated["MCPBridge.c"] = "class MCPReplyEx : MCPResult\n{\n};\n\n" + mutated["MCPBridge.c"]
+        with self.assertRaisesRegex(AssertionError, "MCPReplyEx derives from MCPResult"):
+            _owner_problems(census(mutated))
+
+    def test_an_indirect_or_modded_message_class_in_a_bridge_fails_closed(self) -> None:
+        for label, declaration, expected in (
+            (
+                "indirect",
+                "class MCPReplyBase : MCPJob\n{\n};\n\nclass MCPReplyEx : MCPReplyBase\n{\n};\n\n",
+                "MCPReplyEx derives from MCPJob",
+            ),
+            (
+                "modded",
+                "modded class MCPJob\n{\n\tvoid ClearOwner()\n\t{\n\t\tis_owner = false;\n\t}\n};\n\n",
+                "mods MCPJob",
+            ),
+        ):
+            with self.subTest(case=label):
+                mutated = dict(self.sources)
+                mutated["MCPBridge.c"] = declaration + mutated["MCPBridge.c"]
+                with self.assertRaisesRegex(AssertionError, expected):
+                    census(mutated)
+
+    def test_template_parameters_and_arguments_do_not_hide_a_chain(self) -> None:
+        mutated = dict(self.sources)
+        mutated["MCPBridge.c"] = (
+            "class MCPReplyBase<Class T> : MCPJob\n{\n};\n\n"
+            "class MCPReplyEx : MCPReplyBase<int>\n{\n};\n\n" + mutated["MCPBridge.c"]
+        )
+        with self.assertRaisesRegex(AssertionError, "MCPReplyEx derives from MCPJob"):
+            census(mutated)
+
+    def test_a_class_the_declaration_scan_misses_fails_closed(self) -> None:
+        # A header shape the light scan does not know (a trailing token): the
+        # full parser still sees the class, and the census refuses to go on.
+        mutated = dict(self.sources)
+        mutated["MCPBridge.c"] = "class MCPOdd : MCPJob final\n{\n};\n\n" + mutated["MCPBridge.c"]
+        with self.assertRaisesRegex(AssertionError, r"\['MCPOdd'\] escaped the class declaration scan"):
+            census(mutated)
+
+    def test_a_chain_through_a_script_the_census_does_not_read_is_reported(self) -> None:
+        files = {
+            "MCPBridge.c": "class MCPReplyEx : MCPOtherBase\n{\n};\n",
+            MESSAGES: self.sources[MESSAGES],
+            "MCPOther.c": "class MCPOtherBase : MCPResult\n{\n};\n",
+        }
+        self.assertEqual(
+            _message_class_descendants(files, MESSAGES),
+            [
+                f"MCPBridge.c:1: MCPReplyEx derives from MCPResult, a class of {MESSAGES}",
+                f"MCPOther.c:1: MCPOtherBase derives from MCPResult, a class of {MESSAGES}",
+            ],
+        )
+
+    def test_a_bridge_class_outside_the_message_hierarchy_is_allowed(self) -> None:
+        # Precision: with a writer in MCPResult, a bridge class derived from an
+        # engine class inherits nothing from MCPMessages.c, and the owner sets
+        # do not move.
+        mutated = _mutant(self.sources, MESSAGES, "\tint gear;\n", self.SET_GEAR)
+        mutated = self._peek_branch(
+            mutated, "MCPPeekHelper helper = new MCPPeekHelper();\n\t\t\thelper.Touch();"
+        )
+        mutated["MCPBridge.c"] = (
+            "class MCPPeekHelper : Managed\n{\n\tvoid Touch()\n\t{\n\t}\n};\n\n"
+            + mutated["MCPBridge.c"]
+        )
+        self.assertEqual(_owner_problems(census(mutated)), [])
 
     def test_an_initialized_watched_field_is_reported(self) -> None:
         messages = _mutant(self.sources, MESSAGES, "\tint gear;\n", "\tint gear = -1;\n")[MESSAGES]
