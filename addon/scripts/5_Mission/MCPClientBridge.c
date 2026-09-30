@@ -156,6 +156,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const int CAMERA_PHASE_APPLY = 0;
 	protected const int CAMERA_PHASE_SETTLE = 1;
 	protected const int CAMERA_PHASE_REPORT = 2;
+	// f47b: OnTick calls a staticcamera release spends on FreeDebugCamera before
+	// it leaves that one too (BeginCameraHandoff / FinishCameraHandoff).
+	protected const int CAMERA_HANDOFF_TICKS = 10;
 	// Seated apply is observed via GetCurrentCameraTransform, not m_ActiveCam.
 	// Cabin vs requested pose farther than this is an unmoved-cabin fail.
 	protected const float CAMERA_SEATED_POSE_EPS_M = 0.05;
@@ -219,9 +222,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool m_PlayerSimulationDisabled;
 	protected bool m_ActiveCamOwned;
 	protected Camera m_ActiveCam;
-	//! Owned staticcamera a release deactivated but did not delete (f47b).
-	//! Not ref: an entity, owned by the world; the pointer only lets us delete it.
-	protected Camera m_RetiredCam;
+	//! f47b release handoff: the staticcamera it deactivated (deleted when the
+	//! handoff finishes; not ref, an entity the world owns) and its OnTick count.
+	protected Camera m_CameraHandoffCam;
+	protected bool m_CameraHandoffPending;
+	protected int m_CameraHandoffTicks;
 	protected ref array<ref RestCallback> m_CallbackRefs;
 	protected ref array<ref RestCallback> m_PollCallbackRefs;
 	protected ref MCPClientPollCallback m_PollCallback;
@@ -257,6 +262,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_ControlsSuppressed = false;
 		m_PlayerSimulationDisabled = false;
 		m_ActiveCamOwned = false;
+		m_CameraHandoffPending = false;
+		m_CameraHandoffTicks = 0;
 		m_CallbackRefs = new array<ref RestCallback>();
 		m_PollCallbackRefs = new array<ref RestCallback>();
 		m_Pending = new array<ref MCPCommand>();
@@ -315,6 +322,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// sample belongs to the frame the action or callback state changed.
 		// Returns before any engine call while no timeline is active.
 		MCPAnimTimeline.Tick(timeslice);
+		// Ahead of the job runner, so a restore_gameplay job posts in the very
+		// tick the camera handoff finishes (f47b). Returns at once when none runs.
+		TickCameraHandoff();
 
 		if (m_JobRunner)
 		{
@@ -805,6 +815,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			RestoreGameplay();
 			ReleaseCamera();
 			result.ok = true;
+			// While a staticcamera release is still handing off to the free camera,
+			// a job posts this reply once it has finished (f47b).
+			postNow = !QueueRestoreGameplayJob(command, result);
 		}
 		else if (command.cmd == "key_press")
 		{
@@ -1157,6 +1170,31 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		result.ok = true;
 		result.camera = BuildCameraResult(mode);
+		return true;
+	}
+
+	// f47b: the restore_gameplay tool re-reads camera_get as soon as this reply
+	// lands and needs view=player, so while a staticcamera release is still
+	// handing off to the free camera the reply is a job, posted by
+	// MCP_PostJobSuccess once the handoff has finished. It counts as exclusive
+	// (HasExclusiveJob), so camera_set answers busy meanwhile. True when queued.
+	protected bool QueueRestoreGameplayJob(MCPCommand command, MCPResult result)
+	{
+		if (!m_CameraHandoffPending)
+		{
+			return false;
+		}
+
+		MCPJob job = new MCPJob();
+		job.id = command.id;
+		job.kind = "restore_gameplay";
+		job.deadline_s = m_JobRunner.GetElapsedS() + CAMERA_JOB_TIMEOUT_S;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		m_JobRunner.AddJob(job);
+
+		Log("client job queued id=" + job.id + " kind=restore_gameplay deadline_s=" + job.deadline_s);
 		return true;
 	}
 
@@ -3415,6 +3453,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			return ProcessWeaponActionJob(job);
 		}
+		else if (job.kind == "restore_gameplay")
+		{
+			// Done once OnTick has finished the camera handoff (TickCameraHandoff).
+			return !m_CameraHandoffPending;
+		}
 
 		return false;
 	}
@@ -4097,6 +4140,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 
+		// A release still handing off would share the free camera and the player
+		// simulation with this apply: finish it first (f47b). No-op otherwise.
+		FinishCameraHandoff();
 		SuppressGameplay();
 
 		if (validation.mode_id == CAMERA_MODE_FREE)
@@ -4147,8 +4193,6 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		cam.SetActive(true);
 		m_ActiveCam = cam;
 		m_ActiveCamOwned = true;
-		// A camera an earlier release retired goes only now, with this one live.
-		DeleteRetiredCamera();
 		return true;
 	}
 
@@ -4193,8 +4237,6 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		freeCam.SetActive(true);
 		m_ActiveCam = freeCam;
 		m_ActiveCamOwned = false;
-		// Same as the static path: a retired camera goes once this one is live.
-		DeleteRetiredCamera();
 		return true;
 	}
 
@@ -4277,6 +4319,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job.kind == "weapon_action")
 		{
 			PostWeaponActionJob(job, "");
+		}
+
+		// Exactly the reply the restore_gameplay dispatch posts when no handoff runs.
+		if (job.kind == "restore_gameplay")
+		{
+			MCPResult resultRestore = new MCPResult();
+			resultRestore.id = job.id;
+			resultRestore.ok = true;
+			resultRestore.tick_poll_sent = job.tick_poll_sent;
+			resultRestore.tick_poll_callback = job.tick_poll_callback;
+			resultRestore.tick_dispatch = job.tick_dispatch;
+			PostResult(resultRestore);
 		}
 	}
 
@@ -5074,10 +5128,32 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// it is what stops the two paths drifting apart again.
 	// Ownership is the subtlety: FreeDebugCamera is a singleton the bridge does not
 	// own and is only deactivated, while the staticcamera built for
-	// orient/lookat/matrix is owned and must also be deleted -- but not in the
-	// frame that deactivates it (f47b, RetireOwnedCamera).
+	// orient/lookat/matrix is owned and must also be deleted.
+	// f47b: an active staticcamera is not dropped straight back to the player
+	// view, which froze the render; BeginCameraHandoff passes the view through the
+	// free camera first and OnTick finishes the release. Shutdown has no later
+	// tick, so it still tears down at once.
 	protected void ReleaseCamera()
 	{
+		if (!m_Shutdown)
+		{
+			// A release already handing off owns the free camera until it finishes.
+			if (m_CameraHandoffPending)
+			{
+				return;
+			}
+
+			if (m_ActiveCam && m_ActiveCamOwned && m_ActiveCam.IsActive())
+			{
+				if (BeginCameraHandoff())
+				{
+					return;
+				}
+			}
+		}
+
+		FinishCameraHandoff();
+
 		if (m_ActiveCam)
 		{
 			m_ActiveCam.SetActive(false);
@@ -5091,7 +5167,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			freeCam.SetActive(false);
 		}
 
-		RetireOwnedCamera();
+		DeleteOwnedCamera();
 	}
 
 	// Windowed diag clients capture the OS mouse on join (f298). Resetting
@@ -5122,34 +5198,98 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_ActiveCamOwned = false;
 	}
 
-	// f47b: deleting the owned staticcamera in the frame that deactivated it left
-	// the client render frozen on that camera's last frame while camera_get read
-	// view:"player"; the FreeDebugCamera path only deactivates and came back live.
-	// So a release keeps the deactivated camera in m_RetiredCam, and
-	// DeleteRetiredCamera runs once another camera is live (the next camera_set)
-	// or at shutdown. Not the call queue: the SYSTEM queue ticks right after
-	// mission.OnUpdate in the same DayZGame.OnUpdate (dayzgame.c:2968, 2982), so a
-	// Call queued from the bridge tick still runs in the release frame, and a
-	// CallLater delay would only guess how many frames the engine needs.
-	protected void RetireOwnedCamera()
+	// f47b: an active staticcamera dropped straight back to the player view left
+	// the client render frozen on its last frame while camera_get read player,
+	// and keeping the camera undeleted did not help (run 24cf553a); releasing
+	// after camera_set free renders live. Vanilla CameraToolsMenu leaves its
+	// staticcameras by activating FreeDebugCamera (cameratoolsmenu.c:506-508) and
+	// the free camera is left later with SetActive(false)
+	// (developerfreecamera.c:52-74). So: static off, free on at the same pose,
+	// player simulation off as ApplyFreeCamera does; FinishCameraHandoff undoes it
+	// CAMERA_HANDOFF_TICKS OnTick calls later. False when there is no free camera.
+	protected bool BeginCameraHandoff()
 	{
-		if (m_ActiveCam && m_ActiveCamOwned)
+		FreeDebugCamera freeCam = FreeDebugCamera.GetInstance();
+		if (!freeCam)
 		{
-			// Never overwrite a retired reference: that would strand its camera.
-			DeleteRetiredCamera();
-			m_RetiredCam = m_ActiveCam;
+			return false;
+		}
+
+		vector handoffPos = m_ActiveCam.GetPosition();
+		vector handoffOri = m_ActiveCam.GetOrientation();
+		m_ActiveCam.SetActive(false);
+		freeCam.SetPosition(handoffPos);
+		freeCam.SetOrientation(handoffOri);
+		freeCam.SetActive(true);
+
+		PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (player)
+		{
+			player.DisableSimulation(true);
+			m_PlayerSimulationDisabled = true;
+		}
+
+		m_CameraHandoffCam = m_ActiveCam;
+		m_CameraHandoffTicks = 0;
+		m_CameraHandoffPending = true;
+		// The free camera is what the client shows until the handoff finishes.
+		m_ActiveCam = freeCam;
+		m_ActiveCamOwned = false;
+		return true;
+	}
+
+	protected void TickCameraHandoff()
+	{
+		if (!m_CameraHandoffPending)
+		{
+			return;
+		}
+
+		m_CameraHandoffTicks = m_CameraHandoffTicks + 1;
+		if (m_CameraHandoffTicks >= CAMERA_HANDOFF_TICKS)
+		{
+			FinishCameraHandoff();
+		}
+	}
+
+	// The release measured live after camera_set free: the free camera goes, the
+	// player simulation comes back, then the deactivated staticcamera is deleted.
+	// Runs from OnTick, from a camera_set apply that comes first, and at shutdown.
+	protected void FinishCameraHandoff()
+	{
+		if (!m_CameraHandoffPending)
+		{
+			return;
+		}
+
+		m_CameraHandoffPending = false;
+		m_CameraHandoffTicks = 0;
+
+		FreeDebugCamera freeCam = FreeDebugCamera.GetInstance();
+		if (freeCam)
+		{
+			freeCam.SetActive(false);
 		}
 		m_ActiveCam = null;
 		m_ActiveCamOwned = false;
-	}
 
-	protected void DeleteRetiredCamera()
-	{
-		if (m_RetiredCam)
+		// Shutdown can run after CGame is gone (see RestoreGameplay).
+		PlayerBase player;
+		if (GetGame())
 		{
-			g_Game.ObjectDelete(m_RetiredCam);
+			player = PlayerBase.Cast(GetGame().GetPlayer());
 		}
-		m_RetiredCam = null;
+		if (player && m_PlayerSimulationDisabled)
+		{
+			player.DisableSimulation(false);
+			m_PlayerSimulationDisabled = false;
+		}
+
+		if (m_CameraHandoffCam)
+		{
+			g_Game.ObjectDelete(m_CameraHandoffCam);
+		}
+		m_CameraHandoffCam = null;
 	}
 
 	protected void PostCommandError(MCPCommand command, string error)
@@ -5306,9 +5446,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPAnimTimeline.Abort("shutdown");
 		MCPCarDrive.Clear();
 		RestoreGameplay();
+		// m_Shutdown is already set, so this finishes any camera handoff and
+		// deactivates and deletes at once (f47b).
 		ReleaseCamera();
-		// The mission is ending: there is no later frame to keep a retired camera for.
-		DeleteRetiredCamera();
 
 		// A completed cached callback is absent from m_PollCallbackRefs.
 		if (m_PollCallback)

@@ -2,14 +2,16 @@
 
 Measured on DayZDiag 1.29 (runs ad4aaa5f and 151b98d0, 2026-09-30): after camera_set
 lookat plus restore_gameplay, camera_get read view "player" while the render stayed on
-the last scripted frame. The owned staticcamera was deactivated and deleted in the same
-frame; the FreeDebugCamera path, which is only deactivated, came back live.
+the last scripted frame; releasing after camera_set free rendered live. Keeping the
+staticcamera undeleted did not help (run 24cf553a). The release now copies vanilla
+CameraToolsMenu: hand the view to FreeDebugCamera, leave that one a few ticks later.
 
 No game, no daemon. Two halves:
-  - Enforce SOURCE gates (not compiled or run): a release deactivates the owned
-    staticcamera and retires it; the retired camera is deleted only after the next
-    camera_set has activated its own camera, or at shutdown, and no path overwrites
-    the retired reference.
+  - Enforce SOURCE gates (not compiled or run): outside shutdown, a release that finds
+    an owned staticcamera active turns it off, turns the free camera on at its pose and
+    turns the player simulation off; OnTick undoes that CAMERA_HANDOFF_TICKS later
+    (free off, simulation on, staticcamera deleted); restore_gameplay replies only
+    after that; a camera_set and a shutdown finish a running handoff first.
   - The Python rule: render_frozen_signal fires when max_adjacent_delta is under
     RENDER_FROZEN_DELTA_EPS, even when the sha-distinct count is above 1.
 """
@@ -27,13 +29,22 @@ from tests._addon_paths import addon_root
 
 BRIDGE = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
 RELEASE = "protected void ReleaseCamera()"
-RETIRE = "protected void RetireOwnedCamera()"
-DELETE_RETIRED = "protected void DeleteRetiredCamera()"
+BEGIN = "protected bool BeginCameraHandoff()"
+TICK = "protected void TickCameraHandoff()"
+FINISH = "protected void FinishCameraHandoff()"
+QUEUE = "protected bool QueueRestoreGameplayJob(MCPCommand command, MCPResult result)"
 APPLY_STATIC = "protected bool ApplyCameraSet(MCPJob job)"
 APPLY_FREE = "protected bool ApplyFreeCamera(MCPJob job, MCPCameraValidation validation)"
+ON_TICK = "void OnTick(float timeslice)"
+CONSTRUCTOR = "void MCPClientBridge()"
 SHUTDOWN = "void Shutdown()"
 DISPATCH = "protected void Dispatch(MCPCommand command)"
+DISPATCH_SET = "protected bool DispatchCameraSet(MCPCommand command, MCPResult result)"
+EXCLUSIVE = "protected bool HasExclusiveJob()"
+PROCESS_JOB = "override bool MCP_ProcessJob(MCPJob job)"
+POST_SUCCESS = "override void MCP_PostJobSuccess(MCPJob job)"
 RESTORE_BRANCH = 'else if (command.cmd == "restore_gameplay")'
+OWNED_ACTIVE = "if (m_ActiveCam && m_ActiveCamOwned && m_ActiveCam.IsActive())"
 
 _TOKENS = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.S)
 
@@ -63,87 +74,193 @@ def _body(source: str, signature: str) -> str:
     raise AssertionError(f"unterminated source contract: {signature}")
 
 
-class CameraReleaseEnforceSourceTest(unittest.TestCase):
-    def test_release_deactivates_and_retires_without_deleting_in_that_frame(self) -> None:
-        source = _source()
-        release = _body(source, RELEASE)
-        self.assertIn("m_ActiveCam.SetActive(false);", release)
-        self.assertIn("freeCam.SetActive(false);", release)
-        self.assertIn("RetireOwnedCamera();", release)
-        self.assertLess(release.index("m_ActiveCam.SetActive(false);"), release.index("RetireOwnedCamera();"))
-        self.assertLess(release.index("freeCam.SetActive(false);"), release.index("RetireOwnedCamera();"))
-        # The frame that deactivates the camera deletes nothing: not here, and not in
-        # the restore_gameplay branch that calls it.
-        dispatch = _body(source, DISPATCH)
-        branch = _body(dispatch, RESTORE_BRANCH)
-        self.assertIn("RestoreGameplay();", branch)
-        self.assertIn("ReleaseCamera();", branch)
-        for forbidden in ("ObjectDelete", "DeleteOwnedCamera", "DeleteRetiredCamera"):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, release)
-                self.assertNotIn(forbidden, branch)
+class CameraReleaseHandoffSourceTest(unittest.TestCase):
+    def _assert_in_order(self, body: str, statements: list[str]) -> None:
+        previous = -1
+        for statement in statements:
+            index = body.find(statement)
+            self.assertGreater(index, previous, f"{statement!r} missing or out of order")
+            previous = index
 
-    def test_retire_keeps_the_deactivated_camera_referenced(self) -> None:
-        body = _body(_source(), RETIRE)
-        owned = "if (m_ActiveCam && m_ActiveCamOwned)"
-        guard = _body(body, owned)
-        # A retired reference is never overwritten: an earlier one is deleted first.
-        # That is never the camera this release just deactivated.
-        self.assertLess(guard.index("DeleteRetiredCamera();"), guard.index("m_RetiredCam = m_ActiveCam;"))
+    def test_release_outside_shutdown_hands_an_active_static_camera_off(self) -> None:
+        release = _body(_source(), RELEASE)
+        guard = _body(release, "if (!m_Shutdown)")
+        # A second release during a handoff leaves it running (its reply waits too).
+        self.assertEqual(_body(guard, "if (m_CameraHandoffPending)").strip(), "return;")
+        owned = _body(guard, OWNED_ACTIVE)
+        self.assertEqual(_body(owned, "if (BeginCameraHandoff())").strip(), "return;")
+        self.assertLess(guard.index("if (m_CameraHandoffPending)"), guard.index(OWNED_ACTIVE))
+        self.assertEqual(release.count("BeginCameraHandoff()"), 1)
+
+    def test_handoff_begins_static_off_then_free_on_then_simulation_off(self) -> None:
+        body = _body(_source(), BEGIN)
+        # No free camera, no handoff: ReleaseCamera falls through to the immediate release.
+        self.assertEqual(_body(body, "if (!freeCam)").strip(), "return false;")
+        self._assert_in_order(body, [
+            "FreeDebugCamera freeCam = FreeDebugCamera.GetInstance();",
+            "vector handoffPos = m_ActiveCam.GetPosition();",
+            "vector handoffOri = m_ActiveCam.GetOrientation();",
+            "m_ActiveCam.SetActive(false);",
+            "freeCam.SetPosition(handoffPos);",
+            "freeCam.SetOrientation(handoffOri);",
+            "freeCam.SetActive(true);",
+            "player.DisableSimulation(true);",
+            "m_PlayerSimulationDisabled = true;",
+            "m_CameraHandoffCam = m_ActiveCam;",
+            "m_CameraHandoffTicks = 0;",
+            "m_CameraHandoffPending = true;",
+            "m_ActiveCam = freeCam;",
+            "m_ActiveCamOwned = false;",
+            "return true;",
+        ])
         self.assertNotIn("ObjectDelete", body)
-        self.assertNotIn("DeleteOwnedCamera", body)
-        # The bookkeeping is dropped for every camera, owned or the free singleton.
-        after = body[body.index(guard) + len(guard):]
-        self.assertIn("m_ActiveCam = null;", after)
-        self.assertIn("m_ActiveCamOwned = false;", after)
-        self.assertNotIn("m_ActiveCam = null;", guard)
 
-    def test_retired_camera_is_a_plain_entity_pointer(self) -> None:
+    def test_handoff_finishes_free_off_then_simulation_on_then_delete(self) -> None:
+        body = _body(_source(), FINISH)
+        self.assertEqual(_body(body, "if (!m_CameraHandoffPending)").strip(), "return;")
+        self._assert_in_order(body, [
+            "m_CameraHandoffPending = false;",
+            "freeCam.SetActive(false);",
+            "m_ActiveCam = null;",
+            "player.DisableSimulation(false);",
+            "m_PlayerSimulationDisabled = false;",
+            "g_Game.ObjectDelete(m_CameraHandoffCam);",
+            "m_CameraHandoffCam = null;",
+        ])
+        # Simulation comes back only while this bridge still holds it off.
+        self.assertIn("if (player && m_PlayerSimulationDisabled)", body)
+        self.assertEqual(_body(body, "if (m_CameraHandoffCam)").strip(), "g_Game.ObjectDelete(m_CameraHandoffCam);")
+
+    def test_on_tick_finishes_the_handoff_after_the_named_tick_count(self) -> None:
         source = _source()
-        self.assertIn("protected Camera m_RetiredCam;", source)
-        self.assertNotRegex(source, r"\bref\s+Camera\s+m_RetiredCam\b")
+        ticks = re.search(r"protected const int CAMERA_HANDOFF_TICKS = (\d+);", source)
+        self.assertIsNotNone(ticks)
+        self.assertEqual(int(ticks.group(1)), 10)
+        tick = _body(source, TICK)
+        self.assertEqual(_body(tick, "if (!m_CameraHandoffPending)").strip(), "return;")
+        self._assert_in_order(tick, [
+            "m_CameraHandoffTicks = m_CameraHandoffTicks + 1;",
+            "if (m_CameraHandoffTicks >= CAMERA_HANDOFF_TICKS)",
+        ])
+        self.assertEqual(
+            _body(tick, "if (m_CameraHandoffTicks >= CAMERA_HANDOFF_TICKS)").strip(), "FinishCameraHandoff();"
+        )
+        on_tick = _body(source, ON_TICK)
+        self.assertEqual(on_tick.count("TickCameraHandoff();"), 1)
+        # Ahead of the job runner (the restore job posts in the same tick) and of the
+        # unconfigured early return.
+        self.assertLess(on_tick.index("TickCameraHandoff();"), on_tick.index("m_JobRunner.Tick(timeslice, this);"))
+        self.assertLess(on_tick.index("TickCameraHandoff();"), on_tick.index("if (!m_Configured)"))
 
-    def test_delete_retired_camera_deletes_then_clears(self) -> None:
-        body = _body(_source(), DELETE_RETIRED)
-        self.assertEqual(_body(body, "if (m_RetiredCam)").strip(), "g_Game.ObjectDelete(m_RetiredCam);")
-        self.assertRegex(body, r"\}\s*m_RetiredCam = null;\s*$")
-
-    def test_the_retired_reference_has_exactly_two_writers(self) -> None:
+    def test_restore_gameplay_replies_only_after_the_handoff_finished(self) -> None:
         source = _source()
-        self.assertEqual(len(re.findall(r"\bm_RetiredCam\s*=(?!=)", source)), 2)
-        self.assertIn("m_RetiredCam = m_ActiveCam;", _body(source, RETIRE))
-        self.assertIn("m_RetiredCam = null;", _body(source, DELETE_RETIRED))
+        branch = _body(_body(source, DISPATCH), RESTORE_BRANCH)
+        self._assert_in_order(branch, [
+            "RestoreGameplay();",
+            "ReleaseCamera();",
+            "result.ok = true;",
+            "postNow = !QueueRestoreGameplayJob(command, result);",
+        ])
+        queue = _body(source, QUEUE)
+        self.assertEqual(_body(queue, "if (!m_CameraHandoffPending)").strip(), "return false;")
+        for statement in (
+            "job.id = command.id;",
+            'job.kind = "restore_gameplay";',
+            "job.deadline_s = m_JobRunner.GetElapsedS() + CAMERA_JOB_TIMEOUT_S;",
+            "job.tick_poll_sent = result.tick_poll_sent;",
+            "job.tick_poll_callback = result.tick_poll_callback;",
+            "job.tick_dispatch = result.tick_dispatch;",
+        ):
+            with self.subTest(statement=statement):
+                self.assertIn(statement, queue)
+        self.assertRegex(queue, r"m_JobRunner\.AddJob\(job\);[\s\S]*return true;\s*$")
+        process = _body(source, PROCESS_JOB)
+        self.assertEqual(
+            _body(process, 'else if (job.kind == "restore_gameplay")').strip(), "return !m_CameraHandoffPending;"
+        )
+        # The reply the dispatch posts when no handoff runs: same fields, nothing else.
+        post = _body(_body(source, POST_SUCCESS), 'if (job.kind == "restore_gameplay")')
+        self.assertEqual([line.strip() for line in post.splitlines() if line.strip()], [
+            "MCPResult resultRestore = new MCPResult();",
+            "resultRestore.id = job.id;",
+            "resultRestore.ok = true;",
+            "resultRestore.tick_poll_sent = job.tick_poll_sent;",
+            "resultRestore.tick_poll_callback = job.tick_poll_callback;",
+            "resultRestore.tick_dispatch = job.tick_dispatch;",
+            "PostResult(resultRestore);",
+        ])
 
-    def test_static_path_deletes_the_retired_camera_once_its_own_is_live(self) -> None:
-        body = _body(_source(), APPLY_STATIC)
-        delete = body.index("DeleteRetiredCamera();")
-        self.assertLess(body.index("cam.SetActive(true);"), delete)
-        self.assertLess(body.index("m_ActiveCam = cam;"), delete)
-        # Only on success: a failed apply keeps the retired camera referenced.
-        self.assertRegex(body, r"DeleteRetiredCamera\(\);\s*return true;\s*$")
-
-    def test_free_path_deletes_the_retired_camera_once_its_own_is_live(self) -> None:
-        body = _body(_source(), APPLY_FREE)
-        delete = body.index("DeleteRetiredCamera();")
-        self.assertLess(body.index("freeCam.SetActive(true);"), delete)
-        self.assertLess(body.index("m_ActiveCam = freeCam;"), delete)
-        self.assertRegex(body, r"DeleteRetiredCamera\(\);\s*return true;\s*$")
-
-    def test_shutdown_deletes_the_retired_camera_after_the_shared_release(self) -> None:
-        body = _body(_source(), SHUTDOWN)
-        self.assertLess(body.index("ReleaseCamera();"), body.index("DeleteRetiredCamera();"))
-
-    def test_camera_deletes_happen_only_on_these_paths(self) -> None:
-        # DeleteOwnedCamera stays on the two replace paths, before the new camera is
-        # activated in the same apply, as before f47b; the release no longer calls it.
+    def test_camera_set_during_a_handoff_is_refused_or_finishes_it_first(self) -> None:
         source = _source()
-        owned_sites = {APPLY_STATIC: 1, APPLY_FREE: 1}
-        retired_sites = {RETIRE: 1, APPLY_STATIC: 1, APPLY_FREE: 1, SHUTDOWN: 1}
-        for sites, call in ((owned_sites, "DeleteOwnedCamera();"), (retired_sites, "DeleteRetiredCamera();")):
-            for signature, count in sites.items():
-                with self.subTest(call=call, site=signature):
-                    self.assertEqual(_body(source, signature).count(call), count)
-            self.assertEqual(source.count(call), sum(sites.values()), call)
+        # While the restore job waits, camera_set answers busy: every job except
+        # ui_dialog and weapon_action counts as exclusive.
+        exclusive = _body(source, EXCLUSIVE)
+        self.assertIn('m_JobRunner.CountExcluding("ui_dialog")', exclusive)
+        self.assertNotIn("restore_gameplay", exclusive)
+        self.assertIn("if (HasExclusiveJob())", _body(source, DISPATCH_SET))
+        # A camera_set that reaches apply anyway (the job timed out, or it was queued
+        # first) finishes the handoff before it touches a camera or the simulation.
+        apply = _body(source, APPLY_STATIC)
+        finish = apply.index("FinishCameraHandoff();")
+        self.assertLess(apply.index("ValidateCameraArgs(job.args)"), finish)
+        for later in (
+            "SuppressGameplay();",
+            "return ApplyFreeCamera(job, validation);",
+            "DeleteOwnedCamera();",
+            "g_Game.CreateObject(cameraType, validation.pos, true)",
+        ):
+            with self.subTest(later=later):
+                self.assertLess(finish, apply.index(later))
+
+    def test_shutdown_finishes_a_handoff_and_tears_down_at_once(self) -> None:
+        source = _source()
+        shutdown = _body(source, SHUTDOWN)
+        self._assert_in_order(shutdown, ["m_Shutdown = true;", "RestoreGameplay();", "ReleaseCamera();"])
+        release = _body(source, RELEASE)
+        guard = _body(release, "if (!m_Shutdown)")
+        immediate = release[release.index(guard) + len(guard):]
+        self._assert_in_order(immediate, [
+            "FinishCameraHandoff();",
+            "m_ActiveCam.SetActive(false);",
+            "freeCam.SetActive(false);",
+            "DeleteOwnedCamera();",
+        ])
+        self.assertNotIn("BeginCameraHandoff", immediate)
+        self.assertNotIn("BeginCameraHandoff", shutdown)
+
+    def test_handoff_state_cannot_strand_a_camera(self) -> None:
+        source = _source()
+        self.assertIn("protected Camera m_CameraHandoffCam;", source)
+        self.assertNotRegex(source, r"\bref\s+Camera\s+m_CameraHandoffCam\b")
+        self.assertEqual(len(re.findall(r"\bm_CameraHandoffCam\s*=(?!=)", source)), 2)
+        self.assertIn("m_CameraHandoffCam = m_ActiveCam;", _body(source, BEGIN))
+        self.assertIn("m_CameraHandoffCam = null;", _body(source, FINISH))
+        # Raised in one place, lowered only where the camera is deleted (and at birth).
+        self.assertEqual(len(re.findall(r"\bm_CameraHandoffPending\s*=\s*true;", source)), 1)
+        self.assertIn("m_CameraHandoffPending = true;", _body(source, BEGIN))
+        self.assertEqual(len(re.findall(r"\bm_CameraHandoffPending\s*=\s*false;", source)), 2)
+        self.assertIn("m_CameraHandoffPending = false;", _body(source, CONSTRUCTOR))
+        self.assertIn("m_CameraHandoffPending = false;", _body(source, FINISH))
+        # Every way a handoff ends goes through FinishCameraHandoff.
+        sites = {TICK: 1, RELEASE: 1, APPLY_STATIC: 1}
+        for signature, count in sites.items():
+            with self.subTest(site=signature):
+                self.assertEqual(_body(source, signature).count("FinishCameraHandoff();"), count)
+        self.assertEqual(source.count("FinishCameraHandoff();"), sum(sites.values()))
+
+    def test_round_one_retire_logic_is_gone(self) -> None:
+        # The handoff deletes the staticcamera itself, so the retire-until-next-
+        # camera_set state of round 1 (54c2508) went, and DeleteOwnedCamera is back on
+        # its three call sites.
+        source = _source()
+        for name in ("m_RetiredCam", "RetireOwnedCamera", "DeleteRetiredCamera"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, source)
+        sites = {APPLY_STATIC: 1, APPLY_FREE: 1, RELEASE: 1}
+        for signature, count in sites.items():
+            with self.subTest(site=signature):
+                self.assertEqual(_body(source, signature).count("DeleteOwnedCamera();"), count)
+        self.assertEqual(source.count("DeleteOwnedCamera();"), sum(sites.values()))
 
 
 # (frames, distinct_frames, max_adjacent_delta) of capture_screenshot on DayZDiag 1.29.

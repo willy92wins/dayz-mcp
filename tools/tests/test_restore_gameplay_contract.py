@@ -139,9 +139,10 @@ class RestoreGameplayEnforceSourceContractTest(unittest.TestCase):
 
         release = _method_body(source, "protected void ReleaseCamera()")
         self.assertIn("m_ActiveCam.SetActive(false);", release)
-        # f47b: the owned camera is retired, not deleted, in the frame that
-        # deactivates it (tests/test_fb_f47b_release_render.py).
-        self.assertIn("RetireOwnedCamera();", release)
+        self.assertIn("DeleteOwnedCamera();", release)
+        # f47b: outside shutdown an active staticcamera goes through the free
+        # camera first (tests/test_fb_f47b_release_render.py).
+        self.assertIn("BeginCameraHandoff()", release)
 
         # One copy only. An inline teardown in Shutdown is exactly how the command
         # path came to be missing it, so a second copy must not reappear there.
