@@ -53,10 +53,62 @@ MAX_RELEASE_AUDIT_WORKERS = 1
 RELEASE_AUDIT_TIMEOUT_S = 0.05
 MAX_OPERATION_TOMBSTONES = 128
 OPERATION_TOMBSTONE_TTL_S = 120.0
+# Every audit_failed result names the coordinator step that failed in
+# audit_stage (00c4). The set is closed: only these strings are put on a
+# payload, and clients echo nothing else (public_audit_stage).
+AUDIT_STAGES = frozenset(
+    {
+        # This request's own event did not reach the audit ledger.
+        "write",
+        # The audit gate could not be taken.
+        "gate",
+        # The coordination fault marker (WAL) could not be armed, advanced after
+        # publication or cleared, or the coordination snapshot not persisted.
+        "wal_arm",
+        "wal_transition",
+        "wal_clear",
+        "snapshot",
+        # A provisional grant could not be revoked cleanly.
+        "compensation",
+        # A concurrent queue request of the same client left no ticket in time.
+        "reservation",
+        # An expiry pass this same call ran failed its audit (in practice a
+        # ticket past its TTL; a failed lease-expiry audit latches, below).
+        "expiry",
+        # An earlier failure still fences the queue: a latched coordination audit
+        # fault, grant audit, or release handoff audit.
+        "fault_latched",
+        "grant_latched",
+        "handoff_latched",
+    }
+)
+# _finish_wal_after_publish_locked failure outcome -> the step that failed.
+_WAL_OUTCOME_STAGES = {
+    "terminal_transition_failed": "wal_transition",
+    "snapshot_failed": "snapshot",
+    "clear_pending": "wal_clear",
+}
 
 
 def command_requires_lease(command: str) -> bool:
     return command not in READ_ONLY_COMMANDS
+
+
+def public_audit_stage(value: object) -> str | None:
+    """Return value when it is one of AUDIT_STAGES, else None (fail closed)."""
+    if isinstance(value, str) and value in AUDIT_STAGES:
+        return value
+    return None
+
+
+def _echoed_audit_stage(reason: str) -> str | None:
+    """The stage of a rejection whose error echoes the caller's reason.
+
+    process_lifecycle rejects its reservation with reason "audit_failed" when
+    its own ledger event for the request does not append; the decision then
+    carries that error, so it names the step like every other audit_failed.
+    """
+    return "write" if reason == "audit_failed" else None
 
 
 @dataclass(frozen=True)
@@ -118,6 +170,8 @@ class AuthorizationDecision:
     lease_id: str | None = None
     reservation_id: str | None = None
     cleanup_degraded: tuple[str, ...] = ()
+    # Set with error="audit_failed" only: the step that failed (AUDIT_STAGES).
+    audit_stage: str | None = None
 
 
 @dataclass(frozen=True)
@@ -304,9 +358,10 @@ class SessionCoordinator:
                 return 503, {"error": "coordination_repairing"}
             if self._audit_fault is not None:
                 return 503, self._audit_fault_error_locked()
-            if self._queued_grant_audit_failed_locked(degraded):
+            latched_stage = self._queued_grant_audit_stage_locked(degraded)
+            if latched_stage is not None:
                 return 503, self._payload_with_degradation(
-                    {"error": "audit_failed"}, degraded
+                    self._audit_failed_payload(latched_stage), degraded
                 )
             collision = self._identity_collision_locked(client)
             if collision:
@@ -355,7 +410,7 @@ class SessionCoordinator:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0.0:
                         return 503, self._payload_with_degradation(
-                            {"error": "audit_failed"}, degraded
+                            self._audit_failed_payload("reservation"), degraded
                         )
                     self._condition.wait(remaining)
                 if reservation in self._queue:
@@ -366,7 +421,7 @@ class SessionCoordinator:
                         degraded,
                     )
                 return 503, self._payload_with_degradation(
-                    {"error": "audit_failed"}, degraded
+                    self._audit_failed_payload("reservation"), degraded
                 )
 
             if self._active is not None and self._active.client == client:
@@ -387,7 +442,7 @@ class SessionCoordinator:
                     decision="idempotent_active",
                 ):
                     return 503, self._payload_with_degradation(
-                        {"error": "audit_failed"}, degraded
+                        self._audit_failed_payload("write"), degraded
                     )
                 if self._active is not lease:
                     return 409, self._payload_with_degradation(
@@ -408,7 +463,7 @@ class SessionCoordinator:
                         decision="idempotent_queued",
                     ):
                         return 503, self._payload_with_degradation(
-                            {"error": "audit_failed"}, degraded
+                            self._audit_failed_payload("write"), degraded
                         )
                     if ticket not in self._queue:
                         return 409, self._payload_with_degradation(
@@ -486,8 +541,10 @@ class SessionCoordinator:
                         self._bump_revision_locked()
                         self._condition.notify_all()
                     if grant_audit_outcome != "busy":
+                        # Any other outcome is the stage that failed.
                         return 503, self._payload_with_degradation(
-                            {"error": "audit_failed"}, degraded
+                            self._audit_failed_payload(grant_audit_outcome),
+                            degraded,
                         )
                 elif (
                     (
@@ -525,7 +582,8 @@ class SessionCoordinator:
                     )
                     if not compensated:
                         return 503, self._payload_with_degradation(
-                            {"error": "audit_failed"}, ["audit_failed"]
+                            self._audit_failed_payload("compensation"),
+                            ["audit_failed"],
                         )
                     if cancelled:
                         return 409, {"error": "operation_cancelled"}
@@ -566,7 +624,8 @@ class SessionCoordinator:
                         )
                         if not compensated:
                             return 503, self._payload_with_degradation(
-                                {"error": "audit_failed"}, ["audit_failed"]
+                                self._audit_failed_payload("compensation"),
+                                ["audit_failed"],
                             )
                         if cancelled:
                             return 409, {"error": "operation_cancelled"}
@@ -597,7 +656,10 @@ class SessionCoordinator:
                             )
                             self._latch_wal_fault_locked(failure, failure)
                         return 503, self._payload_with_degradation(
-                            {"error": "audit_failed"}, ["audit_failed"]
+                            self._audit_failed_payload(
+                                _WAL_OUTCOME_STAGES.get(wal_outcome)
+                            ),
+                            ["audit_failed"],
                         )
                     if (
                         self._grant_inflight is not grant
@@ -623,7 +685,8 @@ class SessionCoordinator:
                         )
                         if not compensated:
                             return 503, self._payload_with_degradation(
-                                {"error": "audit_failed"}, ["audit_failed"]
+                                self._audit_failed_payload("compensation"),
+                                ["audit_failed"],
                             )
                         return 409, self._payload_with_degradation(
                             {"error": "coordination_changed"}, degraded
@@ -649,7 +712,8 @@ class SessionCoordinator:
                         )
                         if not compensated:
                             return 503, self._payload_with_degradation(
-                                {"error": "audit_failed"}, ["audit_failed"]
+                                self._audit_failed_payload("compensation"),
+                                ["audit_failed"],
                             )
                         return 409, {"error": "operation_cancelled"}
                     self._grant_inflight = None
@@ -688,7 +752,7 @@ class SessionCoordinator:
                     self._queue_reservations.remove(ticket)
                     self._condition.notify_all()
                 return 503, self._payload_with_degradation(
-                    {"error": "audit_failed"}, degraded
+                    self._audit_failed_payload("write"), degraded
                 )
             if (
                 ticket not in self._queue_reservations
@@ -722,7 +786,7 @@ class SessionCoordinator:
                     self._queue_reservations.remove(ticket)
                     self._condition.notify_all()
                 return 503, self._payload_with_degradation(
-                    {"error": "audit_failed"}, degraded
+                    self._audit_failed_payload("write"), degraded
                 )
             while (
                 ticket in self._queue_reservations
@@ -802,7 +866,7 @@ class SessionCoordinator:
                 if ticket in self._queue_reservations:
                     self._queue_reservations.remove(ticket)
                     self._condition.notify_all()
-                return 503, {"error": "audit_failed"}
+                return 503, self._audit_failed_payload("write")
             if self._operation_tombstoned_locked(client, operation_id):
                 if ticket in self._queue_reservations:
                     self._queue_reservations.remove(ticket)
@@ -822,7 +886,7 @@ class SessionCoordinator:
                 if ticket in self._queue_reservations:
                     self._queue_reservations.remove(ticket)
                     self._condition.notify_all()
-                return 503, {"error": "audit_failed"}
+                return 503, self._audit_failed_payload("write")
             while (
                 ticket in self._queue_reservations
                 and self._queue_reservations[0] is not ticket
@@ -944,7 +1008,7 @@ class SessionCoordinator:
                     ticket=ticket_id,
                     decision="cancelled",
                 ):
-                    return 503, {"error": "audit_failed"}
+                    return 503, self._audit_failed_payload("write")
                 return 200, {"cancelled": True, "ticket": ticket_id}
         return self.cancel_operation(client, operation_id)
 
@@ -974,9 +1038,10 @@ class SessionCoordinator:
                 return 503, {"error": "coordination_repairing"}
             if self._audit_fault is not None:
                 return 503, self._audit_fault_error_locked()
-            if self._queued_grant_audit_failed_locked(degraded):
+            latched_stage = self._queued_grant_audit_stage_locked(degraded)
+            if latched_stage is not None:
                 return 503, self._payload_with_degradation(
-                    {"error": "audit_failed"}, degraded
+                    self._audit_failed_payload(latched_stage), degraded
                 )
 
             active_payload = self._wait_active_payload_locked(client, ticket_id)
@@ -992,7 +1057,7 @@ class SessionCoordinator:
                     wait_started_at=wait_started_at,
                 ):
                     return 503, self._payload_with_degradation(
-                        {"error": "audit_failed"}, degraded
+                        self._audit_failed_payload("write"), degraded
                     )
                 if self._active is not active_lease:
                     return 409, self._payload_with_degradation(
@@ -1022,9 +1087,10 @@ class SessionCoordinator:
 
             while True:
                 degraded.extend(self._expire_due())
-                if self._queued_grant_audit_failed_locked(degraded):
+                latched_stage = self._queued_grant_audit_stage_locked(degraded)
+                if latched_stage is not None:
                     return 503, self._payload_with_degradation(
-                        {"error": "audit_failed"}, degraded
+                        self._audit_failed_payload(latched_stage), degraded
                     )
                 active_payload = self._wait_active_payload_locked(client, ticket_id)
                 if active_payload is not None:
@@ -1043,7 +1109,7 @@ class SessionCoordinator:
                         wait_started_at=wait_started_at,
                     ):
                         return 503, self._payload_with_degradation(
-                            {"error": "audit_failed"}, degraded
+                            self._audit_failed_payload("write"), degraded
                         )
                     if self._active is not active_lease:
                         return 409, self._payload_with_degradation(
@@ -1064,7 +1130,7 @@ class SessionCoordinator:
                         wait_started_at=wait_started_at,
                     ):
                         return 503, self._payload_with_degradation(
-                            {"error": "audit_failed"}, degraded
+                            self._audit_failed_payload("write"), degraded
                         )
                     body: dict[str, object] = {"error": "ticket_expired"}
                     if degraded:
@@ -1102,8 +1168,13 @@ class SessionCoordinator:
                             claim_payload["cleanup_degraded"] = self._unique(degraded)
                         return 200, claim_payload
                     if claim_outcome == "audit_failed":
+                        # The claim returns the audit_failed body, audit_stage
+                        # included, in place of the grant payload (every such
+                        # return goes through its failed()); the fallback only
+                        # keeps the refusal a dict.
                         return 503, self._payload_with_degradation(
-                            {"error": "audit_failed"}, degraded
+                            claim_payload or self._audit_failed_payload(None),
+                            degraded,
                         )
                     if claim_outcome == "coordination_changed":
                         return 409, self._payload_with_degradation(
@@ -1132,7 +1203,7 @@ class SessionCoordinator:
                     )
                     if audit_outcome == "failed":
                         return 503, self._payload_with_degradation(
-                            {"error": "audit_failed"}, degraded
+                            self._audit_failed_payload("write"), degraded
                         )
                     active_payload = self._wait_active_payload_locked(client, ticket_id)
                     still_granting = (
@@ -1181,7 +1252,7 @@ class SessionCoordinator:
                 decision="renewed",
             ):
                 return 503, self._payload_with_degradation(
-                    {"error": "audit_failed"}, degraded
+                    self._audit_failed_payload("write"), degraded
                 )
             if self._active is not lease:
                 return 409, self._payload_with_degradation(
@@ -1210,8 +1281,9 @@ class SessionCoordinator:
             cleanup_result, release_degraded = self._release_active_locked(reason)
             degraded.extend(release_degraded)
             if self._active is lease:
+                # Only a release WAL that could not be armed leaves it active.
                 return 503, {
-                    "error": "audit_failed",
+                    **self._audit_failed_payload("wal_arm"),
                     "cleanup_degraded": self._unique(degraded),
                 }
             if cleanup_result.get("error") == "lifecycle_cleanup_pending":
@@ -1324,7 +1396,12 @@ class SessionCoordinator:
                 decision="mutation",
             ):
                 return AuthorizationDecision(
-                    False, 503, "audit_failed", None, cleanup_degraded=degraded
+                    False,
+                    503,
+                    "audit_failed",
+                    None,
+                    cleanup_degraded=degraded,
+                    audit_stage="write",
                 )
             if self._active is not lease:
                 return AuthorizationDecision(
@@ -1530,6 +1607,7 @@ class SessionCoordinator:
                     reason,
                     None,
                     cleanup_degraded=tuple(self._unique(degraded)),
+                    audit_stage=_echoed_audit_stage(reason),
                 )
             authorization_index = next(
                 (
@@ -1564,6 +1642,7 @@ class SessionCoordinator:
                     "audit_failed",
                     None,
                     cleanup_degraded=tuple(self._unique([*degraded, "audit_failed"])),
+                    audit_stage="write",
                 )
             return AuthorizationDecision(
                 False,
@@ -1571,6 +1650,7 @@ class SessionCoordinator:
                 reason,
                 None,
                 cleanup_degraded=tuple(self._unique(degraded)),
+                audit_stage=_echoed_audit_stage(reason),
             )
 
     def discard_committed(
@@ -1692,6 +1772,7 @@ class SessionCoordinator:
                     reason,
                     None,
                     cleanup_degraded=tuple(self._unique(degraded)),
+                    audit_stage=_echoed_audit_stage(reason),
                 )
 
             authorization_index = next(
@@ -1724,6 +1805,7 @@ class SessionCoordinator:
                     "audit_failed",
                     None,
                     cleanup_degraded=tuple(self._unique([*degraded, "audit_failed"])),
+                    audit_stage="write",
                 )
             return AuthorizationDecision(
                 False,
@@ -1731,6 +1813,7 @@ class SessionCoordinator:
                 reason,
                 None,
                 cleanup_degraded=tuple(self._unique(degraded)),
+                audit_stage=_echoed_audit_stage(reason),
             )
 
     def admin_release(self, lease_id: str, reason: str) -> tuple[int, dict[str, object]]:
@@ -1756,14 +1839,15 @@ class SessionCoordinator:
                 lease_id=lease.lease_id,
                 decision="confirmed",
             ):
-                return 503, {"error": "audit_failed"}
+                return 503, self._audit_failed_payload("write")
             if self._active is not lease:
                 return 409, {"error": "lease_invalid"}
             cleanup, release_degraded = self._release_active_locked("admin_release")
             degraded.extend(release_degraded)
             if self._active is lease:
+                # Only a release WAL that could not be armed leaves it active.
                 return 503, {
-                    "error": "audit_failed",
+                    **self._audit_failed_payload("wal_arm"),
                     "cleanup_degraded": self._unique(degraded),
                 }
             if cleanup.get("error") == "lifecycle_cleanup_pending":
@@ -2730,6 +2814,7 @@ class SessionCoordinator:
     def _claim_head_from_wait_locked(
         self, ticket: _Ticket
     ) -> tuple[str, dict[str, object] | None]:
+        """(outcome, body): the grant payload, or the audit_failed body with its stage."""
         lease = self._new_lease_locked(
             ticket.client,
             ticket.purpose,
@@ -2790,6 +2875,10 @@ class SessionCoordinator:
             finally:
                 self._condition.acquire()
 
+        def failed(stage: str | None) -> tuple[str, dict[str, object]]:
+            # wait() answers with this body, audit_stage included.
+            return "audit_failed", self._audit_failed_payload(stage)
+
         self._condition.release()
         try:
             try:
@@ -2802,7 +2891,9 @@ class SessionCoordinator:
             self._condition.acquire()
         if not gate_acquired:
             clear_grant()
-            return ("audit_failed" if gate_failed else "busy"), None
+            if gate_failed:
+                return failed("gate")
+            return "busy", None
 
         try:
             if not self._arm_wal_locked(
@@ -2812,7 +2903,7 @@ class SessionCoordinator:
                 reason="fifo_head",
             ):
                 clear_grant()
-                return "audit_failed", None
+                return failed("wal_arm")
             prepared_ok = write_with_gate(
                 event(
                     "session_grant_prepared",
@@ -2823,7 +2914,7 @@ class SessionCoordinator:
             if not prepared_ok:
                 clear_grant()
                 self._latch_wal_fault_locked("audit_failed", "audit_failed")
-                return "audit_failed", None
+                return failed("write")
             if not state_is_exact():
                 cancelled = self._operation_tombstoned_locked(
                     ticket.client, ticket.operation_id
@@ -2837,7 +2928,7 @@ class SessionCoordinator:
                     requeue_ticket=not cancelled,
                 )
                 if not compensated:
-                    return "audit_failed", None
+                    return failed("compensation")
                 return (
                     "operation_cancelled" if cancelled else "coordination_changed"
                 ), None
@@ -2863,7 +2954,7 @@ class SessionCoordinator:
                     failure = "audit_failed"
                 clear_grant()
                 self._latch_wal_fault_locked(failure, failure)
-                return "audit_failed", None
+                return failed("write")
 
             if not state_is_exact():
                 cancelled = self._operation_tombstoned_locked(
@@ -2885,7 +2976,7 @@ class SessionCoordinator:
                     requeue_ticket=not cancelled,
                 )
                 if not compensated:
-                    return "audit_failed", None
+                    return failed("compensation")
                 return (
                     "operation_cancelled" if cancelled else "coordination_changed"
                 ), None
@@ -2917,7 +3008,7 @@ class SessionCoordinator:
                     requeue_ticket=not cancelled,
                 )
                 if not compensated:
-                    return "audit_failed", None
+                    return failed("compensation")
                 return (
                     "operation_cancelled" if cancelled else "coordination_changed"
                 ), None
@@ -2941,7 +3032,7 @@ class SessionCoordinator:
                         self._condition.notify_all()
                     failure = wal_outcome if revoked else "compensation_failed"
                     self._latch_wal_fault_locked(failure, failure)
-                return "audit_failed", None
+                return failed(_WAL_OUTCOME_STAGES.get(wal_outcome))
             if (
                 self._grant_inflight is not grant
                 or self._active is not lease
@@ -2963,7 +3054,7 @@ class SessionCoordinator:
                     requeue_ticket=True,
                 )
                 if not compensated:
-                    return "audit_failed", None
+                    return failed("compensation")
                 return "coordination_changed", None
             if self._operation_tombstoned_locked(
                 ticket.client, ticket.operation_id
@@ -2981,7 +3072,7 @@ class SessionCoordinator:
                     requeue_ticket=False,
                 )
                 if not compensated:
-                    return "audit_failed", None
+                    return failed("compensation")
                 return "operation_cancelled", None
             self._grant_inflight = None
             self._bump_revision_locked()
@@ -3274,28 +3365,36 @@ class SessionCoordinator:
     def _queue_capacity_locked(self) -> int:
         return len(self._queue) + len(self._queue_reservations)
 
-    def _queued_grant_audit_failed_locked(self, degraded: list[str]) -> bool:
+    def _queued_grant_audit_stage_locked(self, degraded: list[str]) -> str | None:
+        """The audit_stage of the failure that fences a queued grant, or None.
+
+        degraded is what this call's own expiry passes returned, so "expiry"
+        names an audit that this call ran and that failed.
+        """
         if self._audit_fault is not None:
-            return True
+            return "fault_latched"
         if self._grant_audit_failed:
-            return (
-                self._active is None
-                and self._releasing is None
-            )
+            if self._active is None and self._releasing is None:
+                return "grant_latched"
+            return None
         if self._handoff_audit_failed:
-            return (
+            if (
                 self._active is None
                 and self._releasing is None
                 and bool(self._queue)
-            )
-        return (
+            ):
+                return "handoff_latched"
+            return None
+        if (
             "audit_failed" in degraded
             and self._active is None
             and self._releasing is None
             and self._grant_inflight is None
             and not self._handoff_pending
             and bool(self._queue)
-        )
+        ):
+            return "expiry"
+        return None
 
     def _clear_handoff_pending_locked(self) -> None:
         if self._handoff_pending:
@@ -3753,6 +3852,7 @@ class SessionCoordinator:
             self._invalid_tokens.pop(next(iter(self._invalid_tokens)))
 
     def _write_initial_grant_audits_locked(self, lease: _Lease) -> str:
+        """Return "ok", "busy", or the audit_stage that failed ("wal_arm", "write")."""
         events = (
             {
                 "event": "session_acquire",
@@ -3793,7 +3893,7 @@ class SessionCoordinator:
                 finally:
                     self._condition.release()
                 if not armed:
-                    return "failed"
+                    return "wal_arm"
                 for event in events:
                     try:
                         if self._audit(event) is False:
@@ -3821,7 +3921,7 @@ class SessionCoordinator:
                             self._latch_wal_fault_locked(failure, failure)
                         finally:
                             self._condition.release()
-                        return "failed"
+                        return "write"
                 return "ok"
             finally:
                 self._audit_gate.release()
@@ -4004,6 +4104,15 @@ class SessionCoordinator:
         return self._token_error_status(error), self._payload_with_degradation(
             {"error": error}, degraded
         )
+
+    @staticmethod
+    def _audit_failed_payload(stage: str | None) -> dict[str, object]:
+        """The audit_failed body; audit_stage names the step that failed (00c4)."""
+        payload: dict[str, object] = {"error": "audit_failed"}
+        checked = public_audit_stage(stage)
+        if checked is not None:
+            payload["audit_stage"] = checked
+        return payload
 
     def _payload_with_degradation(
         self,

@@ -111,6 +111,7 @@ from dayz_mcp.session_coordination import (
     READ_ONLY_COMMANDS,
     ClientIdentity,
     command_requires_lease,
+    public_audit_stage,
 )
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
 from dayz_mcp import anim_timeline as anim_timeline_contract
@@ -1615,6 +1616,21 @@ def _retail_quarantine_recipe(reason: object) -> str:
     return RETAIL_QUARANTINE_RECIPE
 
 
+def _audit_failed_message(message: str, audit_stage: object) -> str:
+    """Name the coordinator step an audit_failed stopped at (00c4).
+
+    The stage travels only when it is one of session_coordination.AUDIT_STAGES,
+    together with next_step=session_status: its audit_fault, claimable and
+    cleanup_degraded tell whether the failure is still latched. Without a known
+    stage (the exec_enforce or lifecycle audit, or an older daemon) the message
+    is returned unchanged.
+    """
+    stage = public_audit_stage(audit_stage)
+    if stage is None:
+        return message
+    return with_next_step(f"{message}; audit_stage={stage}", "session_status")
+
+
 def _public_enqueue_error(
     payload: dict[str, Any],
     *,
@@ -1631,6 +1647,8 @@ def _public_enqueue_error(
     a stripped remote_error -- when that token is on the enqueue payload,
     not merely on a sibling /status snapshot. run_not_owned also carries
     next_step=session_acquire_wait: that grant adopts the ownerless run.
+    A coordinator audit_failed carries its audit_stage and
+    next_step=session_status (_audit_failed_message).
     """
     code = _remote_error_code(payload)
     if code == "retail_quarantine":
@@ -1671,6 +1689,8 @@ def _public_enqueue_error(
         # Named here, not only in the daemon's hint, so an older daemon's
         # prose still reaches the caller with the tool to call next.
         return with_next_step(message, "session_acquire_wait")
+    if code == "audit_failed":
+        return _audit_failed_message(message, payload.get("audit_stage"))
     return message
 
 
@@ -2463,6 +2483,10 @@ class ClientRuntime:
                 return LEASE_EXPIRED_RECIPE
             if error.code == "lease_invalid":
                 return LEASE_INVALID_RECIPE
+            if error.code == "audit_failed":
+                return _audit_failed_message(
+                    str(error) if error.hint else error.code, error.audit_stage
+                )
             if error.hint and (
                 error.code in _REMOTE_ERROR_CODES
                 or error.code in _CONTROL_CLIENT_ERROR_CODES

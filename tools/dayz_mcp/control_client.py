@@ -16,6 +16,7 @@ from typing import Awaitable, Callable, Iterator
 from dayz_mcp import accredited_daemon_transport as transport
 from dayz_mcp import daemon_credential
 from dayz_mcp.daemon_policy_contract import AccreditedDaemonPolicy
+from dayz_mcp.session_coordination import public_audit_stage
 
 
 _monotonic = time.monotonic
@@ -69,6 +70,7 @@ class ControlClientError(RuntimeError):
         hint: str | None = None,
         policy_cause: str | None = None,
         body: VerifiedErrorBody | None = None,
+        audit_stage: object = None,
     ) -> None:
         self.code = code
         self.request_stage = request_stage
@@ -77,6 +79,11 @@ class ControlClientError(RuntimeError):
         # Separate metadata: callers must not parse or compose the stable code.
         self.policy_cause = policy_cause
         self.body = body if isinstance(body, VerifiedErrorBody) else None
+        # The coordinator step an audit_failed names (00c4). Only a member of the
+        # closed AUDIT_STAGES set is kept; anything else from the wire is dropped.
+        self.audit_stage = (
+            public_audit_stage(audit_stage) if code == "audit_failed" else None
+        )
         super().__init__(
             code if self.hint is None else f"{code}: {self.hint}"
         )
@@ -358,6 +365,7 @@ class ControlClient:
                 http_bytes_sent=1,
                 hint=hint if isinstance(hint, str) else None,
                 body=verified,
+                audit_stage=response.get("audit_stage"),
             )
         return response
 
