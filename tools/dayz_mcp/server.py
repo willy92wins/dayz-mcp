@@ -6728,8 +6728,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             f"{LEASE_TOOL_LINE} Spawn a DayZ object through the existing "
             "world_spawn bridge command. type is a CfgVehicles classname, for "
-            'example type="CivilianSedan"; any other value, such as '
-            '"vehicle", returns unknown_type naming the type received. '
+            'example type="CivilianSedan"; a value that is not a loaded '
+            'CfgVehicles classname, such as "vehicle", returns unknown_type '
+            "naming the type received. "
             "rotation is an RF_* CreateObjectEx "
             "flag integer, not an angle; 0 uses the bridge default RF_DEFAULT. "
             f"{WORLD_SPAWN_FLAGS_LINE} "

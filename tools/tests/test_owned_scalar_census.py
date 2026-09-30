@@ -3,12 +3,23 @@
 result_prune.OWNED_SCALAR_FIELDS keeps an owned scalar only for its owner
 commands (fb-20260823-130809-a412) and NEVER_FILLED_SCALAR_FIELDS drops a scalar
 no command assigns (fb-20260823-141958-dde3). Both are hand-kept, so this test
-derives them again from the two bridges, MCPBridge.c and MCPClientBridge.c:
-every assignment to one of those fields on an MCPResult, attributed to the
-commands that can reach it. A command that writes an owned field without being
+derives them again from the Enforce sources: MCPBridge.c and MCPClientBridge.c,
+where commands are dispatched, and MCPMessages.c, where MCPResult and the other
+message classes are declared. A command that writes an owned field without being
 one of its owners fails here, so a new verb cannot lose its answer to the prune
 unnoticed. A listed owner that no longer writes the field fails too, so the prune
 does not keep a stale 0 for it. A never-filled field must have no write at all.
+
+A write is an assignment to a watched field of an MCPResult. In a bridge it is an
+assignment on a variable of MCPResult (or of a class derived from it). In
+MCPMessages.c a method writes a field when it assigns it on such a variable, when
+it belongs to MCPResult (or to a class derived from it) and assigns the field on
+itself (`gear = ...`, `this.gear = ...`), or when it calls a method that does. A
+bridge call to such a method writes those fields where the call is: an instance
+call on a variable of a message class, a static call on a message class, or
+`new` of a message class whose constructor writes. Review R1 F1: a new verb
+calling result.SetGear(2), with SetGear declared in MCPResult, went unseen while
+MCPMessages.c was not read.
 
 This is attribution, not execution. Comments are blanked, preprocessor lines
 ignored and string contents masked, then every method of every class is found
@@ -18,19 +29,21 @@ the `if` blocks around it:
 - `if (command.cmd == "x")`, with `command` an MCPCommand, narrows to {x};
 - `if (job.kind == "k")`, with `job` an MCPJob, narrows to the commands whose
   dispatch reaches `job.kind = "k"`;
-- a method called only from its own class gets the union of its call sites.
-  A method that is public, `override`, referenced without a call, called on
-  another object or named in a string literal can be reached from outside, so it
-  starts with every command.
+- a bridge method called only from its own class gets the union of its call
+  sites. One that is public, `override`, referenced without a call, called on
+  another object or named in a string literal can be reached from outside, so
+  it starts with every command.
 
 Nothing else narrows: an `else`, a loop, a negated test or a gate mixed with
 another test under `||`. Each of these simplifications can only widen the set of
 commands a write is attributed to, so the census can report a writer that does
-not exist but cannot miss one that does. A write it cannot place (a variable it
-cannot type, a chained target, a write that no command reaches or that any
-command reaches) and a `job.kind` set from a non-literal fail the test instead of
-being guessed. A field passed as a bare call argument counts as a write, because
-an `out` parameter writes it.
+not exist but cannot miss one that does. What it cannot place fails the test
+instead of being guessed: a write on a variable it cannot type or through a
+chain, a write that no command or every command reaches, a `job.kind` set from a
+non-literal, a method called on a message-class variable when that class does
+not declare it, and a writing method called on a receiver it cannot type. A field
+passed as a bare call argument counts as a write, because an `out` parameter
+writes it.
 """
 from __future__ import annotations
 
@@ -57,6 +70,8 @@ from tests.enforce_subset_helpers import clean
 SCRIPTS = addon_root() / "scripts"
 MISSION = SCRIPTS / "5_Mission"
 BRIDGES = ("MCPBridge.c", "MCPClientBridge.c")
+MESSAGES = "MCPMessages.c"
+RESULT_CLASS = "MCPResult"
 WATCHED = frozenset(OWNED_SCALAR_FIELDS) | NEVER_FILLED_SCALAR_FIELDS
 
 # "Any command": a method reachable from outside its class, before narrowing.
@@ -64,7 +79,7 @@ TOP = None
 
 _STRING = re.compile(r'"(?:\\.|[^"\\])*"')
 _PREPROCESSOR = re.compile(r"(?m)^[ \t]*#[^\n]*")
-_CLASS_HEADER = re.compile(r"^(?:modded\s+)?class\s+(\w+)\b")
+_CLASS_HEADER = re.compile(r"^(?:modded\s+)?class\s+(\w+)\b(?:\s*(?::|extends)\s*(\w+))?")
 _METHOD_HEADER = re.compile(
     r"^(?P<mods>(?:(?:protected|private|static|override|proto|native|sealed|"
     r"external|volatile|event)\s+)*)"
@@ -88,6 +103,8 @@ _NOT_TYPES = frozenset(
 )
 _CALL = re.compile(r"(?<![\w.~])(\w+)\s*\(")
 _QUALIFIED_CALL = re.compile(r"(\w+)\s*\.\s*(\w+)\s*\(")
+_NEW_CALL = re.compile(r"(?<![\w.])new\s+(\w+)\s*\(")
+_DOTTED_CALL = re.compile(r"\.\s*(\w+)\s*\(")
 _BARE_NAME = re.compile(r"(?<![\w.])(\w+)\b(?!\s*\()")
 _THIS_NAME = re.compile(r"\bthis\s*\.\s*(\w+)\b(?!\s*\()")
 _LITERAL_NAME = re.compile(r'"(\w+)"')
@@ -95,6 +112,7 @@ _ASSIGN_AFTER = re.compile(r"\s*(?:(?:[-+*/%&|^]|<<|>>)?=(?!=)|\+\+|--)")
 _ROOT_BEFORE = re.compile(r"(?<![\w.)\]])(\w+)\s*$")
 _KIND_WRITE = re.compile(r"(?<![\w.])(\w+)\s*\.\s*kind\s*=(?!=)\s*")
 _KEYWORD_CALLS = frozenset({"if", "while", "for", "foreach", "switch", "return"})
+_SELF = frozenset({"this", "super"})
 
 
 @dataclass
@@ -120,6 +138,14 @@ class _Source:
 
     def line(self, pos: int) -> int:
         return self.text.count("\n", 0, pos) + 1
+
+
+@dataclass
+class _Parsed:
+    methods: list[_Method]
+    members: dict[str, dict[str, set[str]]]  # class -> member -> declared types
+    bases: dict[str, str | None]  # every class of the file -> its base, if any
+    class_text: dict[str, str]  # class -> its body with every method blanked
 
 
 def _prepare(path: str, raw: str) -> _Source:
@@ -278,10 +304,11 @@ def _declare(types: dict[str, set[str]], text: str) -> None:
         types.setdefault(name, set()).add(type_name)
 
 
-def _parse(source: _Source) -> tuple[list[_Method], dict[str, dict[str, set[str]]]]:
-    """Methods of every class, and each class's member declarations."""
+def _parse(source: _Source) -> _Parsed:
+    """Every class of the file: its methods, members, base and class-level text."""
     blocks = _blocks(source)
     classes: list[tuple[str, int, int]] = []
+    bases: dict[str, str | None] = {}
     methods: list[_Method] = []
     for open_at, close_at, depth, header_at in blocks:
         header = " ".join(source.masked[header_at:open_at].split())
@@ -289,6 +316,7 @@ def _parse(source: _Source) -> tuple[list[_Method], dict[str, dict[str, set[str]
             klass = _CLASS_HEADER.match(header)
             if klass:
                 classes.append((klass.group(1), open_at, close_at))
+                bases[klass.group(1)] = klass.group(2)
                 continue
         owner = "<global>" if depth == 0 else None
         if depth == 1:
@@ -326,6 +354,7 @@ def _parse(source: _Source) -> tuple[list[_Method], dict[str, dict[str, set[str]
             method.blocks.append((open_at, close_at, atoms))
             index += 1
     members: dict[str, dict[str, set[str]]] = {}
+    class_text: dict[str, str] = {}
     for name, start, end in classes:
         # Class level only: every method, signature included, is blanked.
         chars = list(source.masked[start + 1 : end])
@@ -333,9 +362,10 @@ def _parse(source: _Source) -> tuple[list[_Method], dict[str, dict[str, set[str]
             if method.klass == name and start < method.open < end:
                 for index in range(method.header - start - 1, method.close - start):
                     chars[index] = " "
+        class_text[name] = "".join(chars)
         members[name] = {}
-        _declare(members[name], "".join(chars))
-    return methods, members
+        _declare(members[name], class_text[name])
+    return _Parsed(methods, members, bases, class_text)
 
 
 def _resolve(
@@ -390,19 +420,320 @@ class _Write:
     line: int
 
 
-def census(sources: dict[str, str]) -> dict[str, frozenset[str]]:
-    """Watched field -> the commands whose dispatch writes it, over `sources`.
+def _where(source: _Source, method: _Method, pos: int) -> str:
+    return f"{source.path}:{source.line(pos)} ({method.klass}.{method.name})"
 
+
+def _lookup(
+    classes: dict[str, dict[str, _Method]],
+    bases: dict[str, str | None],
+    klass: str | None,
+    name: str,
+) -> _Method | None:
+    """Method `name` of `klass`, or of the nearest base that declares it."""
+    seen: set[str] = set()
+    while klass is not None and klass not in seen:
+        seen.add(klass)
+        method = classes.get(klass, {}).get(name)
+        if method is not None:
+            return method
+        klass = bases.get(klass)
+    return None
+
+
+def _constructors(
+    classes: dict[str, dict[str, _Method]], bases: dict[str, str | None], klass: str
+) -> list[_Method]:
+    """The constructors `new klass(...)` runs: its own and those of its bases."""
+    found: list[_Method] = []
+    seen: set[str] = set()
+    current: str | None = klass
+    while current in classes and current not in seen:
+        seen.add(current)
+        constructor = classes[current].get(current)
+        if constructor is not None:
+            found.append(constructor)
+        current = bases.get(current)
+    return found
+
+
+def _result_types(bases: dict[str, str | None]) -> frozenset[str]:
+    """MCPResult and every class whose base chain reaches it."""
+    found = {RESULT_CLASS}
+    for klass in bases:
+        seen: set[str] = set()
+        current: str | None = klass
+        while current is not None and current not in seen:
+            if current == RESULT_CLASS:
+                found.add(klass)
+                break
+            seen.add(current)
+            current = bases.get(current)
+    return frozenset(found)
+
+
+def _enclosing_call(before: str) -> str | None:
+    """Name before the innermost unclosed `(` that ends `before`, if any."""
+    depth = 0
+    for index in range(len(before) - 1, -1, -1):
+        char = before[index]
+        if char == ")":
+            depth += 1
+        elif char == "(":
+            if depth == 0:
+                name = re.search(r"(\w+)\s*$", before[:index])
+                return name.group(1) if name else None
+            depth -= 1
+        elif char in "{};":
+            return None
+    return None
+
+
+def _is_write(before: str, after: str, root_pattern: str) -> bool:
+    """True when the name that ends `before` (matched by root_pattern) is written."""
+    if _ASSIGN_AFTER.match(after) is not None:
+        return True
+    if re.search(rf"(?:\+\+|--)\s*{root_pattern}$", before):
+        return True
+    # A bare argument can be an `out` parameter, which writes the field.
+    if re.search(rf"[(,]\s*{root_pattern}$", before) and re.match(r"\s*[,)]", after):
+        call = _enclosing_call(before)
+        return call is not None and call not in _KEYWORD_CALLS
+    return False
+
+
+def _writes_in(
+    source: _Source, method: _Method, resolve, result_types: frozenset[str]
+) -> list[_Write]:
+    """Writes of watched fields on an MCPResult variable (or `this` in a result class)."""
+    body = source.masked[method.open + 1 : method.close]
+    offset = method.open + 1
+    found: list[_Write] = []
+    for name in sorted(WATCHED):
+        for match in re.finditer(rf"\.\s*{name}\b", body):
+            pos = offset + match.start()
+            before = body[: match.start()]
+            if not _is_write(before, body[match.end() :], r"\w+\s*"):
+                continue
+            root = _ROOT_BEFORE.search(before)
+            if root is None:
+                raise AssertionError(
+                    f"{source.path}:{source.line(pos)}: .{name} written through a "
+                    "target the census cannot type"
+                )
+            if root.group(1) in _SELF:
+                # this.x names the member of the class the method belongs to.
+                if method.klass in result_types:
+                    found.append(_Write(method, pos, name, source.line(pos)))
+                continue
+            declared = resolve(method, root.group(1))
+            if declared is None:
+                raise AssertionError(
+                    f"{source.path}:{source.line(pos)}: .{name} written on "
+                    f"{root.group(1)!r}, which the census cannot type"
+                )
+            if declared & result_types:
+                found.append(_Write(method, pos, name, source.line(pos)))
+    return found
+
+
+def _self_writes(source: _Source, method: _Method) -> list[_Write]:
+    """Bare writes of watched fields in a method of a result class: fields of `this`."""
+    body = source.masked[method.open + 1 : method.close]
+    offset = method.open + 1
+    found: list[_Write] = []
+    for name in sorted(WATCHED):
+        for match in re.finditer(rf"(?<![\w.]){name}\b", body):
+            if _is_write(body[: match.start()], body[match.end() :], ""):
+                pos = offset + match.start()
+                found.append(_Write(method, pos, name, source.line(pos)))
+    return found
+
+
+def _message_calls(
+    source: _Source,
+    method: _Method,
+    resolve,
+    classes: dict[str, dict[str, _Method]],
+    bases: dict[str, str | None],
+) -> list[tuple[_Method, int]]:
+    """Message-class methods `method` calls, each with the position of the call.
+
+    `new T(...)` runs T's constructors; `v.X(...)` calls X of the message classes
+    `v` is declared as; `T.X(...)` calls X of message class T; `X(...)`,
+    `this.X(...)` and `super.X(...)` call a method of the caller's own class or a
+    base, which is a message method inside a message class (or a class derived
+    from one). A method a message class does not declare, called on it, cannot
+    be resolved and fails. A chained receiver is left to _unresolved_writer_calls.
+    """
+    body = source.masked[method.open + 1 : method.close]
+    offset = method.open + 1
+    inside = method.klass in classes
+    found: list[tuple[_Method, int]] = []
+    for match in _NEW_CALL.finditer(body):
+        for constructor in _constructors(classes, bases, match.group(1)):
+            found.append((constructor, offset + match.start()))
+    for match in _CALL.finditer(body):
+        callee = _lookup(classes, bases, method.klass, match.group(1))
+        if callee is not None:
+            found.append((callee, offset + match.start()))
+    for match in _QUALIFIED_CALL.finditer(body):
+        start = match.start()
+        if start > 0 and (body[start - 1] in ".)]" or body[start - 1].isalnum() or body[start - 1] == "_"):
+            continue
+        qualifier, name = match.group(1), match.group(2)
+        pos = offset + start
+        if qualifier in _SELF:
+            owner = method.klass if qualifier == "this" else bases.get(method.klass)
+            callee = _lookup(classes, bases, owner, name)
+            if callee is not None:
+                found.append((callee, pos))
+            elif inside:
+                raise AssertionError(
+                    f"{_where(source, method, pos)}: calls {qualifier}.{name}, which "
+                    f"{method.klass} and its bases do not declare in {MESSAGES}; the "
+                    "census cannot resolve the call"
+                )
+            # Otherwise a bridge's own method: the bridge call graph has it.
+            continue
+        if qualifier in classes:
+            targets = [qualifier]
+        else:
+            targets = sorted((resolve(method, qualifier) or set()) & set(classes))
+        if not targets:
+            continue
+        callees = [
+            callee
+            for callee in (_lookup(classes, bases, target, name) for target in targets)
+            if callee is not None
+        ]
+        if not callees:
+            raise AssertionError(
+                f"{_where(source, method, pos)}: calls {qualifier}.{name}, which "
+                f"{'/'.join(targets)} does not declare in {MESSAGES}; the census "
+                "cannot resolve the call"
+            )
+        found.extend((callee, pos) for callee in callees)
+    return found
+
+
+def _unresolved_writer_calls(
+    source: _Source,
+    method: _Method,
+    resolve,
+    classes: dict[str, dict[str, _Method]],
+    bases: dict[str, str | None],
+    writer_names: frozenset[str],
+) -> None:
+    """Fail on a writing method called through a receiver the census cannot type,
+    or referenced without a call (CallLater(result.SetGear, ...)): when that runs,
+    and for which command, cannot be placed."""
+    body = source.masked[method.open + 1 : method.close]
+    offset = method.open + 1
+    for match in re.finditer(r"\.\s*(\w+)\b(?!\s*\()", body):
+        if match.group(1) in writer_names:
+            raise AssertionError(
+                f"{_where(source, method, offset + match.start())}: .{match.group(1)}, "
+                "which writes a watched field, is referenced without a call; the "
+                "census cannot resolve when it runs"
+            )
+    if method.klass in classes:
+        for match in _BARE_NAME.finditer(body):
+            name = match.group(1)
+            if name in writer_names and _lookup(classes, bases, method.klass, name) is not None:
+                raise AssertionError(
+                    f"{_where(source, method, offset + match.start())}: {name}, which "
+                    "writes a watched field, is referenced without a call; the census "
+                    "cannot resolve when it runs"
+                )
+    for match in _DOTTED_CALL.finditer(body):
+        name = match.group(1)
+        if name not in writer_names:
+            continue
+        pos = offset + match.start()
+        root = _ROOT_BEFORE.search(body[: match.start()])
+        if root is None:
+            raise AssertionError(
+                f"{_where(source, method, pos)}: calls .{name}, which writes a watched "
+                "field, through a chain; the census cannot resolve the receiver"
+            )
+        qualifier = root.group(1)
+        if qualifier in _SELF or qualifier in classes:
+            continue
+        if resolve(method, qualifier) is None:
+            raise AssertionError(
+                f"{_where(source, method, pos)}: calls {qualifier}.{name}, which "
+                f"writes a watched field, on a name the census cannot resolve"
+            )
+
+
+def _message_writers(
+    source: _Source, parsed: _Parsed, result_types: frozenset[str]
+) -> tuple[dict[str, dict[str, _Method]], dict[int, frozenset[str]], frozenset[str]]:
+    """Message classes by name, the watched fields each of their methods writes on an
+    MCPResult (directly or through the methods it calls), and the writing names."""
+    classes: dict[str, dict[str, _Method]] = {name: {} for name in parsed.bases}
+    for method in parsed.methods:
+        classes.setdefault(method.klass, {})[method.name] = method
+
+    def resolve(method: _Method, name: str) -> set[str] | None:
+        return _resolve(method, parsed.members.get(method.klass, {}), name)
+
+    writes: dict[int, frozenset[str]] = {}
+    callees: dict[int, list[_Method]] = {}
+    for method in parsed.methods:
+        fields = {write.field for write in _writes_in(source, method, resolve, result_types)}
+        if method.klass in result_types:
+            fields |= {write.field for write in _self_writes(source, method)}
+        writes[id(method)] = frozenset(fields)
+        callees[id(method)] = [
+            callee
+            for callee, _pos in _message_calls(source, method, resolve, classes, parsed.bases)
+        ]
+    changed = True
+    while changed:
+        changed = False
+        for method in parsed.methods:
+            reached = writes[id(method)].union(*(writes[id(c)] for c in callees[id(method)]))
+            if reached != writes[id(method)]:
+                writes[id(method)] = reached
+                changed = True
+    writer_names = frozenset(method.name for method in parsed.methods if writes[id(method)])
+    for method in parsed.methods:
+        _unresolved_writer_calls(source, method, resolve, classes, parsed.bases, writer_names)
+    return classes, writes, writer_names
+
+
+def census(sources: dict[str, str]) -> dict[str, frozenset[str]]:
+    """Watched field -> the commands whose dispatch writes it.
+
+    `sources` maps a file name to its text: the bridges and MCPMessages.c.
     Raises AssertionError for a write, a call or a job kind it cannot place.
     """
-    prepared = [_prepare(path, raw) for path, raw in sources.items()]
-    methods: list[_Method] = []
-    members: dict[tuple[str, str], dict[str, set[str]]] = {}
-    for source in prepared:
-        found, class_members = _parse(source)
-        methods.extend(found)
-        for klass, declared in class_members.items():
-            members[(source.path, klass)] = declared
+    if MESSAGES not in sources:
+        raise AssertionError(
+            f"the census reads {MESSAGES}, where MCPResult and its methods are declared"
+        )
+    messages = _prepare(MESSAGES, sources[MESSAGES])
+    parsed_messages = _parse(messages)
+    parsed_bridges = [
+        (source, _parse(source))
+        for source in (_prepare(path, raw) for path, raw in sources.items() if path != MESSAGES)
+    ]
+    bases = dict(parsed_messages.bases)
+    for _source, parsed in parsed_bridges:
+        bases.update(parsed.bases)
+    result_types = _result_types(bases)
+    classes, message_writes, writer_names = _message_writers(
+        messages, parsed_messages, result_types
+    )
+
+    methods = [method for _source, parsed in parsed_bridges for method in parsed.methods]
+    members = {
+        (source.path, klass): declared
+        for source, parsed in parsed_bridges
+        for klass, declared in parsed.members.items()
+    }
 
     def resolve(method: _Method, name: str) -> set[str] | None:
         return _resolve(method, members.get((method.path, method.klass), {}), name)
@@ -415,7 +746,7 @@ def census(sources: dict[str, str]) -> dict[str, frozenset[str]]:
     calls: dict[int, list[tuple[_Method, int]]] = {}
     kind_sites: dict[str, list[tuple[_Method, int]]] = {}
     writes: list[_Write] = []
-    for source in prepared:
+    for source, _parsed in parsed_bridges:
         literals = {match.group(1) for match in _LITERAL_NAME.finditer(source.text)}
         for (path, klass), named in by_name.items():
             if path != source.path:
@@ -465,7 +796,13 @@ def census(sources: dict[str, str]) -> dict[str, frozenset[str]]:
                     kind_sites.setdefault(literal.group(1), []).append(
                         (method, offset + match.start())
                     )
-                writes.extend(_writes_in(source, method, resolve))
+                writes.extend(_writes_in(source, method, resolve, result_types))
+                if method.klass in result_types:
+                    writes.extend(_self_writes(source, method))
+                for callee, pos in _message_calls(source, method, resolve, classes, bases):
+                    for name in sorted(message_writes[id(callee)]):
+                        writes.append(_Write(method, pos, name, source.line(pos)))
+                _unresolved_writer_calls(source, method, resolve, classes, bases, writer_names)
 
     reach: dict[int, frozenset[str] | None] = {
         id(method): (TOP if id(method) in entries else frozenset()) for method in methods
@@ -492,89 +829,79 @@ def census(sources: dict[str, str]) -> dict[str, frozenset[str]]:
                 changed = True
 
     observed: dict[str, frozenset[str]] = {name: frozenset() for name in WATCHED}
+    unplaced: list[str] = []
     for write in writes:
         commands = _narrow(reach[id(write.method)], _atoms_at(write.method, write.pos), kinds)
         where = f"{write.method.path}:{write.line} ({write.method.klass}.{write.method.name})"
         if commands is TOP:
-            raise AssertionError(
-                f"{where}: .{write.field} is written on a path any command reaches"
-            )
-        if not commands:
-            raise AssertionError(
-                f"{where}: .{write.field} is written where the census finds no command"
-            )
-        observed[write.field] = observed[write.field] | commands
+            unplaced.append(f"{where}: .{write.field} is written on a path any command reaches")
+        elif not commands:
+            unplaced.append(f"{where}: .{write.field} is written where the census finds no command")
+        else:
+            observed[write.field] = observed[write.field] | commands
+    if unplaced:
+        raise AssertionError("; ".join(sorted(set(unplaced))))
     return observed
 
 
-def _enclosing_call(before: str) -> str | None:
-    """Name before the innermost unclosed `(` that ends `before`, if any."""
-    depth = 0
-    for index in range(len(before) - 1, -1, -1):
-        char = before[index]
-        if char == ")":
-            depth += 1
-        elif char == "(":
-            if depth == 0:
-                name = re.search(r"(\w+)\s*$", before[:index])
-                return name.group(1) if name else None
-            depth -= 1
-        elif char in "{};":
-            return None
-    return None
-
-
-def _writes_in(source: _Source, method: _Method, resolve) -> list[_Write]:
-    body = source.masked[method.open + 1 : method.close]
-    offset = method.open + 1
-    found: list[_Write] = []
-    for name in sorted(WATCHED):
-        for match in re.finditer(rf"\.\s*{name}\b", body):
-            pos = offset + match.start()
-            after = body[match.end() :]
-            before = body[: match.start()]
-            assigned = _ASSIGN_AFTER.match(after) is not None or re.search(
-                r"(?:\+\+|--)\s*\w+\s*$", before
+def _owner_problems(observed: dict[str, frozenset[str]]) -> list[str]:
+    """Where OWNED_SCALAR_FIELDS and the Enforce writers disagree."""
+    problems: list[str] = []
+    for name, owners in sorted(OWNED_SCALAR_FIELDS.items()):
+        unlisted = sorted(observed[name] - owners)
+        stale = sorted(owners - observed[name])
+        if unlisted:
+            problems.append(
+                f"{name}: {unlisted} write it, but OWNED_SCALAR_FIELDS drops it from their result"
             )
-            # A bare argument can be an `out` parameter, which writes the field.
-            argument = False
-            if re.search(r"[(,]\s*\w+\s*$", before) and re.match(r"\s*[,)]", after):
-                call = _enclosing_call(before)
-                argument = call is not None and call not in _KEYWORD_CALLS
-            if not (assigned or argument):
-                continue
-            root = _ROOT_BEFORE.search(before)
-            if root is None:
-                raise AssertionError(
-                    f"{source.path}:{source.line(pos)}: .{name} written through a "
-                    "target the census cannot type"
-                )
-            declared = resolve(method, root.group(1))
-            if declared is None:
-                raise AssertionError(
-                    f"{source.path}:{source.line(pos)}: .{name} written on "
-                    f"{root.group(1)!r}, which the census cannot type"
-                )
-            if "MCPResult" in declared:
-                found.append(_Write(method, pos, name, source.line(pos)))
-    return found
+        if stale:
+            problems.append(
+                f"{name}: owners {stale} no longer write it; the prune would keep their "
+                "unassigned default"
+            )
+    return problems
 
 
-def _bridge_sources() -> dict[str, str]:
-    return {name: (MISSION / name).read_text(encoding="utf-8") for name in BRIDGES}
+def _never_filled_problems(observed: dict[str, frozenset[str]]) -> list[str]:
+    return [
+        f"{name}: {sorted(observed[name])} write it; move it to OWNED_SCALAR_FIELDS"
+        for name in sorted(NEVER_FILLED_SCALAR_FIELDS)
+        if observed[name]
+    ]
+
+
+def _census_sources() -> dict[str, str]:
+    return {
+        name: (MISSION / name).read_text(encoding="utf-8") for name in (*BRIDGES, MESSAGES)
+    }
+
+
+def _mcp_result_declarations(messages: str) -> list[tuple[str, str, str | None]]:
+    """(type with `ref` kept, name, initializer or None) of every MCPResult member."""
+    parsed = _parse(_prepare(MESSAGES, messages))
+    declarations: list[tuple[str, str, str | None]] = []
+    for statement in parsed.class_text[RESULT_CLASS].split(";"):
+        declaration, equals, initializer = statement.partition("=")
+        words = declaration.split()
+        if len(words) >= 2:
+            declarations.append(
+                (" ".join(words[:-1]), words[-1], initializer.strip() if equals else None)
+            )
+    return declarations
 
 
 def _mcp_result_members(messages: str) -> dict[str, str]:
     """name -> declared type of every MCPResult member, `ref` kept in the type."""
-    text = clean(messages)
-    start = text.index("class MCPResult")
-    body = text[text.index("{", start) + 1 : text.index("\n};", start)]
-    members: dict[str, str] = {}
-    for statement in body.split(";"):
-        words = statement.split()
-        if len(words) >= 2:
-            members[words[-1]] = " ".join(words[:-1])
-    return members
+    return {name: type_name for type_name, name, _init in _mcp_result_declarations(messages)}
+
+
+def _mcp_result_initializers(messages: str) -> dict[str, str]:
+    """name -> initializer of every MCPResult member declared with one."""
+    return {
+        name: initializer
+        for _type, name, initializer in _mcp_result_declarations(messages)
+        if initializer is not None
+    }
 
 
 def _mutant(sources: dict[str, str], name: str, anchor: str, replacement: str) -> dict[str, str]:
@@ -592,37 +919,17 @@ def _mutant(sources: dict[str, str], name: str, anchor: str, replacement: str) -
 
 class OwnedScalarCensusTest(unittest.TestCase):
     def test_owner_sets_are_exactly_the_commands_that_write_each_field(self) -> None:
-        observed = census(_bridge_sources())
-
-        for name, owners in sorted(OWNED_SCALAR_FIELDS.items()):
-            with self.subTest(field=name):
-                self.assertEqual(
-                    observed[name] - owners,
-                    frozenset(),
-                    f"these commands write {name} but OWNED_SCALAR_FIELDS drops it "
-                    "from their result",
-                )
-                self.assertEqual(
-                    owners - observed[name],
-                    frozenset(),
-                    f"these owners of {name} no longer write it; the prune would keep "
-                    "their unassigned default",
-                )
+        self.assertEqual(_owner_problems(census(_census_sources())), [])
 
     def test_never_filled_fields_have_no_write(self) -> None:
-        observed = census(_bridge_sources())
-
-        for name in sorted(NEVER_FILLED_SCALAR_FIELDS):
-            with self.subTest(field=name):
-                self.assertEqual(
-                    observed[name],
-                    frozenset(),
-                    f"{name} is now written; move it to OWNED_SCALAR_FIELDS with "
-                    "these owners",
-                )
+        self.assertEqual(_never_filled_problems(census(_census_sources())), [])
 
     def test_owned_and_never_filled_fields_are_scalar_members_of_mcp_result(self) -> None:
-        members = _mcp_result_members((MISSION / "MCPMessages.c").read_text(encoding="utf-8"))
+        messages = (MISSION / MESSAGES).read_text(encoding="utf-8")
+        members = _mcp_result_members(messages)
+        # An initializer fills the field for every command, which an owner set
+        # cannot express.
+        initialized = _mcp_result_initializers(messages)
 
         self.assertEqual(set(OWNED_SCALAR_FIELDS) & NEVER_FILLED_SCALAR_FIELDS, set())
         for name in sorted(WATCHED):
@@ -630,6 +937,7 @@ class OwnedScalarCensusTest(unittest.TestCase):
                 self.assertIn(name, members)
                 self.assertFalse(members[name].startswith("ref "), members[name])
                 self.assertNotIn(name, PRUNABLE_FIELDS)
+                self.assertNotIn(name, initialized)
 
     def test_every_owner_is_a_whitelisted_bridge_command(self) -> None:
         commands = loopback.SERVER_COMMANDS | loopback.CLIENT_COMMANDS
@@ -638,32 +946,52 @@ class OwnedScalarCensusTest(unittest.TestCase):
                 self.assertTrue(owners)
                 self.assertLessEqual(owners, commands)
 
-    def test_only_the_two_bridges_build_or_fill_a_result(self) -> None:
-        # The census reads two files. Any other script that names MCPResult
-        # could fill it without being read, so that would widen this test first.
-        declaring = MISSION / "MCPMessages.c"
+    def test_only_the_analyzed_files_name_mcp_result(self) -> None:
+        # The census reads the two bridges and MCPMessages.c. Any other script
+        # that names MCPResult could build or fill one without being read, so
+        # that would widen this test first.
+        analyzed = {*BRIDGES, MESSAGES}
         others = [
             path.relative_to(SCRIPTS).as_posix()
             for path in sorted(SCRIPTS.rglob("*.c"))
-            if path.name not in BRIDGES
-            and path != declaring
+            if not (path.parent == MISSION and path.name in analyzed)
             and re.search(r"\bMCPResult\b", clean(path.read_text(encoding="utf-8")))
         ]
         self.assertEqual(others, [])
+
+    def test_the_census_does_not_run_without_the_message_classes(self) -> None:
+        sources = _census_sources()
+        del sources[MESSAGES]
+        with self.assertRaisesRegex(AssertionError, MESSAGES):
+            census(sources)
 
 
 class OwnedScalarCensusControlTest(unittest.TestCase):
     """Negative controls: each edit a future change could make is seen."""
 
+    # The dispatch branch the message-class controls add, and where.
+    OBJECT_DELETE = '\t\telse if (command.cmd == "object_delete")\n'
+    DELETE_BODY = "\t\tresult.object_id = objectId;\n\t\tresult.deleted = 0;\n"
+    SET_GEAR = "\tint gear;\n\tvoid SetGear(int value)\n\t{\n\t\tgear = value;\n\t}\n"
+
     def setUp(self) -> None:
-        self.sources = _bridge_sources()
+        self.sources = _census_sources()
+
+    def _peek_branch(self, sources: dict[str, str], statement: str) -> dict[str, str]:
+        return _mutant(
+            sources,
+            "MCPBridge.c",
+            self.OBJECT_DELETE,
+            '\t\telse if (command.cmd == "vehicle_peek")\n\t\t{\n'
+            f"\t\t\t{statement}\n\t\t\tresult.ok = true;\n\t\t}}\n" + self.OBJECT_DELETE,
+        )
 
     def test_a_verb_that_starts_writing_an_owned_field_is_named(self) -> None:
         mutated = _mutant(
             self.sources,
             "MCPBridge.c",
-            "\t\tresult.object_id = objectId;\n\t\tresult.deleted = 0;\n",
-            "\t\tresult.object_id = objectId;\n\t\tresult.deleted = 0;\n\t\tresult.gear = 0;\n",
+            self.DELETE_BODY,
+            self.DELETE_BODY + "\t\tresult.gear = 0;\n",
         )
         self.assertEqual(census(mutated)["gear"], {"vehicle_telemetry", "object_delete"})
 
@@ -769,10 +1097,7 @@ class OwnedScalarCensusControlTest(unittest.TestCase):
         ):
             with self.subTest(target=label):
                 mutated = _mutant(
-                    self.sources,
-                    "MCPBridge.c",
-                    "\t\tresult.object_id = objectId;\n\t\tresult.deleted = 0;\n",
-                    "\t\tresult.object_id = objectId;\n\t\tresult.deleted = 0;\n" + statement,
+                    self.sources, "MCPBridge.c", self.DELETE_BODY, self.DELETE_BODY + statement
                 )
                 with self.assertRaisesRegex(AssertionError, "cannot type"):
                     census(mutated)
@@ -786,6 +1111,131 @@ class OwnedScalarCensusControlTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(AssertionError, "non-literal"):
             census(mutated)
+
+    # R1 F1: writes that live in MCPMessages.c methods.
+
+    def test_a_result_method_that_writes_a_field_is_attributed_to_its_caller(self) -> None:
+        # The review's case: SetGear, declared in MCPResult, assigns gear, and a
+        # new verb calls it. The owner test goes red for it.
+        mutated = _mutant(self.sources, MESSAGES, "\tint gear;\n", self.SET_GEAR)
+        mutated = self._peek_branch(mutated, "result.SetGear(2);")
+
+        observed = census(mutated)
+
+        self.assertEqual(observed["gear"], {"vehicle_telemetry", "vehicle_peek"})
+        self.assertEqual(
+            _owner_problems(observed),
+            [
+                "gear: ['vehicle_peek'] write it, but OWNED_SCALAR_FIELDS drops it "
+                "from their result"
+            ],
+        )
+
+    def test_a_writer_reached_through_a_static_helper_and_this_is_named(self) -> None:
+        # A static helper of another message class calls a result method that
+        # writes this.seated.
+        mutated = _mutant(
+            self.sources,
+            MESSAGES,
+            "\tbool seated;\n",
+            "\tbool seated;\n\tvoid MarkSeated()\n\t{\n\t\tthis.seated = true;\n\t}\n",
+        )
+        mutated = _mutant(
+            mutated,
+            MESSAGES,
+            "class MCPJob\n{",
+            "class MCPResultFill\n{\n\tstatic void Seat(MCPResult target)\n\t{\n"
+            "\t\ttarget.MarkSeated();\n\t}\n};\n\nclass MCPJob\n{",
+        )
+        mutated = _mutant(
+            mutated,
+            "MCPBridge.c",
+            self.DELETE_BODY,
+            self.DELETE_BODY + "\t\tMCPResultFill.Seat(result);\n",
+        )
+        self.assertIn("object_delete", census(mutated)["seated"])
+
+    def test_a_result_constructor_that_writes_a_field_fails(self) -> None:
+        # Every dispatch builds its reply with new MCPResult(): a write in the
+        # constructor reaches every command, which no owner set can express.
+        mutated = _mutant(
+            self.sources,
+            MESSAGES,
+            "\tint gear;\n",
+            "\tint gear;\n\tvoid MCPResult()\n\t{\n\t\tgear = -1;\n\t}\n",
+        )
+        with self.assertRaisesRegex(AssertionError, "any command reaches"):
+            census(mutated)
+
+    def test_a_method_the_result_class_does_not_declare_fails(self) -> None:
+        mutated = self._peek_branch(self.sources, "result.SetGear(2);")
+        with self.assertRaisesRegex(AssertionError, "cannot resolve the call"):
+            census(mutated)
+
+    def test_a_writing_method_on_a_receiver_it_cannot_type_fails(self) -> None:
+        with_setter = _mutant(self.sources, MESSAGES, "\tint gear;\n", self.SET_GEAR)
+        for label, statement in (
+            ("chained", "command.args.reply.SetGear(2);"),
+            ("undeclared", "m_Reply.SetGear(2);"),
+        ):
+            with self.subTest(receiver=label):
+                with self.assertRaisesRegex(AssertionError, "cannot resolve"):
+                    census(self._peek_branch(with_setter, statement))
+
+    def test_a_writing_method_referenced_without_a_call_fails(self) -> None:
+        # CallLater(result.SetGear, ...) runs SetGear later, for no command the
+        # census can place. Inside MCPResult, a bare SetGear reference is the same.
+        with_setter = _mutant(self.sources, MESSAGES, "\tint gear;\n", self.SET_GEAR)
+        deferred = self._peek_branch(
+            with_setter,
+            "GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(result.SetGear, 0, false, 2);",
+        )
+        inside = _mutant(
+            with_setter,
+            MESSAGES,
+            self.SET_GEAR,
+            self.SET_GEAR
+            + "\tvoid SetGearLater()\n\t{\n"
+            "\t\tGetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(SetGear, 0, false, 2);\n"
+            "\t}\n",
+        )
+        for label, mutated in (("bridge", deferred), ("result class", inside)):
+            with self.subTest(where=label):
+                with self.assertRaisesRegex(AssertionError, "referenced without a call"):
+                    census(mutated)
+
+    def test_a_same_named_member_of_another_message_class_is_not_a_result_write(self) -> None:
+        # MCPJob declares is_owner too. Its own method writing it writes the job,
+        # not a reply, so the owner sets do not move.
+        mutated = _mutant(
+            self.sources,
+            MESSAGES,
+            "class MCPJob\n{",
+            "class MCPJob\n{\n\tvoid ClearOwner()\n\t{\n\t\tis_owner = false;\n\t}\n",
+        )
+        mutated = _mutant(
+            mutated,
+            "MCPBridge.c",
+            '\t\tjob.kind = "seat";\n',
+            '\t\tjob.kind = "seat";\n\t\tjob.ClearOwner();\n',
+        )
+        self.assertEqual(_owner_problems(census(mutated)), [])
+
+    def test_a_result_class_declared_in_a_bridge_file_fails_closed(self) -> None:
+        # A class derived from MCPResult inside a bridge file: its public method
+        # can be called from anywhere, so its bare write reaches any command.
+        mutated = dict(self.sources)
+        mutated["MCPBridge.c"] = (
+            self.sources["MCPBridge.c"]
+            + "\nclass MCPReplyEx : MCPResult\n{\n\tvoid MarkGear()\n\t{\n\t\tgear = 3;\n\t}\n};\n"
+        )
+        with self.assertRaisesRegex(AssertionError, "any command reaches"):
+            census(mutated)
+
+    def test_an_initialized_watched_field_is_reported(self) -> None:
+        messages = _mutant(self.sources, MESSAGES, "\tint gear;\n", "\tint gear = -1;\n")[MESSAGES]
+        self.assertEqual(_mcp_result_initializers(messages), {"gear": "-1"})
+        self.assertEqual(_mcp_result_initializers(self.sources[MESSAGES]), {})
 
 
 if __name__ == "__main__":

@@ -8,7 +8,9 @@ Tool descriptions and one Python ToolError text only; no Enforce, no PBO.
 - c931: condition_failed means action_use did not dispatch; it does not promise
   that nothing follows (fb-20260818-161011-c931).
 - 4f1c: world_spawn's type is a CfgVehicles classname, and unknown_type names
-  the type received (fb-20260823-131632-4f1c).
+  the type received (fb-20260823-131632-4f1c). Only a value that is not a
+  loaded CfgVehicles classname is refused (MCPBridge.c ValidateSpawnArgs): the
+  round-1 text said "any other value", and another classname is forwarded.
 - 00c4 part b: session_status.claimable does not mean the lease is free
   (fb-20260821-162508-00c4). The coordinator tests anchor the two cases the
   description names, so the sentence fails here if _claimable_locked changes.
@@ -23,6 +25,15 @@ from unittest.mock import AsyncMock, patch
 from dayz_mcp import server
 from dayz_mcp.server import ServerConfig, ToolError, build_app
 from tests.lease_helpers import MID, FakeClock, _coord, _identity
+from tests.mcp_helpers import _content_json
+
+# R1 F2: the bridge refuses only an empty type or one ConfigIsExisting does
+# not find under CfgVehicles, so the description names that case and no other.
+WORLD_SPAWN_TYPE_SENTENCE = (
+    'type is a CfgVehicles classname, for example type="CivilianSedan"; a '
+    'value that is not a loaded CfgVehicles classname, such as "vehicle", '
+    "returns unknown_type naming the type received."
+)
 
 
 class V13DescriptionsTest(unittest.IsolatedAsyncioTestCase):
@@ -74,9 +85,8 @@ class V13DescriptionsTest(unittest.IsolatedAsyncioTestCase):
 
     def test_world_spawn_names_the_classname_contract(self) -> None:
         description = self._description("world_spawn")
-        self.assertIn("type is a CfgVehicles classname", description)
-        self.assertIn('type="CivilianSedan"', description)
-        self.assertIn("returns unknown_type naming the type received", description)
+        self.assertIn(WORLD_SPAWN_TYPE_SENTENCE, description)
+        self.assertNotIn("any other value", description)
 
     def test_session_status_says_what_claimable_does_not_mean(self) -> None:
         description = self._description("session_status")
@@ -138,6 +148,31 @@ class UnknownSpawnTypeTextTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(repr(spawn_type[:64]), message)
         self.assertIn("(first 64 of 100 characters)", message)
         self.assertNotIn(spawn_type, message)
+
+    async def test_another_loaded_classname_is_forwarded_unchanged(self) -> None:
+        # Only a type CfgVehicles does not have is refused, so a description
+        # that promised unknown_type for "any other value" than the example
+        # would contradict this call.
+        tools = {tool.name: tool for tool in await self.app.list_tools()}
+        description = tools["world_spawn"].description or ""
+        self.assertIn(WORLD_SPAWN_TYPE_SENTENCE, description)
+        self.assertNotIn("any other value", description)
+
+        accepted = {"ok": 1, "type": "Hatchback_02", "object_id": 42, "found": 1}
+        call = AsyncMock(return_value=accepted)
+        with patch.object(self.runtime, "call_bridge", new=call):
+            result = _content_json(
+                await self.app.call_tool(
+                    "world_spawn",
+                    {"type": "Hatchback_02", "pos": [7500.0, 0.0, 7500.0], "timeout_s": 1.0},
+                )
+            )
+
+        call.assert_awaited_once()
+        command, args, peer, timeout = call.await_args.args
+        self.assertEqual((command, peer, timeout), ("world_spawn", "server", 1.0))
+        self.assertEqual(args["type"], "Hatchback_02")
+        self.assertEqual(result, accepted)
 
     async def test_other_bridge_refusals_keep_their_bare_code(self) -> None:
         for code in ("spawn_failed", "bad_pos", "bad_flags", "timeout"):
