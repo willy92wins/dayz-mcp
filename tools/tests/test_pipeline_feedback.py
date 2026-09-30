@@ -15,9 +15,41 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 from dayz_mcp import inbox, server
+from tests.mcp_helpers import _content_json
 
 
 _ID_RE = r"^fb-\d{8}-\d{6}-[0-9a-f]{4}$"
+# Ficha fb-20260930-165220-6211: the caller resolved _NEAR_MISS_ID, which no
+# entry had, and was told it worked; the ticket it meant was _REAL_ID.
+_REAL_ID = "fb-20260930-053537-7863"
+_NEAR_MISS_ID = "fb-20260930-053510-7863"
+
+
+def _entry(entry_id: str, title: str = "t") -> dict:
+    return {
+        "id": entry_id,
+        "ts": "2026-09-30T05:35:37Z",
+        "kind": "bug",
+        "title": title,
+        "body": "b",
+        "project": "",
+        "platform": "",
+    }
+
+
+def _jsonl(*records: object) -> bytes:
+    """Records framed the way inbox._append_jsonl writes them."""
+    return "".join(
+        json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        for record in records
+    ).encode("utf-8")
+
+
+def _seed_store(payload: bytes) -> bytes:
+    """Write the temporary store (never the live one) and return its bytes."""
+    inbox.INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    inbox.FEEDBACK_PATH.write_bytes(payload)
+    return payload
 
 
 class InboxTest(unittest.TestCase):
@@ -243,6 +275,141 @@ class InboxTest(unittest.TestCase):
         self.assertNotIn(b"age_s", after)
         self.assertNotIn(b"age_label", after)
 
+    def test_unknown_id_is_refused_and_the_store_bytes_are_unchanged(self) -> None:
+        before = _seed_store(_jsonl(_entry(_REAL_ID), _entry("fb-20260930-060000-abcd")))
+        with self.assertRaises(ValueError) as ctx:
+            inbox.append_resolution(_NEAR_MISS_ID, "fix")
+        self.assertEqual(str(ctx.exception), f"feedback_not_found: {_NEAR_MISS_ID}")
+        self.assertEqual(inbox.FEEDBACK_PATH.read_bytes(), before)
+        # The ticket the caller meant is still open.
+        self.assertEqual(inbox.read_inbox()["unresolved_total"], 2)
+
+    def test_unknown_id_without_a_store_creates_nothing(self) -> None:
+        self.assertFalse(inbox.INBOX_DIR.exists())
+        with self.assertRaises(ValueError) as ctx:
+            inbox.append_resolution(_NEAR_MISS_ID, "fix")
+        self.assertEqual(str(ctx.exception), f"feedback_not_found: {_NEAR_MISS_ID}")
+        self.assertFalse(inbox.INBOX_DIR.exists())
+
+    def test_only_a_feedback_record_vouches_for_an_id(self) -> None:
+        # Each line below names _NEAR_MISS_ID and none of them is its entry: the
+        # orphan resolution the ficha left behind, a resolution record that also
+        # carries an "id", an entry quoting it in its title, a JSON list, and a
+        # torn last line such as a concurrent writer leaves mid-append.
+        payload = _jsonl(
+            {
+                "resolves": _NEAR_MISS_ID,
+                "ts": "2026-09-30T16:51:32Z",
+                "resolution": "fix",
+                "platform": "",
+            },
+            {
+                "resolves": _REAL_ID,
+                "id": _NEAR_MISS_ID,
+                "ts": "2026-09-30T16:52:00Z",
+                "resolution": "fix",
+                "platform": "",
+            },
+            _entry(_REAL_ID, title=f"not {_NEAR_MISS_ID}"),
+            [_NEAR_MISS_ID],
+        ) + ('{"id":"' + _NEAR_MISS_ID + '","ts":"2026').encode("ascii")
+        before = _seed_store(payload)
+        with self.assertRaises(ValueError) as ctx:
+            inbox.append_resolution(_NEAR_MISS_ID, "fix")
+        self.assertEqual(str(ctx.exception), f"feedback_not_found: {_NEAR_MISS_ID}")
+        self.assertEqual(inbox.FEEDBACK_PATH.read_bytes(), before)
+
+    def test_the_store_is_read_at_call_time(self) -> None:
+        _seed_store(_jsonl(_entry(_REAL_ID)))
+        with self.assertRaises(ValueError) as ctx:
+            inbox.append_resolution(_NEAR_MISS_ID, "fix")
+        self.assertEqual(str(ctx.exception), f"feedback_not_found: {_NEAR_MISS_ID}")
+        # Another process files that id; the very next call must see it.
+        with inbox.FEEDBACK_PATH.open("ab") as handle:
+            handle.write(_jsonl(_entry(_NEAR_MISS_ID)))
+        record = inbox.append_resolution(_NEAR_MISS_ID, "fix")
+        self.assertEqual(record["resolves"], _NEAR_MISS_ID)
+        self.assertIs(record["already_resolved"], False)
+
+    def test_known_id_appends_one_line_and_says_it_was_open(self) -> None:
+        before = _seed_store(_jsonl(_entry(_REAL_ID)))
+        record = inbox.append_resolution(
+            _REAL_ID, "fix", platform="claude", evidence_ref="reviews/r.md"
+        )
+        self.assertIs(record["already_resolved"], False)
+        after = inbox.FEEDBACK_PATH.read_bytes()
+        self.assertTrue(after.startswith(before))
+        appended = after[len(before):]
+        self.assertEqual(appended.count(b"\n"), 1)
+        # already_resolved is reply-only: the persisted record is the rest.
+        persisted = {key: value for key, value in record.items() if key != "already_resolved"}
+        self.assertEqual(json.loads(appended), persisted)
+        self.assertNotIn(b"already_resolved", after)
+        resolved = inbox.read_inbox(include_resolved=True)["entries"][0]
+        self.assertEqual(resolved["resolution"], "fix")
+        self.assertEqual(resolved["evidence_ref"], "reviews/r.md")
+
+    def test_resolving_twice_appends_both_and_says_already_resolved(self) -> None:
+        item = inbox.append_feedback("bug", "two", "b2")
+        first = inbox.append_resolution(item["id"], "first-fix")
+        second = inbox.append_resolution(item["id"], "second-fix")
+        self.assertIs(first["already_resolved"], False)
+        self.assertIs(second["already_resolved"], True)
+        lines = inbox.FEEDBACK_PATH.read_bytes().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(
+            [json.loads(line)["resolution"] for line in lines[1:]],
+            ["first-fix", "second-fix"],
+        )
+        shown = inbox.read_inbox(include_resolved=True)
+        self.assertEqual(shown["entries"][0]["resolution"], "second-fix")
+
+    def test_a_resolution_before_its_entry_does_not_count_as_resolved(self) -> None:
+        # _read_inbox attaches a resolution only to an entry read before it, so
+        # the reply must not call resolved an entry pipeline_inbox shows open.
+        _seed_store(_jsonl(
+            {
+                "resolves": _REAL_ID,
+                "ts": "2026-09-30T05:00:00Z",
+                "resolution": "early",
+                "platform": "",
+            },
+            _entry(_REAL_ID),
+        ))
+        shown = inbox.read_inbox(include_resolved=True)["entries"]
+        self.assertEqual([item["id"] for item in shown], [_REAL_ID])
+        self.assertNotIn("resolution", shown[0])
+        self.assertIs(inbox.append_resolution(_REAL_ID, "fix")["already_resolved"], False)
+        self.assertIs(inbox.append_resolution(_REAL_ID, "again")["already_resolved"], True)
+
+    def test_malformed_ids_keep_their_bad_args_error(self) -> None:
+        # The lookup runs after validation, so a malformed id is never reported
+        # as feedback_not_found, even when an entry differs from it by one char.
+        before = _seed_store(_jsonl(_entry(_REAL_ID)))
+        shape_error = "bad_args: feedback_id must match fb-YYYYMMDD-HHMMSS-xxxx"
+        for feedback_id in (
+            "",
+            "fb-x",
+            "FB-20260930-053537-7863",
+            " fb-20260930-053537-7863",
+            "fb-20260930-053537-7863 ",
+            "fb-20260930-053537-7863\n",
+            "fb-20260930-053537-786",
+            "fb-20260930-053537-78G3",
+        ):
+            with self.subTest(feedback_id=repr(feedback_id)):
+                with self.assertRaises(ValueError) as ctx:
+                    inbox.append_resolution(feedback_id, "fix")
+                self.assertEqual(str(ctx.exception), shape_error)
+        for feedback_id in (None, 7863):
+            with self.subTest(feedback_id=repr(feedback_id)):
+                with self.assertRaises(ValueError) as ctx:
+                    inbox.append_resolution(feedback_id, "fix")
+                self.assertEqual(
+                    str(ctx.exception), "bad_args: feedback_id must be a string"
+                )
+        self.assertEqual(inbox.FEEDBACK_PATH.read_bytes(), before)
+
     def test_age_boundaries_are_derived_from_original_ts_without_persistence(self) -> None:
         from datetime import datetime, timedelta, timezone
 
@@ -350,6 +517,53 @@ class PipelineToolsTest(unittest.IsolatedAsyncioTestCase):
             "bad_args" in message or "tool_contribution" in message,
             message,
         )
+
+
+class PipelineResolveUnknownIdToolTest(unittest.IsolatedAsyncioTestCase):
+    """Ficha fb-20260930-165220-6211 at the tool: refuse, write nothing."""
+
+    def setUp(self) -> None:
+        self._orig_dir = inbox.INBOX_DIR
+        self._orig_path = inbox.FEEDBACK_PATH
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        inbox.INBOX_DIR = root / "inbox"
+        inbox.FEEDBACK_PATH = inbox.INBOX_DIR / "feedback.jsonl"
+
+    def tearDown(self) -> None:
+        inbox.INBOX_DIR = self._orig_dir
+        inbox.FEEDBACK_PATH = self._orig_path
+        self._tmp.cleanup()
+
+    async def test_unknown_id_is_a_tool_error_that_writes_nothing(self) -> None:
+        before = _seed_store(_jsonl(_entry(_REAL_ID)))
+        app, _runtime = server.build_app(server.ServerConfig())
+        # The tool maps the refusal to a ToolError itself, as it does bad_args.
+        tool = app._tool_manager.get_tool("pipeline_resolve")
+        with self.assertRaises(server.ToolError) as direct:
+            await tool.fn(feedback_id=_NEAR_MISS_ID, resolution="fix")
+        self.assertEqual(str(direct.exception), f"feedback_not_found: {_NEAR_MISS_ID}")
+        with self.assertRaises(Exception) as ctx:
+            await app.call_tool(
+                "pipeline_resolve",
+                {"feedback_id": _NEAR_MISS_ID, "resolution": "fix"},
+            )
+        self.assertEqual(type(ctx.exception).__name__, "ToolError")
+        message = str(ctx.exception)
+        self.assertIn(f"feedback_not_found: {_NEAR_MISS_ID}", message)
+        self.assertNotIn("bad_args", message)
+        self.assertEqual(inbox.FEEDBACK_PATH.read_bytes(), before)
+
+    async def test_known_id_reply_says_whether_it_was_already_resolved(self) -> None:
+        _seed_store(_jsonl(_entry(_REAL_ID)))
+        app, _runtime = server.build_app(server.ServerConfig())
+        arguments = {"feedback_id": _REAL_ID, "resolution": "fix"}
+        first = _content_json(await app.call_tool("pipeline_resolve", arguments))
+        second = _content_json(await app.call_tool("pipeline_resolve", arguments))
+        self.assertEqual(first["resolves"], _REAL_ID)
+        self.assertIs(first["already_resolved"], False)
+        self.assertIs(second["already_resolved"], True)
+        self.assertEqual(len(inbox.FEEDBACK_PATH.read_bytes().splitlines()), 3)
 
 
 class PipelineFeedbackInputSchemaLimitsTest(unittest.IsolatedAsyncioTestCase):
@@ -565,6 +779,12 @@ class PipelineToolDescriptionsDeclareLimitsTest(unittest.IsolatedAsyncioTestCase
         self.assertIn("string_too_long", text)
         self.assertNotIn("2087 > 2000", text)
         self.assertNotIn("naming its real count", text)
+
+    async def test_resolve_declares_the_unknown_id_refusal(self) -> None:
+        # Ficha fb-20260930-165220-6211: a caller must learn from the catalog
+        # that an unknown id is refused, not only by tripping it.
+        text = (await self._tool_descriptions())["pipeline_resolve"]
+        self.assertIn("feedback_not_found", text)
 
 
 if __name__ == "__main__":

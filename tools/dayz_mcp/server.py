@@ -8494,7 +8494,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Triage a feedback item by appending a resolution; deletes "
-            "nothing, history is append-only. Enforced limits, in characters: "
+            "nothing, history is append-only. A feedback_id that matches no "
+            "filed entry is refused with feedback_not_found; nothing is "
+            "appended. Enforced limits, in characters: "
             "resolution 1..2000, evidence_ref 1..240. evidence_ref is a path "
             "only -- a path relative to DayZ_MCP_dev starting at one of "
             "reviews | gates | reports | research, ASCII, segments of "
@@ -8512,7 +8514,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             str | None, Field(max_length=inbox.EVIDENCE_REF_MAX_CHARS)
         ] = None,
     ) -> dict[str, Any]:
-        """Triage a feedback item by appending a resolution; deletes nothing, history is append-only. Enforced limits, in characters: resolution 1..2000, evidence_ref 1..240. evidence_ref is a path only -- relative to DayZ_MCP_dev, starting at reviews | gates | reports | research, ASCII, segments of [A-Za-z0-9._-], no repo prefix and nothing appended (note, parentheses, commit id, #anchor). An over-length resolution is rejected by the published inputSchema (Pydantic type=string_too_long) before inbox; trim to 2000 without guessing."""
+        """Triage a feedback item by appending a resolution; deletes nothing, history is append-only. A feedback_id that matches no filed entry is refused with feedback_not_found; nothing is appended. Enforced limits, in characters: resolution 1..2000, evidence_ref 1..240. evidence_ref is a path only -- relative to DayZ_MCP_dev, starting at reviews | gates | reports | research, ASCII, segments of [A-Za-z0-9._-], no repo prefix and nothing appended (note, parentheses, commit id, #anchor). An over-length resolution is rejected by the published inputSchema (Pydantic type=string_too_long) before inbox; trim to 2000 without guessing."""
         # The lock here only preserves the one-tool-at-a-time client invariant;
         # these tools do not call the bridge.
         async with runtime.tool_lock:
@@ -8525,7 +8527,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 )
             except ValueError as exc:
                 message = str(exc)
-                if message == "bad_args" or message.startswith("bad_args"):
+                if (
+                    message == "bad_args"
+                    or message.startswith("bad_args")
+                    or message.startswith("feedback_not_found")
+                ):
                     raise ToolError(message) from None
                 raise
 
