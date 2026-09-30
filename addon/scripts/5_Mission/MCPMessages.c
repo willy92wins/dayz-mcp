@@ -40,6 +40,11 @@ class MCPDialogResult
 	}
 };
 
+// Command args. A key absent from the command JSON reaches the handler as 0 or
+// false, not as the constructor value (fb-20260930-065425-8779: an object_anim
+// read wrote phase 0 and a partial world_weather_set zeroed the other levels).
+// So a value that must be left alone when absent travels with a bool <field>_set,
+// true beside the value. An absent flag reads false and the value is not read.
 class MCPArgs
 {
 	string type;
@@ -92,6 +97,11 @@ class MCPArgs
 	float overcast;
 	float rain;
 	float fog;
+	// Presence of the four values above (see the class comment).
+	bool time_multiplier_set;
+	bool overcast_set;
+	bool rain_set;
+	bool fog_set;
 	float time;
 	float min_duration;
 	string expr;
@@ -104,9 +114,10 @@ class MCPArgs
 	// F3.1 surface_query
 	float x;
 	float z;
-	// F3.4 object_anim (phase == MCP_ARG_FLOAT_UNSET means read-only)
+	// F3.4 object_anim. phase_set true writes phase; false (absent) only reads.
 	string source;
 	float phase;
+	bool phase_set;
 	// F3.5 inventory_give / b256 inventory_attach
 	string classname;
 	string dest;
@@ -134,8 +145,11 @@ class MCPArgs
 	ref array<ref MCPDialogField> fields;
 
 	// F3.7 infected_drive - heading in DEGREES (bridge converts to radians).
+	// Unless mode is release, both flags must be true (see the class comment).
 	float heading;
 	float speed;
+	bool heading_set;
+	bool speed_set;
 	// weapon_raise. False lowers at once. Other commands leave this false.
 	bool raised;
 	// weapon_aim. Absolute value capped at MCPWeaponControl.AIM_CHANGE_ABS_MAX.
@@ -160,6 +174,8 @@ class MCPArgs
 		sample_hz = 20;
 		max_samples = 4096;
 		hold_ttl_s = 0.0;
+		// Second guard only: every reader tests the _set flag first, and the server's
+		// IsFiniteFloat refuses float.MAX if a flag ever arrives without its value.
 		time_multiplier = MCP_ARG_FLOAT_UNSET;
 		overcast = MCP_ARG_FLOAT_UNSET;
 		rain = MCP_ARG_FLOAT_UNSET;

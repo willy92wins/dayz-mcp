@@ -111,12 +111,14 @@ EXPECTED_VEHICLE_DOOR_MEMBERS = [
 
 # object_anim sentences pinned by tests/test_object_anim.py that the new
 # pointer sentence must not disturb.
+# fb-20260930-065425-8779 replaced "does not hold on the vehicle" and "cannot
+# keep a door open": each object_anim read wrote phase 0.
 OBJECT_ANIM_PINNED = (
     "The returned phase is the same-tick re-read",
     "can still read the old value",
     "confirm a write with a later read",
-    "A phase written by object_anim does not hold on the vehicle",
-    "cannot keep a door open",
+    "A read writes nothing.",
+    "A written phase holds",
     "For building doors, read object_doors",
     "read 0 for an open building door",
 )

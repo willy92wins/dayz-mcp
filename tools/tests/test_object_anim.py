@@ -15,7 +15,8 @@ VALID_READ = {
     "pos": [7500.0, 0.0, 7500.0],
     "source": "Doors1",
 }
-VALID_WRITE = {**VALID_READ, "phase": 1.0}
+# A write carries its presence flag (fb-20260930-065425-8779).
+VALID_WRITE = {**VALID_READ, "phase": 1.0, "phase_set": True}
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 
 
@@ -48,7 +49,7 @@ class ObjectAnimIngressTest(unittest.TestCase):
         self.assertTrue(command_requires_lease(COMMAND))
 
         by_id_read = {"object_id": 5, "source": "Doors1"}
-        by_id_write = {"object_id": 5, "source": "Doors1", "phase": 0.0}
+        by_id_write = {"object_id": 5, "source": "Doors1", "phase": 0.0, "phase_set": True}
         for args in (VALID_READ, VALID_WRITE, by_id_read, by_id_write):
             with self.subTest(args=args):
                 status, body = self.state.enqueue_command(COMMAND, dict(args))
@@ -61,9 +62,13 @@ class ObjectAnimIngressTest(unittest.TestCase):
             {**VALID_READ, "source": ""},
             {**VALID_READ, "type": ""},
             {**VALID_READ, "pos": [1.0, 2.0]},
-            {**VALID_READ, "phase": float("nan")},
+            {**VALID_READ, "phase": float("nan"), "phase_set": True},
             {**VALID_READ, "extra": 1},
-            {"type": "X", "pos": [0.0, 0.0, 0.0], "source": "Doors1", "phase": True},
+            {"type": "X", "pos": [0.0, 0.0, 0.0], "source": "Doors1", "phase": True, "phase_set": True},
+            # A value without its flag, a flag without its value, a false flag.
+            {**VALID_READ, "phase": 1.0},
+            {**VALID_READ, "phase_set": True},
+            {**VALID_READ, "phase": 1.0, "phase_set": False},
             {"object_id": 0, "source": "Doors1"},
             {"object_id": 5},
             {"object_id": 5, "type": "X", "source": "Doors1"},
@@ -85,7 +90,7 @@ class ObjectAnimEnforceContractTest(unittest.TestCase):
             "Entity.Cast(match)",
             "SetAnimationPhaseNow(command.args.source, command.args.phase)",
             "GetAnimationPhase(command.args.source)",
-            "command.args.phase != MCP_ARG_FLOAT_UNSET",
+            "bool writePhase = command.args.phase_set;",
             "result.error = error",
         ]
         for token in required:
@@ -149,7 +154,7 @@ class ObjectAnimAppToolTest(unittest.IsolatedAsyncioTestCase):
                 COMMAND, {"source": "Doors1", "object_id": 7}, "server", 1.0
             )
 
-    async def test_description_states_same_tick_reread_vehicle_hold_and_doors(self) -> None:
+    async def test_description_states_same_tick_reread_read_hold_and_doors(self) -> None:
         app, _runtime = server.build_app(
             server.ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
         )
@@ -159,10 +164,12 @@ class ObjectAnimAppToolTest(unittest.IsolatedAsyncioTestCase):
             "The returned phase is the same-tick re-read",
             "can still read the old value",
             "confirm a write with a later read",
-            "A phase written by object_anim does not hold on the vehicle",
-            "cannot keep a door open",
+            "A read writes nothing.",
+            "A written phase holds",
+            "For a car door, use vehicle_door.",
             "For building doors, read object_doors",
             "read 0 for an open building door",
+            "Omit phase to read.",
         ):
             with self.subTest(sentence=sentence):
                 self.assertIn(sentence, description)
@@ -173,13 +180,18 @@ class ObjectAnimAppToolTest(unittest.IsolatedAsyncioTestCase):
             re.search(r"\binstantly\b", description, re.IGNORECASE),
             description,
         )
+        # fb-20260930-065425-8779 retracted "a written phase does not hold on
+        # the vehicle": each object_anim read wrote phase 0. The hold is stated
+        # with the instrument that measured it, vehicle_door reads.
+        for retracted in ("does not hold", "cannot keep a door open", "instantaneous probe"):
+            with self.subTest(retracted=retracted):
+                self.assertNotIn(retracted, description)
         hold = ""
         for part in re.split(r"(?<=\.)\s+", description):
-            if "does not hold" in part:
+            if "phase holds" in part:
                 hold = part
                 break
-        self.assertIn("does not hold", hold)
-        self.assertIn("vehicle", hold)
+        self.assertIn("vehicle_door", hold)
 
 
 if __name__ == "__main__":

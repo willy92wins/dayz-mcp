@@ -1407,9 +1407,11 @@ class MCPBridge : Managed
 	}
 
 	// F3.4: read GetAnimationPhase or write SetAnimationPhaseNow on Entity (entity.c:12-25).
-	// phase == MCP_ARG_FLOAT_UNSET means read-only. Writes use the Now variant, which does
-	// not make the same-tick re-read fresh: measured 2026-09-30, the reply can still read the
-	// old value, and on a vehicle a phase written here does not hold (ficha df3a).
+	// phase_set true writes phase; false, which is what an absent key arrives as, only reads
+	// (fb-20260930-065425-8779: testing phase against the float.MAX sentinel made every read
+	// write 0, which ficha df3a took for a written phase that reverts). Writes use the Now
+	// variant, which does not make the same-tick re-read fresh: the reply can still read the
+	// old value. Measured 2026-09-30 with vehicle_door reads, a written car door phase holds.
 	// Resolution: args.object_id > 0 selects from the runtime registry (position-independent,
 	// reaches a client-authoritative fixture whose server replica never left spawn);
 	// otherwise classname near pos within OBJECT_LOOKUP_RADIUS.
@@ -1422,7 +1424,7 @@ class MCPBridge : Managed
 			return true;
 		}
 
-		bool writePhase = command.args.phase != MCP_ARG_FLOAT_UNSET;
+		bool writePhase = command.args.phase_set;
 		if (writePhase && !IsFiniteFloat(command.args.phase))
 		{
 			result.ok = false;
@@ -1604,8 +1606,8 @@ class MCPBridge : Managed
 		}
 
 		bool release = command.args.mode == "release";
-		bool headingUnset = command.args.heading == MCP_ARG_FLOAT_UNSET;
-		bool speedUnset = command.args.speed == MCP_ARG_FLOAT_UNSET;
+		bool headingUnset = !command.args.heading_set;
+		bool speedUnset = !command.args.speed_set;
 		if (!release && (headingUnset || speedUnset))
 		{
 			result.ok = false;
@@ -2220,7 +2222,7 @@ class MCPBridge : Managed
 		}
 
 		world.SetDate(command.args.year, command.args.month, command.args.day, command.args.hour, command.args.minute);
-		if (command.args.time_multiplier != MCP_ARG_FLOAT_UNSET)
+		if (command.args.time_multiplier_set)
 		{
 			world.SetTimeMultiplier(command.args.time_multiplier);
 		}
@@ -2264,15 +2266,15 @@ class MCPBridge : Managed
 		float changeTime = command.args.time;
 		float minDuration = command.args.min_duration;
 
-		if (command.args.overcast != MCP_ARG_FLOAT_UNSET)
+		if (command.args.overcast_set)
 		{
 			overcast.Set(command.args.overcast, changeTime, minDuration);
 		}
-		if (command.args.rain != MCP_ARG_FLOAT_UNSET)
+		if (command.args.rain_set)
 		{
 			rain.Set(command.args.rain, changeTime, minDuration);
 		}
-		if (command.args.fog != MCP_ARG_FLOAT_UNSET)
+		if (command.args.fog_set)
 		{
 			fog.Set(command.args.fog, changeTime, minDuration);
 		}
@@ -2539,7 +2541,7 @@ class MCPBridge : Managed
 			result.error = "bad_minute";
 			return false;
 		}
-		if (args.time_multiplier != MCP_ARG_FLOAT_UNSET)
+		if (args.time_multiplier_set)
 		{
 			if (!IsFiniteFloat(args.time_multiplier))
 			{
@@ -2581,7 +2583,7 @@ class MCPBridge : Managed
 		}
 
 		bool hasPhenomenon = false;
-		if (args.overcast != MCP_ARG_FLOAT_UNSET)
+		if (args.overcast_set)
 		{
 			hasPhenomenon = true;
 			if (!ValidateWeatherValue(args.overcast))
@@ -2591,7 +2593,7 @@ class MCPBridge : Managed
 				return false;
 			}
 		}
-		if (args.rain != MCP_ARG_FLOAT_UNSET)
+		if (args.rain_set)
 		{
 			hasPhenomenon = true;
 			if (!ValidateWeatherValue(args.rain))
@@ -2601,7 +2603,7 @@ class MCPBridge : Managed
 				return false;
 			}
 		}
-		if (args.fog != MCP_ARG_FLOAT_UNSET)
+		if (args.fog_set)
 		{
 			hasPhenomenon = true;
 			if (!ValidateWeatherValue(args.fog))
