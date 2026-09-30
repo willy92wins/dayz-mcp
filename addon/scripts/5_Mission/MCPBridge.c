@@ -192,8 +192,7 @@ class MCPBridge : Managed
 			return;
 		}
 
-		string loopbackPrefix = "http://127.0.0.1:";
-		if (!StringHasPrefix(cfg.url, loopbackPrefix))
+		if (!IsLoopbackBridgeUrl(cfg.url))
 		{
 			LogInitFailure("config url not loopback");
 			return;
@@ -3090,6 +3089,59 @@ class MCPBridge : Managed
 		}
 
 		return false;
+	}
+
+	// fb-20260822-191204-46b3: the only bridge URL is "http://127.0.0.1:<port>/",
+	// the form the daemon and both installers write. It is the RestContext base
+	// that "poll?..." and "result?..." are appended to, so the final "/" belongs
+	// to it (see PollContextUrl in MCPClientBridge.c). <port> is 1 to 5 ASCII
+	// digits (ToAscii 48..57) worth 1..65535. Anything else, userinfo, path,
+	// query, fragment, whitespace or backslash included, is refused. The same
+	// rule is in MCPClientBridge.c.
+	protected bool IsLoopbackBridgeUrl(string url)
+	{
+		string prefix = "http://127.0.0.1:";
+		int prefixLength = prefix.Length();
+		int digitCount = url.Length() - prefixLength - 1;
+		int port = 0;
+		int index = 0;
+		int code = 0;
+		string digit;
+
+		if (digitCount < 1 || digitCount > 5)
+		{
+			return false;
+		}
+
+		if (!StringHasPrefix(url, prefix))
+		{
+			return false;
+		}
+
+		if (url.Substring(prefixLength + digitCount, 1) != "/")
+		{
+			return false;
+		}
+
+		while (index < digitCount)
+		{
+			digit = url.Substring(prefixLength + index, 1);
+			code = digit.ToAscii();
+			if (code < 48 || code > 57)
+			{
+				return false;
+			}
+
+			port = port * 10 + code - 48;
+			index = index + 1;
+		}
+
+		if (port < 1 || port > 65535)
+		{
+			return false;
+		}
+
+		return true;
 	}
 
 	protected bool IsFiniteFloat(float value)

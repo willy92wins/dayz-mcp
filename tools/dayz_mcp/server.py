@@ -7816,7 +7816,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "owned vehicle's engine. This requires client-side ownership "
             "established with vehicle_get_in_client. command_sent reports "
             "bridge acceptance; state_confirmed reports matching engine "
-            "readback when available, otherwise null (accepted, not confirmed)."
+            "readback when available, otherwise null (accepted, not confirmed). "
+            "The local player must drive a car this client owns: otherwise the "
+            "bridge returns not_seated (not seated in a car), not_driver "
+            "(seated, but not in the driver seat) or not_owner (in the driver "
+            "seat, but this client does not own the car)."
         )
     )
     async def engine_set(mode: str, timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
@@ -7847,7 +7851,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Set sustained "
-            "owner-side driving control (held until released or deadman TTL)."
+            "owner-side driving control (held until released or deadman TTL). "
+            "The local player must drive a car this client owns: otherwise the "
+            "bridge returns not_seated (not seated in a car), not_driver "
+            "(seated, but not in the driver seat) or not_owner (in the driver "
+            "seat, but this client does not own the car)."
         )
     )
     async def vehicle_control(
