@@ -567,6 +567,13 @@ def _activate_server_coordination(
         daemon_generation=daemon_generation,
     )
     if recovered_lifecycle_fault is None:
+        # fb-20260904-200821-dae1 part 2 (A1-F7): first, so a process the
+        # previous daemon launched just before dying is already in its row
+        # when the two recoveries below read it. Kills nothing; no intent file
+        # is a no-op.
+        recover_launch_intent = getattr(lifecycle, "recover_launch_intent", None)
+        if callable(recover_launch_intent):
+            bounded_io(recover_launch_intent)
         bounded_io(
             recover_unacknowledged_before_listen,
             lifecycle,

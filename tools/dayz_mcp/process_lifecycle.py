@@ -27,7 +27,8 @@ from typing import Callable, Mapping, TypeVar
 from dayz_mcp import dayz_test_storage, window_close
 from dayz_mcp.child_environment import whitelisted_child_environment
 from dayz_mcp.input_activity import InputAttributor, InputSample
-from dayz_mcp.instance_fence import BindingPrepareError
+from dayz_mcp.instance_fence import BindingPrepareError, format_creation_time_utc
+from dayz_mcp.native_process_guard import identity_hashes
 from dayz_mcp.steam_launch_guard import Preparation
 from dayz_mcp.steam_prepare_supervisor import SteamPreparationGate
 from dayz_mcp.runtime_state import RuntimePaths, atomic_write_bytes, atomic_write_json
@@ -836,6 +837,53 @@ _PORT_STILL_HELD_HINT = (
 # the same order as PEER_STALE_S. The bound below is twice the measured maximum,
 # so a legitimate call never trips it while a request replayed minutes later does.
 _REPLACE_WITNESS_MAX_AGE_S = 60.0
+# fb-20260904-200821-dae1 part 1 (H-A2-3): the reaper can retire a run between
+# the adopt and the stop of the worker. The owner a reap cleared is kept here,
+# daemon memory only and bounded like _retired_diagnostics, so the stop of that
+# owner can be answered as the exit it is instead of run_not_adopted.
+_REAPED_OWNER_MEMORY = 32
+# fb-20260904-200821-dae1 part 2 (A1-F7): the launch intent. A daemon that died
+# between the Popen of start_run and the manifest write left the process it had
+# just launched outside every row. start_run writes this file, fsynced, right
+# before the Popen, and removes it once the durable row is no longer STARTING;
+# the next daemon start reads it in recover_launch_intent. File: beside
+# runs.json. Format, version 1, every field required and no other allowed:
+#   version              1
+#   run_id               the run the launch creates or extends
+#   role                 the launch role, as its ProcessRecord will carry it
+#   instance             the bridge instance minted for this launch (UUID4);
+#                        the process reads it from <profiles>\dayz_mcp.json
+#   profiles             the absolute profiles folder of that config; the argv
+#                        names the same folder with -profiles=
+#   command_line_sha256  the argv hash the process guard will read for it
+#                        (native_process_guard.identity_hashes). Never the raw
+#                        command line, as runs.json never keeps one.
+#   owner_session_id,
+#   owner_lease_id       the owner of the STARTING row the launch belongs to
+#   not_before_utc       the wall clock just before the intent was written
+# No file is the legacy state: there is nothing to recover.
+_LAUNCH_INTENT_NAME = "launch-intent.json"
+_LAUNCH_INTENT_VERSION = 1
+_LAUNCH_INTENT_FIELDS = frozenset(
+    {
+        "version",
+        "run_id",
+        "role",
+        "instance",
+        "profiles",
+        "command_line_sha256",
+        "owner_session_id",
+        "owner_lease_id",
+        "not_before_utc",
+    }
+)
+# The process of an intent is created after it: the Popen is the next step. The
+# kernel may stamp the creation time from a clock coarser than the precise one
+# the daemon reads (the timer tick is 15.6 ms by default), so it can read a few
+# milliseconds earlier than the intent; the slack absorbs that and nothing
+# larger. The window bounds how late after the intent the process may start.
+_LAUNCH_INTENT_CLOCK_SLACK_S = 1.0
+_LAUNCH_INTENT_WINDOW_S = 60.0
 
 
 def _request_parser_sha256() -> str | None:
@@ -1865,6 +1913,15 @@ class ProcessLifecycle:
         # Retired-run diagnostics live in daemon memory and start empty after a
         # restart; the audit file is never read to reconstruct them.
         self._retired_diagnostics: deque[RetiredRunDiagnostic] = deque(maxlen=32)
+        # fb-20260904-200821-dae1 part 1: the owner (session, lease) and the
+        # records of each run the reaper retired while it had one, by activity
+        # key. Daemon memory under _activity_lock, bounded, never persisted.
+        self._reaped_owners: dict[
+            tuple[str, str], tuple[str, str, tuple[ProcessRecord, ...]]
+        ] = {}
+        # fb-20260904-200821-dae1 part 2: the clock of not_before_utc in the
+        # launch intent. Instance state so a test can drive it.
+        self._launch_intent_clock: Callable[[], float] = time.time
         # Bound of the socket-release confirmation (P-L2.c). Instance state so a
         # test can shorten it without patching the module.
         self._role_release_tries = _ROLE_RELEASE_TRIES
@@ -3455,6 +3512,7 @@ class ProcessLifecycle:
             launched: object | None = None
             record: ProcessRecord | None = None
             minted: str | None = None
+            intent: dict[str, object] | None = None
             launch_role = str(parsed["role"])
             attempt_started_at = time.time()
             try:
@@ -3616,6 +3674,32 @@ class ProcessLifecycle:
                 ]
                 if server_launch:
                     self._clear_server_start_verdict()
+                # fb-20260904-200821-dae1 part 2 (A1-F7): the trace of this
+                # launch is durable before its process exists. A daemon that
+                # dies between the Popen and the manifest write below leaves
+                # it for recover_launch_intent; the finally drops it once the
+                # row is no longer STARTING. Refused rather than launched
+                # without it: a launch that cannot leave its trace is the one
+                # a crash would turn into an unknown DayZ occupying the box.
+                intent = self._launch_intent_for(
+                    run_id, launch_role, minted, parsed, provisional
+                )
+                if intent is not None:
+                    try:
+                        self._write_launch_intent(intent)
+                    except Exception:
+                        self._retire_minted(
+                            run_id, launch_role, minted, "launch_failed"
+                        )
+                        return self._settle_failed_launch(
+                            client=client,
+                            previous=previous,
+                            provisional=provisional,
+                            launched=None,
+                            record=None,
+                            confirmed_error="launch_intent_failed",
+                            attempt_started_at=attempt_started_at,
+                        )
                 launched_at = self._server_start_clock()
                 try:
                     launched = self.launcher(
@@ -3673,6 +3757,20 @@ class ProcessLifecycle:
                         manifest_failure=True,
                         attempt_started_at=attempt_started_at,
                     )
+                if intent is not None:
+                    # What recover_launch_intent would conclude about this very
+                    # process after a crash. A mismatch changes nothing here;
+                    # it leaves the row a live check can read.
+                    unmatched = self._launch_intent_mismatch(intent, record)
+                    if unmatched is not None and not self._audit(
+                        "lifecycle_launch_intent_unmatchable",
+                        client,
+                        unmatched,
+                        "recorded",
+                        run_id=run_id,
+                        role=launch_role,
+                    ):
+                        self._note_audit_row_dropped()
                 self._capture_start_activity(completed, launched=record)
                 if supplied_run_id is None:
                     # 250f: the session that created the run is its launcher
@@ -3709,6 +3807,303 @@ class ProcessLifecycle:
                 )
             finally:
                 self._finish_committed(authority, command_id)
+                if intent is not None:
+                    self._settle_launch_intent(run_id)
+
+    def _launch_intent_path(self) -> Path | None:
+        paths = getattr(self.manifest, "paths", None)
+        runs_path = getattr(paths, "runs_path", None)
+        if isinstance(runs_path, (str, Path)):
+            return Path(runs_path).with_name(_LAUNCH_INTENT_NAME)
+        return None
+
+    def _launch_intent_for(
+        self,
+        run_id: str,
+        role: str,
+        minted: str | None,
+        parsed: dict[str, object],
+        provisional: RunRecord,
+    ) -> dict[str, object] | None:
+        """The launch intent of this launch, or None when nothing could bind it.
+
+        A process is tied to an intent by its argv and by the bridge instance
+        it reads, so there is an intent only when an instance was minted and
+        the argv names the profiles folder that holds it. Without one the
+        launch runs as it did before the intent existed.
+        """
+        if self._launch_intent_path() is None or not _valid_uuid4(minted):
+            return None
+        argv = [str(item) for item in parsed["argv"]]
+        profiles = parsed.get("profiles")
+        named = _launch_output_dir(argv)
+        if (
+            not isinstance(profiles, str)
+            or named is None
+            or os.path.normcase(os.path.normpath(named))
+            != os.path.normcase(os.path.normpath(profiles))
+            or provisional.owner_session_id is None
+            or provisional.owner_lease_id is None
+        ):
+            return None
+        try:
+            command_line_sha256 = identity_hashes(argv[0], argv)["command_line_sha256"]
+            not_before_utc = format_creation_time_utc(self._launch_intent_clock())
+        except (OSError, OverflowError, TypeError, ValueError):
+            return None
+        return {
+            "version": _LAUNCH_INTENT_VERSION,
+            "run_id": run_id,
+            "role": role,
+            "instance": minted,
+            "profiles": profiles,
+            "command_line_sha256": command_line_sha256,
+            "owner_session_id": provisional.owner_session_id,
+            "owner_lease_id": provisional.owner_lease_id,
+            "not_before_utc": not_before_utc,
+        }
+
+    def _write_launch_intent(self, document: dict[str, object]) -> None:
+        path = self._launch_intent_path()
+        if path is None:
+            raise RuntimeError("launch_intent_unavailable")
+        atomic_write_json(path, document)
+
+    def _clear_launch_intent(self) -> bool:
+        path = self._launch_intent_path()
+        if path is None:
+            return True
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    def _settle_launch_intent(self, run_id: str) -> None:
+        """Drop the intent of this launch unless its row is still STARTING.
+
+        STARTING is the one durable state a restart cannot tell from a launch
+        that was cut short; every other state already says how it ended. A
+        file that cannot be removed is retired by the next daemon start.
+        """
+        try:
+            current = self.manifest.get(run_id)
+            if current is not None and current.state == "STARTING":
+                return
+            self._clear_launch_intent()
+        except Exception:
+            return
+
+    def _read_launch_intent(self) -> dict[str, object] | None:
+        """The intent on disk, or None unless it is exactly format version 1."""
+        path = self._launch_intent_path()
+        if path is None:
+            return None
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return None
+        if (
+            not isinstance(document, dict)
+            or set(document) != _LAUNCH_INTENT_FIELDS
+            or type(document["version"]) is not int
+            or document["version"] != _LAUNCH_INTENT_VERSION
+        ):
+            return None
+        for key in ("run_id", "role", "profiles", "owner_session_id", "owner_lease_id"):
+            value = document[key]
+            if not isinstance(value, str) or not value:
+                return None
+        if (
+            not _valid_uuid4(document["instance"])
+            or not _valid_sha256(document["command_line_sha256"])
+            or not Path(str(document["profiles"])).is_absolute()
+            or _utc_epoch(document["not_before_utc"]) is None
+        ):
+            return None
+        return document
+
+    @staticmethod
+    def _launch_intent_mismatch(
+        document: Mapping[str, object], record: ProcessRecord
+    ) -> str | None:
+        """Why this process is not the one the intent launched, or None.
+
+        The argv hash and the creation time. The instance lives in the
+        profiles, which _match_launch_intent reads.
+        """
+        if record.command_line_sha256 != document.get("command_line_sha256"):
+            return "argv_mismatch"
+        created = _utc_epoch(record.creation_time_utc)
+        not_before = _utc_epoch(document.get("not_before_utc"))
+        if (
+            created is None
+            or not_before is None
+            or created < not_before - _LAUNCH_INTENT_CLOCK_SLACK_S
+            or created > not_before + _LAUNCH_INTENT_WINDOW_S
+        ):
+            return "created_outside_intent"
+        return None
+
+    @staticmethod
+    def _launch_intent_instance(document: Mapping[str, object]) -> str | None:
+        """The instance the profiles of the intent hold now.
+
+        loopback.ServerState.prepare wrote it into <profiles>\\dayz_mcp.json
+        before the Popen; the game only reads that file.
+        """
+        config = Path(str(document["profiles"])) / "dayz_mcp.json"
+        try:
+            payload = json.loads(config.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        instance = payload.get("instance")
+        return instance if isinstance(instance, str) else None
+
+    def _match_launch_intent(
+        self, document: dict[str, object]
+    ) -> tuple[ProcessRecord | None, str]:
+        """The one live process the intent launched, or why there is none.
+
+        Candidates are the DayZ images the process scan lists that no active
+        run registers. A candidate the guard cannot read stops the match (it
+        could be the process sought); two with the argv hash are ambiguous.
+        The one match must then be created within the launch and read, from
+        the profiles, the instance the intent carries.
+        """
+        reason, listed = self._diag_snapshot()
+        if reason is not None or listed is None:
+            return None, reason or "diag_snapshot_unknown"
+        registered = {
+            record.pid
+            for run in self.manifest.list_runs()
+            if run.state in _ACTIVE_STATES
+            for record in run.processes
+        }
+        role = str(document["role"])
+        matched: list[ProcessRecord] = []
+        for row in listed:
+            pid = int(row["pid"])
+            if pid in registered:
+                continue
+            try:
+                actual = self.guard.snapshot(pid)
+            except Exception:
+                return None, "guard_unavailable"
+            if (
+                isinstance(actual, dict)
+                and actual.get("error") == "process_not_found"
+                and actual.get("exit_code") == 4
+            ):
+                continue
+            record = self._record_from_snapshot(actual, role)
+            if record is None or record.pid != pid:
+                return None, "identity_unavailable"
+            if record.command_line_sha256 == document["command_line_sha256"]:
+                matched.append(record)
+        if not matched:
+            return None, "process_not_found"
+        if len(matched) > 1:
+            return None, "process_ambiguous"
+        record = matched[0]
+        mismatch = self._launch_intent_mismatch(document, record)
+        if mismatch is not None:
+            return None, mismatch
+        if self._launch_intent_instance(document) != document["instance"]:
+            return None, "instance_mismatch"
+        return record, ""
+
+    def _retire_launch_intent(
+        self, document: dict[str, object] | None, reason: str
+    ) -> dict[str, object]:
+        fields: dict[str, object] = {}
+        if document is not None:
+            fields["run_id"] = str(document["run_id"])
+        if not self._audit(
+            "lifecycle_launch_intent_retired", None, reason, "retired", **fields
+        ):
+            self._note_audit_row_dropped()
+        outcome: dict[str, object] = {"launch_intent": "retired", "reason": reason}
+        outcome.update(fields)
+        if not self._clear_launch_intent():
+            outcome["cleanup_degraded"] = ["launch_intent_not_removed"]
+        return outcome
+
+    def recover_launch_intent(self) -> dict[str, object]:
+        """Daemon start: settle the launch intent a daemon that died left behind.
+
+        fb-20260904-200821-dae1 part 2 (A1-F7). daemon._activate_server_coordination
+        calls it before recover_unacknowledged_before_listen and
+        recover_after_restart. A process that matches the intent exactly -- its
+        argv hash, a creation time from the launch, the instance its profiles
+        hold -- joins its STARTING row as the manifest write of start_run would
+        have recorded it, and those two recoveries then give the run what they
+        give any RUNNING run whose owner vanished. Anything short of that
+        retires the intent and leaves the row to them unchanged. Kills nothing.
+        No intent file (the legacy state) is a no-op.
+        """
+        path = self._launch_intent_path()
+        if path is None or not path.exists():
+            return {"launch_intent": "absent"}
+        with self._operation_lock:
+            try:
+                return self._recover_launch_intent_locked()
+            except Exception:
+                # A fault here must not keep the daemon from starting: the
+                # intent stays, the row goes to the existing recovery.
+                return {"launch_intent": "kept", "reason": "recovery_failed"}
+
+    def _recover_launch_intent_locked(self) -> dict[str, object]:
+        document = self._read_launch_intent()
+        if document is None:
+            return self._retire_launch_intent(None, "intent_unreadable")
+        run_id = str(document["run_id"])
+        run = self.manifest.get(run_id)
+        if run is None:
+            return self._retire_launch_intent(document, "run_not_found")
+        if run.state != "STARTING":
+            return self._retire_launch_intent(document, "launch_settled")
+        if (
+            run.owner_session_id != document["owner_session_id"]
+            or run.owner_lease_id != document["owner_lease_id"]
+        ):
+            return self._retire_launch_intent(document, "run_changed")
+        if self._quarantined():
+            return self._retire_launch_intent(document, "retail_quarantine")
+        record, reason = self._match_launch_intent(document)
+        if record is None:
+            return self._retire_launch_intent(document, reason)
+        if not self._audit(
+            "lifecycle_launch_intent_recovered",
+            None,
+            "process_matched",
+            "recorded",
+            run_id=run_id,
+            role=record.role,
+            pid=record.pid,
+        ):
+            return {"launch_intent": "kept", "reason": "audit_failed", "run_id": run_id}
+        completed = RunRecord.from_payload(dataclasses.asdict(run))
+        completed.processes.append(record)
+        completed.state = "RUNNING"
+        try:
+            self.manifest.replace(completed)
+        except Exception:
+            return {"launch_intent": "kept", "reason": "manifest_failed", "run_id": run_id}
+        self._invalidate_box_cache()
+        outcome: dict[str, object] = {
+            "launch_intent": "recovered",
+            "run_id": run_id,
+            "role": record.role,
+            "pid": record.pid,
+        }
+        if not self._clear_launch_intent():
+            outcome["cleanup_degraded"] = ["launch_intent_not_removed"]
+        return outcome
 
     def ack_run(
         self,
@@ -4010,6 +4405,81 @@ class ProcessLifecycle:
         ]
         return [record.pid for record in retiring], None
 
+    def _stop_reaped_run(
+        self,
+        client: ClientIdentity,
+        authority: tuple[str, str, str],
+        command: str,
+        run: RunRecord,
+    ) -> dict[str, object] | None:
+        """The stop of a run the reaper retired from this caller, or None.
+
+        fb-20260904-200821-dae1 part 1 (H-A2-3). The reaper can run between the
+        adopt and the stop of the worker. The stop then found the row EXITED
+        and answered run_not_adopted about a run this caller owned and the
+        daemon itself retired; dayz_test_stop only learned the box was free
+        through the status fallback of the worker (744a), when that extra call
+        got through. The answer is the reply the sealed worker maps to success
+        (ok, run_id, state EXITED: dayz_test_worker._successful_run), and only
+        when the reap cleared exactly this session and lease and every record
+        it retired still reads gone or foreign. Anything else is None, and the
+        caller answers run_not_adopted as before. Caller holds _operation_lock.
+        """
+        with self._activity_lock:
+            reaped = self._reaped_owners.get(self._activity_key(run.run_id))
+        if (
+            reaped is None
+            or reaped[0] != client.session_id
+            or reaped[1] != authority[1]
+            or run.state != "EXITED"
+            or run.owner_session_id is not None
+            or run.owner_lease_id is not None
+            or run.processes
+        ):
+            return None
+        buckets, _unknown_reason = self._partition_registered_processes(
+            list(reaped[2])
+        )
+        if buckets["owned"] or buckets["unknown"]:
+            return None
+        if not self._audit(
+            "lifecycle_stop",
+            client,
+            "already_reaped",
+            "allowed",
+            run_id=run.run_id,
+            gone_pids=list(buckets["gone"]),
+            foreign_pids=list(buckets["foreign"]),
+        ):
+            self.coordinator.reject_reservation(
+                authority[0], authority[1], authority[2], "audit_failed"
+            )
+            return self._error("audit_failed", 503)
+        command_id = self._commit_reserved(authority, command)
+        if command_id is None:
+            return self._error("lease_invalid", 409)
+        try:
+            result: dict[str, object] = {
+                "ok": True,
+                "run_id": run.run_id,
+                "state": "EXITED",
+                "terminated": 0,
+                "stop_method": "already_exited",
+                "exit_metrics_valid": False,
+            }
+            return self._terminal_outcome(
+                result,
+                "lifecycle_stop_outcome",
+                client,
+                reason="already_reaped",
+                decision="already_exited",
+                run_id=run.run_id,
+                state="EXITED",
+                terminated=0,
+            )
+        finally:
+            self._finish_committed(authority, command_id)
+
     def stop_run(self, client: ClientIdentity, token: str | None, run_id: object) -> dict[str, object]:
         """Stop the run. Ordinary callers are unchanged.
 
@@ -4055,6 +4525,10 @@ class ProcessLifecycle:
                 and run.owner_session_id is None
                 and run.owner_lease_id is None
             )
+            if not never_started and run.state == "EXITED":
+                reaped = self._stop_reaped_run(client, authority, command, run)
+                if reaped is not None:
+                    return reaped
             if not never_started and (
                 run.owner_session_id != client.session_id
                 or run.owner_lease_id != authority[1]
@@ -6387,6 +6861,8 @@ class ProcessLifecycle:
         ):
             return "audit_failed"
         owner_session_id = run.owner_session_id
+        owner_lease_id = run.owner_lease_id
+        reaped_records = tuple(run.processes)
         run.owner_session_id = None
         run.owner_lease_id = None
         run.processes = []
@@ -6394,8 +6870,28 @@ class ProcessLifecycle:
         if not self._commit_retirement(run, event, reason, decision):
             return "manifest_failed"
         self._take_idle_retirement(run.run_id)
+        self._remember_reaped_owner(
+            run.run_id, owner_session_id, owner_lease_id, reaped_records
+        )
         self.coordinator.note_run_reaped(owner_session_id)
         return ""
+
+    def _remember_reaped_owner(
+        self,
+        run_id: str,
+        session_id: str | None,
+        lease_id: str | None,
+        records: tuple[ProcessRecord, ...],
+    ) -> None:
+        """fb-20260904-200821-dae1 part 1: the owner a committed reap cleared."""
+        if not isinstance(session_id, str) or not isinstance(lease_id, str):
+            return
+        key = self._activity_key(run_id)
+        with self._activity_lock:
+            self._reaped_owners.pop(key, None)
+            self._reaped_owners[key] = (session_id, lease_id, records)
+            while len(self._reaped_owners) > _REAPED_OWNER_MEMORY:
+                del self._reaped_owners[next(iter(self._reaped_owners))]
 
     def _reap_dead_runs_locked(self) -> list[str]:
         """Caller holds _operation_lock. Safe under retail quarantine: never
