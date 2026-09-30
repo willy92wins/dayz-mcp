@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -155,22 +156,31 @@ class ObjectAnimAppToolTest(unittest.IsolatedAsyncioTestCase):
         tools = {tool.name: tool for tool in await app.list_tools()}
         description = tools[COMMAND].description or ""
         for sentence in (
-            "same-tick re-read",
+            "The returned phase is the same-tick re-read",
             "can still read the old value",
-            "does not hold a written phase",
-            "instantaneous probe",
+            "confirm a write with a later read",
+            "A phase written by object_anim does not hold on the vehicle",
             "cannot keep a door open",
-            "ficha df3a",
-            "with no player near, 0 throughout",
             "For building doors, read object_doors",
             "read 0 for an open building door",
         ):
             with self.subTest(sentence=sentence):
                 self.assertIn(sentence, description)
-        self.assertIn("SetAnimationPhaseNow", description)
-        self.assertIn("phase is a unitless value", description)
-        self.assertIn("Omit phase to read.", description)
-        self.assertNotIn("apply instantly", description)
+        self.assertIsNone(
+            re.search(
+                r"\bappl(?:y|ied|ies)\s+instantly\b",
+                description,
+                re.IGNORECASE,
+            ),
+            description,
+        )
+        hold = ""
+        for part in re.split(r"(?<=\.)\s+", description):
+            if "does not hold" in part:
+                hold = part
+                break
+        self.assertIn("does not hold", hold)
+        self.assertIn("vehicle", hold)
 
 
 if __name__ == "__main__":

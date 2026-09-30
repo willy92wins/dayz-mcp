@@ -171,11 +171,13 @@ Instrument findings the shakedown surfaced (both fixed in this tree):
   now carries a 0.5% allowance (19.9).
 
 Known caveat kept honest: an `object_anim` write applies (the door visibly
-moves), but the phase re-read in the same tick can lag the write -- a value
-read one command later reflects the transition (measured 0.0 -> 0.599 -> 1.0
-trajectory). Confirm writes with a follow-up read, not with the write reply
-alone. A written door phase does not hold on the server, so a door-open
-fixture cannot rely on `object_anim`. Measured 2026-09-30 on DayZDiag 1.29
+moves), but the phase re-read in the same tick can lag the write -- with a
+player near, a value read one command later can reflect the transition
+(measured 0.0 -> 0.599 -> 1.0 trajectory) or read 0 again, and with no
+player near the value never appears. Confirm writes with a follow-up read,
+not with the write reply alone. A phase written by `object_anim` does not
+hold on the vehicle, so a door-open fixture cannot rely on `object_anim`.
+Measured 2026-09-30 on DayZDiag 1.29
 (run eda91d22), a bare vanilla `CivilianSedan` on asphalt,
 `object_anim` source `DoorsDriver`: write `phase=1` replied 0, then read 1
 at +0.6 s and 0 at +1.2 s; a second write replied 0, read 1 at +4.8 s, then
