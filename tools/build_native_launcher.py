@@ -1074,18 +1074,30 @@ def _artifact_fingerprint(bundle: Path) -> dict[str, str]:
     }
 
 
-# A rename Windows refuses because the tree is in use: WinError 5
+# A step Windows refuses because the tree is in use: WinError 5
 # (ERROR_ACCESS_DENIED, a directory with an open file inside) or 32
 # (ERROR_SHARING_VIOLATION, an open file), winerror.h:279 and :522. Both
 # arrive as PermissionError.
 _IN_USE_WINERRORS = frozenset({5, 32})
+# Removing a tree also waits out ERROR_DIR_NOT_EMPTY (winerror.h:1252): a file
+# deleted while another process keeps it open stays until that handle closes.
+_ERROR_DIR_NOT_EMPTY = 145
 _RENAME_RETRY_SECONDS = 10.0
 _RENAME_FIRST_DELAY = 0.05
 _RENAME_MAX_DELAY = 1.0
 _RM_LIST_FIRST = 16
 _RM_LIST_MAX = 1024
-_HINT_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}")
-_DAYZ_MCP_MODES = ("--client", "--daemon", "--embedded")
+# CPython options before -m (python -h): flags, and options whose value is the
+# next argument. That value is skipped, never read.
+_PYTHON_FLAGS = frozenset(
+    {"-b", "-bb", "-B", "-d", "-E", "-i", "-I", "-O", "-OO", "-P", "-q", "-s", "-S", "-u", "-v", "-x"}
+)
+_PYTHON_VALUE_OPTIONS = frozenset({"-W", "-X", "--check-hash-based-pycs"})
+_DAYZ_MCP_HINTS = {
+    "--client": "dayz_mcp --client",
+    "--daemon": "dayz_mcp --daemon",
+    "--embedded": "dayz_mcp --embedded",
+}
 
 _HolderLookup = Callable[[list[str]], list[dict[str, object]]]
 
@@ -1184,7 +1196,6 @@ def _restart_manager_holders(paths: Sequence[str]) -> list[dict[str, object]]:
         _named_holder(
             int(info.Process.dwProcessId),
             _filetime(info.Process.ProcessStartTime),
-            info.strAppName,
             info.strServiceShortName,
         )
         for info in infos[: filled.value]
@@ -1216,16 +1227,17 @@ def _image_and_argv(pid: int, started: int) -> tuple[str | None, list[str] | Non
         _kernel32.CloseHandle(handle)
 
 
-def _named_holder(pid: int, started: int, app_name: str, service: str) -> dict[str, object]:
-    """One holder: pid, image name and command-line hint.
+def _named_holder(pid: int, started: int, service: str) -> dict[str, object]:
+    """One holder: its pid, its image name and a fixed hint.
 
-    When the process cannot be read, or is no longer the one that held the
-    file, the Restart Manager's own names stay: its friendly name ("Python")
-    and the service short name.
+    The image name is read from the process while it is still the one that
+    held the file, else it is "unknown"; the Restart Manager's friendly name
+    never stands in for it. The hint is a dayz_mcp mode (_command_hint), or
+    the service short name the Restart Manager reports for a service.
     """
     holder: dict[str, object] = {
         "pid": pid,
-        "image": app_name or "unknown",
+        "image": "unknown",
         "command_hint": f"service {service}" if service else None,
     }
     try:
@@ -1241,27 +1253,30 @@ def _named_holder(pid: int, started: int, app_name: str, service: str) -> dict[s
 
 
 def _command_hint(argv: object) -> str | None:
-    """What a holder runs: ``dayz_mcp --client``, ``unittest``, ``app.pyz``.
+    """``dayz_mcp --client`` (or ``--daemon``, ``--embedded``) for a dayz_mcp process, else None.
 
-    Never an option value: a command line can carry a token, so only the
-    module or script name, and dayz_mcp's mode flag, reach the error text.
+    No text of argv reaches the error, and a command line can carry a token:
+    those three fixed strings are the only hints. One is given only when
+    ``-m dayz_mcp`` sits where the interpreter reads its module switch, after
+    interpreter options alone (the value of -W, -X or --check-hash-based-pycs
+    is skipped, so it can pose neither as a script nor as -m), and exactly one
+    of the three mode flags follows it.
     """
     if type(argv) is not list or not all(type(item) is str for item in argv):
         return None
-    name = None
-    for index in range(1, len(argv)):
-        item = argv[index]
-        if item == "-m":
-            name = argv[index + 1] if index + 1 < len(argv) else None
-            break
-        if item.casefold().endswith((".py", ".pyz")):
-            name = ntpath.basename(item)
-            break
-    if name is None or _HINT_NAME.fullmatch(name) is None:
+    index = 1
+    while index < len(argv) and argv[index] != "-m":
+        option = argv[index]
+        if option in _PYTHON_VALUE_OPTIONS:
+            index += 2
+        elif option in _PYTHON_FLAGS or (option[:2] in ("-W", "-X") and len(option) > 2):
+            index += 1
+        else:
+            return None  # a script, -c, or an option this does not know: not a module run
+    if argv[index + 1 : index + 2] != ["dayz_mcp"]:
         return None
-    if name == "dayz_mcp":
-        return " ".join([name, *(flag for flag in _DAYZ_MCP_MODES if flag in argv)])
-    return name
+    modes = [item for item in argv[index + 2 :] if item in _DAYZ_MCP_HINTS]
+    return _DAYZ_MCP_HINTS[modes[0]] if len(modes) == 1 else None
 
 
 def _holder_text(holder: dict[str, object]) -> str:
@@ -1270,25 +1285,28 @@ def _holder_text(holder: dict[str, object]) -> str:
 
 
 class BundleInUseError(PermissionError):
-    """A rename of the bundle stayed refused as in use past the retry budget.
+    """A step of the publish stayed refused as in use past its retry budget.
 
-    ``holders`` lists the processes the Restart Manager saw holding the
-    bundle's files ({"pid", "image", "command_hint"}), or is None when they
-    could not be listed. The last refusal is the ``__cause__``. It stays a
-    PermissionError, so code that caught the bare refusal still catches it.
+    ``step`` says what was refused ("renaming A to B", "removing A") and
+    ``path`` is the tree that could not be moved or removed. ``holders``
+    lists the processes the Restart Manager saw holding its files ({"pid",
+    "image", "command_hint"}), or is None when they could not be listed. The
+    last refusal is the ``__cause__``, and its errno and winerror are this
+    error's own: it stays a PermissionError, so code that caught the bare
+    refusal still catches it.
     """
 
     def __init__(
         self,
-        source: Path,
-        destination: Path,
-        budget: float,
+        step: str,
+        path: Path,
+        waited: float,
         holders: list[dict[str, object]] | None,
         unknown: str | None,
         refusal: OSError,
     ) -> None:
-        self.source = source
-        self.destination = destination
+        self.step = step
+        self.path = path
         self.holders = holders
         code = getattr(refusal, "winerror", None)
         refused = f"WinError {code}" if code else type(refusal).__name__
@@ -1299,10 +1317,11 @@ class BundleInUseError(PermissionError):
             who = f"holders unknown: {unknown}"
             remedy = "Close or reopen the MCP client sessions that use this bundle"
         super().__init__(
-            f"bundle_in_use: renaming {source} to {destination.name} was refused for "
-            f"{budget:g} s ({refused}); {who}. {remedy}, then publish again. "
-            "Nothing was stopped or signalled."
+            f"bundle_in_use: {step} was refused for {waited:.1f} s ({refused}); {who}. "
+            f"{remedy}, then publish again. Nothing was stopped or signalled."
         )
+        self.errno = refusal.errno
+        self.winerror = code
 
 
 def _tree_files(root: Path) -> list[str]:
@@ -1353,23 +1372,58 @@ def _refused_in_use(error: OSError) -> bool:
     return isinstance(error, PermissionError) or getattr(error, "winerror", None) in _IN_USE_WINERRORS
 
 
-def _replace_when_free(
-    source: Path,
-    destination: Path,
-    *,
-    budget: float,
-    find_holders: _HolderLookup,
-    monotonic: Callable[[], float],
-    sleep: Callable[[float], None],
-) -> None:
-    """os.replace, retried for ``budget`` seconds while Windows refuses it as in use.
+class _Retry:
+    """How long a step Windows refuses as in use is retried, and who is asked why."""
 
-    Any other error is raised at once, unchanged. Past the budget the holders
-    of both trees are looked up once and BundleInUseError is raised from the
-    last refusal.
+    def __init__(
+        self,
+        seconds: float,
+        find_holders: _HolderLookup,
+        monotonic: Callable[[], float],
+        sleep: Callable[[float], None],
+    ) -> None:
+        self.seconds = seconds
+        self.find_holders = find_holders
+        self.monotonic = monotonic
+        self.sleep = sleep
+
+    def budget(self) -> _Budget:
+        return _Budget(self)
+
+
+class _Budget:
+    """One step's retries: wait() sleeps before the next attempt, False once spent.
+
+    The waits double from 0.05 s up to 1 s and never sleep past the budget.
     """
-    deadline = monotonic() + budget
-    delay = _RENAME_FIRST_DELAY
+
+    def __init__(self, retry: _Retry) -> None:
+        self.retry = retry
+        self.started = retry.monotonic()
+        self.delay = _RENAME_FIRST_DELAY
+
+    def wait(self) -> bool:
+        remaining = self.started + self.retry.seconds - self.retry.monotonic()
+        if not remaining > 0:
+            return False
+        self.retry.sleep(min(self.delay, remaining))
+        self.delay = min(self.delay * 2, _RENAME_MAX_DELAY)
+        return True
+
+    def refused(self, step: str, path: Path, refusal: OSError) -> BundleInUseError:
+        """The error for a step still refused: the holders of ``path``, the refusal as cause."""
+        waited = self.retry.monotonic() - self.started
+        holders, unknown = _bundle_holders((path,), self.retry.find_holders)
+        return BundleInUseError(step, path, waited, holders, unknown, refusal)
+
+
+def _replace_when_free(source: Path, destination: Path, retry: _Retry) -> None:
+    """os.replace, retried while Windows refuses it as in use.
+
+    Any other error is raised at once, unchanged. Past the budget,
+    BundleInUseError names the holders of ``source``.
+    """
+    budget = retry.budget()
     while True:
         try:
             os.replace(source, destination)
@@ -1377,12 +1431,70 @@ def _replace_when_free(
         except OSError as error:
             if not _refused_in_use(error):
                 raise
-            remaining = deadline - monotonic()
-            if not remaining > 0:
-                holders, unknown = _bundle_holders((source, destination), find_holders)
-                raise BundleInUseError(source, destination, budget, holders, unknown, error) from error
-        sleep(min(delay, remaining))
-        delay = min(delay * 2, _RENAME_MAX_DELAY)
+            if not budget.wait():
+                raise budget.refused(f"renaming {source} to {destination.name}", source, error) from error
+
+
+def _remove_when_free(tree: Path, retry: _Retry) -> None:
+    """Remove ``tree``, retried while Windows refuses it as in use.
+
+    Each attempt first removes all it can, so only what is held stays, then
+    removes the rest or raises why it cannot. Any other error is raised at
+    once. Past the budget, BundleInUseError names the holders of what stays.
+    """
+    budget = retry.budget()
+    while True:
+        shutil.rmtree(tree, ignore_errors=True)
+        if not tree.exists():
+            return
+        try:
+            shutil.rmtree(tree)
+            return
+        except OSError as error:
+            if not (_refused_in_use(error) or getattr(error, "winerror", None) == _ERROR_DIR_NOT_EMPTY):
+                raise
+            if not budget.wait():
+                raise budget.refused(f"removing {tree}", tree, error) from error
+
+
+def _swap_when_free(incoming: Path, output: Path, previous: Path, retry: _Retry) -> None:
+    """Move ``output`` to ``previous`` and ``incoming`` to ``output``, the pair retried in one budget.
+
+    A refused second rename puts ``previous`` back at once, so every wait
+    happens with ``output`` in place: a reader meanwhile finds the last
+    bundle, never none (review of 7672, F2). ``output`` is missing only
+    between two renames that both succeed, or while that put-back is itself
+    refused; then the swap stops, and ``previous`` keeps the bundle for the
+    next publish.
+    """
+    budget = retry.budget()
+    while True:
+        step, held = f"renaming {output} to {previous.name}", output
+        try:
+            if output.exists():
+                os.replace(output, previous)
+            step, held = f"renaming {incoming} to {output.name}", incoming
+            os.replace(incoming, output)
+            return
+        except BaseException as error:
+            stuck = None
+            if previous.exists() and not output.exists():
+                try:
+                    _replace_when_free(previous, output, retry)
+                except Exception as failure:
+                    stuck = failure
+            in_use = isinstance(error, OSError) and _refused_in_use(error)
+            if in_use and stuck is None and budget.wait():
+                continue
+            final = budget.refused(step, held, error) if in_use else error
+            if stuck is not None:
+                final.add_note(
+                    f"putting the last valid bundle back failed ({stuck}); it stays in "
+                    f"{previous}, and the next publish moves it back first"
+                )
+            if final is error:
+                raise
+            raise final from error
 
 
 def _publish_bundle(
@@ -1409,64 +1521,56 @@ def _publish_bundle(
 
     A live MCP client keeps the bundle it loaded open (load_verified_bundle),
     and Windows refuses to rename it: WinError 5, or 32 for a file (inbox
-    7672). Every rename refused as in use is retried for ``retry_seconds``.
-    Past that, BundleInUseError names the processes the Restart Manager sees
-    holding the files, with the refusal as its cause. Diagnosis only: nothing
-    is stopped or signalled. Every path keeps the invariant above, and no
-    ``.incoming`` this publish made is left behind.
+    7672). The swap is retried as a pair within ``retry_seconds``, and a
+    refused second rename puts ``.previous`` back at once, so every wait
+    happens with ``output`` in place. Removing a leftover tree is retried the
+    same way. Past the budget, BundleInUseError names the tree, the refusal
+    and the processes the Restart Manager sees holding its files, with the
+    refusal as its cause. Diagnosis only: nothing is stopped or signalled. A
+    copy that cannot be removed is named on the error being raised, and the
+    next publish removes it first.
     """
     if not 0 <= retry_seconds < math.inf:
         raise ValueError("rename_retry_budget")
-    lookup = _restart_manager_holders if find_holders is None else find_holders
-
-    def replace(source: Path, destination: Path) -> None:
-        _replace_when_free(
-            source,
-            destination,
-            budget=retry_seconds,
-            find_holders=lookup,
-            monotonic=monotonic,
-            sleep=sleep,
-        )
-
+    retry = _Retry(
+        retry_seconds,
+        _restart_manager_holders if find_holders is None else find_holders,
+        monotonic,
+        sleep,
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     incoming = output.with_name(output.name + ".incoming")
     previous = output.with_name(output.name + ".previous")
     if previous.exists() and not output.exists():
-        replace(previous, output)
+        _replace_when_free(previous, output, retry)
     for stale in (incoming, previous):
         if stale.exists():
-            shutil.rmtree(stale)
+            _remove_when_free(stale, retry)
     try:
         shutil.copytree(staging, incoming)
         verify_bundle(incoming, require_receipt=False)
         if _artifact_fingerprint(incoming) != fingerprint:
             raise ValueError("final_copy_mismatch")
-    except BaseException:
-        shutil.rmtree(incoming, ignore_errors=True)
-        raise
-    if output.exists():
-        try:
-            replace(output, previous)
-        except BaseException:
-            shutil.rmtree(incoming, ignore_errors=True)
-            raise
-    try:
-        replace(incoming, output)
+        _swap_when_free(incoming, output, previous, retry)
     except BaseException as error:
-        try:
-            if previous.exists() and not output.exists():
-                replace(previous, output)
-        except Exception as restore_error:
-            error.add_note(
-                f"restoring the last valid bundle failed ({restore_error}); it stays "
-                f"in {previous}, and the next publish moves it back first"
-            )
-        finally:
-            shutil.rmtree(incoming, ignore_errors=True)
+        if incoming.exists():
+            try:
+                _remove_when_free(incoming, retry)
+            except Exception as leftover:
+                error.add_note(
+                    f"the copy in {incoming} could not be removed ({leftover}); "
+                    "the next publish removes it first"
+                )
         raise
     if previous.exists():
-        shutil.rmtree(previous)
+        try:
+            _remove_when_free(previous, retry)
+        except Exception as error:
+            error.add_note(
+                f"the new bundle is already published in {output}; the next publish "
+                f"removes {previous} first"
+            )
+            raise
 
 
 def verify_reproducibility_receipt(

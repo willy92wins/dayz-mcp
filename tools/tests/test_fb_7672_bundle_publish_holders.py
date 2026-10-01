@@ -6,11 +6,13 @@ live MCP client had the previous bundle loaded: load_verified_bundle keeps a
 FILE_SHARE_READ handle on every closure file until its session ends, and the
 operator had to find that process by hand.
 
-A rename Windows refuses as in use is now retried for a bounded time. Past
-it, BundleInUseError names the processes the Restart Manager sees holding the
-bundle's files, with the refusal as its cause. Nothing is stopped or
-signalled. On every path the last valid bundle stays in output or .previous,
-and the .incoming the publish made is removed.
+A step Windows refuses as in use (a rename, or removing a leftover copy) is
+now retried for a bounded time. Past it, BundleInUseError names the tree, the
+refusal and the processes the Restart Manager sees holding its files, with the
+refusal as its cause. Nothing is stopped or signalled. On every path the last
+valid bundle stays in output or .previous; a refused second rename puts it back
+at once, so every wait happens with output in place. A copy that cannot be
+removed is reported on the error, and the next publish removes it first.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -34,6 +37,7 @@ _HOLDERS = [
     {"pid": 4242, "image": "python.exe", "command_hint": "dayz_mcp --client"},
     {"pid": 31337, "image": "MsMpEng.exe", "command_hint": None},
 ]
+_HINTS = (None, "dayz_mcp --client", "dayz_mcp --daemon", "dayz_mcp --embedded")
 
 
 class _Clock:
@@ -56,8 +60,22 @@ def _sharing_violation(source: object, destination: object) -> PermissionError:
     return PermissionError(errno.EACCES, "Access is denied", str(source), 5, str(destination))
 
 
+def _held_file(tree: Path) -> OSError:
+    # What shutil.rmtree raises when a file inside is open without FILE_SHARE_DELETE.
+    return PermissionError(errno.EACCES, "The file is in use", str(tree / "app.pyz"), 32)
+
+
+def _not_empty_yet(tree: Path) -> OSError:
+    # A deleted file another process still has open keeps its directory non-empty.
+    return OSError(errno.ENOTEMPTY, "The directory is not empty", str(tree), 145)
+
+
 def _files(root: Path) -> list[str]:
     return sorted(str(path) for path in root.rglob("*") if path.is_file())
+
+
+def _notes(error: BaseException) -> str:
+    return "\n".join(getattr(error, "__notes__", []))
 
 
 class _PublishFixture(unittest.TestCase):
@@ -80,7 +98,12 @@ class _PublishFixture(unittest.TestCase):
         self.lookups: list[list[str]] = []
         self.renames: list[tuple[Path, Path]] = []
         self.refusals: dict[tuple[Path, Path], float] = {}
+        self.removal_refusals: dict[Path, float] = {}
+        self.removal_error = _held_file
+        # (output exists, .previous exists) at every wait.
+        self.states: list[tuple[bool, bool]] = []
         real_replace = os.replace
+        real_rmtree = shutil.rmtree
 
         def replace(source: object, destination: object) -> None:
             pair = (Path(source), Path(destination))
@@ -91,8 +114,21 @@ class _PublishFixture(unittest.TestCase):
                 raise _sharing_violation(source, destination)
             real_replace(source, destination)
 
+        def rmtree(path: object, *args: object, **kwargs: object) -> None:
+            # A held tree: each removal that raises is one refusal; ignoring the
+            # errors leaves the tree as it is and does not make the holder let go.
+            tree = Path(path)  # type: ignore[arg-type]
+            left = self.removal_refusals.get(tree, 0)
+            if left:
+                if kwargs.get("ignore_errors") or (args and args[0] is True):
+                    return
+                self.removal_refusals[tree] = left - 1
+                raise self.removal_error(tree)
+            real_rmtree(path, *args, **kwargs)  # type: ignore[arg-type]
+
         for patcher in (
             patch.object(build_native_launcher.os, "replace", replace),
+            patch.object(build_native_launcher.shutil, "rmtree", rmtree),
             patch.object(build_native_launcher, "verify_bundle", lambda *_a, **_k: None),
         ):
             patcher.start()
@@ -101,24 +137,40 @@ class _PublishFixture(unittest.TestCase):
     def refuse(self, source: Path, destination: Path, times: float = math.inf) -> None:
         self.refusals[(source, destination)] = times
 
+    def refuse_removal(self, tree: Path, times: float = math.inf) -> None:
+        self.removal_refusals[tree] = times
+
     def holders(self, paths: list[str]) -> list[dict[str, object]]:
         self.lookups.append(list(paths))
         return [dict(item) for item in _HOLDERS]
+
+    def sleep(self, seconds: float) -> None:
+        self.states.append((self.output.exists(), self.previous.exists()))
+        self.clock.sleep(seconds)
 
     def publish(self, **overrides: object) -> None:
         options: dict[str, object] = {
             "find_holders": self.holders,
             "monotonic": self.clock.monotonic,
-            "sleep": self.clock.sleep,
+            "sleep": self.sleep,
         }
         options.update(overrides)
-        build_native_launcher._publish_bundle(self.staging, self.output, self.fingerprint, **options)
+        fingerprint = options.pop("fingerprint", self.fingerprint)
+        build_native_launcher._publish_bundle(self.staging, self.output, fingerprint, **options)
 
     def siblings(self) -> list[str]:
         return sorted(path.name for path in self.output.parent.iterdir())
 
     def assert_bundle(self, path: Path, marker: bytes) -> None:
         self.assertEqual((path / "app.pyz").read_bytes(), marker)
+
+    def assert_refusal(self, error: BaseException, winerror: int) -> None:
+        # The refusal is the cause, and its codes are the error's own.
+        self.assertIsInstance(error, PermissionError)
+        self.assertIsInstance(error.__cause__, OSError)
+        self.assertEqual(error.__cause__.winerror, winerror)
+        self.assertEqual(error.winerror, winerror)  # type: ignore[attr-defined]
+        self.assertEqual(error.errno, error.__cause__.errno)  # type: ignore[attr-defined]
 
 
 class FreeBundleTest(_PublishFixture):
@@ -177,16 +229,22 @@ class RefusalThatClearsTest(_PublishFixture):
         self.publish()
 
         self.assertEqual(self.clock.slept, [0.05, 0.1, 0.2])
+        self.assertEqual(self.states, [(True, False)] * 3)
         self.assertEqual(self.lookups, [])
         self.assert_bundle(self.output, b"app.pyz new")
         self.assertEqual(self.siblings(), ["dayz-test-v1"])
 
-    def test_a_scan_of_the_incoming_copy_is_waited_out_too(self) -> None:
+    def test_a_refused_second_rename_puts_output_back_before_it_waits(self) -> None:
+        # Review round 1, F2: a reader meanwhile must find the last bundle, never none.
         self.refuse(self.incoming, self.output, times=2)
 
         self.publish()
 
+        self.assertEqual(self.states, [(True, False)] * 2)
         self.assertEqual(self.clock.slept, [0.05, 0.1])
+        swap = [(self.output, self.previous), (self.incoming, self.output)]
+        put_back = [(self.previous, self.output)]
+        self.assertEqual(self.renames, (swap + put_back) * 2 + swap)
         self.assert_bundle(self.output, b"app.pyz new")
         self.assertEqual(self.siblings(), ["dayz-test-v1"])
 
@@ -202,16 +260,14 @@ class RefusalPastTheBudgetTest(_PublishFixture):
         error = caught.exception
         message = str(error)
         self.assertTrue(message.startswith("bundle_in_use"), message)
+        self.assertIn(f"renaming {self.output} to dayz-test-v1.previous", message)
         self.assertIn("pid 4242 python.exe (dayz_mcp --client)", message)
         self.assertIn("pid 31337 MsMpEng.exe", message)
         self.assertIn("Close or reopen", message)
         self.assertEqual(error.holders, _HOLDERS)
-        self.assertEqual((error.source, error.destination), (self.output, self.previous))
-        # Code that caught the bare refusal before still catches this.
-        self.assertIsInstance(error, PermissionError)
-        self.assertIsInstance(error.__cause__, PermissionError)
-        self.assertEqual(error.__cause__.winerror, 5)
-        # Bounded: the waits add up to the budget, then one lookup of the bundle's files.
+        self.assertEqual(error.path, self.output)
+        self.assert_refusal(error, 5)
+        # Bounded: the waits add up to the budget, then one lookup of the refused tree.
         self.assertAlmostEqual(sum(self.clock.slept), build_native_launcher._RENAME_RETRY_SECONDS)
         self.assertEqual(max(self.clock.slept), 1.0)
         self.assertEqual(self.lookups, [held])
@@ -219,19 +275,26 @@ class RefusalPastTheBudgetTest(_PublishFixture):
         self.assert_bundle(self.output, b"old")
         self.assertEqual(self.siblings(), ["dayz-test-v1"])
 
-    def test_a_refused_incoming_rename_puts_the_previous_bundle_back(self) -> None:
+    def test_a_second_rename_refused_past_the_budget_waits_with_output_in_place(self) -> None:
         self.refuse(self.incoming, self.output)
+        held = _files(self.staging)
 
         with self.assertRaises(build_native_launcher.BundleInUseError) as caught:
             self.publish()
 
-        self.assertEqual(caught.exception.source, self.incoming)
-        self.assertEqual(len(self.lookups), 1)
-        self.assertTrue(all(name.startswith(str(self.incoming)) for name in self.lookups[0]))
+        self.assertTrue(self.states)
+        self.assertEqual(set(self.states), {(True, False)})
+        # One budget for the whole swap, not one per rename.
+        self.assertAlmostEqual(sum(self.clock.slept), build_native_launcher._RENAME_RETRY_SECONDS)
+        error = caught.exception
+        self.assertEqual(error.path, self.incoming)
+        self.assertIn(f"renaming {self.incoming} to dayz-test-v1", str(error))
+        self.assert_refusal(error, 5)
+        self.assertEqual(self.lookups, [[name.replace(str(self.staging), str(self.incoming)) for name in held]])
         self.assert_bundle(self.output, b"old")
         self.assertEqual(self.siblings(), ["dayz-test-v1"])
 
-    def test_when_the_restore_is_refused_too_previous_keeps_the_bundle(self) -> None:
+    def test_when_the_put_back_is_refused_too_previous_keeps_the_bundle(self) -> None:
         self.refuse(self.incoming, self.output)
         self.refuse(self.previous, self.output)
 
@@ -239,9 +302,13 @@ class RefusalPastTheBudgetTest(_PublishFixture):
             self.publish()
 
         error = caught.exception
-        self.assertEqual(error.source, self.incoming)
-        self.assertEqual(error.__cause__.winerror, 5)
-        self.assertIn(str(self.previous), "\n".join(getattr(error, "__notes__", [])))
+        self.assertEqual(error.path, self.incoming)
+        self.assert_refusal(error, 5)
+        self.assertIn(str(self.previous), _notes(error))
+        self.assertIn("the next publish moves it back first", _notes(error))
+        # It stopped there: the swap is not tried again without output in place.
+        self.assertEqual(self.renames[:2], [(self.output, self.previous), (self.incoming, self.output)])
+        self.assertEqual(set(self.renames[2:]), {(self.previous, self.output)})
         self.assert_bundle(self.previous, b"old")
         self.assertEqual(self.siblings(), ["dayz-test-v1.previous"])
 
@@ -259,9 +326,137 @@ class RefusalPastTheBudgetTest(_PublishFixture):
         with self.assertRaises(build_native_launcher.BundleInUseError) as caught:
             self.publish()
 
-        self.assertEqual(caught.exception.source, self.previous)
+        self.assertEqual(caught.exception.path, self.previous)
         self.assert_bundle(self.previous, b"old")
         self.assertEqual(self.siblings(), ["dayz-test-v1.previous"])
+
+
+class SwapFailureTest(_PublishFixture):
+    """The second rename failing for another reason still puts the bundle back."""
+
+    def fail_second_rename(self, failure: BaseException) -> None:
+        recording = build_native_launcher.os.replace
+
+        def replace(source: object, destination: object) -> None:
+            if (Path(source), Path(destination)) == (self.incoming, self.output):
+                raise failure
+            recording(source, destination)
+
+        patcher = patch.object(build_native_launcher.os, "replace", replace)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_an_interrupt_between_the_two_renames_puts_the_bundle_back(self) -> None:
+        self.fail_second_rename(KeyboardInterrupt())
+
+        with self.assertRaises(KeyboardInterrupt):
+            self.publish()
+
+        self.assertEqual(self.clock.slept, [])
+        self.assertEqual(self.renames[-1], (self.previous, self.output))
+        self.assert_bundle(self.output, b"old")
+        self.assertEqual(self.siblings(), ["dayz-test-v1"])
+
+    def test_another_error_on_the_second_rename_is_raised_unchanged_after_the_put_back(self) -> None:
+        failure = OSError(errno.EIO, "The request could not be performed because of an I/O device error")
+        self.fail_second_rename(failure)
+
+        with self.assertRaises(OSError) as caught:
+            self.publish()
+
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(self.clock.slept, [])
+        self.assertEqual(self.lookups, [])
+        self.assert_bundle(self.output, b"old")
+        self.assertEqual(self.siblings(), ["dayz-test-v1"])
+
+
+class LeftoverCopyTest(_PublishFixture):
+    """Review round 1, F3: a copy that cannot be removed is never hidden."""
+
+    def test_a_copy_held_for_a_moment_is_removed_once_it_is_free(self) -> None:
+        self.refuse_removal(self.incoming, times=2)
+
+        with self.assertRaisesRegex(ValueError, "final_copy_mismatch"):
+            self.publish(fingerprint=dict(self.fingerprint, app_pyz_sha256="0" * 64))
+
+        self.assertEqual(self.clock.slept, [0.05, 0.1])
+        self.assert_bundle(self.output, b"old")
+        self.assertEqual(self.siblings(), ["dayz-test-v1"])
+
+    def test_a_copy_that_stays_is_named_on_the_error_it_follows(self) -> None:
+        self.refuse_removal(self.incoming)
+
+        with self.assertRaisesRegex(ValueError, "final_copy_mismatch") as caught:
+            self.publish(fingerprint=dict(self.fingerprint, app_pyz_sha256="0" * 64))
+
+        notes = _notes(caught.exception)
+        self.assertIn(f"removing {self.incoming}", notes)
+        self.assertIn("WinError 32", notes)
+        self.assertIn("pid 4242 python.exe (dayz_mcp --client)", notes)
+        self.assertIn("the next publish removes it first", notes)
+        self.assertEqual(self.lookups, [_files(self.incoming)])
+        self.assert_bundle(self.output, b"old")
+
+    def test_a_copy_that_stays_after_a_refused_swap_keeps_the_refusal_first(self) -> None:
+        self.refuse(self.output, self.previous)
+        self.refuse_removal(self.incoming)
+
+        with self.assertRaises(build_native_launcher.BundleInUseError) as caught:
+            self.publish()
+
+        error = caught.exception
+        self.assertEqual(error.path, self.output)
+        self.assert_refusal(error, 5)
+        self.assertIn(f"removing {self.incoming}", _notes(error))
+        self.assertIn("WinError 32", _notes(error))
+        self.assert_bundle(self.output, b"old")
+
+    def test_a_stale_copy_that_stays_stops_the_next_publish_naming_it(self) -> None:
+        for stale in (self.incoming, self.previous):
+            with self.subTest(stale=stale.name):
+                stale.mkdir()
+                (stale / "app.pyz").write_bytes(b"stale")
+                self.refuse_removal(stale)
+                self.lookups.clear()
+
+                with self.assertRaises(build_native_launcher.BundleInUseError) as caught:
+                    self.publish()
+
+                error = caught.exception
+                self.assertEqual(error.path, stale)
+                self.assertIn(f"removing {stale}", str(error))
+                self.assertIn("pid 4242 python.exe (dayz_mcp --client)", str(error))
+                self.assert_refusal(error, 32)
+                self.assertEqual(self.lookups, [[str(stale / "app.pyz")]])
+                self.assert_bundle(stale, b"stale")
+                self.assert_bundle(self.output, b"old")
+                self.removal_refusals.clear()
+                shutil.rmtree(stale)
+
+    def test_a_previous_bundle_that_stays_after_the_swap_is_reported_as_published(self) -> None:
+        self.refuse_removal(self.previous)
+
+        with self.assertRaises(build_native_launcher.BundleInUseError) as caught:
+            self.publish()
+
+        error = caught.exception
+        self.assertEqual(error.path, self.previous)
+        self.assert_refusal(error, 32)
+        self.assertIn(f"already published in {self.output}", _notes(error))
+        self.assert_bundle(self.output, b"app.pyz new")
+
+    def test_a_directory_that_is_not_empty_yet_is_waited_out_like_a_held_file(self) -> None:
+        self.incoming.mkdir()
+        (self.incoming / "app.pyz").write_bytes(b"stale")
+        self.removal_error = _not_empty_yet
+        self.refuse_removal(self.incoming, times=2)
+
+        self.publish()
+
+        self.assertEqual(self.clock.slept, [0.05, 0.1])
+        self.assert_bundle(self.output, b"app.pyz new")
+        self.assertEqual(self.siblings(), ["dayz-test-v1"])
 
 
 class UnknownHoldersTest(_PublishFixture):
@@ -272,8 +467,7 @@ class UnknownHoldersTest(_PublishFixture):
         self.assertIn(reason, message)
         self.assertIn("Close or reopen", message)
         # The refusal is still the cause: the diagnosis never masks it.
-        self.assertIsInstance(error.__cause__, PermissionError)
-        self.assertEqual(error.__cause__.winerror, 5)
+        self.assert_refusal(error, 5)
         self.assert_bundle(self.output, b"old")
         self.assertEqual(self.siblings(), ["dayz-test-v1"])
 
@@ -329,6 +523,7 @@ class InUseTest(unittest.TestCase):
             (OtherOSError(errno.EIO, "a subclass that still carries the code", "a", 32), True),
             (OSError(errno.EXDEV, "The system cannot move the file to a different disk drive"), False),
             (FileNotFoundError(errno.ENOENT, "missing"), False),
+            (_not_empty_yet(Path("a")), False),
         ]
         for error, expected in cases:
             with self.subTest(error=error):
@@ -337,38 +532,60 @@ class InUseTest(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "OpenProcess is a Windows API")
 class HolderNamingTest(unittest.TestCase):
-    def test_a_process_that_did_not_start_when_the_holder_did_keeps_the_restart_manager_names(self) -> None:
+    def test_a_process_that_did_not_start_when_the_holder_did_is_not_named(self) -> None:
         # This process did not start at FILETIME 1: a reused pid must not lend
         # its image or command line to the holder.
-        holder = build_native_launcher._named_holder(os.getpid(), 1, "Python", "")
+        holder = build_native_launcher._named_holder(os.getpid(), 1, "")
 
-        self.assertEqual(holder, {"pid": os.getpid(), "image": "Python", "command_hint": None})
+        self.assertEqual(holder, {"pid": os.getpid(), "image": "unknown", "command_hint": None})
 
-    def test_a_process_that_cannot_be_opened_keeps_the_restart_manager_names(self) -> None:
-        holder = build_native_launcher._named_holder(0, 0, "Windows Search", "WSearch")
+    def test_a_service_that_cannot_be_opened_keeps_its_service_name(self) -> None:
+        holder = build_native_launcher._named_holder(0, 0, "WSearch")
 
-        self.assertEqual(holder, {"pid": 0, "image": "Windows Search", "command_hint": "service WSearch"})
+        self.assertEqual(holder, {"pid": 0, "image": "unknown", "command_hint": "service WSearch"})
 
     def test_without_any_name_the_image_is_unknown(self) -> None:
-        holder = build_native_launcher._named_holder(0, 0, "", "")
+        holder = build_native_launcher._named_holder(0, 0, "")
 
         self.assertEqual(holder, {"pid": 0, "image": "unknown", "command_hint": None})
 
+    def test_a_foreign_command_line_never_reaches_the_error(self) -> None:
+        # Review round 1, F1: python.exe -W secreto_token.py worker.py is a valid
+        # command line whose option value looks like a script.
+        argv = [r"C:\Python314\python.exe", "-W", "secreto_token.py", "worker.py"]
+        with patch.object(
+            build_native_launcher,
+            "_image_and_argv",
+            return_value=(r"C:\Python314\python.exe", argv),
+        ):
+            holder = build_native_launcher._named_holder(4242, 5, "")
+        error = build_native_launcher.BundleInUseError(
+            "renaming a to b", Path("a"), 10.0, [holder], None, _sharing_violation("a", "b")
+        )
+
+        self.assertEqual(holder, {"pid": 4242, "image": "python.exe", "command_hint": None})
+        self.assertNotIn("secreto", str(error))
+
 
 class CommandHintTest(unittest.TestCase):
-    def test_the_hint_names_the_program_and_never_an_option_value(self) -> None:
+    def test_only_a_dayz_mcp_invocation_gets_a_hint(self) -> None:
         cases = [
             (
                 [r"C:\venv\Scripts\python.exe", "-m", "dayz_mcp", "--client", "--port", "8765",
-                 "--keyfile", r"C:\keys\daemon.key", "--client-platform", "codex"],
+                 "--keyfile", r"C:\keys\token.py", "--client-platform", "codex"],
                 "dayz_mcp --client",
             ),
             (["python.exe", "-m", "dayz_mcp", "--daemon", "--port", "8765"], "dayz_mcp --daemon"),
-            (["python.exe", "-B", "-m", "unittest", "tests.test_x"], "unittest"),
-            (["python.exe", r"C:\tools\build_native_launcher.py", "--offline"], "build_native_launcher.py"),
-            (["python.exe", "-I", r"C:\bundle\app.pyz", "--token", "s3cret"], "app.pyz"),
-            (["python.exe", "-c", "import os; os.getpid()"], None),
-            (["python.exe", "-m", "not a module name", "--client"], None),
+            (["python.exe", "-B", "-I", "-m", "dayz_mcp", "--embedded"], "dayz_mcp --embedded"),
+            (["python.exe", "-Wignore", "-X", "utf8", "-m", "dayz_mcp", "--client"], "dayz_mcp --client"),
+            (["python.exe", "-m", "dayz_mcp"], None),
+            (["python.exe", "-m", "dayz_mcp", "--client", "--daemon"], None),
+            (["python.exe", "-m", "dayz_mcp", "--client", "--client"], None),
+            (["python.exe", "-m", "dayz_mcp.server", "--client"], None),
+            (["python.exe", "-mdayz_mcp", "--client"], None),
+            (["python.exe", "-B", "-m", "unittest", "tests.test_x"], None),
+            (["python.exe", r"C:\tools\build_native_launcher.py", "--offline"], None),
+            (["python.exe", "-I", "-B", "-S", r"C:\bundle\app.pyz", "--lifecycle-child"], None),
             ([r"C:\Windows\explorer.exe"], None),
             ([], None),
             (None, None),
@@ -376,6 +593,25 @@ class CommandHintTest(unittest.TestCase):
         for argv, expected in cases:
             with self.subTest(argv=argv):
                 self.assertEqual(build_native_launcher._command_hint(argv), expected)
+
+    def test_an_option_value_that_looks_like_a_script_is_never_taken_for_one(self) -> None:
+        # Review round 1, F1. Each value is skipped as the option's value: it is
+        # neither shown nor allowed to stand for the module switch.
+        cases = [
+            (["python.exe", "-W", "secreto_token.py", "worker.py"], None),
+            (["python.exe", "-X", "secreto.pyz", "-m", "dayz_mcp", "--client"], "dayz_mcp --client"),
+            (["python.exe", "--check-hash-based-pycs", "secreto.py", "-m", "dayz_mcp", "--daemon"],
+             "dayz_mcp --daemon"),
+            (["python.exe", "-W", "-m", "dayz_mcp", "--client"], None),
+            (["python.exe", "worker.py", "-m", "dayz_mcp", "--client"], None),
+            (["python.exe", "-c", "pass", "-m", "dayz_mcp", "--client"], None),
+            (["python.exe", "-W"], None),
+        ]
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                hint = build_native_launcher._command_hint(argv)
+                self.assertEqual(hint, expected)
+                self.assertIn(hint, _HINTS)
 
 
 class RestartManagerBindingTest(unittest.TestCase):
@@ -441,7 +677,7 @@ class RestartManagerBindingTest(unittest.TestCase):
                     return 234  # ERROR_MORE_DATA
                 for index in range(20):
                     infos[index].Process.dwProcessId = 1000 + index  # type: ignore[index]
-                    infos[index].strAppName = f"app{index}"  # type: ignore[index]
+                    infos[index].strServiceShortName = f"svc{index}"  # type: ignore[index]
                 filled._obj.value = 20  # type: ignore[attr-defined]
                 return 0
 
@@ -450,8 +686,8 @@ class RestartManagerBindingTest(unittest.TestCase):
 
         library = Library()
 
-        def named(pid: int, started: int, app_name: str, service: str) -> dict[str, object]:
-            return {"pid": pid, "image": app_name, "command_hint": None}
+        def named(pid: int, started: int, service: str) -> dict[str, object]:
+            return {"pid": pid, "image": "python.exe", "command_hint": service}
 
         with (
             patch.object(build_native_launcher, "_restart_manager", return_value=library),
@@ -462,7 +698,118 @@ class RestartManagerBindingTest(unittest.TestCase):
         self.assertEqual(library.registered, [r"C:\bundle\app.pyz", r"C:\bundle\x.exe"])
         self.assertEqual(capacities, [16, 20])
         self.assertEqual([item["pid"] for item in holders], list(range(1000, 1020)))
-        self.assertEqual(holders[19]["image"], "app19")
+        self.assertEqual(holders[19]["command_hint"], "svc19")
+
+
+def _real_bundle(root: Path) -> tuple[Path, Path, dict[str, str]]:
+    staging = root / "staging" / "dayz-test-v1"
+    staging.mkdir(parents=True)
+    for name in ("app.pyz", "closure-manifest.json", "dayz-test-launcher.exe", "request-policy.json"):
+        (staging / name).write_bytes(name.encode() + b" new")
+    output = root / "native-launchers" / "dayz-test-v1"
+    output.mkdir(parents=True)
+    for name in ("app.pyz", "closure-manifest.json", "dayz-test-launcher.exe"):
+        (output / name).write_bytes(b"old")
+    return staging, output, build_native_launcher._artifact_fingerprint(staging)
+
+
+@unittest.skipUnless(sys.platform == "win32", "a real sharing violation is Windows behaviour")
+class HeldIncomingCopyTest(unittest.TestCase):
+    """Review round 1, F2 and F3: a real handle on a file inside .incoming.
+
+    The holder lookup is injected, so this runs where the Restart Manager does not.
+    """
+
+    def setUp(self) -> None:
+        from dayz_mcp.launcher_registry import _open_pinned_read
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.staging, self.output, self.fingerprint = _real_bundle(Path(directory.name))
+        self.incoming = self.output.with_name("dayz-test-v1.incoming")
+        self.previous = self.output.with_name("dayz-test-v1.previous")
+        self.hold = True
+        self.handles: list[object] = []
+        self.addCleanup(self.release)
+        self.lookups: list[list[str]] = []
+        self.states: list[tuple[bool, bool]] = []
+
+        def verify(path: Path, **_kwargs: object) -> None:
+            # Held the way a live MCP client holds a bundle: FILE_SHARE_READ only.
+            if self.hold and path.name.endswith(".incoming") and not self.handles:
+                self.handles.append(_open_pinned_read(path / "app.pyz"))
+
+        patcher = patch.object(build_native_launcher, "verify_bundle", verify)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def release(self) -> None:
+        self.hold = False
+        while self.handles:
+            self.handles.pop().close()  # type: ignore[attr-defined]
+
+    def holders(self, paths: list[str]) -> list[dict[str, object]]:
+        self.lookups.append(list(paths))
+        return []
+
+    def sleep(self, seconds: float) -> None:
+        self.states.append((self.output.exists(), self.previous.exists()))
+        time.sleep(seconds)
+
+    def publish(self) -> None:
+        build_native_launcher._publish_bundle(
+            self.staging,
+            self.output,
+            self.fingerprint,
+            retry_seconds=0.3,
+            find_holders=self.holders,
+            sleep=self.sleep,
+        )
+
+    def siblings(self) -> list[str]:
+        return sorted(path.name for path in self.output.parent.iterdir())
+
+    @slow_test
+    def test_waits_for_a_held_incoming_copy_happen_with_output_in_place(self) -> None:
+        with self.assertRaises(build_native_launcher.BundleInUseError) as caught:
+            self.publish()
+
+        self.assertTrue(self.states)
+        self.assertEqual(set(self.states), {(True, False)})
+        self.assertEqual(caught.exception.path, self.incoming)
+        self.assertEqual(caught.exception.__cause__.winerror, 5)
+        self.assertEqual((self.output / "app.pyz").read_bytes(), b"old")
+        self.assertFalse(self.previous.exists())
+
+    @slow_test
+    def test_a_held_leftover_is_reported_now_and_named_by_the_next_publish(self) -> None:
+        with self.assertRaises(build_native_launcher.BundleInUseError) as caught:
+            self.publish()
+
+        held = str(self.incoming / "app.pyz")
+        notes = _notes(caught.exception)
+        self.assertIn(f"removing {self.incoming}", notes)
+        self.assertIn("WinError 32", notes)
+        self.assertIn([held], self.lookups)
+        self.assertEqual(_files(self.incoming), [held])
+
+        # Still held: the next publish stops at the leftover and names it.
+        self.lookups.clear()
+        with self.assertRaises(build_native_launcher.BundleInUseError) as again:
+            self.publish()
+
+        self.assertEqual(again.exception.path, self.incoming)
+        self.assertIn(f"removing {self.incoming}", str(again.exception))
+        self.assertEqual(again.exception.winerror, 32)
+        self.assertEqual(self.lookups, [[held]])
+        self.assertEqual((self.output / "app.pyz").read_bytes(), b"old")
+
+        # Released: the next publish removes it first and goes through.
+        self.release()
+        self.publish()
+
+        self.assertEqual((self.output / "app.pyz").read_bytes(), b"app.pyz new")
+        self.assertEqual(self.siblings(), ["dayz-test-v1"])
 
 
 @unittest.skipUnless(sys.platform == "win32", "the Restart Manager is a Windows API")
@@ -481,18 +828,10 @@ class RestartManagerOnThisHostTest(unittest.TestCase):
             self.skipTest(f"the Restart Manager cannot run on this host: {error}")
 
     def bundle(self) -> tuple[Path, Path, dict[str, str]]:
-        staging = self.root / "staging" / "dayz-test-v1"
-        staging.mkdir(parents=True)
-        for name in ("app.pyz", "closure-manifest.json", "dayz-test-launcher.exe", "request-policy.json"):
-            (staging / name).write_bytes(name.encode() + b" new")
-        output = self.root / "native-launchers" / "dayz-test-v1"
-        output.mkdir(parents=True)
-        for name in ("app.pyz", "closure-manifest.json", "dayz-test-launcher.exe"):
-            (output / name).write_bytes(b"old")
         patcher = patch.object(build_native_launcher, "verify_bundle", lambda *_a, **_k: None)
         patcher.start()
         self.addCleanup(patcher.stop)
-        return staging, output, build_native_launcher._artifact_fingerprint(staging)
+        return _real_bundle(self.root)
 
     @slow_test
     def test_a_handle_this_process_keeps_open_is_named(self) -> None:
