@@ -155,6 +155,8 @@ class NativeBundleTest(unittest.TestCase):
             40: unknown,
             41: unknown,
             42: unknown,
+            43: unknown,
+            44: unknown,
         }
         paths = {
             11: r"C:\bundle\python.exe",
@@ -264,6 +266,14 @@ class NativeBundleTest(unittest.TestCase):
                 r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
                 r"\v4.0_10.0.0.0_es_b03f5f7f11d50a3a\mscorlib.resources.dll"
             ),
+            43: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\System.Resources.Reader"
+                r"\v4.0_4.0.0.0_es_b77a5c561934e089\System.Resources.Reader.dll"
+            ),
+            44: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es_zzzz5c561934e089\mscorlib.resources.dll"
+            ),
         }
         with patch.object(
             native_bundle, "_file_identity", side_effect=lambda handle: identities[handle]
@@ -292,16 +302,21 @@ class NativeBundleTest(unittest.TestCase):
             self.assertTrue(authority.approve_debug_image(30, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(31, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(32, event_kind="LOAD_DLL"))
-            self.assertFalse(authority.approve_debug_image(33, event_kind="LOAD_DLL"))
-            self.assertFalse(authority.approve_debug_image(34, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(35, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(36, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(37, event_kind="LOAD_DLL"))
             self.assertTrue(authority.approve_debug_image(38, event_kind="LOAD_DLL"))
             self.assertTrue(authority.approve_debug_image(39, event_kind="LOAD_DLL"))
-            self.assertFalse(authority.approve_debug_image(40, event_kind="LOAD_DLL"))
-            self.assertFalse(authority.approve_debug_image(41, event_kind="LOAD_DLL"))
-            self.assertFalse(authority.approve_debug_image(42, event_kind="LOAD_DLL"))
+            # Structural satellite rule: any version/token/culture that parses
+            # is approved inside the admin-protected subtree (33, 34, 40, 42).
+            self.assertTrue(authority.approve_debug_image(33, event_kind="LOAD_DLL"))
+            self.assertTrue(authority.approve_debug_image(34, event_kind="LOAD_DLL"))
+            self.assertTrue(authority.approve_debug_image(40, event_kind="LOAD_DLL"))
+            self.assertTrue(authority.approve_debug_image(42, event_kind="LOAD_DLL"))
+            # Still rejected: code assemblies without .resources, non-hex
+            # tokens, evil roots, foreign basenames, nesting, bad cultures.
+            self.assertFalse(authority.approve_debug_image(43, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(44, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(11, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(12, event_kind="CREATE_PROCESS"))
             self.assertFalse(authority.approve_debug_image(11, event_kind="UNKNOWN"))

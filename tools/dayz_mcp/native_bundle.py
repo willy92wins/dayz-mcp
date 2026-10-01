@@ -225,55 +225,55 @@ def _is_trusted_gac_microsoft_visual_basic(path: str, windows_directory: str) ->
 
 
 def _is_trusted_gac_resource_satellite(path: str, windows_directory: str) -> bool:
-    # Localized .NET resource satellites (mscorlib.resources.dll,
-    # Microsoft.VisualBasic.resources.dll, ...) load into the AddonBuilder
-    # toolchain the same way their main assemblies do — when an exception is
-    # formatted under a non-English OS UI culture. Observed 2026-10-01 (gate
-    # #61, culture es):
+    # Localized .NET resource satellites (*.resources) load into the
+    # AddonBuilder toolchain when an exception is formatted under a
+    # non-English OS UI culture. Observed 2026-10-01 (gate #61, culture es):
     #   GAC_MSIL\mscorlib.resources\v4.0_4.0.0.0_es_b77a5c561934e089\
     #   GAC_MSIL\Microsoft.VisualBasic.resources\v4.0_10.0.0.0_es_b03f5f7f11d50a3a\
-    # Both live in the admin-protected GAC_MSIL tree. The culture is part of
-    # the version directory name, so the version directory is validated field
-    # by field: fixed v4.0, the assembly's known version, its official public
-    # key token, and a BCP-47-shaped culture of ASCII alnum subtags. Adding a
-    # new satellite means adding its (assembly, version, token) triple here.
-    _KNOWN_SATELLITES = {
-        "mscorlib.resources.dll": {
-            "assembly": "mscorlib.resources",
-            "version": "4.0.0.0",
-            "token": "b77a5c561934e089",
-        },
-        "microsoft.visualbasic.resources.dll": {
-            "assembly": "Microsoft.VisualBasic.resources",
-            "version": "10.0.0.0",
-            "token": "b03f5f7f11d50a3a",
-        },
-    }
-    normalized = ntpath.normpath(path)
-    parent, basename = ntpath.split(normalized)
-    if basename.casefold() not in _KNOWN_SATELLITES:
-        return False
-    version_directory = ntpath.basename(parent)
-    assembly_directory = ntpath.basename(ntpath.dirname(parent))
+    # The host machine carries ~180 *.resources assemblies in GAC_MSIL across
+    # three official token families (b77a5c561934e089, b03f5f7f11d50a3a,
+    # 31bf3856ad364e35), so a per-assembly allowlist would chase loads one
+    # rejection at a time. This rule instead trusts the whole
+    # admin-protected satellite subtree with structural validation — the
+    # same trust model already applied to System32, WinSxS and NativeImages.
+    # Required shape, exactly four levels under the pinned root:
+    #   GAC_MSIL\<X.resources>\<v4.0_version_culture_token>\<X.resources.dll>
+    # where the basename must equal the assembly directory + ".dll"
+    # (self-consistency: a foreign basename inside a trusted directory is
+    # still rejected), the version directory must be exactly
+    # v4.0_<digits.quad>_<BCP-47 ASCII subtags>_<16 hex chars>, and only
+    # ".resources" directories qualify (code assemblies like
+    # System.Resources.Reader stay out). Evil sibling roots, foreign
+    # basenames, deeper nesting and malformed fields stay rejected.
     expected = ntpath.normpath(
         ntpath.join(
             windows_directory, "Microsoft.NET", "assembly", "GAC_MSIL"
         )
     )
+    normalized = ntpath.normpath(path)
+    parent, basename = ntpath.split(normalized)
+    version_directory = ntpath.basename(parent)
+    assembly_directory = ntpath.basename(ntpath.dirname(parent))
     # parent = <GAC_MSIL>\<assembly>\<version dir>; one more dirname gets the
     # assembly directory, one more the pinned GAC_MSIL root.
     gac_directory = ntpath.dirname(ntpath.dirname(parent))
     if gac_directory.casefold() != expected.casefold():
         return False
-    spec = _KNOWN_SATELLITES[basename.casefold()]
-    if assembly_directory.casefold() != spec["assembly"].casefold():
+    if not assembly_directory.casefold().endswith(".resources"):
+        return False
+    if basename.casefold() != assembly_directory.casefold() + ".dll":
         return False
     fields = version_directory.split("_")
-    if (
-        len(fields) != 4
-        or fields[0] != "v4.0"
-        or fields[1] != spec["version"]
-        or fields[3] != spec["token"]
+    if len(fields) != 4 or fields[0] != "v4.0":
+        return False
+    version_parts = fields[1].split(".")
+    if len(version_parts) != 4 or not all(
+        part.isascii() and part.isdigit() and len(part) > 0
+        for part in version_parts
+    ):
+        return False
+    if len(fields[3]) != 16 or not all(
+        character in "0123456789abcdefABCDEF" for character in fields[3]
     ):
         return False
     subtags = fields[2].split("-")
