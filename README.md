@@ -253,9 +253,10 @@ Each of these fails closed with a named error instead of guessing (#93):
   such as `DayZ Exp`, start the daemon with `DAYZ_GAME_PATH` set to it.
 - **DayZ Tools on another drive.** The bundle builder and the bundle verifier find
   DayZ Tools the same way: `DAYZ_TOOLS_PATH` if it points at them, then the
-  registry, then the default `C:` path. `dayz_test_run(build=true)` still needs
-  DayZ Tools under the default `C:` path, whatever `DAYZ_TOOLS_PATH` says,
-  because the sealed launcher starts AddonBuilder from that fixed path.
+  registry, then the default `C:` path. `dayz_test_run(build=true)` runs the
+  AddonBuilder sealed into the native launcher when it was built, so the daemon
+  must find the same DayZ Tools. If DayZ Tools move, build and register the
+  launcher again (steps 2 and 3 under "What is deliberately not in this repo").
 
 ## Security model
 
