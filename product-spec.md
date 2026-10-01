@@ -414,7 +414,7 @@ Cada elemento de `fields` acepta en la tool las claves exactas `{id, label}` má
 - `default` / `default_text` ≤ 256 chars (`ui_dialog.py:27,186-196`).
 - 7 campos (N+1) → `bad_args` **antes** de encolar (`ui_dialog.py:126-127`).
 - Presupuesto Python del puente = `timeout_s + 10.0` (`BRIDGE_SLACK_S`, `ui_dialog.py:31,67-69`)
-  → ≤ 250 s, por debajo de `MAX_TIMEOUT_S` 300.0 (`server.py`). El `operation_timeout_s`
+  → ≤ 250 s, por debajo de `MAX_TIMEOUT_S` 300.0 (`tool_args.py`). El `operation_timeout_s`
   encolado es ese presupuesto, no el timeout del jugador. El sondeo usa
   `WAIT_FOR_MIN_POLL_INTERVAL_S` 0.5 s (`server.py`, constante y bucle de sondeo).
 

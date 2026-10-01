@@ -13,8 +13,8 @@ Lane **única** (no dual): el mecanismo está citado a `path:line` en este árbo
 Tres lecturas falsas sobre tools de **status** (no mutan procesos):
 
 1. `tool_registry_remediation=reopen_mcp_client` siempre, incluso con `server_modules.status=fresh` → el modelo imputa crash/daemon. Hoy: `server.py:728-734` + `server_freshness.py:24`.
-2. `fence.mutation_rejects_by_code` (ints de por vida, `loopback.py:1864-1866` / `:2878-2884`) se lee como bloqueo actual. `compute_bridge_ready` (`server.py:523-566`) **no** usa esos ints; `ready=true` y contadores >0 ya coexisten.
-3. `session_status.blocked_on` con `box.occupied=true` manda al FIFO de `dayz_test_run` (`server.py:3406-3410`), aunque un `RUNNING_IDLE` único sin dueño se adopta al conceder el lease (`loopback.py:3180-3271`).
+2. `fence.mutation_rejects_by_code` (ints de por vida, `loopback.py:1864-1866` / `:2878-2884`) se lee como bloqueo actual. `compute_bridge_ready` (`bridge_readiness.py`) **no** usa esos ints; `ready=true` y contadores >0 ya coexisten.
+3. `session_status.blocked_on` con `box.occupied=true` manda al FIFO de `dayz_test_run` (`box_occupancy.py`, `_session_status_blocked_on`), aunque un `RUNNING_IDLE` único sin dueño se adopta al conceder el lease (`loopback.py:3180-3271`).
 
 `9b7b` ya publica fingerprint + `tool_registry_schema_signal`. Este plan añade scope/aplicabilidad y no inventa reload de daemon.
 
@@ -188,7 +188,7 @@ Un test = un veredicto. Interpreter: `tools/.venv-mcp/Scripts/python.exe`. Cwd `
 | N3 | `ready.ready is True` y contadores >0 | `bridge_status` | **No** se infiere bloqueo: `blocks_now is False`. Un assert que exigiera `ready.ready is False` por contadores >0 es el anti-fixture. |
 | P4-neg | occupied idle adoptable | `session_status` | `blocked_on` **no** es `BOX_BLOCKED_ON` (`test_session_status_blocked_on.py:25-28`). |
 | N4 | dos runs `RUNNING_IDLE` ownerless | `session_status` | `{new_launch: false, adopt: false}` (espejo `multiple_idle_runs`); `blocked_on` no promete adopt. |
-| N5 | `port_scan_known=false` | `session_status` | ambos flags false; `blocked_on` sigue el texto de port-scan (`server.py:3396-3405`), no FIFO ni adopt. |
+| N5 | `port_scan_known=false` | `session_status` | ambos flags false; `blocked_on` sigue el texto de port-scan (`box_occupancy.py`, `_session_status_blocked_on`), no FIFO ni adopt. |
 | N6 | loopback HTTP `/status` | GET | **sin** `tool_registry_remediation`, **sin** `available_for`, `mutation_rejects_by_code.*.__class__ is int` (no objetos). |
 
 ### INCONCLUSO / setup-failed (LL-017)

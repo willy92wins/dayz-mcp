@@ -115,6 +115,183 @@ from dayz_mcp.session_coordination import (
 )
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
 from dayz_mcp import anim_timeline as anim_timeline_contract
+# Moved out of this module unchanged (backlog 71fc) and imported back, so
+# dayz_mcp.server.<name> is still the same object for every name it had.
+from dayz_mcp.tool_catalog import (
+    _COMPACT_DESCRIPTION_MARKER,
+    _FULL_CATALOG_PLATFORMS,
+    _INITIAL_CATALOG_NAMES,
+    _INITIAL_CORE_NAMES,
+    _INITIAL_DESCRIPTION_LIMIT,
+    _INITIAL_READ_TOOL_NAMES,
+    _LEASE_REVEAL_PREFIXES,
+    _OPENER_FOR_CLOSER,
+    _bridge_success_candidates,
+    _compact_description,
+    _compact_initial_catalog,
+    _is_lease_revealed_tool,
+    _next_public_call,
+    _progressive_disclosure_active,
+    _progressive_disclosure_enabled,
+    _runtime_holds_lease,
+    _visible_public_tools,
+    _with_bridge_success_hints,
+    _with_ok_next_step,
+)
+from dayz_mcp.bridge_readiness import (
+    EXPECTED_SERVER_ARG_CONTRACT_HASH,
+    READY_REASONS,
+    SERVER_ARG_CONTRACT,
+    _BRIDGE_COMMAND_TOOLS,
+    _BRIDGE_WORLD_READ_COMMANDS,
+    _FENCE_BLOCK_READY,
+    _READY_NEXT_TOOLS,
+    _client_peer_announces_command,
+    _compare_bridge_capabilities,
+    _finite_poll_age,
+    _front_key,
+    _game_not_ready_reason,
+    _has_ready_snapshot_shape,
+    _ready_next_tool,
+    _runtime_client_peer_probeable,
+    _target_peer_down,
+    _with_capability_comparison,
+    _with_ready,
+    _world_read_not_ready,
+    compute_bridge_ready,
+    server_arg_contract_canonical,
+    server_arg_contract_hash,
+)
+from dayz_mcp.bridge_errors import (
+    LEASE_EXPIRED_RECIPE,
+    LEASE_INVALID_RECIPE,
+    LEASE_REQUIRED_RECIPE,
+    RETAIL_QUARANTINE_RECIPE,
+    _CONTROL_CLIENT_ERROR_CODES,
+    _ENQUEUE_HINT_MAX_CHARS,
+    _FIXTURE_NOT_READY_TELEMETRY_KEYS,
+    _FIXTURE_SCALAR_STR_MAX,
+    _INPUT_TRIGGER_OBSERVED_KEYS,
+    _INPUT_TRIGGER_REASON_RE,
+    _INPUT_TRIGGER_RELEASED_BY,
+    _PUBLISHED_NOT_READY_CODES,
+    _REMOTE_ERROR_CODES,
+    _RETAIL_QUARANTINE_REASONS,
+    _STALE_LEASE_ERRORS,
+    _STALE_TICKET_ERRORS,
+    _UI_CLICK_DIAGNOSTIC_KEYS,
+    _UI_ECHO_KEYS,
+    _UI_ECHO_VERBS,
+    _VEHICLE_DOOR_SLOT_RE,
+    _audit_failed_message,
+    _bridge_error,
+    _bridge_error_detail,
+    _carriable_hint,
+    _fixture_not_ready_detail,
+    _format_fixture_scalar,
+    _input_trigger_detail,
+    _is_safe_error_token,
+    _log_opaque_failure,
+    _opaque_dayz_test_failure,
+    _public_enqueue_error,
+    _published_not_ready_code,
+    _remote_error_code,
+    _retail_quarantine_recipe,
+    _vehicle_door_missing_detail,
+    _wire_safe_error,
+)
+from dayz_mcp.tool_args import (
+    INPUT_TRIGGER_HOLD_SLACK_S,
+    MAX_TIMEOUT_S,
+    _CLOSED_UNEXPECTED_ARGUMENT_CAP,
+    _SPAWN_TYPE_ECHO_MAX,
+    _bad_args,
+    _closed_unexpected_arguments_message,
+    _echo_unexpected_argument_key,
+    _finite_float,
+    _input_trigger_request,
+    _input_trigger_seconds,
+    _inspect_type_is_valid,
+    _object_target_args,
+    _optional_finite_float,
+    _patch_closed_tool_schema,
+    _patch_mode_enum_from_authority,
+    _patch_public_argument_alias,
+    _require_float_list,
+    _require_range,
+    _require_vec3,
+    _timeout,
+    _unknown_spawn_type,
+)
+from dayz_mcp.world_results import (
+    ENTITIES_QUERY_BUBBLE_M,
+    WORLD_TIME_FIELDS,
+    _add_applied_days,
+    _annotate_entities_reliability,
+    _cargo_flag,
+    _clock_was_normalized,
+    _is_int_clock_part,
+    _normalize_applied_clock,
+    _normalize_entities_cargo,
+    _overflow_clock_parts,
+    _world_time_reply,
+)
+from dayz_mcp.launch_logs import (
+    _coerce_logs_since_marker,
+    _current_launch_logs,
+    _log_label,
+    _log_markers_at_end,
+    _log_markers_with_lookback,
+    _marker_rewound,
+    _new_log_lines,
+    _newest_rpt_and_script,
+    _offset_before_last_lines,
+    _offset_before_last_lines_in_window,
+    _profile_dirs_from_runs,
+    _record_scan,
+    _run_start_epoch,
+    _scanned_report,
+    _sibling_profile_dirs,
+)
+from dayz_mcp.box_occupancy import (
+    ADOPT_BLOCKED_ON,
+    TAKEOVER_REQUIRED,
+    _BOX_OFFER_MOD,
+    _BOX_OFFER_MOD_CAP,
+    _BOX_OFFER_RUN_ID,
+    _BOX_OFFER_STATES,
+    _DAYZ_GAME_PORT_MAX,
+    _DAYZ_GAME_PORT_MIN,
+    _annotate_box_foreign_ports,
+    _annotate_foreign_port_list,
+    _apply_takeover_required,
+    _attach_queue_offer,
+    _box_from_status,
+    _box_head_is,
+    _box_queue_offer,
+    _box_queue_position,
+    _box_ready_for,
+    _box_run,
+    _box_session_is,
+    _box_wait_cannot_help,
+    _enrich_active_run_result,
+    _first_box_dict,
+    _foreign_port_number,
+    _foreign_ports_contain,
+    _occupant_from_box,
+    _offer_age_s,
+    _offer_mods,
+    _offer_port,
+    _offer_run_id,
+    _offer_state,
+    _ownerless_idle_runs,
+    _port_conflict_fields,
+    _port_is_dayz_relevant,
+    _protection_blocked_on,
+    _row_is_protected,
+    _session_status_blocked_on,
+    box_available_for,
+)
 
 # Import the production lazy closures before freezing their source baseline.
 # These imports bind definitions only; they do not launch or acquire anything.
@@ -146,10 +323,6 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
 
 
 DEFAULT_TOOL_TIMEOUT_S = 15.0
-# Upper bound for per-tool bridge timeouts. 300 s, not 120 s, because
-# dayz_test_run in mode=all measured 28.6 s and the operation pin already caps
-# at MAX_OPERATION_PIN_S=300.0 (session_coordination).
-MAX_TIMEOUT_S = 300.0
 # The liveness probe runs AFTER the caller's budget is already spent, and inside
 # the tool lock, so it gets its own short ceiling instead of the 5.0 s default of
 # _request_once. A slow daemon degrades the message; it must not extend the call.
@@ -172,31 +345,6 @@ WAIT_FOR_CONDITIONS = frozenset({
     "entity_state",
 })
 TELEMETRY_READ_MODES = frozenset({"object_at", "fixture_jsonl"})
-LEASE_REQUIRED_RECIPE = with_next_step(
-    "lease_required: call session_acquire_wait(purpose=...)",
-    "session_acquire_wait",
-)
-LEASE_EXPIRED_RECIPE = with_next_step(
-    "lease_expired: the lease timed out. A run left RUNNING_IDLE can be "
-    "re-adopted with session_acquire_wait while its grace lasts",
-    "session_acquire_wait",
-)
-LEASE_INVALID_RECIPE = with_next_step(
-    "lease_invalid: token was never valid for this client",
-    "session_status",
-)
-TAKEOVER_REQUIRED = "takeover_required"
-RETAIL_QUARANTINE_RECIPE = (
-    "retail_quarantine: a DayZ retail process is running on this machine; "
-    "mutations are blocked until no DayZ retail process is running"
-)
-_RETAIL_QUARANTINE_REASONS = frozenset({
-    "no_probe",
-    "probe_error",
-    "probe_malformed",
-    "probe_unknown",
-    "retail_present",
-})
 LEASE_TOOL_LINE = "Requires a lease (session_acquire_wait)."
 
 # flags=0 stays the surface default. This mask is the example to add when
@@ -229,54 +377,6 @@ DAEMON_AUTOSPAWN_ALREADY = (
     "daemon_unavailable: autospawn already attempted (start the daemon "
     "or omit --no-daemon-autospawn)"
 )
-# Published ready.reason set. The bridge_status description derives its list
-# from this set plus _FENCE_BLOCK_READY.values() at build time and declares it
-# OPEN: consumers validate by shape, never against a copied whitelist.
-# *_legacy_blocked / version_mismatch only after that peer has polled at least
-# once (last_poll_age_s is not None).
-READY_REASONS = frozenset({
-    "ready",
-    "no_run",
-    "server_poll_stale",
-    "client_not_polling",
-    "client_legacy_blocked",
-    "version_mismatch",
-    "arg_contract_mismatch",
-    "capabilities_unknown",
-    "binding_ambiguous",
-    "unbound_after_restart",
-    "binding_not_ready",
-    "binding_retired",
-    "instance_unknown",
-    "instance_unattributed",
-    "instance_role_mismatch",
-    "instance_malformed",
-    "instance_peer_collision",
-    "legacy_unbound",
-    "creation_time_unreadable",
-})
-# Public tools named when ready is false. Never lifecycle_status.
-# OK payloads do not get next_step here.
-_READY_NEXT_TOOLS: dict[str, str] = {
-    "no_run": "dayz_test_run",
-    "binding_not_ready": "bridge_status",
-    "server_poll_stale": "bridge_status",
-    "client_not_polling": "bridge_status",
-    "binding_retired": "session_status",
-    "unbound_after_restart": "dayz_test_run",
-    "legacy_unbound": "dayz_test_run",
-    "instance_unknown": "dayz_test_run",
-    "instance_malformed": "dayz_test_run",
-    "instance_role_mismatch": "session_status",
-    "instance_peer_collision": "session_status",
-    "instance_unattributed": "bridge_status",
-    "creation_time_unreadable": "bridge_status",
-    "binding_ambiguous": "session_status",
-    "version_mismatch": "bridge_status",
-    "arg_contract_mismatch": "bridge_status",
-    "capabilities_unknown": "bridge_status",
-    "client_legacy_blocked": "dayz_test_run",
-}
 WAIT_FOR_LOOKBACK_MAX = 2000
 # lookback_from="launch" scans each current-launch log from byte 0 instead of
 # rewinding a line count. Measured 2026-08-21: the "[DayZ-MCP] config loaded"
@@ -290,74 +390,6 @@ WAIT_FOR_LOOKBACK_FROM = frozenset({"lines", "launch"})
 # instead of being quietly half-read.
 WAIT_FOR_LAUNCH_SCAN_MAX_BYTES = 64 * 1024 * 1024
 _LAUNCH_SCAN_CHUNK_BYTES = 1024 * 1024
-_REMOTE_ERROR_CODES = frozenset({
-    "audit_failed",
-    "bad_args",
-    "bad_content_length",
-    "bad_id",
-    "bad_json",
-    "bad_json_type",
-    "bad_ms",
-    "bad_ms_range",
-    "bad_operation_timeout",
-    "bad_operation_id",
-    "bad_peer",
-    "bad_purpose",
-    "bad_wait_timeout",
-    "exec_not_allowed",
-    "identity_mismatch",
-    "invalid_identity",
-    "lease_expired",
-    "lease_invalid",
-    "lease_required",
-    "not_found",
-    "not_whitelisted",
-    "queue_full",
-    "retail_quarantine",
-    "coordination_audit_fault",
-    "coordination_repairing",
-    "operation_cancelled",
-    "operation_conflict",
-    "operation_tombstones_saturated",
-    "session_releasing",
-    "ticket_expired",
-    "ticket_invalid",
-    "unauthorized",
-    "version_blocked",
-    "legacy_unbound",
-    "instance_malformed",
-    "instance_unknown",
-    "unbound_after_restart",
-    "instance_role_mismatch",
-    "instance_ambiguous",
-    "instance_unattributed",
-    "binding_not_ready",
-    "binding_retired",
-    "instance_peer_collision",
-    "instance_config_missing",
-    "instance_config_mismatch",
-    "creation_time_unreadable",
-    # run-fence refusals emitted by loopback._enqueue_run_rejection and loopback._enqueue_command.
-    "run_not_owned",
-    "run_state_unavailable",
-    "run_protected",
-    "enqueue_cancelled",
-    # lease-grant race surfaced by session_coordination._validate_token_locked on /enqueue.
-    "session_granting",
-})
-_STALE_TICKET_ERRORS = frozenset({"ticket_expired", "ticket_invalid"})
-_STALE_LEASE_ERRORS = frozenset({"lease_expired", "lease_invalid"})
-_ENQUEUE_HINT_MAX_CHARS = 240
-# ready.reason tokens that are not /enqueue whitelist codes. Treating them as
-# unknown collapses the only identifier a caller can use to tell a loading
-# client from a real enqueue failure -- if that token actually travelled on
-# the enqueue payload. Global /status readiness is computed separately and
-# does not by itself prove a given /enqueue was refused with this code.
-_PUBLISHED_NOT_READY_CODES = frozenset(
-    reason
-    for reason in READY_REASONS
-    if reason != "ready" and reason not in _REMOTE_ERROR_CODES
-)
 _WAIT_FOR_RETRYABLE_NOT_READY = frozenset({
     "game_not_ready:reason=server_poll_stale",
     "game_not_ready:reason=client_not_polling",
@@ -366,23 +398,6 @@ _WAIT_FOR_RETRYABLE_NOT_READY = frozenset({
     "client_not_polling",
     "binding_not_ready",
 })
-
-
-def _carriable_hint(payload: object) -> str | None:
-    """Accredited-daemon prose travels only beside a whitelist code, bounded; it
-    never replaces the code."""
-    if not isinstance(payload, dict):
-        return None
-    hint = payload.get("hint")
-    if type(hint) is not str:
-        return None
-    if not 0 < len(hint) <= _ENQUEUE_HINT_MAX_CHARS:
-        return None
-    if hint != hint.strip():
-        return None
-    if not hint.isprintable():
-        return None
-    return hint
 
 
 # Constant ValueError tokens raised along the dayz_test request path, mapped to
@@ -414,96 +429,6 @@ _DAYZ_TEST_VALUE_ERROR_CODES = {
 }
 
 
-def _log_opaque_failure(runtime: Any, tool: str, exc: BaseException) -> None:
-    """Write the dropped cause to the LOCAL log, never to the wire.
-
-    The wire carries the exception type alone because the message can hold host
-    paths, and that protection stays. What was missing is the other half: nothing
-    printed the cause anywhere, so `dayz_test_failed:ValueError` reached the caller
-    with the answer one frame away in ``__cause__``. Two sessions spent an afternoon
-    each on that silence on 2026-08-21. The client process's stderr is local, so the
-    full chain belongs there.
-
-    Never raises: a diagnostic that masks the failure it describes is worse than none.
-    """
-    sink = getattr(runtime, "_log", None)
-    if not callable(sink):
-        return
-    try:
-        detail = "".join(
-            traceback.format_exception(type(exc), exc, exc.__traceback__)
-        ).rstrip()
-        sink(f"[{tool}] opaque failure; full cause (local only):\n{detail}")
-    except Exception:
-        try:
-            sink(f"[{tool}] opaque failure: {type(exc).__name__}")
-        except Exception:
-            pass
-
-
-def _wire_safe_error(runtime: Any, tool: str, detail: object) -> str:
-    """Reduce a backend error to the token the wire may carry.
-
-    A capture failure reports what actually broke, and what broke is described
-    with a host path: `mcp_capture` names GRAB_SCRIPT when the grab script is
-    missing, forwards the grab backend's stderr when it fails, and forwards the
-    exception text otherwise. Any of those puts C:\\Users\\<name>\\... in front of
-    whoever called the tool, on a wire that reaches other machines.
-
-    The leading token before the first colon is our own constant
-    (`capture_backend_failed`, `capture_timeout`), so that part travels and the
-    detail goes to the local log -- the same split `_typed_dayz_test_value_errors`
-    already applies, for the same reason. A token that is not identifier-shaped is
-    replaced rather than trusted: the point is a searchable name, never the text.
-    """
-    text = str(detail)
-    token = text.split(":", 1)[0].strip()
-    if text != token:
-        sink = getattr(runtime, "_log", None)
-        if callable(sink):
-            try:
-                sink(f"[{tool}] error detail (local only): {text}")
-            except Exception:
-                pass
-    return token if _is_safe_error_token(token) else f"{tool}_failed"
-
-
-def _is_safe_error_token(value: str) -> bool:
-    """True for a bare identifier-shaped token, which cannot hold a host path.
-
-    Deliberately strict: no dot, colon, separator, space or quote survives, so a
-    stdlib message (`invalid literal for int() with base 10: 'x'`) is rejected
-    and stays mute, while a source constant (`invalid_session_lease`) passes.
-    """
-    return (
-        3 <= len(value) <= 64
-        and value[0].isascii()
-        and value[0].isalpha()
-        and all(char.isascii() and (char.isalnum() or char == "_") for char in value)
-    )
-
-
-def _opaque_dayz_test_failure(exc: BaseException) -> str:
-    """`dayz_test_failed:<Type>`, plus `:<code>` when the launcher backend named one.
-
-    NativeLauncherBackendError (native_launcher_backend.py) keeps a source
-    constant in ``code`` -- invalid_native_launcher_environment,
-    native_launcher_create_failed, ... -- and any host detail in ``detail``,
-    which never travels. Only an identifier-shaped code crosses the wire.
-    An identifier-shaped ``fine_code`` is appended as a fourth part.
-    Ficha ae65 (2026-09-04): build=true died in that backend and the caller saw
-    the class name alone, with the code one frame away in the local log.
-    """
-    name = type(exc).__name__
-    code = getattr(exc, "code", None) if name == "NativeLauncherBackendError" else None
-    if isinstance(code, str) and _is_safe_error_token(code):
-        fine_code = getattr(exc, "fine_code", None)
-        if isinstance(fine_code, str) and _is_safe_error_token(fine_code):
-            return f"dayz_test_failed:{name}:{code}:{fine_code}"
-        return f"dayz_test_failed:{name}:{code}"
-    return f"dayz_test_failed:{name}"
-
-
 @contextmanager
 def _typed_dayz_test_value_errors() -> Iterator[None]:
     """Type the constant ValueError tokens of the dayz_test request path.
@@ -529,335 +454,6 @@ def _typed_dayz_test_value_errors() -> Iterator[None]:
             # now only exists to RENAME the few tokens whose own name is poor.
             raise dayz_test_tool.DayzTestToolError(token) from None
         raise
-
-
-_CONTROL_CLIENT_ERROR_CODES = frozenset({
-    "credential_source_untrusted",
-    "client_policy_untrusted_open_new_session",
-    "daemon_credential_desynchronized",
-    "daemon_reaccreditation_failed_open_new_session",
-    "daemon_bad_body",
-    "daemon_bad_session_response",
-    "daemon_identity_unverified",
-    "daemon_response_ambiguous",
-    "daemon_unavailable",
-    "session_cleanup_failed",
-    "session_transition_conflict",
-    "session_wait_timeout",
-    "stale_client_credential_refresh_failed",
-    "stale_client_credential_retry_rejected",
-    "stale_client_credential_retry_transport_failed",
-})
-
-
-def _published_not_ready_code(payload: object) -> str | None:
-    """Return a published ready.reason carried on an enqueue-shaped payload.
-
-    `_remote_error_code` only accepts `_REMOTE_ERROR_CODES`. These tokens live
-    on bridge_status.ready.reason instead, so a payload that names them as
-    `error` or `reason` used to become the bare token remote_error.
-
-    Conditional: this recovers the token only when the enqueue body itself
-    carries it. A status snapshot with ready.reason=client_not_polling does
-    not imply that a given /enqueue was refused with that code.
-    """
-    if not isinstance(payload, dict):
-        return None
-    candidates: list[object] = [payload.get("error"), payload.get("reason")]
-    ready = payload.get("ready")
-    if isinstance(ready, dict):
-        candidates.append(ready.get("reason"))
-    for value in candidates:
-        if isinstance(value, str) and value in _PUBLISHED_NOT_READY_CODES:
-            return value
-    return None
-
-
-def _remote_error_code(payload: object) -> str:
-    if isinstance(payload, dict):
-        error = payload.get("error")
-        if isinstance(error, str) and error in _REMOTE_ERROR_CODES:
-            return error
-        published = _published_not_ready_code(payload)
-        if published is not None:
-            return published
-    return "remote_error"
-
-
-_FENCE_BLOCK_READY = {
-    "AMBIGUOUS": "binding_ambiguous",
-    "STARTING": "binding_not_ready",
-    "RETIRED": "binding_retired",
-    "binding_retired": "binding_retired",
-    "instance_unknown": "instance_unknown",
-    "unbound_after_restart": "unbound_after_restart",
-    "instance_unattributed": "instance_unattributed",
-    "instance_role_mismatch": "instance_role_mismatch",
-    "instance_malformed": "instance_malformed",
-    "instance_peer_collision": "instance_peer_collision",
-    "creation_time_unreadable": "creation_time_unreadable",
-}
-
-
-async def _runtime_client_peer_probeable(runtime: Any) -> bool:
-    try:
-        status = await runtime.bridge_status_payload()
-    except Exception:
-        return False
-    return _client_peer_probeable(status)
-
-
-def _finite_poll_age(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
-def compute_bridge_ready(status: dict[str, Any]) -> dict[str, Any]:
-    """Return {ready, reason} for a bridge_status snapshot. Additive field.
-
-    Version reasons are used only when that peer has polled at least once.
-    Server liveness is checked before client liveness.
-
-    A BOUND peer with no accredited poll this generation is binding_not_ready,
-    not server_poll_stale: leftover last_poll_age_s from a dead pre-launch
-    peer must not look like a failed live server (fb-20260917-100411-5edf).
-    """
-    server = status.get("server_peer") if isinstance(status.get("server_peer"), dict) else {}
-    client = status.get("client_peer") if isinstance(status.get("client_peer"), dict) else {}
-    s_age = server.get("last_poll_age_s")
-    c_age = client.get("last_poll_age_s")
-    s_live = _peer_is_live(server)
-    c_live = _peer_is_live(client)
-    s_state = server.get("version_state")
-    c_state = client.get("version_state")
-    s_bind = server.get("binding_state")
-    c_bind = client.get("binding_state")
-    s_block = _FENCE_BLOCK_READY.get(s_bind)
-    c_block = _FENCE_BLOCK_READY.get(c_bind)
-    if s_block:
-        return {"ready": False, "reason": s_block}
-    if c_block:
-        return {"ready": False, "reason": c_block}
-    if s_bind == "LEGACY_UNBOUND" and s_age is not None:
-        return {"ready": False, "reason": "legacy_unbound"}
-    if c_bind == "LEGACY_UNBOUND" and c_age is not None:
-        return {"ready": False, "reason": "legacy_unbound"}
-    # 0878: name-only census can green-wash a stale PBO that rejects current
-    # tool args (vehicle_prepare_fixture mode/radius). Server ready requires an
-    # accredited caps census AND a matching ach. Capability comparison (B1)
-    # must run before this so published status sees mismatch/unknown, not raw
-    # announced. Raw announced (no comparison yet) still checks ach directly.
-    # Unknown / missing / malformed caps: ready=false (B2).
-    s_caps = server.get("capabilities") if isinstance(server.get("capabilities"), dict) else {}
-    if s_live:
-        caps_state = s_caps.get("state")
-        if caps_state == "match":
-            pass
-        elif caps_state == "announced":
-            ach = s_caps.get("announced_arg_contract_hash")
-            if (
-                not isinstance(ach, str)
-                or ach == ""
-                or ach != EXPECTED_SERVER_ARG_CONTRACT_HASH
-            ):
-                return {"ready": False, "reason": "arg_contract_mismatch"}
-        elif caps_state == "mismatch":
-            # Fail-closed on arg-contract hash independently of the primary
-            # compare reason. Census disagreement used to hide absent/wrong ach
-            # (B2 residual): missing census cmd + bad/absent ach must not
-            # green-wash ready=true. Matching ach + census-only mismatch keeps
-            # historical ready behavior.
-            if s_caps.get("reason") == "arg_contract_mismatch":
-                return {"ready": False, "reason": "arg_contract_mismatch"}
-            ach = s_caps.get("announced_arg_contract_hash")
-            if (
-                not isinstance(ach, str)
-                or ach == ""
-                or ach != EXPECTED_SERVER_ARG_CONTRACT_HASH
-            ):
-                return {"ready": False, "reason": "arg_contract_mismatch"}
-            # Name-census disagreement with matching ach: historical ready.
-            pass
-        else:
-            return {"ready": False, "reason": "capabilities_unknown"}
-    if s_live and c_live and s_state == "ok" and c_state == "ok":
-        return {"ready": True, "reason": "ready"}
-    if s_bind == "BOUND" and not _finite_poll_age(server.get("bound_last_poll_age_s")):
-        return {"ready": False, "reason": "binding_not_ready"}
-    if c_bind == "BOUND" and not _finite_poll_age(client.get("bound_last_poll_age_s")):
-        return {"ready": False, "reason": "binding_not_ready"}
-    if s_age is None and c_age is None:
-        return {"ready": False, "reason": "no_run"}
-    if not s_live:
-        return {"ready": False, "reason": "server_poll_stale"}
-    if not c_live:
-        return {"ready": False, "reason": "client_not_polling"}
-    if c_age is not None and c_state == "legacy_blocked":
-        return {"ready": False, "reason": "client_legacy_blocked"}
-    if (
-        (s_age is not None and s_state in {"version_mismatch", "legacy_blocked"})
-        or (c_age is not None and c_state == "version_mismatch")
-    ):
-        return {"ready": False, "reason": "version_mismatch"}
-    if s_state != "ok" or c_state != "ok":
-        return {"ready": False, "reason": "version_mismatch"}
-    return {"ready": False, "reason": "no_run"}
-
-
-_BRIDGE_WORLD_READ_COMMANDS = READ_ONLY_COMMANDS - {"logs_since"}
-
-# Progressive disclosure (fb-20260917-092908-2ad1): the first tools/list a
-# client-mode caller sees is a compact catalog: the session and lifecycle core
-# plus the reads that need no lease. The rest of world_*/vehicle_*/ui_* stays
-# off the catalog until a lease is held. Embedded mode keeps the full registry
-# so in-process tests and the host-side catalog stay complete. The listing is
-# not an access control: a tool it leaves out still runs when called by name,
-# and the lease gate refuses a mutation without a lease (fb-20260925-233937-b753).
-_LEASE_REVEAL_PREFIXES = ("world_", "vehicle_", "ui_")
-_INITIAL_CORE_NAMES = frozenset(
-    {
-        "bridge_status",
-        "dayz_knowledge_find",
-        "dayz_knowledge_prepare",
-        "dayz_knowledge_show",
-        "dayz_knowledge_status",
-        "dayz_test_close",
-        "dayz_test_run",
-        "dayz_test_stop",
-        "lease_acquire",
-        "pipeline_feedback",
-        "pipeline_inbox",
-        "pipeline_resolve",
-        "session_acquire_wait",
-        "session_heartbeat",
-        "session_release",
-        "session_status",
-        "wait_for",
-    }
-)
-# The public tools whose only bridge command is in READ_ONLY_COMMANDS (the tool
-# _BRIDGE_COMMAND_TOOLS names for it), plus logs_since, which reads host logs
-# and never reaches the game. They run without a lease, so hiding them until
-# one is held only took the information away from weak callers (b753).
-_INITIAL_READ_TOOL_NAMES = frozenset(
-    {
-        "camera_get",
-        "entities_query",
-        "input_describe",
-        "logs_since",
-        "object_doors",
-        "object_inspect",
-        "query_all_players",
-        "query_get_in_condition",
-        "query_player_state",
-        "scene_raycast",
-        "surface_query",
-        "telemetry_read",
-        "ui_tree",
-        "vehicle_telemetry",
-        "weapon_state",
-        "world_time_get",
-    }
-)
-_INITIAL_CATALOG_NAMES = _INITIAL_CORE_NAMES | _INITIAL_READ_TOOL_NAMES
-# Whole sentences are kept up to this many characters (b753); see
-# _compact_description for what happens when the first sentence is longer.
-_INITIAL_DESCRIPTION_LIMIT = 120
-_COMPACT_DESCRIPTION_MARKER = "…"
-_OPENER_FOR_CLOSER = {")": "(", "]": "[", "}": "{"}
-# Claude Code never re-lists after tools/list_changed (#93, e7ef): a compact
-# catalog there hides the game verbs for the whole session, so this platform
-# lists the full catalog from the start, as --no-progressive-disclosure does.
-_FULL_CATALOG_PLATFORMS = frozenset({"claude"})
-
-
-def _runtime_holds_lease(runtime: Any) -> bool:
-    token = getattr(runtime, "active_lease_token", None)
-    if callable(token):
-        try:
-            token = token()
-        except Exception:
-            token = None
-    return bool(token)
-
-
-def _progressive_disclosure_enabled(config: Any) -> bool:
-    """True when this process lists the compact catalog while it holds no lease."""
-    return (
-        getattr(config, "mode", None) == "client"
-        and getattr(config, "progressive_disclosure", True) is not False
-        and getattr(config, "client_platform", None) not in _FULL_CATALOG_PLATFORMS
-    )
-
-
-def _progressive_disclosure_active(runtime: Any) -> bool:
-    return _progressive_disclosure_enabled(
-        getattr(runtime, "config", None)
-    ) and not _runtime_holds_lease(runtime)
-
-
-def _is_lease_revealed_tool(name: str) -> bool:
-    return name.startswith(_LEASE_REVEAL_PREFIXES)
-
-
-def _compact_description(description: str) -> str:
-    """Shorten a description for the compact catalog without a misleading cut.
-
-    Keeps the longest run of whole sentences that fits in
-    _INITIAL_DESCRIPTION_LIMIT. When even the first sentence is longer, it is
-    cut at the last space outside brackets that fits, with the separator it
-    leaves dangling removed. Either way the dropped text is marked with a
-    trailing "…", and with no such space the marker stands alone. A cut inside a
-    word read as a real value (b753: "kind must be bug | request | find…").
-    """
-    if len(description) <= _INITIAL_DESCRIPTION_LIMIT:
-        return description
-    room = _INITIAL_DESCRIPTION_LIMIT - len(" " + _COMPACT_DESCRIPTION_MARKER)
-    sentence_end = word_end = 0
-    open_brackets: list[str] = []
-    for index, char in enumerate(description[: room + 1]):
-        if char in "([{":
-            open_brackets.append(char)
-        elif char in _OPENER_FOR_CLOSER:
-            if open_brackets and open_brackets[-1] == _OPENER_FOR_CLOSER[char]:
-                open_brackets.pop()
-        elif char.isspace() and index > 0 and not open_brackets:
-            word_end = index
-            if description[index - 1] in ".!?" and description[
-                max(0, index - 4) : index
-            ].lower() not in ("e.g.", "i.e."):
-                sentence_end = index
-    if sentence_end:
-        kept = description[:sentence_end].rstrip()
-    else:
-        kept = description[:word_end].rstrip().rstrip(",;:|/-=>+&").rstrip()
-    if not kept:
-        return _COMPACT_DESCRIPTION_MARKER
-    return f"{kept} {_COMPACT_DESCRIPTION_MARKER}"
-
-
-def _compact_initial_catalog(tools: list[Any]) -> list[Any]:
-    """The pre-lease tools/list for 8B clients: the core plus lease-free reads.
-
-    About 17 KB with the reads (b753), most of it input schemas, which stay
-    whole. Descriptions go through _compact_description; outputSchema is
-    dropped. A world_*/vehicle_*/ui_* tool is listed only when it is a read.
-    """
-    compacted: list[Any] = []
-    for tool in tools:
-        name = getattr(tool, "name", "")
-        if name not in _INITIAL_CATALOG_NAMES:
-            continue
-        if _is_lease_revealed_tool(name) and name not in _INITIAL_READ_TOOL_NAMES:
-            continue
-        description = getattr(tool, "description", None) or ""
-        updates: dict[str, Any] = {}
-        compact_description = _compact_description(description)
-        if compact_description != description:
-            updates["description"] = compact_description
-        if getattr(tool, "outputSchema", None) is not None:
-            updates["outputSchema"] = None
-        compacted.append(tool.model_copy(update=updates) if updates else tool)
-    return compacted
 
 
 def _install_catalog_change_notice(app: Any, runtime: Any) -> None:
@@ -907,375 +503,6 @@ def _install_catalog_change_notice(app: Any, runtime: Any) -> None:
     app._mcp_server.call_tool(validate_input=False)(call_tool_then_announce)
 
 
-def _visible_public_tools(runtime: Any) -> frozenset[str]:
-    """Return the real registry when build_app published it, else the full public set."""
-    names = getattr(runtime, "_registered_tool_names", None)
-    if isinstance(names, (set, frozenset)):
-        return frozenset(name for name in names if isinstance(name, str))
-    return PUBLIC_NEXT_TOOLS
-
-
-def _next_public_call(runtime: Any, *preferred: str) -> dict[str, Any]:
-    visible = _visible_public_tools(runtime)
-    for tool in preferred:
-        if tool in PUBLIC_NEXT_TOOLS and tool in visible:
-            return {"tool": tool, "args": {}}
-    # Every supported registry pack includes bridge_status. The fallback also
-    # keeps direct Runtime instances useful before build_app attaches its set.
-    return {"tool": "bridge_status", "args": {}}
-
-
-def _world_read_not_ready(
-    runtime: Any, cmd: str, status: dict[str, Any]
-) -> dict[str, Any] | None:
-    """Return the short fail-fast envelope for bridge world reads, or None."""
-    if cmd not in _BRIDGE_WORLD_READ_COMMANDS:
-        return None
-    verdict = compute_bridge_ready(status)
-    if verdict["ready"]:
-        return None
-    reason = str(verdict["reason"])
-    return {
-        "ok": False,
-        "error": f"game_not_ready:reason={reason}",
-        "code": "not_ready",
-        "reason": reason,
-        "next_step": _next_public_call(runtime, "bridge_status"),
-    }
-
-
-def _has_ready_snapshot_shape(status: object) -> bool:
-    """True when a client-fetched status has both readiness inputs."""
-    if not isinstance(status, dict):
-        return False
-    for key in ("server_peer", "client_peer"):
-        peer = status.get(key)
-        if not isinstance(peer, dict):
-            return False
-        if "last_poll_age_s" not in peer or "version_state" not in peer:
-            return False
-    return True
-
-
-def _bridge_success_candidates(
-    cmd: str, result: dict[str, Any]
-) -> list[tuple[str, dict[str, Any]]]:
-    """Return ordered follow-up candidates derived only from wire-visible facts."""
-    if cmd == "query_all_players":
-        players = result.get("players")
-        if isinstance(players, list) and players:
-            return [("query_player_state", {}), ("bridge_status", {})]
-        if isinstance(players, list):
-            return [
-                ("wait_for", {"condition": "players_at_least", "value": 1}),
-                ("bridge_status", {}),
-            ]
-    if cmd == "entities_query":
-        entities = result.get("entities")
-        if isinstance(entities, list) and entities:
-            row = next((item for item in entities if isinstance(item, dict)), None)
-            if isinstance(row, dict):
-                object_type = row.get("type") or row.get("classname")
-                pos = row.get("pos")
-                if (
-                    isinstance(object_type, str)
-                    and object_type
-                    and isinstance(pos, list)
-                    and len(pos) == 3
-                ):
-                    return [
-                        (
-                            "object_inspect",
-                            {
-                                "type": object_type,
-                                "pos": list(pos),
-                                "want": ["bounding_center"],
-                            },
-                        ),
-                        ("bridge_status", {}),
-                    ]
-    return [("bridge_status", {}), ("session_status", {})]
-
-
-def _with_bridge_success_hints(
-    runtime: Any, cmd: str, result: dict[str, Any]
-) -> dict[str, Any]:
-    """Add at most two calls that exist in this client's exposed registry."""
-    if not isinstance(result, dict) or not result.get("ok"):
-        return result
-    visible = _visible_public_tools(runtime)
-    suggested: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for tool, args in _bridge_success_candidates(cmd, result):
-        if tool in seen or tool not in PUBLIC_NEXT_TOOLS or tool not in visible:
-            continue
-        suggested.append({"tool": tool, "args": dict(args)})
-        seen.add(tool)
-        if len(suggested) == 2:
-            break
-    if not suggested:
-        return _with_ok_next_step(result, cmd)
-    payload = dict(result)
-    payload["suggested_calls"] = suggested
-    return _with_ok_next_step(payload, cmd)
-
-
-def _with_ok_next_step(result: dict[str, Any], cmd: str) -> dict[str, Any]:
-    """Attach next_step from PUBLIC_NEXT_TOOLS on ok:true mutation/session results."""
-    if not isinstance(result, dict):
-        return result
-    if result.get("ok") not in (True, 1) and "ok" in result:
-        return result
-    if result.get("error"):
-        return result
-    existing = result.get("next_step")
-    if isinstance(existing, str) and existing in PUBLIC_NEXT_TOOLS:
-        return result
-    mutating = command_requires_lease(cmd)
-    follow = ok_next_step(cmd, mutating=mutating)
-    if follow is None:
-        return result
-    payload = dict(result)
-    if payload.get("ok") not in (True, 1):
-        payload["ok"] = True
-    payload["next_step"] = follow
-    return payload
-
-
-# Arg-contract fingerprint (fb-20260924-235528-0878). Command-name census alone
-# cannot see a PBO that still lists vehicle_prepare_fixture but rejects the
-# tool's mode=/radius= shape. Both sides ship the same 16-hex SHA-256 prefix of
-# the canonical form below; the PBO announces it as poll `ach=` and
-# `_compare_bridge_capabilities` fails closed on absent/wrong values for the
-# server peer. Client peer has no ach gate yet.
-SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
-    "vehicle_prepare_fixture": ("mode", "pos", "radius", "type"),
-}
-
-
-def server_arg_contract_canonical() -> str:
-    """Stable, newline-joined `cmd=k1,k2` lines (keys sorted, cmds sorted)."""
-
-    return "\n".join(
-        f"{cmd}={','.join(keys)}"
-        for cmd, keys in sorted(SERVER_ARG_CONTRACT.items())
-    )
-
-
-def server_arg_contract_hash() -> str:
-    """First 16 hex chars of sha256(canonical). Must match MCPBridge.c."""
-
-    import hashlib
-
-    return hashlib.sha256(server_arg_contract_canonical().encode("utf-8")).hexdigest()[:16]
-
-
-EXPECTED_SERVER_ARG_CONTRACT_HASH = server_arg_contract_hash()
-
-
-# peer + command -> the public tool that fronts it, or None when the command is
-# deliberately not exposed. Hand written from the two Enforce dispatchers
-# (MCPBridge.c SERVER_CAPABILITIES, MCPClientBridge.c CLIENT_POLL_CAPS).
-#
-# Explicitly NOT derived from app.list_tools(), from loopback's command lists or
-# from the PBO. The census exists so it CAN disagree with what the daemon
-# registers; a table derived from either side would agree by construction and
-# detect nothing. A command the bridge announces and this table does not know is
-# reported as unmapped rather than silently accepted -- that is the case a new
-# command shipped in the PBO produces, and it should be visible on the first
-# poll instead of on the first failed call.
-_BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
-    "server": {
-        "entities_query": "entities_query",
-        "exec_enforce": None,  # not a public tool by decision
-        "hands_take": "hands_take",
-        "infected_drive": "infected_drive",
-        "inventory_attach": "inventory_attach",
-        "inventory_give": "inventory_give",
-        "notify_players": "notify_players",
-        "object_anim": "object_anim",
-        "object_delete": "object_delete",
-        "object_doors": "object_doors",
-        "object_inspect": "object_inspect",
-        "player_teleport": "player_teleport",
-        "query_all_players": "query_all_players",
-        "query_get_in_condition": "query_get_in_condition",
-        "query_player_state": "query_player_state",
-        "scene_raycast": "scene_raycast",
-        "surface_query": "surface_query",
-        "telemetry_read": "telemetry_read",
-        "vehicle_door": "vehicle_door",
-        "vehicle_enter": "vehicle_enter",
-        "vehicle_prepare_fixture": "vehicle_prepare_fixture",
-        "weapon_state": "weapon_state",
-        "world_spawn": "world_spawn",
-        "world_time_get": "world_time_get",
-        "world_time_set": "world_time_set",
-        "world_weather_set": "world_weather_set",
-    },
-    "client": {
-        "action_use": "action_use",
-        "action_use_door": "action_use",
-        "action_use_target": "action_use",
-        "anim_timeline": "anim_timeline",
-        "camera_get": "camera_get",
-        "camera_set": "camera_set",
-        "engine_set": "engine_set",
-        "input_describe": "input_describe",
-        "input_trigger": "input_trigger",
-        "key_press": "key_press",
-        "player_respawn": "player_respawn",
-        "restore_gameplay": "restore_gameplay",
-        "ui_click": "ui_click",
-        "ui_dialog": "ui_dialog",
-        "ui_focus": "ui_focus",
-        "ui_reload_layout": "ui_reload_layout",
-        "ui_set_text": "ui_set_text",
-        "ui_tree": "ui_tree",
-        "vehicle_control": "vehicle_control",
-        "vehicle_get_in_client": "vehicle_get_in_client",
-        "vehicle_release": "vehicle_release",
-        "vehicle_telemetry": "vehicle_telemetry",
-        "vehicle_trace": "vehicle_trace",
-        "weapon_aim": "weapon_aim",
-        "weapon_fire": "weapon_fire",
-        "weapon_raise": "weapon_raise",
-        "weapon_sights": "weapon_sights",
-    },
-}
-
-
-def _compare_bridge_capabilities(
-    peer: str,
-    capabilities: object,
-    registered_tools: frozenset[str],
-    intended_tools: frozenset[str] | None = None,
-) -> dict[str, Any]:
-    """Cross one peer's announced census against the registered tools.
-
-    Three verdicts and never a fourth: ``match`` when every mapped command has
-    its tool and every tool has its command, ``mismatch`` when they disagree --
-    naming exactly which commands -- and ``unknown`` when there is no census to
-    judge. ``unknown`` is not a mismatch: an absent, malformed or unaccredited
-    announcement means we did not look, and saying otherwise would put a red on
-    a bridge that may be perfectly fine.
-    """
-
-    block = capabilities if isinstance(capabilities, dict) else {}
-    mapping = _BRIDGE_COMMAND_TOOLS.get(peer, {})
-    expected_tools = {tool for tool in mapping.values() if tool}
-    intended_bridge_tools = (
-        expected_tools
-        if intended_tools is None
-        else expected_tools & set(intended_tools)
-    )
-    registered_bridge_tools = sorted(intended_bridge_tools & registered_tools)
-    announced = block.get("announced_commands")
-    if block.get("state") != "announced" or not isinstance(announced, list):
-        return {
-            "state": "unknown",
-            "reason": str(block.get("reason") or "absent"),
-            "announced_commands": [],
-            "registered_bridge_tools": registered_bridge_tools,
-            "announced_without_registered_tool": [],
-            "registered_without_announced_command": [],
-            "unmapped_announced_commands": [],
-            "expected_arg_contract_hash": (
-                EXPECTED_SERVER_ARG_CONTRACT_HASH if peer == "server" else None
-            ),
-            "announced_arg_contract_hash": None,
-        }
-    announced_set = {item for item in announced if isinstance(item, str)}
-    unmapped = sorted(item for item in announced_set if item not in mapping)
-    missing_tool = sorted(
-        item
-        for item in announced_set
-        if mapping.get(item) in intended_bridge_tools
-        and mapping[item] not in registered_tools
-    )
-    announced_tools = {mapping[item] for item in announced_set if mapping.get(item)}
-    not_announced = sorted(
-        tool for tool in registered_bridge_tools if tool not in announced_tools
-    )
-    agrees = not (unmapped or missing_tool or not_announced)
-    announced_hash = block.get("announced_arg_contract_hash")
-    expected_hash = (
-        EXPECTED_SERVER_ARG_CONTRACT_HASH if peer == "server" else None
-    )
-    arg_contract_ok = True
-    arg_reason = "ok"
-    if expected_hash is not None:
-        if not isinstance(announced_hash, str) or announced_hash == "":
-            arg_contract_ok = False
-            arg_reason = "arg_contract_mismatch"
-            announced_hash = None
-        elif announced_hash != expected_hash:
-            arg_contract_ok = False
-            arg_reason = "arg_contract_mismatch"
-    # Prefer arg_contract_mismatch when both census and ach fail so the
-    # fail-closed gate is not hidden behind census_disagrees (B2 residual).
-    # Census-only disagreement keeps its historical reason; details remain in
-    # announced_without_registered_tool / registered_without_announced_command.
-    if not arg_contract_ok:
-        state = "mismatch"
-        reason = arg_reason
-    elif not agrees:
-        state = "mismatch"
-        reason = "census_disagrees_with_registered_tools"
-    else:
-        state = "match"
-        reason = "ok"
-    return {
-        "state": state,
-        "reason": reason,
-        "announced_commands": sorted(announced_set),
-        "registered_bridge_tools": registered_bridge_tools,
-        "announced_without_registered_tool": missing_tool,
-        "registered_without_announced_command": not_announced,
-        "unmapped_announced_commands": unmapped,
-        "expected_arg_contract_hash": expected_hash,
-        "announced_arg_contract_hash": announced_hash if isinstance(announced_hash, str) else None,
-    }
-
-
-def _with_capability_comparison(
-    payload: dict[str, Any],
-    registered_tools: frozenset[str],
-    intended_tools: frozenset[str] | None = None,
-) -> dict[str, Any]:
-    enriched = dict(payload)
-    for peer, key in (("server", "server_peer"), ("client", "client_peer")):
-        block = enriched.get(key)
-        if not isinstance(block, dict):
-            continue
-        block = dict(block)
-        block["capabilities"] = _compare_bridge_capabilities(
-            peer,
-            block.get("capabilities"),
-            registered_tools,
-            intended_tools,
-        )
-        enriched[key] = block
-    return enriched
-
-
-def _client_peer_announces_command(status: object, command: str) -> bool:
-    if not isinstance(status, dict):
-        return False
-    client_peer = status.get("client_peer")
-    if not isinstance(client_peer, dict):
-        return False
-    capabilities = client_peer.get("capabilities")
-    if not isinstance(capabilities, dict):
-        return False
-    if capabilities.get("state") != "announced":
-        return False
-    announced = capabilities.get("announced_commands")
-    if not isinstance(announced, list):
-        return False
-    return command in announced
-
-
 def _registry_tool_records(app: FastMCP) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for tool in app._tool_manager.list_tools():
@@ -1314,386 +541,6 @@ def _frozen_tool_registry_overlay(app: FastMCP, config: ServerConfig) -> dict[st
         "tool_registry_fingerprint": snapshot.fingerprint,
         "tool_registry_captured_at": snapshot.captured_at_utc,
     }
-
-
-def _front_key(payload: dict[str, Any], key: str) -> dict[str, Any]:
-    """Put key first so an 8B scanner sees the verdict before the rest of the blob."""
-    if key not in payload:
-        return dict(payload)
-    ordered: dict[str, Any] = {key: payload[key]}
-    for name, value in payload.items():
-        if name != key:
-            ordered[name] = value
-    return ordered
-
-
-def _ready_next_tool(reason: str, *, is_ready: bool) -> str | None:
-    if is_ready or reason == "ready":
-        return None
-    # Uniform ready=false envelope (fb-20260917-092908-1765 / baf9):
-    # always name bridge_status, never a per-reason fork.
-    return next_step("bridge_status")
-
-
-def _with_ready(status: dict[str, Any]) -> dict[str, Any]:
-    payload = dict(status)
-    verdict = compute_bridge_ready(payload)
-    server = payload.get("server_peer") if isinstance(payload.get("server_peer"), dict) else {}
-    client = payload.get("client_peer") if isinstance(payload.get("client_peer"), dict) else {}
-    is_ready = bool(verdict["ready"])
-    reason = str(verdict["reason"])
-    # ready/reason/next_step first so an 8B scanner sees the verdict before ages.
-    ready: dict[str, Any] = {
-        "ready": is_ready,
-        "reason": reason,
-    }
-    follow = _ready_next_tool(reason, is_ready=is_ready)
-    if follow is not None:
-        ready["next_step"] = follow
-    ready["stale_threshold_s"] = PEER_STALE_S
-    ready["server_last_poll_age_s"] = server.get("last_poll_age_s")
-    ready["client_last_poll_age_s"] = client.get("last_poll_age_s")
-    ready["server_bound_last_poll_age_s"] = server.get("bound_last_poll_age_s")
-    ready["client_bound_last_poll_age_s"] = client.get("bound_last_poll_age_s")
-    payload["ready"] = ready
-    return _front_key(payload, "ready")
-
-
-def _game_not_ready_reason(
-    status: dict[str, Any] | None,
-    peer: str | None = None,
-) -> str:
-    if isinstance(status, dict) and peer in {"server", "client"}:
-        key = "client_peer" if peer == "client" else "server_peer"
-        if not _peer_is_live(status.get(key)):
-            return "client_not_polling" if peer == "client" else "server_poll_stale"
-    if not isinstance(status, dict):
-        return "no_run"
-    reason = compute_bridge_ready(status)["reason"]
-    if reason == "ready":
-        return "no_run"
-    return str(reason)
-
-
-def _target_peer_down(
-    status_snapshot: dict[str, Any] | None,
-    peer: str | None,
-) -> bool:
-    """True when the command's target peer is not live (same rule as embedded)."""
-    if not isinstance(status_snapshot, dict):
-        return False
-    if peer in {"server", "client"}:
-        key = "client_peer" if peer == "client" else "server_peer"
-        return not _peer_is_live(status_snapshot.get(key))
-    return not _peer_is_live(status_snapshot.get("server_peer")) and not _peer_is_live(
-        status_snapshot.get("client_peer")
-    )
-
-
-_UI_ECHO_VERBS = frozenset({"ui_click", "ui_focus", "ui_set_text", "ui_tree"})
-_UI_CLICK_DIAGNOSTIC_KEYS = ("handler", "user_id", "clicked")
-_UI_ECHO_KEYS = ("requested_path", "requested_root", "matched_path")
-# vehicle_prepare_fixture fills these before fixture_not_ready
-# (MCPBridge.c PopulateTelemetryObject + vehicle_fixture_ready). The
-# expected WheelCount() is not on the wire; do not invent it (fb-b1ff).
-_FIXTURE_NOT_READY_TELEMETRY_KEYS = ("wheel_count", "fuel_fraction", "attachment_count")
-_FIXTURE_SCALAR_STR_MAX = 32
-
-
-def _format_fixture_scalar(value: object) -> str | None:
-    """Unquoted [EXACT] form for allowlisted fixture scalars.
-
-    int/float/bool match the published message (``wheel_count=2``). A JSON
-    string ``'2'`` must not become Python ``!r`` quotes (``wheel_count='2'``).
-    Non-numeric strings are omitted, not leaked.
-    """
-    if isinstance(value, bool):
-        return "True" if value else "False"
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            return None
-        return repr(value)
-    if isinstance(value, str) and 0 < len(value) <= _FIXTURE_SCALAR_STR_MAX:
-        negative = value.startswith("-") and len(value) > 1
-        text = value[1:] if negative else value
-        if text.isdigit():
-            parsed_int = int(text, 10)
-            return str(-parsed_int if negative else parsed_int)
-        left, sep, right = text.partition(".")
-        if sep and left.isdigit() and right.isdigit():
-            parsed = float(f"{'-' if negative else ''}{left}.{right}")
-            if math.isfinite(parsed):
-                return repr(parsed)
-    return None
-
-
-def _fixture_not_ready_detail(result: dict[str, Any]) -> str:
-    pairs: list[str] = []
-    telemetry = result.get("telemetry")
-    if isinstance(telemetry, dict):
-        for key in _FIXTURE_NOT_READY_TELEMETRY_KEYS:
-            if key not in telemetry:
-                continue
-            rendered = _format_fixture_scalar(telemetry[key])
-            if rendered is None:
-                continue
-            pairs.append(f"{key}={rendered}")
-    if "vehicle_fixture_ready" in result:
-        rendered = _format_fixture_scalar(result["vehicle_fixture_ready"])
-        if rendered is not None:
-            pairs.append(f"vehicle_fixture_ready={rendered}")
-    if not pairs:
-        return ""
-    # P34-P2-1: label the blob so a client does not read wheel_count= as the
-    # cause. expected (WheelCount()) is not on the wire; do not invent it.
-    return "observed=" + " ".join(pairs)
-
-
-# vehicle_door fills vehicle_door.slot, state and phase before door_missing
-# (MCPBridge.c DispatchVehicleDoor). slot is the car script's slot name for the
-# crew door's seat, never caller input; a value that is not a plain slot token
-# is omitted, not leaked. source is caller input and stays out.
-_VEHICLE_DOOR_SLOT_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
-
-
-def _vehicle_door_missing_detail(result: dict[str, Any]) -> str:
-    report = result.get("vehicle_door")
-    if not isinstance(report, dict):
-        return ""
-    pairs: list[str] = []
-    slot = report.get("slot")
-    if isinstance(slot, str) and _VEHICLE_DOOR_SLOT_RE.fullmatch(slot):
-        pairs.append(f"slot={slot}")
-    if report.get("state") == "missing":
-        pairs.append("state=missing")
-    phase = report.get("phase")
-    if (
-        isinstance(phase, (int, float))
-        and not isinstance(phase, bool)
-        and math.isfinite(phase)
-    ):
-        pairs.append(f"phase={float(phase)!r}")
-    return " ".join(pairs)
-
-
-# input_trigger fills its reply before refusing (MCPClientBridge.c
-# DispatchInputTrigger). Only a reason token, a known released_by and 0/1
-# facts cross, and each code publishes only its own facts: the reply is one
-# flat class, so an unread fact still arrives as 0. name is caller input and
-# stays out.
-_INPUT_TRIGGER_REASON_RE = re.compile(r"[a-z_]{1,64}")
-_INPUT_TRIGGER_RELEASED_BY = frozenset(
-    {"phase", "ttl", "restore", "player_changed", "shutdown"}
-)
-_INPUT_TRIGGER_OBSERVED_KEYS: dict[str, tuple[str, ...]] = {
-    "input_not_drivable": ("exists", "locked", "in_active_inputs"),
-    "not_held": ("released_by",),
-    "aborted": ("released_by",),
-}
-
-
-def _input_trigger_detail(result: dict[str, Any]) -> str:
-    report = result.get("input_trigger")
-    if not isinstance(report, dict):
-        return ""
-    parts: list[str] = []
-    reason = report.get("reason")
-    if isinstance(reason, str) and _INPUT_TRIGGER_REASON_RE.fullmatch(reason):
-        parts.append(f"reason={reason}")
-    pairs: list[str] = []
-    code = str(result.get("error") or "")
-    for key in _INPUT_TRIGGER_OBSERVED_KEYS.get(code, ()):
-        value = report.get(key)
-        if key == "released_by":
-            if isinstance(value, str) and value in _INPUT_TRIGGER_RELEASED_BY:
-                pairs.append(f"released_by={value}")
-        elif isinstance(value, int) and value in (0, 1):
-            # Enforce sends a bool as 0 or 1; Python's bool is an int too.
-            pairs.append(f"{key}={int(value)}")
-    if pairs:
-        parts.append("observed=" + " ".join(pairs))
-    return "; ".join(parts)
-
-
-def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
-    """Diagnostics the bridge filled BEFORE deciding the error, as message text.
-
-    ui_click sets user_id, handler and clicked before it settles on not_handled
-    (MCPClientBridge.c:1465-1480), and the four core UI verbs echo their request
-    (ui_request, MCPClientBridge.c:2199-2218). Only the message of a ToolError
-    crosses the MCP wire, so a bare code threw away the two fields that
-    discriminate the cause (fb-20260829-221423-b2c4).
-
-    vehicle_prepare_fixture is the same shape for fixture_not_ready
-    (fb-20260911-230927-b1ff): telemetry.wheel_count was already on the
-    result and the Python layer raised the bare code. Expected axle count
-    is not in the echo, so the allowlist is observed scalars only, published
-    under an ``observed=`` label (P34-P2-1). Do not invent ``expected``.
-
-    vehicle_door's door_missing is the third: the bridge already filled the
-    empty crew-door slot, and the caller needs it to fill that slot
-    (inventory_attach takes slot=). Only slot, state and phase cross.
-
-    input_trigger is the fourth: its refusals carry reason= (a token, e.g.
-    no_local_setter) and observed= with the facts of that code only
-    (exists/locked/in_active_inputs for input_not_drivable, released_by for
-    not_held and aborted). The name it resolved is caller input and stays out.
-
-    The decision is by VERB, never by key presence: MCPResult is one flat class
-    (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
-    clicked=false, and a world_spawn timeout has to stay "timeout". The click
-    scalars are reported for ui_click only, an empty handler included -- no
-    handler ran, which is a different diagnosis from one that ran and declined.
-    The echo is whitelisted; requested_root and requested_path are echoed
-    whenever the bridge sent the key (empty root included, ficha f4f2).
-    matched_path is filled only after a unique match, so an empty value is
-    omitted (it is not a request input). requested_text stays out on purpose,
-    it would replay caller input (possibly sensitive, unbounded) into an
-    error message.
-    """
-    if cmd == "vehicle_prepare_fixture" and str(result.get("error") or "") == "fixture_not_ready":
-        return _fixture_not_ready_detail(result)
-    if cmd == "vehicle_door" and str(result.get("error") or "") == "door_missing":
-        return _vehicle_door_missing_detail(result)
-    if cmd == "input_trigger":
-        return _input_trigger_detail(result)
-    if cmd not in _UI_ECHO_VERBS:
-        return ""
-    parts: list[str] = []
-    if cmd == "ui_click":
-        fields = [
-            f"{key}={result[key]!r}" for key in _UI_CLICK_DIAGNOSTIC_KEYS if key in result
-        ]
-        if fields:
-            parts.append(" ".join(fields))
-    echo = result.get("ui_request")
-    if isinstance(echo, dict):
-        pairs = []
-        for key in _UI_ECHO_KEYS:
-            if key not in echo:
-                continue
-            value = echo[key]
-            if value is None:
-                continue
-            # Empty matched_path is unset resolution, not an echoed input.
-            if key == "matched_path" and value == "":
-                continue
-            pairs.append(f"{key}={value!r}")
-        if pairs:
-            parts.append(" ".join(pairs))
-    return "; ".join(parts)
-
-
-def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
-    # The message head stays the fixed code; the bridge's object_id (sent on a
-    # spawn timeout, MCPBridge.c:3272) rides in a structured attribute so the
-    # caller can clean up instead of duplicating, without the message carrying
-    # host content across the MCP wire. For the core UI verbs the diagnostics
-    # the bridge filled before the error follow the code after "; " -- see
-    # _bridge_error_detail; other verbs keep the bare code except
-    # vehicle_prepare_fixture/fixture_not_ready, which carries the
-    # observed= telemetry allowlist the bridge already filled,
-    # vehicle_door/door_missing, which carries the empty slot, and
-    # input_trigger, whose refusals carry reason= and observed=.
-    code = str(result.get("error") or "bridge_error")
-    detail = _bridge_error_detail(result, cmd)
-    if code in {"binding_retired", "run_not_owned"}:
-        # The daemon also retires (binding_retired) or fences (run_not_owned)
-        # already queued commands. Carry the same bounded hint and next step
-        # through /await as through a refused /enqueue.
-        error = ToolError(_public_enqueue_error(result))
-    else:
-        error = ToolError(f"{code}; {detail}" if detail else code)
-    object_id = result.get("object_id")
-    if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
-        error.object_id = object_id
-    return error
-
-
-def _retail_quarantine_recipe(reason: object) -> str:
-    if isinstance(reason, str) and reason in _RETAIL_QUARANTINE_REASONS:
-        return f"{RETAIL_QUARANTINE_RECIPE}; reason: {reason}"
-    return RETAIL_QUARANTINE_RECIPE
-
-
-def _audit_failed_message(message: str, audit_stage: object) -> str:
-    """Name the coordinator step an audit_failed stopped at (00c4).
-
-    The stage travels only when it is one of session_coordination.AUDIT_STAGES,
-    together with next_step=session_status: its audit_fault, claimable and
-    cleanup_degraded tell whether the failure is still latched. Without a known
-    stage (the exec_enforce or lifecycle audit, or an older daemon) the message
-    is returned unchanged.
-    """
-    stage = public_audit_stage(audit_stage)
-    if stage is None:
-        return message
-    return with_next_step(f"{message}; audit_stage={stage}", "session_status")
-
-
-def _public_enqueue_error(
-    payload: dict[str, Any],
-    *,
-    status_snapshot: dict[str, Any] | None = None,
-    peer: str | None = None,
-) -> str:
-    """Map a remote enqueue payload to the caller-facing ToolError string.
-
-    A known code with a valid hint travels as "<code>: <hint>"; a known code
-    without a hint stays bare; an unknown code stays the bare token remote_error
-    even when a hint is present. A published ready.reason that is not on the
-    enqueue whitelist travels as game_not_ready:reason=<token> so the caller
-    still sees client_not_polling (and the other startup reasons) instead of
-    a stripped remote_error -- when that token is on the enqueue payload,
-    not merely on a sibling /status snapshot. run_not_owned also carries
-    next_step=session_acquire_wait: that grant adopts the ownerless run.
-    A coordinator audit_failed carries its audit_stage and
-    next_step=session_status (_audit_failed_message).
-    """
-    code = _remote_error_code(payload)
-    if code == "retail_quarantine":
-        return _retail_quarantine_recipe(payload.get("reason"))
-    if code == "lease_required":
-        if (
-            isinstance(payload, dict)
-            and payload.get("version_state") in {"legacy_blocked", "version_mismatch"}
-        ):
-            if _target_peer_down(status_snapshot, peer):
-                return f"game_not_ready:reason={_game_not_ready_reason(status_snapshot, peer)}"
-            expected = payload.get("expected")
-            got = payload.get("got")
-            return (
-                f"{LEASE_REQUIRED_RECIPE}; "
-                f"version_blocked:bridge {got!r} != {expected!r}"
-            )
-        return LEASE_REQUIRED_RECIPE
-    if code == "lease_expired":
-        return LEASE_EXPIRED_RECIPE
-    if code == "lease_invalid":
-        return LEASE_INVALID_RECIPE
-    if code == "version_blocked":
-        if _target_peer_down(status_snapshot, peer):
-            return f"game_not_ready:reason={_game_not_ready_reason(status_snapshot, peer)}"
-        expected = payload.get("expected") if isinstance(payload, dict) else None
-        got = payload.get("got") if isinstance(payload, dict) else None
-        if isinstance(expected, str):
-            return f"version_blocked:bridge {got!r} != {expected!r}"
-        return "version_blocked"
-    if code in _PUBLISHED_NOT_READY_CODES:
-        return f"game_not_ready:reason={code}"
-    hint = _carriable_hint(payload)
-    message = code
-    if code != "remote_error" and hint is not None:
-        message = f"{code}: {hint}"
-    if code == "run_not_owned":
-        # Named here, not only in the daemon's hint, so an older daemon's
-        # prose still reaches the caller with the tool to call next.
-        return with_next_step(message, "session_acquire_wait")
-    if code == "audit_failed":
-        return _audit_failed_message(message, payload.get("audit_stage"))
-    return message
 
 
 def _image_format_from_mime(mime: object) -> str:
@@ -3222,73 +2069,6 @@ def required_keyfile(config: ServerConfig) -> str:
     return config.keyfile
 
 
-def _bad_args(field: str, value: object, requirement: str) -> str:
-    return f"bad_args: {field} {value!r} must {requirement}"
-
-
-# fb-20260823-131632-4f1c: the bridge answers a bare unknown_type when type is
-# empty or ConfigIsExisting("CfgVehicles " + type) is false (MCPBridge.c
-# ValidateSpawnArgs), so type="vehicle" never said what type is. The tool knows
-# the type it sent and names it. type is caller input of any length, so the
-# echo is cut at _SPAWN_TYPE_ECHO_MAX characters.
-_SPAWN_TYPE_ECHO_MAX = 64
-
-
-def _unknown_spawn_type(type_name: str) -> str:
-    shown = repr(type_name[:_SPAWN_TYPE_ECHO_MAX])
-    if len(type_name) > _SPAWN_TYPE_ECHO_MAX:
-        shown += f" (first {_SPAWN_TYPE_ECHO_MAX} of {len(type_name)} characters)"
-    return (
-        f"unknown_type: type {shown} is not a CfgVehicles classname; type takes "
-        "a classname such as CivilianSedan (a mod's classnames exist only while "
-        "that mod is loaded)"
-    )
-
-
-def _require_vec3(value: list[float] | None, name: str) -> list[float]:
-    error = (
-        "bad_pos"
-        if name == "pos"
-        else _bad_args(name, value, "be a list of 3 finite numbers")
-    )
-    if not isinstance(value, list) or len(value) != 3:
-        raise ToolError(error)
-    try:
-        vec = [float(value[0]), float(value[1]), float(value[2])]
-    except (TypeError, ValueError) as exc:
-        raise ToolError(error) from exc
-    if not all(math.isfinite(item) for item in vec):
-        raise ToolError(error)
-    return vec
-
-
-def _require_float_list(
-    value: list[float] | None, count: int, name: str = "value"
-) -> list[float]:
-    error = _bad_args(name, value, f"be a list of {count} finite numbers")
-    if not isinstance(value, list) or len(value) != count:
-        raise ToolError(error)
-    try:
-        items = [float(item) for item in value]
-    except (TypeError, ValueError) as exc:
-        raise ToolError(error) from exc
-    if not all(math.isfinite(item) for item in items):
-        raise ToolError(error)
-    return items
-
-
-def _timeout(timeout_s: float) -> float:
-    try:
-        value = float(timeout_s)
-    except (TypeError, ValueError) as exc:
-        raise ToolError("bad_timeout") from exc
-    if value <= 0.0 or not math.isfinite(value):
-        raise ToolError("bad_timeout")
-    if value > MAX_TIMEOUT_S:
-        raise ToolError("bad_timeout")
-    return value
-
-
 # restore_gameplay closes its verdict blind in Enforce (ficha 4f83). The
 # observer is dayz_mcp.camera_restore: view=player vs view=scripted vs ok=0.
 # Re-exported below so existing tests keep importing from server.
@@ -3303,365 +2083,6 @@ VEHICLE_CONTROL_MAX_TTL_S = 30.0
 WEAPON_RAISE_DEFAULT_TTL_S = 3.0
 WEAPON_RAISE_MAX_TTL_S = 30.0
 WEAPON_AIM_ABS_MAX = 3.141593
-
-
-def _finite_float(value: float, error: str = "bad_args") -> float:
-    resolved_error = (
-        _bad_args("value", value, "be a finite number")
-        if error == "bad_args"
-        else error
-    )
-    try:
-        converted = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ToolError(resolved_error) from exc
-    if not math.isfinite(converted):
-        raise ToolError(resolved_error)
-    return converted
-
-
-# A hold answers after its release, hold_s after the press: the tool waits at
-# least hold_s plus this, the slack MCPClientBridge.c INPUT_TRIGGER_JOB_SLACK_S
-# gives the job before it releases the key itself.
-INPUT_TRIGGER_HOLD_SLACK_S = 5.0
-
-
-def _input_trigger_seconds(field: str, value: object, maximum: float, when: str) -> float:
-    requirement = f"be a finite number in (0, {maximum}] with {when}"
-    if value is None or isinstance(value, bool):
-        raise ToolError(_bad_args(field, value, requirement))
-    seconds = _finite_float(value, _bad_args(field, value, requirement))
-    if seconds <= 0.0 or seconds > maximum:
-        raise ToolError(_bad_args(field, value, requirement))
-    return seconds
-
-
-def _input_trigger_request(
-    kind: object,
-    dik: object,
-    name: object,
-    entry: object,
-    phase: object,
-    hold_s: object,
-    ttl_s: object,
-    timeout_s: object,
-) -> tuple[dict[str, Any], float]:
-    """The input_trigger wire args and wait budget, or ToolError bad_args.
-
-    Each kind and phase sends exactly the keys of its ingress variant
-    (loopback._input_trigger_variant). No number travels without its phase,
-    so an absent key never reaches Enforce as 0 (fb-20260930-065425-8779).
-    """
-    if kind not in ("key", "input"):
-        raise ToolError(_bad_args("kind", kind, "be 'key' or 'input'"))
-    if phase not in ("click", "hold", "press", "release"):
-        raise ToolError(
-            _bad_args("phase", phase, "be 'click', 'hold', 'press' or 'release'")
-        )
-    args: dict[str, Any] = {"trigger_kind": kind, "trigger_edge": phase}
-    if kind == "key":
-        if (
-            isinstance(dik, bool)
-            or not isinstance(dik, int)
-            or dik < 0
-            or dik > INPUT_TRIGGER_DIK_MAX
-        ):
-            raise ToolError(
-                _bad_args(
-                    "dik", dik, f"be an int from 0 to {INPUT_TRIGGER_DIK_MAX} with kind='key'"
-                )
-            )
-        if name is not None:
-            raise ToolError(_bad_args("name", name, "be omitted with kind='key'"))
-        chosen_entry = "game" if entry is None else entry
-        if chosen_entry not in ("game", "mission"):
-            raise ToolError(_bad_args("entry", entry, "be 'game' or 'mission'"))
-        args["trigger_entry"] = chosen_entry
-        args["dik"] = dik
-    else:
-        if not is_printable_input_name(name):
-            raise ToolError(
-                _bad_args(
-                    "name",
-                    name,
-                    f"be 1..{INPUT_NAME_MAX_CHARS} printable ASCII characters "
-                    "(codes 32..126) with kind='input'",
-                )
-            )
-        if dik is not None:
-            raise ToolError(_bad_args("dik", dik, "be omitted with kind='input'"))
-        if entry is not None:
-            raise ToolError(_bad_args("entry", entry, "be omitted with kind='input'"))
-        args["name"] = name
-    if phase == "hold":
-        args["hold_s"] = _input_trigger_seconds(
-            "hold_s", hold_s, INPUT_TRIGGER_HOLD_MAX_S, "phase='hold'"
-        )
-    elif hold_s is not None:
-        raise ToolError(_bad_args("hold_s", hold_s, "be omitted unless phase is 'hold'"))
-    if phase == "press":
-        args["hold_ttl_s"] = _input_trigger_seconds(
-            "ttl_s", ttl_s, INPUT_TRIGGER_PRESS_MAX_TTL_S, "phase='press'"
-        )
-    elif ttl_s is not None:
-        raise ToolError(_bad_args("ttl_s", ttl_s, "be omitted unless phase is 'press'"))
-    timeout = _timeout(timeout_s)
-    if phase == "hold":
-        timeout = max(timeout, args["hold_s"] + INPUT_TRIGGER_HOLD_SLACK_S)
-    return args, timeout
-
-
-def _is_int_clock_part(value: object) -> bool:
-    """True for int or finite integral float (60.0, 24.0). Never bool."""
-    if isinstance(value, bool):
-        return False
-    if type(value) is int:
-        return True
-    if type(value) is float:
-        return math.isfinite(value) and value == int(value)
-    return False
-
-
-def _add_applied_days(out: dict[str, Any], extra_days: int) -> None:
-    if extra_days == 0:
-        return
-    year, month, day = out.get("year"), out.get("month"), out.get("day")
-    if all(_is_int_clock_part(part) for part in (year, month, day)):
-        try:
-            shifted = datetime(int(year), int(month), int(day)) + timedelta(
-                days=extra_days
-            )
-        except ValueError:
-            if _is_int_clock_part(day):
-                out["day"] = int(day) + extra_days
-            return
-        out["year"] = shifted.year
-        out["month"] = shifted.month
-        out["day"] = shifted.day
-        return
-    # Incomplete calendar (day without year/month) must not invent a date.
-
-
-def _overflow_clock_parts(hour: int, minute: int) -> tuple[int, int, int]:
-    extra_hours, minute = divmod(minute, 60)
-    extra_days, hour = divmod(hour + extra_hours, 24)
-    return extra_days, hour, minute
-
-
-def _clock_was_normalized(raw: dict[str, Any], normalized: dict[str, Any]) -> bool:
-    return any(
-        raw.get(field) != normalized.get(field)
-        for field in ("year", "month", "day", "hour", "minute")
-    )
-
-
-def _normalize_applied_clock(applied: dict[str, Any]) -> dict[str, Any]:
-    """Carry minute>=60 into hour, then into the calendar day. Hour stays 0–23.
-
-    GetDate can echo hour=8, minute=60 for a requested 9:00, or hour=23,
-    minute=60 for midnight (fb-20260911-230929-311d). Integral floats
-    60.0 and 24.0 take the same carry path as int 60/24. Overflow always
-    carries into the next calendar day so applied.hour is never 24. The
-    request is not consulted; a same-day 23:60 echo becomes 00:00 the
-    next day even if the client asked for 00:00 on the echoed day.
-    """
-    out = dict(applied)
-    hour = out.get("hour")
-    minute = out.get("minute")
-    if not _is_int_clock_part(hour) or not _is_int_clock_part(minute):
-        return out
-    hour = int(hour)
-    minute = int(minute)
-    if minute < 60 and 0 <= hour <= 23:
-        return out
-    extra_days, hour, minute = _overflow_clock_parts(hour, minute)
-    out["hour"] = hour
-    out["minute"] = minute
-    _add_applied_days(out, extra_days)
-    return out
-
-
-# The five World.GetDate fields world_time_get answers in world_time.
-WORLD_TIME_FIELDS = ("year", "month", "day", "hour", "minute")
-
-
-def _world_time_reply(result: dict[str, Any]) -> dict[str, Any]:
-    """world_time_get's answer: world_time normalized, the raw read beside it.
-
-    GetDate can report hour=8, minute=60 for 9:00 (fb-20260911-230929-311d),
-    so world_time goes through _normalize_applied_clock, as world_time_set's
-    applied echo does; world_time_echo keeps the raw values. An answer that
-    is not ok (the not-ready envelope a world read returns before enqueue)
-    passes through untouched. An ok answer without the five integral fields
-    is ok=0 with world_time_incomplete: a clock that did not arrive is not a
-    reading.
-    """
-    if not isinstance(result, dict) or not result.get("ok"):
-        return result
-    response = dict(result)
-    world_time = result.get("world_time")
-    if isinstance(world_time, dict):
-        echo = dict(world_time)
-        normalized = _normalize_applied_clock(echo)
-        response["world_time"] = normalized
-        response["world_time_echo"] = echo
-        response["clock_normalized"] = _clock_was_normalized(echo, normalized)
-    complete = isinstance(world_time, dict) and all(
-        _is_int_clock_part(world_time.get(field)) for field in WORLD_TIME_FIELDS
-    )
-    if not complete:
-        response["ok"] = 0
-        response["warnings"] = ["world_time_incomplete"]
-    return response
-
-
-def _optional_finite_float(
-    value: float | None, error: str = "bad_args"
-) -> float | None:
-    if value is None:
-        return None
-    return _finite_float(value, error)
-
-
-def _require_range(
-    value: float,
-    minimum: float,
-    maximum: float,
-    error: str = "bad_args",
-) -> float:
-    resolved_error = (
-        _bad_args(
-            "value", value, f"be a finite number from {minimum} to {maximum}"
-        )
-        if error == "bad_args"
-        else error
-    )
-    converted = _finite_float(value, resolved_error)
-    if converted < minimum or converted > maximum:
-        raise ToolError(resolved_error)
-    return converted
-
-
-def _patch_public_argument_alias(app: FastMCP, tool_name: str, internal: str, public: str) -> None:
-    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
-    if tool is None:
-        raise RuntimeError(f"missing tool {tool_name}")
-    properties = tool.parameters.get("properties", {})
-    if internal in properties:
-        properties[public] = properties.pop(internal)
-    required = tool.parameters.get("required")
-    if isinstance(required, list):
-        tool.parameters["required"] = [public if item == internal else item for item in required]
-    original = tool.fn_metadata.call_fn_with_arg_validation
-
-    async def patched(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly):
-        arguments = dict(arguments_to_validate)
-        if public in arguments and internal not in arguments:
-            arguments[internal] = arguments.pop(public)
-        return await original(fn, fn_is_async, arguments, arguments_to_pass_directly)
-
-    object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
-
-
-_CLOSED_UNEXPECTED_ARGUMENT_CAP = 5
-
-
-def _echo_unexpected_argument_key(key: str) -> str:
-    """Render a caller-supplied argument name for a closed-schema error.
-
-    Identifier-shaped keys are echoed. Anything else (path, space, punctuation)
-    becomes ``<unsafe>`` so host text never crosses the MCP wire. Short names
-    such as ``id`` fail ``_is_safe_error_token``'s 3-char floor but are still
-    identifier-shaped and safe to name.
-    """
-    if not isinstance(key, str):
-        return "<unsafe>"
-    if _is_safe_error_token(key):
-        return key
-    if (
-        1 <= len(key) <= 2
-        and key[0].isascii()
-        and key[0].isalpha()
-        and all(char.isascii() and (char.isalnum() or char == "_") for char in key)
-    ):
-        return key
-    return "<unsafe>"
-
-
-def _closed_unexpected_arguments_message(
-    unknown: set[str],
-    allowed: set[str],
-    required: list[str] | tuple[str, ...],
-    provided: object,
-) -> str:
-    """``bad_args: unexpected arguments: ... (accepted: ...)`` plus ``; missing:``."""
-    ranked = sorted(unknown)
-    echoed = [
-        _echo_unexpected_argument_key(name)
-        for name in ranked[:_CLOSED_UNEXPECTED_ARGUMENT_CAP]
-    ]
-    unexpected = ", ".join(echoed)
-    overflow = len(ranked) - _CLOSED_UNEXPECTED_ARGUMENT_CAP
-    if overflow > 0:
-        unexpected = f"{unexpected} +{overflow} more"
-    accepted = ", ".join(sorted(allowed))
-    message = f"bad_args: unexpected arguments: {unexpected} (accepted: {accepted})"
-    missing = sorted(name for name in required if name not in provided)
-    if missing:
-        message = f"{message}; missing: {', '.join(missing)}"
-    return message
-
-
-def _patch_closed_tool_schema(app: FastMCP, tool_name: str) -> None:
-    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
-    if tool is None:
-        raise RuntimeError(f"missing tool {tool_name}")
-    tool.parameters["additionalProperties"] = False
-    # A zero-argument tool publishes `required: []` explicitly: a consumer that generates
-    # calls from the schema must see a closed, empty contract, not an absent key.
-    tool.parameters.setdefault("required", [])
-    allowed = set(tool.parameters.get("properties", {}))
-    required = tuple(tool.parameters.get("required") or [])
-    original = tool.fn_metadata.call_fn_with_arg_validation
-
-    async def patched(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly):
-        unknown = set(arguments_to_validate) - allowed
-        if unknown:
-            raise ToolError(
-                _closed_unexpected_arguments_message(
-                    unknown, allowed, required, arguments_to_validate
-                )
-            )
-        return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
-
-    object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
-
-
-def _patch_mode_enum_from_authority(app: FastMCP, tool_name: str, field: str = "mode") -> None:
-    """Publish and enforce a mode enum read from the M12 authority at build time and per call.
-
-    ``dayz_test_modes.public_mode_names()`` is read when the app is BUILT (never when this module
-    is imported) for the published schema, and again on EVERY call before validation, so a
-    substituted record set is honoured both by a new ``build_app()`` and by the next call
-    (Codex B-01, 2026-09-04). Schema and validation close together: the annotation stays ``str``
-    and this wrapper is the gate.
-    """
-    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
-    if tool is None:
-        raise RuntimeError(f"missing tool {tool_name}")
-    prop = tool.parameters.get("properties", {}).get(field)
-    if not isinstance(prop, dict):
-        raise RuntimeError(f"missing property {field} on {tool_name}")
-    prop["enum"] = list(dayz_test_modes.public_mode_names())
-    original = tool.fn_metadata.call_fn_with_arg_validation
-
-    async def patched(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly):
-        allowed = dayz_test_modes.public_mode_names()
-        if arguments_to_validate.get(field) not in allowed:
-            raise ToolError(f"bad_args: {field} must be one of " + "|".join(allowed))
-        return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
-
-    object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
 
 
 RUN_ID_MATRIX_MODE_DESCRIPTION = (
@@ -3768,74 +2189,6 @@ def _player_count(result: dict[str, Any]) -> int:
     return len(players)
 
 
-def _sibling_profile_dirs(profiles: list[str]) -> list[str]:
-    """Add the _client/_server sibling when the run only recorded one side."""
-    extra: list[str] = []
-    for item in profiles:
-        path = Path(item)
-        parent = path.parent.name.casefold()
-        if parent == "_server":
-            sibling = str(path.parent.parent / "_client" / "profiles")
-        elif parent == "_client":
-            sibling = str(path.parent.parent / "_server" / "profiles")
-        else:
-            continue
-        if log_tail.is_allowed_profiles_dir(sibling) and Path(sibling).is_dir():
-            extra.append(sibling)
-    return sorted(set(profiles + extra))
-
-
-def _run_start_epoch(runs: list[dict[str, Any]]) -> float | None:
-    """Start of the launch in progress: the newest run's earliest process.
-
-    `min` inside a run is when that run started -- process_lifecycle._run_age_s
-    aggregates the same way. `max` across runs keeps the floor on the current
-    launch, so a second live run cannot pull it back and readmit the first
-    one's logs as if they belonged to this one.
-
-    Only a live run reaches here with a stamp at all: RunRecord.validate makes
-    EXITED carry an empty `processes` and RUNNING/RUNNING_IDLE a non-empty one.
-    With a single live run -- the only shape observed on this host across the
-    store and its six pre-prune backups -- both aggregations return the same
-    float, so this is a guard rather than a repair.
-    """
-
-    starts: list[float] = []
-    for run in runs:
-        times: list[float] = []
-        for proc in run.get("processes") or []:
-            if not isinstance(proc, dict):
-                continue
-            raw = proc.get("creation_time_utc")
-            if not isinstance(raw, str) or not raw:
-                continue
-            try:
-                times.append(
-                    datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
-                )
-            except ValueError:
-                continue
-        if times:
-            starts.append(min(times))
-    return max(starts) if starts else None
-
-
-def _newest_rpt_and_script(dated: list[tuple[float, str]]) -> list[str]:
-    """Newest .rpt and newest .log by suffix, independent of mtime gap."""
-    newest_rpt: str | None = None
-    newest_script: str | None = None
-    rpt_mtime = script_mtime = None
-    for mtime, path in dated:
-        suffix = Path(path).suffix.casefold()
-        if suffix == ".rpt":
-            if rpt_mtime is None or mtime >= rpt_mtime:
-                newest_rpt, rpt_mtime = path, mtime
-        elif suffix == ".log":
-            if script_mtime is None or mtime >= script_mtime:
-                newest_script, script_mtime = path, mtime
-    return [path for path in (newest_rpt, newest_script) if path]
-
-
 # Teleport clearance probe (fb-20260824-115220-1bc1): a surface landing must have
 # an uncovered vertical column. Constants mirror the certified site gate probe
 # (tools/g0_site_gate.py canopy_gate, calibrated 2026-08-19 at 0.05 m).
@@ -3844,178 +2197,10 @@ CLEARANCE_PROBE_DOWN_M = 5.0
 CLEARANCE_TOLERANCE_M = 0.05
 CLEARANCE_LANDING_BAND_M = 0.5
 
-# entities_query is trustworthy only with a player streaming the area: far from
-# every player the engine answers 0 rows or exactly the cap with no error signal
-# (fb-20260824-123204-638e, measured 2026-08-24). 300 m is conservative against
-# the certified corridor probes (player within ~215 m of every sphere).
-ENTITIES_QUERY_BUBBLE_M = 300.0
-
-
-# entities_query rows carry has_cargo: MCPEntityHit declares the field
-# (addon/scripts/5_Mission/MCPMessages.c:360) and DispatchEntitiesQuery fills it with
-# HasCargoCapacity (MCPBridge.c:1422, defined :1441-1456 as EntityAI.Cast ->
-# GetInventory() -> GetCargo() != null). Two wire facts keep a normalisation on this
-# side:
-#   - the bridge serialises an Enforce bool as int 0/1, the same way `ok` arrives
-#     (wait_for_result above), so a consumer testing `row["has_cargo"] is True` would
-#     read every container as false;
-#   - a bridge that predates the field omits the key entirely, and absent means "the
-#     bridge did not say" (null), never "no cargo" (false).
-# A value in any other form is published as null rather than guessed: a truthiness test
-# on an unknown shape would fabricate a verdict the bridge never gave.
-def _cargo_flag(value: object) -> bool | None:
-    """Read one has_cargo cell off the wire as a bool, or None when unstated."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        return value != 0
-    return None
-
-
-def _normalize_entities_cargo(result: dict[str, Any]) -> dict[str, Any]:
-    """Publish has_cargo on every entities_query row as bool | None.
-
-    Additive and total: no row is dropped, reordered or otherwise rewritten, and no
-    shape raises. A result without rows, or rows that are not dicts, comes back as it
-    arrived -- a missing field must never cost the caller the answer it did get.
-    """
-    if not isinstance(result, dict):
-        return result
-    rows = result.get("entities")
-    if not isinstance(rows, list):
-        return result
-    for row in rows:
-        if isinstance(row, dict):
-            row["has_cargo"] = _cargo_flag(row.get("has_cargo"))
-    return result
-
-
-def _annotate_entities_reliability(
-    result: dict[str, Any], players_result: object, pos: list[float]
-) -> dict[str, Any]:
-    """Stamp nearest_player_m and reliability on an entities_query result."""
-    if not isinstance(result, dict) or not result.get("ok"):
-        return result
-    nearest: float | None = None
-    players = []
-    # The probe's raw list, kept apart from the iteration default: an ok reply
-    # WITHOUT a players list is not evidence that nobody is connected.
-    players_raw: object = None
-    if isinstance(players_result, dict) and players_result.get("ok"):
-        players_raw = players_result.get("players")
-        players = players_raw if isinstance(players_raw, list) else []
-    for player in players:
-        ppos = player.get("pos") if isinstance(player, dict) else None
-        if not (isinstance(ppos, list) and len(ppos) == 3):
-            continue
-        try:
-            deltas = [float(a) - float(b) for a, b in zip(ppos, pos)]
-        except (TypeError, ValueError):
-            continue
-        distance = (deltas[0] ** 2 + deltas[1] ** 2 + deltas[2] ** 2) ** 0.5
-        if nearest is None or distance < nearest:
-            nearest = distance
-    if nearest is not None:
-        result["nearest_player_m"] = round(nearest, 1)
-    else:
-        result["nearest_player_m"] = None
-    if nearest is not None and nearest <= ENTITIES_QUERY_BUBBLE_M:
-        result["reliability"] = "player_in_bubble"
-    else:
-        result["reliability"] = "remote_unverified"
-    # Positive evidence only: the probe answered ok AND carried an empty list.
-    # A missing or non-list field is reported as remote_unverified without a reason.
-    if isinstance(players_raw, list) and not players_raw:
-        result["reason"] = "no_player_connected"
-    return result
-
-
-def _object_target_args(
-    type: str, pos: list[float] | None, object_id: int
-) -> dict[str, Any]:
-    """Validate the object_id-or-classname target contract shared by object verbs."""
-    if not isinstance(object_id, int) or isinstance(object_id, bool) or object_id < 0:
-        raise ToolError(_bad_args("object_id", object_id, "be a non-negative int"))
-    if object_id > 0:
-        return {"object_id": object_id}
-    if not isinstance(type, str) or type == "":
-        raise ToolError(
-            _bad_args("type", type, "be a non-empty string when object_id is omitted")
-        )
-    if not _inspect_type_is_valid(type):
-        raise ToolError(
-            _bad_args("type", type, "be a DayZ classname without whitespace")
-        )
-    return {"type": type, "pos": _require_vec3(pos, "pos")}
-
-
-def _inspect_type_is_valid(type: object) -> bool:
-    """True for a classname token object_inspect can echo on rejection."""
-    if not isinstance(type, str) or not type:
-        return False
-    if type.strip() != type or any(ch.isspace() for ch in type):
-        return False
-    if "/" in type or "\\" in type or type[0] in "{[":
-        return False
-    return True
-
-
-def _current_launch_logs(profiles_dir: str, start_epoch: float | None) -> list[str]:
-    """Return RPT/script files from the current launch, never historic dumps.
-
-    Without a launch timestamp, keep the newest .rpt and the newest .log by
-    name suffix (not a time cluster), so a quiet current file is not dropped.
-    """
-    paths = log_tail.resolve_log_files(profiles_dir)
-    dated: list[tuple[float, str]] = []
-    for path in paths:
-        # crash_*.log dumps are excluded even when freshly touched: a crash dump
-        # carries CE world-create noise by the hundred thousand lines and starves
-        # the wait_for scan budget (fb-20260823-130809-413a).
-        if Path(path).name.casefold().startswith("crash"):
-            continue
-        try:
-            dated.append((Path(path).stat().st_mtime, path))
-        except OSError:
-            continue
-    if not dated:
-        return []
-    if start_epoch is None:
-        return _newest_rpt_and_script(dated)
-    floor = start_epoch - 2.0
-    return [path for mtime, path in dated if mtime >= floor]
-
-
-def _coerce_logs_since_marker(marker: object) -> str:
-    """Normalize a logs_since marker to the encoded JSON string.
-
-    The tool returns an encoded JSON string. FastMCP pre-parses JSON-looking
-    strings into dicts before the handler runs because the parameter type is a
-    union, not bare ``str`` (``FuncMetadata.pre_parse_json``). Clients that
-    JSON-decode the returned marker also pass a dict. Accept both; reject
-    anything else as ``bad_marker``.
-    """
-    if isinstance(marker, str):
-        return marker
-    if isinstance(marker, dict):
-        try:
-            return json.dumps(marker, separators=(",", ":"), sort_keys=True)
-        except (TypeError, ValueError) as error:
-            raise ToolError("bad_marker") from error
-    raise ToolError("bad_marker")
-
 
 # Run states whose client window may still be on screen, so a capture should be
 # aimed at it. Anything else (EXITED, FAILED) has no window to disambiguate.
 _CAPTURE_LIVE_RUN_STATES = frozenset({"STARTING", "RUNNING", "RUNNING_IDLE", "STOPPING"})
-
-
-def _profile_dirs_from_runs(runs: list[dict[str, Any]]) -> list[str]:
-    candidates = sorted(
-        {str(item.get("profiles")) for item in runs if item.get("profiles")}
-    )
-    allowed = [item for item in candidates if log_tail.is_allowed_profiles_dir(item)]
-    return _sibling_profile_dirs(allowed)
 
 
 async def _wait_for_script_log_paths(runtime: Any) -> list[str]:
@@ -4040,140 +2225,6 @@ async def _wait_for_script_log_paths(runtime: Any) -> list[str]:
     for profiles_dir in profiles:
         paths.extend(_current_launch_logs(profiles_dir, start_epoch))
     return paths
-
-
-def _offset_before_last_lines(data: bytes, lookback_lines: int) -> int:
-    """Byte offset of the start of the last ``lookback_lines`` lines.
-
-    The result is always ``0`` or the byte just after a ``\\n``: a reader
-    resuming there sees whole lines, never a half-line.
-    """
-    if lookback_lines <= 0 or not data:
-        return len(data)
-    parts = data.split(b"\n")
-    line_count = len(parts) - 1 if parts and parts[-1] == b"" else len(parts)
-    skip = max(0, line_count - lookback_lines)
-    if skip == 0:
-        return 0
-    offset = 0
-    seen = 0
-    for part in parts:
-        if seen >= skip:
-            break
-        offset += len(part) + 1
-        seen += 1
-    # `offset` is measured from byte 0 of `data` (each skipped line contributes
-    # its length plus its terminating newline), so it is already an absolute
-    # file offset; no window base is added.
-    return min(offset, len(data))
-
-
-def _offset_before_last_lines_in_window(
-    window: bytes, window_start: int, lookback_lines: int
-) -> int:
-    """Absolute offset of the start of the last ``lookback_lines`` lines.
-
-    ``window`` is the tail of the file starting at ``window_start``, not the whole
-    file, and that is what makes this fiddly in two places:
-
-    * unless the window starts at byte 0 its first line is a fragment cut by the
-      window boundary. It is not a line, so it is neither counted nor returned --
-      but its bytes still have to be added to the offset, or the result lands
-      mid-line and the reader gets half a line as though it were whole;
-    * when the window holds fewer complete lines than were asked for, the honest
-      answer is the first complete line IN THE WINDOW. Returning 0 would point at
-      the start of a file that may be hundreds of MB, which is the read this
-      function exists to avoid.
-    """
-    if lookback_lines <= 0 or not window:
-        return window_start + len(window)
-    parts = window.split(b"\n")
-    base = window_start
-    if window_start > 0:
-        base += len(parts[0]) + 1      # skip the boundary fragment, bytes included
-        parts = parts[1:]
-    if not parts:
-        return base
-    line_count = len(parts) - 1 if parts[-1] == b"" else len(parts)
-    skip = max(0, line_count - lookback_lines)
-    offset = base
-    for part in parts[:skip]:
-        offset += len(part) + 1
-    return min(offset, window_start + len(window))
-
-
-def _marker_rewound(path: str, lookback_lines: int) -> log_tail.TailMarker:
-    """Marker rewound by ``lookback_lines``, reading only the file's tail.
-
-    D40: this used to read the file whole. DayZ RPTs reach hundreds of MB in a
-    long session, and every ``wait_for(log_matches, lookback_lines>0)`` paid for
-    it. ``log_tail`` already caps its own reads at ``MAX_TAIL_BYTES``; this now
-    respects the same ceiling. Size comes from ``os.fstat`` on the open handle,
-    not from ``stat(path)``: the game is appending to this file while we read it,
-    so the size has to describe the bytes we actually took.
-    """
-    file_path = Path(path)
-    with file_path.open("rb") as handle:
-        size = os.fstat(handle.fileno()).st_size
-        identity = log_tail._file_identity(
-            handle, min(log_tail.IDENTITY_PREFIX_BYTES, size)
-        )
-        read_size = min(size, log_tail.MAX_TAIL_BYTES)
-        window_start = size - read_size
-        handle.seek(window_start)
-        window = handle.read(read_size)
-    offset = _offset_before_last_lines_in_window(window, window_start, lookback_lines)
-    return log_tail.TailMarker(
-        path=str(file_path), offset=offset, size=size, identity=identity
-    )
-
-
-def _log_markers_at_end(paths: list[str]) -> dict[str, log_tail.TailMarker]:
-    markers: dict[str, log_tail.TailMarker] = {}
-    for path in paths:
-        try:
-            result = log_tail.read_since(path, None)
-        except log_tail.LogTailError:
-            continue
-        markers[path] = result["marker"]
-    return markers
-
-
-def _log_markers_with_lookback(
-    paths: list[str], lookback_lines: int
-) -> dict[str, log_tail.TailMarker]:
-    if lookback_lines <= 0:
-        return _log_markers_at_end(paths)
-    markers: dict[str, log_tail.TailMarker] = {}
-    for path in paths:
-        try:
-            markers[path] = _marker_rewound(path, lookback_lines)
-        except (OSError, log_tail.LogTailError):
-            continue
-    return markers
-
-
-def _new_log_lines(
-    paths: list[str], markers: dict[str, log_tail.TailMarker]
-) -> tuple[list[str], dict[str, log_tail.TailMarker], dict[str, int]]:
-    """New lines since ``markers``, plus how many each file contributed.
-
-    A path missing from the returned counts could not be read at all. That is
-    the difference between "the file had nothing new" and "the file was never
-    opened", and wait_for used to collapse both into silence.
-    """
-    lines: list[str] = []
-    updated = dict(markers)
-    counts: dict[str, int] = {}
-    for path in paths:
-        try:
-            result = log_tail.read_since(path, markers.get(path))
-        except log_tail.LogTailError:
-            continue
-        updated[path] = result["marker"]
-        lines.extend(result["lines"])
-        counts[path] = len(result["lines"])
-    return lines, updated, counts
 
 
 def _scan_log_for_pattern(
@@ -4226,65 +2277,6 @@ def _scan_log_for_pattern(
         if pattern in line:
             return line, scanned, truncated
     return None, scanned, truncated
-
-
-def _log_label(path: str) -> str:
-    """Side-qualified file name for the wire; no host path leaves the daemon."""
-    item = Path(path)
-    side = item.parent.parent.name
-    return f"{side}/{item.name}" if side.startswith("_") else item.name
-
-
-def _record_scan(
-    paths: list[str],
-    counts: dict[str, int],
-    seen: list[str],
-    totals: dict[str, int],
-    unreadable: set[str],
-) -> None:
-    """Fold one probe's per-file counts into the cumulative scan report."""
-    for path in paths:
-        if path not in totals:
-            seen.append(path)
-            totals[path] = 0
-        if path in counts:
-            totals[path] += counts[path]
-            unreadable.discard(path)
-        else:
-            unreadable.add(path)
-
-
-def _scanned_report(
-    paths: list[str],
-    totals: dict[str, int],
-    unreadable: set[str],
-    lookback_from: str,
-    scan_truncated: bool,
-) -> dict[str, Any]:
-    """What wait_for actually read, so a no-match is visible as a no-match.
-
-    Reported by two sessions on 2026-08-21: ``observed`` carries only the last
-    line of the newest file, so when the RPT sorts newest it looks like the
-    script log was never opened. It was; nothing in it matched. Names are
-    side-qualified file names, never host paths -- this crosses the MCP wire.
-    """
-    files = [
-        {
-            "name": _log_label(path),
-            "lines": totals.get(path, 0),
-            "readable": path not in unreadable,
-        }
-        for path in paths
-    ]
-    report: dict[str, Any] = {
-        "pattern_kind": "substring",
-        "lookback_from": lookback_from,
-        "files": files,
-        "lines_total": sum(int(item["lines"]) for item in files),
-    }
-    if lookback_from == "launch":
-        report["scan_truncated"] = scan_truncated
-    return report
 
 
 def _wait_for_response(
@@ -4817,489 +2809,6 @@ def _parse_client_start_budget_s(value: object) -> float | None:
     return converted
 
 
-def _box_from_status(status: object) -> dict[str, Any]:
-    if not isinstance(status, dict):
-        return empty_box(occupied=True)
-    box = status.get("box")
-    if not isinstance(box, dict):
-        return empty_box(occupied=True)
-    payload = dict(box)
-    if not isinstance(payload.get("runs"), list):
-        payload["runs"] = []
-    if not isinstance(payload.get("foreign"), list):
-        payload["foreign"] = []
-    if not isinstance(payload.get("ports_in_use"), list):
-        payload["ports_in_use"] = []
-    if not isinstance(payload.get("queue"), list):
-        payload["queue"] = []
-    if payload.get("occupied") is not False:
-        payload["occupied"] = bool(payload.get("occupied", True))
-    return payload
-
-
-def _box_session_is(session: object, session_id: str) -> bool:
-    if not isinstance(session, str) or not isinstance(session_id, str):
-        return False
-    return session in {session_id, session_id[:12]}
-
-
-def _box_head_is(box: dict[str, Any], session_id: str) -> bool:
-    queue = box.get("queue")
-    if not isinstance(queue, list) or not queue:
-        return False
-    head = queue[0]
-    if not isinstance(head, dict):
-        return False
-    return _box_session_is(head.get("session"), session_id)
-
-
-def _box_ready_for(box: dict[str, Any], session_id: str) -> bool:
-    if box.get("occupied") is True:
-        return False
-    return _box_head_is(box, session_id)
-
-
-_BOX_OFFER_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-_BOX_OFFER_MOD = re.compile(r"[A-Za-z0-9@ _.+-]{1,64}")
-_BOX_OFFER_STATES = frozenset({
-    "STARTING",
-    "RUNNING",
-    "RUNNING_IDLE",
-    "STOPPING",
-    "UNRECONCILED",
-})
-_BOX_OFFER_MOD_CAP = 16
-
-
-def _offer_run_id(value: object) -> str | None:
-    if isinstance(value, str) and _BOX_OFFER_RUN_ID.fullmatch(value):
-        return value
-    return None
-
-
-def _offer_state(value: object) -> str | None:
-    if isinstance(value, str) and value in _BOX_OFFER_STATES:
-        return value
-    return None
-
-
-def _offer_port(value: object) -> int | None:
-    if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 65535:
-        return value
-    return None
-
-
-def _offer_age_s(value: object) -> float | None:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
-    return None
-
-
-def _offer_mods(raw: object) -> list[str]:
-    if isinstance(raw, str):
-        items: list[object] = [raw]
-    elif isinstance(raw, list):
-        items = raw
-    else:
-        return []
-    kept: list[str] = []
-    for item in items:
-        if not isinstance(item, str) or not item:
-            continue
-        if item[0] == " " or item[-1] == " ":
-            continue
-        if _BOX_OFFER_MOD.fullmatch(item) is None:
-            continue
-        kept.append(item)
-        if len(kept) >= _BOX_OFFER_MOD_CAP:
-            break
-    return kept
-
-
-def _first_box_dict(items: object) -> dict[str, Any] | None:
-    if not isinstance(items, list):
-        return None
-    for item in items:
-        if isinstance(item, dict):
-            return item
-    return None
-
-
-def _box_run(box: object, run_id: object) -> dict[str, Any] | None:
-    if not isinstance(box, dict) or not isinstance(run_id, str) or not run_id:
-        return None
-    runs = box.get("runs")
-    if not isinstance(runs, list):
-        return None
-    for item in runs:
-        if isinstance(item, dict) and item.get("run_id") == run_id:
-            return item
-    return None
-
-
-def _row_is_protected(
-    row: dict[str, Any] | None, caller_session: str | None
-) -> bool:
-    """Ownerless RUNNING_IDLE, or a revert that has not landed. Fail closed.
-
-    A RUNNING row is not this refusal unless its adoption revert is still
-    pending. The launcher is not refused. The daemon decides with the full
-    session id; this layer only has the public prefix.
-    """
-
-    if not isinstance(row, dict):
-        return False
-    if row.get("use_reason") == ADOPTION_REVERT_PENDING:
-        return not caller_launched_row(row, caller_session)
-    if row.get("state") != "RUNNING_IDLE":
-        return False
-    owner = row.get("owner_session")
-    if isinstance(owner, str) and owner:
-        return False
-    return not caller_may_adopt_ownerless(row, caller_session)
-
-
-def _box_wait_cannot_help(
-    box: object,
-    caller_session: str | None = None,
-    port: int | None = None,
-) -> str | None:
-    """Return a reason when waiting in the FIFO cannot free the box."""
-
-    if not isinstance(box, dict):
-        return None
-    if box.get("port_scan_known") is False:
-        return "port_scan_unknown"
-    session_id = caller_session if isinstance(caller_session, str) else ""
-    runs = box.get("runs")
-    if isinstance(runs, list) and session_id:
-        for occupier in runs:
-            if (
-                isinstance(occupier, dict)
-                and occupier.get("state") in {"RUNNING", "RUNNING_IDLE"}
-                and _box_session_is(occupier.get("owner_session"), session_id)
-            ):
-                return "own_run"
-    if box_available_for(box, caller_session=session_id or None)["adopt"] is True:
-        return "adopt"
-    if isinstance(runs, list):
-        for item in runs:
-            if isinstance(item, dict) and item.get("state") == "UNRECONCILED":
-                return "unreconciled"
-    if _port_conflict_fields(box, port).get("reason") == "port_in_use_foreign":
-        return "port_in_use_foreign"
-    return None
-
-
-def _occupant_from_box(box: dict[str, Any]) -> tuple[dict[str, Any], float | None]:
-    run = _first_box_dict(box.get("runs"))
-    if run is not None:
-        mods_raw: object = run.get("mods")
-        if not isinstance(mods_raw, list):
-            mods_raw = run.get("mod")
-        occupant = {
-            "run_id": _offer_run_id(run.get("run_id")),
-            "state": _offer_state(run.get("state")),
-            "foreign": False,
-            "port": _offer_port(run.get("port")),
-            "mods": _offer_mods(mods_raw),
-        }
-        return occupant, _offer_age_s(run.get("age_s"))
-    foreign = _first_box_dict(box.get("foreign"))
-    if foreign is not None:
-        occupant = {
-            "run_id": _offer_run_id(foreign.get("run_id")),
-            "state": _offer_state(foreign.get("state")),
-            "foreign": True,
-            "port": _offer_port(foreign.get("port")),
-            "mods": _offer_mods(foreign.get("mods")),
-        }
-        return occupant, _offer_age_s(foreign.get("age_s"))
-    occupant = {
-        "run_id": None,
-        "state": None,
-        "foreign": False,
-        "port": None,
-        "mods": [],
-    }
-    return occupant, _offer_age_s(box.get("claimed_s"))
-
-
-def _box_queue_position(box: dict[str, Any], session_id: str) -> int | None:
-    queue = box.get("queue")
-    if not isinstance(queue, list) or not session_id:
-        return None
-    for index, item in enumerate(queue):
-        if isinstance(item, dict) and _box_session_is(item.get("session"), session_id):
-            return index + 1
-    return None
-
-
-def _box_queue_offer(
-    box: object,
-    *,
-    caller_session: str | None = None,
-    port: int | None = None,
-) -> dict[str, Any] | None:
-    """Actionable FIFO offer for a busy-box rejection or session_status."""
-
-    if not isinstance(box, dict):
-        return None
-    session_id = caller_session if isinstance(caller_session, str) else ""
-    wait_reason = _box_wait_cannot_help(
-        box, caller_session=session_id or None, port=port
-    )
-    if wait_reason is not None and wait_reason != "own_run":
-        return None
-    if _port_conflict_fields(box, port).get("reason") == "port_in_use_foreign":
-        return None
-    waiters = 0
-    queue = box.get("queue")
-    if isinstance(queue, list):
-        for item in queue:
-            session = item.get("session") if isinstance(item, dict) else None
-            if _box_session_is(session, session_id):
-                continue
-            waiters += 1
-    occupant, age_s = _occupant_from_box(box)
-    retry: dict[str, Any] = {
-        "tool": "dayz_test_run",
-        "same_args": True,
-    }
-    if wait_reason != "own_run":
-        retry["on_busy"] = "queue"
-    return {
-        "position_if_joined": waiters + 1,
-        "waiters": waiters,
-        "occupant": occupant,
-        "occupant_age_s": age_s,
-        "retry": retry,
-    }
-
-
-def _attach_queue_offer(
-    payload: dict[str, Any],
-    box: object,
-    *,
-    caller_session: str | None = None,
-    port: int | None = None,
-) -> dict[str, Any]:
-    if payload.get("error_code") in {
-        "active_run_exists",
-        TAKEOVER_REQUIRED,
-        "run_protected",
-    }:
-        payload["queue_offer"] = _box_queue_offer(
-            box, caller_session=caller_session, port=port
-        )
-    return payload
-
-
-_DAYZ_GAME_PORT_MIN = 2302
-_DAYZ_GAME_PORT_MAX = 2999
-
-
-def _port_is_dayz_relevant(port: object) -> bool:
-    return (
-        isinstance(port, int)
-        and not isinstance(port, bool)
-        and _DAYZ_GAME_PORT_MIN <= port <= _DAYZ_GAME_PORT_MAX
-    )
-
-
-def _foreign_port_number(item: object) -> int | None:
-    if isinstance(item, int) and not isinstance(item, bool):
-        return item
-    if isinstance(item, dict):
-        port = item.get("port")
-        if isinstance(port, int) and not isinstance(port, bool):
-            return port
-    return None
-
-
-def _foreign_ports_contain(foreign_ports: object, port: int) -> bool:
-    if not isinstance(foreign_ports, list):
-        return False
-    return any(_foreign_port_number(item) == port for item in foreign_ports)
-
-
-def _annotate_foreign_port_list(
-    ports: object,
-    *,
-    relevant_ports: set[int] | None = None,
-) -> list[dict[str, Any]]:
-    """Normalize a foreign_ports* list to [{port, dayz_relevant}, ...].
-
-    When relevant_ports is set (membership of capture's DayZ-related
-    foreign_ports), dayz_relevant follows that set so image-classified
-    ports outside 2302-2999 stay coherent with foreign_ports_meta.dayz_related.
-    Otherwise fall back to the UDP game-port range alone.
-    """
-    if not isinstance(ports, list):
-        return []
-    annotated: list[dict[str, Any]] = []
-    for item in ports:
-        port = _foreign_port_number(item)
-        if port is None:
-            continue
-        extra = dict(item) if isinstance(item, dict) else {}
-        extra.pop("port", None)
-        extra["port"] = port
-        if relevant_ports is not None:
-            extra["dayz_relevant"] = port in relevant_ports
-        else:
-            extra["dayz_relevant"] = _port_is_dayz_relevant(port)
-        annotated.append(extra)
-    return annotated
-
-
-def _annotate_box_foreign_ports(box: dict[str, Any]) -> dict[str, Any]:
-    """Flag DayZ-relevant listeners; keep full table under foreign_ports_all.
-
-    Capture already filters foreign_ports to image-or-range DayZ-related
-    holders. Annotate both lists from that membership so a DayZ image on
-    e.g. 1234 stays dayz_relevant:true and meta dayz_relevant matches
-    dayz_related (fb-1432 B1). Range-only marking demoted those ports.
-    """
-    ports = box.get("foreign_ports")
-    relevant_ports: set[int] | None = None
-    if isinstance(ports, list):
-        relevant_ports = {
-            port
-            for port in (_foreign_port_number(item) for item in ports)
-            if port is not None
-        }
-
-    annotated: list[dict[str, Any]] = []
-    if isinstance(ports, list):
-        annotated = _annotate_foreign_port_list(
-            ports, relevant_ports=relevant_ports
-        )
-        box["foreign_ports"] = annotated
-
-    ports_all = box.get("foreign_ports_all")
-    annotated_all: list[dict[str, Any]] | None = None
-    if isinstance(ports_all, list):
-        annotated_all = _annotate_foreign_port_list(
-            ports_all, relevant_ports=relevant_ports
-        )
-        box["foreign_ports_all"] = annotated_all
-
-    meta = dict(box.get("foreign_ports_meta") or {})
-    if isinstance(ports, list):
-        meta["count"] = len(annotated)
-        meta["dayz_relevant"] = sum(
-            1 for item in annotated if item.get("dayz_relevant")
-        )
-    if annotated_all is not None:
-        meta["count_all"] = len(annotated_all)
-    box["foreign_ports_meta"] = meta
-    return box
-
-
-def _port_conflict_fields(box: object, port: int | None) -> dict[str, Any]:
-    """Diagnosis for an active_run_exists that the box alone cannot explain.
-
-    fb-20260904-114520-6927: a launch refused because the requested port is
-    held by a process that is not ours (any image) arrives with a box that
-    reads free -- only DayZ images occupy the box -- so the generic hint told
-    the caller to wait for a box that was never busy. The held port is in
-    foreign_ports; say that, and say when the socket table itself could not be
-    read (waiting does not repair that either).
-    """
-    if not isinstance(box, dict):
-        return {}
-    if box.get("port_scan_known") is False:
-        reason = box.get("port_scan_reason")
-        return {
-            "reason": reason if isinstance(reason, str) and reason else "port_scan_unknown",
-            "hint": (
-                "the daemon could not read the host UDP socket table "
-                "(psutil/netstat): waiting does not help, restore that first"
-            ),
-        }
-    # Prefer the full table when present (option A); fall back to the default
-    # DayZ-related list for older payloads that never emitted foreign_ports_all.
-    foreign_ports_all = box.get("foreign_ports_all")
-    foreign_ports = (
-        foreign_ports_all
-        if isinstance(foreign_ports_all, list)
-        else box.get("foreign_ports")
-    )
-    runs = box.get("runs")
-    if isinstance(port, int) and _foreign_ports_contain(foreign_ports, port):
-        # Any requested port, any image: foreign_ports_all is the socket table
-        # minus managed runs. When a run also occupies the box, both blockers
-        # are named -- freeing the box does not free this port.
-        if isinstance(runs, list) and runs:
-            hint = (
-                f"the box is busy (see occupied_by_run_id) AND port {port} is held "
-                "by a process that is not a managed run: after the box frees, pass "
-                "another port= or wait for that holder to exit; waiting for the box "
-                "alone does not free the port"
-            )
-        else:
-            hint = (
-                f"port {port} is held by a process on this host that is not a "
-                "managed run (see session_status.box.foreign_ports_all): pass another "
-                "port= or wait for its holder to exit; wait_for_box_s does not "
-                "help while the box reads free"
-            )
-        return {"reason": "port_in_use_foreign", "port": port, "hint": hint}
-    return {}
-
-
-def _apply_takeover_required(
-    payload: dict[str, Any],
-    box: object,
-    *,
-    caller_session: str | None = None,
-) -> dict[str, Any]:
-    if payload.get("reason") == "port_in_use_foreign":
-        return payload
-    target = takeover_target_run_id(box, caller_session=caller_session)
-    if target is None:
-        return payload
-    row = _box_run(box, target)
-    if _row_is_protected(row, caller_session):
-        payload["error_code"] = "run_protected"
-        notice = protection_fields(row)
-        payload["hint"] = notice["hint"]
-        payload["use_state"] = notice["use_state"]
-        payload["use_reason"] = notice["use_reason"]
-        if "retry_after_s" in notice:
-            payload["retry_after_s"] = notice["retry_after_s"]
-        return payload
-    payload["error_code"] = TAKEOVER_REQUIRED
-    extra = occupancy_error_fields(box, caller_session=caller_session)
-    hint = extra.get("hint")
-    if isinstance(hint, str) and hint:
-        payload["hint"] = hint
-    return payload
-
-
-def _enrich_active_run_result(
-    result: dict[str, Any],
-    box: dict[str, Any],
-    *,
-    caller_session: str | None = None,
-    port: int | None = None,
-) -> dict[str, Any]:
-    extra = occupancy_error_fields(box, caller_session=caller_session)
-    payload = dict(result)
-    payload.update(extra)
-    payload.update(_port_conflict_fields(box, port))
-    payload["run_id"] = None
-    payload["status"] = "failed"
-    payload["error_code"] = "active_run_exists"
-    return _attach_queue_offer(
-        _apply_takeover_required(payload, box, caller_session=caller_session),
-        box,
-        caller_session=caller_session,
-        port=port,
-    )
-
-
 def _failed_active_run_result(
     *,
     project: str,
@@ -5566,11 +3075,6 @@ async def execute_wait_for_box(
         raise
 
 
-ADOPT_BLOCKED_ON = (
-    "DayZ test box has an ownerless RUNNING_IDLE run; next: call "
-    "session_acquire_wait(purpose=...) to adopt it. dayz_test_run wait_for_box_s "
-    "is for a new launch, not this box."
-)
 _TOOLS_REMEDIATION_STALE = "tool_registry_schema_signal=stale_client"
 _TOOLS_REMEDIATION_UNKNOWN = (
     "tool_registry_schema_signal=unknown; sources unverifiable, not a crash"
@@ -5585,46 +3089,6 @@ _MUTATION_REJECTS_META = {
     "origin": "loopback_enqueue_fence",
     "blocks_now": False,
 }
-
-
-def _ownerless_idle_runs(box: dict[str, Any]) -> list[dict[str, Any]]:
-    runs = box.get("runs")
-    if not isinstance(runs, list):
-        return []
-    idle: list[dict[str, Any]] = []
-    for item in runs:
-        if not isinstance(item, dict):
-            continue
-        if item.get("state") != "RUNNING_IDLE":
-            continue
-        owner = item.get("owner_session")
-        if owner is None or owner == "":
-            idle.append(item)
-    return idle
-
-
-def box_available_for(
-    box: object, caller_session: str | None = None
-) -> dict[str, bool]:
-    """MCP-only: new launch, or adopt for the launcher or an abandoned run.
-
-    caller_session None cannot prove the launcher, so adopt is only abandoned.
-    """
-
-    unavailable = {"new_launch": False, "adopt": False}
-    if not isinstance(box, dict):
-        return unavailable
-    if box.get("port_scan_known") is False:
-        return unavailable
-    if box.get("occupied") is not True:
-        return {"new_launch": True, "adopt": False}
-    foreign = box.get("foreign")
-    if not isinstance(foreign, list) or foreign:
-        return unavailable
-    idle = _ownerless_idle_runs(box)
-    if len(idle) == 1 and caller_may_adopt_ownerless(idle[0], caller_session):
-        return {"new_launch": False, "adopt": True}
-    return unavailable
 
 
 def _tool_registry_remediation_for(signal: str) -> dict[str, str] | None:
@@ -5761,70 +3225,6 @@ async def _attach_revalidated_runs_retired_recently(
             status["runs_retired_recently"] = rows
             return
     status["runs_retired_recently"] = dayz_test_tool._runs_retired_recently(raw, None)
-
-
-def _protection_blocked_on(row: dict[str, Any]) -> str:
-    """What protects the run, and until when, for a caller who cannot adopt."""
-
-    notice = protection_fields(row)
-    state = notice.get("use_state") or "unclassified"
-    reason = notice.get("use_reason")
-    text = f"DayZ test box is protected ({state}"
-    if isinstance(reason, str) and reason:
-        text += f", {reason}"
-    text += ")"
-    retry = notice.get("retry_after_s")
-    if isinstance(retry, (int, float)) and not isinstance(retry, bool):
-        text += f"; it can be abandoned in {retry}s"
-    else:
-        text += "; no time is given for when it can be abandoned"
-    text += ". Waiting in the box FIFO does not adopt it."
-    return text
-
-
-def _session_status_blocked_on(
-    status: dict[str, Any], caller_session: str | None = None
-) -> str | None:
-    """Return the next queue a caller should join, if a resource is busy."""
-
-    if isinstance(status.get("owner"), dict):
-        return (
-            "session lease; next: call session_acquire_wait(purpose=...) "
-            "to join the lease FIFO"
-        )
-    box = status.get("box")
-    if isinstance(box, dict) and box.get("port_scan_known") is False:
-        # The box reads occupied because the daemon could not read or
-        # attribute the host UDP socket table; the FIFO does not repair that.
-        reason = box.get("port_scan_reason")
-        reason_text = reason if isinstance(reason, str) and reason else "port_scan_unknown"
-        return (
-            f"DayZ test box, {reason_text}; next: restore the daemon's view of the "
-            "host UDP socket table (psutil/netstat, process attribution) -- "
-            "wait_for_box_s does not help"
-        )
-    if isinstance(box, dict):
-        runs = box.get("runs")
-        if isinstance(runs, list):
-            for item in runs:
-                if (
-                    isinstance(item, dict)
-                    and item.get("use_reason") == ADOPTION_REVERT_PENDING
-                    and _row_is_protected(item, caller_session)
-                ):
-                    return _protection_blocked_on(item)
-    if isinstance(box, dict) and box_available_for(box, caller_session)["adopt"] is True:
-        return ADOPT_BLOCKED_ON
-    if isinstance(box, dict):
-        idle = _ownerless_idle_runs(box)
-        if len(idle) == 1 and _row_is_protected(idle[0], caller_session):
-            return _protection_blocked_on(idle[0])
-    if isinstance(box, dict) and box.get("occupied") is True:
-        return (
-            'DayZ test box; next: call dayz_test_run(..., on_busy="queue") '
-            "to join the box FIFO"
-        )
-    return None
 
 
 def _bridge_status_description() -> str:
