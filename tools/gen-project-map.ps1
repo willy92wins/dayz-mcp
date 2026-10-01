@@ -174,7 +174,9 @@ for path, info in docs:
 lines.extend(['', '## Reparse points omitidos', '',
               'Se comprueba `FILE_ATTRIBUTE_REPARSE_POINT` (`0x400`) antes de descender o contar.'])
 if skipped:
-    lines.extend(f'- `{path}`' for path in sorted(skipped, key=order))
+    # Repository-relative like the anchors; relative_to raises, so a reparse
+    # point outside the root stops the generator instead of pinning a path.
+    lines.extend(f'- `{path.relative_to(repo)}`' for path in sorted(skipped, key=order))
 else:
     lines.append('Ninguno encontrado dentro de los directorios censados.')
 
