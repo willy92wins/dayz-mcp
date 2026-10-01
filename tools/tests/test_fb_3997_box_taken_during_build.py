@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 import types
 import unittest
 from contextlib import contextmanager
@@ -63,6 +64,7 @@ from tests.lifecycle_helpers import (
     IDENTITY,
     IDENTITY_B,
     IDENTITY_PAYLOAD,
+    Clock,
     LifecycleFixture,
     identity,
     record,
@@ -596,8 +598,54 @@ class BoxWasFreeForTest(unittest.TestCase):
                 self.assertFalse(self._free(box))
 
 
+class BoxHeldByAnotherTest(unittest.TestCase):
+    """The positive proof a refusal needs before it is called a lost box."""
+
+    _CALLER = BoxHolderSessionTest._CALLER
+
+    def _held(self, box: object) -> bool:
+        return box_occupancy._box_held_by_another(box, self._CALLER)
+
+    def test_another_run_claim_or_unmanaged_dayz_is_proof(self) -> None:
+        claimed = BoxHolderSessionTest._claimed
+        ownerless = dict(
+            _TAKER_RUN,
+            state="RUNNING_IDLE",
+            owner_session=None,
+            launched_by={"session": "b5528aaa-0d6"},
+        )
+        for label, box in (
+            ("another session's run", {"runs": [dict(_TAKER_RUN)]}),
+            ("an ownerless run another session launched", {"runs": [ownerless]}),
+            ("another session's claim", claimed(_TAKER.session_id)),
+            ("an unmanaged DayZ", {"runs": [], "foreign": [{"port": None}]}),
+        ):
+            with self.subTest(label):
+                self.assertTrue(self._held(box))
+
+    def test_nothing_that_holds_it_now_is_no_proof(self) -> None:
+        claimed = BoxHolderSessionTest._claimed
+        own_run = dict(_TAKER_RUN, owner_session=self._CALLER[:12])
+        for label, box in (
+            ("a free box", {"occupied": False, "runs": [], "foreign": [], "queue": []}),
+            ("the caller's own claim", claimed(self._CALLER)),
+            ("the caller's own run", {"runs": [own_run]}),
+            (
+                "a port held by a process that is not DayZ",
+                {"occupied": False, "runs": [], "foreign": [], "foreign_ports_all": [2302]},
+            ),
+            ("an unreadable box", {"occupied": True, "runs": [], "foreign": [], "scan_known": False}),
+            ("not a box", None),
+        ):
+            with self.subTest(label):
+                self.assertFalse(self._held(box))
+
+
 class BoxTakenDuringBuildTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        self._build()
+
+    def _build(self, **runtime_kwargs: object) -> None:
         config = ServerConfig(
             mode="client",
             key="k",
@@ -605,7 +653,7 @@ class BoxTakenDuringBuildTest(unittest.IsolatedAsyncioTestCase):
             client_platform="codex",
             log_sink=lambda _message: None,
         )
-        self.runtime = _fixture_client_runtime(config)
+        self.runtime = _fixture_client_runtime(config, **runtime_kwargs)
         with patch.object(server, "ClientRuntime", return_value=self.runtime):
             self.app, _built = server.build_app(config)
         self.box = _Box()
@@ -789,23 +837,123 @@ class BoxTakenDuringBuildTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("box_requeued", payload)
         self.assertTrue(self._queue_empty())
 
-    async def test_a_refusal_under_the_callers_own_claim_names_no_holder(
+    async def test_a_refusal_no_holder_explains_stays_plain_and_is_not_requeued(
         self,
     ) -> None:
-        # Refused for something the box does not list (a foreign process on a
-        # port it did not see, say) while this call still holds its claim.
+        # Refused while the box read after shows only this call's own claim:
+        # whatever refused the launch (a port holder that has exited, say) is
+        # not observable, so no lost box, no FIFO offer and no second launch,
+        # although the wait budget is far from spent.
         async def execute(attempt: int) -> dict[str, object]:
-            await asyncio.sleep(0.02)  # the build outlasts wait_for_box_s
             return _refused()
 
         payload = await self._call(
-            execute, build=True, on_busy="queue", wait_for_box_s=0.001
+            execute, build=True, on_busy="queue", wait_for_box_s=5.0
         )
 
+        self.assertEqual(len(self.launches), 1)
+        self.assertEqual(self.box.joins, 1)
+        self.assertEqual(payload["error_code"], "active_run_exists")
+        self.assertIsNone(payload["reason"])
+        self.assertIsNone(payload["queue_offer"])
+        self.assertNotIn("occupied_by_session", payload)
+        self.assertNotIn("box_requeued", payload)
+        self.assertTrue(self._queue_empty())
+
+    async def test_a_port_refusal_with_the_box_free_before_and_after_is_plain(
+        self,
+    ) -> None:
+        """A process that is not DayZ holds the requested port, then exits.
+
+        The daemon refuses that launch from a fresh socket probe
+        (_foreign_port_reason), apart from box occupancy: the box reads free
+        while the holder is there and after it has gone.
+        """
+        fixture = LifecycleFixture()
+        self.addCleanup(fixture.close)
+        state = loopback.ServerState("key", coordination=fixture.coordinator)
+        state.lifecycle = fixture.lifecycle
+        holder = {"port": 2302, "pid": 999998, "name": "python.exe"}
+        request = fixture.request()
+        request["argv"].append("-port=2302")
+        with patch.object(
+            fixture.lifecycle, "_port_holders", return_value=(None, [holder])
+        ):
+            before = fixture.lifecycle.box_occupancy(now=time.time())
+            status, body = _lifecycle_reply(
+                state,
+                "start",
+                {
+                    "identity": IDENTITY_PAYLOAD,
+                    "lease_token": fixture.token,
+                    "request": request,
+                },
+            )
+        with patch.object(fixture.lifecycle, "_port_holders", return_value=(None, [])):
+            after = fixture.lifecycle.box_occupancy(now=time.time())
+
+        self.assertEqual((status, body), (409, {"error": "active_run_exists"}))
+        self.assertEqual(
+            [
+                event.get("reason")
+                for event in fixture.audit.events
+                if event.get("event") == "lifecycle_start_rejected"
+            ],
+            ["port_in_use_foreign"],
+        )
+        self.assertIs(before["occupied"], False)
+        self.assertIs(after["occupied"], False)
+        self.assertEqual(after["foreign_ports_all"], [])
+
+        # The worker carries that exact body as active_run_exists (see
+        # test_the_worker_answers_active_run_exists_after_its_build); here it
+        # reaches dayz_test_run over a box that reads free before and after.
+        async def execute(attempt: int) -> dict[str, object]:
+            return _refused()
+
+        for arguments in ({}, {"on_busy": "queue", "wait_for_box_s": 5.0}):
+            with self.subTest(**arguments):
+                self.launches.clear()
+                payload = await self._call(execute, build=True, **arguments)
+
+                self.assertEqual(len(self.launches), 1)
+                self.assertEqual(payload["error_code"], "active_run_exists")
+                self.assertIsNone(payload["reason"])
+                self.assertIsNone(payload["queue_offer"])
+                self.assertNotIn("occupied_by_session", payload)
+                self.assertNotIn("box_requeued", payload)
+                self.assertTrue(self._queue_empty())
+
+    async def test_a_slow_release_does_not_stretch_the_wait_budget(self) -> None:
+        clock = Clock()
+        clock.now = 1000.0
+        self._build(time_fn=clock)
+        release = server._release_box_wait_ticket
+
+        async def slow_release(client: object, ticket: object) -> None:
+            # Leaving the FIFO outlasts what was left of wait_for_box_s, and
+            # the run that took the box is gone by then.
+            clock.advance(10.0)
+            self.box.runs = []
+            await release(client, ticket)
+
+        async def execute(attempt: int) -> dict[str, object]:
+            self.box.runs = [dict(_TAKER_RUN)]
+            return _refused()
+
+        with patch.object(
+            server, "_release_box_wait_ticket", side_effect=slow_release
+        ):
+            payload = await self._call(
+                execute, build=True, on_busy="queue", wait_for_box_s=5.0
+            )
+
+        self.assertEqual(len(self.launches), 1)
+        self.assertEqual(self.box.joins, 1)
         self.assertEqual(payload["error_code"], "active_run_exists")
         self.assertEqual(payload["reason"], "box_taken_during_build")
-        self.assertIsNone(payload["occupied_by_session"])
-        self.assertEqual(payload["queue_offer"]["waiters"], 0)
+        self.assertEqual(payload["occupied_by_session"], "a4317999-9c5")
+        self.assertNotIn("box_requeued", payload)
         self.assertTrue(self._queue_empty())
 
     async def test_queue_without_contention_launches_once_with_its_build(self) -> None:
@@ -851,6 +999,8 @@ class BoxTakenDuringBuildTest(unittest.IsolatedAsyncioTestCase):
             "occupied_by_session",
             "re-enters the FIFO once",
             "launches without rebuilding (box_requeued: true)",
+            "the box read after the refusal showing who holds it",
+            "nothing visible explains any more stays active_run_exists",
             "returns run_id null",
         ):
             with self.subTest(phrase=phrase):

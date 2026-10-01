@@ -271,6 +271,7 @@ from dayz_mcp.box_occupancy import (
     _attach_queue_offer,
     _box_from_status,
     _box_head_is,
+    _box_held_by_another,
     _box_queue_offer,
     _box_queue_position,
     _box_ready_for,
@@ -3590,17 +3591,19 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "sleeping). on_busy=\"queue\" waits in that FIFO (wait_for_box_s "
             "when >0, else the 600s cap) instead of failing at once; busy "
             "rejections include queue_offer, or null when waiting cannot help. "
-            "A box taken while this call builds or waits for its launch "
-            "(claimed by a FIFO waiter, or occupied by another run or an "
-            "unmanaged DayZ) refuses the launch as active_run_exists with "
-            "run_id null, reason "
-            "box_taken_during_build (box_taken_before_launch when it did not "
-            "build), occupied_by_session and a queue_offer whose retry turns "
-            "build, clean and pack_only off; on_busy=\"queue\" instead re-enters "
-            "the FIFO once, within what is left of that wait budget, and "
-            "launches without rebuilding (box_requeued: true). A failed launch "
-            "whose run_id the run store does not list (dayz_test_stop would "
-            "answer run_not_found) returns run_id null. "
+            "A launch refused after the box, free when this call started, was "
+            "taken while it built or waited for its launch, with the box read "
+            "after the refusal showing who holds it (a FIFO waiter's claim, "
+            "another run or an unmanaged DayZ), answers active_run_exists with "
+            "run_id null, reason box_taken_during_build (box_taken_before_launch "
+            "when it did not build), occupied_by_session and a queue_offer "
+            "whose retry turns build, clean and pack_only off; on_busy=\"queue\" "
+            "instead re-enters the FIFO once, within what is left of that wait "
+            "budget, and launches without rebuilding (box_requeued: true). A "
+            "refusal that nothing visible explains any more stays "
+            "active_run_exists without that reason or a queue_offer. A failed "
+            "launch whose run_id the run store does not list (dayz_test_stop "
+            "would answer run_not_found) returns run_id null. "
             "A DayZ server holding a game port counts as an "
             "occupied box even without a run record, and a launch onto a "
             "port held by a process that is not ours is refused "
@@ -3678,6 +3681,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "bad_dayz_test_request:navmesh_data_server_requires_server_launch"
             )
         client = _client_runtime()
+        # The runtime's monotonic clock (ClientRuntime(time_fn=...)), the one
+        # its own call deadlines use; it holds the box wait budget below.
+        clock = client._time_fn
         started = time.monotonic()
         box_ticket: str | None = None
         claim_task: asyncio.Task[None] | None = None
@@ -3764,13 +3770,18 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         built = bool(build or clean)
         box_wait_deadline: float | None = None
 
+        def box_was_taken(admitted: object, box_now: object) -> bool:
+            # inbox 3997: proof, not inference. The box read free for this
+            # call when it was admitted, and the box read after the refusal
+            # shows another run, another session's claim or an unmanaged DayZ.
+            return _box_was_free_for(
+                admitted, caller_session
+            ) and _box_held_by_another(box_now, caller_session)
+
         def refused_answer(
             result: dict[str, Any], box_now: dict[str, Any], admitted: object
         ) -> dict[str, Any]:
-            # A launch refused over a box that read free for this call when it
-            # was admitted lost the box during the call (inbox 3997); a box
-            # that was already busy keeps the answer it always had.
-            if _box_was_free_for(admitted, caller_session):
+            if box_was_taken(admitted, box_now):
                 return _box_taken_result(
                     result,
                     box_now,
@@ -3778,9 +3789,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     caller_session=caller_session,
                     port=port,
                 )
-            return _enrich_active_run_result(
+            refused = _enrich_active_run_result(
                 result, box_now, caller_session=caller_session, port=port
             )
+            if _box_was_free_for(admitted, caller_session):
+                # The box read free and nothing visible holds it now: what
+                # refused the launch (a port holder that has exited, for one)
+                # cannot be named, so there is no lost box and no FIFO to offer.
+                refused["queue_offer"] = None
+            # A box that was already busy keeps the answer it always had.
+            return refused
 
         try:
             if on_busy == "queue":
@@ -3815,7 +3833,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                             box, caller_session=session_for_wait, port=port
                         )
 
-                box_wait_deadline = time.monotonic() + wait_budget
+                box_wait_deadline = clock() + wait_budget
                 waited = await execute_wait_for_box(
                     client, wait_budget, abort_if=abort
                 )
@@ -3903,51 +3921,60 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 )
             # The box this launch was admitted over, read under the same lock.
             admitted_box: object = box
-            remaining_s = (
-                box_wait_deadline - time.monotonic()
-                if box_wait_deadline is not None
-                else 0.0
-            )
+            # The box read after a refusal, while this call still holds any
+            # claim of its own: a holder seen here took the box during the call.
+            box_now: dict[str, Any] | None = None
             if (
-                on_busy == "queue"
-                and execute_error is None
+                execute_error is None
                 and isinstance(result, dict)
                 and result.get("error_code") == "active_run_exists"
-                and remaining_s > 0.0
             ):
-                # inbox 3997. The launch was refused after the FIFO grant, and
-                # after any build: the worker builds before it starts anything,
-                # so this refusal followed a build that succeeded. on_busy=
-                # "queue" re-enters the FIFO ONCE, within what is left of the
-                # wait budget, and launches with build, clean and pack_only off.
-                # The retry runs no takeover: a run that took the box meanwhile
-                # won it.
-                requeued = True
-                await release_box()
-                await report("queued", "box taken before launch; waiting for box")
-                waited = await execute_wait_for_box(
-                    client, remaining_s, abort_if=abort
-                )
-                ticket = waited.get("ticket")
-                box_ticket = ticket if isinstance(ticket, str) else None
-                if not waited.get("ok"):
-                    failed = wait_failed(
-                        waited,
-                        refused_answer(
-                            result,
-                            _box_from_status({"box": waited.get("box")}),
-                            admitted_box,
-                        ),
-                    )
-                    failed["box_requeued"] = True
-                    return annotated(failed)
-                if box_ticket:
-                    claim_task = asyncio.create_task(
-                        _heartbeat_box_claim(client, box_ticket)
-                    )
-                admitted_box = waited.get("box")
-                async with client.tool_lock:
-                    execute_error, result = await execute(dict(BOX_TAKEN_NO_REBUILD))
+                box_now = await peek_box()
+                if (
+                    on_busy == "queue"
+                    and box_wait_deadline is not None
+                    and box_was_taken(admitted_box, box_now)
+                ):
+                    # inbox 3997. The launch was refused after the FIFO grant,
+                    # after any build (the worker builds before it starts
+                    # anything), and another holder of the box is in sight.
+                    # on_busy="queue" re-enters the FIFO ONCE, within what is
+                    # left of the wait budget, and launches with build, clean
+                    # and pack_only off. The retry runs no takeover: a run
+                    # that took the box meanwhile won it.
+                    await release_box()
+                    await report("queued", "box taken before launch")
+                    # Measured after the release and the notice, either of
+                    # which can take time; nothing left means no second join.
+                    remaining_s = box_wait_deadline - clock()
+                    if remaining_s > 0.0:
+                        requeued = True
+                        waited = await execute_wait_for_box(
+                            client, remaining_s, abort_if=abort
+                        )
+                        ticket = waited.get("ticket")
+                        box_ticket = ticket if isinstance(ticket, str) else None
+                        if not waited.get("ok"):
+                            failed = wait_failed(
+                                waited,
+                                refused_answer(
+                                    result,
+                                    _box_from_status({"box": waited.get("box")}),
+                                    admitted_box,
+                                ),
+                            )
+                            failed["box_requeued"] = True
+                            return annotated(failed)
+                        if box_ticket:
+                            claim_task = asyncio.create_task(
+                                _heartbeat_box_claim(client, box_ticket)
+                            )
+                        admitted_box = waited.get("box")
+                        box_now = None
+                        async with client.tool_lock:
+                            execute_error, result = await execute(
+                                dict(BOX_TAKEN_NO_REBUILD)
+                            )
             if execute_error is not None:
                 if execute_error.code == "active_run_exists":
                     failed = _failed_active_run_result(
@@ -3966,7 +3993,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 isinstance(result, dict)
                 and result.get("error_code") == "active_run_exists"
             ):
-                refused = refused_answer(result, await peek_box(), admitted_box)
+                if box_now is None:
+                    box_now = await peek_box()
+                refused = refused_answer(result, box_now, admitted_box)
                 if requeued:
                     refused["box_requeued"] = True
                 return annotated(refused)

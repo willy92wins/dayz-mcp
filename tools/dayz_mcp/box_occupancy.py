@@ -509,8 +509,9 @@ def _enrich_active_run_result(
 
 
 # inbox 3997 (fb-20261001-000925-3997). A launch refused as active_run_exists
-# although the box read free for this call right before it: the box was taken
-# while the call built, or while it waited for the lease.
+# although the box read free for this call right before it, and the box read
+# after the refusal shows who holds it now (_box_held_by_another): the box was
+# taken while the call built, or while it waited for the lease.
 BOX_TAKEN_DURING_BUILD = "box_taken_during_build"
 BOX_TAKEN_BEFORE_LAUNCH = "box_taken_before_launch"
 # What dayz_test_run changes to launch again without rebuilding: build or
@@ -562,6 +563,46 @@ def _box_was_free_for(box: object, caller_session: str | None) -> bool:
     return isinstance(caller_session, str) and _box_head_is(box, caller_session)
 
 
+def _box_held_by_another(box: object, caller_session: str | None) -> bool:
+    """Positive proof that someone other than this caller holds the box now.
+
+    A registered run this caller does not own (or, ownerless, did not launch),
+    the box claim of another session, or a DayZ this daemon does not manage.
+    A box that reads free, holds only this caller's own claim, shows a held
+    port and no occupant, or cannot be read proves nothing: what refused the
+    launch, a port holder that has exited for one, may not be observable any
+    more, and is then not called a lost box.
+    """
+    if not isinstance(box, dict):
+        return False
+    foreign = box.get("foreign")
+    if isinstance(foreign, list) and any(isinstance(item, dict) for item in foreign):
+        return True
+    caller = caller_session if isinstance(caller_session, str) and caller_session else None
+    runs = box.get("runs")
+    if isinstance(runs, list):
+        for item in runs:
+            if not isinstance(item, dict):
+                continue
+            run_id = item.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                continue
+            owner = item.get("owner_session")
+            if isinstance(owner, str) and owner:
+                if caller is None or not _box_session_is(owner, caller):
+                    return True
+            elif caller is None or not caller_launched_row(item, caller):
+                return True
+    claimed = box.get("claimed_s")
+    if isinstance(claimed, bool) or not isinstance(claimed, (int, float)):
+        return False
+    head = _first_box_dict(box.get("queue"))
+    session = head.get("session") if head is not None else None
+    if not isinstance(session, str) or not session:
+        return False
+    return caller is None or not _box_session_is(session, caller)
+
+
 def _box_holder_session(
     box: object, caller_session: str | None = None
 ) -> str | None:
@@ -609,7 +650,7 @@ def _box_taken_result(
     caller_session: str | None = None,
     port: int | None = None,
 ) -> dict[str, Any]:
-    """active_run_exists for a box taken after this call read it free.
+    """active_run_exists for a box proven taken after this call read it free.
 
     Not takeover_required: the run that holds the box now won it while this
     call built or waited for its launch, so the answer offers the FIFO, not
