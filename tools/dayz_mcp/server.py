@@ -257,6 +257,7 @@ from dayz_mcp.launch_logs import (
 )
 from dayz_mcp.box_occupancy import (
     ADOPT_BLOCKED_ON,
+    BOX_TAKEN_NO_REBUILD,
     TAKEOVER_REQUIRED,
     _BOX_OFFER_MOD,
     _BOX_OFFER_MOD_CAP,
@@ -270,12 +271,15 @@ from dayz_mcp.box_occupancy import (
     _attach_queue_offer,
     _box_from_status,
     _box_head_is,
+    _box_held_by_another,
     _box_queue_offer,
     _box_queue_position,
     _box_ready_for,
     _box_run,
     _box_session_is,
+    _box_taken_result,
     _box_wait_cannot_help,
+    _box_was_free_for,
     _enrich_active_run_result,
     _first_box_dict,
     _foreign_port_number,
@@ -2964,6 +2968,7 @@ async def execute_wait_for_box(
     time_fn: Callable[[], float] | None = None,
     poll_interval_s: float | None = None,
     abort_if: Callable[[dict[str, Any]], object] | None = None,
+    until: float | None = None,
 ) -> dict[str, Any]:
     """Wait until the box is free and this waiter is FIFO head.
 
@@ -2972,21 +2977,33 @@ async def execute_wait_for_box(
     require the caller to heartbeat. ``abort_if`` is checked after
     every status read; a truthy result ends the wait like a timeout
     (the caller still holds the ticket to leave the FIFO).
+
+    ``until`` is an absolute end in ``time_fn``'s clock that no reply can
+    stretch (the dayz_test_run re-queue, inbox 3997): it is checked before
+    each join, again with tool_lock held before each join and claim is
+    sent, and after each reply and claim; once past it the wait ends like
+    a timeout, ticket handed back. Without it the deadline runs from entry
+    and a grant seen on the last reply still counts, as before.
     """
 
     sleeper = sleep_fn or asyncio.sleep
     clock = time_fn or time.monotonic
     interval = BOX_WAIT_POLL_S if poll_interval_s is None else poll_interval_s
     poll = max(float(interval), BOX_WAIT_MIN_POLL_S)
-    deadline = clock() + float(wait_s)
+    deadline = clock() + float(wait_s) if until is None else float(until)
     ticket: str | None = None
     box = empty_box(occupied=True)
     session_id = str(getattr(getattr(client, "identity", None), "session_id", "") or "")
     join_task: asyncio.Task[Any] | None = None
     try:
         while True:
+            if until is not None and clock() >= deadline:
+                return {"ok": False, "ticket": ticket, "box": box}
             wait_error = None
             async with client.tool_lock:
+                if until is not None and clock() >= deadline:
+                    # The lock was held past the end: no join out of budget.
+                    return {"ok": False, "ticket": ticket, "box": box}
                 join_task = asyncio.create_task(
                     client.session_box_status(wait=True, ticket=ticket)
                 )
@@ -3029,6 +3046,10 @@ async def execute_wait_for_box(
                     if isinstance(reason, str):
                         payload["error"] = reason
                     return payload
+            if until is not None and clock() >= deadline:
+                # The reply came back after the end: a free box seen now is
+                # not a grant.
+                return {"ok": False, "ticket": ticket, "box": box}
             ready = (
                 isinstance(ticket, str)
                 and ticket
@@ -3037,6 +3058,10 @@ async def execute_wait_for_box(
             )
             if ready:
                 async with client.tool_lock:
+                    if until is not None and clock() >= deadline:
+                        # The lock was held past the end: no claim out of
+                        # budget; the caller releases the ticket.
+                        return {"ok": False, "ticket": ticket, "box": box}
                     join_task = asyncio.create_task(
                         client.session_box_status(
                             wait=True, ticket=ticket, claim=True
@@ -3047,6 +3072,10 @@ async def execute_wait_for_box(
                 if isinstance(claimed, dict):
                     box = _box_from_status(claimed)
                     holds_claim = claimed.get("box_claimed") is not False
+                if holds_claim and until is not None and clock() >= deadline:
+                    # Claimed too late: the caller releases the ticket, and
+                    # with it the claim.
+                    return {"ok": False, "ticket": ticket, "box": box}
                 if holds_claim:
                     return {"ok": True, "ticket": ticket, "box": box}
             remaining = deadline - clock()
@@ -3587,6 +3616,19 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "sleeping). on_busy=\"queue\" waits in that FIFO (wait_for_box_s "
             "when >0, else the 600s cap) instead of failing at once; busy "
             "rejections include queue_offer, or null when waiting cannot help. "
+            "A launch refused after the box, free when this call started, was "
+            "taken while it built or waited for its launch, with the box read "
+            "after the refusal showing who holds it (a FIFO waiter's claim, "
+            "another run or an unmanaged DayZ), answers active_run_exists with "
+            "run_id null, reason box_taken_during_build (box_taken_before_launch "
+            "when it did not build), occupied_by_session and a queue_offer "
+            "whose retry turns build, clean and pack_only off; on_busy=\"queue\" "
+            "instead re-enters the FIFO once, within what is left of that wait "
+            "budget, and launches without rebuilding (box_requeued: true). A "
+            "refusal that nothing visible explains any more stays "
+            "active_run_exists without that reason or a queue_offer. A failed "
+            "launch whose run_id the run store does not list (dayz_test_stop "
+            "would answer run_not_found) returns run_id null. "
             "A DayZ server holding a game port counts as an "
             "occupied box even without a run record, and a launch onto a "
             "port held by a process that is not ours is refused "
@@ -3664,6 +3706,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "bad_dayz_test_request:navmesh_data_server_requires_server_launch"
             )
         client = _client_runtime()
+        # The runtime's monotonic clock (ClientRuntime(time_fn=...)), the one
+        # its own call deadlines use; it holds the box wait budget below.
+        clock = client._time_fn
         started = time.monotonic()
         box_ticket: str | None = None
         claim_task: asyncio.Task[None] | None = None
@@ -3675,6 +3720,110 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async def peek_box() -> dict[str, Any]:
             async with client.tool_lock:
                 return _box_from_status(await client.session_status())
+
+        def wait_failed(
+            waited: dict[str, Any], failed: dict[str, Any]
+        ) -> dict[str, Any]:
+            wait_error = waited.get("error")
+            if wait_error == "port_scan_unknown":
+                failed["error_code"] = "port_scan_unknown"
+            if wait_error == "box_queue_saturated":
+                failed["error_code"] = "box_queue_saturated"
+                failed["hint"] = "retry with wait_for_box_s=<n>"
+            if wait_error in {"own_run", "adopt"}:
+                failed["reason"] = wait_error
+            return failed
+
+        async def release_box() -> None:
+            nonlocal box_ticket, claim_task
+            if claim_task is not None:
+                claim_task.cancel()
+                try:
+                    await claim_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                claim_task = None
+            if isinstance(box_ticket, str) and box_ticket:
+                ticket, box_ticket = box_ticket, None
+                await _release_box_wait_ticket(client, ticket)
+
+        async def execute(
+            launch: dict[str, bool],
+        ) -> tuple[dayz_test_tool.DayzTestToolError | None, dict[str, Any] | None]:
+            # The caller holds client.tool_lock.
+            try:
+                with _typed_dayz_test_value_errors():
+                    return None, await dayz_test_tool.execute_dayz_test_run(
+                        client,
+                        project=project,
+                        mode=mode,
+                        mission=mission,
+                        build=launch["build"],
+                        clean=launch["clean"],
+                        pack_only=launch["pack_only"],
+                        preflight=preflight,
+                        run_id=run_id,
+                        extra_mods=extra_mods,
+                        base_mods=base_mods,
+                        server_mods=server_mods,
+                        no_base_mods=no_base_mods,
+                        no_file_patching=no_file_patching,
+                        navmesh_data_server=navmesh_data_server,
+                        port=port,
+                        width=width,
+                        height=height,
+                        player_name=player_name,
+                        server_wait_s=server_wait_s,
+                        progress_cb=report,
+                        auto_remediate_steam=auto_remediate_steam,
+                        client_start_budget_s=budget_s,
+                    )
+            except dayz_test_tool.DayzTestToolError as error:
+                return error, None
+            except ToolError:
+                raise
+            except Exception as exc:
+                # The ToolError carries the exception TYPE, plus the launcher
+                # backend's bare code when it has one (ficha ae65). The message
+                # can hold host paths, so it must not cross the MCP wire; FastMCP
+                # serializes str(exc) alone. `from exc` keeps the cause in
+                # __cause__ for LOCAL diagnosis (needed to see why build:true failed), not for the wire.
+                _log_opaque_failure(client, "dayz_test_run", exc)
+                raise ToolError(_opaque_dayz_test_failure(exc)) from exc
+
+        # inbox 3997: the sealed request builds when build or clean is set.
+        built = bool(build or clean)
+        box_wait_deadline: float | None = None
+
+        def box_was_taken(admitted: object, box_now: object) -> bool:
+            # inbox 3997: proof, not inference. The box read free for this
+            # call when it was admitted, and the box read after the refusal
+            # shows another run, another session's claim or an unmanaged DayZ.
+            return _box_was_free_for(
+                admitted, caller_session
+            ) and _box_held_by_another(box_now, caller_session)
+
+        def refused_answer(
+            result: dict[str, Any], box_now: dict[str, Any], admitted: object
+        ) -> dict[str, Any]:
+            if box_was_taken(admitted, box_now):
+                return _box_taken_result(
+                    result,
+                    box_now,
+                    built=built,
+                    caller_session=caller_session,
+                    port=port,
+                )
+            refused = _enrich_active_run_result(
+                result, box_now, caller_session=caller_session, port=port
+            )
+            if _box_was_free_for(admitted, caller_session):
+                # The box read free and nothing visible holds it now: what
+                # refused the launch (a port holder that has exited, for one)
+                # cannot be named, so there is no lost box and no FIFO to offer.
+                refused["queue_offer"] = None
+            # A box that was already busy keeps the answer it always had.
+            return refused
 
         try:
             if on_busy == "queue":
@@ -3709,29 +3858,26 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                             box, caller_session=session_for_wait, port=port
                         )
 
+                box_wait_deadline = clock() + wait_budget
                 waited = await execute_wait_for_box(
                     client, wait_budget, abort_if=abort
                 )
                 ticket = waited.get("ticket")
                 box_ticket = ticket if isinstance(ticket, str) else None
                 if not waited.get("ok"):
-                    failed = _failed_active_run_result(
-                        project=project,
-                        mode=mode,
-                        box=waited.get("box"),
-                        started=started,
-                        caller_session=caller_session,
-                        port=port,
+                    return annotated(
+                        wait_failed(
+                            waited,
+                            _failed_active_run_result(
+                                project=project,
+                                mode=mode,
+                                box=waited.get("box"),
+                                started=started,
+                                caller_session=caller_session,
+                                port=port,
+                            ),
+                        )
                     )
-                    wait_error = waited.get("error")
-                    if wait_error == "port_scan_unknown":
-                        failed["error_code"] = "port_scan_unknown"
-                    if wait_error == "box_queue_saturated":
-                        failed["error_code"] = "box_queue_saturated"
-                        failed["hint"] = "retry with wait_for_box_s=<n>"
-                    if wait_error in {"own_run", "adopt"}:
-                        failed["reason"] = wait_error
-                    return annotated(failed)
                 if box_ticket:
                     claim_task = asyncio.create_task(
                         _heartbeat_box_claim(client, box_ticket)
@@ -3740,6 +3886,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             execute_error: dayz_test_tool.DayzTestToolError | None = None
             result: dict[str, Any] | None = None
             evicted_run_id: str | None = None
+            requeued = False
             async with client.tool_lock:
                 box: dict[str, Any] = {}
                 try:
@@ -3794,84 +3941,107 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     ):
                         return annotated(stop_result)
                     evicted_run_id = target
-                try:
-                    with _typed_dayz_test_value_errors():
-                        result = await dayz_test_tool.execute_dayz_test_run(
+                execute_error, result = await execute(
+                    {"build": build, "clean": clean, "pack_only": pack_only}
+                )
+            # The box this launch was admitted over, read under the same lock.
+            admitted_box: object = box
+            # The box read after a refusal, while this call still holds any
+            # claim of its own: a holder seen here took the box during the call.
+            box_now: dict[str, Any] | None = None
+            if (
+                execute_error is None
+                and isinstance(result, dict)
+                and result.get("error_code") == "active_run_exists"
+            ):
+                box_now = await peek_box()
+                if (
+                    on_busy == "queue"
+                    and box_wait_deadline is not None
+                    and box_was_taken(admitted_box, box_now)
+                ):
+                    # inbox 3997. The launch was refused after the FIFO grant,
+                    # after any build (the worker builds before it starts
+                    # anything), and another holder of the box is in sight.
+                    # on_busy="queue" re-enters the FIFO ONCE, within what is
+                    # left of the wait budget, and launches with build, clean
+                    # and pack_only off. The retry runs no takeover: a run
+                    # that took the box meanwhile won it.
+                    await release_box()
+                    await report("queued", "box taken before launch")
+                    # Measured after the release and the notice, either of
+                    # which can take time; nothing left means no second join.
+                    remaining_s = box_wait_deadline - clock()
+                    if remaining_s > 0.0:
+                        requeued = True
+                        waited = await execute_wait_for_box(
                             client,
-                            project=project,
-                            mode=mode,
-                            mission=mission,
-                            build=build,
-                            clean=clean,
-                            pack_only=pack_only,
-                            preflight=preflight,
-                            run_id=run_id,
-                            extra_mods=extra_mods,
-                            base_mods=base_mods,
-                            server_mods=server_mods,
-                            no_base_mods=no_base_mods,
-                            no_file_patching=no_file_patching,
-                            navmesh_data_server=navmesh_data_server,
-                            port=port,
-                            width=width,
-                            height=height,
-                            player_name=player_name,
-                            server_wait_s=server_wait_s,
-                            progress_cb=report,
-                            auto_remediate_steam=auto_remediate_steam,
-                            client_start_budget_s=budget_s,
+                            remaining_s,
+                            abort_if=abort,
+                            time_fn=clock,
+                            until=box_wait_deadline,
                         )
-                except dayz_test_tool.DayzTestToolError as error:
-                    execute_error = error
-                except ToolError:
-                    raise
-                except Exception as exc:
-                    # The ToolError carries the exception TYPE, plus the launcher
-                    # backend's bare code when it has one (ficha ae65). The message
-                    # can hold host paths, so it must not cross the MCP wire; FastMCP
-                    # serializes str(exc) alone. `from exc` keeps the cause in
-                    # __cause__ for LOCAL diagnosis (needed to see why build:true failed), not for the wire.
-                    _log_opaque_failure(client, "dayz_test_run", exc)
-                    raise ToolError(_opaque_dayz_test_failure(exc)) from exc
+                        ticket = waited.get("ticket")
+                        box_ticket = ticket if isinstance(ticket, str) else None
+                        if not waited.get("ok"):
+                            # Out of budget, wherever the end fell (asleep, on
+                            # a late join or a late claim): the refusal this
+                            # call proved. A wait that ended for a reason of
+                            # its own answers from what it saw. The finally
+                            # releases the ticket, claimed or not.
+                            seen = (
+                                box_now
+                                if waited.get("error") is None
+                                else _box_from_status({"box": waited.get("box")})
+                            )
+                            failed = wait_failed(
+                                waited, refused_answer(result, seen, admitted_box)
+                            )
+                            failed["box_requeued"] = True
+                            return annotated(failed)
+                        if box_ticket:
+                            claim_task = asyncio.create_task(
+                                _heartbeat_box_claim(client, box_ticket)
+                            )
+                        admitted_box = waited.get("box")
+                        box_now = None
+                        async with client.tool_lock:
+                            execute_error, result = await execute(
+                                dict(BOX_TAKEN_NO_REBUILD)
+                            )
             if execute_error is not None:
                 if execute_error.code == "active_run_exists":
-                    return annotated(
-                        _failed_active_run_result(
-                            project=project,
-                            mode=mode,
-                            box=await peek_box(),
-                            started=started,
-                            caller_session=caller_session,
-                            port=port,
-                        )
+                    failed = _failed_active_run_result(
+                        project=project,
+                        mode=mode,
+                        box=await peek_box(),
+                        started=started,
+                        caller_session=caller_session,
+                        port=port,
                     )
+                    if requeued:
+                        failed["box_requeued"] = True
+                    return annotated(failed)
                 raise ToolError(execute_error.code) from None
             if (
                 isinstance(result, dict)
                 and result.get("error_code") == "active_run_exists"
             ):
-                return annotated(
-                    _enrich_active_run_result(
-                        result,
-                        await peek_box(),
-                        caller_session=caller_session,
-                        port=port,
-                    )
-                )
+                if box_now is None:
+                    box_now = await peek_box()
+                refused = refused_answer(result, box_now, admitted_box)
+                if requeued:
+                    refused["box_requeued"] = True
+                return annotated(refused)
             if result is None:
                 raise ToolError("dayz_test_failed:RuntimeError")
             if evicted_run_id is not None:
                 result["evicted_run_id"] = evicted_run_id
+            if requeued:
+                result["box_requeued"] = True
             return annotated(result)
         finally:
-            if claim_task is not None:
-                claim_task.cancel()
-                try:
-                    await claim_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            if isinstance(box_ticket, str) and box_ticket:
-                await _release_box_wait_ticket(client, box_ticket)
+            await release_box()
 
     @app.tool(
         description=(
