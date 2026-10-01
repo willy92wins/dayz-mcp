@@ -508,6 +508,139 @@ def _enrich_active_run_result(
     )
 
 
+# inbox 3997 (fb-20261001-000925-3997). A launch refused as active_run_exists
+# although the box read free for this call right before it: the box was taken
+# while the call built, or while it waited for the lease.
+BOX_TAKEN_DURING_BUILD = "box_taken_during_build"
+BOX_TAKEN_BEFORE_LAUNCH = "box_taken_before_launch"
+# What dayz_test_run changes to launch again without rebuilding: build or
+# clean starts a build, and pack_only needs one.
+BOX_TAKEN_NO_REBUILD = {"build": False, "clean": False, "pack_only": False}
+_BOX_TAKEN_HINT = {
+    BOX_TAKEN_DURING_BUILD: (
+        "the box was taken while this call was building: the build completed, "
+        "then the launch found the box claimed by a FIFO waiter, or occupied "
+        "by another run or a DayZ this daemon does not manage. Call "
+        "dayz_test_run again with build=false and on_busy='queue' to wait in "
+        "the box FIFO without rebuilding"
+    ),
+    BOX_TAKEN_BEFORE_LAUNCH: (
+        "the box was taken while this call waited for its launch: it read free "
+        "when the call started, and the launch found it claimed by a FIFO "
+        "waiter, or occupied by another run or a DayZ this daemon does not "
+        "manage. Call dayz_test_run again with on_busy='queue' to wait in the "
+        "box FIFO"
+    ),
+}
+
+
+def _box_was_free_for(box: object, caller_session: str | None) -> bool:
+    """Whether the box this call read right before its launch was free for it.
+
+    Free is read free, or occupied only by this caller's own FIFO claim (the
+    on_busy="queue" path claims the box before it launches). Anything else is
+    not free, unreadable included: a launch refused over a box that was already
+    busy when the call started is not a box taken during the call.
+    """
+    if (
+        not isinstance(box, dict)
+        or box.get("port_scan_known") is False
+        or box.get("scan_known") is False
+    ):
+        return False
+    if box.get("occupied") is False:
+        return True
+    if box.get("occupied") is not True:
+        return False
+    runs = box.get("runs")
+    foreign = box.get("foreign")
+    if not isinstance(runs, list) or runs or not isinstance(foreign, list) or foreign:
+        return False
+    claimed = box.get("claimed_s")
+    if isinstance(claimed, bool) or not isinstance(claimed, (int, float)):
+        return False
+    return isinstance(caller_session, str) and _box_head_is(box, caller_session)
+
+
+def _box_holder_session(
+    box: object, caller_session: str | None = None
+) -> str | None:
+    """The public session that holds the box, or None when no session does.
+
+    The run occupancy_error_fields names: its owner, else the session that
+    launched it (an ownerless run). With no run registered yet, the FIFO head
+    that holds the box claim: the claimant before it launches. The caller's
+    own claim (still held while its answer is built) names nobody, and a
+    foreign DayZ has no session.
+    """
+    if not isinstance(box, dict):
+        return None
+    runs = box.get("runs")
+    if isinstance(runs, list):
+        for item in runs:
+            if not isinstance(item, dict):
+                continue
+            run_id = item.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                continue
+            owner = item.get("owner_session")
+            if isinstance(owner, str) and owner:
+                return owner[:12]
+            launched = item.get("launched_by")
+            session = launched.get("session") if isinstance(launched, dict) else None
+            return session[:12] if isinstance(session, str) and session else None
+    claimed = box.get("claimed_s")
+    if isinstance(claimed, bool) or not isinstance(claimed, (int, float)):
+        return None
+    head = _first_box_dict(box.get("queue"))
+    session = head.get("session") if head is not None else None
+    if not isinstance(session, str) or not session:
+        return None
+    if isinstance(caller_session, str) and _box_session_is(session, caller_session):
+        return None
+    return session[:12]
+
+
+def _box_taken_result(
+    result: dict[str, Any],
+    box: dict[str, Any],
+    *,
+    built: bool,
+    caller_session: str | None = None,
+    port: int | None = None,
+) -> dict[str, Any]:
+    """active_run_exists for a box taken after this call read it free.
+
+    Not takeover_required: the run that holds the box now won it while this
+    call built or waited for its launch, so the answer offers the FIFO, not
+    an eviction (H11). The holder's session and the queue offer come from the
+    box read after the refusal. A port held by a process that is not a
+    managed run keeps its own reason and hint, since waiting does not free it.
+    A run id is kept only when the worker could not confirm its stop, so the
+    caller can stop it.
+    """
+    payload = dict(result)
+    payload.update(occupancy_error_fields(box, caller_session=caller_session))
+    conflict = _port_conflict_fields(box, port)
+    payload.update(conflict)
+    if payload.get("cleanup_degraded") is not True:
+        payload["run_id"] = None
+    payload["status"] = "failed"
+    payload["error_code"] = "active_run_exists"
+    payload["occupied_by_session"] = _box_holder_session(box, caller_session)
+    reason = BOX_TAKEN_DURING_BUILD if built else BOX_TAKEN_BEFORE_LAUNCH
+    if not conflict.get("reason"):
+        payload["reason"] = reason
+        payload["hint"] = _BOX_TAKEN_HINT[reason]
+    payload = _attach_queue_offer(
+        payload, box, caller_session=caller_session, port=port
+    )
+    offer = payload.get("queue_offer")
+    if built and isinstance(offer, dict) and isinstance(offer.get("retry"), dict):
+        offer["retry"].update(BOX_TAKEN_NO_REBUILD)
+    return payload
+
+
 ADOPT_BLOCKED_ON = (
     "DayZ test box has an ownerless RUNNING_IDLE run; next: call "
     "session_acquire_wait(purpose=...) to adopt it. dayz_test_run wait_for_box_s "

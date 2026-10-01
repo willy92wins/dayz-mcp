@@ -2169,8 +2169,13 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_worker_failed_carries_lifecycle_start_error(self) -> None:
         policy = _policy()
+        # last_start_error is only written by _settle_failed_launch, which
+        # settles the row the launch already added: the store lists the run.
         runtime = _Runtime(
-            lifecycle={"runs": [], "last_start_error": "instance_config_missing"}
+            lifecycle={
+                "runs": [{"run_id": RUN_ID, "state": "EXITED", "processes": []}],
+                "last_start_error": "instance_config_missing",
+            }
         )
 
         async def launch(_raw_request: bytes, **kwargs: object) -> int:

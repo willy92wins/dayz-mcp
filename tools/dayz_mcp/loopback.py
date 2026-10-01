@@ -4323,6 +4323,18 @@ class Handler(BaseHTTPRequestHandler):
         result = dict(result)
         status = int(result.pop("_http_status", 200))
         result = self._persist_coordination(result)
+        if action == "start" and "error" in result and "run_id" not in result:
+            # inbox 3997 (fb-20261001-000925-3997). A start refused before
+            # admission created no run. Its only reader is the sealed
+            # dayz_test_worker, which republishes active_run_exists only when
+            # the body is exactly {"error": ...} (_pre_admission_rejection).
+            # The renewed lease_id stamped here since #131 turned every such
+            # refusal into worker_failed, plus a second start and a stop of a
+            # run_id the store never knew. Nothing reads lease_id on this
+            # route: the MCP carrier is refreshed by its heartbeats and by the
+            # enqueue, close and reap replies, which keep the stamp.
+            self._json(status, result)
+            return
         self._json(status, self._with_renewed_lease(result))
 
     def _handle_client_dumps(self) -> None:

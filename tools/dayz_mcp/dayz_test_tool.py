@@ -527,6 +527,21 @@ def _exact_run(status: object, run_id: object) -> dict[str, object]:
     return matches[0]
 
 
+def _run_unknown_to_store(status: object, run_id: str) -> bool:
+    """True only when a readable /lifecycle/status lists no row for run_id.
+
+    The same rows _exact_run resolves dayz_test_stop against, so an id this
+    returns True for is one dayz_test_stop answers run_not_found. A status that
+    cannot be read, or does not read as a list of rows, proves nothing.
+    """
+    if not isinstance(status, dict):
+        return False
+    runs = status.get("runs")
+    if not isinstance(runs, list) or any(not isinstance(item, dict) for item in runs):
+        return False
+    return not any(item.get("run_id") == run_id for item in runs)
+
+
 # fb-20260904-025733-d60f: a stop whose cleanup degraded leaves the run
 # UNRECONCILED with no owner, and the second dayz_test_stop was refused here,
 # one layer above the lifecycle, so the only remaining route was a human
@@ -1715,6 +1730,28 @@ async def _execute_request(
             readiness_status = None
         if _server_start_hung(readiness_status, terminal.run_id):
             terminal = replace(terminal, error_code=SERVER_START_HUNG)
+    # inbox 3997. When the worker cannot confirm the stop of the run it minted
+    # it names that run (cleanup_degraded), even when the daemon refused its
+    # start before registering anything: dayz_test_stop then answered
+    # run_not_found for the id this call returned. A call that creates its run
+    # drops an id the store does not list; a status it cannot read keeps it.
+    # The cleanup claim goes with the id (parse_worker_terminal ties
+    # cleanup_degraded to a run_id): the store has no row for it, a launch
+    # writes its row before it spawns, and the transaction released and
+    # verified its lease before this terminal was read, so no start of that id
+    # can still be admitted. The error code is kept.
+    if (
+        not terminal.ok
+        and terminal.run_id is not None
+        and expected_run_id is None
+        and not preflight
+    ):
+        try:
+            registered = await runtime.lifecycle_status()
+        except Exception:
+            registered = None
+        if _run_unknown_to_store(registered, terminal.run_id):
+            terminal = replace(terminal, run_id=None, cleanup_degraded=False)
     server_alive: bool | None = None
     client_alive: bool | None = None
     readiness: LaunchReadinessProjection | None = None
