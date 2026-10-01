@@ -1430,13 +1430,16 @@ class MCPBridge : Managed
 	// the first human; a set uid resolves by PlayerIdentity.GetPlainId(). Refusals
 	// come before anything changes, and a dead body is refused: the heal would not
 	// revive it. Nothing moves the player or touches its seat; the vitals are read
-	// before and after.
+	// before and after. A worn splint comes off as vanilla takes it off when legs
+	// heal, and the reply says whether and where the Splint item went.
 	protected bool DispatchPlayerHeal(MCPCommand command, MCPResult result)
 	{
 		string healResolveError;
 		PlayerBase healPlayer;
 		MCPPlayerHeal healReport;
+		string healSplintTo;
 		healResolveError = "";
+		healSplintTo = "";
 		if (!command.args)
 		{
 			result.ok = false;
@@ -1463,8 +1466,10 @@ class MCPBridge : Managed
 		healReport.full = command.args.full;
 		healReport.in_vehicle = healPlayer.IsInVehicle();
 		FillPlayerVitals(healPlayer, healReport.before);
-		healPlayer.MCPHealServer(command.args.full);
+		healSplintTo = healPlayer.MCPHealServer(command.args.full);
 		FillPlayerVitals(healPlayer, healReport.after);
+		healReport.splint_returned = healSplintTo != "";
+		healReport.splint_returned_to = healSplintTo;
 		result.player_heal = healReport;
 		result.ok = true;
 		return true;

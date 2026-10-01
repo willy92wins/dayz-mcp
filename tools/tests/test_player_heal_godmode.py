@@ -42,9 +42,11 @@ CLIENT_PATH = SCRIPTS / "5_Mission" / "MCPClientBridge.c"
 MESSAGES_PATH = SCRIPTS / "5_Mission" / "MCPMessages.c"
 MISSION_PATH = SCRIPTS / "5_Mission" / "MissionServer.c"
 CENSUS_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "bridge_capabilities_v1.json"
+CHANGELOG_PATH = Path(__file__).resolve().parents[2] / "CHANGELOG.md"
 VANILLA = Path(os.environ.get("DAYZ_MCP_VANILLA_SCRIPTS", "P:/scripts"))
 
-HEAL_SERVER = "void MCPHealServer(bool full)"
+HEAL_SERVER = "string MCPHealServer(bool full)"
+COUNT_SPLINTS = "protected int MCPCountSplints()"
 DISPATCH = "protected void Dispatch(MCPCommand command)"
 DISPATCH_HEAL = "protected bool DispatchPlayerHeal(MCPCommand command, MCPResult result)"
 DISPATCH_GODMODE = "protected bool DispatchPlayerGodmode(MCPCommand command, MCPResult result)"
@@ -74,6 +76,15 @@ LOW_THRESHOLD = 300.0
 STAT_MAX = 5000.0
 # A new character's water and energy (playerstatspco.c:297-298).
 STAT_INIT = 600.0
+# eModifiers.MDF_BROKEN_LEGS, any distinct value for the fakes.
+MDF_BROKEN_LEGS = 25
+# The heal's one documented inventory change (review R1 F1): vanilla's own splint
+# return when legs heal, said in the tool description and in the CHANGELOG.
+SPLINT_RULE = (
+    "Healing a player with an applied splint removes the splint and gives the "
+    "Splint item back as vanilla does, into the inventory or, when it is full, on "
+    "the ground at the player; nothing else in the inventory changes."
+)
 
 EXPECTED_VITALS_MEMBERS = [
     ("float", "health"),
@@ -88,6 +99,8 @@ EXPECTED_VITALS_MEMBERS = [
 EXPECTED_HEAL_MEMBERS = [
     ("bool", "full"),
     ("bool", "in_vehicle"),
+    ("bool", "splint_returned"),
+    ("string", "splint_returned_to"),
     ("ref MCPPlayerVitals", "before"),
     ("ref MCPPlayerVitals", "after"),
 ]
@@ -362,7 +375,7 @@ class _Godmode:
 
 class _HealPlayer:
     """One server PlayerBase as MCPHealServer sees it: every call, in order, with
-    whether damage was allowed at the time."""
+    whether damage was allowed at the time, its inventory and the ground at it."""
 
     def __init__(
         self,
@@ -373,6 +386,9 @@ class _HealPlayer:
         unconscious: bool = False,
         managers: bool = True,
         stats: bool = True,
+        splint_worn: bool = False,
+        legs_modifier_active: bool = True,
+        room: bool = True,
     ) -> None:
         self.calls: list[tuple[Any, ...]] = []
         self.allow_damage = allow_damage
@@ -382,6 +398,11 @@ class _HealPlayer:
         self.values = {"blood_type": 6, "water": 900.0, "energy": 1200.0, "heat_buffer": 12.5, "heat_comfort": -0.25}
         self.stats = self._stats(self.values) if stats else None
         self.managers = managers
+        self.splint_worn = splint_worn
+        self.legs_modifier_active = legs_modifier_active
+        self.room = room
+        self.inventory: list[str] = ["Bandage", "Splint_Applied"] if splint_worn else ["Bandage"]
+        self.ground: list[str] = []
 
     @staticmethod
     def _stats(values: dict[str, float]) -> dict[str, _Stat]:
@@ -402,9 +423,21 @@ class _HealPlayer:
 
     def _reset_all(self) -> None:
         self._record("ResetAll")
-        # BrokenLegsMdfr.OnDeactivate clears an active modifier's state
-        # (brokenlegs.c:38-48); a pending one keeps it.
+        if not self.legs_modifier_active:
+            # Deactivate returns at once for an inactive modifier (modifierbase.c:217-231).
+            return
+        # BrokenLegsMdfr.OnDeactivate (brokenlegs.c:38-48): RemoveSplint when the
+        # splint is worn gives the Splint item back into the inventory (or the
+        # hands) when there is room, else on the ground at the player, and queues
+        # the applied one's Delete, which stays until the call queue runs
+        # (miscgameplayfunctions.c:1636-1687, humaninventory.c:65-71, object.c:82-85).
+        if self.splint_worn:
+            (self.inventory if self.room else self.ground).append("Splint")
         self.legs = self.legs_after_reset_all
+
+    def _count_splints(self) -> int:
+        self._record("MCPCountSplints")
+        return self.inventory.count("Splint")
 
     def _set_broken_legs(self, state: int) -> None:
         self._record("SetBrokenLegs", state)
@@ -428,7 +461,13 @@ class _HealPlayer:
             "GetAllowDamage": lambda: self.allow_damage,
             "SetAllowDamage": self._set_allow_damage,
             "DamageSystem": SimpleNamespace(ResetAllZones=lambda entity: self._record("ResetAllZones", entity is self)),
-            "m_ModifiersManager": manager(ResetAll=self._reset_all),
+            "m_ModifiersManager": manager(
+                ResetAll=self._reset_all,
+                IsModifierActive=lambda modifier: modifier == MDF_BROKEN_LEGS and self.legs_modifier_active,
+            ),
+            "eModifiers": SimpleNamespace(MDF_BROKEN_LEGS=MDF_BROKEN_LEGS),
+            "IsWearingSplint": lambda: self.splint_worn,
+            "MCPCountSplints": self._count_splints,
             "GetBrokenLegs": lambda: self.legs,
             "SetBrokenLegs": self._set_broken_legs,
             "eBrokenLegs": SimpleNamespace(NO_BROKEN_LEGS=0, BROKEN_LEGS=1, BROKEN_LEGS_SPLINT=2),
@@ -448,9 +487,9 @@ class _HealPlayer:
             ),
         }
 
-    def heal(self, full: bool) -> None:
+    def heal(self, full: bool) -> str:
         heal = translate(_source(CARE_PATH), HEAL_SERVER, self.namespace())
-        heal(full)
+        return heal(full).text
 
     def names(self) -> list[str]:
         return [call[0] for call in self.calls]
@@ -679,15 +718,52 @@ class PlayerHealSequenceTest(unittest.TestCase):
         player.heal(full=True)
         self.assertEqual(player.names(), ["ResetAllZones", "SendPlayerUnconsciousness"])
 
+    # Review R1 F1: a worn splint comes off through vanilla's own deactivation,
+    # and the heal says whether and where the Splint item went.
+
+    def test_a_worn_splint_comes_back_into_the_inventory_through_vanillas_deactivation(self) -> None:
+        player = _HealPlayer(legs=2, legs_after_reset_all=0, splint_worn=True)
+        before = list(player.inventory)
+        self.assertEqual(player.heal(full=False), "inventory")
+        self.assertEqual(player.inventory, before + ["Splint"], "only the returned Splint is new")
+        self.assertEqual(player.ground, [])
+        self.assertEqual(
+            [name for name in player.names() if name in ("MCPCountSplints", "ResetAll")],
+            ["MCPCountSplints", "ResetAll", "MCPCountSplints"],
+        )
+        self.assertNotIn("SetBrokenLegs", player.names(), "vanilla's deactivation cleared the legs")
+
+    def test_with_no_room_the_splint_lands_on_the_ground_and_the_inventory_stays(self) -> None:
+        player = _HealPlayer(legs=2, legs_after_reset_all=0, splint_worn=True, room=False)
+        before = list(player.inventory)
+        self.assertEqual(player.heal(full=True), "ground")
+        self.assertEqual(player.inventory, before)
+        self.assertEqual(player.ground, ["Splint"])
+
+    def test_without_a_splint_coming_off_nothing_is_returned_or_counted(self) -> None:
+        for case in (
+            {},
+            {"splint_worn": True, "legs_modifier_active": False},
+            {"splint_worn": True, "managers": False},
+        ):
+            with self.subTest(**case):
+                player = _HealPlayer(legs=2, legs_after_reset_all=0, **case)
+                before = list(player.inventory)
+                self.assertEqual(player.heal(full=False), "")
+                self.assertEqual(player.inventory, before)
+                self.assertEqual(player.ground, [])
+                self.assertNotIn("MCPCountSplints", player.names())
+
 
 class PlayerHealContractTest(unittest.TestCase):
     def setUp(self) -> None:
         self.care = _source(CARE_PATH)
         self.heal = method_body(self.care, HEAL_SERVER)
+        self.counter = method_body(self.care, COUNT_SPLINTS)
         self.bridge = _source(BRIDGE_PATH)
         self.dispatch = method_body(self.bridge, DISPATCH_HEAL)
 
-    def test_the_heal_gives_no_immunity_boost_and_never_moves_or_equips(self) -> None:
+    def test_the_heal_gives_no_immunity_boost_and_never_moves_the_player(self) -> None:
         for forbidden in (
             "MDF_IMMUNITYBOOST",
             "ActivateModifier",
@@ -698,9 +774,6 @@ class PlayerHealContractTest(unittest.TestCase):
             "GetCommand_Vehicle",
             "GetTransport",
             "GetParent",
-            "GetInventory",
-            "CreateInInventory",
-            "Delete(",
             "SetHealth(",
             "ResetPlayer",
             "FixAllInventoryItems",
@@ -708,6 +781,58 @@ class PlayerHealContractTest(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, self.heal)
                 self.assertNotIn(forbidden, self.dispatch)
+
+    def test_the_only_inventory_change_is_vanillas_splint_return(self) -> None:
+        # Review R1 F1, decided by the orchestrator: the inventory does change in
+        # one documented case, a worn splint, and only through vanilla's own path
+        # (ResetAll -> BrokenLegsMdfr.OnDeactivate -> RemoveSplint, brokenlegs.c:38-44).
+        # Nothing removes the splint by hand, nothing suppresses that path, and
+        # the counter that tells where the Splint went only reads.
+        self.assertEqual(self.heal.count("m_ModifiersManager.ResetAll();"), 1)
+        for write in (
+            "RemoveSplint",
+            "Splint_Applied",
+            "Delete(",
+            "CreateInInventory",
+            "CreateInHands",
+            "SpawnEntity",
+            "ServerDropEntity",
+            "PredictiveDropEntity",
+            "LocalDestroyEntity",
+            "TakeEntity",
+            "GetInventory",
+            "GetHumanInventory",
+            "DeactivateModifier",
+            "SetModifierLock",
+            "SetLock(",
+        ):
+            with self.subTest(write=write):
+                self.assertNotIn(write, self.heal)
+                self.assertNotIn(write, self.dispatch)
+        self.assertEqual(
+            set(re.findall(r"(\w+)\s*\(", self.counter)),
+            {"GetInventory", "EnumerateInventory", "while", "Count", "if", "Cast", "Get", "GetItemInHands"},
+            "MCPCountSplints may only read the inventory",
+        )
+        self.assertIn("protected int MCPCountSplints()", self.care, "only the heal calls it")
+        # Vanilla's two conditions, read before anything changes; one count before
+        # ResetAll and one after; the answer is where the Splint went.
+        _in_order(
+            self,
+            self.heal,
+            "if (m_ModifiersManager && IsWearingSplint())",
+            "splintComesOff = m_ModifiersManager.IsModifierActive(eModifiers.MDF_BROKEN_LEGS);",
+            "splintsBefore = MCPCountSplints();",
+            "damageWasAllowed = GetAllowDamage();",
+            "DamageSystem.ResetAllZones(this);",
+            "m_ModifiersManager.ResetAll();",
+            'splintTo = "ground";',
+            "if (MCPCountSplints() > splintsBefore)",
+            'splintTo = "inventory";',
+            "return splintTo;",
+        )
+        # The applied splint's Delete is deferred (object.c:82-85): it is never re-read.
+        self.assertEqual(self.heal.count("IsWearingSplint()"), 1)
 
     def test_the_heal_is_a_public_player_base_method(self) -> None:
         # MCPBridge (5_Mission) calls it: protected would not compile across
@@ -729,8 +854,10 @@ class PlayerHealContractTest(unittest.TestCase):
             "healReport = new MCPPlayerHeal();",
             "healReport.in_vehicle = healPlayer.IsInVehicle();",
             "FillPlayerVitals(healPlayer, healReport.before);",
-            "healPlayer.MCPHealServer(command.args.full);",
+            "healSplintTo = healPlayer.MCPHealServer(command.args.full);",
             "FillPlayerVitals(healPlayer, healReport.after);",
+            'healReport.splint_returned = healSplintTo != "";',
+            "healReport.splint_returned_to = healSplintTo;",
             "result.player_heal = healReport;",
             "result.ok = true;",
         )
@@ -752,6 +879,65 @@ class PlayerHealContractTest(unittest.TestCase):
         ):
             with self.subTest(read=read):
                 self.assertIn(read, fill)
+
+
+class _Item:
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+
+
+class PlayerHealSplintCountTest(unittest.TestCase):
+    """MCPCountSplints translated and run: the Splint items in the inventory and the hands."""
+
+    def _count(self, enumerated: list[_Item], hands: _Item | None) -> int:
+        class _Array:
+            def __init__(self) -> None:
+                self.items: list[_Item] = []
+
+            def Count(self) -> int:
+                return len(self.items)
+
+            def Get(self, index: int) -> _Item:
+                return self.items[index]
+
+        def enumerate_inventory(traversal: str, out: _Array) -> bool:
+            self.assertEqual(traversal, "PREORDER")
+            out.items.extend(enumerated)
+            return bool(enumerated)
+
+        namespace: dict[str, Any] = {
+            "NewEntityArray": _Array,
+            "GetInventory": lambda: SimpleNamespace(EnumerateInventory=enumerate_inventory),
+            "InventoryTraversalType": SimpleNamespace(PREORDER="PREORDER"),
+            # The script class Splint (splint.c:1); Splint_Applied is a Clothing (splint.c:12).
+            "Splint": SimpleNamespace(Cast=lambda item: item if isinstance(item, _Item) and item.kind == "Splint" else None),
+            "GetItemInHands": lambda: hands,
+        }
+        rewrites = (
+            (re.compile(r"new array<EntityAI>\(\)"), "NewEntityArray()"),
+            (re.compile(r"array<EntityAI>"), "EntityArray"),
+        )
+        count = translate(
+            _rewritten(_source(CARE_PATH), COUNT_SPLINTS, rewrites),
+            COUNT_SPLINTS,
+            namespace,
+            class_types=("EntityArray",),
+        )
+        return count()
+
+    def test_only_splint_items_count_never_the_applied_one(self) -> None:
+        enumerated = [_Item("SurvivorM_Mirek"), _Item("Splint"), _Item("Splint_Applied"), _Item("Bandage"), _Item("Splint")]
+        self.assertEqual(self._count(enumerated, None), 2)
+        self.assertEqual(self._count([_Item("Splint_Applied")], _Item("Bandage")), 0)
+
+    def test_a_splint_returned_into_the_hands_raises_the_count_either_way(self) -> None:
+        # Whether or not the enumeration holds the hands, the count is taken the
+        # same way before and after, so a new Splint in the hands always shows.
+        before = self._count([_Item("Bandage")], None)
+        held = _Item("Splint")
+        for enumerated in ([_Item("Bandage")], [_Item("Bandage"), held]):
+            with self.subTest(enumeration_holds_the_hands=len(enumerated) == 2):
+                self.assertGreater(self._count(enumerated, held), before)
 
 
 # --- godmode, run ---------------------------------------------------------------
@@ -1095,7 +1281,17 @@ class HealGodmodeMessagesTest(unittest.TestCase):
 class HealGodmodePruneTest(unittest.TestCase):
     def test_each_reply_is_prunable_and_kept_for_its_verb(self) -> None:
         for field, filled in (
-            (HEAL, {"full": 1, "in_vehicle": 0, "before": {"health": 0.03}, "after": {"health": 1.0}}),
+            (
+                HEAL,
+                {
+                    "full": 1,
+                    "in_vehicle": 0,
+                    "splint_returned": 1,
+                    "splint_returned_to": "inventory",
+                    "before": {"health": 0.03},
+                    "after": {"health": 1.0},
+                },
+            ),
             (GODMODE, {"before": 1, "after": 0}),
         ):
             with self.subTest(field=field):
@@ -1283,6 +1479,23 @@ class HealGodmodeToolTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(tool=GODMODE, phrase=phrase):
                 self.assertIn(phrase, godmode)
 
+    def test_the_heal_description_and_the_changelog_state_the_splint_rule(self) -> None:
+        # Review R1 F1: the one inventory change is said in plain words, with the
+        # two answer fields, and nothing claims the inventory is never touched.
+        heal = self.tools[HEAL].description or ""
+        self.assertIn(SPLINT_RULE, heal)
+        self.assertIn(
+            "splint_returned and splint_returned_to (inventory, the hands included, or "
+            "ground; empty when no splint came off)",
+            heal,
+        )
+        self.assertNotIn("never touches the inventory", heal)
+        self.assertNotIn("the inventory changes only when", heal)
+        changelog = CHANGELOG_PATH.read_text(encoding="utf-8")
+        unreleased = changelog[changelog.index("## [Unreleased]") : changelog.index("## [1.3]")]
+        self.assertIn(SPLINT_RULE, unreleased)
+        self.assertIn("`splint_returned` and `splint_returned_to`", unreleased)
+
     def test_the_compact_catalog_never_lists_the_mutating_verbs(self) -> None:
         for tool in COMMANDS:
             with self.subTest(tool=tool):
@@ -1378,6 +1591,34 @@ class VanillaPremiseTest(unittest.TestCase):
         self.assertIn("new PlayerStat<float> (0, PlayerConstants.SL_WATER_MAX, 600,", pco)
         self.assertIn("new PlayerStat<float> (0, PlayerConstants.SL_ENERGY_MAX, 600,", pco)
         self.assertRegex(constants, r"SL_WATER_MAX\s*=\s*5000;")
+
+    def test_vanillas_splint_return_when_legs_heal(self) -> None:
+        legs = _flat(self._vanilla("4_world/classes/playermodifiers/modifiers/conditions/brokenlegs.c"))
+        deactivate = legs[legs.index("override void OnDeactivate(PlayerBase player)") : legs.index("override bool DeactivateCondition(")]
+        _in_order(self, deactivate, "if ( player.IsWearingSplint() )", "MiscGameplayFunctions.RemoveSplint(player);")
+        modifier = _flat(self._vanilla("4_world/classes/playermodifiers/modifierbase.c"))
+        deactivation = modifier[modifier.index("void Deactivate(bool trigger = true)") : modifier.index("void OnStoreSave(ParamsWriteContext ctx);")]
+        _in_order(self, deactivation, "if (!m_IsActive) return;", "OnDeactivate(m_Player);")
+        misc = _flat(self._vanilla("4_world/static/miscgameplayfunctions.c"))
+        remove = misc[misc.index("static void RemoveSplint( PlayerBase player )") : misc.index("static void TeleportCheck(")]
+        _in_order(
+            self,
+            remove,
+            'player.GetInventory().CreateInInventory("Splint");',
+            "if (!entity)",
+            'player.SpawnEntityOnGroundOnCursorDir("Splint", 0.5);',
+            "attachment.Delete();",
+        )
+        human = _flat(self._vanilla("3_game/systems/inventory/humaninventory.c"))
+        _in_order(self, human, "EntityAI newEntity = super.CreateInInventory(type);", "newEntity = CreateInHands(type);")
+        splint = _flat(self._vanilla("4_world/entities/itembase/gear/medical/splint.c"))
+        self.assertIn("class Splint: Inventory_Base", splint)
+        self.assertIn("class Splint_Applied: Clothing", splint)
+        self.assertIn("bool IsWearingSplint()", self._vanilla("4_world/entities/manbase/playerbase.c"))
+        self.assertIn(
+            "void Delete() { g_Game.GetCallQueue(CALL_CATEGORY_SYSTEM).Call(g_Game.ObjectDelete, this); }",
+            _flat(self._vanilla("3_game/entities/object.c")),
+        )
 
     def test_the_connect_respawn_and_logout_events(self) -> None:
         mission = _flat(self._vanilla("5_mission/mission/missionserver.c"))

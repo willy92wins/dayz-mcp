@@ -829,11 +829,16 @@ class MCPPlayerVitals
 
 // player_heal reply. full echoes the request and in_vehicle is IsInVehicle()
 // before the heal (dayzplayerimplement.c:465-468): the vehicle command or a
-// Transport parent. Primitives only: no entity reference.
+// Transport parent. splint_returned is true when a worn splint came off with the
+// healed legs and vanilla gave the Splint item back; splint_returned_to is then
+// inventory (the inventory or the hands) or ground, and "" otherwise
+// (PlayerBase.MCPHealServer, MCP_PlayerCare.c). Primitives only: no entity reference.
 class MCPPlayerHeal
 {
 	bool full;
 	bool in_vehicle;
+	bool splint_returned;
+	string splint_returned_to;
 	ref MCPPlayerVitals before;
 	ref MCPPlayerVitals after;
 

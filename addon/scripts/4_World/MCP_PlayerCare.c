@@ -243,22 +243,47 @@ modded class PlayerBase
 	// VITAMINS_LIFETIME_SECS, 300 s (playerconstants.c:192), which a test would
 	// then carry. Broken legs are cleared with SetBrokenLegs
 	// (playerbase.c:3702-3724) when the modifier's deactivation did not
-	// (brokenlegs.c:38-48); that deactivation also gives back a worn splint as a
-	// Splint item (brokenlegs.c:41-44), as vanilla does whenever legs heal. full
-	// also fills water and energy to their stats' maximum, 5000
-	// (playerstatspco.c:297-298), as ResetPlayer's set_max does
+	// (brokenlegs.c:38-48). full also fills water and energy to their stats'
+	// maximum, 5000 (playerstatspco.c:297-298), as ResetPlayer's set_max does
 	// (playerbase.c:7625-7629). Vanilla allows damage before it raises health
 	// and puts the state back after (pluginrepairing.c:36, :83, :88;
 	// construction.c:82-84), so a godmode body is healed the same way and keeps
 	// its godmode. Nothing here moves the player or touches its seat or vehicle.
-	void MCPHealServer(bool full)
+	//
+	// The splint, the heal's one change to the inventory, is vanilla's own: when
+	// legs heal, BrokenLegsMdfr.OnDeactivate calls RemoveSplint if the player
+	// IsWearingSplint (brokenlegs.c:38-44, playerbase.c:3914-3923), and
+	// Deactivate runs it only for an active modifier (modifierbase.c:217-231).
+	// RemoveSplint gives the Splint item back into the inventory, into the hands
+	// when nothing else has room, or else on the ground half a metre in front of
+	// the player, and deletes the applied one (miscgameplayfunctions.c:1636-1687,
+	// humaninventory.c:65-71, playerbase.c:6480-6484). The heal reads those two
+	// conditions before anything changes and returns where the Splint went:
+	// "inventory" when the player holds one Splint more after ResetAll, "ground"
+	// when it does not, "" when no splint came off. The applied splint's Delete
+	// is deferred to the call queue (object.c:82-85), so it is not read after.
+	string MCPHealServer(bool full)
 	{
 		bool damageWasAllowed;
+		bool splintComesOff;
+		int splintsBefore;
+		string splintTo;
 		int bloodType;
 		float energyValue;
 		float waterValue;
 		float heatBuffer;
 		float heatComfort;
+		splintTo = "";
+		splintComesOff = false;
+		splintsBefore = 0;
+		if (m_ModifiersManager && IsWearingSplint())
+		{
+			splintComesOff = m_ModifiersManager.IsModifierActive(eModifiers.MDF_BROKEN_LEGS);
+		}
+		if (splintComesOff)
+		{
+			splintsBefore = MCPCountSplints();
+		}
 		damageWasAllowed = GetAllowDamage();
 		if (!damageWasAllowed)
 		{
@@ -268,6 +293,14 @@ modded class PlayerBase
 		if (m_ModifiersManager)
 		{
 			m_ModifiersManager.ResetAll();
+		}
+		if (splintComesOff)
+		{
+			splintTo = "ground";
+			if (MCPCountSplints() > splintsBefore)
+			{
+				splintTo = "inventory";
+			}
 		}
 		if (GetBrokenLegs() != eBrokenLegs.NO_BROKEN_LEGS)
 		{
@@ -312,5 +345,36 @@ modded class PlayerBase
 		{
 			SetAllowDamage(false);
 		}
+		return splintTo;
+	}
+
+	// The player's Splint items (splint.c:1-10; the applied one is a
+	// Splint_Applied, splint.c:12) in its inventory and its hands
+	// (EnumerateInventory, inventory.c:127; GetItemInHands,
+	// playerbase.c:6437-6440). Reads only. The hands are counted on their own as
+	// well: whether or not the enumeration already holds them, the count is
+	// taken the same way before and after the heal.
+	protected int MCPCountSplints()
+	{
+		array<EntityAI> items;
+		int index;
+		int count;
+		count = 0;
+		items = new array<EntityAI>();
+		GetInventory().EnumerateInventory(InventoryTraversalType.PREORDER, items);
+		index = 0;
+		while (index < items.Count())
+		{
+			if (Splint.Cast(items.Get(index)))
+			{
+				count = count + 1;
+			}
+			index = index + 1;
+		}
+		if (Splint.Cast(GetItemInHands()))
+		{
+			count = count + 1;
+		}
+		return count;
 	}
 };
