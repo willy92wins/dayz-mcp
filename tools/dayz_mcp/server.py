@@ -2980,9 +2980,10 @@ async def execute_wait_for_box(
 
     ``until`` is an absolute end in ``time_fn``'s clock that no reply can
     stretch (the dayz_test_run re-queue, inbox 3997): it is checked before
-    each join and after each reply and claim, and once past it the wait
-    ends like a timeout, ticket handed back. Without it the deadline runs
-    from entry and a grant seen on the last reply still counts, as before.
+    each join, again with tool_lock held before each join and claim is
+    sent, and after each reply and claim; once past it the wait ends like
+    a timeout, ticket handed back. Without it the deadline runs from entry
+    and a grant seen on the last reply still counts, as before.
     """
 
     sleeper = sleep_fn or asyncio.sleep
@@ -3000,6 +3001,9 @@ async def execute_wait_for_box(
                 return {"ok": False, "ticket": ticket, "box": box}
             wait_error = None
             async with client.tool_lock:
+                if until is not None and clock() >= deadline:
+                    # The lock was held past the end: no join out of budget.
+                    return {"ok": False, "ticket": ticket, "box": box}
                 join_task = asyncio.create_task(
                     client.session_box_status(wait=True, ticket=ticket)
                 )
@@ -3054,6 +3058,10 @@ async def execute_wait_for_box(
             )
             if ready:
                 async with client.tool_lock:
+                    if until is not None and clock() >= deadline:
+                        # The lock was held past the end: no claim out of
+                        # budget; the caller releases the ticket.
+                        return {"ok": False, "ticket": ticket, "box": box}
                     join_task = asyncio.create_task(
                         client.session_box_status(
                             wait=True, ticket=ticket, claim=True

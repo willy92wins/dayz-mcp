@@ -735,6 +735,58 @@ class BoxWaitDeadlineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result["ok"], True)
         self.assertEqual(calls, ["join", "claim"])
 
+    async def test_with_until_a_lock_held_past_it_sends_no_join(self) -> None:
+        clock = Clock()
+        clock.now = 1000.0
+        checked = asyncio.Event()
+
+        def watched() -> float:
+            checked.set()
+            return clock()
+
+        client = _ScriptedBoxClient(clock)
+        await client.tool_lock.acquire()
+        waiting = asyncio.create_task(
+            server.execute_wait_for_box(client, 5.0, time_fn=watched, until=1005.0)
+        )
+        await checked.wait()  # past the check made before the lock
+        clock.advance(10.0)  # other work keeps tool_lock past the end
+        client.tool_lock.release()
+        result = await waiting
+
+        self.assertIs(result["ok"], False)
+        self.assertIsNone(result["ticket"])
+        self.assertEqual(client.calls, [])
+
+    async def test_with_until_a_lock_held_past_it_sends_no_claim(self) -> None:
+        clock = Clock()
+        clock.now = 1000.0
+        client = _ScriptedBoxClient(clock)
+        answer = client.session_box_status
+        holders: list[asyncio.Task[None]] = []
+
+        async def hold_past_the_end() -> None:
+            async with client.tool_lock:
+                clock.advance(10.0)
+
+        async def replies(**kwargs: object) -> dict[str, object]:
+            reply = await answer(**kwargs)
+            if not (kwargs.get("claim") or kwargs.get("done")):
+                # Queued for tool_lock while the join holds it: it gets the
+                # lock before the claim does, and keeps it past the end.
+                holders.append(asyncio.create_task(hold_past_the_end()))
+            return reply
+
+        client.session_box_status = replies  # type: ignore[method-assign]
+        result = await server.execute_wait_for_box(
+            client, 5.0, time_fn=clock, until=1005.0
+        )
+        await asyncio.gather(*holders)
+
+        self.assertIs(result["ok"], False)
+        self.assertEqual(result["ticket"], "ticket-1")
+        self.assertEqual(client.calls, ["join"])
+
 
 class BoxTakenDuringBuildTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
