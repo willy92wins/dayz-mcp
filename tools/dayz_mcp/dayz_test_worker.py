@@ -67,7 +67,9 @@ LIFECYCLE_REJECTION_CODES = frozenset(
 WORKER_ERROR_CODES = frozenset(
     {
         "build_failed",
+        "build_source_link_outside",
         "build_source_unavailable",
+        "build_stage_unavailable",
         "internal_failure",
         "operation_cancelled",
         "readiness_failed",
@@ -652,13 +654,16 @@ def _default_has_assets(source: str) -> bool:
 # binarize parses every config.cpp under that folder, through junctions too: a
 # broken one anywhere next to the source failed the build, and a source in P:\
 # or DayZ Projects made it walk every sibling project. When binarize runs, the
-# worker builds from <stage>\<basename> instead, a fresh folder in its private
-# TEMP that holds only junctions: the source, the vanilla roots DayZ Tools
-# extracts next to it, and the parent's folders the source's files reference.
-# The vanilla roots are not optional: binarize resolves \dz\... paths and the
-# vanilla config classes through -addon (2026-10-01, SimpleGroup: T1_FlagKit.p3d
-# was 55 221 B built from DayZ Projects, 43 376 B alone in a parent, and
-# byte-identical to the former with a DZ junction beside the mod).
+# worker builds from <stage>\<basename> instead, a fresh folder in the
+# launcher's private TEMP that holds only junctions: the source, the vanilla
+# roots DayZ Tools extracts next to it, and the parent's folders the source's
+# files reference. The vanilla roots are not optional: binarize resolves
+# \dz\... paths and the vanilla config classes through -addon (2026-10-01,
+# SimpleGroup: T1_FlagKit.p3d was 55 221 B built from DayZ Projects, 43 376 B
+# alone in a parent, and byte-identical to the former with a DZ junction beside
+# the mod). A link inside the source would lead binarize out of the stage again
+# through <stage>\<basename>, so a source holding one that resolves outside the
+# source and the stage's roots is refused (review R1, F2).
 _BUILD_STAGE_PREFIX = "dayz-mcp-build-"
 _VANILLA_ROOTS = frozenset(
     {"dz", "bin", "scripts", "gui", "graphics", "system", "languagecore"}
@@ -689,30 +694,47 @@ _ASSET_PATH = re.compile(
 )
 
 
-def _referenced_roots(source: str) -> frozenset[str]:
-    """The first components, casefolded, of the asset paths the source's files name.
+# The reparse points Windows follows as links. A OneDrive placeholder is a
+# reparse point too, under a cloud tag: a file or a folder like any other.
+_LINK_REPARSE_TAGS = frozenset(
+    {stat.IO_REPARSE_TAG_MOUNT_POINT, stat.IO_REPARSE_TAG_SYMLINK}
+)
 
-    Every folder under the source is listed once, by its resolved path, so a
-    junction back up the tree cannot loop, and every scanned file is read once.
-    Folders behind a junction or a link are walked like the others, because
-    binarize follows them. OSError when a listing or a read fails.
+
+def _is_link(info: os.stat_result) -> bool:
+    """True for the lstat of a junction or a symbolic link, to a folder or a file."""
+    return (
+        stat.S_ISLNK(info.st_mode)
+        or getattr(info, "st_reparse_tag", 0) in _LINK_REPARSE_TAGS
+    )
+
+
+def _scan_source(
+    source: str,
+) -> tuple[frozenset[str], tuple[tuple[str, str], ...]]:
+    """What the source's own tree says about the stage it needs.
+
+    The first components, casefolded, of the asset paths its scanned files
+    name; and (path, resolved target) for every junction and symbolic link in
+    it. A link is recorded and never followed: whether binarize may follow it
+    is decided once the stage's roots are known, in _build_stage_plan. Without
+    links the walk is a tree, and every scanned file is read once. OSError when
+    a listing or a read fails.
     """
     roots: set[str] = set()
+    links: list[tuple[str, str]] = []
     pending = [source]
-    walked: set[str] = set()
     while pending:
         folder = pending.pop()
-        identity = ntpath.normcase(os.path.realpath(folder))
-        if identity in walked:
-            continue
-        walked.add(identity)
         with os.scandir(folder) as entries:
             for entry in entries:
-                if entry.is_dir():
+                if _is_link(entry.stat(follow_symlinks=False)):
+                    links.append((entry.path, os.path.realpath(entry.path)))
+                elif entry.is_dir(follow_symlinks=False):
                     pending.append(entry.path)
                 elif (
                     ntpath.splitext(entry.name)[1].casefold() in _REFERENCE_SCAN_SUFFIXES
-                    and entry.is_file()
+                    and entry.is_file(follow_symlinks=False)
                 ):
                     with open(entry.path, "rb") as handle:
                         data = handle.read()
@@ -720,7 +742,13 @@ def _referenced_roots(source: str) -> frozenset[str]:
                         match.group(1).decode("ascii").casefold()
                         for match in _ASSET_PATH.finditer(data)
                     )
-    return frozenset(roots)
+    return frozenset(roots), tuple(links)
+
+
+def _is_within(path: str, folder: str) -> bool:
+    path = ntpath.normcase(path)
+    folder = ntpath.normcase(folder).rstrip("\\")
+    return path == folder or path.startswith(folder + "\\")
 
 
 def _build_stage_plan(source: str) -> tuple[tuple[str, str], ...]:
@@ -731,22 +759,35 @@ def _build_stage_plan(source: str) -> tuple[tuple[str, str], ...]:
     vanilla root or the first component of an asset path the source's files
     name, under its name on disk. Only those entries of the parent are looked
     at, so a sibling the source does not need plays no part, readable or not.
-    OSError when the source has no parent or a listing or a read fails.
+
+    binarize follows links, so every junction and symbolic link in the source
+    must resolve inside the source or inside one of those folders; otherwise
+    the build is refused with build_source_link_outside. A link to the parent
+    would put every sibling, and every config.cpp in them, back under the
+    stage. OSError when the source has no parent or a listing or a read fails.
     """
     name = ntpath.basename(source)
     parent = ntpath.dirname(source)
     if not name or ntpath.normcase(parent) == ntpath.normcase(source):
         raise OSError("the build source has no parent folder")
-    wanted = (_VANILLA_ROOTS | _referenced_roots(source)) - {name.casefold()}
+    referenced, links = _scan_source(source)
+    wanted = (_VANILLA_ROOTS | referenced) - {name.casefold()}
     roots: list[str] = []
     with os.scandir(parent) as entries:
         for entry in entries:
             if entry.name.casefold() in wanted and entry.is_dir():
                 roots.append(entry.name)
     roots.sort(key=lambda root: (root.casefold(), root))
-    return ((name, source),) + tuple(
+    plan = ((name, source),) + tuple(
         (root, ntpath.join(parent, root)) for root in roots
     )
+    reachable = tuple(os.path.realpath(folder) for _name, folder in plan)
+    if any(
+        not any(_is_within(target, folder) for folder in reachable)
+        for _link, target in links
+    ):
+        raise _failed("build_source_link_outside")
+    return plan
 
 
 def _is_junction(path: str) -> bool:
@@ -795,38 +836,68 @@ def _remove_build_stage(stage: str, links: list[str]) -> None:
         pass
 
 
+def _private_temp() -> str:
+    """The launcher's private folder, the only place a build stage may be made.
+
+    The launcher starts the worker in its private working folder with TEMP and
+    TMP set to that folder, and the MCP side removes it after the launch. So
+    TEMP must be a local folder that is the working folder itself. There is no
+    other candidate: tempfile.gettempdir() falls back to other folders when TEMP
+    is unusable (review R1, F1), and a stage there, with its junctions to real
+    folders, could outlive a failed cleanup where nobody removes it.
+    """
+    temp = os.environ.get("TEMP")
+    try:
+        if (
+            isinstance(temp, str)
+            and _local_path(temp)
+            and os.path.isdir(temp)
+            and os.path.samefile(temp, os.getcwd())
+        ):
+            return temp
+    except (OSError, ValueError):
+        pass
+    raise _failed("build_stage_unavailable")
+
+
 @contextlib.contextmanager
 def _staged_build_source(source: str) -> Iterator[str]:
     """The path AddonBuilder builds from when binarize runs: <stage>\\<basename>.
 
-    The stage is a fresh folder in tempfile.gettempdir(), which in the sealed
-    worker is the launcher's private TEMP, and it holds only the junctions of
-    _build_stage_plan, each verified after it is made. Nothing is written into
-    the source or its parent. When the stage cannot be made, the build fails
-    with build_source_unavailable before AddonBuilder starts, never falling back
-    to the source itself. On the way out, whatever the build did, the junctions
-    and then the emptied stage are removed; a removal that fails does not
-    replace the build's own result.
+    The stage is a fresh folder in the launcher's private TEMP and nowhere
+    else, and it holds only the junctions of _build_stage_plan, each verified
+    after it is made. Nothing is written into the source or its parent. Before
+    AddonBuilder starts, and never falling back to the source itself, the build
+    fails with build_stage_unavailable when the private TEMP is unusable or a
+    junction cannot be made or verified, with build_source_unavailable when the
+    source cannot be listed or read, and with build_source_link_outside when a
+    link in the source leads out of the stage. On the way out, whatever the
+    build did, the junctions and then the emptied stage are removed; a removal
+    that fails does not replace the build's own result.
     """
     stage: str | None = None
-    links: list[str] = []
+    junctions: list[str] = []
     try:
+        private_temp = _private_temp()
         try:
             plan = _build_stage_plan(source)
-            stage = tempfile.mkdtemp(prefix=_BUILD_STAGE_PREFIX, dir=tempfile.gettempdir())
-            for name, target in plan:
-                link = ntpath.join(stage, name)
-                links.append(link)
-                _create_verified_junction(target, link)
-            staged = ntpath.join(stage, plan[0][0])
         except (OSError, ValueError):
             raise _failed("build_source_unavailable") from None
+        try:
+            stage = tempfile.mkdtemp(prefix=_BUILD_STAGE_PREFIX, dir=private_temp)
+            for name, target in plan:
+                junction = ntpath.join(stage, name)
+                junctions.append(junction)
+                _create_verified_junction(target, junction)
+            staged = ntpath.join(stage, plan[0][0])
+        except (OSError, ValueError):
+            raise _failed("build_stage_unavailable") from None
         if not _local_path(staged):
-            raise _failed("build_source_unavailable")
+            raise _failed("build_stage_unavailable")
         yield staged
     finally:
         if stage is not None:
-            _remove_build_stage(stage, links)
+            _remove_build_stage(stage, junctions)
 
 
 async def execute_dayz_test_worker(

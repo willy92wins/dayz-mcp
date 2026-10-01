@@ -6,33 +6,44 @@ next to the source failed every build from 24 to 30 September, and a
 SimpleGroup build walked hundreds of sibling projects for about 4 minutes.
 
 When binarize runs (pack_only false) the sealed worker now builds from
-<stage>\\<basename>, where <stage> is a fresh folder in its private TEMP that
-holds only junctions: the mod, the vanilla roots DayZ Tools extracts into the
-mod's parent, and the parent's folders the mod's own files reference. These
-tests drive the real worker with real junctions in temporary folders and a
-broker that records the AddonBuilder frame. No fixture holds a broken
-config.cpp, and no junction ever points outside the test's own folder.
+<stage>\\<basename>, where <stage> is a fresh folder in the launcher's private
+TEMP, and only there, that holds only junctions: the mod, the vanilla roots
+DayZ Tools extracts into the mod's parent, and the parent's folders the mod's
+own files reference. A link inside the mod that leads out of those folders is
+refused, because binarize would follow it out of the stage. These tests drive
+the real worker with real junctions in temporary folders and a broker that
+records the AddonBuilder frame. No fixture holds a broken config.cpp, every
+junction points inside the test's own folder, and each one a test makes is
+removed with os.rmdir.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import ntpath
 import os
 import stat
 import sys
 import tempfile
+import types
 import unittest
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from unittest import mock
 
-from dayz_mcp import dayz_test_request, dayz_test_worker, native_broker_protocol
+from dayz_mcp import (
+    dayz_test_request,
+    dayz_test_tool,
+    dayz_test_worker,
+    native_broker_protocol,
+)
+from tests.dayz_test_tool_helpers import _terminal
 
 try:
     import _winapi
-except ImportError:  # not Windows: every test here skips
+except ImportError:  # not Windows: every staging test here skips
     _winapi = None
 
 
@@ -43,6 +54,7 @@ RUN_ID = "12345678-1234-4234-8234-1234567890ab"
 OPERATION_ID = "87654321-4321-4321-8321-ba0987654321"
 BUILT = {"ok": True, "exit_code": 0, "pbo_size": 8192}
 FAILED_BUILD = {"ok": False, "exit_code": 1, "pbo_size": 0}
+STAGE_PREFIX = "dayz-mcp-build-"
 # The roots the stage holds for _Fixture besides the mod, in plan order.
 EXPECTED_ROOTS = ("DZ", "Embedded", "LFHeli", "Other", "Scripts", "Shared")
 
@@ -133,6 +145,38 @@ def _stage_view(source: str) -> dict[str, tuple[bool, str, bool]]:
     return view
 
 
+def _stage_folders(folder: str) -> set[str]:
+    """The dayz-mcp-build-* names directly in folder; none when it cannot be listed."""
+    try:
+        return {name for name in os.listdir(folder) if name.startswith(STAGE_PREFIX)}
+    except OSError:
+        return set()
+
+
+@contextlib.contextmanager
+def _worker_folders(temp: str | None, cwd: str) -> Iterator[None]:
+    """TEMP and the working folder the worker runs with, put back afterwards.
+
+    The launcher starts the sealed worker in its private folder, with TEMP and
+    TMP set to that same folder (launcher.cpp:600-602, :1311-1312, :1337-1340).
+    """
+    previous_temp = os.environ.get("TEMP")
+    previous_cwd = os.getcwd()
+    if temp is None:
+        os.environ.pop("TEMP", None)
+    else:
+        os.environ["TEMP"] = temp
+    os.chdir(cwd)
+    try:
+        yield
+    finally:
+        os.chdir(previous_cwd)
+        if previous_temp is None:
+            os.environ.pop("TEMP", None)
+        else:
+            os.environ["TEMP"] = previous_temp
+
+
 class _Fixture:
     """A mod with references, next to the kinds of sibling a real parent holds.
 
@@ -144,11 +188,14 @@ class _Fixture:
       Embedded/      referenced from inside the binary .p3d
       Shared/        referenced by an #include in the .hpp
       NotScanned/    referenced only by the .c script, which is not scanned
-      Unrelated/     not referenced
+      Unrelated/     not referenced, holds note.txt
       Poisoned/      not referenced, holds a config.cpp (valid and inert)
       DZ/, Scripts/  vanilla roots (Scripts in another case than the list's)
       NotADir        a file named like a reference
     private-temp/    stands for the launcher's private TEMP
+    decoy-temp/      what tempfile.gettempdir() answers: the worker must not use it
+    elsewhere/       a working folder that is not the private TEMP
+    temp-file        a file where a folder is expected
     """
 
     def __init__(self, root: Path) -> None:
@@ -156,6 +203,9 @@ class _Fixture:
         self.parent = root / "projects"
         self.source = self.parent / MOD
         self.private_temp = root / "private-temp"
+        self.decoy_temp = root / "decoy-temp"
+        self.elsewhere = root / "elsewhere"
+        self.temp_file = root / "temp-file"
         siblings = (
             "LFHeli", "Other", "Embedded", "Shared", "NotScanned",
             "Unrelated", "Poisoned", "DZ", "Scripts",
@@ -165,10 +215,14 @@ class _Fixture:
             self.source / "cfg",
             self.source / "scripts",
             self.private_temp,
+            self.decoy_temp,
+            self.elsewhere,
             self.parent / "LFHeli" / "models",
             *(self.parent / name for name in siblings),
         ):
             folder.mkdir(parents=True, exist_ok=True)
+        self.temp_file.write_bytes(b"a file, not a folder\n")
+        (self.parent / "Unrelated" / "note.txt").write_bytes(b"outside the stage\n")
         (self.parent / "Poisoned" / "config.cpp").write_text(
             "// inert test fixture: a sibling the stage must leave out\n"
             "class CfgPatches {};\n",
@@ -260,10 +314,13 @@ class _StageTestCase(unittest.TestCase):
         holder = tempfile.TemporaryDirectory(prefix="dayz-mcp-stage-test-")
         self.addCleanup(holder.cleanup)
         self.fixture = _Fixture(Path(holder.name))
-        # The worker's TEMP is the launcher's private folder; here it is ours.
-        patcher = mock.patch.object(tempfile, "tempdir", str(self.fixture.private_temp))
+        # A worker that asked tempfile would get the decoy, never a real folder.
+        patcher = mock.patch.object(tempfile, "tempdir", str(self.fixture.decoy_temp))
         patcher.start()
         self.addCleanup(patcher.stop)
+        # The worker runs in the launcher's private folder, with TEMP set to it.
+        private_temp = str(self.fixture.private_temp)
+        self.enterContext(_worker_folders(private_temp, private_temp))
         self.before = _snapshot(self.fixture.parent)
 
     def _execute(
@@ -308,15 +365,17 @@ class _StageTestCase(unittest.TestCase):
     def assert_trees_untouched(self) -> None:
         self.assertEqual(_snapshot(self.fixture.parent), self.before)
 
-    def assert_private_temp_empty(self) -> None:
+    def assert_no_stage_left(self) -> None:
         self.assertEqual(os.listdir(self.fixture.private_temp), [])
+        self.assertEqual(os.listdir(self.fixture.decoy_temp), [])
 
 
 class BuildStageFrameTest(_StageTestCase):
     def test_binarize_build_runs_from_a_stage_of_junctions_gone_after_the_call(self) -> None:
         broker = _RecordingBroker()
 
-        result = self._execute(broker)
+        with mock.patch.object(tempfile, "mkdtemp", wraps=tempfile.mkdtemp) as mkdtemp:
+            result = self._execute(broker)
 
         self.assertEqual(result, dayz_test_worker.WorkerResult(0, RUN_ID))
         self.assertEqual(
@@ -329,10 +388,15 @@ class BuildStageFrameTest(_StageTestCase):
         )
         stage = self._stage_of(broker)
         self.assertNotEqual(ntpath.normcase(stage), ntpath.normcase(str(self.fixture.parent)))
-        # <stage>\<basename>, the stage a fresh folder directly in the worker's TEMP.
+        # <stage>\<basename>, the stage a fresh folder directly in the private
+        # TEMP, made there by name and nowhere else.
         self.assertEqual(
             ntpath.normcase(ntpath.dirname(stage)),
-            ntpath.normcase(tempfile.gettempdir()),
+            ntpath.normcase(str(self.fixture.private_temp)),
+        )
+        self.assertEqual(
+            [call.kwargs.get("dir") for call in mkdtemp.call_args_list],
+            [str(self.fixture.private_temp)],
         )
         payload = broker.addon_payloads[0]
         self.assertEqual(payload["source"], ntpath.join(stage, MOD))
@@ -352,7 +416,7 @@ class BuildStageFrameTest(_StageTestCase):
         # and its config.cpp, not NotScanned, not the Ghost or NotADir names.
         self.assertEqual(broker.stage_views, [self.fixture.expected_stage()])
         self.assertFalse(os.path.lexists(stage))
-        self.assert_private_temp_empty()
+        self.assert_no_stage_left()
         self.assert_trees_untouched()
 
     def test_pack_only_builds_the_source_itself_and_makes_no_stage(self) -> None:
@@ -371,7 +435,7 @@ class BuildStageFrameTest(_StageTestCase):
                 self.assertEqual(len(broker.addon_payloads), 1)
                 self.assertEqual(broker.addon_payloads[0]["source"], str(self.fixture.source))
                 self.assertIs(broker.addon_payloads[0]["pack_only"], True)
-                self.assert_private_temp_empty()
+                self.assert_no_stage_left()
                 self.assert_trees_untouched()
 
 
@@ -401,7 +465,9 @@ class ReferencedRootTest(_StageTestCase):
                 source = self.fixture.root / ("case-" + root) / MOD
                 (source / relative).parent.mkdir(parents=True, exist_ok=True)
                 (source / relative).write_bytes(data)
-                self.assertEqual(dayz_test_worker._referenced_roots(str(source)), {root})
+                roots, links = dayz_test_worker._scan_source(str(source))
+                self.assertEqual(roots, {root})
+                self.assertEqual(links, ())
 
     def test_what_is_not_an_asset_path_of_a_scanned_file_names_no_root(self) -> None:
         parent = self.fixture.root / "plain"
@@ -416,9 +482,9 @@ class ReferencedRootTest(_StageTestCase):
         )
         (source / "notes.c").write_bytes(b'"\\NotScanned\\x.paa"\n')
 
-        found = dayz_test_worker._referenced_roots(str(source))
+        roots, _links = dayz_test_worker._scan_source(str(source))
 
-        self.assertEqual(found & {"docs", "backup", "notscanned", "loose", "loose.paa"}, set())
+        self.assertEqual(roots & {"docs", "backup", "notscanned", "loose", "loose.paa"}, set())
         self.assertEqual(dayz_test_worker._build_stage_plan(str(source)), ((MOD, str(source)),))
 
 
@@ -432,7 +498,7 @@ class BuildStageCleanupTest(_StageTestCase):
         self.assertEqual(raised.exception.code, "worker_failed")
         self.assertEqual(broker.stage_views, [self.fixture.expected_stage()])
         self.assertFalse(os.path.lexists(self._stage_of(broker)))
-        self.assert_private_temp_empty()
+        self.assert_no_stage_left()
         self.assert_trees_untouched()
 
     def test_a_failed_build_still_removes_the_stage(self) -> None:
@@ -445,7 +511,7 @@ class BuildStageCleanupTest(_StageTestCase):
         self.assertEqual(broker.kinds, [native_broker_protocol.BrokerKind.ADDON_BUILDER])
         self.assertEqual(broker.stage_views, [self.fixture.expected_stage()])
         self.assertFalse(os.path.lexists(self._stage_of(broker)))
-        self.assert_private_temp_empty()
+        self.assert_no_stage_left()
         self.assert_trees_untouched()
 
     def test_a_cancelled_build_still_removes_the_stage(self) -> None:
@@ -456,7 +522,7 @@ class BuildStageCleanupTest(_StageTestCase):
 
         self.assertEqual(broker.stage_views, [self.fixture.expected_stage()])
         self.assertFalse(os.path.lexists(self._stage_of(broker)))
-        self.assert_private_temp_empty()
+        self.assert_no_stage_left()
         self.assert_trees_untouched()
 
     def _refuse_link_removal(self) -> list[str]:
@@ -513,11 +579,14 @@ class BuildStageCleanupTest(_StageTestCase):
 
 class BuildStageFailsClosedTest(_StageTestCase):
     def _assert_refused_before_the_broker(
-        self, broker: _RecordingBroker, error: dayz_test_worker.DayzTestWorkerError
+        self,
+        broker: _RecordingBroker,
+        error: dayz_test_worker.DayzTestWorkerError,
+        code: str,
     ) -> None:
-        self.assertEqual(error.code, "build_source_unavailable")
+        self.assertEqual(error.code, code)
         self.assertEqual(broker.kinds, [])
-        self.assert_private_temp_empty()
+        self.assert_no_stage_left()
         self.assert_trees_untouched()
 
     def test_a_junction_that_cannot_be_created_fails_before_the_broker(self) -> None:
@@ -537,7 +606,9 @@ class BuildStageFailsClosedTest(_StageTestCase):
 
         # The mod's junction was made, the next one failed: both are gone.
         self.assertEqual(len(calls), 2)
-        self._assert_refused_before_the_broker(broker, raised.exception)
+        self._assert_refused_before_the_broker(
+            broker, raised.exception, "build_stage_unavailable"
+        )
 
     def test_a_link_that_is_not_the_junction_asked_for_fails_closed(self) -> None:
         real_create = _winapi.CreateJunction
@@ -551,7 +622,9 @@ class BuildStageFailsClosedTest(_StageTestCase):
                 with mock.patch.object(_winapi, "CreateJunction", create):
                     with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
                         self._execute(broker)
-                self._assert_refused_before_the_broker(broker, raised.exception)
+                self._assert_refused_before_the_broker(
+                    broker, raised.exception, "build_stage_unavailable"
+                )
 
     def test_a_file_the_scan_cannot_read_fails_before_the_broker(self) -> None:
         unreadable = ntpath.normcase(str(self.fixture.source / "data" / "skin.rvmat"))
@@ -567,7 +640,9 @@ class BuildStageFailsClosedTest(_StageTestCase):
             with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
                 self._execute(broker)
 
-        self._assert_refused_before_the_broker(broker, raised.exception)
+        self._assert_refused_before_the_broker(
+            broker, raised.exception, "build_source_unavailable"
+        )
 
     def test_a_parent_that_cannot_be_listed_fails_before_the_broker(self) -> None:
         parent = ntpath.normcase(str(self.fixture.parent))
@@ -584,7 +659,186 @@ class BuildStageFailsClosedTest(_StageTestCase):
                 self._execute(broker)
 
         # Asserted once os.scandir is real again: the snapshot lists the parent too.
-        self._assert_refused_before_the_broker(broker, raised.exception)
+        self._assert_refused_before_the_broker(
+            broker, raised.exception, "build_source_unavailable"
+        )
+
+
+class PrivateTempTest(_StageTestCase):
+    """Review R1, F1: the stage goes into the launcher's private TEMP or nowhere.
+
+    tempfile.gettempdir() tries other folders when TEMP is unusable, and a stage
+    there, with its junctions to real folders, could outlive a failed cleanup
+    outside the folder its owner removes.
+    """
+
+    def _fallback_folders(self) -> set[str]:
+        # Every folder tempfile would try, the working folder, and the decoy.
+        return {
+            *tempfile._candidate_tempdir_list(),
+            os.getcwd(),
+            str(self.fixture.decoy_temp),
+            str(self.fixture.private_temp),
+        }
+
+    def test_an_unusable_private_temp_fails_closed_and_makes_no_stage_anywhere(self) -> None:
+        private_temp = str(self.fixture.private_temp)
+        cases = (
+            ("TEMP unset", None, private_temp),
+            ("TEMP missing", str(self.fixture.root / "no-such-temp"), private_temp),
+            ("TEMP a file", str(self.fixture.temp_file), private_temp),
+            ("TEMP not the working folder", private_temp, str(self.fixture.elsewhere)),
+            ("TEMP not a local path", "relative-temp", private_temp),
+        )
+        for label, temp, cwd in cases:
+            with self.subTest(label), _worker_folders(temp, cwd):
+                folders = self._fallback_folders()
+                before = {folder: _stage_folders(folder) for folder in folders}
+                broker = _RecordingBroker()
+
+                with mock.patch.object(tempfile, "mkdtemp", wraps=tempfile.mkdtemp) as mkdtemp:
+                    with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+                        self._execute(broker)
+
+                self.assertEqual(raised.exception.code, "build_stage_unavailable")
+                self.assertEqual(broker.kinds, [])
+                self.assertEqual(mkdtemp.call_args_list, [])
+                self.assertEqual(
+                    {folder: _stage_folders(folder) - before[folder] for folder in folders},
+                    {folder: set() for folder in folders},
+                )
+                self.assert_no_stage_left()
+                self.assert_trees_untouched()
+
+    def test_a_stage_the_private_temp_cannot_hold_fails_closed(self) -> None:
+        broker = _RecordingBroker()
+        refusal = PermissionError(5, "simulated: access is denied")
+
+        with mock.patch.object(tempfile, "mkdtemp", side_effect=refusal) as mkdtemp:
+            with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+                self._execute(broker)
+
+        self.assertEqual(raised.exception.code, "build_stage_unavailable")
+        self.assertEqual(
+            [call.kwargs.get("dir") for call in mkdtemp.call_args_list],
+            [str(self.fixture.private_temp)],
+        )
+        self.assertEqual(broker.kinds, [])
+        self.assert_no_stage_left()
+        self.assert_trees_untouched()
+
+
+class SourceLinkTest(_StageTestCase):
+    """Review R1, F2: a link in the source leads only into the source or a staged root.
+
+    binarize follows links, so a junction inside the mod that leads to its
+    parent would put every sibling, and every config.cpp in them, back under
+    <stage>\\<basename>. The asset scan is given here: Path.rglob, which decides
+    pack_only, follows a junction loop until Windows' path limits, and it is not
+    what these tests are about.
+    """
+
+    def _junction(self, link: Path, target: Path) -> None:
+        _winapi.CreateJunction(str(target), str(link))
+        self.addCleanup(os.rmdir, str(link))
+        self.before = _snapshot(self.fixture.parent)
+
+    def _assert_refused(self, broker: _RecordingBroker) -> None:
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+            self._execute(broker, has_assets=lambda _source: True)
+        self.assertEqual(raised.exception.code, "build_source_link_outside")
+        self.assertEqual(broker.kinds, [])
+        self.assert_no_stage_left()
+        self.assert_trees_untouched()
+
+    def test_a_junction_to_the_parent_is_refused_before_the_broker(self) -> None:
+        # The parent holds Poisoned\config.cpp and every other sibling.
+        self._junction(self.fixture.source / "parent_alias", self.fixture.parent)
+
+        self._assert_refused(_RecordingBroker())
+
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+            dayz_test_worker._build_stage_plan(str(self.fixture.source))
+        self.assertEqual(raised.exception.code, "build_source_link_outside")
+
+    def test_a_junction_to_a_sibling_the_stage_leaves_out_is_refused(self) -> None:
+        self._junction(
+            self.fixture.source / "data" / "unrelated_alias",
+            self.fixture.parent / "Unrelated",
+        )
+
+        self._assert_refused(_RecordingBroker())
+
+    def test_junctions_inside_the_mod_or_into_a_staged_root_are_allowed(self) -> None:
+        source, parent = self.fixture.source, self.fixture.parent
+        self._junction(source / "data_alias", source / "data")
+        self._junction(source / "itself", source)
+        self._junction(source / "dz_alias", parent / "DZ")
+        self._junction(source / "data" / "heli_models", parent / "LFHeli" / "models")
+        broker = _RecordingBroker()
+
+        result = self._execute(broker, has_assets=lambda _source: True)
+
+        self.assertEqual(result, dayz_test_worker.WorkerResult(0, RUN_ID))
+        # The links add no root: the stage is the one the mod's references make.
+        self.assertEqual(broker.stage_views, [self.fixture.expected_stage()])
+        self.assert_no_stage_left()
+        self.assert_trees_untouched()
+
+    def test_a_symbolic_link_out_of_the_stage_is_refused(self) -> None:
+        outside = self.fixture.parent / "Unrelated"
+        for label, link, target, is_dir in (
+            ("to a file", self.fixture.source / "note.txt", outside / "note.txt", False),
+            ("to a folder", self.fixture.source / "unrelated_dir", outside, True),
+        ):
+            with self.subTest(label):
+                try:
+                    os.symlink(str(target), str(link), target_is_directory=is_dir)
+                except OSError as error:
+                    self.skipTest(f"this host cannot create a symbolic link: {error}")
+                try:
+                    self.before = _snapshot(self.fixture.parent)
+                    self._assert_refused(_RecordingBroker())
+                finally:
+                    # The link, never its target.
+                    (os.rmdir if is_dir else os.unlink)(str(link))
+
+
+class LinkKindTest(unittest.TestCase):
+    def test_only_junctions_and_symbolic_links_are_links(self) -> None:
+        # A OneDrive placeholder is a reparse point too, with a cloud tag: SimpleGroup
+        # held 22 of them on 2026-10-01, and they are files to read, not links.
+        cloud = 0x9000001A
+        for label, mode, tag, expected in (
+            ("junction", stat.S_IFDIR, stat.IO_REPARSE_TAG_MOUNT_POINT, True),
+            ("symbolic link", stat.S_IFLNK, stat.IO_REPARSE_TAG_SYMLINK, True),
+            ("OneDrive file placeholder", stat.S_IFREG, cloud, False),
+            ("OneDrive folder placeholder", stat.S_IFDIR, cloud | 0x1000, False),
+            ("plain file", stat.S_IFREG, 0, False),
+            ("plain folder", stat.S_IFDIR, 0, False),
+        ):
+            with self.subTest(label):
+                info = types.SimpleNamespace(st_mode=mode | 0o644, st_reparse_tag=tag)
+                self.assertIs(dayz_test_worker._is_link(info), expected)
+
+
+class StageCodesTest(unittest.TestCase):
+    def test_the_stage_codes_reach_the_caller_unchanged(self) -> None:
+        for code in ("build_stage_unavailable", "build_source_link_outside"):
+            with self.subTest(code):
+                self.assertIn(code, dayz_test_worker.WORKER_ERROR_CODES)
+                dayz_test_worker.DayzTestWorkerError(code)
+                terminal = _terminal(
+                    {
+                        "cleanup_degraded": False,
+                        "error_code": code,
+                        "exit_code": 2,
+                        "ok": False,
+                        "run_id": None,
+                    }
+                )
+                parsed = dayz_test_tool.parse_worker_terminal(terminal, b"", 2)
+                self.assertEqual(parsed.error_code, code)
 
 
 if __name__ == "__main__":
