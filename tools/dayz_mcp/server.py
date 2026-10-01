@@ -2968,6 +2968,7 @@ async def execute_wait_for_box(
     time_fn: Callable[[], float] | None = None,
     poll_interval_s: float | None = None,
     abort_if: Callable[[dict[str, Any]], object] | None = None,
+    until: float | None = None,
 ) -> dict[str, Any]:
     """Wait until the box is free and this waiter is FIFO head.
 
@@ -2976,19 +2977,27 @@ async def execute_wait_for_box(
     require the caller to heartbeat. ``abort_if`` is checked after
     every status read; a truthy result ends the wait like a timeout
     (the caller still holds the ticket to leave the FIFO).
+
+    ``until`` is an absolute end in ``time_fn``'s clock that no reply can
+    stretch (the dayz_test_run re-queue, inbox 3997): it is checked before
+    each join and after each reply and claim, and once past it the wait
+    ends like a timeout, ticket handed back. Without it the deadline runs
+    from entry and a grant seen on the last reply still counts, as before.
     """
 
     sleeper = sleep_fn or asyncio.sleep
     clock = time_fn or time.monotonic
     interval = BOX_WAIT_POLL_S if poll_interval_s is None else poll_interval_s
     poll = max(float(interval), BOX_WAIT_MIN_POLL_S)
-    deadline = clock() + float(wait_s)
+    deadline = clock() + float(wait_s) if until is None else float(until)
     ticket: str | None = None
     box = empty_box(occupied=True)
     session_id = str(getattr(getattr(client, "identity", None), "session_id", "") or "")
     join_task: asyncio.Task[Any] | None = None
     try:
         while True:
+            if until is not None and clock() >= deadline:
+                return {"ok": False, "ticket": ticket, "box": box}
             wait_error = None
             async with client.tool_lock:
                 join_task = asyncio.create_task(
@@ -3033,6 +3042,10 @@ async def execute_wait_for_box(
                     if isinstance(reason, str):
                         payload["error"] = reason
                     return payload
+            if until is not None and clock() >= deadline:
+                # The reply came back after the end: a free box seen now is
+                # not a grant.
+                return {"ok": False, "ticket": ticket, "box": box}
             ready = (
                 isinstance(ticket, str)
                 and ticket
@@ -3051,6 +3064,10 @@ async def execute_wait_for_box(
                 if isinstance(claimed, dict):
                     box = _box_from_status(claimed)
                     holds_claim = claimed.get("box_claimed") is not False
+                if holds_claim and until is not None and clock() >= deadline:
+                    # Claimed too late: the caller releases the ticket, and
+                    # with it the claim.
+                    return {"ok": False, "ticket": ticket, "box": box}
                 if holds_claim:
                     return {"ok": True, "ticket": ticket, "box": box}
             remaining = deadline - clock()
@@ -3950,18 +3967,27 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     if remaining_s > 0.0:
                         requeued = True
                         waited = await execute_wait_for_box(
-                            client, remaining_s, abort_if=abort
+                            client,
+                            remaining_s,
+                            abort_if=abort,
+                            time_fn=clock,
+                            until=box_wait_deadline,
                         )
                         ticket = waited.get("ticket")
                         box_ticket = ticket if isinstance(ticket, str) else None
                         if not waited.get("ok"):
+                            # Out of budget, wherever the end fell (asleep, on
+                            # a late join or a late claim): the refusal this
+                            # call proved. A wait that ended for a reason of
+                            # its own answers from what it saw. The finally
+                            # releases the ticket, claimed or not.
+                            seen = (
+                                box_now
+                                if waited.get("error") is None
+                                else _box_from_status({"box": waited.get("box")})
+                            )
                             failed = wait_failed(
-                                waited,
-                                refused_answer(
-                                    result,
-                                    _box_from_status({"box": waited.get("box")}),
-                                    admitted_box,
-                                ),
+                                waited, refused_answer(result, seen, admitted_box)
                             )
                             failed["box_requeued"] = True
                             return annotated(failed)

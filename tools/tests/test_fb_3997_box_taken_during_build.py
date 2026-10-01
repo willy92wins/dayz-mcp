@@ -641,6 +641,101 @@ class BoxHeldByAnotherTest(unittest.TestCase):
                 self.assertFalse(self._held(box))
 
 
+class _ScriptedBoxClient:
+    """Answers a free box with this caller at the FIFO head.
+
+    The reply named by ``late`` ("join" or "claim") comes back after the test
+    clock has moved 10 s.
+    """
+
+    def __init__(self, clock: Clock, *, late: str | None = None) -> None:
+        self.identity = types.SimpleNamespace(
+            session_id="c0ffee00-1111-4222-8333-444455556666"
+        )
+        self.tool_lock = asyncio.Lock()
+        self.clock = clock
+        self.late = late
+        self.calls: list[str] = []
+
+    async def session_box_status(self, **kwargs: object) -> dict[str, object]:
+        if kwargs.get("done"):
+            kind = "done"
+        elif kwargs.get("claim"):
+            kind = "claim"
+        else:
+            kind = "join"
+        self.calls.append(kind)
+        if kind == self.late:
+            self.clock.advance(10.0)
+        claimed = kind == "claim"
+        box: dict[str, object] = {
+            "occupied": claimed,
+            "runs": [],
+            "foreign": [],
+            "queue": [{"session": self.identity.session_id[:12], "waiting_s": 0.0}],
+            "scan_known": True,
+            "port_scan_known": True,
+        }
+        reply: dict[str, object] = {"box": box, "box_ticket": "ticket-1"}
+        if claimed:
+            box["claimed_s"] = 0.0
+            reply["box_claimed"] = True
+        return reply
+
+
+class BoxWaitDeadlineTest(unittest.IsolatedAsyncioTestCase):
+    """execute_wait_for_box with and without an absolute end (until)."""
+
+    async def _wait(
+        self, *, late: str | None, until_s: float | None
+    ) -> tuple[dict[str, object], list[str]]:
+        clock = Clock()
+        clock.now = 1000.0
+        client = _ScriptedBoxClient(clock, late=late)
+        options: dict[str, object] = {"time_fn": clock, "poll_interval_s": 0.05}
+        if until_s is not None:
+            options["until"] = until_s
+        result = await server.execute_wait_for_box(client, 5.0, **options)
+        return result, client.calls
+
+    async def test_without_until_a_late_reply_still_grants_as_before(self) -> None:
+        for late in ("join", "claim"):
+            with self.subTest(late=late):
+                result, calls = await self._wait(late=late, until_s=None)
+                self.assertIs(result["ok"], True)
+                self.assertEqual(calls, ["join", "claim"])
+
+    async def test_with_until_a_late_join_reply_is_not_granted(self) -> None:
+        result, calls = await self._wait(late="join", until_s=1005.0)
+
+        self.assertIs(result["ok"], False)
+        self.assertNotIn("error", result)
+        # Handed back, like a timeout's, for the caller to leave the FIFO.
+        self.assertEqual(result["ticket"], "ticket-1")
+        self.assertEqual(calls, ["join"])
+
+    async def test_with_until_a_late_claim_reply_is_not_granted(self) -> None:
+        result, calls = await self._wait(late="claim", until_s=1005.0)
+
+        self.assertIs(result["ok"], False)
+        self.assertNotIn("error", result)
+        self.assertEqual(result["ticket"], "ticket-1")
+        self.assertEqual(calls, ["join", "claim"])
+
+    async def test_with_until_already_past_nothing_joins(self) -> None:
+        result, calls = await self._wait(late=None, until_s=999.0)
+
+        self.assertIs(result["ok"], False)
+        self.assertIsNone(result["ticket"])
+        self.assertEqual(calls, [])
+
+    async def test_with_until_a_reply_in_time_is_granted(self) -> None:
+        result, calls = await self._wait(late=None, until_s=1005.0)
+
+        self.assertIs(result["ok"], True)
+        self.assertEqual(calls, ["join", "claim"])
+
+
 class BoxTakenDuringBuildTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self._build()
@@ -955,6 +1050,68 @@ class BoxTakenDuringBuildTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["occupied_by_session"], "a4317999-9c5")
         self.assertNotIn("box_requeued", payload)
         self.assertTrue(self._queue_empty())
+
+    async def _requeue_with_a_late_reply(self, *, late: str) -> dict[str, object]:
+        """The second FIFO wait gets a reply after wait_for_box_s has run out.
+
+        late="join": the second join answers late, with the box free by then.
+        late="claim": the second join answers in time over a free box, and
+        the claim answers late. The runtime clock is the test's.
+        """
+        clock = Clock()
+        clock.now = 1000.0
+        self._build(time_fn=clock)
+        box_status = self.runtime.session_box_status
+        rejoined: list[bool] = []
+
+        async def replies(**kwargs: object) -> dict[str, object]:
+            joining = kwargs.get("wait") and not (kwargs.get("ticket") or kwargs.get("done"))
+            if joining and self.box.joins == 1:
+                rejoined.append(True)
+                self.box.runs = []
+                if late == "join":
+                    clock.advance(10.0)
+            elif kwargs.get("claim") and rejoined and late == "claim":
+                clock.advance(10.0)
+            return await box_status(**kwargs)
+
+        self.runtime.session_box_status = replies
+
+        async def execute(attempt: int) -> dict[str, object]:
+            if attempt == 1:
+                self.box.runs = [dict(_TAKER_RUN)]
+                return _refused()
+            return _launched()
+
+        payload = await self._call(
+            execute, build=True, on_busy="queue", wait_for_box_s=5.0
+        )
+        self.assertEqual(rejoined, [True])
+        return payload
+
+    def _assert_the_proven_refusal(self, payload: dict[str, object]) -> None:
+        self.assertEqual(len(self.launches), 1)
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["error_code"], "active_run_exists")
+        self.assertEqual(payload["reason"], "box_taken_during_build")
+        self.assertEqual(payload["occupied_by_session"], "a4317999-9c5")
+        self.assertIsNone(payload["run_id"])
+        self.assertIs(payload["box_requeued"], True)
+        # The ticket of the second wait, claimed or not, is left behind.
+        self.assertTrue(self._queue_empty())
+        self.assertEqual(self.box.coordinator.box_claim_public()["claimed"], False)
+
+    async def test_a_late_second_join_reply_cannot_launch_past_the_budget(
+        self,
+    ) -> None:
+        self._assert_the_proven_refusal(
+            await self._requeue_with_a_late_reply(late="join")
+        )
+
+    async def test_a_late_claim_reply_cannot_launch_past_the_budget(self) -> None:
+        self._assert_the_proven_refusal(
+            await self._requeue_with_a_late_reply(late="claim")
+        )
 
     async def test_queue_without_contention_launches_once_with_its_build(self) -> None:
         async def execute(attempt: int) -> dict[str, object]:
