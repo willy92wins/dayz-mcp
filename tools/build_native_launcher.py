@@ -4,6 +4,7 @@ import argparse
 import ctypes
 import hashlib
 import json
+import math
 import ntpath
 import os
 import re
@@ -12,8 +13,10 @@ import stat
 import struct
 import subprocess
 import tempfile
+import time
 import urllib.request
 import zipfile
+from collections.abc import Callable, Sequence
 from ctypes import wintypes
 from pathlib import Path, PurePosixPath
 
@@ -93,6 +96,29 @@ class _FILE_ID_INFO(ctypes.Structure):
     _fields_ = [("VolumeSerialNumber", ctypes.c_ulonglong), ("FileId", ctypes.c_ubyte * 16)]
 
 
+# Restart Manager, RestartManager.h:24-30 and :87-102 (Windows SDK 10.0.26100.0).
+# cl.exe static_asserts on that header: sizeof(RM_PROCESS_INFO) == 668.
+_CCH_RM_SESSION_KEY = 32  # RM_SESSION_KEY_LEN * 2, sizeof(GUID) * 2
+_CCH_RM_MAX_APP_NAME = 255
+_CCH_RM_MAX_SVC_NAME = 63
+
+
+class _RM_UNIQUE_PROCESS(ctypes.Structure):
+    _fields_ = [("dwProcessId", wintypes.DWORD), ("ProcessStartTime", wintypes.FILETIME)]
+
+
+class _RM_PROCESS_INFO(ctypes.Structure):
+    _fields_ = [
+        ("Process", _RM_UNIQUE_PROCESS),
+        ("strAppName", wintypes.WCHAR * (_CCH_RM_MAX_APP_NAME + 1)),
+        ("strServiceShortName", wintypes.WCHAR * (_CCH_RM_MAX_SVC_NAME + 1)),
+        ("ApplicationType", ctypes.c_int),  # RM_APP_TYPE, a C enum
+        ("AppStatus", wintypes.ULONG),
+        ("TSSessionId", wintypes.DWORD),
+        ("bRestartable", wintypes.BOOL),
+    ]
+
+
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _kernel32.CreateFileW.argtypes = (
     wintypes.LPCWSTR,
@@ -120,6 +146,17 @@ _kernel32.GetFinalPathNameByHandleW.argtypes = (
     wintypes.DWORD,
 )
 _kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+# processthreadsapi.h:885-892 and :134-143.
+_kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+_kernel32.OpenProcess.restype = wintypes.HANDLE
+_kernel32.GetProcessTimes.argtypes = (
+    wintypes.HANDLE,
+    ctypes.POINTER(wintypes.FILETIME),
+    ctypes.POINTER(wintypes.FILETIME),
+    ctypes.POINTER(wintypes.FILETIME),
+    ctypes.POINTER(wintypes.FILETIME),
+)
+_kernel32.GetProcessTimes.restype = wintypes.BOOL
 
 _GENERIC_READ = 0x80000000
 _FILE_READ_ATTRIBUTES = 0x80
@@ -133,6 +170,9 @@ _FILE_STANDARD_INFO_CLASS = 1
 _FILE_ID_INFO_CLASS = 18
 _IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_ERROR_SUCCESS = 0
+_ERROR_MORE_DATA = 234
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -1034,7 +1074,468 @@ def _artifact_fingerprint(bundle: Path) -> dict[str, str]:
     }
 
 
-def _publish_bundle(staging: Path, output: Path, fingerprint: dict[str, str]) -> None:
+# A step Windows refuses because the tree is in use: WinError 5
+# (ERROR_ACCESS_DENIED, a directory with an open file inside) or 32
+# (ERROR_SHARING_VIOLATION, an open file), winerror.h:279 and :522. Both
+# arrive as PermissionError.
+_IN_USE_WINERRORS = frozenset({5, 32})
+# Removing a tree also waits out ERROR_DIR_NOT_EMPTY (winerror.h:1252): a file
+# deleted while another process keeps it open stays until that handle closes.
+_ERROR_DIR_NOT_EMPTY = 145
+_RENAME_RETRY_SECONDS = 10.0
+_RENAME_FIRST_DELAY = 0.05
+_RENAME_MAX_DELAY = 1.0
+_RM_LIST_FIRST = 16
+_RM_LIST_MAX = 1024
+# CPython options before -m (python -h): flags, and options whose value is the
+# next argument. That value is skipped, never read.
+_PYTHON_FLAGS = frozenset(
+    {"-b", "-bb", "-B", "-d", "-E", "-i", "-I", "-O", "-OO", "-P", "-q", "-s", "-S", "-u", "-v", "-x"}
+)
+_PYTHON_VALUE_OPTIONS = frozenset({"-W", "-X", "--check-hash-based-pycs"})
+_DAYZ_MCP_HINTS = {
+    "--client": "dayz_mcp --client",
+    "--daemon": "dayz_mcp --daemon",
+    "--embedded": "dayz_mcp --embedded",
+}
+
+_HolderLookup = Callable[[list[str]], list[dict[str, object]]]
+
+
+def _restart_manager() -> ctypes.WinDLL:
+    """Bind the four Restart Manager calls the holder diagnosis makes.
+
+    Loaded on first use, so an absent or blocked rstrtmgr.dll costs only the
+    diagnosis. RmShutdown and RmRestart are never bound: nothing here can
+    stop or signal a process. Each call returns a Win32 error code.
+    """
+    library = ctypes.WinDLL("rstrtmgr")
+    # RestartManager.h:150-154: RmStartSession(DWORD *pSessionHandle,
+    # DWORD dwSessionFlags, WCHAR strSessionKey[CCH_RM_SESSION_KEY + 1]).
+    library.RmStartSession.argtypes = (ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, wintypes.LPWSTR)
+    library.RmStartSession.restype = wintypes.DWORD
+    # :206-214: RmRegisterResources(DWORD dwSessionHandle, UINT nFiles,
+    # LPCWSTR rgsFileNames[], UINT nApplications, RM_UNIQUE_PROCESS
+    # rgApplications[], UINT nServices, LPCWSTR rgsServiceNames[]).
+    library.RmRegisterResources.argtypes = (
+        wintypes.DWORD,
+        wintypes.UINT,
+        ctypes.POINTER(wintypes.LPCWSTR),
+        wintypes.UINT,
+        ctypes.POINTER(_RM_UNIQUE_PROCESS),
+        wintypes.UINT,
+        ctypes.POINTER(wintypes.LPCWSTR),
+    )
+    library.RmRegisterResources.restype = wintypes.DWORD
+    # :239-245: RmGetList(DWORD dwSessionHandle, UINT *pnProcInfoNeeded,
+    # UINT *pnProcInfo, RM_PROCESS_INFO rgAffectedApps[], LPDWORD lpdwRebootReasons).
+    library.RmGetList.argtypes = (
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.UINT),
+        ctypes.POINTER(wintypes.UINT),
+        ctypes.POINTER(_RM_PROCESS_INFO),
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    library.RmGetList.restype = wintypes.DWORD
+    # :185-186: RmEndSession(DWORD dwSessionHandle).
+    library.RmEndSession.argtypes = (wintypes.DWORD,)
+    library.RmEndSession.restype = wintypes.DWORD
+    return library
+
+
+def _filetime(value: wintypes.FILETIME) -> int:
+    return (int(value.dwHighDateTime) << 32) | int(value.dwLowDateTime)
+
+
+def _restart_manager_holders(paths: Sequence[str]) -> list[dict[str, object]]:
+    """The processes the Restart Manager sees holding any of ``paths``.
+
+    One session: RmStartSession, RmRegisterResources with the files,
+    RmGetList, RmEndSession. It sees processes with a file open, which is how
+    a dayz_mcp client holds the bundle: load_verified_bundle keeps every
+    closure file open with FILE_SHARE_READ. A call that fails raises OSError;
+    the caller reports the holders as unknown.
+    """
+    library = _restart_manager()
+    session = wintypes.DWORD(0)
+    key = ctypes.create_unicode_buffer(_CCH_RM_SESSION_KEY + 1)
+    status = library.RmStartSession(ctypes.byref(session), 0, key)
+    if status != _ERROR_SUCCESS:
+        raise ctypes.WinError(status)
+    try:
+        names = (wintypes.LPCWSTR * len(paths))(*paths)
+        status = library.RmRegisterResources(session.value, len(paths), names, 0, None, 0, None)
+        if status != _ERROR_SUCCESS:
+            raise ctypes.WinError(status)
+        capacity = _RM_LIST_FIRST
+        while True:
+            infos = (_RM_PROCESS_INFO * capacity)()
+            needed = wintypes.UINT(0)
+            filled = wintypes.UINT(capacity)
+            reasons = wintypes.DWORD(0)
+            status = library.RmGetList(
+                session.value,
+                ctypes.byref(needed),
+                ctypes.byref(filled),
+                infos,
+                ctypes.byref(reasons),
+            )
+            # The list can grow between two calls: read it again, larger each
+            # time and never past _RM_LIST_MAX.
+            if status == _ERROR_MORE_DATA and capacity < needed.value <= _RM_LIST_MAX:
+                capacity = needed.value
+                continue
+            if status != _ERROR_SUCCESS:
+                raise ctypes.WinError(status)
+            if filled.value > capacity:
+                raise ValueError("restart_manager_list_overflow")
+            break
+    finally:
+        library.RmEndSession(session.value)
+    return [
+        _named_holder(
+            int(info.Process.dwProcessId),
+            _filetime(info.Process.ProcessStartTime),
+            info.strServiceShortName,
+        )
+        for info in infos[: filled.value]
+    ]
+
+
+def _image_and_argv(pid: int, started: int) -> tuple[str | None, list[str] | None]:
+    """Image path and argv of ``pid``, while it is the process that started at ``started``.
+
+    Read while a query handle pins the pid, which Windows does not reuse while
+    a handle to the process is open, so they cannot belong to a newer process.
+    """
+    handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None, None
+    try:
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if not _kernel32.GetProcessTimes(handle, *(ctypes.byref(item) for item in times)):
+            return None, None
+        if _filetime(times[0]) != started:
+            return None, None
+        from dayz_mcp import native_process_snapshot
+
+        return (
+            native_process_snapshot.full_image_path_of(pid),
+            native_process_snapshot.command_argv_of(pid),
+        )
+    finally:
+        _kernel32.CloseHandle(handle)
+
+
+def _named_holder(pid: int, started: int, service: str) -> dict[str, object]:
+    """One holder: its pid, its image name and a fixed hint.
+
+    The image name is read from the process while it is still the one that
+    held the file, else it is "unknown"; the Restart Manager's friendly name
+    never stands in for it. The hint is a dayz_mcp mode (_command_hint), or
+    the service short name the Restart Manager reports for a service.
+    """
+    holder: dict[str, object] = {
+        "pid": pid,
+        "image": "unknown",
+        "command_hint": f"service {service}" if service else None,
+    }
+    try:
+        image, argv = _image_and_argv(pid, started)
+    except Exception:
+        return holder
+    if image:
+        holder["image"] = ntpath.basename(image)
+    hint = _command_hint(argv)
+    if hint:
+        holder["command_hint"] = hint
+    return holder
+
+
+def _command_hint(argv: object) -> str | None:
+    """``dayz_mcp --client`` (or ``--daemon``, ``--embedded``) for a dayz_mcp process, else None.
+
+    No text of argv reaches the error, and a command line can carry a token:
+    those three fixed strings are the only hints. One is given only when
+    ``-m dayz_mcp`` sits where the interpreter reads its module switch, after
+    interpreter options alone (the value of -W, -X or --check-hash-based-pycs
+    is skipped, so it can pose neither as a script nor as -m), and exactly one
+    of the three mode flags follows it.
+    """
+    if type(argv) is not list or not all(type(item) is str for item in argv):
+        return None
+    index = 1
+    while index < len(argv) and argv[index] != "-m":
+        option = argv[index]
+        if option in _PYTHON_VALUE_OPTIONS:
+            index += 2
+        elif option in _PYTHON_FLAGS or (option[:2] in ("-W", "-X") and len(option) > 2):
+            index += 1
+        else:
+            return None  # a script, -c, or an option this does not know: not a module run
+    if argv[index + 1 : index + 2] != ["dayz_mcp"]:
+        return None
+    modes = [item for item in argv[index + 2 :] if item in _DAYZ_MCP_HINTS]
+    return _DAYZ_MCP_HINTS[modes[0]] if len(modes) == 1 else None
+
+
+def _holder_text(holder: dict[str, object]) -> str:
+    text = f"pid {holder['pid']} {holder['image']}"
+    return f"{text} ({holder['command_hint']})" if holder.get("command_hint") else text
+
+
+def _holders_text(holders: list[dict[str, object]] | None, unknown: str | None) -> str:
+    if holders:
+        return "held by " + ", ".join(_holder_text(item) for item in holders)
+    return f"holders unknown: {unknown}"
+
+
+class BundleInUseError(PermissionError):
+    """A step of the publish stayed refused as in use past its retry budget.
+
+    ``step`` says what was refused ("renaming A to B", "removing A") and
+    ``path`` is the tree that could not be moved or removed. ``holders``
+    lists the processes the Restart Manager saw holding its files ({"pid",
+    "image", "command_hint"}), or is None when they could not be listed. The
+    last refusal is the ``__cause__``, and its errno and winerror are this
+    error's own: it stays a PermissionError, so code that caught the bare
+    refusal still catches it.
+    """
+
+    def __init__(
+        self,
+        step: str,
+        path: Path,
+        waited: float,
+        holders: list[dict[str, object]] | None,
+        unknown: str | None,
+        refusal: OSError,
+    ) -> None:
+        self.step = step
+        self.path = path
+        self.holders = holders
+        code = getattr(refusal, "winerror", None)
+        refused = f"WinError {code}" if code else type(refusal).__name__
+        remedy = (
+            "Close or reopen the MCP client sessions among them, let the other holders finish"
+            if holders
+            else "Close or reopen the MCP client sessions that use this bundle"
+        )
+        super().__init__(
+            f"bundle_in_use: {step} was refused for {waited:.1f} s ({refused}); "
+            f"{_holders_text(holders, unknown)}. {remedy}, then publish again. "
+            "Nothing was stopped or signalled."
+        )
+        self.errno = refusal.errno
+        self.winerror = code
+
+
+def _tree_files(root: Path) -> list[str]:
+    """Absolute paths of the regular files under ``root``, or of ``root`` itself."""
+    if root.is_symlink() or not root.exists():
+        return []
+    if not root.is_dir():
+        return [str(root.absolute())]
+    return sorted(
+        str(path.absolute())
+        for path in root.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+
+
+def _valid_holder(value: object) -> bool:
+    return (
+        type(value) is dict
+        and type(value.get("pid")) is int
+        and type(value.get("image")) is str
+        and (value.get("command_hint") is None or type(value.get("command_hint")) is str)
+    )
+
+
+def _bundle_holders(
+    roots: Sequence[Path], find_holders: _HolderLookup
+) -> tuple[list[dict[str, object]] | None, str | None]:
+    """Who holds files under ``roots``: (holders, None), or (None, why they are unknown).
+
+    The lookup only adds to the refusal being reported. When it fails or
+    answers something malformed, the holders are unknown; it never raises.
+    """
+    try:
+        files = [name for root in roots for name in _tree_files(root)]
+        if not files:
+            return None, "no file of the bundle was found to look up"
+        holders = find_holders(files)
+    except Exception as error:
+        return None, f"the lookup failed ({type(error).__name__}: {error})"
+    if type(holders) is not list or not all(_valid_holder(item) for item in holders):
+        return None, "the holder list was malformed"
+    if not holders:
+        return [], "the Restart Manager named no process"
+    return sorted(holders, key=lambda item: item["pid"]), None
+
+
+def _refused_in_use(error: OSError) -> bool:
+    return isinstance(error, PermissionError) or getattr(error, "winerror", None) in _IN_USE_WINERRORS
+
+
+class _Retry:
+    """How long a step Windows refuses as in use is retried, and who is asked why."""
+
+    def __init__(
+        self,
+        seconds: float,
+        find_holders: _HolderLookup,
+        monotonic: Callable[[], float],
+        sleep: Callable[[float], None],
+    ) -> None:
+        self.seconds = seconds
+        self.find_holders = find_holders
+        self.monotonic = monotonic
+        self.sleep = sleep
+
+    def budget(self) -> _Budget:
+        return _Budget(self)
+
+
+class _Budget:
+    """One step's retries: wait() sleeps before the next attempt, False once spent.
+
+    The waits double from 0.05 s up to 1 s and never sleep past the budget.
+    """
+
+    def __init__(self, retry: _Retry) -> None:
+        self.retry = retry
+        self.started = retry.monotonic()
+        self.delay = _RENAME_FIRST_DELAY
+
+    def wait(self) -> bool:
+        remaining = self.started + self.retry.seconds - self.retry.monotonic()
+        if not remaining > 0:
+            return False
+        self.retry.sleep(min(self.delay, remaining))
+        self.delay = min(self.delay * 2, _RENAME_MAX_DELAY)
+        return True
+
+    def refused(self, step: str, path: Path, refusal: OSError) -> BundleInUseError:
+        """The error for a step still refused: the holders of ``path``, the refusal as cause."""
+        waited = self.retry.monotonic() - self.started
+        holders, unknown = _bundle_holders((path,), self.retry.find_holders)
+        return BundleInUseError(step, path, waited, holders, unknown, refusal)
+
+
+def _replace_when_free(source: Path, destination: Path, retry: _Retry) -> None:
+    """os.replace, retried while Windows refuses it as in use.
+
+    Any other error is raised at once, unchanged. Past the budget,
+    BundleInUseError names the holders of ``source``.
+    """
+    budget = retry.budget()
+    while True:
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as error:
+            if not _refused_in_use(error):
+                raise
+            if not budget.wait():
+                raise budget.refused(f"renaming {source} to {destination.name}", source, error) from error
+
+
+def _remove_once(tree: Path) -> None:
+    """Remove ``tree`` in one attempt that never waits.
+
+    It first removes all it can, so only what is held stays, then removes the
+    rest or raises why it cannot.
+    """
+    shutil.rmtree(tree, ignore_errors=True)
+    if tree.exists():
+        shutil.rmtree(tree)
+
+
+def _remove_when_free(tree: Path, retry: _Retry) -> None:
+    """_remove_once, retried while Windows refuses it as in use.
+
+    Any other error is raised at once. Past the budget, BundleInUseError
+    names the holders of what stays.
+    """
+    budget = retry.budget()
+    while True:
+        try:
+            _remove_once(tree)
+            return
+        except OSError as error:
+            if not (_refused_in_use(error) or getattr(error, "winerror", None) == _ERROR_DIR_NOT_EMPTY):
+                raise
+            if not budget.wait():
+                raise budget.refused(f"removing {tree}", tree, error) from error
+
+
+def _stranded_note(previous: Path, output: Path, failure: OSError, retry: _Retry) -> str:
+    """The note for a put-back that failed: tried once, never waited for."""
+    code = getattr(failure, "winerror", None)
+    refused = f"WinError {code}" if code else f"{type(failure).__name__}: {failure}"
+    if _refused_in_use(failure):
+        holders, unknown = _bundle_holders((previous,), retry.find_holders)
+        refused = f"{refused}; {_holders_text(holders, unknown)}"
+        verb = "was refused"
+    else:
+        verb = "failed"
+    return (
+        f"putting the last valid bundle back {verb}: renaming {previous} to {output.name} "
+        f"({refused}). It was tried once and not waited for, so that no wait happens while "
+        f"{output} is missing: the last valid bundle is in {previous}, and the next publish "
+        "moves it back first"
+    )
+
+
+def _swap_when_free(incoming: Path, output: Path, previous: Path, retry: _Retry) -> None:
+    """Move ``output`` to ``previous`` and ``incoming`` to ``output``, the pair retried in one budget.
+
+    A refused second rename puts ``previous`` back at once, so every wait
+    happens with ``output`` in place: a reader meanwhile finds the last
+    bundle, never none (review of 7672). That put-back is tried once and never
+    waited for. If it fails too, the swap stops at once with no wait: the
+    bundle stays in ``previous``, the error says so in a note, and the next
+    publish moves it back first. ``output`` is missing only between two
+    renames that both succeed, or from such a stop on.
+    """
+    budget = retry.budget()
+    while True:
+        step, held = f"renaming {output} to {previous.name}", output
+        try:
+            if output.exists():
+                os.replace(output, previous)
+            step, held = f"renaming {incoming} to {output.name}", incoming
+            os.replace(incoming, output)
+            return
+        except BaseException as error:
+            stranded = None
+            if previous.exists() and not output.exists():
+                try:
+                    os.replace(previous, output)
+                except OSError as failure:
+                    stranded = failure
+            in_use = isinstance(error, OSError) and _refused_in_use(error)
+            if in_use and stranded is None and budget.wait():
+                continue
+            final = budget.refused(step, held, error) if in_use else error
+            if stranded is not None:
+                final.add_note(_stranded_note(previous, output, stranded, retry))
+            if final is error:
+                raise
+            raise final from error
+
+
+def _publish_bundle(
+    staging: Path,
+    output: Path,
+    fingerprint: dict[str, str],
+    *,
+    retry_seconds: float = _RENAME_RETRY_SECONDS,
+    find_holders: _HolderLookup | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
     """Swap a verified staging bundle into ``output`` without renaming across volumes.
 
     Staging lives under %TEMP%, which can be on another drive than the output;
@@ -1046,33 +1547,66 @@ def _publish_bundle(staging: Path, output: Path, fingerprint: dict[str, str]) ->
     so between the two renames only ``.previous`` holds it; a publish stopped
     there is repaired by the next one, which restores ``.previous`` before
     anything else (review of #114, F2).
+
+    A live MCP client keeps the bundle it loaded open (load_verified_bundle),
+    and Windows refuses to rename it: WinError 5, or 32 for a file (inbox
+    7672). The swap is retried as a pair within ``retry_seconds``, and a
+    refused second rename puts ``.previous`` back at once, so every wait
+    happens with ``output`` in place. If that put-back is refused too, the
+    publish stops at once and nothing waits while ``output`` is missing: the
+    bundle stays in ``.previous``, the copy gets one removal attempt, and the
+    next publish moves the bundle back first. Removing a leftover tree is
+    otherwise retried like a rename. Past the budget, BundleInUseError names
+    the tree, the refusal and the processes the Restart Manager sees holding
+    its files, with the refusal as its cause. Diagnosis only: nothing is
+    stopped or signalled. A copy that cannot be removed is named on the error
+    being raised, and the next publish removes it first.
     """
+    if not 0 <= retry_seconds < math.inf:
+        raise ValueError("rename_retry_budget")
+    retry = _Retry(
+        retry_seconds,
+        _restart_manager_holders if find_holders is None else find_holders,
+        monotonic,
+        sleep,
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     incoming = output.with_name(output.name + ".incoming")
     previous = output.with_name(output.name + ".previous")
     if previous.exists() and not output.exists():
-        os.replace(previous, output)
+        _replace_when_free(previous, output, retry)
     for stale in (incoming, previous):
         if stale.exists():
-            shutil.rmtree(stale)
+            _remove_when_free(stale, retry)
     try:
         shutil.copytree(staging, incoming)
         verify_bundle(incoming, require_receipt=False)
         if _artifact_fingerprint(incoming) != fingerprint:
             raise ValueError("final_copy_mismatch")
-    except BaseException:
-        shutil.rmtree(incoming, ignore_errors=True)
-        raise
-    if output.exists():
-        os.replace(output, previous)
-    try:
-        os.replace(incoming, output)
-    except BaseException:
-        if previous.exists() and not output.exists():
-            os.replace(previous, output)
+        _swap_when_free(incoming, output, previous, retry)
+    except BaseException as error:
+        if incoming.exists():
+            try:
+                if previous.exists() and not output.exists():
+                    # The swap stopped with the last bundle in .previous: no wait now.
+                    _remove_once(incoming)
+                else:
+                    _remove_when_free(incoming, retry)
+            except Exception as leftover:
+                error.add_note(
+                    f"the copy in {incoming} could not be removed ({leftover}); "
+                    "the next publish removes it first"
+                )
         raise
     if previous.exists():
-        shutil.rmtree(previous)
+        try:
+            _remove_when_free(previous, retry)
+        except Exception as error:
+            error.add_note(
+                f"the new bundle is already published in {output}; the next publish "
+                f"removes {previous} first"
+            )
+            raise
 
 
 def verify_reproducibility_receipt(
