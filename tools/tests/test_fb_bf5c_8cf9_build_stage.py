@@ -20,6 +20,7 @@ removed with os.rmdir.
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import json
 import ntpath
@@ -101,6 +102,11 @@ def _is_junction(path: str) -> bool:
 def _link_target(path: str) -> str:
     value = os.readlink(path)
     return value[4:] if value.startswith("\\\\?\\") else value
+
+
+def _real(path: object) -> str:
+    """The resolved folder a stage junction points at, case-folded for comparison."""
+    return ntpath.normcase(os.path.realpath(os.fspath(path)))
 
 
 def _snapshot(root: Path) -> dict[str, tuple[bool, int, int]]:
@@ -253,10 +259,14 @@ class _Fixture:
             'string path = "\\NotScanned\\data\\x.paa";\n', encoding="ascii"
         )
 
-    def expected_stage(self) -> dict[str, tuple[bool, str, bool]]:
-        expected = {MOD: (True, ntpath.normcase(str(self.source)), True)}
-        for name in EXPECTED_ROOTS:
-            expected[name] = (True, ntpath.normcase(str(self.parent / name)), True)
+    def expected_stage(
+        self, *names: str, targets: dict[str, Path] | None = None
+    ) -> dict[str, tuple[bool, str, bool]]:
+        """The stage for this fixture, plus the extra roots a test adds by name."""
+        expected = {MOD: (True, _real(self.source), True)}
+        for name in (*EXPECTED_ROOTS, *names):
+            target = (targets or {}).get(name, self.parent / name)
+            expected[name] = (True, _real(target), True)
         return expected
 
     def policy(self) -> dayz_test_request.RequestProjectPolicy:
@@ -362,6 +372,17 @@ class _StageTestCase(unittest.TestCase):
         self.assertEqual(len(broker.addon_payloads), 1, broker.addon_payloads)
         return ntpath.dirname(str(broker.addon_payloads[0]["source"]))
 
+    def _junction(self, link: Path, target: Path) -> None:
+        """A junction inside the test's folder, removed with os.rmdir at the end."""
+        _winapi.CreateJunction(str(target), str(link))
+        self.addCleanup(os.rmdir, str(link))
+        self.before = _snapshot(self.fixture.parent)
+
+    def _write(self, path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="ascii")
+        self.before = _snapshot(self.fixture.parent)
+
     def assert_trees_untouched(self) -> None:
         self.assertEqual(_snapshot(self.fixture.parent), self.before)
 
@@ -444,9 +465,9 @@ class ReferencedRootTest(_StageTestCase):
         plan = dayz_test_worker._build_stage_plan(str(self.fixture.source))
 
         self.assertEqual(
-            plan,
-            ((MOD, str(self.fixture.source)),)
-            + tuple((name, str(self.fixture.parent / name)) for name in EXPECTED_ROOTS),
+            [(name, ntpath.normcase(target)) for name, target in plan],
+            [(MOD, _real(self.fixture.source))]
+            + [(name, _real(self.fixture.parent / name)) for name in EXPECTED_ROOTS],
         )
         # The mod's own \StageMod\... reference does not add it a second time.
         self.assertEqual(len({name.casefold() for name, _target in plan}), len(plan))
@@ -465,7 +486,7 @@ class ReferencedRootTest(_StageTestCase):
                 source = self.fixture.root / ("case-" + root) / MOD
                 (source / relative).parent.mkdir(parents=True, exist_ok=True)
                 (source / relative).write_bytes(data)
-                roots, links = dayz_test_worker._scan_source(str(source))
+                roots, links = dayz_test_worker._scan_tree(str(source))
                 self.assertEqual(roots, {root})
                 self.assertEqual(links, ())
 
@@ -482,10 +503,14 @@ class ReferencedRootTest(_StageTestCase):
         )
         (source / "notes.c").write_bytes(b'"\\NotScanned\\x.paa"\n')
 
-        roots, _links = dayz_test_worker._scan_source(str(source))
+        roots, _links = dayz_test_worker._scan_tree(str(source))
 
         self.assertEqual(roots & {"docs", "backup", "notscanned", "loose", "loose.paa"}, set())
-        self.assertEqual(dayz_test_worker._build_stage_plan(str(source)), ((MOD, str(source)),))
+        self.assertEqual(
+            [(name, ntpath.normcase(target)) for name, target in
+             dayz_test_worker._build_stage_plan(str(source))],
+            [(MOD, _real(source))],
+        )
 
 
 class BuildStageCleanupTest(_StageTestCase):
@@ -627,11 +652,11 @@ class BuildStageFailsClosedTest(_StageTestCase):
                 )
 
     def test_a_file_the_scan_cannot_read_fails_before_the_broker(self) -> None:
-        unreadable = ntpath.normcase(str(self.fixture.source / "data" / "skin.rvmat"))
+        unreadable = _real(self.fixture.source / "data" / "skin.rvmat")
         real_open = open
 
         def guarded_open(file: object, *args: object, **kwargs: object) -> object:
-            if isinstance(file, (str, os.PathLike)) and ntpath.normcase(os.fspath(file)) == unreadable:
+            if isinstance(file, (str, os.PathLike)) and _real(file) == unreadable:
                 raise PermissionError(13, "simulated: the file is locked", os.fspath(file))
             return real_open(file, *args, **kwargs)
 
@@ -738,11 +763,6 @@ class SourceLinkTest(_StageTestCase):
     what these tests are about.
     """
 
-    def _junction(self, link: Path, target: Path) -> None:
-        _winapi.CreateJunction(str(target), str(link))
-        self.addCleanup(os.rmdir, str(link))
-        self.before = _snapshot(self.fixture.parent)
-
     def _assert_refused(self, broker: _RecordingBroker) -> None:
         with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
             self._execute(broker, has_assets=lambda _source: True)
@@ -802,6 +822,172 @@ class SourceLinkTest(_StageTestCase):
                 finally:
                     # The link, never its target.
                     (os.rmdir if is_dir else os.unlink)(str(link))
+
+
+class ClosureTest(_StageTestCase):
+    """Review R2: every root is checked before any stage exists, and the plan is a closure.
+
+    F1: a root that is itself a junction in the parent (Bridge -> <parent>) put
+    every sibling back under the stage. F2: a link from the mod into an allowed
+    root hid that root's own references (First naming \\Second\\...). The
+    vanilla roots are DayZ Tools' own extraction and are never read.
+    """
+
+    def _assert_refused(self, broker: _RecordingBroker) -> None:
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+            self._execute(broker)
+        self.assertEqual(raised.exception.code, "build_source_link_outside")
+        self.assertEqual(broker.kinds, [])
+        self.assert_no_stage_left()
+        self.assert_trees_untouched()
+
+    def _assert_built(self, broker: _RecordingBroker, expected: dict[str, object]) -> None:
+        result = self._execute(broker)
+        self.assertEqual(result, dayz_test_worker.WorkerResult(0, RUN_ID))
+        self.assertEqual(broker.stage_views, [expected])
+        self.assert_no_stage_left()
+        self.assert_trees_untouched()
+
+    def test_a_root_that_is_a_junction_to_the_parent_is_refused_before_the_broker(self) -> None:
+        self._write(
+            self.fixture.source / "cfg" / "bridge.hpp", '#include "\\Bridge\\cfg\\bridge.hpp"\n'
+        )
+        self._junction(self.fixture.parent / "Bridge", self.fixture.parent)
+
+        self._assert_refused(_RecordingBroker())
+
+    def test_a_vanilla_root_that_is_a_junction_to_the_parent_or_above_is_refused(self) -> None:
+        for name, target in (("gui", self.fixture.parent), ("system", self.fixture.root)):
+            with self.subTest(name):
+                link = self.fixture.parent / name
+                _winapi.CreateJunction(str(target), str(link))
+                try:
+                    self.before = _snapshot(self.fixture.parent)
+                    self._assert_refused(_RecordingBroker())
+                finally:
+                    os.rmdir(str(link))
+
+    def test_a_source_that_resolves_to_its_parent_is_refused(self) -> None:
+        loop = self.fixture.parent / "LoopMod"
+        self._junction(loop, self.fixture.parent)
+
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+            dayz_test_worker._build_stage_plan(str(loop))
+
+        self.assertEqual(raised.exception.code, "build_source_link_outside")
+        self.assert_trees_untouched()
+
+    def test_a_source_reached_through_a_junction_guards_the_parent_it_resolves_in(self) -> None:
+        # projects\JunctionMod -> real-projects\RealMod, whose neighbours are
+        # the siblings that a root resolving to real-projects would expose.
+        real_parent = self.fixture.root / "real-projects"
+        real_mod = real_parent / "RealMod"
+        self._write(real_parent / "Neighbour" / "config.cpp", "class CfgPatches {};\n")
+        self._write(real_mod / "config.cpp", 'class M { model = "\\RealParent\\m.p3d"; };\n')
+        source = self.fixture.parent / "JunctionMod"
+        self._junction(source, real_mod)
+        self._junction(self.fixture.parent / "RealParent", real_parent)
+
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+            dayz_test_worker._build_stage_plan(str(source))
+        self.assertEqual(raised.exception.code, "build_source_link_outside")
+
+        # Without that reference the source is staged where it resolves.
+        self._write(real_mod / "config.cpp", 'class M { model = "\\JunctionMod\\m.p3d"; };\n')
+        plan = dayz_test_worker._build_stage_plan(str(source))
+        self.assertEqual(plan[0][0], "JunctionMod")
+        self.assertEqual(ntpath.normcase(plan[0][1]), _real(real_mod))
+        self.assertNotIn("RealParent", {name for name, _target in plan})
+        self.assert_trees_untouched()
+
+    def test_a_link_into_a_staged_root_brings_that_roots_own_references(self) -> None:
+        source, parent = self.fixture.source, self.fixture.parent
+        self._write(source / "data" / "first.rvmat", 'class F { texture = "\\First\\data\\f.paa"; };\n')
+        self._write(
+            parent / "First" / "config.cpp",
+            'class CfgVehicles { class StageFirst { model = "\\Second\\models\\y.p3d"; }; };\n',
+        )
+        (parent / "Second" / "models").mkdir(parents=True)
+        self._junction(source / "alias", parent / "First")
+
+        self._assert_built(_RecordingBroker(), self.fixture.expected_stage("First", "Second"))
+
+    def test_the_closure_follows_references_root_by_root(self) -> None:
+        source, parent = self.fixture.source, self.fixture.parent
+        self._write(source / "data" / "level.rvmat", 'class L { texture = "\\Level1\\data\\a.paa"; };\n')
+        self._write(parent / "Level1" / "data" / "next.rvmat", 'class L { texture = "\\Level2\\b.paa"; };\n')
+        self._write(parent / "Level2" / "cfg" / "next.hpp", '#include "\\Level3\\cfg\\c.hpp"\n')
+        (parent / "Level3").mkdir()
+        self.before = _snapshot(parent)
+
+        self._assert_built(
+            _RecordingBroker(), self.fixture.expected_stage("Level1", "Level2", "Level3")
+        )
+
+    def test_a_link_inside_a_staged_root_to_a_left_out_sibling_is_refused(self) -> None:
+        self._junction(self.fixture.parent / "LFHeli" / "escape", self.fixture.parent / "Unrelated")
+
+        self._assert_refused(_RecordingBroker())
+
+    def test_a_root_that_is_a_junction_elsewhere_is_staged_under_its_own_name(self) -> None:
+        source, parent = self.fixture.source, self.fixture.parent
+        remote = self.fixture.root / "assets" / "RemoteData"
+        self._write(remote / "remote.rvmat", 'class R { texture = "\\Second\\data\\r.paa"; };\n')
+        (parent / "Second").mkdir()
+        self._write(source / "data" / "remote.rvmat", 'class M { texture = "\\Remote\\data\\m.paa"; };\n')
+        self._junction(parent / "Remote", remote)
+
+        # Remote keeps its name and points at the folder that was checked; its
+        # own files are scanned there, which brings Second.
+        self._assert_built(
+            _RecordingBroker(),
+            self.fixture.expected_stage("Remote", "Second", targets={"Remote": remote}),
+        )
+
+    def test_each_tree_is_read_once_and_no_vanilla_root_is_read(self) -> None:
+        source, parent = self.fixture.source, self.fixture.parent
+        # Read, these vanilla files would bring Unrelated and Poisoned.
+        self._write(parent / "DZ" / "data" / "dz.rvmat", 'class D { texture = "\\Unrelated\\u.paa"; };\n')
+        self._write(parent / "Scripts" / "config.cpp", 'class CfgPatches { model = "\\Poisoned\\p.p3d"; };\n')
+        # Shared is named as Shared and as SharedAlias, and a link in the mod
+        # leads into it; Inner resolves inside the mod.
+        self._write(parent / "Shared" / "shared.rvmat", 'class S { texture = "\\Other\\o.paa"; };\n')
+        self._write(
+            source / "data" / "alias.rvmat",
+            'class A { texture = "\\SharedAlias\\s.paa"; other = "\\Inner\\i.paa"; };\n',
+        )
+        self._junction(parent / "SharedAlias", parent / "Shared")
+        self._junction(parent / "Inner", source / "data")
+        self._junction(source / "shared_link", parent / "Shared")
+        opened: collections.Counter[str] = collections.Counter()
+        real_open = open
+
+        def counting_open(file: object, *args: object, **kwargs: object) -> object:
+            if isinstance(file, (str, os.PathLike)):
+                opened[_real(file)] += 1
+            return real_open(file, *args, **kwargs)
+
+        with mock.patch("builtins.open", counting_open):
+            plan = dayz_test_worker._build_stage_plan(str(source))
+
+        self.assertEqual(
+            dict(opened),
+            {
+                _real(path): 1
+                for path in (
+                    source / "config.cpp",
+                    source / "cfg" / "base.hpp",
+                    source / "data" / "skin.rvmat",
+                    source / "data" / "model.p3d",
+                    source / "data" / "alias.rvmat",
+                    parent / "Shared" / "shared.rvmat",
+                )
+            },
+        )
+        names = {name for name, _target in plan}
+        self.assertTrue({"Shared", "SharedAlias", "Inner", "DZ", "Scripts"} <= names, names)
+        self.assertFalse({"Unrelated", "Poisoned"} & names, names)
+        self.assert_trees_untouched()
 
 
 class LinkKindTest(unittest.TestCase):

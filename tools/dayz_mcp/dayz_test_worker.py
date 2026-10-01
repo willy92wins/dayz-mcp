@@ -661,9 +661,14 @@ def _default_has_assets(source: str) -> bool:
 # \dz\... paths and the vanilla config classes through -addon (2026-10-01,
 # SimpleGroup: T1_FlagKit.p3d was 55 221 B built from DayZ Projects, 43 376 B
 # alone in a parent, and byte-identical to the former with a DZ junction beside
-# the mod). A link inside the source would lead binarize out of the stage again
-# through <stage>\<basename>, so a source holding one that resolves outside the
-# source and the stage's roots is refused (review R1, F2).
+# the mod). binarize follows links, so the stage refuses anything that would
+# lead it out again: a root or the source that resolves to the parent or above,
+# and a junction or symbolic link, in the source or in a root it scans, that
+# resolves outside the source and the stage's roots (reviews R1 and R2).
+#
+# Trust boundary: the vanilla roots are DayZ Tools' own extraction, tens of GB.
+# Each is checked where it resolves, like any root, but never scanned: neither
+# their files nor the links inside them are examined.
 _BUILD_STAGE_PREFIX = "dayz-mcp-build-"
 _VANILLA_ROOTS = frozenset(
     {"dz", "bin", "scripts", "gui", "graphics", "system", "languagecore"}
@@ -709,21 +714,22 @@ def _is_link(info: os.stat_result) -> bool:
     )
 
 
-def _scan_source(
-    source: str,
+def _scan_tree(
+    tree: str, skip: tuple[str, ...] = ()
 ) -> tuple[frozenset[str], tuple[tuple[str, str], ...]]:
-    """What the source's own tree says about the stage it needs.
+    """What one folder tree says about the stage it needs.
 
     The first components, casefolded, of the asset paths its scanned files
     name; and (path, resolved target) for every junction and symbolic link in
     it. A link is recorded and never followed: whether binarize may follow it
-    is decided once the stage's roots are known, in _build_stage_plan. Without
-    links the walk is a tree, and every scanned file is read once. OSError when
-    a listing or a read fails.
+    is decided once the stage's roots are known, in _build_stage_plan. A folder
+    in skip (a tree scanned already, or a vanilla root) is not entered, so
+    every file is read once at most. OSError when a listing or a read fails.
     """
+    skipped = {ntpath.normcase(folder) for folder in skip}
     roots: set[str] = set()
     links: list[tuple[str, str]] = []
-    pending = [source]
+    pending = [tree]
     while pending:
         folder = pending.pop()
         with os.scandir(folder) as entries:
@@ -731,7 +737,8 @@ def _scan_source(
                 if _is_link(entry.stat(follow_symlinks=False)):
                     links.append((entry.path, os.path.realpath(entry.path)))
                 elif entry.is_dir(follow_symlinks=False):
-                    pending.append(entry.path)
+                    if ntpath.normcase(entry.path) not in skipped:
+                        pending.append(entry.path)
                 elif (
                     ntpath.splitext(entry.name)[1].casefold() in _REFERENCE_SCAN_SUFFIXES
                     and entry.is_file(follow_symlinks=False)
@@ -752,42 +759,85 @@ def _is_within(path: str, folder: str) -> bool:
 
 
 def _build_stage_plan(source: str) -> tuple[tuple[str, str], ...]:
-    """(junction name, folder) for each junction of the stage, the source first.
+    """(junction name, resolved folder) for each junction of the stage, the source first.
 
     The source keeps its own name, so its \\<name>\\... paths resolve as they
-    did. Then, sorted, every folder directly in the source's parent that is a
-    vanilla root or the first component of an asset path the source's files
-    name, under its name on disk. Only those entries of the parent are looked
-    at, so a sibling the source does not need plays no part, readable or not.
+    did, and every root keeps its name on disk, sorted. The roots are the
+    vanilla roots present directly in the source's parent, and the closure of
+    the references: every folder directly in the parent whose name is the
+    first component of an asset path in the source's files, then in that
+    folder's own files, and so on until no new one appears. Each tree is
+    scanned once, where it resolves, and only the parent entries a vanilla
+    name or a reference names are looked at, so a sibling nothing needs plays
+    no part, readable or not. The vanilla roots are never scanned (the trust
+    boundary above).
 
-    binarize follows links, so every junction and symbolic link in the source
-    must resolve inside the source or inside one of those folders; otherwise
-    the build is refused with build_source_link_outside. A link to the parent
-    would put every sibling, and every config.cpp in them, back under the
-    stage. OSError when the source has no parent or a listing or a read fails.
+    binarize follows links. Before any stage exists, the build is refused with
+    build_source_link_outside when the source or a root resolves to the parent
+    or above (the parent the source path names, or the one the source resolves
+    in), which would put every sibling and its config.cpp back in view, or when
+    a junction or symbolic link in the source or in a scanned root resolves
+    outside the source and the roots. Each junction of the stage then points at
+    the folder that was checked. OSError when the source has no parent or a
+    listing or a read fails.
     """
     name = ntpath.basename(source)
     parent = ntpath.dirname(source)
     if not name or ntpath.normcase(parent) == ntpath.normcase(source):
         raise OSError("the build source has no parent folder")
-    referenced, links = _scan_source(source)
-    wanted = (_VANILLA_ROOTS | referenced) - {name.casefold()}
-    roots: list[str] = []
+    parent_real = os.path.realpath(parent)
+    source_real = os.path.realpath(source)
+    # The parent where the source path names it, and the one it resolves in: a
+    # folder resolving to either, or above, holds the siblings.
+    guarded = (parent_real, ntpath.dirname(source_real))
+
+    def exposes_siblings(folder: str) -> bool:
+        return any(_is_within(parent_folder, folder) for parent_folder in guarded)
+
+    if exposes_siblings(source_real):
+        raise _failed("build_source_link_outside")
+    siblings: dict[str, list[os.DirEntry[str]]] = {}
     with os.scandir(parent) as entries:
         for entry in entries:
-            if entry.name.casefold() in wanted and entry.is_dir():
-                roots.append(entry.name)
-    roots.sort(key=lambda root: (root.casefold(), root))
-    plan = ((name, source),) + tuple(
-        (root, ntpath.join(parent, root)) for root in roots
-    )
-    reachable = tuple(os.path.realpath(folder) for _name, folder in plan)
+            if entry.name.casefold() != name.casefold():
+                siblings.setdefault(entry.name.casefold(), []).append(entry)
+    roots: dict[str, str] = {}
+    trusted: list[str] = []
+    pending: list[str] = [source_real]
+
+    def admit(key: str) -> None:
+        # Checked before anything inside the root is read.
+        for entry in siblings.pop(key, ()):
+            if not entry.is_dir():
+                continue
+            resolved = os.path.realpath(entry.path)
+            if exposes_siblings(resolved):
+                raise _failed("build_source_link_outside")
+            roots[entry.name] = resolved
+            (trusted if key in _VANILLA_ROOTS else pending).append(resolved)
+
+    for key in sorted(_VANILLA_ROOTS):
+        admit(key)
+    scanned: list[str] = []
+    links: list[tuple[str, str]] = []
+    while pending:
+        tree = pending.pop(0)
+        known = (*scanned, *trusted)
+        if scanned and any(_is_within(tree, folder) for folder in known):
+            continue  # read already as part of a scanned tree, or a vanilla root
+        referenced, found = _scan_tree(tree, known)
+        scanned.append(tree)
+        links.extend(found)
+        for key in sorted(referenced):
+            admit(key)
+    reachable = (source_real, *roots.values())
     if any(
         not any(_is_within(target, folder) for folder in reachable)
         for _link, target in links
     ):
         raise _failed("build_source_link_outside")
-    return plan
+    ordered = sorted(roots, key=lambda root: (root.casefold(), root))
+    return ((name, source_real),) + tuple((root, roots[root]) for root in ordered)
 
 
 def _is_junction(path: str) -> bool:
@@ -870,8 +920,9 @@ def _staged_build_source(source: str) -> Iterator[str]:
     AddonBuilder starts, and never falling back to the source itself, the build
     fails with build_stage_unavailable when the private TEMP is unusable or a
     junction cannot be made or verified, with build_source_unavailable when the
-    source cannot be listed or read, and with build_source_link_outside when a
-    link in the source leads out of the stage. On the way out, whatever the
+    source or a root it needs cannot be listed or read, and with
+    build_source_link_outside when the source, a root or a link in them would
+    lead binarize out of the stage. On the way out, whatever the
     build did, the junctions and then the emptied stage are removed; a removal
     that fails does not replace the build's own result.
     """
