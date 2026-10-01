@@ -409,6 +409,28 @@ def _input_trigger_detail(result: dict[str, Any]) -> str:
     return "; ".join(parts)
 
 
+# player_move fills its reply before refusing (MCPClientBridge.c
+# DispatchPlayerMove). Only a known released_by crosses, and only on the two
+# codes that are about a release: not_held (the last release, when there was
+# one) and aborted (what ended the hold first).
+_PLAYER_MOVE_RELEASED_BY = frozenset(
+    {"hold", "phase", "ttl", "arrived", "restore", "player_changed", "shutdown"}
+)
+_PLAYER_MOVE_RELEASE_CODES = frozenset({"not_held", "aborted"})
+
+
+def _player_move_detail(result: dict[str, Any]) -> str:
+    if str(result.get("error") or "") not in _PLAYER_MOVE_RELEASE_CODES:
+        return ""
+    report = result.get("player_move")
+    if not isinstance(report, dict):
+        return ""
+    released_by = report.get("released_by")
+    if isinstance(released_by, str) and released_by in _PLAYER_MOVE_RELEASED_BY:
+        return f"observed=released_by={released_by}"
+    return ""
+
+
 def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     """Diagnostics the bridge filled BEFORE deciding the error, as message text.
 
@@ -433,6 +455,9 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     (exists/locked/in_active_inputs for input_not_drivable, released_by for
     not_held and aborted). The name it resolved is caller input and stays out.
 
+    player_move is the fifth: not_held and aborted carry observed=released_by=
+    with a known release cause, and nothing else crosses.
+
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
     clicked=false, and a world_spawn timeout has to stay "timeout". The click
@@ -451,6 +476,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _vehicle_door_missing_detail(result)
     if cmd == "input_trigger":
         return _input_trigger_detail(result)
+    if cmd == "player_move":
+        return _player_move_detail(result)
     if cmd not in _UI_ECHO_VERBS:
         return ""
     parts: list[str] = []
@@ -487,8 +514,9 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # _bridge_error_detail; other verbs keep the bare code except
     # vehicle_prepare_fixture/fixture_not_ready, which carries the
     # observed= telemetry allowlist the bridge already filled,
-    # vehicle_door/door_missing, which carries the empty slot, and
-    # input_trigger, whose refusals carry reason= and observed=.
+    # vehicle_door/door_missing, which carries the empty slot,
+    # input_trigger, whose refusals carry reason= and observed=, and
+    # player_move, whose not_held and aborted carry observed=released_by=.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
     if code in {"binding_retired", "run_not_owned"}:

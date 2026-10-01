@@ -115,6 +115,7 @@ from dayz_mcp.session_coordination import (
 )
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
 from dayz_mcp import anim_timeline as anim_timeline_contract
+from dayz_mcp import player_move as player_move_contract
 from dayz_mcp import player_trace as player_trace_contract
 # Moved out of this module unchanged (backlog 71fc) and imported back, so
 # dayz_mcp.server.<name> is still the same object for every name it had.
@@ -320,6 +321,9 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "dayz_knowledge_status",
     "dayz_knowledge_prepare",
     "dayz_test_run",
+    # A mistyped direction (heading=90 for heading_deg) must not walk the
+    # player straight ahead: an unknown key is refused, not dropped.
+    "player_move",
 )
 
 
@@ -5617,6 +5621,136 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         )
         async with runtime.tool_lock:
             return await runtime.call_bridge("input_trigger", args, "client", timeout)
+
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Walk, jog or sprint the local on-foot player with no "
+        "OS input and no window focus, through the engine's own move command: "
+        "the owner client sets HumanInputController.OverrideMovementSpeed and "
+        "OverrideMovementAngle ENABLED from the local player's CommandHandler "
+        "every tick and, in multiplayer, sends a request (ScriptInputUserData) "
+        "on which the server applies the same two overrides to its copy of the "
+        "player in every move it consumes (ConsumeMove) and in its "
+        "CommandHandler. Each side sets DISABLED only what it enabled when the "
+        "move ends. The camera is not turned and nothing is teleported or "
+        "aligned. speed is walk, jog or sprint (OverrideMovementSpeed 1, 2, "
+        "3); the engine may still use a slower gait, for example sprint at a "
+        "non-zero angle or without stamina (player_trace's movement_idx shows "
+        "the gait used). Direction, at most one of: angle_deg in [-180, 180], "
+        "degrees relative to the current heading, 0 straight ahead; "
+        "heading_deg in [0, 360), a compass heading (0 north = +Z, 90 east = "
+        "+X); to=[x, y, z], walked to on the horizontal plane until within "
+        f"arrive_radius_m ({player_move_contract.ARRIVE_RADIUS_MIN_M:g}.."
+        f"{player_move_contract.ARRIVE_RADIUS_MAX_M:g}, default "
+        f"{player_move_contract.ARRIVE_RADIUS_DEFAULT_M:g}, used only with "
+        f"to) and at most {player_move_contract.TO_MAX_DISTANCE_M:g} m away "
+        "(bad_to). None means angle_deg=0; more than one is bad_args. "
+        "heading_deg and to become an angle relative to the heading again on "
+        "every tick, on each side from its own heading and position. The "
+        "override's angle is taken as degrees, positive to the right, from "
+        "HumanCommandMove's movement angles (human.c:439-445): not yet "
+        "measured in game. A small arrive_radius_m at jog or sprint can circle "
+        "the point until hold_s or ttl_s ends the move. phase=hold (default) "
+        "moves until hold_s (required, 0 < hold_s <= "
+        f"{player_move_contract.HOLD_MAX_S:g}) or, with to, the arrival, then "
+        "answers after the release; the tool waits at least hold_s + "
+        f"{player_move_contract.HOLD_SLACK_S:g} s. A hold occupies this "
+        "session's tool calls until it answers: the tool keeps this session's "
+        "tool lock while it waits, so neither phase=release nor "
+        "restore_gameplay from this session can cut it short. To stop a move "
+        "early from this session, use phase=press and then phase=release. "
+        "phase=press starts and answers at once with release_due_s; the move "
+        "stops on phase=release, its ttl_s (required, 0 < ttl_s <= "
+        f"{player_move_contract.PRESS_MAX_TTL_S:g}), the arrival, "
+        "restore_gameplay, a death, unconsciousness, restraint, seat or change "
+        "of the local player, or the bridge shutting down. phase=release stops "
+        "the active press; with none it is not_held, with "
+        "observed=released_by=... of the last release. One move at a time: a "
+        "hold or press while one runs is player_move_busy. A hold answers "
+        "aborted, with observed=released_by=..., only when something other "
+        "than this session ended it first: a death, unconsciousness, "
+        "restraint, seat or change of the local player (player_changed), a "
+        "restore run by a still-running job of an earlier call (restore), or "
+        "the hold outliving hold_s + "
+        f"{player_move_contract.HOLD_SLACK_S:g} s (ttl). The server refusing "
+        "its copy does not end the client's hold: the client walks alone, is "
+        "corrected back, and the server log says accepted=0. If the mission "
+        "ends during a hold, the bridge drops the call and it times out. "
+        "Refused before anything moves: a player in a vehicle (seated), dead, "
+        "unconscious or restrained, without an input controller, or not in "
+        "the move command (swimming, falling, on a ladder: "
+        "not_in_move_command). The server checks every start before it "
+        "touches the move it runs, and a refused start leaves that move "
+        "running: a start whose move_id is not greater than every id this "
+        "player's server copy has seen is refused (stale_move_id), so a "
+        "duplicate or replayed start cannot re-arm a move, and the owner "
+        "sends the previous move's release before its next start. The "
+        "server copy stops on the owner's release of that move_id, its own "
+        "arrival check, a death, the owner's client being gone (no identity "
+        "left), and last on its deadman: the move's hold_s or ttl_s plus "
+        f"{player_move_contract.SERVER_DEADMAN_MARGIN_S:g} s from the "
+        "start's arrival, so a body whose client vanished without a release "
+        "walks at most the move's remaining seconds plus "
+        f"{player_move_contract.SERVER_DEADMAN_MARGIN_S:g} s. At shutdown the "
+        "client makes one best-effort attempt to send that release. The "
+        "server prints [DayZ_MCP] player_move server accepted=0|1 "
+        "move=<move_id> reason=..., released move=<move_id> reason=... and "
+        "ignored move=<move_id> reason=... in its script log. "
+        "server_request=sent means the request left the client, not that the "
+        "server accepted it; unavailable means the game is not a multiplayer "
+        "client, so the local overrides are the whole move. A full input "
+        "channel, or a previous move's release that cannot be sent yet, is "
+        "input_busy and moves neither side. The answer is "
+        "player_move: phase, speed and speed_value, direction with angle_deg, "
+        "heading_deg, or to and arrive_radius_m, move_id, start_pos, end_pos "
+        "and distance_m (horizontal, at the release), arrived, released_by "
+        "(hold, phase, ttl, arrived, restore, player_changed, which also "
+        "covers a death, unconsciousness, restraint or seat, or shutdown), "
+        "start_tick and release_tick (client bridge ticks, player_trace's "
+        "tick), start_tick_time_s, release_tick_time_s and release_due_s "
+        "(client GetTickTime seconds, player_trace's monotonic_s), "
+        "server_request, applied_angle_deg (the last angle passed to "
+        "OverrideMovementAngle on the client) and command_ticks (the client "
+        "CommandHandler ticks that applied the overrides). Positions are the "
+        "owner client's; the server's is query_all_players. Errors: bad_args, "
+        "bad_speed, bad_angle_deg, bad_heading_deg, bad_to, "
+        "bad_arrive_radius_m, bad_hold_s, bad_ttl_s, client_not_in_game, "
+        "no_player, player_dead, player_unconscious, player_restrained, "
+        "seated, no_input_controller, not_in_move_command, player_move_busy, "
+        "input_busy, not_held, aborted."
+    ))
+    async def player_move(
+        speed: StrictStr = "walk",
+        phase: StrictStr = "hold",
+        hold_s: StrictFloat | None = None,
+        ttl_s: StrictFloat | None = None,
+        angle_deg: StrictFloat | None = None,
+        heading_deg: StrictFloat | None = None,
+        to: list[StrictFloat] | None = None,
+        arrive_radius_m: StrictFloat = player_move_contract.ARRIVE_RADIUS_DEFAULT_M,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        try:
+            args = player_move_contract.normalize_request(
+                speed,
+                phase,
+                hold_s,
+                ttl_s,
+                angle_deg,
+                heading_deg,
+                to,
+                arrive_radius_m,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        timeout = _timeout(timeout_s)
+        if args["mode"] == "hold":
+            timeout = max(timeout, args["hold_s"] + player_move_contract.HOLD_SLACK_S)
+        async with runtime.tool_lock:
+            raw_result = await runtime.call_bridge("player_move", args, "client", timeout)
+        try:
+            return player_move_contract.normalize_bridge_result(raw_result)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Request a random local-player respawn through the "

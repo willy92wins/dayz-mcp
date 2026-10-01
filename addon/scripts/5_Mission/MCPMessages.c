@@ -170,6 +170,14 @@ class MCPArgs
 	// absent key arrives as, leaves the economy lifetime alone (see the class comment).
 	float lifetime_s;
 	bool lifetime_s_set;
+	// player_move (c1cb). mode is hold, press or release (phase is object_anim's
+	// float). speed (1 walk, 2 jog, 3 sprint), heading (compass degrees, 0 north),
+	// to, radius (the arrive radius), hold_s and hold_ttl_s are reused without
+	// their _set flags: each phase and direction travels as one exact shape and
+	// the bridge refuses the 0 an absent key reads as. direction is angle,
+	// heading or to, and angle_deg the relative angle of direction angle.
+	string direction;
+	float angle_deg;
 
 	void MCPArgs()
 	{
@@ -712,6 +720,62 @@ class MCPInputTrigger
 	}
 };
 
+// player_move payload (c1cb). phase echoes the request. speed is walk, jog or
+// sprint and speed_value the OverrideMovementSpeed value (1, 2, 3). direction is
+// angle, heading or to, with angle_deg, heading_deg, or to and arrive_radius_m
+// (the tool keeps only the fields of direction). move_id is the owner's id of
+// the move, the one the server's script log names. start_pos and end_pos are
+// the owner's PhysicsGetPositionWS at the start and at the release; distance_m
+// is the horizontal distance between them. arrived means the move ended inside
+// arrive_radius_m. released_by is hold, phase, ttl, arrived, restore,
+// player_changed or shutdown. start_tick and release_tick count client bridge
+// OnTick calls (the counter tick_dispatch and player_trace's tick report);
+// start_tick_time_s, release_tick_time_s and release_due_s (the scheduled end)
+// are client GetTickTime seconds, player_trace's monotonic_s. server_request is
+// sent or unavailable. applied_angle_deg is the last angle passed to
+// OverrideMovementAngle on the owner and command_ticks counts the owner's
+// CommandHandler ticks that applied the overrides. -1 marks an unset id, tick,
+// time or distance. Primitives only: no entity reference.
+class MCPPlayerMove
+{
+	string phase;
+	string speed;
+	float speed_value;
+	string direction;
+	float angle_deg;
+	float heading_deg;
+	ref array<float> to;
+	float arrive_radius_m;
+	int move_id;
+	ref array<float> start_pos;
+	ref array<float> end_pos;
+	float distance_m;
+	bool arrived;
+	string released_by;
+	int start_tick;
+	int release_tick;
+	float start_tick_time_s;
+	float release_tick_time_s;
+	float release_due_s;
+	string server_request;
+	float applied_angle_deg;
+	int command_ticks;
+
+	void MCPPlayerMove()
+	{
+		to = new array<float>();
+		start_pos = new array<float>();
+		end_pos = new array<float>();
+		move_id = -1;
+		distance_m = -1.0;
+		start_tick = -1;
+		release_tick = -1;
+		start_tick_time_s = -1.0;
+		release_tick_time_s = -1.0;
+		release_due_s = -1.0;
+	}
+};
+
 // world_spawn lifetime read-back (fb-20260930-080543-bd28), assigned only when
 // the command carried lifetime_s. remaining_s is GetLifetime() and max_s is
 // GetLifetimeMax() (entityai.c:3377-3387), both read when the reply is built.
@@ -834,6 +898,9 @@ class MCPResult
 	ref MCPWorldTime world_time;
 	// ui_click mode="complete" read-back. Unassigned in direct mode and on other commands.
 	ref MCPUiClickSequence click_sequence;
+	// player_move reply, also on its refusals once the phase is known.
+	// Unassigned on other commands.
+	ref MCPPlayerMove player_move;
 	// player_trace header and paged samples. Unassigned on other commands.
 	ref MCPPlayerTraceRead player_trace;
 };
@@ -874,6 +941,8 @@ class MCPJob
 	ref MCPWeaponAction weapon_action;
 	// input_trigger click or hold: the reply posted after the release.
 	ref MCPInputTrigger input_trigger;
+	// player_move hold: the reply posted after the release.
+	ref MCPPlayerMove player_move;
 };
 
 class MCPSpawnValidation
