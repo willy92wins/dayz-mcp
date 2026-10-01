@@ -142,6 +142,15 @@ class NativeBundleTest(unittest.TestCase):
             27: unknown,
             28: unknown,
             29: unknown,
+            30: unknown,
+            31: unknown,
+            32: unknown,
+            33: unknown,
+            34: unknown,
+            35: unknown,
+            36: unknown,
+            37: unknown,
+            38: unknown,
         }
         paths = {
             11: r"C:\bundle\python.exe",
@@ -196,6 +205,42 @@ class NativeBundleTest(unittest.TestCase):
                 r"C:\Windows\WinSxS\amd64_microsoft.windows.common-controls_"
                 r"6595b64144ccf1df_6.0.22621.6060_none_deadbeef\comctl32.dll"
             ),
+            30: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es_b77a5c561934e089\mscorlib.resources.dll"
+            ),
+            31: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL-evil\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es_b77a5c561934e089\mscorlib.resources.dll"
+            ),
+            32: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\Other.Resources"
+                r"\v4.0_4.0.0.0_es_b77a5c561934e089\mscorlib.resources.dll"
+            ),
+            33: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.1.0_es_b77a5c561934e089\mscorlib.resources.dll"
+            ),
+            34: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es_b77a5c561934e08A\mscorlib.resources.dll"
+            ),
+            35: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es_b77a5c561934e089\evil.dll"
+            ),
+            36: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es_b77a5c561934e089\sub\mscorlib.resources.dll"
+            ),
+            37: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es..evil_b77a5c561934e089\mscorlib.resources.dll"
+            ),
+            38: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es-MX_b77a5c561934e089\mscorlib.resources.dll"
+            ),
         }
         with patch.object(
             native_bundle, "_file_identity", side_effect=lambda handle: identities[handle]
@@ -221,6 +266,15 @@ class NativeBundleTest(unittest.TestCase):
             self.assertFalse(authority.approve_debug_image(27, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(28, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(29, event_kind="LOAD_DLL"))
+            self.assertTrue(authority.approve_debug_image(30, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(31, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(32, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(33, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(34, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(35, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(36, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(37, event_kind="LOAD_DLL"))
+            self.assertTrue(authority.approve_debug_image(38, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(11, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(12, event_kind="CREATE_PROCESS"))
             self.assertFalse(authority.approve_debug_image(11, event_kind="UNKNOWN"))

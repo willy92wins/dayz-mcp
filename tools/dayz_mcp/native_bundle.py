@@ -224,6 +224,52 @@ def _is_trusted_gac_microsoft_visual_basic(path: str, windows_directory: str) ->
     )
 
 
+def _is_trusted_gac_mscorlib_resource_satellite(
+    path: str, windows_directory: str
+) -> bool:
+    # mscorlib.resources.dll is the localized-exception satellite the .NET
+    # Framework tools load when the OS UI culture is not English. Observed on
+    # 2026-10-01 (gate #61 attempt, OS culture es):
+    #   GAC_MSIL\mscorlib.resources\v4.0_4.0.0.0_es_b77a5c561934e089\
+    #   mscorlib.resources.dll
+    # Same admin-protected GAC_MSIL tree as the Microsoft.VisualBasic pin
+    # above. The culture is part of the version directory name, so instead of
+    # pinning one exact path the version directory is validated field by
+    # field: fixed v4.0 / 4.0.0.0 / mscorlib's official key token, and a
+    # BCP-47-shaped culture of ASCII alnum subtags. Anything else (evil
+    # sibling directories, other assemblies, other versions, other tokens,
+    # other basenames, deeper nesting) stays rejected.
+    expected_prefix = ntpath.normpath(
+        ntpath.join(
+            windows_directory,
+            "Microsoft.NET",
+            "assembly",
+            "GAC_MSIL",
+            "mscorlib.resources",
+        )
+    )
+    normalized = ntpath.normpath(path)
+    prefix_with_separator = expected_prefix.casefold() + "\\"
+    if not normalized.casefold().startswith(prefix_with_separator):
+        return False
+    parts = normalized[len(expected_prefix) + 1 :].split("\\")
+    if len(parts) != 2 or parts[1].casefold() != "mscorlib.resources.dll":
+        return False
+    fields = parts[0].split("_")
+    if (
+        len(fields) != 4
+        or fields[0] != "v4.0"
+        or fields[1] != "4.0.0.0"
+        or fields[3] != "b77a5c561934e089"
+    ):
+        return False
+    subtags = fields[2].split("-")
+    return all(
+        subtag.isascii() and subtag.isalnum() and 1 <= len(subtag) <= 8
+        for subtag in subtags
+    )
+
+
 @dataclass(frozen=True)
 class DebugProcessDescriptor:
     kind: BrokerKind
@@ -280,6 +326,9 @@ class DebugImageAuthority:
             )
             or _is_trusted_winsxs_common_controls(path, str(windows_directory))
             or _is_trusted_gac_microsoft_visual_basic(path, str(windows_directory))
+            or _is_trusted_gac_mscorlib_resource_satellite(
+                path, str(windows_directory)
+            )
         )
 
     def approve_announced_process(
