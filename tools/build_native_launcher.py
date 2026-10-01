@@ -1284,6 +1284,12 @@ def _holder_text(holder: dict[str, object]) -> str:
     return f"{text} ({holder['command_hint']})" if holder.get("command_hint") else text
 
 
+def _holders_text(holders: list[dict[str, object]] | None, unknown: str | None) -> str:
+    if holders:
+        return "held by " + ", ".join(_holder_text(item) for item in holders)
+    return f"holders unknown: {unknown}"
+
+
 class BundleInUseError(PermissionError):
     """A step of the publish stayed refused as in use past its retry budget.
 
@@ -1310,15 +1316,15 @@ class BundleInUseError(PermissionError):
         self.holders = holders
         code = getattr(refusal, "winerror", None)
         refused = f"WinError {code}" if code else type(refusal).__name__
-        if holders:
-            who = "held by " + ", ".join(_holder_text(item) for item in holders)
-            remedy = "Close or reopen the MCP client sessions among them, let the other holders finish"
-        else:
-            who = f"holders unknown: {unknown}"
-            remedy = "Close or reopen the MCP client sessions that use this bundle"
+        remedy = (
+            "Close or reopen the MCP client sessions among them, let the other holders finish"
+            if holders
+            else "Close or reopen the MCP client sessions that use this bundle"
+        )
         super().__init__(
-            f"bundle_in_use: {step} was refused for {waited:.1f} s ({refused}); {who}. "
-            f"{remedy}, then publish again. Nothing was stopped or signalled."
+            f"bundle_in_use: {step} was refused for {waited:.1f} s ({refused}); "
+            f"{_holders_text(holders, unknown)}. {remedy}, then publish again. "
+            "Nothing was stopped or signalled."
         )
         self.errno = refusal.errno
         self.winerror = code
@@ -1435,20 +1441,27 @@ def _replace_when_free(source: Path, destination: Path, retry: _Retry) -> None:
                 raise budget.refused(f"renaming {source} to {destination.name}", source, error) from error
 
 
-def _remove_when_free(tree: Path, retry: _Retry) -> None:
-    """Remove ``tree``, retried while Windows refuses it as in use.
+def _remove_once(tree: Path) -> None:
+    """Remove ``tree`` in one attempt that never waits.
 
-    Each attempt first removes all it can, so only what is held stays, then
-    removes the rest or raises why it cannot. Any other error is raised at
-    once. Past the budget, BundleInUseError names the holders of what stays.
+    It first removes all it can, so only what is held stays, then removes the
+    rest or raises why it cannot.
+    """
+    shutil.rmtree(tree, ignore_errors=True)
+    if tree.exists():
+        shutil.rmtree(tree)
+
+
+def _remove_when_free(tree: Path, retry: _Retry) -> None:
+    """_remove_once, retried while Windows refuses it as in use.
+
+    Any other error is raised at once. Past the budget, BundleInUseError
+    names the holders of what stays.
     """
     budget = retry.budget()
     while True:
-        shutil.rmtree(tree, ignore_errors=True)
-        if not tree.exists():
-            return
         try:
-            shutil.rmtree(tree)
+            _remove_once(tree)
             return
         except OSError as error:
             if not (_refused_in_use(error) or getattr(error, "winerror", None) == _ERROR_DIR_NOT_EMPTY):
@@ -1457,15 +1470,34 @@ def _remove_when_free(tree: Path, retry: _Retry) -> None:
                 raise budget.refused(f"removing {tree}", tree, error) from error
 
 
+def _stranded_note(previous: Path, output: Path, failure: OSError, retry: _Retry) -> str:
+    """The note for a put-back that failed: tried once, never waited for."""
+    code = getattr(failure, "winerror", None)
+    refused = f"WinError {code}" if code else f"{type(failure).__name__}: {failure}"
+    if _refused_in_use(failure):
+        holders, unknown = _bundle_holders((previous,), retry.find_holders)
+        refused = f"{refused}; {_holders_text(holders, unknown)}"
+        verb = "was refused"
+    else:
+        verb = "failed"
+    return (
+        f"putting the last valid bundle back {verb}: renaming {previous} to {output.name} "
+        f"({refused}). It was tried once and not waited for, so that no wait happens while "
+        f"{output} is missing: the last valid bundle is in {previous}, and the next publish "
+        "moves it back first"
+    )
+
+
 def _swap_when_free(incoming: Path, output: Path, previous: Path, retry: _Retry) -> None:
     """Move ``output`` to ``previous`` and ``incoming`` to ``output``, the pair retried in one budget.
 
     A refused second rename puts ``previous`` back at once, so every wait
     happens with ``output`` in place: a reader meanwhile finds the last
-    bundle, never none (review of 7672, F2). ``output`` is missing only
-    between two renames that both succeed, or while that put-back is itself
-    refused; then the swap stops, and ``previous`` keeps the bundle for the
-    next publish.
+    bundle, never none (review of 7672). That put-back is tried once and never
+    waited for. If it fails too, the swap stops at once with no wait: the
+    bundle stays in ``previous``, the error says so in a note, and the next
+    publish moves it back first. ``output`` is missing only between two
+    renames that both succeed, or from such a stop on.
     """
     budget = retry.budget()
     while True:
@@ -1477,21 +1509,18 @@ def _swap_when_free(incoming: Path, output: Path, previous: Path, retry: _Retry)
             os.replace(incoming, output)
             return
         except BaseException as error:
-            stuck = None
+            stranded = None
             if previous.exists() and not output.exists():
                 try:
-                    _replace_when_free(previous, output, retry)
-                except Exception as failure:
-                    stuck = failure
+                    os.replace(previous, output)
+                except OSError as failure:
+                    stranded = failure
             in_use = isinstance(error, OSError) and _refused_in_use(error)
-            if in_use and stuck is None and budget.wait():
+            if in_use and stranded is None and budget.wait():
                 continue
             final = budget.refused(step, held, error) if in_use else error
-            if stuck is not None:
-                final.add_note(
-                    f"putting the last valid bundle back failed ({stuck}); it stays in "
-                    f"{previous}, and the next publish moves it back first"
-                )
+            if stranded is not None:
+                final.add_note(_stranded_note(previous, output, stranded, retry))
             if final is error:
                 raise
             raise final from error
@@ -1523,12 +1552,15 @@ def _publish_bundle(
     and Windows refuses to rename it: WinError 5, or 32 for a file (inbox
     7672). The swap is retried as a pair within ``retry_seconds``, and a
     refused second rename puts ``.previous`` back at once, so every wait
-    happens with ``output`` in place. Removing a leftover tree is retried the
-    same way. Past the budget, BundleInUseError names the tree, the refusal
-    and the processes the Restart Manager sees holding its files, with the
-    refusal as its cause. Diagnosis only: nothing is stopped or signalled. A
-    copy that cannot be removed is named on the error being raised, and the
-    next publish removes it first.
+    happens with ``output`` in place. If that put-back is refused too, the
+    publish stops at once and nothing waits while ``output`` is missing: the
+    bundle stays in ``.previous``, the copy gets one removal attempt, and the
+    next publish moves the bundle back first. Removing a leftover tree is
+    otherwise retried like a rename. Past the budget, BundleInUseError names
+    the tree, the refusal and the processes the Restart Manager sees holding
+    its files, with the refusal as its cause. Diagnosis only: nothing is
+    stopped or signalled. A copy that cannot be removed is named on the error
+    being raised, and the next publish removes it first.
     """
     if not 0 <= retry_seconds < math.inf:
         raise ValueError("rename_retry_budget")
@@ -1555,7 +1587,11 @@ def _publish_bundle(
     except BaseException as error:
         if incoming.exists():
             try:
-                _remove_when_free(incoming, retry)
+                if previous.exists() and not output.exists():
+                    # The swap stopped with the last bundle in .previous: no wait now.
+                    _remove_once(incoming)
+                else:
+                    _remove_when_free(incoming, retry)
             except Exception as leftover:
                 error.add_note(
                     f"the copy in {incoming} could not be removed ({leftover}); "

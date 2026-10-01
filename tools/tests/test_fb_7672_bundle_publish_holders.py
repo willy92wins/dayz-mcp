@@ -11,8 +11,11 @@ now retried for a bounded time. Past it, BundleInUseError names the tree, the
 refusal and the processes the Restart Manager sees holding its files, with the
 refusal as its cause. Nothing is stopped or signalled. On every path the last
 valid bundle stays in output or .previous; a refused second rename puts it back
-at once, so every wait happens with output in place. A copy that cannot be
-removed is reported on the error, and the next publish removes it first.
+at once, so every wait happens with output in place. If that put-back is
+refused too, the publish stops at once with no wait at all: the bundle stays in
+.previous, the error says so, and the next publish moves it back first. A copy
+that cannot be removed is reported on the error, and the next publish removes
+it first.
 """
 
 from __future__ import annotations
@@ -97,20 +100,28 @@ class _PublishFixture(unittest.TestCase):
         self.clock = _Clock()
         self.lookups: list[list[str]] = []
         self.renames: list[tuple[Path, Path]] = []
-        self.refusals: dict[tuple[Path, Path], float] = {}
+        # pair -> (renames still let through, refusals after them)
+        self.refusals: dict[tuple[Path, Path], tuple[int, float]] = {}
         self.removal_refusals: dict[Path, float] = {}
         self.removal_error = _held_file
         # (output exists, .previous exists) at every wait.
         self.states: list[tuple[bool, bool]] = []
+        # In order: ("rename", pair, refused) and ("sleep", output exists, .previous exists).
+        self.events: list[tuple[object, ...]] = []
         real_replace = os.replace
         real_rmtree = shutil.rmtree
 
         def replace(source: object, destination: object) -> None:
             pair = (Path(source), Path(destination))
+            through, refusals = self.refusals.get(pair, (0, 0))
+            refused = not through and refusals > 0
+            if through:
+                self.refusals[pair] = (through - 1, refusals)
+            elif refused:
+                self.refusals[pair] = (0, refusals - 1)
             self.renames.append(pair)
-            left = self.refusals.get(pair, 0)
-            if left:
-                self.refusals[pair] = left - 1
+            self.events.append(("rename", pair, refused))
+            if refused:
                 raise _sharing_violation(source, destination)
             real_replace(source, destination)
 
@@ -134,8 +145,8 @@ class _PublishFixture(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def refuse(self, source: Path, destination: Path, times: float = math.inf) -> None:
-        self.refusals[(source, destination)] = times
+    def refuse(self, source: Path, destination: Path, times: float = math.inf, after: int = 0) -> None:
+        self.refusals[(source, destination)] = (after, times)
 
     def refuse_removal(self, tree: Path, times: float = math.inf) -> None:
         self.removal_refusals[tree] = times
@@ -145,7 +156,9 @@ class _PublishFixture(unittest.TestCase):
         return [dict(item) for item in _HOLDERS]
 
     def sleep(self, seconds: float) -> None:
-        self.states.append((self.output.exists(), self.previous.exists()))
+        state = (self.output.exists(), self.previous.exists())
+        self.states.append(state)
+        self.events.append(("sleep", *state))
         self.clock.sleep(seconds)
 
     def publish(self, **overrides: object) -> None:
@@ -294,26 +307,64 @@ class RefusalPastTheBudgetTest(_PublishFixture):
         self.assert_bundle(self.output, b"old")
         self.assertEqual(self.siblings(), ["dayz-test-v1"])
 
-    def test_when_the_put_back_is_refused_too_previous_keeps_the_bundle(self) -> None:
+    def test_a_refused_put_back_stops_at_once_and_no_wait_follows_it(self) -> None:
+        # Review round 2, F1: no sleep may happen while output is missing. Two
+        # put-backs go through, each wait comes with output in place; the third
+        # is refused, tried once, and nothing waits after it.
         self.refuse(self.incoming, self.output)
-        self.refuse(self.previous, self.output)
+        self.refuse(self.previous, self.output, after=2)
 
         with self.assertRaises(build_native_launcher.BundleInUseError) as caught:
             self.publish()
 
+        put_backs = [
+            index for index, event in enumerate(self.events) if event[:2] == ("rename", (self.previous, self.output))
+        ]
+        self.assertEqual([self.events[index][2] for index in put_backs], [False, False, True])
+        self.assertEqual([event for event in self.events if event[0] == "sleep"], [("sleep", True, False)] * 2)
+        self.assertNotIn("sleep", [event[0] for event in self.events[put_backs[-1]:]])
+        # The refusal that started it is the error; the put-back refusal is a note.
         error = caught.exception
         self.assertEqual(error.path, self.incoming)
         self.assert_refusal(error, 5)
-        self.assertIn(str(self.previous), _notes(error))
-        self.assertIn("the next publish moves it back first", _notes(error))
-        # It stopped there: the swap is not tried again without output in place.
-        self.assertEqual(self.renames[:2], [(self.output, self.previous), (self.incoming, self.output)])
-        self.assertEqual(set(self.renames[2:]), {(self.previous, self.output)})
+        notes = _notes(error)
+        self.assertIn(f"putting the last valid bundle back was refused: renaming {self.previous} to dayz-test-v1", notes)
+        self.assertIn("WinError 5", notes)
+        self.assertIn("pid 4242 python.exe (dayz_mcp --client)", notes)
+        self.assertIn(f"the last valid bundle is in {self.previous}", notes)
+        self.assertIn("the next publish moves it back first", notes)
+        self.assertEqual(self.lookups[-1], _files(self.previous))
+        self.assertFalse(self.output.exists())
         self.assert_bundle(self.previous, b"old")
         self.assertEqual(self.siblings(), ["dayz-test-v1.previous"])
 
-        # The next publish moves it back before anything else.
+        # Released: the next publish moves it back before anything else.
         self.refusals.clear()
+        self.publish()
+
+        self.assert_bundle(self.output, b"app.pyz new")
+        self.assertEqual(self.siblings(), ["dayz-test-v1"])
+
+    def test_a_refused_put_back_leaves_a_held_copy_without_waiting_for_it(self) -> None:
+        self.refuse(self.incoming, self.output)
+        self.refuse(self.previous, self.output)
+        self.refuse_removal(self.incoming)
+
+        with self.assertRaises(build_native_launcher.BundleInUseError) as caught:
+            self.publish()
+
+        self.assertEqual(self.clock.slept, [])
+        self.assertEqual(self.renames.count((self.previous, self.output)), 1)
+        notes = _notes(caught.exception)
+        self.assertIn(f"the copy in {self.incoming} could not be removed", notes)
+        self.assertIn("WinError 32", notes)
+        self.assertIn("the next publish removes it first", notes)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.siblings(), ["dayz-test-v1.incoming", "dayz-test-v1.previous"])
+
+        # Released: the next publish puts the bundle back, removes the copy and publishes.
+        self.refusals.clear()
+        self.removal_refusals.clear()
         self.publish()
 
         self.assert_bundle(self.output, b"app.pyz new")
@@ -715,7 +766,7 @@ def _real_bundle(root: Path) -> tuple[Path, Path, dict[str, str]]:
 
 @unittest.skipUnless(sys.platform == "win32", "a real sharing violation is Windows behaviour")
 class HeldIncomingCopyTest(unittest.TestCase):
-    """Review round 1, F2 and F3: a real handle on a file inside .incoming.
+    """Review rounds 1 and 2: real handles on files inside .incoming and .previous.
 
     The holder lookup is injected, so this runs where the Restart Manager does not.
     """
@@ -723,6 +774,7 @@ class HeldIncomingCopyTest(unittest.TestCase):
     def setUp(self) -> None:
         from dayz_mcp.launcher_registry import _open_pinned_read
 
+        self.open_pinned = _open_pinned_read
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.staging, self.output, self.fingerprint = _real_bundle(Path(directory.name))
@@ -740,6 +792,24 @@ class HeldIncomingCopyTest(unittest.TestCase):
                 self.handles.append(_open_pinned_read(path / "app.pyz"))
 
         patcher = patch.object(build_native_launcher, "verify_bundle", verify)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def hold_previous_before_the_second_rename(self) -> None:
+        # A reader that opens the old bundle under .previous after output moved
+        # there, before the refused .incoming -> output rename (the reviewer's case).
+        real_replace = os.replace
+
+        def replace(source: object, destination: object) -> None:
+            if (
+                self.hold
+                and (Path(source), Path(destination)) == (self.incoming, self.output)
+                and len(self.handles) == 1
+            ):
+                self.handles.append(self.open_pinned(self.previous / "app.pyz"))
+            real_replace(source, destination)
+
+        patcher = patch.object(build_native_launcher.os, "replace", replace)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -805,6 +875,34 @@ class HeldIncomingCopyTest(unittest.TestCase):
         self.assertEqual((self.output / "app.pyz").read_bytes(), b"old")
 
         # Released: the next publish removes it first and goes through.
+        self.release()
+        self.publish()
+
+        self.assertEqual((self.output / "app.pyz").read_bytes(), b"app.pyz new")
+        self.assertEqual(self.siblings(), ["dayz-test-v1"])
+
+    def test_a_refused_put_back_stops_without_a_wait_and_the_next_publish_puts_it_back(self) -> None:
+        # Fast-tier on purpose: with nothing waited for, it takes a few tens of ms.
+        self.hold_previous_before_the_second_rename()
+
+        with self.assertRaises(build_native_launcher.BundleInUseError) as caught:
+            self.publish()
+
+        # Nothing waited: output was missing from the refused put-back on.
+        self.assertEqual(self.states, [])
+        error = caught.exception
+        self.assertEqual(error.path, self.incoming)
+        self.assertEqual(error.__cause__.winerror, 5)
+        notes = _notes(error)
+        self.assertIn(f"putting the last valid bundle back was refused: renaming {self.previous}", notes)
+        self.assertIn("WinError 5", notes)
+        self.assertIn("the next publish moves it back first", notes)
+        self.assertIn(f"the copy in {self.incoming} could not be removed", notes)
+        self.assertIn(_files(self.previous), self.lookups)
+        self.assertFalse(self.output.exists())
+        self.assertEqual((self.previous / "app.pyz").read_bytes(), b"old")
+
+        # Released: the next publish puts the bundle back first, then publishes.
         self.release()
         self.publish()
 
