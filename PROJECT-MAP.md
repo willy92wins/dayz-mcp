@@ -1,6 +1,6 @@
 # DayZ_MCP - location map
 
-Generated 2026-10-01 00:25:04 UTC by `tools\gen-project-map.ps1`.
+Generated 2026-10-01 00:44:18 UTC by `tools\gen-project-map.ps1`.
 Este mapa indica DÓNDE están las cosas. El estado actual vive en `HANDOFF.md`.
 Regenerar tras mover o cambiar archivos: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\gen-project-map.ps1`.
 Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más cercano.
@@ -9,15 +9,15 @@ Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más c
 
 | What | Path |
 |---|---|
-| Dev / docs | `C:\Users\guill\AppData\Local\Temp\dzn-changelog` |
-| Mod source (censo Enforce) | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\addon` |
-| Tools | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\tools` |
-| Tests | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\tools\tests` |
-| Plans | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\plans` |
-| Reviews | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\reviews` |
-| Decisions | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\decisions` (ausente en este checkout) |
-| Server logs (RPT + script.log) | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\_server\profiles` (ausente en este checkout) |
-| Client logs (RPT + script.log) | `C:\Users\guill\AppData\Local\Temp\dzn-changelog\_client\profiles` (ausente en este checkout) |
+| Dev / docs | `.` (raíz del repositorio) |
+| Mod source (censo Enforce) | `addon` |
+| Tools | `tools` |
+| Tests | `tools\tests` |
+| Plans | `plans` |
+| Reviews | `reviews` |
+| Decisions | `decisions` (ausente en este checkout) |
+| Server logs (RPT + script.log) | `_server\profiles` (ausente en este checkout) |
+| Client logs (RPT + script.log) | `_client\profiles` (ausente en este checkout) |
 | Destino PBO | `tools/pack-addon.ps1`: parámetro `-Destination`; evidencias de builds en `reviews/` |
 
 ## HANDOFF: cuánto leer
@@ -29,7 +29,7 @@ El histórico separado, si existe, está en `HANDOFF-ARCHIVE.md`.
 
 ## Enforce scripts (13 files, 359 KB)
 
-Rutas relativas a la fuente del mod: `C:\Users\guill\AppData\Local\Temp\dzn-changelog\addon`.
+Rutas relativas a la fuente del mod: `addon`.
 Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (incluidos junctions).
 
 **4_World/**
@@ -51,7 +51,7 @@ Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (inclui
 - `scripts/5_Mission/MissionGameplay.c` - 647 B
 - `scripts/5_Mission/MissionServer.c` - 409 B
 
-- **config.cpp** -> `C:\Users\guill\AppData\Local\Temp\dzn-changelog\addon\config.cpp` (536 B)
+- **config.cpp** -> `addon\config.cpp` (536 B)
 
 ## Build / test entry points
 

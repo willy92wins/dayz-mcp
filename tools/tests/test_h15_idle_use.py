@@ -206,7 +206,8 @@ class H15SpecContractTests(unittest.TestCase):
         self.assertEqual(rows["H13"]["criterion"], _H13_CRITERION)
         self.assertEqual(
             rows["H13"]["state"],
-            "✓ offline + in-game (validation-matrix: H8 0ab2 wall-clock)",
+            "✓ offline; en juego solo la parte de FIFO y `takeover_required` "
+            "(validation-matrix: H8 0ab2 wall-clock)",
         )
         self.assertIn(
             "Un `RUNNING_IDLE` sin dueño que no está `abandoned`",

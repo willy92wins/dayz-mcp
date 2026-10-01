@@ -75,7 +75,17 @@ def order(path):
 
 
 def location(path):
-    return f'`{path}`' + ('' if path.exists() else ' (ausente en este checkout)')
+    # Repository-relative, so the map holds in any checkout and never pins the
+    # directory it was generated in (a temporary worktree, for one).
+    note = ''
+    try:
+        rel = path.relative_to(repo)
+        shown = str(rel)
+        if shown == '.':
+            note = ' (ra\u00edz del repositorio)'
+    except ValueError:
+        shown = str(path)
+    return f'`{shown}`' + note + ('' if path.exists() else ' (ausente en este checkout)')
 
 
 # The census reads the checked-out addon/ tree. pack-addon.ps1 packs git's
@@ -143,7 +153,7 @@ for path, info in scripts:
 config = mod / 'config.cpp'
 config_info = metadata(config)
 if config_info is not None and stat.S_ISREG(config_info.st_mode):
-    lines.extend(['', f'- **config.cpp** -> `{config}` ({size_text(config_info.st_size)})'])
+    lines.extend(['', f'- **config.cpp** -> `{config.relative_to(repo)}` ({size_text(config_info.st_size)})'])
 lines.extend([
     '', '## Build / test entry points', '',
     'Rutas relativas a `tools/`. Scripts `.ps1`, `.bat` y `.cmd` en su ra\u00edz y en',

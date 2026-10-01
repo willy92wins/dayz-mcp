@@ -18,7 +18,7 @@
   - H9 pasa con 2 sesiones Claude y 2 Codex reales.
   - Evidencia en el vault: `research/2026-09-30-v13/` (`p17/`, `p18/`, `h9/`).
 - **Pendiente de la release:**
-  - la ventana del dueño (P18b): resellar el launcher (6ed1, más la decisión de f298), rescatar el pase B con el vigilante permanente (250f) y c261;
+  - la ventana del dueño (P18b): resellar el launcher (6ed1, más la decisión sobre el foco al arrancar, fade/75e7), rescatar el pase B con el vigilante permanente (250f) y c261;
   - después, con el sí del dueño: la etiqueta `v1.3`, los assets de `docs/RELEASE.md`, y comentar y cerrar #93.
 - **Hallazgos abiertos:**
   - c8c7 (el aviso de reset de la rotación no llega a quien llama) y 7f27 (escalares genéricos en todos los verbos), para la v1.4;
@@ -57,7 +57,7 @@ La cola antigua quedó vacía en la v1.3: 0ab2 (#31), 546d (#26), a429 (#29), 2e
 | **HOLD** | `9ab8` (heater), GATES | Decisión del dueño. |
 | **FUERA, documentado** | `6084`, `ce72` | Decisión del dueño (D-94). |
 | **v1.4** | `c8c7` (el aviso de reset de la rotación no llega a quien llama), `7f27` (escalares genéricos con su valor por defecto en todos los verbos) | Hallazgos de la P18a. |
-| **Del dueño** | `bf5c`, `8cf9`, `a97e` (alcance del `-addon` de AddonBuilder, source en `P:`), `7672` (publicar el bundle con handles vivos), f298 (el foco al arrancar) | El arreglo toca el worker o el launcher sellados. |
+| **Del dueño** | `bf5c`, `8cf9`, `a97e` (alcance del `-addon` de AddonBuilder, source en `P:`), `7672` (publicar el bundle con handles vivos), `fade`/`75e7` (el foco al arrancar; f298 está cerrada) | El arreglo toca el worker o el launcher sellados. |
 
 ## Superficie (no recontar a ciegas)
 
