@@ -18,6 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Godmode is now on by default for every player of a test run.** In every run that loads DayZ_MCP, the server makes each player immune to damage when it connects or respawns: falls, hits, hunger and thirst no longer hurt or kill it, which changes how damage behaves in the game under test. `player_godmode(on=false)` gives a player vanilla damage back, and it stays off for that player identity across respawns until the mission ends. A body that respawns or logs out loses its godmode first, so vanilla can still kill it. `query_player_state` and `query_all_players` report `godmode` for each player, after their existing fields (inbox 3136).
 
+### Fixed
+
+- A `dayz_test_run` that loses the box between its build and its launch (another run took it) answers `active_run_exists` with `reason=box_taken_during_build` (or `box_taken_before_launch`), the holder's session and run, and a retry offer without `build`, `clean` or `pack_only`, instead of `worker_failed` with a run id the store never registered. With `on_busy="queue"` the call re-enters the box FIFO once, within its remaining `wait_for_box_s`, and launches without rebuilding. The cause was a regression from #131: the renewed `lease_id` stamped on a `/lifecycle/start` refusal stopped the sealed worker from recognising the refusal (inbox 3997, #192).
+- Publishing the native launcher bundle (`build_native_launcher.py`) no longer fails with a bare `WinError 5`/`32` when a live MCP client holds the previous bundle: the in-use rename is retried for 10 s, then `bundle_in_use` names the processes holding it (Windows Restart Manager, diagnosis only, nothing is stopped) with the original error as the cause; the last valid bundle is kept on every path (inbox 7672). The bundle seals the builder's own hash, so a tree with a built bundle reports builder drift in its built-bundle checks until the next reseal rebuilds it.
+
 ## [1.3] - 2026-10-01
 
 ### Added
