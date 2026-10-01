@@ -500,6 +500,34 @@ class MCPUiRequestEcho
 	string matched_path;
 };
 
+// One event of a ui_click handler walk; mode="complete" reports three of them.
+// handler is the class that consumed it, else the first one that received it,
+// else "" when the walk found no handler. received counts the handlers that got
+// it: one at most without bubble.
+class MCPUiClickPhase
+{
+	string phase;
+	string handler;
+	bool consumed;
+	int received;
+};
+
+// ui_click mode="complete" read-back. x and y are the rounded centre of the
+// target's screen box, the point every phase got; bubble echoes the request.
+// phases holds down, up and click in the order they ran.
+class MCPUiClickSequence
+{
+	int x;
+	int y;
+	bool bubble;
+	ref array<ref MCPUiClickPhase> phases;
+
+	void MCPUiClickSequence()
+	{
+		phases = new array<ref MCPUiClickPhase>();
+	}
+};
+
 class MCPInventoryAttachReceipt
 {
 	string dest;
@@ -804,6 +832,8 @@ class MCPResult
 	ref MCPInputTrigger input_trigger;
 	// world_time_get read. Unassigned on other commands.
 	ref MCPWorldTime world_time;
+	// ui_click mode="complete" read-back. Unassigned in direct mode and on other commands.
+	ref MCPUiClickSequence click_sequence;
 };
 
 class MCPJob

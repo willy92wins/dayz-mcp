@@ -388,7 +388,13 @@ def verify_ui_request_echo(source: str) -> None:
         raise AssertionError("reload: source must carry no UI meaning")
 
 
+COMPLETE_HANDOFF = "return DispatchUiClickComplete(command, result, target, mouseButton);"
+
+
 def verify_click_mode_contract(source: str) -> None:
+    """complete is implemented (backlog 20be): after the unique match it hands the
+    resolved target to DispatchUiClickComplete, which alone reads bubble, and
+    returns. The sequence itself is pinned in tests/test_ui_click_complete.py."""
     click = _method_body(source, CORE_UI_VERBS["ui_click"])
     if "bubble" in click:
         raise AssertionError("direct mode must not read bubble")
@@ -399,12 +405,13 @@ def verify_click_mode_contract(source: str) -> None:
     if complete_idx < 0 or third_idx < 0 or third_idx < complete_idx:
         raise AssertionError("complete and unknown-mode gates must both exist, complete first")
     complete_block = click[complete_idx:third_idx]
-    if (
-        "return true;" not in complete_block
-        or "InvokeUiClick(" in complete_block
-        or re.search(r"\bmode = ", complete_block)
-    ):
-        raise AssertionError("complete must return before any handler runs, never rewrite the mode")
+    if _compact(complete_block) != f'if (mode == "complete") {{ {COMPLETE_HANDOFF} }}':
+        raise AssertionError(
+            "complete must hand the resolved target to its own dispatch and return: "
+            "never a handler lookup here, never a rewritten mode"
+        )
+    if "mode_not_implemented" in source:
+        raise AssertionError("complete is implemented: mode_not_implemented must be gone")
     _ordered(
         click,
         "ResolveUiRoot(",
@@ -414,7 +421,7 @@ def verify_click_mode_contract(source: str) -> None:
         'if (mode == "")',
         'mode = "direct";',
         'if (mode == "complete")',
-        'result.error = "mode_not_implemented";',
+        COMPLETE_HANDOFF,
         'if (mode != "direct")',
         'result.error = "bad_args";',
         "InvokeUiClick(",
@@ -621,9 +628,7 @@ class UiEnforceContractTest(unittest.TestCase):
         complete_block = (
             '\t\tif (mode == "complete")\n'
             "\t\t{\n"
-            "\t\t\tresult.ok = false;\n"
-            '\t\t\tresult.error = "mode_not_implemented";\n'
-            "\t\t\treturn true;\n"
+            f"\t\t\t{COMPLETE_HANDOFF}\n"
             "\t\t}\n"
         )
         # (mutant, reason the verifier must give): each mutant is caught for
@@ -651,15 +656,26 @@ class UiEnforceContractTest(unittest.TestCase):
                     complete_block,
                     '\t\tif (mode == "complete")\n\t\t{\n\t\t\tmode = "direct";\n\t\t}\n',
                 ),
-                "complete must return before any handler runs",
+                "complete must hand the resolved target to its own dispatch",
             ),
-            "complete_dispatches_anyway": (
+            "complete_dispatches_direct_first": (
                 _mutate(
                     source,
-                    '\t\t\tresult.error = "mode_not_implemented";\n\t\t\treturn true;\n',
-                    '\t\t\tresult.error = "mode_not_implemented";\n\t\t\tInvokeUiClick(target, mouseButton, handlerName);\n\t\t\treturn true;\n',
+                    f"\t\t\t{COMPLETE_HANDOFF}\n",
+                    f"\t\t\tInvokeUiClick(target, mouseButton, handlerName);\n\t\t\t{COMPLETE_HANDOFF}\n",
                 ),
                 "only the direct branch may reach the handler lookup",
+            ),
+            # The refusal this module used to pin, restored: complete is
+            # implemented now, so bringing it back is a regression.
+            "complete_refused_again": (
+                _mutate(
+                    source,
+                    complete_block,
+                    '\t\tif (mode == "complete")\n\t\t{\n\t\t\tresult.ok = false;\n'
+                    '\t\t\tresult.error = "mode_not_implemented";\n\t\t\treturn true;\n\t\t}\n',
+                ),
+                "complete must hand the resolved target to its own dispatch",
             ),
             "direct_reads_bubble": (
                 _mutate(

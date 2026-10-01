@@ -82,6 +82,8 @@ PRUNABLE_FIELDS = (
     "input_trigger",
     # world_time_get fills it with the World.GetDate read.
     "world_time",
+    # ui_click fills it in mode="complete" only: direct mode leaves it unset.
+    "click_sequence",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
