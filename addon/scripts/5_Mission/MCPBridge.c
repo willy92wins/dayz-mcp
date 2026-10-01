@@ -33,7 +33,7 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,player_godmode,player_heal,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
@@ -535,6 +535,14 @@ class MCPBridge : Managed
 		else if (command.cmd == "player_teleport")
 		{
 			postNow = DispatchPlayerTeleport(command, result);
+		}
+		else if (command.cmd == "player_heal")
+		{
+			postNow = DispatchPlayerHeal(command, result);
+		}
+		else if (command.cmd == "player_godmode")
+		{
+			postNow = DispatchPlayerGodmode(command, result);
 		}
 		else if (command.cmd == "object_anim")
 		{
@@ -1415,6 +1423,132 @@ class MCPBridge : Managed
 		VectorToArray(applied, result.pos_real);
 		result.ok = true;
 		return true;
+	}
+
+	// player_heal (inbox bef7): the vanilla full heal (PlayerBase.MCPHealServer,
+	// MCP_PlayerCare.c) on the server's PlayerBase, seated or not. Empty uid targets
+	// the first human; a set uid resolves by PlayerIdentity.GetPlainId(). Refusals
+	// come before anything changes, and a dead body is refused: the heal would not
+	// revive it. Nothing moves the player or touches its seat; the vitals are read
+	// before and after. A worn splint comes off as vanilla takes it off when legs
+	// heal, and the reply says whether and where the Splint item went.
+	protected bool DispatchPlayerHeal(MCPCommand command, MCPResult result)
+	{
+		string healResolveError;
+		PlayerBase healPlayer;
+		MCPPlayerHeal healReport;
+		string healSplintTo;
+		healResolveError = "";
+		healSplintTo = "";
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		healPlayer = ResolvePlayer(command.args, healResolveError);
+		if (!healPlayer)
+		{
+			result.ok = false;
+			result.error = healResolveError;
+			return true;
+		}
+
+		if (!healPlayer.IsAlive())
+		{
+			result.ok = false;
+			result.error = "player_dead";
+			return true;
+		}
+
+		healReport = new MCPPlayerHeal();
+		healReport.full = command.args.full;
+		healReport.in_vehicle = healPlayer.IsInVehicle();
+		FillPlayerVitals(healPlayer, healReport.before);
+		healSplintTo = healPlayer.MCPHealServer(command.args.full);
+		FillPlayerVitals(healPlayer, healReport.after);
+		healReport.splint_returned = healSplintTo == "inventory" || healSplintTo == "ground";
+		healReport.splint_returned_to = healSplintTo;
+		result.player_heal = healReport;
+		result.ok = true;
+		return true;
+	}
+
+	// player_godmode (inbox 3136): the identity's choice for the rest of the mission,
+	// applied to the server's PlayerBase only, never to its vehicle
+	// (MCPGodmode.Choose, MCP_PlayerCare.c). Empty uid targets the first human; a set
+	// uid resolves by PlayerIdentity.GetPlainId(). The choice is kept by identity, so
+	// a body without one is refused, as is a dead body. The reply is the state before
+	// and after, from GetAllowDamage.
+	protected bool DispatchPlayerGodmode(MCPCommand command, MCPResult result)
+	{
+		string godmodeResolveError;
+		PlayerBase godmodePlayer;
+		PlayerIdentity godmodeIdentity;
+		MCPPlayerGodmode godmodeReport;
+		godmodeResolveError = "";
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		godmodePlayer = ResolvePlayer(command.args, godmodeResolveError);
+		if (!godmodePlayer)
+		{
+			result.ok = false;
+			result.error = godmodeResolveError;
+			return true;
+		}
+
+		if (!godmodePlayer.IsAlive())
+		{
+			result.ok = false;
+			result.error = "player_dead";
+			return true;
+		}
+
+		godmodeIdentity = godmodePlayer.GetIdentity();
+		if (!godmodeIdentity)
+		{
+			result.ok = false;
+			result.error = "no_identity";
+			return true;
+		}
+
+		godmodeReport = new MCPPlayerGodmode();
+		godmodeReport.before = MCPGodmode.IsOn(godmodePlayer);
+		MCPGodmode.Choose(godmodePlayer, godmodeIdentity.GetPlainId(), command.args.godmode);
+		godmodeReport.after = MCPGodmode.IsOn(godmodePlayer);
+		result.player_godmode = godmodeReport;
+		result.ok = true;
+		return true;
+	}
+
+	// player_heal vitals of one server PlayerBase (MCPPlayerVitals, MCPMessages.c).
+	// A stat that does not exist leaves its value at 0 (playerbase.c:7843-7868).
+	protected void FillPlayerVitals(PlayerBase target, MCPPlayerVitals vitals)
+	{
+		PlayerStat<float> vitalsWater;
+		PlayerStat<float> vitalsEnergy;
+		vitals.health = target.GetHealth01("", "");
+		vitals.blood = target.GetHealth01("", "Blood");
+		vitals.shock = target.GetHealth01("", "Shock");
+		vitals.broken_legs = target.GetBrokenLegs() != eBrokenLegs.NO_BROKEN_LEGS;
+		vitals.unconscious = target.IsUnconscious();
+		vitals.bleeding_sources = target.GetBleedingSourceCount();
+		vitalsWater = target.GetStatWater();
+		if (vitalsWater)
+		{
+			vitals.water = vitalsWater.Get();
+		}
+		vitalsEnergy = target.GetStatEnergy();
+		if (vitalsEnergy)
+		{
+			vitals.energy = vitalsEnergy.Get();
+		}
 	}
 
 	// F3.4: read GetAnimationPhase or write SetAnimationPhaseNow on Entity (entity.c:12-25).
@@ -3864,6 +3998,7 @@ class MCPBridge : Managed
 			player.pos.Insert(pos[2]);
 			player.health = p.GetHealth01("", "");
 			player.in_vehicle = p.IsInTransport();
+			player.godmode = MCPGodmode.IsOn(p);
 			players.Insert(player);
 		}
 
@@ -3902,6 +4037,7 @@ class MCPBridge : Managed
 		state.pos.Insert(pos[0]);
 		state.pos.Insert(pos[1]);
 		state.pos.Insert(pos[2]);
+		state.godmode = MCPGodmode.IsOn(player);
 		return state;
 	}
 

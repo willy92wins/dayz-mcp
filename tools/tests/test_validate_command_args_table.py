@@ -407,6 +407,24 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             (False, "bad_args"),
         ),
     ),
+    # full and godmode always travel as JSON booleans: the bridge reads an
+    # absent key as false (fb-20260930-065425-8779).
+    "player_heal": (
+        ("valid_full", {"full": True}, (True, None)),
+        ("valid_not_full_with_uid", {"full": False, "uid": "player-1"}, (True, None)),
+        ("missing_full", {"uid": "player-1"}, (False, "bad_args")),
+        ("full_int_is_not_bool", {"full": 1}, (False, "bad_args")),
+        ("uid_wrong_type", {"full": True, "uid": 1}, (False, "bad_args")),
+        ("extra_key", {"full": True, "extra": None}, (False, "bad_args")),
+    ),
+    "player_godmode": (
+        ("valid_off", {"godmode": False}, (True, None)),
+        ("valid_on_with_uid", {"godmode": True, "uid": "player-1"}, (True, None)),
+        ("missing_godmode", {"uid": "player-1"}, (False, "bad_args")),
+        ("godmode_int_is_not_bool", {"godmode": 0}, (False, "bad_args")),
+        ("uid_wrong_type", {"godmode": True, "uid": 1}, (False, "bad_args")),
+        ("extra_key", {"godmode": True, "on": True}, (False, "bad_args")),
+    ),
     # heading and speed travel with their _set flags (fb-20260930-065425-8779).
     "infected_drive": (
         (

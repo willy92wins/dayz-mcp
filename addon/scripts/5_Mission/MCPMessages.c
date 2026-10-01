@@ -178,6 +178,12 @@ class MCPArgs
 	// heading or to, and angle_deg the relative angle of direction angle.
 	string direction;
 	float angle_deg;
+	// player_heal: true also fills water and energy to their maximum. The tool
+	// always sends it; an absent key reads false, the heal without the refill.
+	bool full;
+	// player_godmode: the state to set, true for godmode on. The tool always
+	// sends it; an absent key reads false, which is vanilla damage.
+	bool godmode;
 
 	void MCPArgs()
 	{
@@ -228,10 +234,13 @@ class MCPCommandBatch
 	}
 };
 
+// godmode, here and in MCPAllPlayer, is MCPGodmode.IsOn: GetAllowDamage() false
+// on the server's body (MCP_PlayerCare.c).
 class MCPPlayerState
 {
 	string name;
 	ref array<float> pos;
+	bool godmode;
 
 	void MCPPlayerState()
 	{
@@ -245,6 +254,7 @@ class MCPAllPlayer
 	ref array<float> pos;
 	float health;
 	bool in_vehicle;
+	bool godmode;
 
 	void MCPAllPlayer()
 	{
@@ -799,6 +809,57 @@ class MCPWorldTime
 	int minute;
 };
 
+// player_heal vitals of the server's PlayerBase, read before and after the heal.
+// health, blood and shock are GetHealth01 of the global zone (object.c:997), 1.0
+// at the maximum. broken_legs is GetBrokenLegs() other than NO_BROKEN_LEGS
+// (playerbase.c:3696-3699), a splinted leg included. bleeding_sources is
+// GetBleedingSourceCount() (playerbase.c:7585-7588). water and energy are the
+// stats' values, 0 to 5000 (playerstatspco.c:297-298). Primitives only.
+class MCPPlayerVitals
+{
+	float health;
+	float blood;
+	float shock;
+	bool broken_legs;
+	bool unconscious;
+	int bleeding_sources;
+	float water;
+	float energy;
+};
+
+// player_heal reply. full echoes the request and in_vehicle is IsInVehicle()
+// before the heal (dayzplayerimplement.c:465-468): the vehicle command or a
+// Transport parent. When a worn splint came off with the healed legs,
+// splint_returned_to names where a new Splint item was found after the heal,
+// inventory (the inventory or the hands) or ground, and splint_returned is then
+// true; it is none, with splint_returned false, when no new Splint was found
+// there: vanilla deletes the applied splint even when it cannot place the item.
+// Both are false and "" when no splint came off
+// (PlayerBase.MCPHealServer, MCP_PlayerCare.c). Primitives only: no entity reference.
+class MCPPlayerHeal
+{
+	bool full;
+	bool in_vehicle;
+	bool splint_returned;
+	string splint_returned_to;
+	ref MCPPlayerVitals before;
+	ref MCPPlayerVitals after;
+
+	void MCPPlayerHeal()
+	{
+		before = new MCPPlayerVitals();
+		after = new MCPPlayerVitals();
+	}
+};
+
+// player_godmode reply: MCPGodmode.IsOn of the server's body before and after
+// the switch, true for godmode on. Primitives only: no entity reference.
+class MCPPlayerGodmode
+{
+	bool before;
+	bool after;
+};
+
 class MCPResult
 {
 	int id;
@@ -898,6 +959,10 @@ class MCPResult
 	ref MCPWorldTime world_time;
 	// ui_click mode="complete" read-back. Unassigned in direct mode and on other commands.
 	ref MCPUiClickSequence click_sequence;
+	// player_heal reply. Unassigned on its refusals and on other commands.
+	ref MCPPlayerHeal player_heal;
+	// player_godmode reply. Unassigned on its refusals and on other commands.
+	ref MCPPlayerGodmode player_godmode;
 	// player_move reply, also on its refusals once the phase is known.
 	// Unassigned on other commands.
 	ref MCPPlayerMove player_move;

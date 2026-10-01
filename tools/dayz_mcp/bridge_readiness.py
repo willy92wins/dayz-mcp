@@ -279,6 +279,8 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "object_delete": "object_delete",
         "object_doors": "object_doors",
         "object_inspect": "object_inspect",
+        "player_godmode": "player_godmode",
+        "player_heal": "player_heal",
         "player_teleport": "player_teleport",
         "query_all_players": "query_all_players",
         "query_get_in_condition": "query_get_in_condition",

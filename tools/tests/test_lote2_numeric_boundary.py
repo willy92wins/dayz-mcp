@@ -95,7 +95,11 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # mode and trace_id are strings, not in this census).
         # + 7 from c1cb (player_move hold_s/ttl_s/angle_deg/heading_deg/to/
         # arrive_radius_m/timeout_s; speed and phase are strings, not in this census).
-        self.assertEqual(len(rows), 164)
+        # + 2 from bef7 and 3136 (player_heal timeout_s, player_godmode timeout_s;
+        # uid is a string and full and on are bools, not in this census).
+        self.assertEqual(len(rows), 166)
+        self.assertIn(("player_heal", "timeout_s", "float"), rows)
+        self.assertIn(("player_godmode", "timeout_s", "float"), rows)
         for name in ("cursor", "limit", "sample_hz", "max_samples"):
             self.assertIn(("player_trace", name, "int"), rows)
         self.assertIn(("player_trace", "timeout_s", "float"), rows)

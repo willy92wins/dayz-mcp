@@ -117,6 +117,10 @@ def _minimal_args(cmd: str) -> dict:
         return {"x": 0.0, "z": 0.0}
     if cmd == "player_teleport":
         return {"pos": [0.0, 0.0, 0.0]}
+    if cmd == "player_heal":
+        return {"full": True}
+    if cmd == "player_godmode":
+        return {"godmode": False}
     if cmd == "infected_drive":
         return {
             "type": "Infected",
