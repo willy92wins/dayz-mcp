@@ -14,11 +14,13 @@ promotion.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import re
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from dayz_mcp import loopback, player_move, result_prune, server
@@ -33,6 +35,7 @@ from dayz_mcp.server import (
 from dayz_mcp.session_coordination import READ_ONLY_COMMANDS, command_requires_lease
 from tests._addon_paths import addon_root
 from tests.bridge_client_capabilities_helpers import announced_caps, dispatch_census
+from tests.enforce_subset_helpers import EnforceString, method_body, translate
 from tests.fence_helpers import bind_both_peers
 
 
@@ -126,6 +129,7 @@ NEXT_ID = "static int NextMoveId()"
 BEGIN = "static int Begin(PlayerBase player, MCPPlayerMoveRequest request, float nowS, string serverRequest)"
 APPLY = "static void Apply(PlayerBase player)"
 RELEASE_ALL = "static void ReleaseAll(string why)"
+SHUTDOWN_RELEASE = "static void ShutdownRelease()"
 RELEASE_DUE = "static void ReleaseDue()"
 ON_COMMAND = "static void OnCommandHandler(PlayerBase player)"
 MAINTAIN = "static void MaintainFromTick(int bridgeTick)"
@@ -139,20 +143,24 @@ SERVER_INPUT = "override bool OnInputUserDataProcess(int userDataType, ParamsRea
 SERVER_READ = "protected void MCPMoveReadRequest(ParamsReadContext ctx)"
 SERVER_READ_RELEASE = "protected void MCPMoveReadRelease(int moveId)"
 SERVER_ACCEPT = "protected void MCPMoveAccept(MCPPlayerMoveRequest request)"
+SERVER_FRESHNESS = "protected string MCPMoveFreshnessRefusal(int moveId)"
+SERVER_OWNER = "protected string MCPMoveOwnerRefusal()"
 SERVER_TICK = "protected void MCPMoveServerTick(bool fromConsume)"
 SERVER_RELEASE = "protected void MCPMoveServerRelease(string why)"
 SERVER_VERDICT = "protected void MCPMoveVerdict(bool accepted, int moveId, string reason)"
 SERVER_NOTE = "protected void MCPMoveNote(int moveId, string reason)"
+SERVER_RECONNECT = "override void OnReconnect()"
 COMMAND_HANDLER = (
     "override void CommandHandler(float pDt, int pCurrentCommandID, bool pCurrentCommandFinished)"
 )
 CONSUME = "protected override event void ConsumeMove(PawnMove pMove)"
 MOVE_METHODS = (
     REFUSAL, SECONDS, ACTOR, START_REFUSAL, DISTANCE, RELATIVE, ARRIVED, HORIZONTAL,
-    FINITE, ENABLE, DISABLE, NEXT_ID, BEGIN, APPLY, RELEASE_ALL, RELEASE_DUE, ON_COMMAND,
-    MAINTAIN, SEND_START, FLUSH, READ_REQUEST, WRAP, COMPASS, BEARING, SERVER_INPUT,
-    SERVER_READ, SERVER_READ_RELEASE, SERVER_ACCEPT, SERVER_TICK, SERVER_RELEASE,
-    SERVER_VERDICT, SERVER_NOTE, COMMAND_HANDLER, CONSUME,
+    FINITE, ENABLE, DISABLE, NEXT_ID, BEGIN, APPLY, RELEASE_ALL, SHUTDOWN_RELEASE,
+    RELEASE_DUE, ON_COMMAND, MAINTAIN, SEND_START, FLUSH, READ_REQUEST, WRAP, COMPASS,
+    BEARING, SERVER_INPUT, SERVER_READ, SERVER_READ_RELEASE, SERVER_ACCEPT,
+    SERVER_FRESHNESS, SERVER_OWNER, SERVER_TICK, SERVER_RELEASE, SERVER_VERDICT,
+    SERVER_NOTE, SERVER_RECONNECT, COMMAND_HANDLER, CONSUME,
 )
 
 _COMMENT_OR_STRING = re.compile(r'"(?:\\.|[^"\\\n])*"|//[^\n]*|/\*[\s\S]*?\*/')
@@ -309,6 +317,226 @@ def _bridge_codes() -> set[str]:
     codes |= set(re.findall(r'code = "(\w+)";', _method_body(move, SECONDS)))
     codes.discard("")
     return codes
+
+
+class _LogString(EnforceString):
+    """An Enforce string with the + the log lines use."""
+
+    __slots__ = ()
+
+    def __add__(self, other: object) -> "_LogString":
+        if not isinstance(other, EnforceString):
+            raise TypeError(f"string + {type(other).__name__}")
+        return _LogString(self.data + other.data)
+
+
+_ENFORCE_STRING = re.compile(r'"(?:\\.|[^"\\])*"')
+_TO_STRING = re.compile(r"\b([A-Za-z_][\w.]*)\.ToString\(\)")
+INSTANCE_TYPES = SimpleNamespace(INSTANCETYPE_SERVER=21, INSTANCETYPE_CLIENT=22)
+SERVER_MODEL_MEMBERS = (
+    "m_MCPMoveActive|m_MCPMoveDeadlineS|m_MCPMoveApplied|m_MCPMoveConsumed|m_MCPMoveHandled|"
+    "m_MCPMoveLastId|MCPMoveVerdict|MCPMoveNote|MCPMoveServerRelease|MCPMoveFreshnessRefusal|"
+    "MCPMoveOwnerRefusal|GetInstanceType|GetIdentity|IsPlayerDisconnected|GetInputController"
+)
+SERVER_MODEL_METHODS = (
+    SERVER_VERDICT, SERVER_NOTE, SERVER_RELEASE, SERVER_FRESHNESS, SERVER_OWNER,
+    SERVER_READ_RELEASE, SERVER_ACCEPT, SERVER_TICK, SERVER_RECONNECT,
+)
+
+
+def _free_function(source: str, signature: str, members: str, owner: str) -> str:
+    """One method of `source` as a free function: `members` read through `owner`,
+    X.ToString() as ToStr(X) and `new ScriptInputUserData()` as a call."""
+    member = re.compile(r"(?<![\w.])(" + members + r")\b")
+
+    def rewrite(code: str) -> str:
+        code = member.sub(owner + r".\1", code).replace("new ScriptInputUserData()", "ScriptInputUserData()")
+        return _TO_STRING.sub(r"ToStr(\1)", code)
+
+    body = method_body(source, signature)
+    pieces: list[str] = []
+    last = 0
+    for match in _ENFORCE_STRING.finditer(body):
+        pieces += [rewrite(body[last : match.start()]), match.group(0)]
+        last = match.end()
+    pieces.append(rewrite(body[last:]))
+    return signature + "\n{" + "".join(pieces) + "}\n"
+
+
+def _absent(name: str):
+    def call(*_args: object) -> None:
+        raise AssertionError(f"{name} is absent from MCP_PlayerMove.c")
+
+    return call
+
+
+class _ServerPlayer:
+    """The server instance of one PlayerBase: the members the move code keeps and the engine calls it makes."""
+
+    def __init__(self) -> None:
+        self.m_MCPMoveActive: object | None = None
+        self.m_MCPMoveDeadlineS = 0.0
+        self.m_MCPMoveApplied = False
+        self.m_MCPMoveConsumed = 0
+        self.m_MCPMoveHandled = 0
+        self.m_MCPMoveLastId = 0
+        self.identity: object | None = object()
+        self.disconnected = False
+        self.alive = True
+        self.controller = object()
+
+    def GetInstanceType(self) -> int:
+        return INSTANCE_TYPES.INSTANCETYPE_SERVER
+
+    def GetIdentity(self) -> object | None:
+        return self.identity
+
+    def IsPlayerDisconnected(self) -> bool:
+        return self.disconnected
+
+    def GetInputController(self) -> object:
+        return self.controller
+
+
+class _ServerMoveModel:
+    """The server copy's methods of MCP_PlayerMove.c, translated and run on one fake player.
+
+    The values check is the real RequestRefusal, so speed=99 is refused as the
+    server would refuse it. The actor, move-command and distance checks are fakes
+    (dead is player_dead, as ActorRefusal answers). A method absent from the
+    source fails when called, so these tests also run against older revisions.
+    """
+
+    def __init__(self, source: str) -> None:
+        constants = {
+            name: float(value) for name, value in re.findall(r"static const float (\w+) = ([0-9.]+);", source)
+        }
+        self.now = 100.0
+        self.log: list[str] = []
+        self.controls: list[tuple[object, ...]] = []
+        self.supers: list[str] = []
+        self.start_refusal = ""
+        self.player = _ServerPlayer()
+
+        def actor(player: _ServerPlayer) -> _LogString:
+            return _LogString.of("" if player.alive else "player_dead")
+
+        control = SimpleNamespace(
+            SERVER_DEADMAN_MARGIN_S=constants["SERVER_DEADMAN_MARGIN_S"],
+            # StartRefusal runs ActorRefusal first, then the move-command check.
+            StartRefusal=lambda player: actor(player) or _LogString.of(self.start_refusal),
+            DistanceRefusal=lambda player, request: _LogString.of(""),
+            ActorRefusal=actor,
+            HasArrived=lambda player, request: False,
+            RelativeAngleDeg=lambda player, request: request.angle_deg,
+            Enable=lambda hic, speed, angle: self.controls.append(("Enable", speed, angle)),
+            Disable=lambda hic: self.controls.append(("Disable",)),
+        )
+        namespace: dict[str, object] = {
+            "_S": _LogString,
+            "ToStr": lambda value: _LogString.of(str(value)),
+            "this": self.player,
+            "super": SimpleNamespace(OnReconnect=lambda: self.supers.append("OnReconnect")),
+            "GetGame": lambda: SimpleNamespace(GetTickTime=lambda: self.now),
+            "Print": lambda line: self.log.append(line.text),
+            "DayZPlayerInstanceType": INSTANCE_TYPES,
+            "MCPPlayerMoveControl": control,
+            "IsFiniteValue": math.isfinite,
+            "IsFiniteVector": lambda value: all(math.isfinite(axis) for axis in value),
+            **constants,
+        }
+        translate(source, SECONDS, namespace)
+        control.RequestRefusal = translate(source, REFUSAL, namespace)
+        for signature in SERVER_MODEL_METHODS:
+            name = signature[: signature.index("(")].split()[-1]
+            if signature not in source:
+                setattr(self.player, name, _absent(name))
+                continue
+            free = _free_function(source, signature, SERVER_MODEL_MEMBERS, "this")
+            setattr(self.player, name, translate(free, signature, namespace, class_types={"HumanInputController"}))
+
+    def start(self, move_id: int, **values: object) -> None:
+        request = SimpleNamespace(
+            move_id=move_id, phase="hold", speed=1.0, direction="angle", angle_deg=30.0,
+            heading_deg=0.0, target=(0.0, 0.0, 0.0), radius=0.5, seconds=5.0,
+        )
+        for key, value in values.items():
+            setattr(request, key, value)
+        request.phase = _LogString.of(request.phase)
+        request.direction = _LogString.of(request.direction)
+        self.player.MCPMoveAccept(request)
+
+    def release(self, move_id: int) -> None:
+        self.player.MCPMoveReadRelease(move_id)
+
+    def tick(self, from_consume: bool = True) -> None:
+        self.player.MCPMoveServerTick(from_consume)
+
+    @property
+    def active(self) -> int | None:
+        active = self.player.m_MCPMoveActive
+        return None if active is None else active.move_id
+
+
+class _OwnerReleaseModel:
+    """The owner's ReleaseAll, FlushServerRelease and ShutdownRelease, translated,
+    with the input channel and the local player as fakes."""
+
+    def __init__(self, source: str) -> None:
+        self.sent: list[list[object]] = []
+        self.disabled = 0
+        self.channel_free = True
+        self.local_player = True
+        model = self
+
+        class InputUserData:
+            def __init__(self) -> None:
+                self.values: list[object] = []
+
+            @staticmethod
+            def CanStoreInputUserData() -> bool:
+                return model.channel_free
+
+            def Write(self, value: object) -> None:
+                self.values.append(value)
+
+            def Send(self) -> None:
+                model.sent.append(self.values)
+
+        body = SimpleNamespace(PhysicsGetPositionWS=lambda: (1.0, 2.0, 3.0), GetInputController=lambda: object())
+        self.state = SimpleNamespace(
+            s_Active=True, s_Armed=True, s_Player=body, s_Gen=5, s_Tick=40, s_ServerRequest=_LogString.of("sent"),
+            s_ServerReleasePending=False, s_ServerReleaseId=0, s_ReleasedGen=0, s_ReleasedBy=_LogString.of(""),
+            s_ReleaseTick=0, s_ReleaseTimeS=0.0, s_ReleaseArrived=False, s_ReleasePosKnown=False, s_ReleasePos=None,
+        )
+        game = SimpleNamespace(
+            GetTickTime=lambda: 50.0, IsMultiplayer=lambda: True, IsClient=lambda: True,
+            GetPlayer=lambda: body if self.local_player else None,
+        )
+        self.namespace: dict[str, object] = {
+            "_S": _LogString,
+            "S": self.state,
+            "GetGame": lambda: game,
+            "ScriptInputUserData": InputUserData,
+            "MCP_INPUT_UDT_PLAYER_MOVE": int(re.search(r"const int MCP_INPUT_UDT_PLAYER_MOVE = (\d+);", source).group(1)),
+            "Disable": self._disable,
+        }
+        self.source = source
+        for signature in (FLUSH, RELEASE_ALL):
+            self._translate(signature)
+
+    def _disable(self, _hic: object) -> None:
+        self.disabled += 1
+
+    def _translate(self, signature: str):
+        free = _free_function(self.source, signature, r"s_\w+", "S")
+        return translate(free, signature, self.namespace, class_types={"HumanInputController", "ScriptInputUserData"})
+
+    def release_all(self, why: str) -> None:
+        self.namespace["ReleaseAll"](_LogString.of(why))
+
+    def shutdown_release(self) -> None:
+        self._translate(SHUTDOWN_RELEASE)()
 
 
 class PlayerMoveIngressTest(unittest.TestCase):
@@ -668,12 +896,13 @@ class PlayerMoveOwnerLifecycleTest(unittest.TestCase):
             "Disable(hic);",
             "s_Armed = false;",
             "s_Player = null;",
-            'if (why == "shutdown")',
             'if (s_ServerRequest == "sent")',
         )
         self.assertIn("s_ReleaseArrived = true;", _if_body(release, 'why == "arrived"'))
-        # A sent move sends its release, naming its move, except at shutdown.
-        self.assertIn("s_ServerReleasePending = false;", _if_body(release, 'why == "shutdown"'))
+        # A sent move sends its release, naming its move, whatever the cause
+        # (review R1 F4: shutdown no longer drops it before trying).
+        self.assertNotIn('"shutdown"', _without_comments(release))
+        self.assertTrue(release.rstrip().endswith("FlushServerRelease();\n\t\t}"))
         _in_order(
             self,
             _if_body(release, 's_ServerRequest == "sent"'),
@@ -681,6 +910,34 @@ class PlayerMoveOwnerLifecycleTest(unittest.TestCase):
             "s_ServerReleaseId = s_Gen;",
             "FlushServerRelease();",
         )
+
+    def test_shutdown_tries_the_identified_release_once_then_drops_it(self) -> None:
+        # Review R1 F4(a): the release that the shutdown ending (or an earlier one)
+        # left waiting gets one best-effort send, and FlushServerRelease sends only
+        # while the local player exists and the input channel takes it.
+        self.assertEqual(
+            _flat(_method_body(self.source, SHUTDOWN_RELEASE)),
+            'ReleaseAll("shutdown"); FlushServerRelease(); s_ServerReleasePending = false;',
+        )
+        flush = _method_body(self.source, FLUSH)
+        _in_order(
+            self,
+            flush,
+            "if (!GetGame().GetPlayer())",
+            "if (!ScriptInputUserData.CanStoreInputUserData())",
+            "message.Write(s_ServerReleaseId);",
+            "message.Send();",
+        )
+        shutdown = _method_body(self.client, "void Shutdown()")
+        _in_order(
+            self,
+            shutdown,
+            'MCPInputTriggerControl.ReleaseAll("shutdown");',
+            "MCPPlayerMoveControl.ShutdownRelease();",
+            "RestoreGameplay();",
+            "m_JobRunner.Clear();",
+        )
+        self.assertNotIn("MCPPlayerMoveControl.ReleaseAll(", shutdown)
 
     def test_every_release_names_one_of_the_seven_causes(self) -> None:
         causes = set(re.findall(r'ReleaseAll\("(\w+)"\)', _without_comments(self.source)))
@@ -694,14 +951,6 @@ class PlayerMoveOwnerLifecycleTest(unittest.TestCase):
             'MCPInputTriggerControl.ReleaseAll("restore");',
             'MCPPlayerMoveControl.ReleaseAll("restore");',
             "if (!GetGame())",
-        )
-        shutdown = _method_body(self.client, "void Shutdown()")
-        _in_order(
-            self,
-            shutdown,
-            'MCPInputTriggerControl.ReleaseAll("shutdown");',
-            'MCPPlayerMoveControl.ReleaseAll("shutdown");',
-            "RestoreGameplay();",
         )
 
     def test_begin_records_the_start_and_applies_once(self) -> None:
@@ -753,19 +1002,27 @@ class PlayerMoveServerContractTest(unittest.TestCase):
             send,
             "if (!GetGame().IsMultiplayer())",
             "if (!GetGame().IsClient())",
+            "FlushServerRelease();",
+            "if (s_ServerReleasePending)",
             "if (!ScriptInputUserData.CanStoreInputUserData())",
             "message = new ScriptInputUserData();",
             "message.Write(MCP_INPUT_UDT_PLAYER_MOVE);",
             "message.Write(true);",
             "message.Write(request.move_id);",
             "message.Send();",
-            "s_ServerReleasePending = false;",
             'return "sent";',
         )
         self.assertEqual(
             _if_body(send, "!ScriptInputUserData.CanStoreInputUserData()").strip(),
             'return "input_busy";',
         )
+        # Review R1 F2: a refused start leaves the server's running move alone, so
+        # a start never stands in for the previous move's release: that release
+        # goes out first, a start is input_busy while it cannot, and a start
+        # never clears a release it did not send.
+        self.assertEqual(_if_body(send, "s_ServerReleasePending").strip(), 'return "input_busy";')
+        self.assertNotIn("s_ServerReleasePending = false;", send)
+        self.assertTrue(send.rstrip().endswith('message.Send();\n\t\treturn "sent";'))
         self.assertEqual(_if_body(send, "!GetGame().IsMultiplayer()").strip(), 'return "unavailable";')
         self.assertEqual(_if_body(send, "!GetGame().IsClient()").strip(), 'return "unavailable";')
         written = re.findall(r"message\.Write\(request\.(\w+)\);", send)
@@ -836,16 +1093,23 @@ class PlayerMoveServerContractTest(unittest.TestCase):
         )
 
     def test_the_server_rechecks_on_its_own_copy_before_it_accepts(self) -> None:
+        # Review R1 F1/F2: every check runs before the running move is touched, so
+        # a refused start (an id already seen, speed=99, ...) leaves that move
+        # armed; only an accepted start supersedes it.
         accept = _method_body(self.source, SERVER_ACCEPT)
         _in_order(
             self,
             accept,
-            'MCPMoveServerRelease("superseded");',
             "if (GetInstanceType() != DayZPlayerInstanceType.INSTANCETYPE_SERVER)",
+            "if (!GetGame())",
+            "refusal = MCPMoveFreshnessRefusal(request.move_id);",
+            "m_MCPMoveLastId = request.move_id;",
+            "refusal = MCPMoveOwnerRefusal();",
             "refusal = MCPPlayerMoveControl.RequestRefusal(request);",
             "refusal = MCPPlayerMoveControl.StartRefusal(this);",
             "refusal = MCPPlayerMoveControl.DistanceRefusal(this, request);",
             'if (refusal != "")',
+            'MCPMoveServerRelease("superseded");',
             "m_MCPMoveActive = request;",
             "m_MCPMoveDeadlineS = GetGame().GetTickTime() + request.seconds + "
             "MCPPlayerMoveControl.SERVER_DEADMAN_MARGIN_S;",
@@ -856,9 +1120,79 @@ class PlayerMoveServerContractTest(unittest.TestCase):
             'MCPMoveVerdict(false, request.move_id, "not_server");',
             _if_body(accept, "GetInstanceType() != DayZPlayerInstanceType.INSTANCETYPE_SERVER"),
         )
-        self.assertIn("MCPMoveVerdict(false, request.move_id, refusal);", _if_body(accept, 'refusal != ""'))
+        self.assertEqual(
+            _flat(_if_body(accept, 'refusal != ""')), "MCPMoveVerdict(false, request.move_id, refusal); return;"
+        )
+        # Before that gate nothing touches the running move. The one write is the
+        # id record, and only once the id has passed the freshness check.
+        gate = _without_comments(accept[: accept.index('if (refusal != "")')])
+        self.assertEqual(re.findall(r"(\w+) = [^=]", gate), ["refusal", "m_MCPMoveLastId"] + ["refusal"] * 4)
+        self.assertNotIn("MCPMoveServerRelease(", gate)
+        self.assertNotIn("m_MCPMoveActive", gate)
+        fresh = accept.index("refusal = MCPMoveFreshnessRefusal(request.move_id);")
+        self.assertEqual(
+            _flat(accept[fresh : accept.index("{", fresh)]),
+            'refusal = MCPMoveFreshnessRefusal(request.move_id); if (refusal == "")',
+        )
+        self.assertEqual(
+            _flat(_without_comments(_block_after(accept, fresh))),
+            "m_MCPMoveLastId = request.move_id; refusal = MCPMoveOwnerRefusal();",
+        )
         # Accepting changes no override: the ticks apply them.
         self.assertNotIn("Enable(", accept)
+
+    def test_a_start_must_carry_an_id_newer_than_any_this_copy_has_seen(self) -> None:
+        # Review R1 F1: ids start at 1; one already seen in a start or a release
+        # is a duplicate or a replay, refused before anything changes.
+        self.assertEqual(
+            _flat(_method_body(self.source, SERVER_FRESHNESS)),
+            'if (moveId <= 0) { return "bad_move_id"; } '
+            'if (moveId <= m_MCPMoveLastId) { return "stale_move_id"; } return "";',
+        )
+        # A release counts its id as seen, so a start of that move arriving after
+        # it cannot re-arm it; the release still ends only the move it names.
+        release = _method_body(self.source, SERVER_READ_RELEASE)
+        self.assertEqual(_flat(_if_body(release, "moveId > m_MCPMoveLastId")), "m_MCPMoveLastId = moveId;")
+        _in_order(self, release, "if (moveId > m_MCPMoveLastId)", "if (!m_MCPMoveActive)",
+                  "if (m_MCPMoveActive.move_id != moveId)", 'MCPMoveServerRelease("client");')
+        # The member is a plain int (0 on a new PlayerBase) and only these write it.
+        self.assertIn("\tprotected int m_MCPMoveLastId;\n", self.source)
+        writes = re.findall(r"m_MCPMoveLastId = ([^;]+);", self.code)
+        self.assertEqual(writes, ["moveId", "request.move_id", "0"])
+        # A reconnect into this body may be a new client process counting from 1.
+        self.assertEqual(
+            _flat(_method_body(self.source, SERVER_RECONNECT)),
+            'super.OnReconnect(); MCPMoveServerRelease("reconnect"); m_MCPMoveLastId = 0;',
+        )
+        # The owner's ids only grow within its process: s_Gen is static, and the
+        # next id is the last one plus 1.
+        self.assertIn("\tstatic int s_Gen;\n", self.source)
+        self.assertEqual(_method_body(self.source, NEXT_ID).strip(), "return s_Gen + 1;")
+
+    def test_the_server_copy_stops_when_its_owner_is_gone(self) -> None:
+        # Review R1 F4(b): no identity left, or vanilla's disconnect already
+        # processed, ends the server's move in its own tick before the actor
+        # check (a death is ActorRefusal's player_dead); a start from such a body
+        # is refused the same way. The deadman stays the last bound.
+        self.assertEqual(
+            _flat(_method_body(self.source, SERVER_OWNER)),
+            'if (!GetIdentity()) { return "no_identity"; } '
+            'if (IsPlayerDisconnected()) { return "disconnected"; } return "";',
+        )
+        tick = _method_body(self.source, SERVER_TICK)
+        _in_order(
+            self,
+            tick,
+            "refusal = MCPMoveOwnerRefusal();",
+            "refusal = MCPPlayerMoveControl.ActorRefusal(this);",
+            'MCPMoveServerRelease(refusal);',
+            'MCPMoveServerRelease("expired");',
+        )
+        self.assertEqual(
+            _flat(_if_body(tick, 'refusal == ""')), "refusal = MCPPlayerMoveControl.ActorRefusal(this);"
+        )
+        self.assertEqual(_flat(_if_body(tick, 'refusal != ""')), "MCPMoveServerRelease(refusal); return;")
+        self.assertIn('return "player_dead";', _if_body(_method_body(self.source, ACTOR), "!player.IsAlive()"))
 
     def test_the_server_applies_in_every_consumed_move_after_super(self) -> None:
         start = self.code.index(CONSUME)
@@ -925,6 +1259,166 @@ class PlayerMoveServerContractTest(unittest.TestCase):
         self.assertNotIn("MCPResult", self.code)
         self.assertNotIn("MCPPlayerMove ", self.code.replace("MCPPlayerMoveRequest", ""))
         self.assertEqual(self.code.count("modded class PlayerBase"), 1)
+
+
+class PlayerMoveServerCopyModelTest(unittest.TestCase):
+    """Review R1 F1, F2 and F4(b), run on the server copy's translated methods."""
+
+    def setUp(self) -> None:
+        self.source = _source(MOVE_PATH)
+        self.model = _ServerMoveModel(self.source)
+
+    @staticmethod
+    def _verdict(accepted: int, move_id: int, reason: str) -> str:
+        return f"[DayZ_MCP] player_move server accepted={accepted} move={move_id} reason={reason}"
+
+    @staticmethod
+    def _released(move_id: int, why: str, consumed: int = 1) -> str:
+        return f"[DayZ_MCP] player_move server released move={move_id} reason={why} consumed={consumed} handled=0"
+
+    def test_a_replayed_or_older_start_cannot_re_arm_a_released_move(self) -> None:
+        model = self.model
+        model.start(7)
+        self.assertEqual(model.active, 7)
+        model.release(7)
+        self.assertIsNone(model.active)
+        for move_id, reason in ((7, "stale_move_id"), (6, "stale_move_id"), (0, "bad_move_id"), (-3, "bad_move_id")):
+            with self.subTest(move_id=move_id):
+                model.start(move_id)
+                self.assertIsNone(model.active)
+                self.assertEqual(model.log[-1], self._verdict(0, move_id, reason))
+        # A start arriving after its own release is refused too.
+        model.release(9)
+        model.start(9)
+        self.assertEqual((model.active, model.log[-1]), (None, self._verdict(0, 9, "stale_move_id")))
+        # A refused start uses its id up, so a replay of it stays refused.
+        model.start(10, speed=99.0)
+        model.start(10)
+        self.assertEqual((model.active, model.log[-1]), (None, self._verdict(0, 10, "stale_move_id")))
+        model.start(11)
+        self.assertEqual((model.active, model.log[-1]), (11, self._verdict(1, 11, "")))
+        # A release acts only on the move it names, older or newer.
+        for move_id in (10, 12):
+            model.release(move_id)
+            self.assertEqual(model.active, 11)
+            self.assertEqual(
+                model.log[-1], f"[DayZ_MCP] player_move server ignored move={move_id} reason=release_of_another_move"
+            )
+        model.release(11)
+        self.assertEqual((model.active, model.log[-1]), (None, self._released(11, "client", consumed=0)))
+        self.assertEqual(model.controls, [])
+
+    def test_a_refused_start_leaves_the_running_move_armed(self) -> None:
+        for values, start_refusal, reason in (
+            ({"speed": 99.0}, "", "bad_speed"),
+            ({"phase": "walk"}, "", "bad_args"),
+            ({"seconds": 31.0}, "", "bad_hold_s"),
+            ({"angle_deg": 181.0}, "", "bad_angle_deg"),
+            ({}, "not_in_move_command", "not_in_move_command"),
+        ):
+            with self.subTest(reason=reason):
+                model = _ServerMoveModel(self.source)
+                model.start(8)
+                model.tick()
+                armed = (model.player.m_MCPMoveDeadlineS, list(model.controls))
+                model.start_refusal = start_refusal
+                model.start(9, **values)
+                self.assertEqual(model.log[-1], self._verdict(0, 9, reason))
+                self.assertEqual(model.active, 8)
+                self.assertTrue(model.player.m_MCPMoveApplied)
+                self.assertEqual((model.player.m_MCPMoveDeadlineS, model.controls), armed)
+                self.assertEqual([line for line in model.log if " released " in line], [])
+                model.tick()
+                self.assertEqual(model.controls[-1], ("Enable", 1.0, 30.0))
+        # Only an accepted start replaces it, disabling once what the old one enabled.
+        model = self.model
+        model.start(8)
+        model.tick()
+        model.start(9, angle_deg=-45.0)
+        self.assertEqual(model.active, 9)
+        self.assertEqual(model.controls, [("Enable", 1.0, 30.0), ("Disable",)])
+        self.assertEqual(model.log[-2:], [self._released(8, "superseded"), self._verdict(1, 9, "")])
+
+    def test_the_server_copy_stops_when_its_owner_is_gone_or_dead(self) -> None:
+        for cause, end in (
+            ("no_identity", lambda player: setattr(player, "identity", None)),
+            ("disconnected", lambda player: setattr(player, "disconnected", True)),
+            ("player_dead", lambda player: setattr(player, "alive", False)),
+        ):
+            with self.subTest(cause=cause):
+                model = _ServerMoveModel(self.source)
+                model.start(4)
+                model.tick()
+                end(model.player)
+                model.tick(from_consume=False)
+                self.assertIsNone(model.active)
+                self.assertEqual(model.controls, [("Enable", 1.0, 30.0), ("Disable",)])
+                self.assertEqual(model.log[-1], self._released(4, cause))
+                # Nor does such a body start a move.
+                model.start(5)
+                self.assertEqual((model.active, model.log[-1]), (None, self._verdict(0, 5, cause)))
+
+    def test_the_deadman_is_the_last_bound(self) -> None:
+        # Nothing else ending it, the server copy runs the move's seconds plus
+        # SERVER_DEADMAN_MARGIN_S (0.5 s) from the start's arrival.
+        model = self.model
+        model.start(3, seconds=2.0)
+        model.now = 102.5
+        model.tick()
+        self.assertEqual(model.active, 3)
+        model.now = 102.51
+        model.tick()
+        self.assertEqual((model.active, model.log[-1]), (None, self._released(3, "expired")))
+
+    def test_a_reconnect_into_the_body_stops_the_move_and_frees_the_ids(self) -> None:
+        model = self.model
+        model.start(12)
+        model.tick()
+        model.player.OnReconnect()
+        self.assertEqual(model.supers, ["OnReconnect"])
+        self.assertEqual((model.active, model.log[-1]), (None, self._released(12, "reconnect")))
+        model.start(1)
+        self.assertEqual((model.active, model.log[-1]), (1, self._verdict(1, 1, "")))
+
+
+class PlayerMoveShutdownReleaseModelTest(unittest.TestCase):
+    """Review R1 F4(a), run on the owner's translated release methods."""
+
+    def setUp(self) -> None:
+        self.source = _source(MOVE_PATH)
+        self.udt = int(re.search(r"const int MCP_INPUT_UDT_PLAYER_MOVE = (\d+);", self.source).group(1))
+
+    def test_a_move_ended_by_shutdown_sends_its_identified_release(self) -> None:
+        model = _OwnerReleaseModel(self.source)
+        model.release_all("shutdown")
+        self.assertEqual(model.sent, [[self.udt, False, 5]])
+        self.assertFalse(model.state.s_ServerReleasePending)
+        self.assertEqual((model.disabled, model.state.s_ReleasedBy.text), (1, "shutdown"))
+
+    def test_shutdown_tries_once_then_drops_what_it_could_not_send(self) -> None:
+        # The local player gone or the channel full: nothing is sent, the owner's
+        # overrides are off, and nothing waits for an OnTick that will not come.
+        for blocked in ("channel_free", "local_player"):
+            with self.subTest(blocked=blocked):
+                model = _OwnerReleaseModel(self.source)
+                setattr(model, blocked, False)
+                model.shutdown_release()
+                self.assertEqual((model.sent, model.disabled), ([], 1))
+                self.assertFalse(model.state.s_ServerReleasePending)
+        # A release an earlier ending left waiting goes out at shutdown.
+        model = _OwnerReleaseModel(self.source)
+        model.channel_free = False
+        model.release_all("ttl")
+        self.assertEqual((model.sent, model.state.s_ServerReleasePending), ([], True))
+        model.channel_free = True
+        model.shutdown_release()
+        self.assertEqual(model.sent, [[self.udt, False, 5]])
+        self.assertFalse(model.state.s_ServerReleasePending)
+        # A move that never reached the server sends nothing.
+        model = _OwnerReleaseModel(self.source)
+        model.state.s_ServerRequest = _LogString.of("unavailable")
+        model.shutdown_release()
+        self.assertEqual((model.sent, model.disabled), ([], 1))
 
 
 class PlayerMoveRefusalContractTest(unittest.TestCase):
@@ -1376,10 +1870,16 @@ class PlayerMoveToolTest(unittest.IsolatedAsyncioTestCase):
             "its ttl_s (required, 0 < ttl_s <= 30)",
             "One move at a time",
             "not_in_move_command",
-            "its own deadman (the move's hold_s or ttl_s plus 0.5 s)",
+            "a refused start leaves that move running",
+            "is refused (stale_move_id), so a duplicate or replayed start cannot re-arm a move",
+            "the owner's client being gone (no identity left)",
+            "last on its deadman: the move's hold_s or ttl_s plus 0.5 s from the start's arrival",
+            "walks at most the move's remaining seconds plus 0.5 s",
+            "At shutdown the client makes one best-effort attempt to send that release.",
             "[DayZ_MCP] player_move server accepted=0|1 move=<move_id> reason=...",
             "server_request=sent means the request left the client, not that the server accepted it",
-            "A full input channel is input_busy and moves neither side.",
+            "A full input channel, or a previous move's release that cannot be sent yet, is "
+            "input_busy and moves neither side.",
             "player_trace's monotonic_s",
             "player_trace's tick",
             "query_all_players",
@@ -1390,6 +1890,56 @@ class PlayerMoveToolTest(unittest.IsolatedAsyncioTestCase):
         for cause in sorted(RELEASED_BY):
             with self.subTest(cause=cause):
                 self.assertIn(cause, released)
+
+    async def test_description_says_a_hold_occupies_the_session_until_it_answers(self) -> None:
+        # Review R1 F3, decided without restructuring the lock: the description
+        # says what the tool does, and nothing in it lets a release from the same
+        # session cut a hold short.
+        description = await self._description()
+        for fragment in (
+            "A hold occupies this session's tool calls until it answers: the tool keeps this "
+            "session's tool lock while it waits, so neither phase=release nor restore_gameplay "
+            "from this session can cut it short.",
+            "To stop a move early from this session, use phase=press and then phase=release.",
+            "phase=release stops the active press;",
+            "A hold answers aborted, with observed=released_by=..., only when something other "
+            "than this session ended it first:",
+            "If the mission ends during a hold, the bridge drops the call and it times out.",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, description)
+        for stale in (
+            "phase=release stops the active move, hold or press",
+            "a hold that something else stopped first is aborted",
+        ):
+            with self.subTest(stale=stale):
+                self.assertNotIn(stale, description)
+
+    async def test_a_release_from_the_same_session_waits_for_the_running_hold(self) -> None:
+        # What that sentence states: the hold keeps the tool lock while its bridge
+        # call waits, so the release reaches the bridge only once the hold answered.
+        entered = asyncio.Event()
+        finish_hold = asyncio.Event()
+        modes: list[str] = []
+
+        async def bridge(_command: str, args: dict[str, object], _peer: str, _timeout: float) -> dict:
+            modes.append(str(args["mode"]))
+            if args["mode"] == "hold":
+                entered.set()
+                await finish_hold.wait()
+            return {"ok": 1, FIELD: _reply()}
+
+        with patch.object(self.runtime, "call_bridge", new=bridge):
+            hold = asyncio.create_task(self.app.call_tool(COMMAND, {"hold_s": 5.0}))
+            await asyncio.wait_for(entered.wait(), 2.0)
+            release = asyncio.create_task(self.app.call_tool(COMMAND, {"phase": "release"}))
+            await asyncio.sleep(0.05)
+            self.assertEqual(modes, ["hold"])
+            self.assertFalse(release.done())
+            self.assertTrue(self.runtime.tool_lock.locked())
+            finish_hold.set()
+            await asyncio.wait_for(asyncio.gather(hold, release), 2.0)
+        self.assertEqual(modes, ["hold", "release"])
 
     async def test_description_names_every_error_the_bridge_can_return(self) -> None:
         description = await self._description()
@@ -1589,6 +2139,22 @@ class VanillaPremiseTest(unittest.TestCase):
         self.assertIn("proto native static bool CanStoreInputUserData ();", gameplay)
         serializer = self._vanilla(r"1_core\proto\serializer.c")
         self.assertIn("primitive types: int, float, string, bool, vector", serializer)
+
+    def test_the_owner_presence_checks_and_the_reconnect_hook(self) -> None:
+        # Review R1 F4(b): what the server copy reads to stop when its client is
+        # gone, and the hook a reconnect into the same body runs.
+        man = self._vanilla(r"3_game\entities\man.c")
+        self.assertIn("proto native PlayerIdentity GetIdentity();", man)
+        player = self._vanilla(r"4_world\entities\manbase\playerbase.c")
+        self.assertIn("bool IsPlayerDisconnected()\n\t{\n\t\treturn m_PlayerDisconnectProcessed;", player)
+        disconnect = _block_after(player, player.index("void OnDisconnect()"))
+        self.assertTrue(disconnect.rstrip().endswith("SetPlayerDisconnected(true);"))
+        self.assertEqual(player.count("void OnReconnect()"), 1)
+        mission = self._vanilla(r"5_mission\mission\missionserver.c")
+        reconnect = _block_after(
+            mission, mission.index("void OnClientReconnectEvent(PlayerIdentity identity, PlayerBase player)")
+        )
+        self.assertEqual(_flat(reconnect), "if (player) { player.OnReconnect(); }")
 
     def test_the_heading_convention(self) -> None:
         misc = self._vanilla(r"4_world\static\miscgameplayfunctions.c")

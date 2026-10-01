@@ -2825,8 +2825,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return false;
 	}
 
-	// release ends the active move, a hold or a press; a hold so ended answers
-	// aborted. With no move active it is not_held, which carries the last
+	// release ends the active move, in practice a press: the tool keeps a
+	// session's calls waiting while its hold runs, so a hold has answered before
+	// that session can send this (were a hold ended here, its job would answer
+	// aborted). With no move active it is not_held, which carries the last
 	// release when there was one.
 	protected bool ReleasePlayerMove(MCPResult result, MCPPlayerMove reply)
 	{
@@ -6849,8 +6851,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPCarDrive.Clear();
 		// Before RestoreGameplay, so the held key's release names shutdown.
 		MCPInputTriggerControl.ReleaseAll("shutdown");
-		// Likewise for an active player_move.
-		MCPPlayerMoveControl.ReleaseAll("shutdown");
+		// Likewise for an active player_move, with one last best-effort send of
+		// its server release before the mission goes.
+		MCPPlayerMoveControl.ShutdownRelease();
 		RestoreGameplay();
 		// m_Shutdown is already set, so this finishes any camera handoff and
 		// deactivates and deletes at once (f47b).

@@ -118,7 +118,8 @@ class MCPPlayerMoveControl
 	}
 
 	// The id the next move takes. Begin adopts it; a start that is never sent
-	// leaves it free.
+	// leaves it free. Ids only grow in this process (s_Gen is static), and the
+	// server copy refuses a start whose id it has already seen (stale_move_id).
 	static int NextMoveId()
 	{
 		return s_Gen + 1;
@@ -562,8 +563,8 @@ class MCPPlayerMoveControl
 	// Records why the move ended, then DISABLED on the controller this code
 	// enabled. The active state is cleared first, so a path that reaches here
 	// again finds nothing to release. A sent move sends the server its release
-	// (FlushServerRelease), except at shutdown: the mission is being torn down,
-	// and the server's own deadman ends its copy.
+	// (FlushServerRelease), whatever the cause; at shutdown ShutdownRelease then
+	// drops what could not be sent.
 	static void ReleaseAll(string why)
 	{
 		HumanInputController hic;
@@ -601,17 +602,25 @@ class MCPPlayerMoveControl
 		}
 		s_Armed = false;
 		s_Player = null;
-		if (why == "shutdown")
-		{
-			s_ServerReleasePending = false;
-			return;
-		}
 		if (s_ServerRequest == "sent")
 		{
 			s_ServerReleasePending = true;
 			s_ServerReleaseId = s_Gen;
 			FlushServerRelease();
 		}
+	}
+
+	// From MCPClientBridge.Shutdown: an active move ends as shutdown, then the
+	// server release that ending or an earlier one left waiting gets one last
+	// best-effort send (FlushServerRelease sends only while the local player
+	// exists and the input channel takes it) before it is dropped, since no
+	// OnTick will retry it. The server copy otherwise ends on its own checks (no
+	// identity left, not alive) or, last, on its deadman.
+	static void ShutdownRelease()
+	{
+		ReleaseAll("shutdown");
+		FlushServerRelease();
+		s_ServerReleasePending = false;
 	}
 
 	// The scheduled end: hold_s for hold, ttl_s for press.
@@ -710,6 +719,9 @@ class MCPPlayerMoveControl
 	// SendLiftWeaponSync assumes, playerbase.c:8446-8458) or input_busy (the
 	// input channel is taken or full, gameplay.c:130-131). The caller sends
 	// before the owner's overrides change, so input_busy moves neither side.
+	// The release of the previous move goes out first: the server keeps a move
+	// running when a later start is refused, so no start may stand in for a
+	// release. While that release cannot be sent the start is input_busy too.
 	static string SendStart(MCPPlayerMoveRequest request)
 	{
 		ScriptInputUserData message;
@@ -724,6 +736,11 @@ class MCPPlayerMoveControl
 		if (!GetGame().IsClient())
 		{
 			return "unavailable";
+		}
+		FlushServerRelease();
+		if (s_ServerReleasePending)
+		{
+			return "input_busy";
 		}
 		if (!ScriptInputUserData.CanStoreInputUserData())
 		{
@@ -742,8 +759,6 @@ class MCPPlayerMoveControl
 		message.Write(request.radius);
 		message.Write(request.seconds);
 		message.Send();
-		// This start replaces whatever the server still runs.
-		s_ServerReleasePending = false;
 		return "sent";
 	}
 
@@ -860,6 +875,14 @@ modded class PlayerBase
 	// Applications from ConsumeMove and from CommandHandler, logged at the end.
 	protected int m_MCPMoveConsumed;
 	protected int m_MCPMoveHandled;
+	// The highest move id this copy has seen in a start or a release. A start
+	// must carry a greater one, so a duplicate or replayed start cannot re-arm a
+	// move the owner ended. A new PlayerBase (a respawn, a body loaded on
+	// connect) starts from 0, and the owner's id only grows within its process
+	// (MCPPlayerMoveControl.s_Gen is static), so that is consistent; a reconnect
+	// into this same body resets it (OnReconnect), as that client may be a new
+	// process counting from 1 again.
+	protected int m_MCPMoveLastId;
 
 	// playerbase.c:6250. Ours stops here, as the weapon requests do
 	// (MCP_Weapon.c OnInputUserDataProcess).
@@ -907,9 +930,14 @@ modded class PlayerBase
 		MCPMoveAccept(request);
 	}
 
-	// The owner's release ends the move it names, never a newer one.
+	// The owner's release ends the move it names, never a newer one. Its id
+	// counts as seen, so a start of that move arriving after it is refused.
 	protected void MCPMoveReadRelease(int moveId)
 	{
+		if (moveId > m_MCPMoveLastId)
+		{
+			m_MCPMoveLastId = moveId;
+		}
 		if (!m_MCPMoveActive)
 		{
 			MCPMoveNote(moveId, "release_without_move");
@@ -923,14 +951,16 @@ modded class PlayerBase
 		MCPMoveServerRelease("client");
 	}
 
-	// A start replaces whatever this copy still runs: the owner sends one only
-	// after its own release, so a move still running here lost that release.
-	// Then the owner's checks run again on this copy: the values, the actor and
-	// the move command, and the target distance from this copy's own position.
+	// Every check runs before anything changes: the instance, the id's
+	// freshness, the owner still being there, the values, the actor and the
+	// move command, and the target distance from this copy's own position. A
+	// refused start leaves whatever this copy runs untouched. Only an accepted
+	// one replaces it: the owner releases a move before it starts the next
+	// (MCPPlayerMoveControl.SendStart), so a move still running here lost that
+	// release on the way.
 	protected void MCPMoveAccept(MCPPlayerMoveRequest request)
 	{
 		string refusal;
-		MCPMoveServerRelease("superseded");
 		// The server instance of this player only (dayzplayer.c:1070-1072, :1171).
 		if (GetInstanceType() != DayZPlayerInstanceType.INSTANCETYPE_SERVER)
 		{
@@ -942,7 +972,18 @@ modded class PlayerBase
 			MCPMoveVerdict(false, request.move_id, "no_game");
 			return;
 		}
-		refusal = MCPPlayerMoveControl.RequestRefusal(request);
+		refusal = MCPMoveFreshnessRefusal(request.move_id);
+		if (refusal == "")
+		{
+			// The id is used up now, accepted or not: the owner never sends the
+			// same start twice, so a later copy of it can only be a replay.
+			m_MCPMoveLastId = request.move_id;
+			refusal = MCPMoveOwnerRefusal();
+		}
+		if (refusal == "")
+		{
+			refusal = MCPPlayerMoveControl.RequestRefusal(request);
+		}
 		if (refusal == "")
 		{
 			refusal = MCPPlayerMoveControl.StartRefusal(this);
@@ -956,6 +997,7 @@ modded class PlayerBase
 			MCPMoveVerdict(false, request.move_id, refusal);
 			return;
 		}
+		MCPMoveServerRelease("superseded");
 		m_MCPMoveActive = request;
 		m_MCPMoveDeadlineS = GetGame().GetTickTime() + request.seconds + MCPPlayerMoveControl.SERVER_DEADMAN_MARGIN_S;
 		m_MCPMoveApplied = false;
@@ -964,10 +1006,44 @@ modded class PlayerBase
 		MCPMoveVerdict(true, request.move_id, "");
 	}
 
+	// "" for an id greater than any this copy has seen, else why not: ids start
+	// at 1, and an id already seen is a duplicate or a replay.
+	protected string MCPMoveFreshnessRefusal(int moveId)
+	{
+		if (moveId <= 0)
+		{
+			return "bad_move_id";
+		}
+		if (moveId <= m_MCPMoveLastId)
+		{
+			return "stale_move_id";
+		}
+		return "";
+	}
+
+	// The server copy moves only while its owner is still there: a body whose
+	// client is gone (no identity left, Man.GetIdentity at man.c:21, or vanilla's
+	// disconnect already processed, playerbase.c:2453-2461) stops at once instead
+	// of walking on a request nobody will release.
+	protected string MCPMoveOwnerRefusal()
+	{
+		if (!GetIdentity())
+		{
+			return "no_identity";
+		}
+		if (IsPlayerDisconnected())
+		{
+			return "disconnected";
+		}
+		return "";
+	}
+
 	// Every tick of the server's move, from ConsumeMove after super and from
-	// CommandHandler: the end checks first (the actor, its own deadman, its own
-	// arrival), then the two overrides again with the angle recomputed from
-	// this copy's own heading and position.
+	// CommandHandler: the end checks first (the owner still there, the actor,
+	// its own deadman, its own arrival), then the two overrides again with the
+	// angle recomputed from this copy's own heading and position. The deadman,
+	// the move's seconds plus SERVER_DEADMAN_MARGIN_S from the start's arrival,
+	// is the last bound when nothing else ends it.
 	protected void MCPMoveServerTick(bool fromConsume)
 	{
 		string refusal;
@@ -982,7 +1058,11 @@ modded class PlayerBase
 			MCPMoveServerRelease("no_game");
 			return;
 		}
-		refusal = MCPPlayerMoveControl.ActorRefusal(this);
+		refusal = MCPMoveOwnerRefusal();
+		if (refusal == "")
+		{
+			refusal = MCPPlayerMoveControl.ActorRefusal(this);
+		}
 		if (refusal != "")
 		{
 			MCPMoveServerRelease(refusal);
@@ -1055,6 +1135,16 @@ modded class PlayerBase
 	protected void MCPMoveNote(int moveId, string reason)
 	{
 		Print("[DayZ_MCP] player_move server ignored move=" + moveId.ToString() + " reason=" + reason);
+	}
+
+	// A client reconnecting into this body (missionserver.c:620-626) may be a
+	// new process whose move ids start at 1 again: nothing of the old
+	// connection's move runs on, and its ids are fresh for this body again.
+	override void OnReconnect()
+	{
+		super.OnReconnect();
+		MCPMoveServerRelease("reconnect");
+		m_MCPMoveLastId = 0;
 	}
 
 	// super first. The server's copy runs its move before the local-player
