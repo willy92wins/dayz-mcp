@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import ntpath
+import os
 import re
+import stat
+import tempfile
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -19,6 +23,11 @@ from dayz_mcp import (
     dayz_test_storage,
     native_broker_protocol,
 )
+
+try:
+    import _winapi
+except ImportError:  # not Windows: a build stage cannot be made, and the build fails closed
+    _winapi = None  # type: ignore[assignment]
 
 
 _UUID4 = re.compile(
@@ -639,6 +648,187 @@ def _default_has_assets(source: str) -> bool:
         raise _failed("build_source_unavailable") from None
 
 
+# bf5c / 8cf9. AddonBuilder hands binarize -addon="<parent of the source>", and
+# binarize parses every config.cpp under that folder, through junctions too: a
+# broken one anywhere next to the source failed the build, and a source in P:\
+# or DayZ Projects made it walk every sibling project. When binarize runs, the
+# worker builds from <stage>\<basename> instead, a fresh folder in its private
+# TEMP that holds only junctions: the source, the vanilla roots DayZ Tools
+# extracts next to it, and the parent's folders the source's files reference.
+# The vanilla roots are not optional: binarize resolves \dz\... paths and the
+# vanilla config classes through -addon (2026-10-01, SimpleGroup: T1_FlagKit.p3d
+# was 55 221 B built from DayZ Projects, 43 376 B alone in a parent, and
+# byte-identical to the former with a DZ junction beside the mod).
+_BUILD_STAGE_PREFIX = "dayz-mcp-build-"
+_VANILLA_ROOTS = frozenset(
+    {"dz", "bin", "scripts", "gui", "graphics", "system", "languagecore"}
+)
+# The files whose text can name another root, and the suffixes that make a
+# path-like string in them an asset path. The config and header suffixes are
+# for #include, which binarize's preprocessor resolves through -addon as well.
+_REFERENCE_SCAN_SUFFIXES = frozenset(
+    {".p3d", ".rvmat", ".bisurf", ".emat", ".ptc", ".cpp", ".hpp", ".h", ".cfg"}
+)
+_REFERENCE_ASSET_SUFFIXES = (
+    b"anm", b"bisurf", b"cfg", b"cpp", b"emat", b"hpp", b"h", b"p3d",
+    b"paa", b"png", b"ptc", b"rtm", b"rvmat", b"tga", b"wrp",
+)
+_PATH_CHARACTERS = rb"A-Za-z0-9_.\-"
+# A run of path components separated by \ or /, the last one ending in an asset
+# suffix, that does not start or end inside a longer run. Group 1 is the first
+# component, the root binarize looks up under -addon. The text is read as
+# bytes: .p3d files are binary, with their paths as NUL-terminated strings.
+_ASSET_PATH = re.compile(
+    rb"(?<![" + _PATH_CHARACTERS + rb"\\/])"
+    rb"[\\/]*([" + _PATH_CHARACTERS + rb"]+)"
+    rb"(?:[\\/]+[" + _PATH_CHARACTERS + rb"]+)*?"
+    rb"[\\/]+[" + _PATH_CHARACTERS + rb"]*?\.(?:"
+    + rb"|".join(_REFERENCE_ASSET_SUFFIXES)
+    + rb")(?![" + _PATH_CHARACTERS + rb"])",
+    re.IGNORECASE,
+)
+
+
+def _referenced_roots(source: str) -> frozenset[str]:
+    """The first components, casefolded, of the asset paths the source's files name.
+
+    Every folder under the source is listed once, by its resolved path, so a
+    junction back up the tree cannot loop, and every scanned file is read once.
+    Folders behind a junction or a link are walked like the others, because
+    binarize follows them. OSError when a listing or a read fails.
+    """
+    roots: set[str] = set()
+    pending = [source]
+    walked: set[str] = set()
+    while pending:
+        folder = pending.pop()
+        identity = ntpath.normcase(os.path.realpath(folder))
+        if identity in walked:
+            continue
+        walked.add(identity)
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if entry.is_dir():
+                    pending.append(entry.path)
+                elif (
+                    ntpath.splitext(entry.name)[1].casefold() in _REFERENCE_SCAN_SUFFIXES
+                    and entry.is_file()
+                ):
+                    with open(entry.path, "rb") as handle:
+                        data = handle.read()
+                    roots.update(
+                        match.group(1).decode("ascii").casefold()
+                        for match in _ASSET_PATH.finditer(data)
+                    )
+    return frozenset(roots)
+
+
+def _build_stage_plan(source: str) -> tuple[tuple[str, str], ...]:
+    """(junction name, folder) for each junction of the stage, the source first.
+
+    The source keeps its own name, so its \\<name>\\... paths resolve as they
+    did. Then, sorted, every folder directly in the source's parent that is a
+    vanilla root or the first component of an asset path the source's files
+    name, under its name on disk. Only those entries of the parent are looked
+    at, so a sibling the source does not need plays no part, readable or not.
+    OSError when the source has no parent or a listing or a read fails.
+    """
+    name = ntpath.basename(source)
+    parent = ntpath.dirname(source)
+    if not name or ntpath.normcase(parent) == ntpath.normcase(source):
+        raise OSError("the build source has no parent folder")
+    wanted = (_VANILLA_ROOTS | _referenced_roots(source)) - {name.casefold()}
+    roots: list[str] = []
+    with os.scandir(parent) as entries:
+        for entry in entries:
+            if entry.name.casefold() in wanted and entry.is_dir():
+                roots.append(entry.name)
+    roots.sort(key=lambda root: (root.casefold(), root))
+    return ((name, source),) + tuple(
+        (root, ntpath.join(parent, root)) for root in roots
+    )
+
+
+def _is_junction(path: str) -> bool:
+    # os.path.isjunction is new in Python 3.12; the bundled runtime is 3.14.
+    # The suite also runs on 3.11, where the reparse tag is read directly, the
+    # test 3.12's ntpath.isjunction made.
+    isjunction = getattr(os.path, "isjunction", None)
+    if isjunction is not None:
+        return bool(isjunction(path))
+    try:
+        return os.lstat(path).st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def _create_verified_junction(target: str, link: str) -> None:
+    """Make link a junction to the folder target, or raise OSError.
+
+    _winapi.CreateJunction stores the full path of target behind the native
+    "\\??\\" prefix, which os.readlink returns as "\\\\?\\" + target, and it
+    accepts a file as its target. So the link must be a junction, point at
+    exactly target and reach a folder.
+    """
+    if _winapi is None:
+        raise OSError("directory junctions need Windows")
+    _winapi.CreateJunction(target, link)
+    pointed = os.readlink(link) if _is_junction(link) else ""
+    if pointed.startswith("\\\\?\\"):
+        pointed = pointed[4:]
+    if ntpath.normcase(pointed) != ntpath.normcase(target) or not os.path.isdir(link):
+        raise OSError("the build stage junction did not verify: " + link)
+
+
+def _remove_build_stage(stage: str, links: list[str]) -> None:
+    # os.rmdir removes a junction itself, never the folder it points at, and
+    # refuses a folder that is not empty. Nothing here walks a link or removes
+    # recursively; what cannot be removed stays for the private TEMP's owner.
+    for link in reversed(links):
+        try:
+            os.rmdir(link)
+        except (OSError, ValueError):
+            pass
+    try:
+        os.rmdir(stage)
+    except (OSError, ValueError):
+        pass
+
+
+@contextlib.contextmanager
+def _staged_build_source(source: str) -> Iterator[str]:
+    """The path AddonBuilder builds from when binarize runs: <stage>\\<basename>.
+
+    The stage is a fresh folder in tempfile.gettempdir(), which in the sealed
+    worker is the launcher's private TEMP, and it holds only the junctions of
+    _build_stage_plan, each verified after it is made. Nothing is written into
+    the source or its parent. When the stage cannot be made, the build fails
+    with build_source_unavailable before AddonBuilder starts, never falling back
+    to the source itself. On the way out, whatever the build did, the junctions
+    and then the emptied stage are removed; a removal that fails does not
+    replace the build's own result.
+    """
+    stage: str | None = None
+    links: list[str] = []
+    try:
+        try:
+            plan = _build_stage_plan(source)
+            stage = tempfile.mkdtemp(prefix=_BUILD_STAGE_PREFIX, dir=tempfile.gettempdir())
+            for name, target in plan:
+                link = ntpath.join(stage, name)
+                links.append(link)
+                _create_verified_junction(target, link)
+            staged = ntpath.join(stage, plan[0][0])
+        except (OSError, ValueError):
+            raise _failed("build_source_unavailable") from None
+        if not _local_path(staged):
+            raise _failed("build_source_unavailable")
+        yield staged
+    finally:
+        if stage is not None:
+            _remove_build_stage(stage, links)
+
+
 async def execute_dayz_test_worker(
     canonical_request: bytes,
     *,
@@ -652,6 +842,9 @@ async def execute_dayz_test_worker(
         Awaitable[dayz_test_readiness.ReadinessResult],
     ] | None = None,
     has_binarizable_assets: Callable[[str], bool] = _default_has_assets,
+    stage_build_source: Callable[
+        [str], contextlib.AbstractContextManager[str]
+    ] = _staged_build_source,
     cancel_event: asyncio.Event | None = None,
 ) -> WorkerResult:
     if (
@@ -733,18 +926,24 @@ async def execute_dayz_test_worker(
         ):
             raise _failed("build_source_unavailable")
         pack_only = bool(payload["pack_only"]) or not has_binarizable_assets(source)
-        result = await _invoke(
-            broker,
-            native_broker_protocol.BrokerKind.ADDON_BUILDER,
-            {
-                "clear": bool(payload["clean"]),
-                "pack_only": pack_only,
-                "prefix": runtime.mod,
-                "source": source,
-                "target": ntpath.join(runtime.mods_root, "@" + runtime.mod, "Addons"),
-                "temp": ntpath.join(runtime.build_temp_root, runtime.mod),
-            },
+        # bf5c / 8cf9: only a binarizing build is staged; -packonly runs no
+        # binarize and keeps building from the source itself.
+        staging = (
+            contextlib.nullcontext(source) if pack_only else stage_build_source(source)
         )
+        with staging as build_source:
+            result = await _invoke(
+                broker,
+                native_broker_protocol.BrokerKind.ADDON_BUILDER,
+                {
+                    "clear": bool(payload["clean"]),
+                    "pack_only": pack_only,
+                    "prefix": runtime.mod,
+                    "source": build_source,
+                    "target": ntpath.join(runtime.mods_root, "@" + runtime.mod, "Addons"),
+                    "temp": ntpath.join(runtime.build_temp_root, runtime.mod),
+                },
+            )
         if (
             result.get("ok") is not True
             or type(result.get("exit_code")) is not int
