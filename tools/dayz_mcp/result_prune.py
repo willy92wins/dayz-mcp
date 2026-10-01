@@ -84,6 +84,8 @@ PRUNABLE_FIELDS = (
     "world_time",
     # ui_click fills it in mode="complete" only: direct mode leaves it unset.
     "click_sequence",
+    # player_trace fills it with the trace header and its paged samples (4ae5).
+    "player_trace",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.

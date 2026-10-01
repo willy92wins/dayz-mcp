@@ -20,7 +20,14 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
-from dayz_mcp import anim_timeline, daemon_credential, orphan_guard, pinned_keyfile, ui_dialog
+from dayz_mcp import (
+    anim_timeline,
+    daemon_credential,
+    orphan_guard,
+    pinned_keyfile,
+    player_trace,
+    ui_dialog,
+)
 from dayz_mcp.client_dump_registry import ClientDumpRegistry
 from dayz_mcp.core import (
     BLOCKED_VERSION_STATES,
@@ -88,6 +95,7 @@ CLIENT_COMMANDS = {
     "input_describe",
     "input_trigger",
     "player_respawn",
+    "player_trace",
     "vehicle_get_in_client",
     "engine_set",
     "vehicle_control",
@@ -723,6 +731,37 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "limit": _integer_in_range(minimum=1, maximum=64),
                 "sample_hz": _integer_in_range(minimum=20, maximum=60),
                 "max_samples": _integer_in_range(minimum=2, maximum=8192),
+            },
+        )
+    ),
+    # Every key travels in every mode, like vehicle_trace. The bounds mirror
+    # MCPPlayerTrace (addon/scripts/4_World/MCP_PlayerTrace.c) through
+    # player_trace.py.
+    "player_trace": _command_schema(
+        _schema_variant(
+            required=(
+                "mode",
+                "trace_id",
+                "cursor",
+                "limit",
+                "sample_hz",
+                "max_samples",
+            ),
+            validators={
+                "mode": _one_of(*sorted(player_trace.TRACE_MODES)),
+                "trace_id": _lower_hex(32),
+                "cursor": _integer_in_range(minimum=0),
+                "limit": _integer_in_range(
+                    minimum=player_trace.LIMIT_MIN, maximum=player_trace.LIMIT_MAX
+                ),
+                "sample_hz": _integer_in_range(
+                    minimum=player_trace.SAMPLE_HZ_MIN,
+                    maximum=player_trace.SAMPLE_HZ_MAX,
+                ),
+                "max_samples": _integer_in_range(
+                    minimum=player_trace.MAX_SAMPLES_MIN,
+                    maximum=player_trace.MAX_SAMPLES_MAX,
+                ),
             },
         )
     ),

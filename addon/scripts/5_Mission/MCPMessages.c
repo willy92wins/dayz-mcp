@@ -834,6 +834,8 @@ class MCPResult
 	ref MCPWorldTime world_time;
 	// ui_click mode="complete" read-back. Unassigned in direct mode and on other commands.
 	ref MCPUiClickSequence click_sequence;
+	// player_trace header and paged samples. Unassigned on other commands.
+	ref MCPPlayerTraceRead player_trace;
 };
 
 class MCPJob

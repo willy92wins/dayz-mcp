@@ -50,6 +50,22 @@ def _trigger_args(
     return args
 
 
+def _player_trace_args(*, drop: str = "", **overrides: object) -> dict[str, object]:
+    """A valid player_trace payload with `overrides` applied and `drop` removed."""
+    args: dict[str, object] = {
+        "mode": "start",
+        "trace_id": "0123456789abcdef0123456789abcdef",
+        "cursor": 0,
+        "limit": 64,
+        "sample_hz": 20,
+        "max_samples": 4096,
+    }
+    args.update(overrides)
+    if drop:
+        del args[drop]
+    return args
+
+
 # A valid world_spawn payload without the optional lifetime_s pair.
 _SPAWN: dict[str, object] = {
     "type": "CivilianSedan",
@@ -143,6 +159,26 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("input_with_dik", _trigger_args("input", dik=1), (False, "bad_args")),
         ("input_with_entry", _trigger_args("input", trigger_entry="game"), (False, "bad_args")),
         ("extra_key", _trigger_args(extra=None), (False, "bad_args")),
+    ),
+    "player_trace": (
+        ("valid", _player_trace_args(), (True, None)),
+        ("valid_dump", _player_trace_args(mode="dump"), (True, None)),
+        ("valid_bounds_low", _player_trace_args(limit=1, sample_hz=20, max_samples=2), (True, None)),
+        ("valid_bounds_high", _player_trace_args(limit=64, sample_hz=60, max_samples=8192), (True, None)),
+        ("unknown_mode", _player_trace_args(mode="START"), (False, "bad_args")),
+        ("bad_trace_id", _player_trace_args(trace_id="A" * 32), (False, "bad_args")),
+        ("short_trace_id", _player_trace_args(trace_id="a" * 31), (False, "bad_args")),
+        ("negative_cursor", _player_trace_args(cursor=-1), (False, "bad_args")),
+        ("limit_zero", _player_trace_args(limit=0), (False, "bad_args")),
+        ("limit_65", _player_trace_args(limit=65), (False, "bad_args")),
+        ("sample_hz_19", _player_trace_args(sample_hz=19), (False, "bad_args")),
+        ("sample_hz_61", _player_trace_args(sample_hz=61), (False, "bad_args")),
+        ("max_samples_1", _player_trace_args(max_samples=1), (False, "bad_args")),
+        ("max_samples_8193", _player_trace_args(max_samples=8193), (False, "bad_args")),
+        ("limit_bool", _player_trace_args(limit=True), (False, "bad_args")),
+        ("missing_max_samples", _player_trace_args(drop="max_samples"), (False, "bad_args")),
+        ("caller_path", _player_trace_args(path="C:\\x.jsonl"), (False, "bad_args")),
+        ("extra_key", _player_trace_args(extra=None), (False, "bad_args")),
     ),
     "vehicle_trace": (
         (

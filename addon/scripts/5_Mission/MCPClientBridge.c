@@ -462,7 +462,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_use,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,input_trigger,key_press,player_respawn," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_use,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,input_trigger,key_press,player_respawn,player_trace," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -597,6 +597,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// sample belongs to the frame the action or callback state changed.
 		// Returns before any engine call while no timeline is active.
 		MCPAnimTimeline.Tick(timeslice);
+		// player_trace samples here on every frame too, never from a job, with
+		// this bridge tick. Returns before any engine call while no trace is active.
+		MCPPlayerTrace.Tick(timeslice, m_Tick);
 		// Ahead of the job runner, so a restore_gameplay job posts in the very
 		// tick the camera handoff finishes (f47b). Returns at once when none runs.
 		TickCameraHandoff();
@@ -1187,6 +1190,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "weapon_sights")
 		{
 			postNow = DispatchWeaponSights(command, result);
+		}
+		else if (command.cmd == "player_trace")
+		{
+			postNow = DispatchPlayerTrace(command, result);
 		}
 		else if (command.cmd == "ui_dialog")
 		{
@@ -2660,6 +2667,117 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			result.ok = false;
 			result.error = MCPAnimTimeline.GetLastError();
+			return true;
+		}
+		result.ok = true;
+		return true;
+	}
+
+	// player_trace (4ae5): the local player's per-frame trace on this owner
+	// client (MCPPlayerTrace). Sampling runs in OnTick via MCPPlayerTrace.Tick.
+	// No seat is needed and the lifecycle is vehicle_trace's.
+	protected bool DispatchPlayerTrace(MCPCommand command, MCPResult result)
+	{
+		MCPArgs args;
+		PlayerBase player;
+		MCPPlayerTraceRead clearView;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		args = command.args;
+		if (args.mode != "start" && args.mode != "status" && args.mode != "stop" && args.mode != "read" && args.mode != "clear" && args.mode != "dump")
+		{
+			result.ok = false;
+			result.error = "bad_mode";
+			return true;
+		}
+		if (!IsValidTraceId(args.trace_id) || args.cursor < 0 || args.limit < 1 || args.limit > MCPPlayerTrace.LIMIT_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (args.sample_hz < MCPPlayerTrace.SAMPLE_HZ_MIN || args.sample_hz > MCPPlayerTrace.SAMPLE_HZ_MAX || args.max_samples < MCPPlayerTrace.MAX_SAMPLES_MIN || args.max_samples > MCPPlayerTrace.MAX_SAMPLES_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		if (args.mode == "start")
+		{
+			player = PlayerBase.Cast(GetGame().GetPlayer());
+			if (!MCPPlayerTrace.Start(player, args.trace_id, args.sample_hz, args.max_samples))
+			{
+				result.ok = false;
+				result.error = MCPPlayerTrace.GetLastError();
+				return true;
+			}
+			result.player_trace = MCPPlayerTrace.View("start", args.trace_id, 0, 1);
+			result.ok = result.player_trace != null;
+			if (!result.ok)
+			{
+				result.error = MCPPlayerTrace.GetLastError();
+			}
+			return true;
+		}
+
+		if (!MCPPlayerTrace.Matches(args.trace_id))
+		{
+			result.ok = false;
+			result.error = "trace_not_found";
+			return true;
+		}
+		// A dead or changed local player stops the trace before it answers.
+		if (MCPPlayerTrace.IsActive())
+		{
+			MCPPlayerTrace.CheckPlayer();
+		}
+
+		if (args.mode == "stop")
+		{
+			if (!MCPPlayerTrace.Stop(args.trace_id))
+			{
+				result.ok = false;
+				result.error = MCPPlayerTrace.GetLastError();
+				return true;
+			}
+			result.player_trace = MCPPlayerTrace.View("stop", args.trace_id, 0, 1);
+		}
+		else if (args.mode == "clear")
+		{
+			// The header is read before the wipe: it is the last view of the trace.
+			clearView = MCPPlayerTrace.View("clear", args.trace_id, 0, 1);
+			if (!clearView || !MCPPlayerTrace.Clear(args.trace_id))
+			{
+				result.ok = false;
+				result.error = MCPPlayerTrace.GetLastError();
+				return true;
+			}
+			result.player_trace = clearView;
+		}
+		else if (args.mode == "dump")
+		{
+			if (!MCPPlayerTrace.Dump(args.trace_id))
+			{
+				result.ok = false;
+				result.error = MCPPlayerTrace.GetLastError();
+				return true;
+			}
+			result.player_trace = MCPPlayerTrace.View("dump", args.trace_id, 0, 1);
+		}
+		else
+		{
+			result.player_trace = MCPPlayerTrace.View(args.mode, args.trace_id, args.cursor, args.limit);
+		}
+
+		if (!result.player_trace)
+		{
+			result.ok = false;
+			result.error = MCPPlayerTrace.GetLastError();
 			return true;
 		}
 		result.ok = true;
@@ -6409,6 +6527,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_DialogHostTried = false;
 		MCPVehicleTrace.Abort("shutdown");
 		MCPAnimTimeline.Abort("shutdown");
+		MCPPlayerTrace.Abort("shutdown");
 		MCPCarDrive.Clear();
 		// Before RestoreGameplay, so the held key's release names shutdown.
 		MCPInputTriggerControl.ReleaseAll("shutdown");

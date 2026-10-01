@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- 1 new public tool, 76 in all: `player_trace`. It is a client bridge verb and needs a PBO built from this release.
+- `player_trace` records the local player per client frame on the owner client, seated or not and with no window focus: position, velocity, the input heading (`heading_deg`) and the body yaw (`yaw_deg`), `falling`, the floor, linked and parent entities, `sliding_off_linked` and the movement state, with `vehicle_trace`'s lifecycle (`start`, `status`, `stop` with an autodump, `dump` to `$profile:dayz_mcp_player_trace_<trace_id>.jsonl`, `read`, `clear`). A death or change of the local player stops it with that `stop_reason`, and a dead player cannot start one (`player_dead`). Health is not sampled: the owner client has no synced value (inbox 4ae5).
+
 ## [1.3] - 2026-10-01
 
 ### Added

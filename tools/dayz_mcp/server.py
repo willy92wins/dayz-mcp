@@ -115,6 +115,7 @@ from dayz_mcp.session_coordination import (
 )
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
 from dayz_mcp import anim_timeline as anim_timeline_contract
+from dayz_mcp import player_trace as player_trace_contract
 # Moved out of this module unchanged (backlog 71fc) and imported back, so
 # dayz_mcp.server.<name> is still the same object for every name it had.
 from dayz_mcp.tool_catalog import (
@@ -5993,6 +5994,84 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
         try:
             return anim_timeline_contract.normalize_bridge_result(raw_result)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Capture and read a per-frame trace of the local "
+            "player on the owner client, the client that drives the player's "
+            "movement. It runs seated or not, with no window focus, beside "
+            "vehicle_trace. mode=start (no trace_id) returns a new trace_id; "
+            "mode=start while a trace exists returns trace_exists, so call "
+            "mode=clear before reuse; clear of an active trace is trace_active "
+            "(stop first). mode=status reads the header "
+            "and mode=read pages samples by cursor and limit "
+            f"({player_trace_contract.LIMIT_MIN}..{player_trace_contract.LIMIT_MAX}). "
+            "mode=dump writes JSONL to "
+            "$profile:dayz_mcp_player_trace_<trace_id>.jsonl and stop autodumps "
+            "the same file. Samples come at sample_hz "
+            f"({player_trace_contract.SAMPLE_HZ_MIN}..{player_trace_contract.SAMPLE_HZ_MAX}), "
+            "decimated per client frame like vehicle_trace, so at most one per "
+            "frame (an unfocused client renders at about 20 fps), into "
+            f"max_samples ({player_trace_contract.MAX_SAMPLES_MIN}.."
+            f"{player_trace_contract.MAX_SAMPLES_MAX}); a full trace stops with "
+            "overflow=true. Each sample has monotonic_s (client GetTickTime "
+            "seconds) and tick (client bridge tick, the counter tick_dispatch "
+            "reports), pos (PhysicsGetPositionWS), vel (PhysicsGetVelocity), "
+            "heading_deg (the input controller's GetHeadingAngle as a compass "
+            "heading, 0 north = +Z, 90 east = +X; -1 without an input "
+            "controller), yaw_deg (GetOrientation yaw in degrees, the body's "
+            "world orientation, raw like vehicle_trace's yaw_deg), falling "
+            "(PhysicsIsFalling(false), the read vanilla's CommandHandler uses "
+            "to start a fall), floor (PhysicsGetFloorEntity), linked "
+            "(PhysicsGetLinkedEntity: the boat a player stands on; not valid "
+            "while parent is set) and parent (GetParent), each null or {type, "
+            "class_name, net_id_low, net_id_high, pos}, sliding_off_linked, "
+            "command_type_id with its name in command, stance_idx and "
+            "movement_idx (HumanMovementState). Health is not sampled: in "
+            "multiplayer the owner client has no synced value. A death or "
+            "change of the local player stops the trace with stop_reason "
+            "player_dead or player_changed; the other stop reasons are "
+            "requested (mode=stop), overflow, clock_not_monotonic and, in the "
+            "autodump at shutdown, shutdown. In the dump file an absent entity "
+            "is written as the engine serializes an unset reference; read "
+            "answers null. Errors: bad_mode, bad_trace_id, bad_cursor, "
+            "bad_limit, bad_sample_hz, bad_max_samples (refused before the "
+            "bridge), bad_args, client_not_in_game, no_player, player_dead (a "
+            "dead player cannot start a trace), trace_exists, trace_not_found, "
+            "trace_active, dump_failed."
+        )
+    )
+    async def player_trace(
+        mode: StrictStr,
+        trace_id: StrictStr = "",
+        cursor: StrictInt = 0,
+        limit: StrictInt = 64,
+        sample_hz: StrictInt = 20,
+        max_samples: StrictInt = 4096,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        try:
+            args = player_trace_contract.normalize_request(
+                mode,
+                trace_id,
+                cursor,
+                limit,
+                sample_hz,
+                max_samples,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        async with runtime.tool_lock:
+            raw_result = await runtime.call_bridge(
+                "player_trace",
+                args,
+                "client",
+                _timeout(timeout_s),
+            )
+        try:
+            return player_trace_contract.normalize_bridge_result(raw_result)
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
 

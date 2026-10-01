@@ -307,6 +307,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "input_trigger": "input_trigger",
         "key_press": "key_press",
         "player_respawn": "player_respawn",
+        "player_trace": "player_trace",
         "restore_gameplay": "restore_gameplay",
         "ui_click": "ui_click",
         "ui_dialog": "ui_dialog",
