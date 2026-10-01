@@ -108,7 +108,7 @@ DISPATCH_CHAIN = "protected void Dispatch(MCPCommand command)"
 ON_TICK = "void OnTick(float timeslice)"
 SHUTDOWN = "void Shutdown()"
 START = "static bool Start(PlayerBase player, string traceId, int sampleHz, int maxSamples)"
-TICK = "static void Tick(float timeslice, int bridgeTick)"
+TICK = "static void Tick(int bridgeTick)"
 CHECK = "static bool CheckPlayer()"
 STOP = "static bool Stop(string traceId)"
 CLEAR = "static bool Clear(string traceId)"
@@ -278,6 +278,10 @@ def _sample(sequence: int = 0, **fields: object) -> dict[str, object]:
 
 
 def _trace(mode: str = "read", samples: list[object] | None = None, **fields: object) -> dict[str, object]:
+    """An MCPPlayerTraceRead as View answers it: the page is samples cursor..next_cursor."""
+    page = [_sample(0), _sample(1)] if samples is None else samples
+    cursor = fields.get("cursor", 0)
+    end = cursor + len(page) if isinstance(cursor, int) else len(page)
     trace: dict[str, object] = {
         "schema": "dayz-mcp-player-trace-v1",
         "mode": mode,
@@ -288,28 +292,28 @@ def _trace(mode: str = "read", samples: list[object] | None = None, **fields: ob
         "stop_reason": "",
         "sample_hz": 20,
         "capacity": 4096,
-        "count": 2,
+        "count": max(2, end),
         "start_monotonic_s": 99.9,
         "player_type": "SurvivorM_Mirek",
         "net_id_low": 11,
         "net_id_high": 22,
         "cursor": 0,
-        "next_cursor": 2,
+        "next_cursor": end,
         "eof": 0,
         "path": "",
         "rows": 0,
-        "samples": [_sample(0), _sample(1)] if samples is None else samples,
+        "samples": page,
     }
     trace.update(fields)
     return trace
 
 
 def _dump_trace(**fields: object) -> dict[str, object]:
+    """A dump answer: View("dump", id, 0, 1) after Dump, so no samples and rows == count."""
     dumped: dict[str, object] = {
         "active": 0,
         "complete": 1,
         "stop_reason": "requested",
-        "eof": 1,
         "path": player_trace.dump_profile_path(TRACE_ID),
         "rows": 2,
     }
@@ -324,6 +328,164 @@ def _bridge_codes() -> set[str]:
     codes |= set(re.findall(r's_LastError = "(\w+)"', _without_comments(_source(TRACE_PATH))))
     codes.add("client_not_in_game")  # the Dispatch gate before every verb
     return codes
+
+
+class _Return(Exception):
+    """A `return;` reached while walking an Enforce body."""
+
+
+def _block_span(source: str, start: int) -> tuple[str, int]:
+    """The brace block at or after `start`: its content and the index after it."""
+    brace = source.index("{", start)
+    depth = 0
+    for index in range(brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[brace + 1 : index], index + 1
+    raise AssertionError(f"unterminated block at offset {start}")
+
+
+def _parse_statements(code: str) -> list[tuple]:
+    """Comment-free Enforce of statements and if/else blocks, as walkable nodes:
+    ("do", statement) and ("if", condition, then_nodes, else_nodes)."""
+    nodes: list[tuple] = []
+    index = 0
+    while index < len(code):
+        if code[index].isspace():
+            index += 1
+            continue
+        if code.startswith("if (", index):
+            depth = 0
+            close = index + 3
+            while True:
+                if code[close] == "(":
+                    depth += 1
+                elif code[close] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                close += 1
+            condition = " ".join(code[index + 4 : close].split())
+            then_code, index = _block_span(code, close)
+            else_nodes: list[tuple] = []
+            rest = code[index:].lstrip()
+            if re.match(r"else\b", rest):
+                if re.match(r"else\s+if\b", rest):
+                    raise AssertionError("else if is not walked")
+                else_code, index = _block_span(code, len(code) - len(rest) + len("else"))
+                else_nodes = _parse_statements(else_code)
+            nodes.append(("if", condition, _parse_statements(then_code), else_nodes))
+            continue
+        end = code.index(";", index)
+        nodes.append(("do", " ".join(code[index : end + 1].split())))
+        index = end + 1
+    return nodes
+
+
+class _DecimationWalk:
+    """Runs the per-frame decimation branches of a trace's Enforce body.
+
+    Every statement and condition the body has must be transcribed below, so an
+    edit to those branches fails here until the walk learns it. A frame moves
+    the clock by its length: GetTickTime() is the running sum, the body's
+    timeslice or dt is the frame length, and CaptureNow records one sample at
+    that time (CaptureNow sets s_LastSampleS and counts it). The game, the
+    local player and the car owner stay valid. Python doubles, not float32.
+    """
+
+    def __init__(self, sample_hz: int) -> None:
+        self.sample_hz = sample_hz
+        self.statics = {"s_Active": True, "s_Count": 0, "s_LastSampleS": 0.0, "s_AccumS": 0.0, "s_NextDueS": 0.0}
+        self.clock = 0.0
+        self.frame = 0.0
+        self.locals: dict[str, float] = {}
+        self.samples: list[float] = []
+
+    def run(self, nodes: list[tuple], frames: list[float]) -> list[float]:
+        for frame in frames:
+            self.clock += frame
+            self.frame = frame
+            self.locals = {}
+            try:
+                self._run(nodes)
+            except _Return:
+                pass
+        return self.samples
+
+    def _run(self, nodes: list[tuple]) -> None:
+        for node in nodes:
+            if node[0] == "do":
+                self._do(node[1])
+            elif self._holds(node[1]):
+                self._run(node[2])
+            else:
+                self._run(node[3])
+
+    def _do(self, statement: str) -> None:
+        state = self.statics
+        local = self.locals
+        if re.fullmatch(r"(?:float|int) \w+;", statement):
+            return
+        statement = re.sub(r"^(?:float|int) (\w+ =)", r"\1", statement)
+        if statement == "return;":
+            raise _Return()
+        if statement.startswith("Fail("):
+            raise AssertionError(f"the walk failed the trace: {statement}")
+        if statement == "nowS = GetGame().GetTickTime();":
+            local["nowS"] = self.clock
+        elif statement == "intervalS = 1.0 / s_SampleHz;":
+            local["intervalS"] = 1.0 / self.sample_hz
+        elif statement in ("s_AccumS = s_AccumS + timeslice;", "s_AccumS = s_AccumS + dt;"):
+            state["s_AccumS"] += self.frame
+        elif statement == "s_AccumS = s_AccumS - intervalS;":
+            state["s_AccumS"] -= local["intervalS"]
+        elif statement == "s_AccumS = 0.0;":
+            state["s_AccumS"] = 0.0
+        elif statement == "s_NextDueS = nowS + intervalS;":
+            state["s_NextDueS"] = local["nowS"] + local["intervalS"]
+        elif statement == "s_NextDueS = s_NextDueS + intervalS;":
+            state["s_NextDueS"] += local["intervalS"]
+        elif statement in ("CaptureNow(nowS, bridgeTick);", "CaptureNow(car, false);"):
+            self.samples.append(local["nowS"])
+            state["s_LastSampleS"] = local["nowS"]
+            state["s_Count"] += 1
+        else:
+            raise AssertionError(f"the walk has no transcription for: {statement}")
+
+    def _holds(self, condition: str) -> bool:
+        state = self.statics
+        local = self.locals
+        if condition in ("!s_Active", "!s_Active || car != s_Car"):
+            return not state["s_Active"]
+        if condition in ("!GetGame()", "!CheckPlayer()", "!car.IsOwner()"):
+            return False
+        if condition == "s_Count > 0":
+            return state["s_Count"] > 0
+        if condition == "s_Count > 0 && s_AccumS < intervalS":
+            return state["s_Count"] > 0 and state["s_AccumS"] < local["intervalS"]
+        if condition == "s_Count > 0 && nowS < s_LastSampleS":
+            return state["s_Count"] > 0 and local["nowS"] < state["s_LastSampleS"]
+        if condition == "s_Count > 0 && nowS == s_LastSampleS":
+            return state["s_Count"] > 0 and local["nowS"] == state["s_LastSampleS"]
+        if condition == "s_Count > 0 && nowS < s_NextDueS":
+            return state["s_Count"] > 0 and local["nowS"] < state["s_NextDueS"]
+        if condition == "s_Count == 0 || nowS - s_NextDueS >= intervalS":
+            return state["s_Count"] == 0 or local["nowS"] - state["s_NextDueS"] >= local["intervalS"]
+        raise AssertionError(f"the walk has no transcription for the condition: {condition}")
+
+
+def _most_in_one_second(samples: list[float]) -> int:
+    """The most samples any one-second window [t, t + 1) holds."""
+    most = 0
+    start = 0
+    for end, time in enumerate(samples):
+        while time - samples[start] >= 1.0:
+            start += 1
+        most = max(most, end - start + 1)
+    return most
 
 
 class PlayerTraceIngressTest(unittest.TestCase):
@@ -512,36 +674,61 @@ class PlayerTraceLifecycleContractTest(unittest.TestCase):
             "return true;",
         )
 
-    def test_tick_is_idle_first_then_checks_the_player_then_decimates_like_vehicle_trace(
-        self,
-    ) -> None:
+    def test_tick_is_idle_first_then_checks_the_player_then_keeps_a_due_time(self) -> None:
+        # Review F2 (round 1): this sampler departs on purpose from
+        # MCPVehicleTrace.Capture's accumulator, which keeps the time slow
+        # frames owe and then samples every frame above sample_hz. The test
+        # that pinned the two decimations as identical now pins the departure,
+        # and that vehicle_trace's own decimation is left as it was.
         tick = _method_body(self.source, TICK)
         self.assertEqual(_flat(_if_body(tick, "!s_Active")), "return;")
         self.assertLess(tick.index("if (!s_Active)"), tick.index("GetGame()"))
         self.assertEqual(_flat(_if_body(tick, "!CheckPlayer()")), "return;")
-        decimation = (
-            "if (s_Count > 0 && s_AccumS < intervalS)",
-            "if (s_Count > 0 && nowS < s_LastSampleS)",
-            'Fail("clock_not_monotonic");',
-            "if (s_Count > 0 && nowS == s_LastSampleS)",
-            "s_AccumS = s_AccumS - intervalS;",
-            "s_AccumS = 0.0;",
+        self.assertEqual(
+            _flat(_if_body(tick, "s_Count > 0 && nowS < s_LastSampleS")),
+            'Fail("clock_not_monotonic"); return;',
         )
+        self.assertEqual(_flat(_if_body(tick, "s_Count > 0 && nowS < s_NextDueS")), "return;")
         _in_order(
             self,
             tick,
             "if (!s_Active)",
             "if (!GetGame())",
             "if (!CheckPlayer())",
-            "s_AccumS = s_AccumS + timeslice;",
-            "intervalS = 1.0 / s_SampleHz;",
-            decimation[0],
             "nowS = GetGame().GetTickTime();",
-            *decimation[1:],
+            "if (s_Count > 0 && nowS < s_LastSampleS)",
+            "if (s_Count > 0 && nowS < s_NextDueS)",
+            "intervalS = 1.0 / s_SampleHz;",
+            "if (s_Count == 0 || nowS - s_NextDueS >= intervalS)",
+            "s_NextDueS = nowS + intervalS;",
+            "else",
+            "s_NextDueS = s_NextDueS + intervalS;",
             "CaptureNow(nowS, bridgeTick);",
         )
-        # The same decimation statements, in the same order, as the vehicle trace.
-        _in_order(self, _method_body(self.car, VEHICLE_CAPTURE), *decimation)
+        self.assertNotIn("s_AccumS", self.code)
+        self.assertNotIn("timeslice", _without_comments(tick))
+        # vehicle_trace keeps its accumulator, unchanged by this PR.
+        _in_order(
+            self,
+            _method_body(self.car, VEHICLE_CAPTURE),
+            "s_AccumS = s_AccumS + dt;",
+            "if (s_Count > 0 && s_AccumS < intervalS)",
+            "if (s_Count > 0 && nowS < s_LastSampleS)",
+            "if (s_Count > 0 && nowS == s_LastSampleS)",
+            "s_AccumS = s_AccumS - intervalS;",
+            "s_AccumS = 0.0;",
+            "CaptureNow(car, false);",
+        )
+
+    def test_every_static_the_sampler_uses_is_declared(self) -> None:
+        # The offline linter does not resolve identifiers, so a static renamed
+        # in one place only would pass it and not compile in game.
+        declared = set(
+            re.findall(r"\bstatic\s+(?:const\s+)?(?:ref\s+)?[\w<> ]+?\s+(s_\w+)\s*;", self.code)
+        )
+        used = set(re.findall(r"\b(s_\w+)\b", self.code))
+        self.assertIn("s_NextDueS", declared)
+        self.assertEqual(used - declared, set())
 
     def test_check_player_stops_on_a_missing_changed_or_dead_player(self) -> None:
         check = _method_body(self.source, CHECK)
@@ -649,6 +836,54 @@ class PlayerTraceLifecycleContractTest(unittest.TestCase):
         _in_order(self, view, "view.next_cursor = end;", "view.eof = !s_Active && end == s_Count;")
         assigned = set(re.findall(r"\bview\.(\w+) =", view))
         self.assertEqual(assigned, {name for _type, name in EXPECTED_READ_MEMBERS} - {"samples"})
+
+
+class PlayerTraceDecimationTest(unittest.TestCase):
+    """Review F2 (round 1): frame-rate changes walked through the Tick branches."""
+
+    # 30 s unfocused at 20 fps, then 2 s focused at 120 fps: the review's model.
+    DROP_THEN_RECOVERY = [1.0 / 20.0] * 600 + [1.0 / 120.0] * 240
+
+    def setUp(self) -> None:
+        self.tick = _parse_statements(_without_comments(_method_body(_source(TRACE_PATH), TICK)))
+        self.vehicle = _parse_statements(
+            _without_comments(_method_body(_source(CAR_PATH), VEHICLE_CAPTURE))
+        )
+
+    @staticmethod
+    def _between(samples: list[float], start: float, end: float) -> list[float]:
+        return [time for time in samples if start + 1e-9 < time <= end + 1e-9]
+
+    def test_a_frame_rate_drop_then_recovery_never_catches_up_above_sample_hz(self) -> None:
+        samples = _DecimationWalk(60).run(self.tick, self.DROP_THEN_RECOVERY)
+        slow = self._between(samples, -1.0, 30.0)
+        first_second = self._between(samples, 30.0, 31.0)
+        self.assertEqual(len(slow), 600)  # one sample on every 20 fps frame
+        self.assertLessEqual(len(first_second), 60)
+        self.assertGreaterEqual(first_second[0] - slow[-1], 1.0 / 60 - 1e-9)
+        self.assertLessEqual(_most_in_one_second(samples), 61)
+        # Recovered, it keeps 60 Hz: the dropped debt costs no samples after it.
+        self.assertIn(len(samples) - len(slow), range(119, 122))
+        # The same frames through vehicle_trace's decimation, which keeps the
+        # debt: it samples every 120 fps frame, the burst review F2 measured.
+        burst = _DecimationWalk(60).run(self.vehicle, self.DROP_THEN_RECOVERY)
+        self.assertEqual(len(self._between(burst, 30.0, 31.0)), 120)
+
+    def test_steady_frame_rates_keep_sample_hz(self) -> None:
+        for fps, sample_hz, seconds in ((60, 20, 30), (144, 20, 30), (120, 60, 10), (60, 60, 10)):
+            with self.subTest(fps=fps, sample_hz=sample_hz):
+                frames = [1.0 / fps] * (fps * seconds)
+                samples = _DecimationWalk(sample_hz).run(self.tick, frames)
+                self.assertIn(len(samples), range(sample_hz * seconds - 1, sample_hz * seconds + 2))
+                self.assertLessEqual(_most_in_one_second(samples), sample_hz + 1)
+        # Frames slower than sample_hz: one sample on every frame, and no more.
+        self.assertEqual(len(_DecimationWalk(60).run(self.tick, [1.0 / 20.0] * 200)), 200)
+
+    def test_the_walk_refuses_a_branch_it_does_not_know(self) -> None:
+        for body in ("s_Unknown = 1;", "if (s_Other) { return; }"):
+            with self.subTest(body=body):
+                with self.assertRaises(AssertionError):
+                    _DecimationWalk(20).run(_parse_statements(body), [0.05])
 
 
 class PlayerTraceSampleContractTest(unittest.TestCase):
@@ -891,14 +1126,16 @@ class PlayerTraceDispatchContractTest(unittest.TestCase):
             on_tick,
             "m_Tick = m_Tick + 1;",
             "MCPAnimTimeline.Tick(timeslice);",
-            "MCPPlayerTrace.Tick(timeslice, m_Tick);",
+            "MCPPlayerTrace.Tick(m_Tick);",
             "m_JobRunner.Tick(timeslice, this);",
             "if (!m_Configured)",
         )
         every_script = "".join(
             _without_comments(path.read_text(encoding="utf-8")) for path in SCRIPTS.rglob("*.c")
         )
+        # One caller, with the one argument the signature takes.
         self.assertEqual(every_script.count("MCPPlayerTrace.Tick("), 1)
+        self.assertEqual(_source(TRACE_PATH).count(TICK), 1)
         self.assertNotIn("MCPPlayerTrace.Start(", _without_comments(_source(SERVER_BRIDGE_PATH)))
         shutdown = _method_body(self.source, SHUTDOWN)
         _in_order(
@@ -1035,19 +1272,28 @@ class PlayerTraceModuleTest(unittest.TestCase):
         self.assertIs(trace["samples"][0]["sliding_off_linked"], True)
         for bad in (2, "1", None, 0.5, -1):
             with self.subTest(bad=bad):
-                with self.assertRaisesRegex(ValueError, "^bad_bridge_trace_boolean$"):
+                with self.assertRaises(ValueError) as raised:
                     player_trace.normalize_bridge_result({"ok": 1, FIELD: _trace(active=bad)})
-                with self.assertRaisesRegex(ValueError, "^bad_bridge_trace_boolean$"):
+                self.assertEqual(str(raised.exception), "bad_bridge_trace_boolean: player_trace.active")
+                with self.assertRaises(ValueError) as raised:
                     player_trace.normalize_bridge_result(
                         {"ok": 1, FIELD: _trace(samples=[_sample(0, falling=bad)])}
                     )
+                self.assertEqual(
+                    str(raised.exception), "bad_bridge_trace_boolean: player_trace.samples[0].falling"
+                )
         missing_trace_bool = _trace()
         del missing_trace_bool["eof"]
         missing_sample_bool = _sample()
         del missing_sample_bool["sliding_off_linked"]
-        for trace in (missing_trace_bool, _trace(samples=[missing_sample_bool])):
-            with self.assertRaisesRegex(ValueError, "^bad_bridge_trace_boolean$"):
-                player_trace.normalize_bridge_result({"ok": 1, FIELD: trace})
+        for trace, member in (
+            (missing_trace_bool, "player_trace.eof"),
+            (_trace(samples=[missing_sample_bool]), "player_trace.samples[0].sliding_off_linked"),
+        ):
+            with self.subTest(member=member):
+                with self.assertRaises(ValueError) as raised:
+                    player_trace.normalize_bridge_result({"ok": 1, FIELD: trace})
+                self.assertEqual(str(raised.exception), f"bad_bridge_trace_boolean: {member}")
 
     def test_an_unset_entity_reads_null_and_a_malformed_one_is_refused(self) -> None:
         boat = _entity()
@@ -1060,51 +1306,145 @@ class PlayerTraceModuleTest(unittest.TestCase):
         self.assertIsNone(sample["parent"])
         for bad in ([], "Boat_01_Orange", 0, [1, 2]):
             with self.subTest(bad=bad):
-                with self.assertRaisesRegex(ValueError, "^bad_bridge_trace_result$"):
+                with self.assertRaises(ValueError) as raised:
                     player_trace.normalize_bridge_result(
                         {"ok": 1, FIELD: _trace(samples=[_sample(0, linked=bad)])}
                     )
+                self.assertEqual(
+                    str(raised.exception), "bad_bridge_trace_result: player_trace.samples[0].linked"
+                )
         for field in player_trace.ENTITY_SAMPLE_FIELDS:
             with self.subTest(missing=field):
                 sample = _sample()
                 del sample[field]
-                with self.assertRaisesRegex(ValueError, "^bad_bridge_trace_result$"):
+                with self.assertRaises(ValueError) as raised:
                     player_trace.normalize_bridge_result({"ok": 1, FIELD: _trace(samples=[sample])})
+                self.assertEqual(
+                    str(raised.exception), f"bad_bridge_trace_result: player_trace.samples[0].{field}"
+                )
 
     def test_a_result_of_the_wrong_shape_is_refused(self) -> None:
-        for result in (
-            None,
-            [],
-            {"ok": 1},
-            {"ok": 1, FIELD: []},
-            {"ok": 1, FIELD: {k: v for k, v in _trace().items() if k != "samples"}},
-            {"ok": 1, FIELD: _trace(samples={})},
-            {"ok": 1, FIELD: _trace(samples=[[]])},
+        for result, member in (
+            (None, "result"),
+            ([], "result"),
+            ({"ok": 1}, "player_trace"),
+            ({"ok": 1, FIELD: []}, "player_trace"),
+            ({"ok": 1, FIELD: {k: v for k, v in _trace().items() if k != "samples"}}, "player_trace.samples"),
+            ({"ok": 1, FIELD: _trace(samples={})}, "player_trace.samples"),
+            ({"ok": 1, FIELD: _trace(samples=[[]])}, "player_trace.samples[0]"),
         ):
             with self.subTest(result=result):
-                with self.assertRaisesRegex(ValueError, "^bad_bridge_trace_result$"):
+                with self.assertRaises(ValueError) as raised:
                     player_trace.normalize_bridge_result(result)
+                self.assertEqual(str(raised.exception), f"bad_bridge_trace_result: {member}")
+
+    def test_an_incomplete_or_inconsistent_answer_is_refused_with_its_member(self) -> None:
+        # Review F1 (round 1): the first three answers came back as valid.
+        def without(record: dict[str, object], key: str) -> dict[str, object]:
+            return {name: value for name, value in record.items() if name != key}
+
+        def one(**fields: object) -> dict[str, object]:
+            return _trace(samples=[_sample(0, **fields)])
+
+        nan = float("nan")
+        other_path = player_trace.dump_profile_path("f" * 32)
+        cases = (
+            ("sample_without_pos", _trace(samples=[without(_sample(0), "pos")]), "result", "samples[0].pos"),
+            ("linked_with_only_its_type", one(linked={"type": "Boat_01_Orange"}), "result", "samples[0].linked.class_name"),
+            ("dump_count_1_rows_0", _dump_trace(count=1, rows=0), "dump", "rows"),
+            ("schema_of_another_version", _trace(schema="dayz-mcp-player-trace-v2"), "result", "schema"),
+            ("schema_missing", without(_trace(), "schema"), "result", "schema"),
+            ("mode_unknown", _trace(mode="begin"), "result", "mode"),
+            ("trace_id_upper_case", _trace(trace_id=TRACE_ID.upper()), "result", "trace_id"),
+            ("stop_reason_unknown", _trace(stop_reason="crashed"), "result", "stop_reason"),
+            ("sample_hz_out_of_range", _trace(sample_hz=0), "result", "sample_hz"),
+            ("capacity_a_float", _trace(capacity=4096.0), "result", "capacity"),
+            ("count_above_capacity", _trace(count=5000), "result", "count"),
+            ("start_monotonic_s_nan", _trace(start_monotonic_s=nan), "result", "start_monotonic_s"),
+            ("player_type_null", _trace(player_type=None), "result", "player_type"),
+            ("net_id_low_a_string", _trace(net_id_low="11"), "result", "net_id_low"),
+            ("cursor_beyond_count", _trace(samples=[], cursor=3, next_cursor=3, count=2), "result", "cursor"),
+            ("next_cursor_before_cursor", _trace(samples=[], cursor=1, next_cursor=0), "result", "next_cursor"),
+            ("page_shorter_than_its_cursors", _trace(samples=[_sample(0)], next_cursor=2), "result", "samples"),
+            ("rows_above_count", _trace(rows=3), "result", "rows"),
+            ("path_of_another_trace", _trace(path=other_path), "result", "path"),
+            ("sequence_gap", _trace(samples=[_sample(0), _sample(2)]), "result", "samples[1].sequence"),
+            ("monotonic_s_infinite", one(monotonic_s=float("inf")), "result", "samples[0].monotonic_s"),
+            ("sample_dt_s_negative", one(sample_dt_s=-0.05), "result", "samples[0].sample_dt_s"),
+            ("tick_a_float", one(tick=500.0), "result", "samples[0].tick"),
+            ("pos_two_numbers", one(pos=[1.0, 2.0]), "result", "samples[0].pos"),
+            ("pos_with_a_string", one(pos=[1.0, "2", 3.0]), "result", "samples[0].pos"),
+            ("vel_nan", one(vel=[0.0, nan, 1.4]), "result", "samples[0].vel"),
+            ("heading_deg_null", one(heading_deg=None), "result", "samples[0].heading_deg"),
+            ("yaw_deg_a_string", one(yaw_deg="91"), "result", "samples[0].yaw_deg"),
+            ("command_unknown", one(command="walk"), "result", "samples[0].command"),
+            ("command_type_id_a_bool", one(command_type_id=True), "result", "samples[0].command_type_id"),
+            ("movement_idx_missing", _trace(samples=[without(_sample(0), "movement_idx")]), "result", "samples[0].movement_idx"),
+            ("linked_type_empty", one(linked=_entity(type="")), "result", "samples[0].linked.type"),
+            ("floor_net_id_a_string", one(floor=_entity(net_id_low="1234")), "result", "samples[0].floor.net_id_low"),
+            ("parent_pos_four_numbers", one(parent=_entity(pos=[1.0, 2.0, 3.0, 4.0])), "result", "samples[0].parent.pos"),
+            ("linked_pos_nan", one(linked=_entity(pos=[nan, 0.5, 2500.0])), "result", "samples[0].linked.pos"),
+        )
+        for label, trace, kind, member in cases:
+            with self.subTest(label):
+                with self.assertRaises(ValueError) as raised:
+                    player_trace.normalize_bridge_result({"ok": 1, FIELD: trace})
+                self.assertEqual(
+                    str(raised.exception), f"bad_bridge_trace_{kind}: player_trace.{member}"
+                )
+
+    def test_a_complete_answer_passes_as_the_engine_may_write_it(self) -> None:
+        # Integral floats as JSON ints, a page that starts past 0, a non-Object
+        # entity with network id 0 0, a status read after a dump, every mode.
+        integral = _sample(5, pos=[1000, 10, 2000], vel=[0, 0, 1], monotonic_s=100, heading_deg=90, yaw_deg=-91)
+        plain = _entity(type="SomeEntity", class_name="SomeEntity", net_id_low=0, net_id_high=0, pos=[1, 2, 3])
+        answers = [
+            _trace(samples=[integral, _sample(6, parent=plain)], cursor=5, count=9),
+            _trace("status", samples=[], path=player_trace.dump_profile_path(TRACE_ID), rows=2),
+            _trace(net_id_low=-1, net_id_high=2**31 - 1, start_monotonic_s=0),
+            _dump_trace(),
+            _dump_trace(count=0, rows=0),
+        ]
+        answers += [_trace(mode, samples=[]) for mode in sorted(player_trace.TRACE_MODES - {"read", "dump"})]
+        for trace in answers:
+            with self.subTest(mode=trace["mode"], cursor=trace["cursor"]):
+                expected = json.loads(json.dumps(trace))
+                result = player_trace.normalize_bridge_result({"ok": 1, FIELD: trace})
+                self.assertEqual(len(result[FIELD]["samples"]), len(expected["samples"]))
+                self.assertEqual(result[FIELD]["count"], expected["count"])
+
+    def test_the_names_it_accepts_are_the_enforce_ones(self) -> None:
+        code = _without_comments(_source(TRACE_PATH))
+        reasons = set(re.findall(r'Fail\("(\w+)"\)', code))
+        reasons |= set(re.findall(r's_StopReason = "(\w+)"', code))
+        reasons |= set(re.findall(r'MCPPlayerTrace\.Abort\("(\w+)"\)', _source(CLIENT_PATH)))
+        self.assertEqual(player_trace.STOP_REASONS, reasons | {""})
+        names = set(re.findall(r'return "(\w+)";', _method_body(_source(TRACE_PATH), COMMAND_NAME)))
+        self.assertEqual(player_trace.COMMAND_NAMES, names)
 
     def test_a_dump_answer_names_its_canonical_file_and_row_count(self) -> None:
         result = player_trace.normalize_bridge_result({"ok": 1, FIELD: _dump_trace()})
         self.assertEqual(result[FIELD]["path"], "$profile:dayz_mcp_player_trace_" + TRACE_ID + ".jsonl")
         self.assertEqual(result[FIELD]["rows"], 2)
-        for fields in (
-            {"samples": [_sample()]},
-            {"path": ""},
-            {"path": "$profile:dayz_mcp_trace_" + TRACE_ID + ".jsonl"},
-            {"path": "C:\\dayz_mcp_player_trace_" + TRACE_ID + ".jsonl"},
-            {"path": player_trace.dump_profile_path("f" * 32)},
-            {"rows": -1},
-            {"rows": 8193},
-            {"rows": True},
-            {"rows": "2"},
+        for fields, member in (
+            ({"samples": [_sample()]}, "samples"),
+            ({"path": ""}, "path"),
+            ({"path": "$profile:dayz_mcp_trace_" + TRACE_ID + ".jsonl"}, "path"),
+            ({"path": "C:\\dayz_mcp_player_trace_" + TRACE_ID + ".jsonl"}, "path"),
+            ({"path": player_trace.dump_profile_path("f" * 32)}, "path"),
+            ({"rows": -1}, "rows"),
+            ({"rows": 8193}, "rows"),
+            ({"rows": True}, "rows"),
+            ({"rows": "2"}, "rows"),
+            ({"rows": 1}, "rows"),
+            ({"rows": 3, "count": 2}, "rows"),
         ):
             with self.subTest(fields=fields):
                 trace = _dump_trace()
                 trace.update(fields)
-                with self.assertRaisesRegex(ValueError, "^bad_bridge_trace_dump$"):
+                with self.assertRaises(ValueError) as raised:
                     player_trace.normalize_bridge_result({"ok": 1, FIELD: trace})
+                self.assertEqual(str(raised.exception), f"bad_bridge_trace_dump: player_trace.{member}")
 
     def test_nothing_is_derived_dropped_or_reordered(self) -> None:
         samples = [_sample(index, tick=900 - index) for index in range(5)]
@@ -1150,8 +1490,11 @@ class PlayerTraceToolTest(unittest.IsolatedAsyncioTestCase):
             "clear of an active trace is trace_active (stop first)",
             "mode=read pages samples by cursor and limit (1..64)",
             "$profile:dayz_mcp_player_trace_<trace_id>.jsonl and stop autodumps the same file",
-            "sample_hz (20..60), decimated per client frame like vehicle_trace",
+            "Samples come at most at sample_hz (20..60) and at most one per client frame",
             "an unfocused client renders at about 20 fps",
+            "each is due one 1/sample_hz interval after the previous due time",
+            "a frame a full interval or more late restarts that schedule",
+            "the trace never catches up above sample_hz (vehicle_trace's decimation does catch up)",
             "max_samples (2..8192); a full trace stops with overflow=true",
             "monotonic_s (client GetTickTime seconds)",
             "tick (client bridge tick, the counter tick_dispatch reports)",
@@ -1190,9 +1533,13 @@ class PlayerTraceToolTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(reason, stop_text)
         errors = description[description.index("Errors: ") :]
         python_codes = {"bad_mode", "bad_trace_id", "bad_cursor", "bad_limit", "bad_sample_hz", "bad_max_samples"}
+        # normalize_bridge_result's refusals, each followed by the member that failed.
+        python_codes |= {"bad_bridge_trace_result", "bad_bridge_trace_boolean", "bad_bridge_trace_dump"}
         for error in sorted(_bridge_codes() | python_codes):
             with self.subTest(error=error):
                 self.assertIn(error, errors)
+        self.assertIn("followed by the member that failed", errors)
+        self.assertIn("a dump's rows must equal count", errors)
 
     async def test_start_forwards_a_generated_id_and_every_key(self) -> None:
         _result, call = await self._call({"mode": "start", "timeout_s": 1.0})
@@ -1265,9 +1612,13 @@ class PlayerTraceToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(sample["parent"])
         self.assertEqual(sample["yaw_deg"], 91.0)
         for broken, code in (
-            ({"ok": 1}, "bad_bridge_trace_result"),
-            ({"ok": 1, FIELD: _trace(overflow=2)}, "bad_bridge_trace_boolean"),
-            ({"ok": 1, FIELD: _dump_trace(rows=9000)}, "bad_bridge_trace_dump"),
+            ({"ok": 1}, "bad_bridge_trace_result: player_trace"),
+            ({"ok": 1, FIELD: _trace(overflow=2)}, "bad_bridge_trace_boolean: player_trace.overflow"),
+            ({"ok": 1, FIELD: _dump_trace(rows=9000)}, "bad_bridge_trace_dump: player_trace.rows"),
+            (
+                {"ok": 1, FIELD: _trace(samples=[_sample(0, linked={"type": "Boat_01_Orange"})])},
+                "bad_bridge_trace_result: player_trace.samples[0].linked.class_name",
+            ),
         ):
             with self.subTest(code=code):
                 call = AsyncMock(return_value=broken)

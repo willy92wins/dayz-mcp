@@ -9,9 +9,11 @@
 // seated or not and needs no window focus; its rate is bounded by the client's
 // frame rate. The lifecycle is vehicle_trace's (MCP_CarScript.c MCPVehicleTrace):
 // start, status, stop with an autodump, dump, read by cursor and limit, clear.
-// A death or change of the local player stops it with that stop_reason, and a
-// dead player cannot start one (player_dead). Health is not sampled: vanilla reads the local player's GetHealth only when
-// not multiplayer (ingamehud.c:698-709), so the owner client has no synced value.
+// The decimation is not: see Tick, which drops the time slow frames owe instead
+// of catching it up. A death or change of the local player stops the trace with
+// that stop_reason, and a dead player cannot start one (player_dead). Health is
+// not sampled: vanilla reads the local player's GetHealth only when not
+// multiplayer (ingamehud.c:698-709), so the owner client has no synced value.
 
 //! An entity under, carrying or holding the player. type is Object.GetType()
 //! (object.c:473), or ClassName() when the entity is no Object or GetType() is
@@ -124,7 +126,8 @@ class MCPPlayerTrace
 	static int s_Count;
 	static float s_StartMonotonicS;
 	static float s_LastSampleS;
-	static float s_AccumS;
+	// GetTickTime at which the next sample is due (see Tick).
+	static float s_NextDueS;
 	static PlayerBase s_Player;
 	static string s_PlayerType;
 	static int s_NetIdLow;
@@ -185,7 +188,7 @@ class MCPPlayerTrace
 		s_Count = 0;
 		s_StartMonotonicS = GetGame().GetTickTime();
 		s_LastSampleS = 0.0;
-		s_AccumS = 0.0;
+		s_NextDueS = 0.0;
 		s_Complete = false;
 		s_Overflow = false;
 		s_StopReason = "";
@@ -199,10 +202,16 @@ class MCPPlayerTrace
 	}
 
 	// Called from MCPClientBridge.OnTick on every client frame. Idle returns
-	// before any engine call. Decimated to sample_hz as MCPVehicleTrace.Capture
-	// does: the accumulator keeps the fractional remainder, an equal tick time
-	// waits, a backward one fails the trace.
-	static void Tick(float timeslice, int bridgeTick)
+	// before any engine call. At most one sample per frame, due on a grid of
+	// 1/sample_hz of GetTickTime: the next sample is due one interval after the
+	// previous due time, so a frame that comes a little late does not shift the
+	// grid. A frame a full interval or more past its due time restarts the grid
+	// one interval after itself, so the time slow frames owe is dropped: after
+	// the frame rate recovers, the trace does not catch up above sample_hz. That
+	// departs on purpose from MCPVehicleTrace.Capture, whose accumulator keeps
+	// the debt and samples every frame until it is repaid. A frame before the due
+	// time, an equal tick time included, waits; a backward one fails the trace.
+	static void Tick(int bridgeTick)
 	{
 		float intervalS;
 		float nowS;
@@ -219,29 +228,24 @@ class MCPPlayerTrace
 			return;
 		}
 
-		s_AccumS = s_AccumS + timeslice;
-		intervalS = 1.0 / s_SampleHz;
-		if (s_Count > 0 && s_AccumS < intervalS)
-		{
-			return;
-		}
 		nowS = GetGame().GetTickTime();
 		if (s_Count > 0 && nowS < s_LastSampleS)
 		{
 			Fail("clock_not_monotonic");
 			return;
 		}
-		if (s_Count > 0 && nowS == s_LastSampleS)
+		if (s_Count > 0 && nowS < s_NextDueS)
 		{
 			return;
 		}
-		if (s_Count > 0)
+		intervalS = 1.0 / s_SampleHz;
+		if (s_Count == 0 || nowS - s_NextDueS >= intervalS)
 		{
-			s_AccumS = s_AccumS - intervalS;
+			s_NextDueS = nowS + intervalS;
 		}
 		else
 		{
-			s_AccumS = 0.0;
+			s_NextDueS = s_NextDueS + intervalS;
 		}
 		CaptureNow(nowS, bridgeTick);
 	}
@@ -700,7 +704,7 @@ class MCPPlayerTrace
 		s_Count = 0;
 		s_StartMonotonicS = 0.0;
 		s_LastSampleS = 0.0;
-		s_AccumS = 0.0;
+		s_NextDueS = 0.0;
 		s_Player = null;
 		s_PlayerType = "";
 		s_NetIdLow = 0;

@@ -598,8 +598,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// Returns before any engine call while no timeline is active.
 		MCPAnimTimeline.Tick(timeslice);
 		// player_trace samples here on every frame too, never from a job, with
-		// this bridge tick. Returns before any engine call while no trace is active.
-		MCPPlayerTrace.Tick(timeslice, m_Tick);
+		// this bridge tick; its due times are GetTickTime, so it takes no
+		// timeslice. Returns before any engine call while no trace is active.
+		MCPPlayerTrace.Tick(m_Tick);
 		// Ahead of the job runner, so a restore_gameplay job posts in the very
 		// tick the camera handoff finishes (f47b). Returns at once when none runs.
 		TickCameraHandoff();
