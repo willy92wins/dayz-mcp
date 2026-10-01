@@ -455,6 +455,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// much, the job releases the key itself and answers aborted. The tool waits
 	// hold_s plus the same 5 s for a hold.
 	protected const float INPUT_TRIGGER_JOB_SLACK_S = 5.0;
+	// A player_move hold answers after its release. Past hold_s by this much,
+	// the job releases the move itself and answers aborted. The tool waits
+	// hold_s plus the same 5 s.
+	protected const float PLAYER_MOVE_JOB_SLACK_S = 5.0;
 	//! Capability census announced on every poll as `caps=`: the exact set of
 	//! command.cmd branches Dispatch() handles before falling to unknown_command,
 	//! sorted bytewise and comma-separated. tools/tests/test_bridge_client_capabilities.py
@@ -462,7 +466,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_use,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,input_trigger,key_press,player_respawn,player_trace," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_use,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,input_trigger,key_press,player_move,player_respawn,player_trace," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -593,6 +597,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// player says so. Before the job runner, so a click or hold answers in
 		// the tick of its release. Returns before any engine call while no key is held.
 		MCPInputTriggerControl.MaintainFromTick();
+		// Ends the player_move when its hold_s or ttl_s, its arrival or the local
+		// player says so, and retries a server release the input channel did not
+		// take. Before the job runner, so a hold answers in the tick of its
+		// release. Returns before any engine call while no move is active.
+		MCPPlayerMoveControl.MaintainFromTick(m_Tick);
 		// anim_timeline samples here on every frame, never from a job: the edge
 		// sample belongs to the frame the action or callback state changed.
 		// Returns before any engine call while no timeline is active.
@@ -1043,17 +1052,21 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		int blocking;
 		int weaponJobs;
 		int triggerJobs;
+		int moveJobs;
 		if (!m_JobRunner)
 		{
 			return false;
 		}
 
 		// weapon_action is a one-tick read-back. It must not refuse camera_set.
-		// Nor does an input_trigger click or hold, which waits on a key release.
+		// Nor does an input_trigger click or hold, which waits on a key release,
+		// or a player_move hold, which waits on its release.
 		blocking = m_JobRunner.CountExcluding("ui_dialog");
 		weaponJobs = m_JobRunner.CountOfKind("weapon_action");
 		triggerJobs = m_JobRunner.CountOfKind("input_trigger");
 		blocking = blocking - weaponJobs - triggerJobs;
+		moveJobs = m_JobRunner.CountOfKind("player_move");
+		blocking = blocking - moveJobs;
 		return blocking > 0;
 	}
 
@@ -1191,6 +1204,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "weapon_sights")
 		{
 			postNow = DispatchWeaponSights(command, result);
+		}
+		else if (command.cmd == "player_move")
+		{
+			postNow = DispatchPlayerMove(command, result);
 		}
 		else if (command.cmd == "player_trace")
 		{
@@ -2672,6 +2689,218 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 		result.ok = true;
 		return true;
+	}
+
+	// player_move (c1cb): walk the local on-foot player through the engine's
+	// own move command (MCPPlayerMoveControl, MCP_PlayerMove.c). hold answers
+	// after its release (a job), press answers at once, release ends the active
+	// move. Every refusal comes before anything moves, and the server's copy is
+	// sent before the owner's overrides change.
+	protected bool DispatchPlayerMove(MCPCommand command, MCPResult result)
+	{
+		MCPArgs args;
+		MCPPlayerMove reply;
+		MCPPlayerMoveRequest request;
+		PlayerBase player;
+		MCPJob job;
+		vector target;
+		string refusal;
+		string serverRequest;
+		int generation;
+		float nowS;
+		if (!m_JobRunner)
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			return true;
+		}
+		// Client only. The Dispatch gate already needs a local player.
+		if (GetGame().IsDedicatedServer())
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			return true;
+		}
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		args = command.args;
+		if (args.mode != "hold" && args.mode != "press" && args.mode != "release")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		reply = new MCPPlayerMove();
+		reply.phase = args.mode;
+		result.player_move = reply;
+		if (args.mode == "release")
+		{
+			return ReleasePlayerMove(result, reply);
+		}
+		target = vector.Zero;
+		if (args.direction == "to")
+		{
+			if (!ArrayToVector(args.to, target))
+			{
+				result.ok = false;
+				result.error = "bad_to";
+				return true;
+			}
+		}
+		request = new MCPPlayerMoveRequest();
+		request.phase = args.mode;
+		request.speed = args.speed;
+		request.direction = args.direction;
+		request.angle_deg = args.angle_deg;
+		request.heading_deg = args.heading;
+		request.target = target;
+		request.radius = args.radius;
+		request.seconds = args.hold_ttl_s;
+		if (args.mode == "hold")
+		{
+			request.seconds = args.hold_s;
+		}
+		refusal = MCPPlayerMoveControl.RequestRefusal(request);
+		if (refusal != "")
+		{
+			result.ok = false;
+			result.error = refusal;
+			return true;
+		}
+		FillPlayerMoveRequest(reply, request);
+		if (MCPPlayerMoveControl.IsActive() || m_JobRunner.CountOfKind("player_move") > 0)
+		{
+			result.ok = false;
+			result.error = "player_move_busy";
+			return true;
+		}
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		refusal = MCPPlayerMoveControl.StartRefusal(player);
+		if (refusal != "")
+		{
+			result.ok = false;
+			result.error = refusal;
+			return true;
+		}
+		refusal = MCPPlayerMoveControl.DistanceRefusal(player, request);
+		if (refusal != "")
+		{
+			result.ok = false;
+			result.error = refusal;
+			return true;
+		}
+		// The owner's overrides alone do not move the player in multiplayer
+		// (inbox 4485), so the server applies the same move to its copy
+		// (MCP_PlayerMove.c). Sent first: input_busy leaves both sides as they were.
+		request.move_id = MCPPlayerMoveControl.NextMoveId();
+		serverRequest = MCPPlayerMoveControl.SendStart(request);
+		if (serverRequest == "input_busy")
+		{
+			result.ok = false;
+			result.error = "input_busy";
+			return true;
+		}
+		nowS = GetGame().GetTickTime();
+		generation = MCPPlayerMoveControl.Begin(player, request, nowS, serverRequest);
+		FillPlayerMoveRecord(reply);
+		if (args.mode == "press")
+		{
+			result.ok = true;
+			return true;
+		}
+		job = new MCPJob();
+		job.id = command.id;
+		job.kind = "player_move";
+		job.generation = generation;
+		job.deadline_s = m_JobRunner.GetElapsedS() + PLAYER_MOVE_JOB_SLACK_S + request.seconds;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		job.player_move = reply;
+		m_JobRunner.AddJob(job);
+		return false;
+	}
+
+	// release ends the active move, a hold or a press; a hold so ended answers
+	// aborted. With no move active it is not_held, which carries the last
+	// release when there was one.
+	protected bool ReleasePlayerMove(MCPResult result, MCPPlayerMove reply)
+	{
+		if (MCPPlayerMoveControl.IsActive())
+		{
+			MCPPlayerMoveControl.ReleaseAll("phase");
+			FillPlayerMoveRequest(reply, MCPPlayerMoveControl.Request());
+			FillPlayerMoveRecord(reply);
+			FillPlayerMoveRelease(reply);
+			result.ok = true;
+			return true;
+		}
+		if (MCPPlayerMoveControl.HasReleased())
+		{
+			FillPlayerMoveRequest(reply, MCPPlayerMoveControl.Request());
+			FillPlayerMoveRecord(reply);
+			FillPlayerMoveRelease(reply);
+		}
+		result.ok = false;
+		result.error = "not_held";
+		return true;
+	}
+
+	// The request echo: the speed name and value, the direction and its value.
+	protected void FillPlayerMoveRequest(MCPPlayerMove reply, MCPPlayerMoveRequest request)
+	{
+		if (!request)
+		{
+			return;
+		}
+		reply.speed = MCPPlayerMoveControl.SpeedName(request.speed);
+		reply.speed_value = request.speed;
+		reply.direction = request.direction;
+		reply.angle_deg = request.angle_deg;
+		reply.heading_deg = request.heading_deg;
+		if (request.direction == "to")
+		{
+			VectorToArray(request.target, reply.to);
+			reply.arrive_radius_m = request.radius;
+		}
+	}
+
+	// The start of the active or last move.
+	protected void FillPlayerMoveRecord(MCPPlayerMove reply)
+	{
+		reply.move_id = MCPPlayerMoveControl.Generation();
+		VectorToArray(MCPPlayerMoveControl.StartPos(), reply.start_pos);
+		reply.start_tick = MCPPlayerMoveControl.StartTick();
+		reply.start_tick_time_s = MCPPlayerMoveControl.StartS();
+		reply.release_due_s = MCPPlayerMoveControl.DueS();
+		reply.server_request = MCPPlayerMoveControl.ServerRequest();
+		reply.applied_angle_deg = MCPPlayerMoveControl.AppliedAngleDeg();
+		reply.command_ticks = MCPPlayerMoveControl.CommandTicks();
+	}
+
+	// The last release: why, when, where, and the horizontal distance covered.
+	protected void FillPlayerMoveRelease(MCPPlayerMove reply)
+	{
+		vector startPos;
+		vector endPos;
+		reply.released_by = MCPPlayerMoveControl.ReleasedBy();
+		reply.release_tick = MCPPlayerMoveControl.ReleaseTick();
+		reply.release_tick_time_s = MCPPlayerMoveControl.ReleaseTimeS();
+		reply.arrived = MCPPlayerMoveControl.ReleaseArrived();
+		reply.applied_angle_deg = MCPPlayerMoveControl.AppliedAngleDeg();
+		reply.command_ticks = MCPPlayerMoveControl.CommandTicks();
+		if (!MCPPlayerMoveControl.ReleasePosKnown())
+		{
+			return;
+		}
+		startPos = MCPPlayerMoveControl.StartPos();
+		endPos = MCPPlayerMoveControl.ReleasePos();
+		VectorToArray(endPos, reply.end_pos);
+		reply.distance_m = MCPPlayerMoveControl.HorizontalDistance(startPos, endPos);
 	}
 
 	// player_trace (4ae5): the local player's per-frame trace on this owner
@@ -4372,8 +4601,36 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			return ProcessInputTriggerJob(job);
 		}
+		else if (job.kind == "player_move")
+		{
+			return ProcessPlayerMoveJob(job);
+		}
 
 		return false;
+	}
+
+	// A hold answers once its move is released. MaintainFromTick runs before
+	// the job runner in OnTick, so the answer leaves on the release tick. Only
+	// hold_s or the arrival completes a hold; anything else is aborted.
+	protected bool ProcessPlayerMoveJob(MCPJob job)
+	{
+		string releasedBy;
+		if (!job.player_move)
+		{
+			job.error = "bad_args";
+			return true;
+		}
+		if (!MCPPlayerMoveControl.WasReleased(job.generation))
+		{
+			return false;
+		}
+		FillPlayerMoveRelease(job.player_move);
+		releasedBy = job.player_move.released_by;
+		if (releasedBy != "hold" && releasedBy != "arrived")
+		{
+			job.error = "aborted";
+		}
+		return true;
 	}
 
 	// A click or hold answers once its key is released. MaintainFromTick runs
@@ -5305,6 +5562,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			PostInputTriggerJob(job);
 		}
+
+		if (job.kind == "player_move")
+		{
+			PostPlayerMoveJob(job);
+		}
 	}
 
 	override void MCP_PostJobFailure(MCPJob job)
@@ -5318,6 +5580,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job && job.kind == "input_trigger")
 		{
 			PostInputTriggerJob(job);
+			return;
+		}
+
+		if (job && job.kind == "player_move")
+		{
+			PostPlayerMoveJob(job);
 			return;
 		}
 
@@ -5374,6 +5642,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job.kind == "input_trigger")
 		{
 			PostInputTriggerTimeout(job);
+			return;
+		}
+
+		if (job.kind == "player_move")
+		{
+			PostPlayerMoveTimeout(job);
 			return;
 		}
 
@@ -6156,6 +6430,47 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		PostInputTriggerJob(job);
 	}
 
+	protected void PostPlayerMoveJob(MCPJob job)
+	{
+		MCPResult result;
+		if (!job)
+		{
+			return;
+		}
+		result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		result.player_move = job.player_move;
+		if (job.error != "")
+		{
+			result.ok = false;
+			result.error = job.error;
+		}
+		else
+		{
+			result.ok = true;
+		}
+		PostResult(result);
+	}
+
+	// The hold outlived hold_s by PLAYER_MOVE_JOB_SLACK_S: release the move now
+	// if this job still owns it, then answer aborted with what released it.
+	protected void PostPlayerMoveTimeout(MCPJob job)
+	{
+		if (MCPPlayerMoveControl.IsActive() && MCPPlayerMoveControl.Generation() == job.generation)
+		{
+			MCPPlayerMoveControl.ReleaseAll("ttl");
+		}
+		if (job.player_move && MCPPlayerMoveControl.WasReleased(job.generation))
+		{
+			FillPlayerMoveRelease(job.player_move);
+		}
+		job.error = "aborted";
+		PostPlayerMoveJob(job);
+	}
+
 	protected void RestoreGameplay()
 	{
 		// Drops every override this bridge armed. Same method for the
@@ -6163,6 +6478,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPWeaponControl.ReleaseAll("cleared");
 		// A held input_trigger key too. Shutdown releases first, as shutdown.
 		MCPInputTriggerControl.ReleaseAll("restore");
+		// And an active player_move, the same way.
+		MCPPlayerMoveControl.ReleaseAll("restore");
 		// Destructor cleanup can outlive CGame, whose destructor nulls g_Game.
 		// Latched: this method has eight call sites and must not log per call.
 		// Log reaches only Print, which needs no CGame, so the line survives the
@@ -6532,6 +6849,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPCarDrive.Clear();
 		// Before RestoreGameplay, so the held key's release names shutdown.
 		MCPInputTriggerControl.ReleaseAll("shutdown");
+		// Likewise for an active player_move.
+		MCPPlayerMoveControl.ReleaseAll("shutdown");
 		RestoreGameplay();
 		// m_Shutdown is already set, so this finishes any camera handoff and
 		// deactivates and deletes at once (f47b).

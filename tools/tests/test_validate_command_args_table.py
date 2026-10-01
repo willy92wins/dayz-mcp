@@ -50,6 +50,27 @@ def _trigger_args(
     return args
 
 
+def _move_args(
+    phase: str = "hold", direction: str = "angle", *, drop: str = "", **overrides: object
+) -> dict[str, object]:
+    """A valid player_move payload for phase and direction, `overrides` applied, `drop` removed."""
+    args: dict[str, object] = {"mode": phase, "speed": 1.0, "direction": direction}
+    if phase == "hold":
+        args["hold_s"] = 5.0
+    else:
+        args["hold_ttl_s"] = 5.0
+    if direction == "angle":
+        args["angle_deg"] = 0.0
+    elif direction == "heading":
+        args["heading"] = 90.0
+    else:
+        args.update(to=[1.0, 2.0, 3.0], radius=0.5)
+    args.update(overrides)
+    if drop:
+        del args[drop]
+    return args
+
+
 def _player_trace_args(*, drop: str = "", **overrides: object) -> dict[str, object]:
     """A valid player_trace payload with `overrides` applied and `drop` removed."""
     args: dict[str, object] = {
@@ -159,6 +180,70 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("input_with_dik", _trigger_args("input", dik=1), (False, "bad_args")),
         ("input_with_entry", _trigger_args("input", trigger_entry="game"), (False, "bad_args")),
         ("extra_key", _trigger_args(extra=None), (False, "bad_args")),
+    ),
+    "player_move": (
+        ("valid_release", {"mode": "release"}, (True, None)),
+        ("valid_hold_angle", _move_args("hold", "angle"), (True, None)),
+        ("valid_hold_heading", _move_args("hold", "heading"), (True, None)),
+        ("valid_hold_to", _move_args("hold", "to"), (True, None)),
+        ("valid_press_angle", _move_args("press", "angle"), (True, None)),
+        ("valid_press_heading", _move_args("press", "heading"), (True, None)),
+        ("valid_press_to", _move_args("press", "to"), (True, None)),
+        ("valid_jog", _move_args(speed=2.0), (True, None)),
+        ("valid_sprint_int", _move_args(speed=3), (True, None)),
+        ("valid_angle_min", _move_args(angle_deg=-180.0), (True, None)),
+        ("valid_angle_max", _move_args(angle_deg=180), (True, None)),
+        ("valid_heading_zero", _move_args(direction="heading", heading=0.0), (True, None)),
+        ("valid_heading_below_360", _move_args(direction="heading", heading=359.99), (True, None)),
+        ("valid_hold_max", _move_args(hold_s=30.0), (True, None)),
+        ("valid_ttl_max", _move_args("press", hold_ttl_s=30), (True, None)),
+        ("valid_radius_min", _move_args(direction="to", radius=0.2), (True, None)),
+        ("valid_radius_max", _move_args(direction="to", radius=5.0), (True, None)),
+        ("release_with_speed", {"mode": "release", "speed": 1.0}, (False, "bad_args")),
+        ("release_with_hold_s", {"mode": "release", "hold_s": 1.0}, (False, "bad_args")),
+        ("unknown_mode", _move_args(mode="walk"), (False, "bad_args")),
+        ("missing_mode", _move_args(drop="mode"), (False, "bad_args")),
+        ("missing_speed", _move_args(drop="speed"), (False, "bad_args")),
+        ("missing_direction", _move_args(drop="direction"), (False, "bad_args")),
+        ("missing_hold_s", _move_args(drop="hold_s"), (False, "bad_args")),
+        ("missing_ttl", _move_args("press", drop="hold_ttl_s"), (False, "bad_args")),
+        ("missing_angle", _move_args(drop="angle_deg"), (False, "bad_args")),
+        ("missing_heading", _move_args(direction="heading", drop="heading"), (False, "bad_args")),
+        ("missing_to", _move_args(direction="to", drop="to"), (False, "bad_args")),
+        ("missing_radius", _move_args(direction="to", drop="radius"), (False, "bad_args")),
+        ("speed_zero", _move_args(speed=0.0), (False, "bad_args")),
+        ("speed_four", _move_args(speed=4.0), (False, "bad_args")),
+        ("speed_half", _move_args(speed=1.5), (False, "bad_args")),
+        ("speed_bool", _move_args(speed=True), (False, "bad_args")),
+        ("speed_nan", _move_args(speed=float("nan")), (False, "bad_args")),
+        ("speed_name", _move_args(speed="walk"), (False, "bad_args")),
+        ("unknown_direction", _move_args(direction="north"), (False, "bad_args")),
+        ("angle_over", _move_args(angle_deg=180.5), (False, "bad_args")),
+        ("angle_under", _move_args(angle_deg=-181.0), (False, "bad_args")),
+        ("angle_nan", _move_args(angle_deg=float("nan")), (False, "bad_args")),
+        ("angle_inf", _move_args(angle_deg=float("inf")), (False, "bad_args")),
+        ("heading_360", _move_args(direction="heading", heading=360.0), (False, "bad_args")),
+        ("heading_negative", _move_args(direction="heading", heading=-0.5), (False, "bad_args")),
+        ("heading_nan", _move_args(direction="heading", heading=float("nan")), (False, "bad_args")),
+        ("heading_bool", _move_args(direction="heading", heading=True), (False, "bad_args")),
+        ("to_two_values", _move_args(direction="to", to=[1.0, 2.0]), (False, "bad_args")),
+        ("to_nan", _move_args(direction="to", to=[1.0, float("nan"), 3.0]), (False, "bad_args")),
+        ("radius_under", _move_args(direction="to", radius=0.19), (False, "bad_args")),
+        ("radius_over", _move_args(direction="to", radius=5.01), (False, "bad_args")),
+        ("radius_inf", _move_args(direction="to", radius=float("inf")), (False, "bad_args")),
+        ("hold_zero", _move_args(hold_s=0.0), (False, "bad_args")),
+        ("hold_over", _move_args(hold_s=30.5), (False, "bad_args")),
+        ("hold_nan", _move_args(hold_s=float("nan")), (False, "bad_args")),
+        ("ttl_zero", _move_args("press", hold_ttl_s=0), (False, "bad_args")),
+        ("ttl_over", _move_args("press", hold_ttl_s=30.01), (False, "bad_args")),
+        ("hold_with_ttl", _move_args(hold_ttl_s=1.0), (False, "bad_args")),
+        ("press_with_hold_s", _move_args("press", hold_s=1.0), (False, "bad_args")),
+        ("angle_with_heading", _move_args(heading=90.0), (False, "bad_args")),
+        ("angle_with_to", _move_args(to=[1.0, 2.0, 3.0]), (False, "bad_args")),
+        ("heading_with_angle", _move_args(direction="heading", angle_deg=0.0), (False, "bad_args")),
+        ("to_with_heading", _move_args(direction="to", heading=0.0), (False, "bad_args")),
+        ("angle_with_radius", _move_args(radius=0.5), (False, "bad_args")),
+        ("extra_key", _move_args(extra=None), (False, "bad_args")),
     ),
     "player_trace": (
         ("valid", _player_trace_args(), (True, None)),

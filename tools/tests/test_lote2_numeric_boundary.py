@@ -93,10 +93,15 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 1 from world_time_get (timeout_s, its only parameter).
         # + 5 from 4ae5 (player_trace cursor/limit/sample_hz/max_samples/timeout_s;
         # mode and trace_id are strings, not in this census).
-        self.assertEqual(len(rows), 157)
+        # + 7 from c1cb (player_move hold_s/ttl_s/angle_deg/heading_deg/to/
+        # arrive_radius_m/timeout_s; speed and phase are strings, not in this census).
+        self.assertEqual(len(rows), 164)
         for name in ("cursor", "limit", "sample_hz", "max_samples"):
             self.assertIn(("player_trace", name, "int"), rows)
         self.assertIn(("player_trace", "timeout_s", "float"), rows)
+        for name in ("hold_s", "ttl_s", "angle_deg", "heading_deg", "arrive_radius_m", "timeout_s"):
+            self.assertIn(("player_move", name, "float"), rows)
+        self.assertIn(("player_move", "to", "vector"), rows)
         self.assertIn(("world_time_get", "timeout_s", "float"), rows)
         self.assertIn(("input_trigger", "dik", "int"), rows)
         self.assertIn(("input_trigger", "hold_s", "float"), rows)

@@ -25,6 +25,7 @@ from dayz_mcp import (
     daemon_credential,
     orphan_guard,
     pinned_keyfile,
+    player_move,
     player_trace,
     ui_dialog,
 )
@@ -94,6 +95,7 @@ CLIENT_COMMANDS = {
     "key_press",
     "input_describe",
     "input_trigger",
+    "player_move",
     "player_respawn",
     "player_trace",
     "vehicle_get_in_client",
@@ -689,6 +691,81 @@ def _input_trigger_variant(kind: str, edge: str) -> _SchemaVariant:
     return _schema_variant(required=tuple(required), validators=validators)
 
 
+# player_move bounds come from player_move.py, which mirrors MCPPlayerMoveControl
+# (addon/scripts/4_World/MCP_PlayerMove.c); a test keeps the copies equal.
+_SAFE_PLAYER_MOVE_HOLD = _reject_numeric_errors(
+    _real_in_range(minimum=0.0, maximum=player_move.HOLD_MAX_S, minimum_inclusive=False)
+)
+_SAFE_PLAYER_MOVE_TTL = _reject_numeric_errors(
+    _real_in_range(
+        minimum=0.0, maximum=player_move.PRESS_MAX_TTL_S, minimum_inclusive=False
+    )
+)
+_SAFE_PLAYER_MOVE_ANGLE = _reject_numeric_errors(
+    _real_in_range(
+        minimum=-player_move.ANGLE_ABS_MAX_DEG, maximum=player_move.ANGLE_ABS_MAX_DEG
+    )
+)
+_SAFE_PLAYER_MOVE_RADIUS = _reject_numeric_errors(
+    _real_in_range(
+        minimum=player_move.ARRIVE_RADIUS_MIN_M, maximum=player_move.ARRIVE_RADIUS_MAX_M
+    )
+)
+
+
+def _is_player_move_speed(value: object) -> bool:
+    # 1.0, 2.0 or 3.0 (walk, jog, sprint), never a bool: True == 1.0 in Python.
+    try:
+        return _is_real_number(value) and float(value) in player_move.SPEEDS.values()
+    except (OverflowError, ValueError):
+        return False
+
+
+def _is_player_move_heading(value: object) -> bool:
+    # A compass heading in degrees, 0 included and 360 excluded.
+    try:
+        if not _is_real_number(value):
+            return False
+        number = float(value)
+    except (OverflowError, ValueError):
+        return False
+    return 0.0 <= number < player_move.HEADING_MAX_DEG
+
+
+def _player_move_variant(phase: str, direction: str | None) -> _SchemaVariant:
+    # One exact shape per phase and direction, seven in all, and no optional
+    # key: release carries the phase alone; hold carries hold_s and press
+    # hold_ttl_s; angle carries angle_deg, heading carries heading and to
+    # carries to and radius. The bridge reads an absent key as 0, so no value
+    # travels without the phase or direction that reads it
+    # (fb-20260930-065425-8779).
+    if phase == "release":
+        return _schema_variant(required=("mode",), validators={"mode": _equal_to("release")})
+    required = ["mode", "speed", "direction"]
+    validators: dict[str, _FieldValidator] = {
+        "mode": _equal_to(phase),
+        "speed": _is_player_move_speed,
+        "direction": _equal_to(direction),
+    }
+    if phase == "hold":
+        required.append("hold_s")
+        validators["hold_s"] = _SAFE_PLAYER_MOVE_HOLD
+    else:
+        required.append("hold_ttl_s")
+        validators["hold_ttl_s"] = _SAFE_PLAYER_MOVE_TTL
+    if direction == "angle":
+        required.append("angle_deg")
+        validators["angle_deg"] = _SAFE_PLAYER_MOVE_ANGLE
+    elif direction == "heading":
+        required.append("heading")
+        validators["heading"] = _is_player_move_heading
+    else:
+        required += ["to", "radius"]
+        validators["to"] = _is_real_vector3
+        validators["radius"] = _SAFE_PLAYER_MOVE_RADIUS
+    return _schema_variant(required=tuple(required), validators=validators)
+
+
 # Command schemas keep the authenticated ingress contract in one place. Variants
 # preserve alternate payload shapes without duplicating command dispatch logic.
 _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
@@ -733,6 +810,15 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "max_samples": _integer_in_range(minimum=2, maximum=8192),
             },
         )
+    ),
+    # release, and {hold, press} x {angle, heading, to}: see _player_move_variant.
+    "player_move": _command_schema(
+        _player_move_variant("release", None),
+        *(
+            _player_move_variant(phase, direction)
+            for phase in ("hold", "press")
+            for direction in player_move.DIRECTIONS
+        ),
     ),
     # Every key travels in every mode, like vehicle_trace. The bounds mirror
     # MCPPlayerTrace (addon/scripts/4_World/MCP_PlayerTrace.c) through

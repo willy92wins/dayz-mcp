@@ -212,6 +212,18 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("input_trigger", {"kind": "input", "name": "a" * 128, "phase": "release"}, "input_trigger"),
     ("input_trigger", {"kind": "input", "name": "UAGear", "phase": "hold", "hold_s": 1}, "input_trigger"),
     ("input_trigger", {"kind": "input", "name": "UAGear", "phase": "press", "ttl_s": 2}, "input_trigger"),
+    # Every phase x direction player_move emits, and the edges of its bounds (c1cb).
+    ("player_move", {"hold_s": 5.0}, "player_move"),
+    ("player_move", {"hold_s": 30, "angle_deg": -180.0, "speed": "sprint"}, "player_move"),
+    ("player_move", {"hold_s": 0.01, "angle_deg": 180}, "player_move"),
+    ("player_move", {"hold_s": 2.0, "heading_deg": 0.0, "speed": "jog"}, "player_move"),
+    ("player_move", {"hold_s": 2.0, "heading_deg": 359.9}, "player_move"),
+    ("player_move", {"hold_s": 10, "to": [1.0, 2.0, 3.0]}, "player_move"),
+    ("player_move", {"hold_s": 10, "to": [1, 2, 3], "arrive_radius_m": 0.2}, "player_move"),
+    ("player_move", {"phase": "press", "ttl_s": 30.0}, "player_move"),
+    ("player_move", {"phase": "press", "ttl_s": 1, "heading_deg": 90}, "player_move"),
+    ("player_move", {"phase": "press", "ttl_s": 1, "to": [0, 0, 0], "arrive_radius_m": 5}, "player_move"),
+    ("player_move", {"phase": "release"}, "player_move"),
     ("player_trace", {"mode": "start"}, "player_trace"),
     ("player_trace", {"mode": "start", "sample_hz": 60, "max_samples": 8192}, "player_trace"),
     (

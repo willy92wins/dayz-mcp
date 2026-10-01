@@ -109,6 +109,8 @@ def _minimal_args(cmd: str) -> dict:
             "sample_hz": 20,
             "max_samples": 2,
         }
+    if cmd == "player_move":
+        return {"mode": "release"}
     if cmd == "vehicle_prepare_fixture":
         return {"mode": "object_at", "type": "CarScript", "pos": [0.0, 0.0, 0.0], "radius": 1.0}
     if cmd == "surface_query":
