@@ -224,43 +224,56 @@ def _is_trusted_gac_microsoft_visual_basic(path: str, windows_directory: str) ->
     )
 
 
-def _is_trusted_gac_mscorlib_resource_satellite(
-    path: str, windows_directory: str
-) -> bool:
-    # mscorlib.resources.dll is the localized-exception satellite the .NET
-    # Framework tools load when the OS UI culture is not English. Observed on
-    # 2026-10-01 (gate #61 attempt, OS culture es):
+def _is_trusted_gac_resource_satellite(path: str, windows_directory: str) -> bool:
+    # Localized .NET resource satellites (mscorlib.resources.dll,
+    # Microsoft.VisualBasic.resources.dll, ...) load into the AddonBuilder
+    # toolchain the same way their main assemblies do — when an exception is
+    # formatted under a non-English OS UI culture. Observed 2026-10-01 (gate
+    # #61, culture es):
     #   GAC_MSIL\mscorlib.resources\v4.0_4.0.0.0_es_b77a5c561934e089\
-    #   mscorlib.resources.dll
-    # Same admin-protected GAC_MSIL tree as the Microsoft.VisualBasic pin
-    # above. The culture is part of the version directory name, so instead of
-    # pinning one exact path the version directory is validated field by
-    # field: fixed v4.0 / 4.0.0.0 / mscorlib's official key token, and a
-    # BCP-47-shaped culture of ASCII alnum subtags. Anything else (evil
-    # sibling directories, other assemblies, other versions, other tokens,
-    # other basenames, deeper nesting) stays rejected.
-    expected_prefix = ntpath.normpath(
+    #   GAC_MSIL\Microsoft.VisualBasic.resources\v4.0_10.0.0.0_es_b03f5f7f11d50a3a\
+    # Both live in the admin-protected GAC_MSIL tree. The culture is part of
+    # the version directory name, so the version directory is validated field
+    # by field: fixed v4.0, the assembly's known version, its official public
+    # key token, and a BCP-47-shaped culture of ASCII alnum subtags. Adding a
+    # new satellite means adding its (assembly, version, token) triple here.
+    _KNOWN_SATELLITES = {
+        "mscorlib.resources.dll": {
+            "assembly": "mscorlib.resources",
+            "version": "4.0.0.0",
+            "token": "b77a5c561934e089",
+        },
+        "microsoft.visualbasic.resources.dll": {
+            "assembly": "Microsoft.VisualBasic.resources",
+            "version": "10.0.0.0",
+            "token": "b03f5f7f11d50a3a",
+        },
+    }
+    normalized = ntpath.normpath(path)
+    parent, basename = ntpath.split(normalized)
+    if basename.casefold() not in _KNOWN_SATELLITES:
+        return False
+    version_directory = ntpath.basename(parent)
+    assembly_directory = ntpath.basename(ntpath.dirname(parent))
+    expected = ntpath.normpath(
         ntpath.join(
-            windows_directory,
-            "Microsoft.NET",
-            "assembly",
-            "GAC_MSIL",
-            "mscorlib.resources",
+            windows_directory, "Microsoft.NET", "assembly", "GAC_MSIL"
         )
     )
-    normalized = ntpath.normpath(path)
-    prefix_with_separator = expected_prefix.casefold() + "\\"
-    if not normalized.casefold().startswith(prefix_with_separator):
+    # parent = <GAC_MSIL>\<assembly>\<version dir>; one more dirname gets the
+    # assembly directory, one more the pinned GAC_MSIL root.
+    gac_directory = ntpath.dirname(ntpath.dirname(parent))
+    if gac_directory.casefold() != expected.casefold():
         return False
-    parts = normalized[len(expected_prefix) + 1 :].split("\\")
-    if len(parts) != 2 or parts[1].casefold() != "mscorlib.resources.dll":
+    spec = _KNOWN_SATELLITES[basename.casefold()]
+    if assembly_directory.casefold() != spec["assembly"].casefold():
         return False
-    fields = parts[0].split("_")
+    fields = version_directory.split("_")
     if (
         len(fields) != 4
         or fields[0] != "v4.0"
-        or fields[1] != "4.0.0.0"
-        or fields[3] != "b77a5c561934e089"
+        or fields[1] != spec["version"]
+        or fields[3] != spec["token"]
     ):
         return False
     subtags = fields[2].split("-")
@@ -326,9 +339,7 @@ class DebugImageAuthority:
             )
             or _is_trusted_winsxs_common_controls(path, str(windows_directory))
             or _is_trusted_gac_microsoft_visual_basic(path, str(windows_directory))
-            or _is_trusted_gac_mscorlib_resource_satellite(
-                path, str(windows_directory)
-            )
+            or _is_trusted_gac_resource_satellite(path, str(windows_directory))
         )
 
     def approve_announced_process(
