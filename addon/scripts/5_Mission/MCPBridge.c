@@ -1468,7 +1468,7 @@ class MCPBridge : Managed
 		FillPlayerVitals(healPlayer, healReport.before);
 		healSplintTo = healPlayer.MCPHealServer(command.args.full);
 		FillPlayerVitals(healPlayer, healReport.after);
-		healReport.splint_returned = healSplintTo != "";
+		healReport.splint_returned = healSplintTo == "inventory" || healSplintTo == "ground";
 		healReport.splint_returned_to = healSplintTo;
 		result.player_heal = healReport;
 		result.ok = true;

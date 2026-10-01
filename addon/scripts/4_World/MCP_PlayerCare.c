@@ -233,6 +233,14 @@ class MCPGodmode
 
 modded class PlayerBase
 {
+	// How far from the player the heal looks for a Splint vanilla put on the
+	// ground: half a metre in front of the player's origin, then down to the
+	// surface below (playerbase.c:6462-6468, :6480-6484; ECE_PLACE_ON_SURFACE
+	// holds ECE_TRACE, centraleconomy.c:10, :37), lower still when the player
+	// is seated in a vehicle. Only a change in the count is read, so Splints
+	// already lying near the player never count as returned.
+	protected const float MCP_SPLINT_GROUND_RADIUS_M = 3.0;
+
 	// player_heal (inbox bef7), on the server: the full heal of the
 	// Bullet_CupidsBolt branch of EEHitBy (playerbase.c:1302-1340), in its order.
 	// Zones (health, shock and blood to their maximum, damagesystem.c:139-154),
@@ -254,19 +262,25 @@ modded class PlayerBase
 	// legs heal, BrokenLegsMdfr.OnDeactivate calls RemoveSplint if the player
 	// IsWearingSplint (brokenlegs.c:38-44, playerbase.c:3914-3923), and
 	// Deactivate runs it only for an active modifier (modifierbase.c:217-231).
-	// RemoveSplint gives the Splint item back into the inventory, into the hands
-	// when nothing else has room, or else on the ground half a metre in front of
-	// the player, and deletes the applied one (miscgameplayfunctions.c:1636-1687,
-	// humaninventory.c:65-71, playerbase.c:6480-6484). The heal reads those two
-	// conditions before anything changes and returns where the Splint went:
-	// "inventory" when the player holds one Splint more after ResetAll, "ground"
-	// when it does not, "" when no splint came off. The applied splint's Delete
-	// is deferred to the call queue (object.c:82-85), so it is not read after.
+	// RemoveSplint creates the Splint item in the inventory, in the hands when
+	// nothing else has room (humaninventory.c:65-71), or else on the ground half
+	// a metre in front of the player (playerbase.c:6480-6484), and deletes the
+	// applied one even when that ground creation returns null as well
+	// (miscgameplayfunctions.c:1636-1687, playerbase.c:6445-6472): vanilla then
+	// loses the splint. The heal reads those two conditions before anything
+	// changes, counts the Splints in the inventory and the hands and those loose
+	// on the ground near the player, and counts both again after ResetAll. It
+	// returns "inventory" when the first count grew, "ground" when the second
+	// did, "none" when a splint came off and neither grew, and "" when no splint
+	// came off: a place is named only where a new Splint was found. The applied
+	// splint's Delete is deferred to the call queue (object.c:82-85), so it is
+	// not read after.
 	string MCPHealServer(bool full)
 	{
 		bool damageWasAllowed;
 		bool splintComesOff;
 		int splintsBefore;
+		int groundSplintsBefore;
 		string splintTo;
 		int bloodType;
 		float energyValue;
@@ -276,6 +290,7 @@ modded class PlayerBase
 		splintTo = "";
 		splintComesOff = false;
 		splintsBefore = 0;
+		groundSplintsBefore = 0;
 		if (m_ModifiersManager && IsWearingSplint())
 		{
 			splintComesOff = m_ModifiersManager.IsModifierActive(eModifiers.MDF_BROKEN_LEGS);
@@ -283,6 +298,7 @@ modded class PlayerBase
 		if (splintComesOff)
 		{
 			splintsBefore = MCPCountSplints();
+			groundSplintsBefore = MCPCountGroundSplints();
 		}
 		damageWasAllowed = GetAllowDamage();
 		if (!damageWasAllowed)
@@ -296,10 +312,14 @@ modded class PlayerBase
 		}
 		if (splintComesOff)
 		{
-			splintTo = "ground";
+			splintTo = "none";
 			if (MCPCountSplints() > splintsBefore)
 			{
 				splintTo = "inventory";
+			}
+			else if (MCPCountGroundSplints() > groundSplintsBefore)
+			{
+				splintTo = "ground";
 			}
 		}
 		if (GetBrokenLegs() != eBrokenLegs.NO_BROKEN_LEGS)
@@ -374,6 +394,38 @@ modded class PlayerBase
 		if (Splint.Cast(GetItemInHands()))
 		{
 			count = count + 1;
+		}
+		return count;
+	}
+
+	// The Splint items loose on the ground within MCP_SPLINT_GROUND_RADIUS_M of
+	// the player: the objects in that sphere (GetObjectsAtPosition3D,
+	// game.c:929, the query vanilla's vicinity inventory uses,
+	// vicinityitemmanager.c:245, :268) around GetPosition (object.c:293), the
+	// point vanilla's ground spawn starts from (playerbase.c:6482); Splints only
+	// (splint.c:1), and only those with no parent in the hierarchy
+	// (GetHierarchyParent, entityai.c:880), so none in an inventory, a container
+	// or anyone's hands. Reads only.
+	protected int MCPCountGroundSplints()
+	{
+		array<Object> objects;
+		array<CargoBase> proxyCargos;
+		Splint found;
+		int index;
+		int count;
+		count = 0;
+		objects = new array<Object>();
+		proxyCargos = new array<CargoBase>();
+		GetGame().GetObjectsAtPosition3D(GetPosition(), MCP_SPLINT_GROUND_RADIUS_M, objects, proxyCargos);
+		index = 0;
+		while (index < objects.Count())
+		{
+			found = Splint.Cast(objects.Get(index));
+			if (found && !found.GetHierarchyParent())
+			{
+				count = count + 1;
+			}
+			index = index + 1;
 		}
 		return count;
 	}

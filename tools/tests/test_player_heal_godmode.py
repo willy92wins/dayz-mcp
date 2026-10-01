@@ -47,6 +47,7 @@ VANILLA = Path(os.environ.get("DAYZ_MCP_VANILLA_SCRIPTS", "P:/scripts"))
 
 HEAL_SERVER = "string MCPHealServer(bool full)"
 COUNT_SPLINTS = "protected int MCPCountSplints()"
+COUNT_GROUND_SPLINTS = "protected int MCPCountGroundSplints()"
 DISPATCH = "protected void Dispatch(MCPCommand command)"
 DISPATCH_HEAL = "protected bool DispatchPlayerHeal(MCPCommand command, MCPResult result)"
 DISPATCH_GODMODE = "protected bool DispatchPlayerGodmode(MCPCommand command, MCPResult result)"
@@ -85,6 +86,9 @@ SPLINT_RULE = (
     "Splint item back as vanilla does, into the inventory or, when it is full, on "
     "the ground at the player; nothing else in the inventory changes."
 )
+# Review R2 F1: vanilla deletes the applied splint even when it cannot create the
+# Splint item anywhere; the answer then names no place.
+SPLINT_LOSS = "Vanilla can lose the splint when it cannot place it, and the answer then says so."
 
 EXPECTED_VITALS_MEMBERS = [
     ("float", "health"),
@@ -202,6 +206,16 @@ def _godmode_constant(name: str) -> float:
     match = re.search(rf"static const float {name} = ([0-9.]+);", _without_comments(_source(CARE_PATH)))
     if match is None:
         raise AssertionError(f"{name} is absent from MCP_PlayerCare.c")
+    return float(match.group(1))
+
+
+def _splint_ground_radius() -> float:
+    """How far from the player the heal looks for a Splint on the ground."""
+    match = re.search(
+        r"protected const float MCP_SPLINT_GROUND_RADIUS_M = ([0-9.]+);", _without_comments(_source(CARE_PATH))
+    )
+    if match is None:
+        raise AssertionError("MCP_SPLINT_GROUND_RADIUS_M is absent from MCP_PlayerCare.c")
     return float(match.group(1))
 
 
@@ -375,7 +389,12 @@ class _Godmode:
 
 class _HealPlayer:
     """One server PlayerBase as MCPHealServer sees it: every call, in order, with
-    whether damage was allowed at the time, its inventory and the ground at it."""
+    whether damage was allowed at the time, its inventory and the ground at it.
+
+    room: vanilla's CreateInInventory finds a place (the hands included).
+    ground_room: else its ground creation returns an entity; when it returns
+    null too, the Splint item exists nowhere (review R2 F1).
+    lying: Splints already loose on the ground near the player."""
 
     def __init__(
         self,
@@ -389,6 +408,8 @@ class _HealPlayer:
         splint_worn: bool = False,
         legs_modifier_active: bool = True,
         room: bool = True,
+        ground_room: bool = True,
+        lying: int = 0,
     ) -> None:
         self.calls: list[tuple[Any, ...]] = []
         self.allow_damage = allow_damage
@@ -401,8 +422,9 @@ class _HealPlayer:
         self.splint_worn = splint_worn
         self.legs_modifier_active = legs_modifier_active
         self.room = room
+        self.ground_room = ground_room
         self.inventory: list[str] = ["Bandage", "Splint_Applied"] if splint_worn else ["Bandage"]
-        self.ground: list[str] = []
+        self.ground: list[str] = ["Splint"] * lying
 
     @staticmethod
     def _stats(values: dict[str, float]) -> dict[str, _Stat]:
@@ -431,13 +453,22 @@ class _HealPlayer:
         # hands) when there is room, else on the ground at the player, and queues
         # the applied one's Delete, which stays until the call queue runs
         # (miscgameplayfunctions.c:1636-1687, humaninventory.c:65-71, object.c:82-85).
+        # The ground creation can return null as well (playerbase.c:6445-6472):
+        # the applied one is deleted all the same and the Splint is lost.
         if self.splint_worn:
-            (self.inventory if self.room else self.ground).append("Splint")
+            if self.room:
+                self.inventory.append("Splint")
+            elif self.ground_room:
+                self.ground.append("Splint")
         self.legs = self.legs_after_reset_all
 
     def _count_splints(self) -> int:
         self._record("MCPCountSplints")
         return self.inventory.count("Splint")
+
+    def _count_ground_splints(self) -> int:
+        self._record("MCPCountGroundSplints")
+        return self.ground.count("Splint")
 
     def _set_broken_legs(self, state: int) -> None:
         self._record("SetBrokenLegs", state)
@@ -468,6 +499,7 @@ class _HealPlayer:
             "eModifiers": SimpleNamespace(MDF_BROKEN_LEGS=MDF_BROKEN_LEGS),
             "IsWearingSplint": lambda: self.splint_worn,
             "MCPCountSplints": self._count_splints,
+            "MCPCountGroundSplints": self._count_ground_splints,
             "GetBrokenLegs": lambda: self.legs,
             "SetBrokenLegs": self._set_broken_legs,
             "eBrokenLegs": SimpleNamespace(NO_BROKEN_LEGS=0, BROKEN_LEGS=1, BROKEN_LEGS_SPLINT=2),
@@ -721,6 +753,9 @@ class PlayerHealSequenceTest(unittest.TestCase):
     # Review R1 F1: a worn splint comes off through vanilla's own deactivation,
     # and the heal says whether and where the Splint item went.
 
+    def _counts(self, player: _HealPlayer) -> list[str]:
+        return [name for name in player.names() if name in ("MCPCountSplints", "MCPCountGroundSplints", "ResetAll")]
+
     def test_a_worn_splint_comes_back_into_the_inventory_through_vanillas_deactivation(self) -> None:
         player = _HealPlayer(legs=2, legs_after_reset_all=0, splint_worn=True)
         before = list(player.inventory)
@@ -728,17 +763,41 @@ class PlayerHealSequenceTest(unittest.TestCase):
         self.assertEqual(player.inventory, before + ["Splint"], "only the returned Splint is new")
         self.assertEqual(player.ground, [])
         self.assertEqual(
-            [name for name in player.names() if name in ("MCPCountSplints", "ResetAll")],
-            ["MCPCountSplints", "ResetAll", "MCPCountSplints"],
+            self._counts(player),
+            ["MCPCountSplints", "MCPCountGroundSplints", "ResetAll", "MCPCountSplints"],
         )
         self.assertNotIn("SetBrokenLegs", player.names(), "vanilla's deactivation cleared the legs")
 
     def test_with_no_room_the_splint_lands_on_the_ground_and_the_inventory_stays(self) -> None:
-        player = _HealPlayer(legs=2, legs_after_reset_all=0, splint_worn=True, room=False)
-        before = list(player.inventory)
-        self.assertEqual(player.heal(full=True), "ground")
-        self.assertEqual(player.inventory, before)
-        self.assertEqual(player.ground, ["Splint"])
+        for lying in (0, 1):
+            with self.subTest(splints_already_lying=lying):
+                player = _HealPlayer(legs=2, legs_after_reset_all=0, splint_worn=True, room=False, lying=lying)
+                before = list(player.inventory)
+                self.assertEqual(player.heal(full=True), "ground")
+                self.assertEqual(player.inventory, before)
+                self.assertEqual(player.ground, ["Splint"] * (lying + 1))
+                self.assertEqual(
+                    self._counts(player),
+                    ["MCPCountSplints", "MCPCountGroundSplints", "ResetAll", "MCPCountSplints", "MCPCountGroundSplints"],
+                )
+
+    def test_when_vanilla_cannot_place_the_splint_the_answer_claims_no_return(self) -> None:
+        # Review R2 F1: CreateInInventory and the ground creation both return null;
+        # vanilla deletes the applied splint all the same, so no Splint exists.
+        # A Splint that was already lying there is not a return.
+        for lying in (0, 1):
+            with self.subTest(splints_already_lying=lying):
+                player = _HealPlayer(
+                    legs=2, legs_after_reset_all=0, splint_worn=True, room=False, ground_room=False, lying=lying
+                )
+                before = list(player.inventory)
+                self.assertEqual(player.heal(full=True), "none")
+                self.assertEqual(player.inventory, before)
+                self.assertEqual(player.ground, ["Splint"] * lying)
+                self.assertEqual(
+                    self._counts(player),
+                    ["MCPCountSplints", "MCPCountGroundSplints", "ResetAll", "MCPCountSplints", "MCPCountGroundSplints"],
+                )
 
     def test_without_a_splint_coming_off_nothing_is_returned_or_counted(self) -> None:
         for case in (
@@ -753,6 +812,7 @@ class PlayerHealSequenceTest(unittest.TestCase):
                 self.assertEqual(player.inventory, before)
                 self.assertEqual(player.ground, [])
                 self.assertNotIn("MCPCountSplints", player.names())
+                self.assertNotIn("MCPCountGroundSplints", player.names())
 
 
 class PlayerHealContractTest(unittest.TestCase):
@@ -787,7 +847,8 @@ class PlayerHealContractTest(unittest.TestCase):
         # one documented case, a worn splint, and only through vanilla's own path
         # (ResetAll -> BrokenLegsMdfr.OnDeactivate -> RemoveSplint, brokenlegs.c:38-44).
         # Nothing removes the splint by hand, nothing suppresses that path, and
-        # the counter that tells where the Splint went only reads.
+        # the counters that tell where the Splint went only read.
+        ground_counter = method_body(self.care, COUNT_GROUND_SPLINTS)
         self.assertEqual(self.heal.count("m_ModifiersManager.ResetAll();"), 1)
         for write in (
             "RemoveSplint",
@@ -809,28 +870,41 @@ class PlayerHealContractTest(unittest.TestCase):
             with self.subTest(write=write):
                 self.assertNotIn(write, self.heal)
                 self.assertNotIn(write, self.dispatch)
+                self.assertNotIn(write, ground_counter)
         self.assertEqual(
             set(re.findall(r"(\w+)\s*\(", self.counter)),
             {"GetInventory", "EnumerateInventory", "while", "Count", "if", "Cast", "Get", "GetItemInHands"},
             "MCPCountSplints may only read the inventory",
         )
+        self.assertEqual(
+            set(re.findall(r"(\w+)\s*\(", ground_counter)),
+            {"GetGame", "GetObjectsAtPosition3D", "GetPosition", "while", "Count", "Cast", "Get", "if", "GetHierarchyParent"},
+            "MCPCountGroundSplints may only read the objects around the player",
+        )
         self.assertIn("protected int MCPCountSplints()", self.care, "only the heal calls it")
-        # Vanilla's two conditions, read before anything changes; one count before
-        # ResetAll and one after; the answer is where the Splint went.
+        self.assertIn("protected int MCPCountGroundSplints()", self.care, "only the heal calls it")
+        # Vanilla's two conditions, read before anything changes; both counts
+        # before ResetAll and again after; a place is named only where a new
+        # Splint was found, and "none" when a splint came off and none was
+        # (review R2 F1: the ground is confirmed, never inferred).
         _in_order(
             self,
             self.heal,
             "if (m_ModifiersManager && IsWearingSplint())",
             "splintComesOff = m_ModifiersManager.IsModifierActive(eModifiers.MDF_BROKEN_LEGS);",
             "splintsBefore = MCPCountSplints();",
+            "groundSplintsBefore = MCPCountGroundSplints();",
             "damageWasAllowed = GetAllowDamage();",
             "DamageSystem.ResetAllZones(this);",
             "m_ModifiersManager.ResetAll();",
-            'splintTo = "ground";',
+            'splintTo = "none";',
             "if (MCPCountSplints() > splintsBefore)",
             'splintTo = "inventory";',
+            "else if (MCPCountGroundSplints() > groundSplintsBefore)",
+            'splintTo = "ground";',
             "return splintTo;",
         )
+        self.assertEqual(set(re.findall(r'splintTo = "(\w*)";', self.heal)), {"", "none", "inventory", "ground"})
         # The applied splint's Delete is deferred (object.c:82-85): it is never re-read.
         self.assertEqual(self.heal.count("IsWearingSplint()"), 1)
 
@@ -856,7 +930,7 @@ class PlayerHealContractTest(unittest.TestCase):
             "FillPlayerVitals(healPlayer, healReport.before);",
             "healSplintTo = healPlayer.MCPHealServer(command.args.full);",
             "FillPlayerVitals(healPlayer, healReport.after);",
-            'healReport.splint_returned = healSplintTo != "";',
+            'healReport.splint_returned = healSplintTo == "inventory" || healSplintTo == "ground";',
             "healReport.splint_returned_to = healSplintTo;",
             "result.player_heal = healReport;",
             "result.ok = true;",
@@ -864,6 +938,17 @@ class PlayerHealContractTest(unittest.TestCase):
         self.assertEqual(set(re.findall(r'result\.error = "(\w+)";', self.dispatch)), {"bad_args", "player_dead"})
         self.assertEqual(self.dispatch.count("result.ok = true;"), 1)
         self.assertIn("healReport.full = command.args.full;", self.dispatch)
+
+    def test_the_answer_claims_a_return_only_where_a_new_splint_was_found(self) -> None:
+        # Review R2 F1: the dispatch's own expression for splint_returned, run on
+        # each place MCPHealServer can name.
+        assignments = re.findall(r"healReport\.splint_returned = ([^;]+);", self.dispatch)
+        self.assertEqual(len(assignments), 1, assignments)
+        signature = "bool SplintReturned(string healSplintTo)"
+        returned = translate(f"{signature}\n{{\n\treturn {assignments[0]};\n}}\n", signature, {})
+        for place, expected in (("inventory", True), ("ground", True), ("none", False), ("", False)):
+            with self.subTest(place=place):
+                self.assertIs(returned(EnforceString.of(place)), expected)
 
     def test_the_vitals_are_the_contract_reads(self) -> None:
         fill = _flat(method_body(self.bridge, FILL_VITALS))
@@ -938,6 +1023,96 @@ class PlayerHealSplintCountTest(unittest.TestCase):
         for enumerated in ([_Item("Bandage")], [_Item("Bandage"), held]):
             with self.subTest(enumeration_holds_the_hands=len(enumerated) == 2):
                 self.assertGreater(self._count(enumerated, held), before)
+
+
+class _Placed:
+    """An object GetObjectsAtPosition3D returns, with its hierarchy parent."""
+
+    def __init__(self, kind: str, parent: object | None = None) -> None:
+        self.kind = kind
+        self.parent = parent
+
+    def GetHierarchyParent(self) -> object | None:
+        return self.parent
+
+
+class PlayerHealGroundSplintCountTest(unittest.TestCase):
+    """MCPCountGroundSplints translated and run: the Splint items loose on the
+    ground around the player (review R2 F1)."""
+
+    PLAYER_POSITION = "player position"
+
+    def _count(self, placed: list[_Placed]) -> tuple[int, list[tuple[object, float]]]:
+        class _Array:
+            def __init__(self) -> None:
+                self.items: list[object] = []
+
+            def Count(self) -> int:
+                return len(self.items)
+
+            def Get(self, index: int) -> object:
+                return self.items[index]
+
+        queries: list[tuple[object, float]] = []
+
+        def objects_at(position: object, radius: float, objects: _Array, cargos: _Array) -> None:
+            queries.append((position, radius))
+            objects.items.extend(placed)
+
+        namespace: dict[str, Any] = {
+            "NewObjectArray": _Array,
+            "NewCargoArray": _Array,
+            "GetGame": lambda: SimpleNamespace(GetObjectsAtPosition3D=objects_at),
+            "GetPosition": lambda: self.PLAYER_POSITION,
+            "MCP_SPLINT_GROUND_RADIUS_M": _splint_ground_radius(),
+            # The script class Splint (splint.c:1); Splint_Applied is a Clothing (splint.c:12).
+            "Splint": SimpleNamespace(Cast=lambda obj: obj if isinstance(obj, _Placed) and obj.kind == "Splint" else None),
+        }
+        rewrites = (
+            (re.compile(r"new array<Object>\(\)"), "NewObjectArray()"),
+            (re.compile(r"new array<CargoBase>\(\)"), "NewCargoArray()"),
+            (re.compile(r"array<Object>"), "ObjectArray"),
+            (re.compile(r"array<CargoBase>"), "CargoArray"),
+        )
+        count = translate(
+            _rewritten(_source(CARE_PATH), COUNT_GROUND_SPLINTS, rewrites),
+            COUNT_GROUND_SPLINTS,
+            namespace,
+            class_types=("ObjectArray", "CargoArray", "Splint"),
+        )
+        return count(), queries
+
+    def test_only_splints_with_no_parent_count(self) -> None:
+        # Nothing in an inventory, a container or anyone's hands counts: those
+        # have a hierarchy parent (entityai.c:880).
+        player = _Placed("SurvivorM_Mirek")
+        backpack = _Placed("TaloonBag")
+        other = _Placed("SurvivorF_Linda")
+        placed = [
+            player,
+            _Placed("Splint"),
+            _Placed("Splint", backpack),
+            _Placed("Splint_Applied", player),
+            _Placed("Splint", player),
+            _Placed("Bandage"),
+            _Placed("Splint", other),
+            backpack,
+            _Placed("Splint"),
+        ]
+        self.assertEqual(self._count(placed)[0], 2)
+        self.assertEqual(self._count([player, _Placed("Splint_Applied", player)])[0], 0)
+        self.assertEqual(self._count([])[0], 0)
+
+    def test_one_sphere_around_the_player_that_covers_vanillas_half_metre(self) -> None:
+        # RemoveSplint's ground fallback is half a metre in front of the player
+        # (miscgameplayfunctions.c:1640, playerbase.c:6480-6484), dropped to the
+        # surface below: the radius leaves room for that drop and stays small.
+        count, queries = self._count([_Placed("Splint")])
+        self.assertEqual(count, 1)
+        radius = _splint_ground_radius()
+        self.assertEqual(queries, [(self.PLAYER_POSITION, radius)])
+        self.assertGreaterEqual(radius, 2.0)
+        self.assertLessEqual(radius, 5.0)
 
 
 # --- godmode, run ---------------------------------------------------------------
@@ -1482,11 +1657,18 @@ class HealGodmodeToolTest(unittest.IsolatedAsyncioTestCase):
     def test_the_heal_description_and_the_changelog_state_the_splint_rule(self) -> None:
         # Review R1 F1: the one inventory change is said in plain words, with the
         # two answer fields, and nothing claims the inventory is never touched.
+        # Review R2 F1: the loss vanilla allows is said too, with the value that
+        # reports it and the radius the heal searches (the Enforce constant).
+        radius = f"{_splint_ground_radius():g} m"
         heal = self.tools[HEAL].description or ""
         self.assertIn(SPLINT_RULE, heal)
+        self.assertIn(SPLINT_LOSS, heal)
         self.assertIn(
             "splint_returned and splint_returned_to (inventory, the hands included, or "
-            "ground; empty when no splint came off)",
+            "ground, where a new Splint was found after the heal; none, with "
+            "splint_returned false, when the splint came off and no new Splint was "
+            f"found in the inventory, the hands or on the ground within {radius} of the "
+            "player; empty when no splint came off)",
             heal,
         )
         self.assertNotIn("never touches the inventory", heal)
@@ -1494,7 +1676,15 @@ class HealGodmodeToolTest(unittest.IsolatedAsyncioTestCase):
         changelog = CHANGELOG_PATH.read_text(encoding="utf-8")
         unreleased = changelog[changelog.index("## [Unreleased]") : changelog.index("## [1.3]")]
         self.assertIn(SPLINT_RULE, unreleased)
-        self.assertIn("`splint_returned` and `splint_returned_to`", unreleased)
+        self.assertIn(SPLINT_LOSS, unreleased)
+        self.assertIn(
+            "`splint_returned` and `splint_returned_to` (`inventory`, the hands "
+            "included, or `ground`, where a new Splint was found after the heal; "
+            "`none`, with `splint_returned` false, when the splint came off and no new "
+            f"Splint was found in the inventory, the hands or on the ground within {radius} "
+            "of the player; empty when no splint came off)",
+            unreleased,
+        )
 
     def test_the_compact_catalog_never_lists_the_mutating_verbs(self) -> None:
         for tool in COMMANDS:
@@ -1619,6 +1809,57 @@ class VanillaPremiseTest(unittest.TestCase):
             "void Delete() { g_Game.GetCallQueue(CALL_CATEGORY_SYSTEM).Call(g_Game.ObjectDelete, this); }",
             _flat(self._vanilla("3_game/entities/object.c")),
         )
+
+    def test_vanilla_can_lose_the_splint_and_the_heal_reads_the_ground_around_the_player(self) -> None:
+        # Review R2 F1. RemoveSplint deletes the applied splint whether or not a
+        # Splint item was created: the Delete is outside `if (new_item)`.
+        misc = _flat(self._vanilla("4_world/static/miscgameplayfunctions.c"))
+        remove = misc[misc.index("static void RemoveSplint( PlayerBase player )") : misc.index("static void TeleportCheck(")]
+        _in_order(
+            self,
+            remove,
+            'if ( attachment && attachment.GetType() == "Splint_Applied" )',
+            "if (new_item)",
+            "attachment.Delete();",
+        )
+        self.assertNotIn("attachment.Delete();", _block_after(remove, remove.index("if (new_item)")))
+        # The ground creation half a metre in front can return null: CreateObjectEx's
+        # own result, or null on a client (playerbase.c:6445-6484).
+        player = _flat(self._vanilla("4_world/entities/manbase/playerbase.c"))
+        ground = player[
+            player.index("override EntityAI SpawnEntityOnGroundPos(string object_name, vector pos)") : player.index(
+                "EntityAI SpawnEntityOnGroundRaycastDispersed("
+            )
+        ]
+        _in_order(
+            self,
+            ground,
+            "int flags = ECE_PLACE_ON_SURFACE;",
+            "return EntityAI.Cast(g_Game.CreateObjectEx(object_name, inv_loc.GetPos(), flags));",
+            "return null;",
+        )
+        self.assertIn(
+            "vector position = GetPosition() + (GetDirection() * distance); "
+            "return SpawnEntityOnGroundPos(object_name, position);",
+            player,
+        )
+        # That placement traces down to the surface (ECE_TRACE is in ECE_PLACE_ON_SURFACE).
+        economy = self._vanilla("3_game/ce/centraleconomy.c")
+        trace = int(re.search(r"const int ECE_TRACE\s*=\s*(\d+);", economy).group(1))
+        place = int(re.search(r"const int ECE_PLACE_ON_SURFACE\s*=\s*(\d+);", economy).group(1))
+        self.assertEqual(place & trace, trace)
+        # The scan: the sphere query vanilla's vicinity uses, and the hierarchy parent.
+        self.assertIn(
+            "proto native void GetObjectsAtPosition3D(vector pos, float radius, out array<Object> objects, "
+            "out array<CargoBase> proxyCargos);",
+            _flat(self._vanilla("3_game/global/game.c")),
+        )
+        self.assertIn(
+            "g_Game.GetObjectsAtPosition3D(playerPosition, VICINITY_DISTANCE, objectsInVicinity, proxyCargos);",
+            self._vanilla("5_mission/gui/inventorynew/vicinityitemmanager.c"),
+        )
+        self.assertIn("proto native EntityAI GetHierarchyParent();", self._vanilla("3_game/entities/entityai.c"))
+        self.assertIn("proto native vector GetPosition();", self._vanilla("3_game/entities/object.c"))
 
     def test_the_connect_respawn_and_logout_events(self) -> None:
         mission = _flat(self._vanilla("5_mission/mission/missionserver.c"))
