@@ -324,6 +324,10 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     # A mistyped direction (heading=90 for heading_deg) must not walk the
     # player straight ahead: an unknown key is refused, not dropped.
     "player_move",
+    # A mistyped uid key (id=, player=) must not heal or switch the first human
+    # instead of the player named: an unknown key is refused, not dropped.
+    "player_heal",
+    "player_godmode",
 )
 
 
@@ -351,6 +355,14 @@ WAIT_FOR_CONDITIONS = frozenset({
 })
 TELEMETRY_READ_MODES = frozenset({"object_at", "fixture_jsonl"})
 LEASE_TOOL_LINE = "Requires a lease (session_acquire_wait)."
+# Godmode is on by default (inbox 3136). The descriptions of the tools that
+# launch a run, change godmode or report it carry this sentence, so the changed
+# default damage behaviour is stated where an agent reads it.
+GODMODE_DEFAULT_LINE = (
+    "Godmode is ON by default: in every run that loads DayZ_MCP the server makes "
+    "each player immune to damage (falls, hits, hunger and thirst) when it "
+    "connects or respawns; call player_godmode(on=false) to get vanilla damage back."
+)
 
 # flags=0 stays the surface default. This mask is the example to add when
 # the caller wants the object left out of the world save.
@@ -3612,7 +3624,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "without reboot. The call blocks for up to wait_for_box_s plus "
             "the launch, so a client whose own tool-call timeout is shorter "
             "(Antigravity CLI cuts MCP calls at 180 s) must pass a smaller "
-            "wait_for_box_s and repeat the call."
+            "wait_for_box_s and repeat the call. "
+            f"{GODMODE_DEFAULT_LINE}"
         )
     )
     async def dayz_test_run(
@@ -3994,7 +4007,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "vehicle_get_in_client seats only the client: the server-side body "
             "does not travel with the client-owned car, so after client driving "
             "pos stays where the server last put the player (for example the "
-            "player_teleport position). Read the car with vehicle_telemetry."
+            "player_teleport position). Read the car with vehicle_telemetry. "
+            "godmode is true while the player is immune to damage "
+            "(GetAllowDamage() false on the server). "
+            f"{GODMODE_DEFAULT_LINE}"
         )
     )
     async def query_player_state(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
@@ -4008,7 +4024,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "does not travel with the client-owned car, so after client driving "
             "a player's pos stays where the server last put it (for example the "
             "player_teleport position) and in_vehicle stays 0. Read the car with "
-            "vehicle_telemetry."
+            "vehicle_telemetry. Each player's godmode is true while it is immune "
+            "to damage (GetAllowDamage() false on the server). "
+            f"{GODMODE_DEFAULT_LINE}"
         )
     )
     async def query_all_players(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
@@ -4614,6 +4632,83 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 if refusal is not None:
                     return refusal
             return await runtime.call_bridge("player_teleport", args, "server", _timeout(timeout_s))
+
+    # inbox bef7: after two 9 m falls left the player at health 0.03, the only
+    # remedy was player_respawn, which killed the character and moved it.
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Heal a connected player at once on the server, "
+            "seated or not: DayZ's own full heal (health, blood and shock to "
+            "their maximum, bleeding stopped, broken legs and unconsciousness "
+            "ended, diseases and stamina reset; the other player stats except "
+            "blood type, water, energy and body heat go back to a new "
+            "character's values). It never moves the player and never touches "
+            "its seat or vehicle; the inventory changes only when a worn splint "
+            "comes off as a Splint item, as in vanilla when legs heal. "
+            "full=true (default) also fills water and energy to their maximum, "
+            "5000; full=false keeps their values. uid empty (default) targets "
+            "the first human; a non-empty uid selects by "
+            "PlayerIdentity.GetPlainId(). The player's godmode stays as it was. "
+            "The answer is player_heal: full, in_vehicle (seated on the server "
+            "before the heal), and before and after, each with health, blood "
+            "and shock (fractions of the maximum, 1.0 is full), broken_legs, "
+            "unconscious, bleeding_sources, water and energy. Errors: bad_args, "
+            "no_players (no connected human), player_not_found (no player with "
+            "that uid), player_dead (a dead player cannot be healed; "
+            "player_respawn gives a new character). "
+            f"{GODMODE_DEFAULT_LINE}"
+        )
+    )
+    async def player_heal(
+        uid: StrictStr = "",
+        full: StrictBool = True,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(uid, str):
+            raise ToolError(_bad_args("uid", uid, "be a string"))
+        if not isinstance(full, bool):
+            raise ToolError(_bad_args("full", full, "be a bool"))
+        args: dict[str, Any] = {"full": full}
+        if uid != "":
+            args["uid"] = uid
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("player_heal", args, "server", _timeout(timeout_s))
+
+    # inbox 3136: godmode on by default for every player of a run, switchable.
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Switch a connected player's godmode on the "
+            "server. on=true makes the player immune to damage "
+            "(SetAllowDamage(false) on the player, never on its vehicle) and "
+            "keeps its water and energy above the level where hunger and thirst "
+            "cost health; on=false gives vanilla damage back and stops that. "
+            f"{GODMODE_DEFAULT_LINE} The choice is kept for that player identity "
+            "until the mission ends, across player_respawn: a player switched "
+            "off stays off on its next character and one switched on stays on. "
+            "uid empty (default) targets the first human; a non-empty uid "
+            "selects by PlayerIdentity.GetPlainId(). The answer is "
+            "player_godmode: before and after (true is godmode on). "
+            "query_all_players and query_player_state report godmode per "
+            "player. Errors: bad_args, no_players (no connected human), "
+            "player_not_found (no player with that uid), player_dead (respawn "
+            "first; the choice is not changed), no_identity (the player has no "
+            "identity to keep the choice for)."
+        )
+    )
+    async def player_godmode(
+        on: StrictBool,
+        uid: StrictStr = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(on, bool):
+            raise ToolError(_bad_args("on", on, "be a bool"))
+        if not isinstance(uid, str):
+            raise ToolError(_bad_args("uid", uid, "be a string"))
+        args: dict[str, Any] = {"godmode": on}
+        if uid != "":
+            args["uid"] = uid
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("player_godmode", args, "server", _timeout(timeout_s))
 
     # Read or write entity animation phase.
     @app.tool(
@@ -5756,7 +5851,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         f"{LEASE_TOOL_LINE} Request a random local-player respawn through the "
         "same character-selection, death-screen, menu, and mission teardown sequence as "
         "vanilla InGameMenu.GameRespawn. ok/requested means the request was "
-        "issued; observe player state separately for completion."
+        "issued; observe player state separately for completion. The new "
+        "character keeps the player identity's godmode: on by default, off "
+        "when player_godmode(on=false) switched it off during this mission."
     ))
     async def player_respawn(
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,

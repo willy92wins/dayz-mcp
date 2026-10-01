@@ -224,6 +224,11 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("player_move", {"phase": "press", "ttl_s": 1, "heading_deg": 90}, "player_move"),
     ("player_move", {"phase": "press", "ttl_s": 1, "to": [0, 0, 0], "arrive_radius_m": 5}, "player_move"),
     ("player_move", {"phase": "release"}, "player_move"),
+    # Both choices and the uid pass-through of the two server verbs (bef7, 3136).
+    ("player_heal", {}, "player_heal"),
+    ("player_heal", {"full": False, "uid": "76561198000000000"}, "player_heal"),
+    ("player_godmode", {"on": False}, "player_godmode"),
+    ("player_godmode", {"on": True, "uid": "76561198000000000"}, "player_godmode"),
     ("player_trace", {"mode": "start"}, "player_trace"),
     ("player_trace", {"mode": "start", "sample_hz": 60, "max_samples": 8192}, "player_trace"),
     (

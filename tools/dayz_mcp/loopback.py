@@ -77,6 +77,8 @@ SERVER_COMMANDS = {
     # F3: server-side world/object/player verbs (MissionServer bridge).
     "surface_query",
     "player_teleport",
+    "player_heal",
+    "player_godmode",
     "object_anim",
     "vehicle_door",
     "inventory_attach",
@@ -882,6 +884,30 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={
                 "uid": _is_string,
                 "pos": _is_real_vector3,
+            },
+        )
+    ),
+    # uid selects the player as for player_teleport. full and godmode always
+    # travel, as JSON booleans: the bridge reads an absent key as false
+    # (fb-20260930-065425-8779), which would be the heal without the refill or
+    # vanilla damage instead of the choice the caller made.
+    "player_heal": _command_schema(
+        _schema_variant(
+            required=("full",),
+            optional=("uid",),
+            validators={
+                "full": _is_strict_bool,
+                "uid": _is_string,
+            },
+        )
+    ),
+    "player_godmode": _command_schema(
+        _schema_variant(
+            required=("godmode",),
+            optional=("uid",),
+            validators={
+                "godmode": _is_strict_bool,
+                "uid": _is_string,
             },
         )
     ),
