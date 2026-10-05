@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- The host launcher policy can give each project `server_extra_args` and `client_extra_args`: DayZDiag arguments appended after the managed ones to that project's server and client launches (not offline). They come only from `launcher-policy.json`, are sealed in `worker-runtime.json`, and no tool or request field can set them. The builder and the sealed worker both refuse more than 32 entries, entries over 256 characters, anything but `-name`, `-name=value` or `name=value` in printable ASCII without space or `"`, repeated names, and every flag the launcher manages. Takes effect after a launcher rebuild (`tools/README-mcp.md`, Native launcher host policy).
+
 ### Changed
 
 - `docs/RELEASE.md` plays one game with the release PBO before the tag (new step 5). It swaps the PBO in with `swap_pbo.ps1` where test runs load it, plays without `-filePatching`, checks while the run is up that the server and the client with its profile folders and port run with the release's PBO, and keeps that check, `bridge_status`, `dayz_test_close`, the RPT logs and the server's script log as the release's evidence. Step 2 builds the PBO into a folder of its own: with no `-Destination`, `pack-addon.ps1` replaces the PBO test runs load and keeps no copy of it.

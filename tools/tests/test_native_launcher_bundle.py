@@ -440,7 +440,7 @@ class NativeLauncherBundleTest(unittest.TestCase):
         self.builder.validate_worker_runtime_document(payload)
         for project in payload["projects"]:
             self.assertEqual(
-                set(project),
+                set(project) - {"client_extra_args", "server_extra_args"},
                 {
                     "build_source_basename", "build_temp_root", "dev_root",
                     "diag_executable", "game_directory", "mission_aliases",

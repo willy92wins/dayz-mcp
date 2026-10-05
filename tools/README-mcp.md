@@ -188,6 +188,20 @@ The builder reads a host-only intent file. It never loads the published example.
    Live MCP client sessions keep the tool code and the bundle layout they started with: after a
    tools deploy, a daemon restart or a bundle layout change, reopen the client session.
 
+Each project may also carry `server_extra_args` and `client_extra_args` (optional lists, empty by default): DayZDiag arguments the host adds to that project's managed server and client launches, after every argument the launcher sets and in the order given. The offline role gets neither list. Only this file sets them: no `dayz_test_run` argument and no request-v1 field can name them, and `request-policy.json` does not carry them. A non-empty list is sealed in `worker-runtime.json`, whose sha256 the closure manifest pins, so it changes only through a rebuild and the registry renewal of step 9. For example:
+
+```json
+"server_extra_args": ["-doWeaponLog", "-freezecheck", "-newErrorsAreWarnings=1", "animdebugger=true"],
+"client_extra_args": ["-doWeaponLog", "-newErrorsAreWarnings=1", "animdebugger=true"]
+```
+
+The builder refuses anything else with `policy_source_schema`, and the sealed worker refuses it again with `runtime_policy_invalid` before any launch:
+
+- At most 32 entries per list and 256 characters per entry.
+- Each entry is `-name`, `-name=value` or `name=value`. `name` is an ASCII letter followed by up to 63 ASCII letters, digits or `_`; `value` is one or more printable ASCII characters other than space and `"`. Each entry is passed as one argv element, so nothing needs quoting, and nothing that would need it is accepted.
+- A name appears at most once per list (case-insensitive, leading `-` ignored).
+- No name the launcher manages, compared case-insensitively with the leading `-` ignored: `x` and `y` exactly, and any name that starts with `server` (which covers `serverMod`), `config`, `profiles`, `mission`, `mod`, `port`, `connect`, `name`, `window`, `noPause`, `filePatching`, `startNavmeshDataServer` or `storage`. These are every flag the worker emits for the server, client and offline roles, plus `storage`, which would move persistence away from the mission storage the lifecycle rotates. The prefix match also refuses look-alikes such as `-modded` or `-serverProfile`.
+
 Locate the file with `--policy PATH`, then `DAYZ_MCP_LAUNCHER_POLICY`, then `%LOCALAPPDATA%\DayZ_MCP\launcher-policy.json`. An empty env value is an error, not a fallback. The published example is never selected.
 
 Exceptional `python -m dayz_mcp.admin_cli` release/reconcile operations require a real interactive TTY, a non-empty reason, and exact typed confirmation. They are not MCP tools and are not a normal queue-bypass mechanism.

@@ -33,7 +33,9 @@
         "livonia": "C:\\DayZ\\ExampleMod\\dev\\_server\\mpmissions\\dayzOffline.enoch",
         "sakhal": "C:\\DayZ\\ExampleMod\\dev\\_server\\mpmissions\\dayzOffline.sakhal"
       },
-      "mods_root": "C:\\DayZ\\ExampleMod\\mods"
+      "mods_root": "C:\\DayZ\\ExampleMod\\mods",
+      "server_extra_args": [],
+      "client_extra_args": []
     }
   ]
 }
