@@ -1082,6 +1082,88 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             (False, "bad_args"),
         ),
     ),
+    "action_use_component": (
+        (
+            "valid_component_zero",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "component_index": 0,
+                "cursor_pos": [1.0, 2.0, 3.0],
+            },
+            (True, None),
+        ),
+        (
+            "valid_component_876",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "component_index": 876,
+                "cursor_pos": [1.0, 2.0, 3.0],
+                "pos": [4.0, 5.0, 6.0],
+                "radius": 200.0,
+            },
+            (True, None),
+        ),
+        (
+            "component_above_511",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "component_index": 512,
+                "cursor_pos": [0.0, 0.0, 0.0],
+            },
+            (True, None),
+        ),
+        (
+            "negative_component",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "component_index": -1,
+                "cursor_pos": [0.0, 0.0, 0.0],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "bool_component",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "component_index": True,
+                "cursor_pos": [0.0, 0.0, 0.0],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "short_cursor",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "component_index": 0,
+                "cursor_pos": [1.0, 2.0],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "missing_cursor",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "component_index": 0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "missing_component",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "cursor_pos": [1.0, 2.0, 3.0],
+            },
+            (False, "bad_args"),
+        ),
+    ),
     "action_use_door": (
         (
             "valid_door_zero",

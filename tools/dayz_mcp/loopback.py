@@ -114,6 +114,7 @@ CLIENT_COMMANDS = {
     "ui_dialog",
     "action_use",
     "action_use_door",
+    "action_use_component",
     "action_use_target",
     "anim_timeline",
     "weapon_aim",
@@ -1237,6 +1238,24 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "action": _is_non_empty_string,
                 "target": _one_of("hands", "self"),
                 "classname": _is_string,
+                "radius": _SAFE_RADIUS_200,
+            },
+        )
+    ),
+    # Component mode is the command name. component_index is not optional on
+    # action_use: 0 is a valid component, so an absent field cannot mean
+    # "no component". The index is any nonnegative Enforce int, including
+    # values above 511. cursor_pos is the world-space hit the action uses.
+    "action_use_component": _command_schema(
+        _schema_variant(
+            required=("action", "classname", "component_index", "cursor_pos"),
+            optional=("pos", "radius"),
+            validators={
+                "action": _is_non_empty_string,
+                "classname": _is_non_empty_string,
+                "component_index": _integer_in_range(minimum=0, maximum=2_147_483_647),
+                "cursor_pos": _is_real_vector3,
+                "pos": _is_real_vector3,
                 "radius": _SAFE_RADIUS_200,
             },
         )

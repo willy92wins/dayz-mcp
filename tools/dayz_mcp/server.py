@@ -4109,8 +4109,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "does not miss a ~200ms response. action_use: held item is the "
             "ItemBase in the local player's hands (null if empty); world "
             "targets use componentIndex=-1 unless door_index targets one door "
-            "of a Building (then that door's view-geometry component); "
-            "classname is exact GetType()."
+            "of a Building (then that door's view-geometry component), or "
+            "component_index and cursor_pos select one world component through "
+            "action_use_component; classname is exact GetType()."
         ),
         lifespan=lifespan,
     )
@@ -7591,7 +7592,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "Routes to MCPClientBridge on the CLIENT and calls "
         "ActionManagerClient.PerformActionStart with the held item. Without "
         "door_index the synthetic target uses component=-1. With door_index "
-        "the target uses the view-geometry component of that door. This enters the normal client action "
+        "the target uses the view-geometry component of that door. "
+        "component_index and cursor_pos together select one world component "
+        "without scanning: both are required, the target stays world, and "
+        "they are mutually exclusive with door_index. component_index is an "
+        "int from 0 through 2147483647, including values above 511. The call "
+        "needs an addon that announces action_use_component and otherwise "
+        "returns component_not_supported without calling the bridge. A result "
+        "that does not echo the same component_index is component_not_supported. "
+        "An index the object does not have is component_not_found. cursor_pos "
+        "is the world-space hit passed to the action; the selection centre is "
+        "not substituted. This enters the normal client action "
         "lifecycle, including client callbacks such as OnStartClient and, for "
         "AnimatedActionBase when its execution animation event arrives, "
         "OnExecuteClient; client-only mod code compiled under #ifndef SERVER "
@@ -7616,6 +7627,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         radius: StrictFloat = 5.0,
         target: StrictStr = "world",
         door_index: StrictInt | None = None,
+        component_index: StrictInt | None = None,
+        cursor_pos: list[StrictFloat] | None = None,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(action, str) or action == "":
@@ -7668,11 +7681,79 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         radius_value = _finite_float(radius, radius_error)
         if radius_value <= 0.0 or radius_value > 200.0:
             raise ToolError(radius_error)
+        component_mode = component_index is not None or cursor_pos is not None
+        if component_mode:
+            if component_index is None or cursor_pos is None:
+                raise ToolError(
+                    _bad_args(
+                        "component_index",
+                        component_index,
+                        "be set together with cursor_pos",
+                    )
+                )
+            if (
+                isinstance(component_index, bool)
+                or not isinstance(component_index, int)
+                or component_index < 0
+                or component_index > 2_147_483_647
+            ):
+                raise ToolError(
+                    _bad_args(
+                        "component_index",
+                        component_index,
+                        "be an int from 0 to 2147483647",
+                    )
+                )
+            if door_index is not None:
+                raise ToolError(
+                    _bad_args(
+                        "component_index",
+                        component_index,
+                        "be omitted when door_index is set",
+                    )
+                )
+            if target != "world":
+                raise ToolError(
+                    _bad_args(
+                        "component_index",
+                        component_index,
+                        "be omitted unless target is world",
+                    )
+                )
+            if classname == "":
+                raise ToolError(
+                    _bad_args(
+                        "classname",
+                        classname,
+                        "be a non-empty string when component_index is set",
+                    )
+                )
         args: dict[str, Any] = {"action": action, "radius": radius_value}
         if classname != "":
             args["classname"] = classname
         if pos is not None:
             args["pos"] = _require_vec3(pos, "pos")
+        if component_mode:
+            args["component_index"] = component_index
+            args["cursor_pos"] = _require_vec3(cursor_pos, "cursor_pos")
+            announced = False
+            try:
+                status = await runtime.bridge_status_payload()
+                announced = _client_peer_announces_command(
+                    status, "action_use_component"
+                )
+            except Exception:
+                announced = False
+            if not announced:
+                raise ToolError("component_not_supported")
+            async with runtime.tool_lock:
+                result = await runtime.call_bridge(
+                    "action_use_component", args, "client", _timeout(timeout_s)
+                )
+            echoed = result.get("component_index") if isinstance(result, dict) else None
+            if echoed != component_index:
+                raise ToolError("component_not_supported")
+            return result
         if door_index is not None:
             announced = False
             try:

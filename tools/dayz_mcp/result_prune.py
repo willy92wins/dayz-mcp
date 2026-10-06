@@ -21,12 +21,19 @@ Two deliberate limits:
    that key (ficha 59d9), so the empty list stays too.
 
 Rule 1 has one exception it does not cover: a scalar with known owners.
-`door_index` and `component_index` are filled only by `action_use_door`, yet
-the flat class sends them on every verb, so a plain `action_use` reported
-`component_index: 0` although its target used -1 (#156 R1 F2). Outside their
-owners their 0 is always the unassigned default, never an answer, so they are
-dropped there; for an owner they are kept whatever the value, because door 0
-and component 0 are real. Such fields live in OWNED_SCALAR_FIELDS.
+`door_index` is filled only by `action_use_door`, and `component_index` by
+`action_use_door` and `action_use_component`. The flat class sends both on
+every verb, so a plain `action_use` reported `component_index: 0` although
+its target used -1 (#156 R1 F2). Outside their owners their 0 is always the
+unassigned default, never an answer, so they are dropped there; for an owner
+they are kept whatever the value, because door 0 and component 0 are real.
+The same rule covers the other scalars whose writers the census names
+exactly (7f27). `accepted`, `found` and `object_id` stay unmanaged:
+`accepted` is an untyped write (`MCPClientBridge.c` `result.accepted =
+job.weapon_action.accepted`), and `found` / `object_id` are written from
+`MCPBridge.PostJobSuccess` on a path the census attributes broadly. Guessing
+those owners would drop a real answer. Such managed fields live in
+OWNED_SCALAR_FIELDS.
 
 The vehicle scalars are the same case (fb-20260823-130809-a412): `vehicle_control`
 answered `seated=0, gear=0, is_owner=0` while the car it drove was in gear 2 and
@@ -113,13 +120,34 @@ SEMANTIC_EMPTY_FIELDS = frozenset(
 # Scalar field -> the bridge commands whose dispatch writes it. The key is dropped
 # from every other command's result and kept, even at 0, for its owners. An owner
 # is the command name call_bridge sends: action_use with door_index goes out as
-# action_use_door (server.py action_use), and that name reaches this module.
+# action_use_door, and action_use with component_index plus cursor_pos goes out
+# as action_use_component (server.py action_use). That name reaches this module.
 # The sets come from the assignments in MCPBridge.c and MCPClientBridge.c; a
 # field whose owners could not be established exactly is left out, because
-# dropping a real answer is worse than a stale 0.
+# dropping a real answer is worse than a stale 0. Left out on purpose (7f27):
+# accepted (untyped write), found and object_id (PostJobSuccess, broadly
+# attributed).
 OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "door_index": frozenset({"action_use_door"}),
-    "component_index": frozenset({"action_use_door"}),
+    "component_index": frozenset({"action_use_door", "action_use_component"}),
+    "clicked": frozenset({"ui_click"}),
+    "handler": frozenset({"ui_click"}),
+    "user_id": frozenset({"ui_click"}),
+    "delivered": frozenset({"key_press"}),
+    "dik": frozenset({"key_press"}),
+    "requested": frozenset({"player_respawn"}),
+    "action": frozenset({"action_use", "action_use_door", "action_use_target", "action_use_component"}),
+    "target": frozenset({"action_use", "action_use_door", "action_use_target", "action_use_component"}),
+    "distance": frozenset({"action_use", "action_use_door", "action_use_target", "action_use_component"}),
+    "started": frozenset({"action_use", "action_use_door", "action_use_target", "action_use_component"}),
+    "confirmed": frozenset({"hands_take", "weapon_state"}),
+    "sent": frozenset({"exec_enforce", "notify_players"}),
+    "deleted": frozenset({"object_delete"}),
+    "y": frozenset({"surface_query"}),
+    "phase": frozenset({"object_anim"}),
+    "source": frozenset({"object_anim"}),
+    "deferred": frozenset({"inventory_give"}),
+    "count_total": frozenset({"entities_query"}),
     # vehicle_enter answers from its seat job (PostSeatSuccess), vehicle_get_in_client
     # from its vehicle_get_in job (MCP_PostJobSuccess).
     "seated": frozenset({"vehicle_enter", "vehicle_get_in_client", "vehicle_telemetry"}),
