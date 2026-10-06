@@ -63,6 +63,10 @@ def resolve_request_budget(requested: object = None) -> int:
 DEFAULT_MAX_TOKENS = default_max_tokens()
 DEFAULT_FRAME_COUNT = 4
 DEFAULT_FRAME_INTERVAL_S = 0.12
+# Hard grab cap. A larger request is cut here; the evidence says so. Not a backend failure.
+FRAME_LIMIT = 5
+FRAME_LIMIT_REASON = "frame_limit"
+FRAMES_CAPPED = "frames_capped"
 # Cold powershell.exe plus Add-Type on a loaded runner can take longer than
 # the 8 s grab budget before the script has looked for a window. That wait is
 # a start, not a hung capture (fb-20260927-141044-76e2). After the script
@@ -795,14 +799,41 @@ def _annotate_render_frozen_signal(payload: dict[str, Any]) -> dict[str, Any]:
     """Attach render_frozen_signal once when intra-call metrics say the render did not move."""
     if not _is_render_frozen_signal(payload.get("frame_stale_detail")):
         return payload
+    _append_warning(payload, RENDER_FROZEN_SIGNAL)
+    return payload
+
+
+def _append_warning(payload: dict[str, Any], warning: str) -> None:
     warnings = payload.get("warnings")
     if isinstance(warnings, list):
         warnings = list(warnings)
     else:
         warnings = []
-    if RENDER_FROZEN_SIGNAL not in warnings:
-        warnings.append(RENDER_FROZEN_SIGNAL)
+    if warning not in warnings:
+        warnings.append(warning)
     payload["warnings"] = warnings
+
+
+def _frame_cap_fields(requested_frames: int, effective_frames: int) -> dict[str, Any]:
+    """Cap bookkeeping for the frame evidence. limit_reason is present only when the request was cut."""
+    fields: dict[str, Any] = {
+        "requested_frames": requested_frames,
+        "effective_frames": effective_frames,
+        "frame_limit": FRAME_LIMIT,
+    }
+    if requested_frames > FRAME_LIMIT:
+        fields["limit_reason"] = FRAME_LIMIT_REASON
+    return fields
+
+
+def _annotate_frames_capped(payload: dict[str, Any]) -> dict[str, Any]:
+    """Warn frames_capped when this call's evidence says the grab was cut at FRAME_LIMIT.
+
+    A short request publishes the same counts with no warning. A failed grab is still an error
+    from grab_stable_frame; this warning is not one."""
+    detail = payload.get("frame_stale_detail")
+    if isinstance(detail, dict) and detail.get("limit_reason") == FRAME_LIMIT_REASON:
+        _append_warning(payload, FRAMES_CAPPED)
     return payload
 
 
@@ -1365,8 +1396,13 @@ def grab_stable_frame(
     client-area gates, so a rejected capture still counts: "black since T, N captures in a row" is
     only countable if the rejected frames are recorded too, and the error payload returned below
     carries no meta of its own. The report rides on the returned frame as
-    info["frame_stale_report"], which capture_dual publishes."""
-    frame_count = max(1, min(int(frames), 5))
+    info["frame_stale_report"], which capture_dual publishes.
+
+    frames above FRAME_LIMIT are grabbed as FRAME_LIMIT. The evidence records requested_frames,
+    effective_frames and frame_limit, plus limit_reason when the request was cut. The cut is not
+    an error."""
+    requested_frames = int(frames)
+    frame_count = max(1, min(requested_frames, FRAME_LIMIT))
     with tempfile.TemporaryDirectory(prefix="mcp_capture_") as tmp_dir:
         captured: list[Image.Image] = []
         capture_results: list[dict[str, Any]] = []
@@ -1391,11 +1427,13 @@ def grab_stable_frame(
         surface, surface_identity, surface_sha256 = _comparison_surface(
             chosen, chosen_result.get("client"), chosen_window
         )
+        evidence = _frame_evidence(captured, pair_deltas)
+        evidence.update(_frame_cap_fields(requested_frames, frame_count))
         frame_stale_report = _frame_stale_report(
             key=state_key,
             surface=surface,
             current_sha256=surface_sha256,
-            evidence=_frame_evidence(captured, pair_deltas),
+            evidence=evidence,
             key_kind=key_kind,
             identity=surface_identity,
         )
@@ -1448,7 +1486,16 @@ def capture_screenshot(
     chosen = grab_stable_frame(frames=frames, process_name=process_name, method=method, client_pid=client_pid, cmdline_match=cmdline_match)
     if isinstance(chosen, dict):  # error payload from grab_stable_frame
         return chosen
-    return image_content_from_image(chosen, scale=scale, max_tokens=max_tokens, fmt=fmt, quality=quality, crop=crop)
+    content = image_content_from_image(chosen, scale=scale, max_tokens=max_tokens, fmt=fmt, quality=quality, crop=crop)
+    report = chosen.info.get("frame_stale_report") or {}
+    detail = report.get("detail") if isinstance(report, dict) else None
+    meta: dict[str, Any] = {}
+    if isinstance(detail, dict):
+        meta["frame_stale_detail"] = detail
+    _annotate_frames_capped(meta)
+    if meta:
+        content["meta"] = meta
+    return content
 
 
 def resolve_capture_dir(save_dir: str = "") -> str:
@@ -1602,4 +1649,5 @@ def capture_dual(
         out["fullres_path"] = path
         meta["fullres_file_sha256"] = _file_sha256(path)
     _annotate_render_frozen_signal(meta)
+    _annotate_frames_capped(meta)
     return out
